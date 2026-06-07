@@ -32,7 +32,8 @@ from opteryx.types.logical_type import (
     BOOLEAN as _CT_BOOLEAN, INT64 as _CT_INT64, FLOAT64 as _CT_FLOAT64,
     DATE as _CT_DATE, INTERVAL as _CT_INTERVAL, VARCHAR as _CT_VARCHAR,
     VARBINARY as _CT_VARBINARY, NULL as _CT_NULL, ARRAY as _CT_ARRAY,
-    TIMESTAMP as _CT_TIMESTAMP, VARIANT as _CT_VARIANT,
+    TIMESTAMP as _CT_TIMESTAMP, TIME as _CT_TIME, VARIANT as _CT_VARIANT,
+    VECTOR as _CT_VECTOR,
 )
 from opteryx.utils import dates, suggest_alternative
 from opteryx.utils.vector_types import VectorType, get_vector_type
@@ -43,17 +44,21 @@ from opteryx.utils.vector_types import VectorType, get_vector_type
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
 
+# Module-level ColumnType sentinels for factories (singletons can be compared directly).
+_SENTINEL_TIMESTAMP = _CT_TIMESTAMP()
+_SENTINEL_TIME = _CT_TIME()
+
 
 def _evaluate_fixed_temporal_function(function_name: str):
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     if function_name in ("NOW", "CURRENT_TIMESTAMP", "UTC_TIMESTAMP"):
-        return now, LogicalCategory.TIMESTAMP
+        return now, _SENTINEL_TIMESTAMP
     if function_name in ("CURRENT_DATE", "TODAY"):
-        return now.date(), LogicalCategory.DATE
+        return now.date(), _CT_DATE
     if function_name == "YESTERDAY":
-        return (now - datetime.timedelta(days=1)).date(), LogicalCategory.DATE
+        return (now - datetime.timedelta(days=1)).date(), _CT_DATE
     if function_name == "CURRENT_TIME":
-        return now.time(), LogicalCategory.TIME
+        return now.time(), _SENTINEL_TIME
     return None, None
 
 
@@ -70,16 +75,19 @@ def _extract_single_scalar(value):
 
 
 def _as_binary_operand_array(value, value_type):
-    if value_type == LogicalCategory.INTERVAL:
+    if value_type is None:
         return [value]
-    if value_type == LogicalCategory.TIMESTAMP:
+    cat = value_type.category
+    if cat == LogicalCategory.INTERVAL:
+        return [value]
+    if cat == LogicalCategory.TIMESTAMP:
         timestamp = dates.parse_iso(value)
         if timestamp is None:
             raise UnsupportedSyntaxError(
                 "Unable to parse timestamp value in time-travel expression."
             )
         return [int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)]
-    if value_type == LogicalCategory.DATE:
+    if cat == LogicalCategory.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression.")
@@ -88,12 +96,15 @@ def _as_binary_operand_array(value, value_type):
 
 
 def _as_function_parameter_array(value, value_type):
-    if value_type == LogicalCategory.TIMESTAMP:
+    if value_type is None:
+        return [value]
+    cat = value_type.category
+    if cat == LogicalCategory.TIMESTAMP:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
         return [int((dt - _EPOCH_DT).total_seconds() * 1_000_000)]
-    if value_type == LogicalCategory.DATE:
+    if cat == LogicalCategory.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
@@ -103,25 +114,25 @@ def _as_function_parameter_array(value, value_type):
 
 def _type_from_value(value):
     if value is None:
-        return LogicalCategory.NULL
+        return _CT_NULL
     if isinstance(value, bool):
-        return LogicalCategory.BOOLEAN
+        return _CT_BOOLEAN
     if isinstance(value, datetime.datetime):
-        return LogicalCategory.TIMESTAMP
+        return _SENTINEL_TIMESTAMP
     if isinstance(value, datetime.time):
-        return LogicalCategory.TIME
+        return _SENTINEL_TIME
     if isinstance(value, datetime.date):
-        return LogicalCategory.DATE
+        return _CT_DATE
     if isinstance(value, int):
-        return LogicalCategory.INTEGER
+        return _CT_INT64
     if isinstance(value, float):
-        return LogicalCategory.DOUBLE
+        return _CT_FLOAT64
     if isinstance(value, (bytes, bytearray)):
-        return LogicalCategory.BLOB
+        return _CT_VARBINARY
     if isinstance(value, str):
-        return LogicalCategory.VARCHAR
+        return _CT_VARCHAR
     if isinstance(value, tuple) and len(value) == 2:
-        return LogicalCategory.INTERVAL
+        return _CT_INTERVAL
     return None
 
 
@@ -167,11 +178,10 @@ def _apply_interval_scalar(base_value, base_type, interval_value, operator: str)
 
 def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
     if node.node_type == NodeType.LITERAL:
-        # Phase 2: node.type is ColumnType; normalize to LogicalCategory for internal arithmetic.
-        _node_lc = node.type.category if isinstance(node.type, ColumnType) else node.type
-        if _node_lc == LogicalCategory.INTERVAL and apply_interval_literal_to_now:
-            return _interval_to_past_timestamp(node.value), LogicalCategory.TIMESTAMP
-        return node.value, _node_lc
+        _node_ct = node.type  # ColumnType or None
+        if _node_ct is not None and _node_ct.category == LogicalCategory.INTERVAL and apply_interval_literal_to_now:
+            return _interval_to_past_timestamp(node.value), _SENTINEL_TIMESTAMP
+        return node.value, _node_ct
 
     if node.node_type == NodeType.NESTED:
         return _evaluate_timetravel_expression(node.centre, apply_interval_literal_to_now)
@@ -193,15 +203,17 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         if node.value == "TRUNC" and len(scalar_parameters) == 2:
             trunc_value, trunc_value_type = scalar_parameters[0]
             unit_value, unit_type = scalar_parameters[1]
+            _tcat = trunc_value_type.category if trunc_value_type is not None else None
+            _ucat = unit_type.category if unit_type is not None else None
             if (
-                trunc_value_type in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
-                and unit_type == LogicalCategory.VARCHAR
+                _tcat in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+                and _ucat == LogicalCategory.VARCHAR
             ):
                 if isinstance(trunc_value, datetime.date) and not isinstance(
                     trunc_value, datetime.datetime
                 ):
                     trunc_value = datetime.datetime.combine(trunc_value, datetime.time.min)
-                return dates.truncate_single(trunc_value, unit_value.lower()), LogicalCategory.TIMESTAMP
+                return dates.truncate_single(trunc_value, unit_value.lower()), _SENTINEL_TIMESTAMP
 
         try:
             from opteryx.expression.functions import FunctionResolutionContext
@@ -237,22 +249,24 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         # to bail out and return null.  We can evaluate these cases directly
         # using Python's datetime helpers.
         if node.value in ("Plus", "Minus"):
+            _lcat = left_type.category if left_type is not None else None
+            _rcat = right_type.category if right_type is not None else None
             if (
-                left_type in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
-                and right_type == LogicalCategory.INTERVAL
+                _lcat in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+                and _rcat == LogicalCategory.INTERVAL
             ):
                 return (
                     _apply_interval_scalar(left_value, left_type, right_value, node.value),
-                    LogicalCategory.TIMESTAMP,
+                    _SENTINEL_TIMESTAMP,
                 )
-            if left_type == LogicalCategory.INTERVAL and right_type in (
+            if _lcat == LogicalCategory.INTERVAL and _rcat in (
                 LogicalCategory.DATE,
                 LogicalCategory.TIMESTAMP,
             ):
                 # interval +/- date is effectively the same as date +/- interval
                 return (
                     _apply_interval_scalar(right_value, right_type, left_value, node.value),
-                    LogicalCategory.TIMESTAMP,
+                    _SENTINEL_TIMESTAMP,
                 )
 
         left = _as_binary_operand_array(left_value, left_type)
@@ -648,8 +662,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     from opteryx.expression.casts import parse_timestamp_value
     from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 
-    # Phase 2: literal_node.type is ColumnType; normalize to LogicalCategory for comparisons.
-    _node_cat = literal_node.type.category if isinstance(literal_node.type, ColumnType) else literal_node.type
+    _node_cat = literal_node.type.category if literal_node.type is not None else None
 
     # NULL values remain NULL regardless of target type
     if _node_cat == LogicalCategory.NULL:
@@ -998,7 +1011,6 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
         node_type=NodeType.LITERAL,
         type=_CT_ARRAY(element_ct),
         value=[v.value for v in value_nodes],
-        element_type=None,  # element embedded in type
     )
     return Node(
         node_type=NodeType.COMPARISON_OPERATOR,
@@ -1056,7 +1068,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
             "Subscript values must be integer literals, use `->` to access JSON fields."
         )
 
-    _key_cat = key_node.type.category if isinstance(key_node.type, ColumnType) else key_node.type
+    _key_cat = key_node.type.category if key_node.type is not None else None
     if _key_cat != LogicalCategory.INTEGER:
         raise IncorrectTypeError(
             "Subscript values must be integer literals, use `->` to access JSON fields."
@@ -1278,22 +1290,23 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     node_values = [build(t) for t in branch]
     values = [t.value for t in node_values]
 
-    # see if we can specify the element type for the arrat
+    # Infer element ColumnType: homogeneous only
     node_types = {t.type for t in node_values}
-    element_type = None
-    if len(node_types) == 1:
-        element_type = node_types.pop()
-    literal_type = LogicalCategory.ARRAY
-    if element_type in (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL):
-        literal_type = LogicalCategory.VECTOR
-        element_type = LogicalCategory.DOUBLE
+    element_ct = node_types.pop() if len(node_types) == 1 else None
+
+    # element_ct is ColumnType from literal builders; extract category for dispatch
+    elem_cat = element_ct.category if isinstance(element_ct, ColumnType) else element_ct
+    if elem_cat in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL):
+        # Numeric-homogeneous tuple → fixed-size float vector
+        literal_type = _CT_VECTOR(len(values))
+    else:
+        literal_type = _CT_ARRAY(element_ct if element_ct is not None else _CT_VARIANT)
 
     if values and isinstance(values[0], dict):
         values = [build(val["Identifier"]).value for val in values]
     return Node(
         NodeType.LITERAL,
         type=literal_type,
-        element_type=element_type,
         value=tuple(values),
         alias=alias,
     )

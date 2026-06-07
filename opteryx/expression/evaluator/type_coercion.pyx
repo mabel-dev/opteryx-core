@@ -119,11 +119,14 @@ cpdef tuple _coerce_interval(value):
 
 
 cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
+    # target_type is a ColumnType instance; extract .category for dispatch.
     # Imported lazily for the same circular-import reason as _coerce_timestamp.
     from opteryx.expression.casts import parse_timestamp_value
     from opteryx.types.logical_type import LogicalCategory
 
-    if target_type == LogicalCategory.DATE:
+    cdef object cat = target_type.category
+
+    if cat == LogicalCategory.DATE:
         if isinstance(value, datetime.datetime):
             return value.date()
         if isinstance(value, datetime.date):
@@ -133,7 +136,7 @@ cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
         return parse_timestamp_value(value).date()
 
     cdef long long ivalue
-    if target_type == LogicalCategory.TIMESTAMP:
+    if cat == LogicalCategory.TIMESTAMP:
         if isinstance(value, int):
             ivalue = value
             # Suspiciously-small "timestamp" that's actually days-since-epoch

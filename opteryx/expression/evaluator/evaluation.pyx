@@ -28,7 +28,7 @@ from opteryx.compiled.nanobind.vector_accessors import (
     vector_string_is_not_empty as _vector_string_is_not_empty,
 )
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError, IncompatibleTypesError
-from opteryx.types.logical_type import LogicalCategory as _LogicalCategory
+from opteryx.types.logical_type import LogicalCategory as _LogicalCategory, DATE as _CT_DATE, TIMESTAMP as _TIMESTAMP_factory
 from opteryx.types._datetime_conversion import timestamp_to_int64_us as _ts_to_us
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
@@ -98,10 +98,9 @@ DEF _BV_IS_NOT_FALSE = 3
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 
-# Cached LogicalCategory sentinels — used to reconstruct Python type objects from
-# BC_TYPE_DATE / BC_TYPE_TIMESTAMP int codes on the AnyOp/temporal-coercion paths.
-_LogicalCategory_DATE = _LogicalCategory.DATE
-_LogicalCategory_TIMESTAMP = _LogicalCategory.TIMESTAMP
+# ColumnType instances for temporal coercion — passed to _coerce_temporal_scalar_for_arrow
+# to disambiguate DATE vs TIMESTAMP from the BC_TYPE_* int codes on the AnyOp paths.
+_CT_TIMESTAMP = _TIMESTAMP_factory()
 
 # Telemetry: count C-native kernel calls for regression detection (Phase 9c).
 cdef uint64_t _c_native_kernel_call_count = 0
@@ -205,11 +204,12 @@ cdef _unary_op_kernel(int op_code, vec):
     raise NotImplementedError(f"_unary_op_kernel: unsupported unary op code {op_code!r}")
 
 
-cdef bint _is_temporal_type(sql_type):
-    """Check if an LogicalCategory is DATE or TIMESTAMP."""
-    if sql_type is None:
+cdef bint _is_temporal_type(column_type):
+    """Check if a ColumnType is DATE or TIMESTAMP."""
+    if column_type is None:
         return False
-    return sql_type == _LogicalCategory.DATE or sql_type == _LogicalCategory.TIMESTAMP
+    cdef object cat = column_type.category
+    return cat == _LogicalCategory.DATE or cat == _LogicalCategory.TIMESTAMP
 
 
 cdef _validate_temporal_comparison(left_node, right_node, op):
@@ -221,8 +221,8 @@ cdef _validate_temporal_comparison(left_node, right_node, op):
     """
     left_sc = getattr(left_node, "schema_column", None)
     right_sc = getattr(right_node, "schema_column", None)
-    left_type = getattr(left_sc, "category", None) if left_sc is not None else None
-    right_type = getattr(right_sc, "category", None) if right_sc is not None else None
+    left_type = left_sc.column_type if left_sc is not None else None
+    right_type = right_sc.column_type if right_sc is not None else None
 
     cdef bint left_is_temporal = _is_temporal_type(left_type)
     cdef bint right_is_temporal = _is_temporal_type(right_type)
@@ -1715,7 +1715,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(py_left):
                         py_left = _coerce_temporal_scalar_for_arrow(
                             py_left,
-                            _LogicalCategory_DATE if left_type_code == BC_TYPE_DATE else _LogicalCategory_TIMESTAMP,
+                            _CT_DATE if left_type_code == BC_TYPE_DATE else _CT_TIMESTAMP,
                         )
                     compare_result = draken_compare_int(
                         slot.op_code, py_left, inlist_right, left_type_code, right_type_code
@@ -1752,12 +1752,12 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(py_left):
                             py_left = _coerce_temporal_scalar_for_arrow(
                                 py_left,
-                                _LogicalCategory_DATE if left_type_code == BC_TYPE_DATE else _LogicalCategory_TIMESTAMP,
+                                _CT_DATE if left_type_code == BC_TYPE_DATE else _CT_TIMESTAMP,
                             )
                         if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(py_right):
                             py_right = _coerce_temporal_scalar_for_arrow(
                                 py_right,
-                                _LogicalCategory_DATE if right_type_code == BC_TYPE_DATE else _LogicalCategory_TIMESTAMP,
+                                _CT_DATE if right_type_code == BC_TYPE_DATE else _CT_TIMESTAMP,
                             )
                     compare_result = draken_compare_int(
                         slot.op_code, py_left, py_right, left_type_code, right_type_code

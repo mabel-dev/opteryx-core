@@ -100,7 +100,7 @@ def build_literal_node(
     if root is None:
         root = Node(
             NodeType.LITERAL,
-            schema_column=ConstantColumn(name=str(value), type=None),
+            schema_column=ConstantColumn(name=str(value)),
         )
 
     if value is None:
@@ -108,7 +108,6 @@ def build_literal_node(
         root.value = None
         root.node_type = NodeType.LITERAL
         root.type = NULL
-        root.element_type = None
         root.left = None
         root.right = None
         if root.schema_column is not None:
@@ -135,14 +134,6 @@ def build_literal_node(
     }
 
     value_type = type(value)
-    # Accept suggested_type as ColumnType or LogicalCategory (bridge during Phase 2→3 migration).
-    if suggested_type is not None and not isinstance(suggested_type, ColumnType):
-        from opteryx.types.logical_type import sql_to_column_type
-        try:
-            suggested_type = sql_to_column_type(suggested_type)
-        except Exception:
-            suggested_type = None
-
     # Determine the type from the value using the mapping
     if value_type in type_mapping or suggested_type is not None:
         if suggested_type is not None and suggested_type == INTERVAL:
@@ -156,7 +147,6 @@ def build_literal_node(
         root.value = value
         root.node_type = NodeType.LITERAL
         root.type = suggested_type if suggested_type is not None else type_mapping[value_type]
-        root.element_type = None  # element now embedded in root.type for ARRAY
         root.left = None
         root.right = None
         if root.schema_column is not None:

@@ -122,12 +122,12 @@ def _typed_constant_vector(value, length: int, schema_column):
             None if is_null else int(value), length
         )
 
-    if target_type == LogicalCategory.DOUBLE:
+    if target_type == LogicalCategory.FLOAT:
         return _draken_native_expr.vector_float64_from_constant(
             None if is_null else float(value), length
         )
 
-    if target_type == LogicalCategory.BLOB:
+    if target_type == LogicalCategory.VARBINARY:
         # Explicit binary: opaque bytes, VARBINARY tag.
         return _draken_native_expr.vector_varbinary_from_constant(
             None if is_null else value, length

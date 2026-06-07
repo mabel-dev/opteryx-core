@@ -15,7 +15,9 @@ from typing import List, Set, Tuple
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import (
+    LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES, _LARGE_OBJECT_TYPES, _STRING_TYPES,
+)
 
 
 def _is_numeric_join_coercible(left_type, right_type) -> bool:
@@ -25,9 +27,9 @@ def _is_numeric_join_coercible(left_type, right_type) -> bool:
         LogicalCategory.NULL,
     ):
         return False
-    return left_type in (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL) and right_type in (
+    return left_type in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL) and right_type in (
         LogicalCategory.INTEGER,
-        LogicalCategory.DOUBLE,
+        LogicalCategory.FLOAT,
         LogicalCategory.DECIMAL,
     )
 
@@ -77,12 +79,12 @@ def get_mismatched_condition_column_types(
                 return None
             if (
                 relaxed
-                and (left_type.is_numeric() and right_type.is_numeric())
-                or (left_type.is_temporal() and right_type.is_temporal())
-                or (left_type.is_numeric() and right_type.is_temporal())
-                or (left_type.is_temporal() and right_type.is_numeric())
-                or (left_type.is_large_object() and right_type.is_large_object())
-                or (left_type.is_string() and right_type.is_string())
+                and (left_type in _NUMERIC_TYPES and right_type in _NUMERIC_TYPES)
+                or (left_type in _TEMPORAL_TYPES and right_type in _TEMPORAL_TYPES)
+                or (left_type in _NUMERIC_TYPES and right_type in _TEMPORAL_TYPES)
+                or (left_type in _TEMPORAL_TYPES and right_type in _NUMERIC_TYPES)
+                or (left_type in _LARGE_OBJECT_TYPES and right_type in _LARGE_OBJECT_TYPES)
+                or (left_type in _STRING_TYPES and right_type in _STRING_TYPES)
                 or (left_type is None or right_type is None)
             ):
                 return None

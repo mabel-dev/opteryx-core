@@ -152,11 +152,14 @@ _UOP_CODE = {
 
 
 cdef inline int16_t _sql_type_to_code(object sql_type):
-    """Convert an LogicalCategory value to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
+    """Convert a ColumnType to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
+    if sql_type is None:
+        return <int16_t>BC_TYPE_NONE
     _ensure_sql_types()
-    if sql_type is _LogicalCategory_DATE:
+    cdef object cat = sql_type.category
+    if cat is _LogicalCategory_DATE:
         return <int16_t>BC_TYPE_DATE
-    if sql_type is _LogicalCategory_TIMESTAMP:
+    if cat is _LogicalCategory_TIMESTAMP:
         return <int16_t>BC_TYPE_TIMESTAMP
     return <int16_t>BC_TYPE_NONE
 
@@ -180,7 +183,7 @@ cdef inline _ensure_sql_types():
         _LogicalCategory_BOOLEAN = LogicalCategory.BOOLEAN
         _LogicalCategory_VARCHAR = LogicalCategory.VARCHAR
         _LogicalCategory_ARRAY = LogicalCategory.ARRAY
-        _LogicalCategory_BLOB = LogicalCategory.BLOB
+        _LogicalCategory_BLOB = LogicalCategory.VARBINARY
         # Types valid as the LEFT operand of an extraction operator (-> ->> [i]).
         # Includes VARIANT so JSON access chains (a -> b ->> c) with no user cast.
         _STRING_FAMILY = (_LogicalCategory_VARCHAR, LogicalCategory.NVARCHAR, _LogicalCategory_BLOB, LogicalCategory.VARIANT)
@@ -425,8 +428,8 @@ cdef Py_ssize_t _linearize(
         # Read schema types from children BEFORE linearising them.
         left_sc = <object>node.left.schema_column
         right_sc = <object>node.right.schema_column
-        left_type = getattr(left_sc, "category", None) if left_sc is not None else None
-        right_type = getattr(right_sc, "category", None) if right_sc is not None else None
+        left_type = left_sc.column_type if left_sc is not None else None
+        right_type = right_sc.column_type if right_sc is not None else None
         op_str = <object>node.value
         _validate_temporal_at_bind(
             node.left.node_type, left_type,
@@ -462,9 +465,11 @@ cdef Py_ssize_t _linearize(
         _ensure_sql_types()
 
         flags = 0
-        if left_type is _LogicalCategory_DATE or left_type is _LogicalCategory_TIMESTAMP:
+        _left_cat = left_type.category if left_type is not None else None
+        _right_cat = right_type.category if right_type is not None else None
+        if _left_cat is _LogicalCategory_DATE or _left_cat is _LogicalCategory_TIMESTAMP:
             flags |= BC_CMP_LEFT_TEMPORAL
-        if right_type is _LogicalCategory_DATE or right_type is _LogicalCategory_TIMESTAMP:
+        if _right_cat is _LogicalCategory_DATE or _right_cat is _LogicalCategory_TIMESTAMP:
             flags |= BC_CMP_RIGHT_TEMPORAL
         if right_is_inlist_literal:
             flags |= BC_CMP_INLIST_INLINE
@@ -515,8 +520,8 @@ cdef Py_ssize_t _linearize(
             raise ValueError("compiled_expression: BINARY_OPERATOR missing operand")
         bin_left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
         bin_right_sc = <object>node.right.schema_column if node.right.schema_column != NULL else None
-        bin_left_type = getattr(bin_left_sc, "category", None) if bin_left_sc is not None else None
-        bin_right_type = getattr(bin_right_sc, "category", None) if bin_right_sc is not None else None
+        bin_left_type = bin_left_sc.column_type if bin_left_sc is not None else None
+        bin_right_type = bin_right_sc.column_type if bin_right_sc is not None else None
         bin_op_str = <object>node.value
 
         sub_depth = _linearize(node.left, bc, depth)
@@ -600,7 +605,9 @@ cdef Py_ssize_t _linearize(
         if is_nb_callable:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
             _ensure_sql_types()
-            if func_ref_meta.inferred_return_type is _LogicalCategory_BOOLEAN:
+            # Phase 5: inferred_return_type is ColumnType; check .category for BOOLEAN.
+            _irt = func_ref_meta.inferred_return_type
+            if _irt is not None and _irt.category is _LogicalCategory_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
         # Phase 9b: Resolve C kernel function pointer for function calls.
@@ -655,13 +662,14 @@ cdef Py_ssize_t _linearize(
 
         # Phase 5: get the source operand's type from schema_column for bind-time resolution.
         source_sql_name = None
+        source_sql = None
         if node.left.schema_column != NULL:
             src_sc = <object>node.left.schema_column
             if src_sc is not None:
-                source_sql = src_sc.category
+                source_sql = src_sc.column_type
                 if source_sql is not None:
                     # Extract the LogicalCategory name string (e.g., "INT64", "VARCHAR").
-                    source_sql_name = getattr(source_sql, "name", None)
+                    source_sql_name = getattr(source_sql.category, "name", None)
 
         from opteryx.expression.casts import resolve_cast
         try:
@@ -798,7 +806,8 @@ cdef Py_ssize_t _linearize(
         left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
         if left_sc is None:
             raise ValueError("compiled_expression: EXTRACTION_OPERATOR left operand missing schema_column")
-        left_sql = left_sc.category
+        _left_ct = left_sc.column_type
+        left_sql = _left_ct.category if _left_ct is not None else None
 
         # Sub-op + kernel selection: resolve at bind time.
         sub_op = BC_EXTR_UNKNOWN
@@ -951,8 +960,10 @@ cdef _validate_temporal_at_bind(
     has an un-cast literal on one side. Runs once per COMPARISON node.
     """
     _ensure_sql_types()
-    cdef bint left_is_temporal = (left_type is _LogicalCategory_DATE) or (left_type is _LogicalCategory_TIMESTAMP)
-    cdef bint right_is_temporal = (right_type is _LogicalCategory_DATE) or (right_type is _LogicalCategory_TIMESTAMP)
+    cdef object _lcat = left_type.category if left_type is not None else None
+    cdef object _rcat = right_type.category if right_type is not None else None
+    cdef bint left_is_temporal = (_lcat is _LogicalCategory_DATE) or (_lcat is _LogicalCategory_TIMESTAMP)
+    cdef bint right_is_temporal = (_rcat is _LogicalCategory_DATE) or (_rcat is _LogicalCategory_TIMESTAMP)
 
     if not (left_is_temporal or right_is_temporal):
         return

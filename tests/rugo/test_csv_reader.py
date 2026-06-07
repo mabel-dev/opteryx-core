@@ -168,7 +168,7 @@ def test_backslash_escape_in_quoted():
     csv = b'id,val\n1,"say \\"hello\\""\n'
     r = read_csv(csv)
     assert r["num_rows"] == 1
-    assert _to_list(r["columns"][1])[0] == b'say "hello"'
+    assert _to_list(r["columns"][1])[0] == 'say "hello"'
 
 
 def test_doubled_quote_escape():
@@ -176,7 +176,7 @@ def test_doubled_quote_escape():
     csv = b'id,val\n1,"say ""hello"""\n'
     r = read_csv(csv)
     assert r["num_rows"] == 1
-    assert _to_list(r["columns"][1])[0] == b'say "hello"'
+    assert _to_list(r["columns"][1])[0] == 'say "hello"'
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +208,8 @@ def test_no_header_projection():
     csv = b"1,alice,3.14\n2,bob,2.71\n"
     r = read_csv(csv, columns=["col_2", "col_0"], has_header=False)
     assert r["column_names"] == ["col_2", "col_0"]
-    assert _to_list(r["columns"][0]) == [b"3.14", b"2.71"]
+    # 3.14 and 2.71 are both valid floats → inferred as float64
+    assert _to_list(r["columns"][0]) == pytest.approx([3.14, 2.71])
     assert _to_list(r["columns"][1]) == [1, 2]
 
 
@@ -247,7 +248,7 @@ def test_empty_quoted_field_is_empty_string():
     csv = b'a,b\n1,""\n'
     r = read_csv(csv)
     b_col = _to_list(r["columns"][1])
-    assert b_col[0] == b""
+    assert b_col[0] == ""
 
 
 def test_all_null_column():
@@ -287,14 +288,14 @@ def test_mixed_type_falls_back_to_varchar():
     csv = b"v\n1\nhello\n3.14\n"
     r = read_csv(csv)
     col = _to_list(r["columns"][0])
-    assert col == [b"1", b"hello", b"3.14"]
+    assert col == ["1", "hello", "3.14"]
 
 
 def test_varchar_column():
     csv = b"s\nalpha\nbeta\ngamma\n"
     r = read_csv(csv)
     col = _to_list(r["columns"][0])
-    assert col == [b"alpha", b"beta", b"gamma"]
+    assert col == ["alpha", "beta", "gamma"]
 
 
 # ---------------------------------------------------------------------------

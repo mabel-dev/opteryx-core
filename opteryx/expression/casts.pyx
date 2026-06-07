@@ -150,11 +150,11 @@ def cast_to_double(arr, *args):
             return _draken_native_casts.vector_cast_string_to_float64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
-        caster = parser_for(LogicalCategory.DOUBLE)
+        caster = parser_for(LogicalCategory.FLOAT)
         return [caster(i) if i is not None else None for i in arr]
 
     if isinstance(arr, (int, float)):
-        return parse_value(LogicalCategory.DOUBLE, arr)
+        return parse_value(LogicalCategory.FLOAT, arr)
 
     raise TypeError(f"Unsupported type for cast_to_double: {type(arr).__name__}")
 

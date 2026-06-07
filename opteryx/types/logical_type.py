@@ -43,8 +43,7 @@ __all__ = [
     "find_compatible_type",
     "PYTHON_TO_SQL_MAP",
     "SQL_TO_PYTHON_MAP",
-    "sql_to_column_type",
-    "column_type_to_sql",
+    "_CATEGORY_TO_CANONICAL",
     # canonical instances
     "INT8", "INT16", "INT32", "INT64",
     "FLOAT32", "FLOAT64",
@@ -53,31 +52,27 @@ __all__ = [
     "NULL",
     # constructors
     "DECIMAL", "TIMESTAMP", "TIME", "VECTOR",
+    # type-classification sets (import instead of calling .is_numeric() etc.)
+    "_NUMERIC_TYPES", "_TEMPORAL_TYPES", "_COMPLEX_TYPES",
+    "_LARGE_OBJECT_TYPES", "_STRING_TYPES",
 ]
 
 
 class LogicalCategory(Enum):
     """The Opteryx SQL type vocabulary AND the operator-dispatch key (Decision B).
 
-    The single flat type enum carried on expression `Node.type`, returned by
-    `determine_type`, and keyed in the operator map. Integer widths collapse to
-    INTEGER, float widths to FLOAT (the actual physical width lives on `ColumnType`).
-
-    Legacy SQL spellings are kept as aliases so existing call sites resolve without
-    a separate enum: DOUBLE≡FLOAT, BLOB≡VARBINARY, STRUCT/JSONB≡NVARCHAR. Values are
-    the canonical string name (so `.value` round-trips through serialization and
-    `from_name`).
+    Pure projection enum — reachable only via `ColumnType.category`. 15 canonical
+    members; no aliases, no behaviours. Integer/float widths collapse to INTEGER/FLOAT
+    (the actual physical width lives on `ColumnType.physical`).
 
     Unknown/unresolved types are represented by Python `None`, not by a sentinel
-    enum member. Any code that needs to check for an unknown type should use
-    `x is None` rather than comparing against a sentinel.
+    enum member. Check `x is None` rather than comparing against a sentinel.
     """
 
     NULL = "NULL"
     BOOLEAN = "BOOLEAN"
     INTEGER = "INTEGER"
     FLOAT = "FLOAT"
-    DOUBLE = "FLOAT"        # legacy alias of FLOAT
     DECIMAL = "DECIMAL"
     DATE = "DATE"
     TIME = "TIME"
@@ -86,27 +81,9 @@ class LogicalCategory(Enum):
     VARCHAR = "VARCHAR"
     NVARCHAR = "NVARCHAR"
     VARBINARY = "VARBINARY"
-    BLOB = "VARBINARY"     # legacy alias of VARBINARY
-    STRUCT = "NVARCHAR"    # collapse: engine stringifies structs to JSON text
-    JSONB = "NVARCHAR"     # collapse: JSONB alias of NVARCHAR
-    VARIANT = "VARIANT"    # first-class JSON value (DRAKEN_VARIANT), navigable via -> / ->>
+    VARIANT = "VARIANT"
     ARRAY = "ARRAY"
     VECTOR = "VECTOR"
-
-    def is_numeric(self) -> bool:
-        return self in _NUMERIC_TYPES
-
-    def is_temporal(self) -> bool:
-        return self in _TEMPORAL_TYPES
-
-    def is_complex(self) -> bool:
-        return self in _COMPLEX_TYPES
-
-    def is_large_object(self) -> bool:
-        return self in _LARGE_OBJECT_TYPES
-
-    def is_string(self) -> bool:
-        return self in _STRING_TYPES
 
 # Physical type -> dispatch category. Integer/float widths collapse here.
 _CATEGORY_OF: dict = {
@@ -546,64 +523,23 @@ def find_compatible_type(types: list) -> Optional["ColumnType"]:
     return None
 
 
-def sql_to_column_type(sql_type, precision=None, scale=None, element_type=None):
-    """Map a LogicalCategory (+ optional params) to a unified ColumnType.
-
-    Fail-loud on a bare DECIMAL (no precision/scale): the gap must be fixed at the
-    source (result derivation / connector inference), never fabricated here.
-    """
-    t = sql_type
-    if t == LogicalCategory.BOOLEAN:
-        return BOOLEAN
-    if t == LogicalCategory.INTEGER:
-        return INT64
-    if t == LogicalCategory.FLOAT:
-        return FLOAT64
-    if t == LogicalCategory.VARCHAR:
-        return VARCHAR
-    if t == LogicalCategory.NVARCHAR:
-        return NVARCHAR
-    if t == LogicalCategory.VARBINARY:
-        return VARBINARY
-    if t == LogicalCategory.DATE:
-        return DATE
-    if t == LogicalCategory.TIME:
-        return TIME()
-    if t == LogicalCategory.TIMESTAMP:
-        return TIMESTAMP()
-    if t == LogicalCategory.INTERVAL:
-        return INTERVAL
-    if t == LogicalCategory.DECIMAL:
-        if precision is None or scale is None:
-            raise NotImplementedError(
-                "DECIMAL with no precision/scale — refusing to fabricate a default. "
-                "Fix the source (result derivation or connector inference)."
-            )
-        if not (1 <= precision <= 38) or not (0 <= scale <= precision):
-            raise ValueError(f"invalid DECIMAL(precision={precision}, scale={scale})")
-        return DECIMAL(precision, scale)
-    if t == LogicalCategory.VARIANT:
-        return VARIANT
-    if t == LogicalCategory.NULL:
-        return NULL
-    if t == LogicalCategory.ARRAY:
-        elem_ct = VARCHAR if element_type is None else sql_to_column_type(element_type, precision, scale, None)
-        return ARRAY(elem_ct)
-    if t == LogicalCategory.VECTOR:
-        raise NotImplementedError("VECTOR requires a dimension; none carried by the category")
-    raise NotImplementedError(f"no ColumnType mapping for {t!r}")
+# Flat lookup: non-parameterized LogicalCategory → canonical ColumnType instance.
+# Parameterized types (DECIMAL, ARRAY, VECTOR, TIMESTAMP, TIME) need explicit
+# construction — callers that need those use DECIMAL(p,s), ARRAY(elem), etc. directly.
+# Alias members (DOUBLE, BLOB, STRUCT, JSONB) removed in Phase 4; no entries needed.
+_CATEGORY_TO_CANONICAL = {
+    LogicalCategory.BOOLEAN: BOOLEAN,
+    LogicalCategory.INTEGER: INT64,
+    LogicalCategory.FLOAT: FLOAT64,
+    LogicalCategory.VARCHAR: VARCHAR,
+    LogicalCategory.NVARCHAR: NVARCHAR,
+    LogicalCategory.VARBINARY: VARBINARY,
+    LogicalCategory.DATE: DATE,
+    LogicalCategory.TIMESTAMP: TIMESTAMP(),
+    LogicalCategory.TIME: TIME(),
+    LogicalCategory.INTERVAL: INTERVAL,
+    LogicalCategory.VARIANT: VARIANT,
+    LogicalCategory.NULL: NULL,
+}
 
 
-def column_type_to_sql(column_type) -> dict:
-    """Inverse: derive {type, precision, scale, element_type} from a ColumnType."""
-    if column_type is None:
-        return {}
-    out = {}
-    cat = column_type.category
-    out["type"] = cat
-    if cat == LogicalCategory.DECIMAL:
-        out["precision"] = column_type.logical.precision
-        out["scale"] = column_type.logical.scale
-    elif cat == LogicalCategory.ARRAY and column_type.element is not None:
-        out["element_type"] = column_type_to_sql(column_type.element).get("type")
-    return out

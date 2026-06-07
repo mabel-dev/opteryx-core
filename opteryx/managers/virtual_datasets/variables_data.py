@@ -44,7 +44,7 @@ def read(at_date=None, variables=None):
         )
         names.append(variable)
         values.append(str(variable_value))
-        types.append(variable_type.value)
+        types.append(variable_type.category.value)
         owners.append(variable_owner.name)
         visibilities.append(variable_visibility.name)
 
@@ -63,11 +63,11 @@ def schema():
     return  RelationSchema(
         name="$variables",
         columns=[
-            SchemaColumn.from_column_type(name="name", column_type=_lt.VARCHAR),
-            SchemaColumn.from_column_type(name="value", column_type=_lt.VARCHAR),
-            SchemaColumn.from_column_type(name="type", column_type=_lt.VARCHAR),
-            SchemaColumn.from_column_type(name="owner", column_type=_lt.VARCHAR),
-            SchemaColumn.from_column_type(name="visibility", column_type=_lt.VARCHAR),
+            SchemaColumn(name="name", column_type=_lt.VARCHAR),
+            SchemaColumn(name="value", column_type=_lt.VARCHAR),
+            SchemaColumn(name="type", column_type=_lt.VARCHAR),
+            SchemaColumn(name="owner", column_type=_lt.VARCHAR),
+            SchemaColumn(name="visibility", column_type=_lt.VARCHAR),
         ],
     )
     # fmt:on

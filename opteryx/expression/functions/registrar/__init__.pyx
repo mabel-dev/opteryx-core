@@ -31,6 +31,21 @@ from opteryx.expression.functions import (
     ReturnSpec,
 )
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import (
+    BOOLEAN as _CT_BOOLEAN,
+    INT64 as _CT_INT64,
+    FLOAT64 as _CT_FLOAT64,
+    VARCHAR as _CT_VARCHAR,
+    NVARCHAR as _CT_NVARCHAR,
+    VARBINARY as _CT_VARBINARY,
+    DATE as _CT_DATE,
+    INTERVAL as _CT_INTERVAL,
+    VARIANT as _CT_VARIANT,
+    NULL as _CT_NULL,
+    TIMESTAMP as _CT_TIMESTAMP,  # factory: _CT_TIMESTAMP() → ColumnType
+    TIME as _CT_TIME,            # factory: _CT_TIME() → ColumnType
+    ARRAY as _CT_ARRAY,          # factory: _CT_ARRAY(element) → ColumnType
+)
 
 
 # Kernel decorators for common iteration patterns
@@ -152,30 +167,31 @@ def _make(
     )
 
 
-def _coalesce_return_type(arg_nodes) -> LogicalCategory:
-    """Return the first non-null compatible type across all args."""
+def _coalesce_return_type(arg_nodes):
+    """Return the first non-null compatible ColumnType across all args."""
     from opteryx.types import find_compatible_type
 
-    types = [
-        n.schema_column.category
+    column_types = [
+        n.schema_column.column_type
         for n in arg_nodes
         if getattr(n, "schema_column", None) is not None
-        and n.schema_column.category not in (LogicalCategory.NULL, None)
+        and n.schema_column.column_type is not None
+        and n.schema_column.column_type.category not in (LogicalCategory.NULL, None)
     ]
-    return find_compatible_type(types) or LogicalCategory.NULL
+    return find_compatible_type(column_types) or _CT_NULL
 
 
-def _datepart_return_type(arg_nodes) -> LogicalCategory:
+def _datepart_return_type(arg_nodes):
     """EXTRACT/DATEPART return type depends on the part name literal."""
     part_val = getattr(arg_nodes[0], "value", None) if arg_nodes else None
     if part_val is None:
-        return LogicalCategory.INTEGER
+        return _CT_INT64
     part = str(part_val).lower()
     if part in ("epoch", "julian"):
-        return LogicalCategory.DOUBLE
+        return _CT_FLOAT64
     if part == "date":
-        return LogicalCategory.DATE
-    return LogicalCategory.INTEGER
+        return _CT_DATE
+    return _CT_INT64
 
 
 # ---------------------------------------------------------------------------

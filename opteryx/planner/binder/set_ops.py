@@ -107,7 +107,7 @@ def _validate_set_operation_types(
 
     coerced_types = []
     for left_col, right_col in zip(left_columns, right_columns):
-        coerced_type = find_compatible_type([left_col.category, right_col.category])
+        coerced_type = find_compatible_type([left_col.column_type, right_col.column_type])
         coerced_types.append(coerced_type)
 
     return coerced_types
@@ -214,7 +214,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             elem_ct = _lt.VARIANT
         else:
             elem_ct = _lt.VARIANT
-        schema_column = ConstantColumn.from_column_type(
+        schema_column = ConstantColumn(
             name=node.unnest_alias,
             column_type=elem_ct,
             value=node.unnest_column.value,
@@ -263,7 +263,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         else:
             elem_ct_unnest = _lt.VARCHAR
 
-        schema_column = SchemaColumn.from_column_type(name=node.unnest_alias, column_type=elem_ct_unnest)
+        schema_column = SchemaColumn(name=node.unnest_alias, column_type=elem_ct_unnest)
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
             node_type=NodeType.IDENTIFIER,

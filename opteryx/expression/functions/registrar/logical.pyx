@@ -24,8 +24,6 @@ from opteryx.expression.functions.implementations.utility import (
     jsonb_object_keys as _lf_jsonb_object_keys,
 )
 
-# Local helpers provided by registrar package
-from opteryx.types.logical_type import LogicalCategory
 
 
 def get_builtin_logical_functions() -> List[FunctionDefinition]:

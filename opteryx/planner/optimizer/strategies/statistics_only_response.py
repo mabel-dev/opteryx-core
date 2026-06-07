@@ -26,7 +26,7 @@ and complex types lose precision in BRIN bounds and cannot be answered.
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, INT64 as _CT_INT64
 
 # Strategy-style Optimization Class
 from .optimization_strategy import (
@@ -556,7 +556,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                     result_value = total_rows - null_count
                 else:
                     result_value = total_rows
-                result_type = LogicalCategory.INTEGER
+                result_type = _CT_INT64
             elif agg_func in ("MIN", "MAX"):
                 if not column_name:
                     return plan
@@ -564,8 +564,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 if result_value is None:
                     return plan
                 # Preserve the column type (INTEGER or TIMESTAMP)
-                agg_col_type = agg_node.parameters[0].schema_column.category
-                result_type = agg_col_type
+                result_type = agg_node.parameters[0].schema_column.column_type or _CT_INT64
             else:
                 # Unsupported aggregate type
                 return plan

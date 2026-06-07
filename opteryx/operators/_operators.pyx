@@ -407,7 +407,7 @@ cdef class JoinNode(BasePlanNode):
     @staticmethod
     def _join_numeric_target_type(left_type, right_type):
         from opteryx.types.logical_type import LogicalCategory, find_compatible_type
-        numeric_types = (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL)
+        numeric_types = (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)
         if left_type not in numeric_types or right_type not in numeric_types:
             return None
         if left_type == right_type:
@@ -480,7 +480,7 @@ cdef class JoinNode(BasePlanNode):
             target_type = cast_rule["target_type"]
             # Phase 2: target_type is ColumnType; compare via .category
             target_cat = target_type.category if isinstance(target_type, ColumnType) else target_type
-            if target_cat == LogicalCategory.DOUBLE:
+            if target_cat == LogicalCategory.FLOAT:
                 vectors[idx] = cast_to_double(vectors[idx])
                 changed = True
             elif target_cat == LogicalCategory.INTEGER:

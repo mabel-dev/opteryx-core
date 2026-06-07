@@ -626,7 +626,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         and _projection[0].value is None
     ):
         for column in _projection:
-            if column.node_type == NodeType.LITERAL and column.type in (
+            if column.node_type == NodeType.LITERAL and column.type is not None and column.type.category in (
                 LogicalCategory.ARRAY,
                 LogicalCategory.VECTOR,
             ):
@@ -1565,9 +1565,10 @@ def plan_create_table(statement, **kwargs):
                 f"unsupported column type in CREATE TABLE: {type_key}"
             )
 
-        # Map to LogicalCategory
+        # Map to LogicalCategory then to canonical ColumnType
         sql_type_str = type_mapping[type_key]
-        sql_type = LogicalCategory[sql_type_str]
+        from opteryx.types.logical_type import LogicalCategory as _LC, _CATEGORY_TO_CANONICAL
+        sql_type_ct = _CATEGORY_TO_CANONICAL.get(_LC[sql_type_str])
 
         # Check for NOT NULL constraint
         col_nullable = True
@@ -1579,7 +1580,7 @@ def plan_create_table(statement, **kwargs):
                     break
 
         # Create SchemaColumn
-        flat_col = SchemaColumn(name=col_name, type=sql_type, nullable=col_nullable)
+        flat_col = SchemaColumn(name=col_name, column_type=sql_type_ct, nullable=col_nullable)
         columns.append(flat_col)
 
     create_table_node.columns = columns

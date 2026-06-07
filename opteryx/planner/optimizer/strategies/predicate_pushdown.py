@@ -819,7 +819,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 and literal_candidate
                 and literal_candidate.node_type == NodeType.LITERAL
                 and (
-                    (literal_candidate.type == _CT_BOOLEAN or (isinstance(literal_candidate.type, ColumnType) and literal_candidate.type.category == LogicalCategory.BOOLEAN))
+                    (literal_candidate.type is not None and literal_candidate.type.category == LogicalCategory.BOOLEAN)
                     or str(literal_candidate.type).upper() == "BOOLEAN"
                 )
             ):
@@ -861,7 +861,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 if negate:
                     new_condition = Node(NodeType.NOT, centre=expression)
                     expr_name = f"NOT {format_expression(expression)}"
-                    new_condition.schema_column = ExpressionColumn.from_column_type(
+                    new_condition.schema_column = ExpressionColumn(
                         name=expr_name,
                         column_type=_CT_BOOLEAN,
                         expression=expr_name,

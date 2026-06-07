@@ -19,28 +19,39 @@ from opteryx.types.schema import SchemaColumn, RelationSchema
 __all__ = ("read", "schema")
 
 
+def _get_variable(variables, key, default):
+    if isinstance(variables, dict):
+        return variables.get(key, default)
+    try:
+        return variables[key]
+    except (KeyError, VariableNotFoundError, TypeError):
+        return default
+
+
 def read(at_date=None, variables=None):
     variables = variables or {}
 
-    if isinstance(variables, dict):
-        memberships = variables.get("user_memberships", [])
-    elif hasattr(variables, "__getitem__"):
-        try:
-            memberships = variables["user_memberships"]
-        except (KeyError, VariableNotFoundError, TypeError):
-            memberships = []
-    else:
-        memberships = []
+    username = _get_variable(variables, "external_user", "")
+    memberships = _get_variable(variables, "user_memberships", [])
 
-    if hasattr(memberships, "to_pylist"):
+    if callable(getattr(memberships, "to_pylist", None)):
         memberships = memberships.to_pylist()
 
-    # Build Draken vectors directly
-    memberships_list = list(memberships)
+    attributes = []
+    values = []
+
+    if username:
+        attributes.append("username")
+        values.append(username)
+
+    for m in memberships:
+        attributes.append("membership")
+        values.append(str(m))
+
     vectors = [
-        vector_from_sequence(["membership"] * len(memberships_list), dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence([str(value) for value in memberships_list], dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(["VARCHAR"] * len(memberships_list), dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(attributes, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(values, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(["VARCHAR"] * len(attributes), dtype=LogicalCategory.VARCHAR),
     ]
 
     return Morsel.from_vectors(["attribute", "value", "type"], vectors)
@@ -51,9 +62,9 @@ def schema():
     return  RelationSchema(
         name="$user",
         columns=[
-            SchemaColumn.from_column_type(name="attribute", column_type=_lt.VARCHAR),
-            SchemaColumn.from_column_type(name="value", column_type=_lt.VARCHAR),
-            SchemaColumn.from_column_type(name="type", column_type=_lt.VARCHAR)
+            SchemaColumn(name="attribute", column_type=_lt.VARCHAR),
+            SchemaColumn(name="value", column_type=_lt.VARCHAR),
+            SchemaColumn(name="type", column_type=_lt.VARCHAR)
         ],
     )
     # fmt:on

@@ -13,7 +13,7 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types.logical_type import LogicalCategory, ColumnType
+from opteryx.types.logical_type import LogicalCategory, ColumnType, _NUMERIC_TYPES, _TEMPORAL_TYPES
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn, RelationSchema
 from opteryx.utils import random_string
@@ -41,14 +41,12 @@ def visit_function_dataset(
                             if schema_column is not None and isinstance(getattr(schema_column, "column_type", None), ColumnType):
                                 _elem = schema_column.column_type.element
                         element_types[column] = _elem
-        # Phase 2: build each SchemaColumn via from_column_type using ColumnType directly.
         def _build_value_column(column):
             ct = types.get(column)  # ColumnType or None
             if isinstance(ct, ColumnType):
-                return SchemaColumn.from_column_type(name=column, column_type=ct)
-            # Fallback: unknown type → NULL
+                return SchemaColumn(name=column, column_type=ct)
             from opteryx.types import logical_type as _lt2
-            return SchemaColumn.from_column_type(name=column, column_type=_lt2.NULL)
+            return SchemaColumn(name=column, column_type=_lt2.NULL)
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -74,7 +72,7 @@ def visit_function_dataset(
                 node_type=NodeType.IDENTIFIER,
                 source_column=node.unnest_target,
                 source=relation_name,
-                schema_column=SchemaColumn(name=node.unnest_target, type=None),
+                schema_column=SchemaColumn(name=node.unnest_target),
             )
         ]
         schema = RelationSchema(name=relation_name, columns=[c.schema_column for c in columns])
@@ -91,25 +89,22 @@ def visit_function_dataset(
             first_arg = first_arg.centre
         # Phase 2: first_arg.type is ColumnType; compare via .category
         first_arg_cat = first_arg.type.category if isinstance(first_arg.type, ColumnType) else first_arg.type
-        if first_arg_cat is not None and first_arg_cat.is_numeric():
+        if first_arg_cat is not None and first_arg_cat in _NUMERIC_TYPES:
             arg_cts = {n.type for n in node.args}
             arg_cats = {t.category if isinstance(t, ColumnType) else t for t in arg_cts}
             if len(arg_cts) == 1:
                 element_type = list(arg_cts)[0]  # ColumnType
-            elif arg_cats == {LogicalCategory.INTEGER, LogicalCategory.DOUBLE}:
+            elif arg_cats == {LogicalCategory.INTEGER, LogicalCategory.FLOAT}:
                 element_type = _lt.FLOAT64
             else:
                 raise InvalidFunctionParameterError(
                     "GENERATE_SERIES for numbers takes 1 (stop), 2 (start, stop) or 3 (start, stop, interval) parameters."
                 )
-        if first_arg_cat is not None and first_arg_cat.is_temporal():
+        if first_arg_cat is not None and first_arg_cat in _TEMPORAL_TYPES:
             element_type = _lt.TIMESTAMP()
 
         node.relation_name = node.alias
-        if isinstance(element_type, ColumnType):
-            _gs_schema_col = SchemaColumn.from_column_type(name=node.alias, column_type=element_type)
-        else:
-            _gs_schema_col = SchemaColumn(name=node.alias, type=element_type)
+        _gs_schema_col = SchemaColumn(name=node.alias, column_type=element_type if isinstance(element_type, ColumnType) else None)
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,

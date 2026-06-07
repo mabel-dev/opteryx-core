@@ -10,7 +10,7 @@ from opteryx.expression.functions import (
 )
 
 # Use package-level helper to construct concise FunctionDefinition entries.
-from opteryx.types.logical_type import LogicalCategory
+# LogicalCategory imported via __init__.pyx (textually included); canonical ColumnTypes also in scope.
 
 
 def get_builtin_utility_functions() -> List[FunctionDefinition]:
@@ -51,27 +51,26 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     _least_kernel = _isingle(_nanmin)
     _sort_kernel = _sort_factory(_sort)
 
-    def _element_type_return(arg_nodes) -> LogicalCategory:
-        """Return the element type of the first arg (for GREATEST/LEAST/SORT).
+    def _element_type_return(arg_nodes):
+        """Return the element ColumnType of the first arg (for GREATEST/LEAST/SORT).
 
-        D-4 Phase 2: the array element comes from the unified column_type
-        (`column_type.element`), reverse-bridged to LogicalCategory. NULL when unknown.
+        Phase 5: returns ColumnType directly. NULL ColumnType when element is unknown.
         """
         sc = getattr(arg_nodes[0], "schema_column", None)
         if sc is None or sc.column_type is None or sc.column_type.element is None:
-            return LogicalCategory.NULL
-        from opteryx.types.logical_type import column_type_to_sql
-        return column_type_to_sql(sc.column_type.element).get("type") or LogicalCategory.NULL
+            return _CT_NULL
+        return sc.column_type.element  # ColumnType
 
     def _array_literal_return_type(arg_nodes):
-        """ARRAY(expr, type_name): return ARRAY<type_name>."""
+        """ARRAY(expr, type_name): return ARRAY<type_name> ColumnType."""
         from opteryx.types.logical_type import parse_column_type
         type_name = getattr(arg_nodes[1], "value", None) if len(arg_nodes) > 1 else None
         if type_name:
             ct = parse_column_type(f"ARRAY<{type_name}>")
-            element_type = ct.element.category if ct.element is not None else LogicalCategory.NULL
-            return (ct.category, element_type)
-        return (LogicalCategory.ARRAY, LogicalCategory.NULL)
+            # Return (ARRAY<X> ColumnType, element ColumnType) for catalog to split.
+            elem = ct.element if ct.element is not None else _CT_VARIANT
+            return (ct, elem)
+        return (_CT_ARRAY(_CT_VARIANT), _CT_VARIANT)
 
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),
@@ -255,13 +254,15 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     _any = ParameterSpec(name="val", type_family="any")
 
     def _embed_return_type(_arg_nodes):
-        return LogicalCategory.VECTOR
+        # EMBED returns a VECTOR; dimensions are not known at bind time.
+        # VARIANT is a safe placeholder — executor produces the real vector type.
+        return _CT_VARIANT
 
     return [
         _make(
             "ARRAY_CONTAINS",
             other_functions.array_contains,
-            LogicalCategory.BOOLEAN,
+            _CT_BOOLEAN,
             (_arr, _item),
             null_policy="passthru",
             summary="Test if array contains item.",
@@ -270,7 +271,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "ARRAY_CONTAINS_ANY",
             other_functions.array_contains_any,
-            LogicalCategory.BOOLEAN,
+            _CT_BOOLEAN,
             (_arr, _set),
             null_policy="passthru",
             summary="Test if array contains any item from set.",
@@ -279,7 +280,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "ARRAY_CONTAINS_ALL",
             other_functions.array_contains_all,
-            LogicalCategory.BOOLEAN,
+            _CT_BOOLEAN,
             (_arr, _set),
             null_policy="passthru",
             summary="Test if array contains all items from set.",
@@ -288,7 +289,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "JSONB_OBJECT_KEYS",
             other_functions.jsonb_object_keys,
-            LogicalCategory.ARRAY,
+            _CT_ARRAY(_CT_VARIANT),
             (ParameterSpec(name="json", type_family="any"),),
             cost=590.21,
             summary="Extract keys from JSON object.",
@@ -296,7 +297,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "HUMANIZE",
             other_functions.humanize,
-            LogicalCategory.VARCHAR,
+            _CT_VARCHAR,
             (ParameterSpec(name="val", type_family="any"),),
             cost=775947.17,
             summary="Format number in human-readable form.",
@@ -341,7 +342,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="numeric_vector"),
                         ParameterSpec(name="vec", type_family="numeric_vector"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -356,7 +357,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="string"),
                         ParameterSpec(name="vec", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -383,7 +384,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="numeric_vector"),
                         ParameterSpec(name="vec", type_family="numeric_vector"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -398,7 +399,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="string"),
                         ParameterSpec(name="vec", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

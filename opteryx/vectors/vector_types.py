@@ -14,7 +14,7 @@ from opteryx.types.logical_type import LogicalCategory
 NUMERIC_VECTOR_ELEMENT_TYPES = frozenset(
     {
         LogicalCategory.INTEGER,
-        LogicalCategory.DOUBLE,
+        LogicalCategory.FLOAT,
         LogicalCategory.DECIMAL,
     }
 )
@@ -105,7 +105,7 @@ def node_is_constant_embed_call(node) -> bool:
     if argument.node_type != NodeType.LITERAL:
         return False
     arg_type, _ = resolve_node_type(argument)
-    return arg_type in (LogicalCategory.VARCHAR, LogicalCategory.BLOB) or isinstance(
+    return arg_type in (LogicalCategory.VARCHAR, LogicalCategory.VARBINARY) or isinstance(
         getattr(argument, "value", None), (str, bytes, bytearray)
     )
 

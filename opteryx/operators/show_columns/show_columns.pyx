@@ -46,7 +46,7 @@ def _simple_collector(schema):
         if ct is not None:
             type_label = str(ct)
         else:
-            type_label = str(column.type)
+            type_label = "UNKNOWN"
 
         names.append(column.name)
         types.append(type_label)

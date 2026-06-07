@@ -6,7 +6,7 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.types.logical_type import LogicalCategory
+# LogicalCategory imported via __init__.pyx (textually included); canonical ColumnTypes also in scope.
 
 
 def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
@@ -44,12 +44,12 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
 
     functions: list[FunctionDefinition] = [
         _make(
-            "HASH", _hash_kernel, LogicalCategory.BLOB, (_any,), cost=437424.69, summary="Generic hash."
+            "HASH", _hash_kernel, _CT_VARBINARY, (_any,), cost=437424.69, summary="Generic hash."
         ),
         _make(
             "MD5",
             vector_md5,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_any,),
             engine="draken",
             cost=8.44,
@@ -58,7 +58,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "SHA1",
             vector_sha1,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_any,),
             engine="draken",
             cost=5.10,
@@ -67,7 +67,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "SHA224",
             _sha224_kernel,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_any,),
             cost=634394.82,
             summary="SHA-224 hash.",
@@ -75,7 +75,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "SHA256",
             vector_sha256,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_any,),
             engine="draken",
             cost=7.56,
@@ -84,7 +84,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "SHA384",
             _sha384_kernel,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_any,),
             cost=714225.82,
             summary="SHA-384 hash.",
@@ -92,7 +92,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "SHA512",
             vector_sha512,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_any,),
             engine="draken",
             cost=7.47,
@@ -112,7 +112,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="RANDOM_default",
                     parameters=(_n,),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -124,7 +124,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="RANDOM_0",
                     parameters=(),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="zero_arg",
@@ -148,7 +148,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="NORMAL_default",
                     parameters=(_n,),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -160,7 +160,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="NORMAL_0",
                     parameters=(),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="zero_arg",
@@ -175,7 +175,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "RANDOM_STRING",
             number_functions.random_strings,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_n,),
             volatility="volatile",
             summary="Generate random strings.",
@@ -184,7 +184,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "BASE64_ENCODE",
             vector_base64_encode,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_b,),
             engine="draken",
             summary="Base64 encode.",
@@ -193,7 +193,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "BASE64_DECODE",
             vector_base64_decode,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_b,),
             engine="draken",
             summary="Base64 decode.",
@@ -202,7 +202,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "BASE85_ENCODE",
             vector_base85_encode,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_b,),
             engine="draken",
             summary="Base85 encode.",
@@ -211,7 +211,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "BASE85_DECODE",
             vector_base85_decode,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_b,),
             engine="draken",
             summary="Base85 decode.",
@@ -220,13 +220,13 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         _make(
             "HEX_ENCODE",
             vector_hex_encode,
-            LogicalCategory.BLOB,
+            _CT_VARBINARY,
             (_b,),
             summary="Hex encode.",
             cost=539725.99,
         ),
         _make(
-            "HEX_DECODE", vector_hex_decode, LogicalCategory.BLOB, (_b,), summary="Hex decode.", cost=3.87
+            "HEX_DECODE", vector_hex_decode, _CT_VARBINARY, (_b,), summary="Hex decode.", cost=3.87
         ),
     ]
 

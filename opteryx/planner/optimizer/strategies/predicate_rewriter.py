@@ -80,7 +80,6 @@ def rewrite_in_to_eq(predicate):
         predicate.right.type = _arr_ct.element
     else:
         predicate.right.type = _lt.VARCHAR
-    predicate.right.element_type = None
     return predicate
 
 
@@ -106,7 +105,7 @@ def reorder_interval_calc(predicate):
             right=interval,
         )
         binary_op_column_name = format_expression(new_binary_op, True)
-        new_binary_op.schema_column = ExpressionColumn.from_column_type(
+        new_binary_op.schema_column = ExpressionColumn(
             name=binary_op_column_name, column_type=_lt.TIMESTAMP()
         )
 
@@ -116,7 +115,7 @@ def reorder_interval_calc(predicate):
         predicate.left = date_end
 
         predicate_column_name = format_expression(predicate, True)
-        predicate.schema_column = ExpressionColumn.from_column_type(
+        predicate.schema_column = ExpressionColumn(
             name=predicate_column_name, column_type=_lt.BOOLEAN
         )
 
@@ -229,11 +228,10 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
             new_node.left.value = list(set(data["values"]))
             # Phase 2: build ARRAY ColumnType directly from old element type.
             _old_elem_ct = new_node.left.type  # ColumnType of element
-            _arr_ct_1 = _lt.ARRAY(_old_elem_ct) if isinstance(_old_elem_ct, ColumnType) else _lt.ARRAY(_lt.VARIANT)
+            _arr_ct_1 = _lt.ARRAY(_old_elem_ct if isinstance(_old_elem_ct, ColumnType) else _lt.VARIANT)
             new_node.left.type = _arr_ct_1
-            new_node.left.element_type = None  # element embedded in type
             # Phase 2: use the already-computed _arr_ct_1 for schema_column.
-            new_node.left.schema_column = ConstantColumn.from_column_type(
+            new_node.left.schema_column = ConstantColumn(
                 name=new_node.left.name,
                 column_type=_arr_ct_1,
                 value=new_node.left.value,
@@ -305,8 +303,7 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
             _old_elem_ct_2 = new_node.right.type
             _arr_ct_2 = _lt.ARRAY(_old_elem_ct_2) if isinstance(_old_elem_ct_2, ColumnType) else _lt.ARRAY(_lt.VARIANT)
             new_node.right.type = _arr_ct_2
-            new_node.right.element_type = None
-            new_node.right.schema_column = ConstantColumn.from_column_type(
+            new_node.right.schema_column = ConstantColumn(
                 name=new_node.right.name,
                 column_type=_arr_ct_2,
                 value=new_node.right.value,
@@ -356,11 +353,11 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             node = data["node"]
             left_type = getattr(getattr(node.left, "schema_column", None), "category", None)
             _COERCE = {
-                LogicalCategory.DOUBLE: float,
+                LogicalCategory.FLOAT: float,
                 LogicalCategory.INTEGER: int,
                 LogicalCategory.BOOLEAN: bool,
                 LogicalCategory.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                LogicalCategory.BLOB: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
+                LogicalCategory.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
             }
             coerce = _COERCE.get(left_type, lambda v: v)
             values = sorted(str(v) for v in set(data["values"]))
@@ -371,10 +368,9 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             ]
             # Phase 2: build ARRAY ColumnType from old element type.
             _old_elem_ct_3 = node.right.type
-            _arr_ct_3 = _lt.ARRAY(_old_elem_ct_3) if isinstance(_old_elem_ct_3, ColumnType) else _lt.ARRAY(_lt.VARIANT)
+            _arr_ct_3 = _lt.ARRAY(_old_elem_ct_3 if isinstance(_old_elem_ct_3, ColumnType) else _lt.VARIANT)
             node.right.type = _arr_ct_3
-            node.right.element_type = None
-            node.right.schema_column = ConstantColumn.from_column_type(
+            node.right.schema_column = ConstantColumn(
                 name=node.right.name,
                 column_type=_arr_ct_3,
                 value=node.right.value,
@@ -430,7 +426,7 @@ def _build_emptiness_node(ident, op_name):
         value=op_name,
         centre=ident,
     )
-    new_node.schema_column = ExpressionColumn.from_column_type(
+    new_node.schema_column = ExpressionColumn(
         name=format_expression(new_node, True),
         column_type=_lt.BOOLEAN,
     )
@@ -480,7 +476,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
             col_type = getattr(getattr(ident, "schema_column", None), "category", None)
             val = literal.value
             if (
-                col_type in {LogicalCategory.VARCHAR, LogicalCategory.BLOB}
+                col_type in {LogicalCategory.VARCHAR, LogicalCategory.VARBINARY}
                 and val is not None
                 and val in ("", b"")
             ):
@@ -515,7 +511,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
     if inner.node_type != NodeType.IDENTIFIER:
         return predicate
     col_type = getattr(getattr(inner, "schema_column", None), "category", None)
-    if col_type not in {LogicalCategory.VARCHAR, LogicalCategory.BLOB}:
+    if col_type not in {LogicalCategory.VARCHAR, LogicalCategory.VARBINARY}:
         return predicate
 
     val = literal.value
@@ -601,10 +597,8 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     telemetry.optimization_predicate_rewriter_date_trunc_to_range += 1
 
     # Get the column's actual type to match the literal type
-    column_type = LogicalCategory.VARCHAR
-    column_ct = _lt.VARCHAR  # unified ColumnType for the schema_column
+    column_ct = _lt.VARCHAR  # ColumnType for the schema_column
     if column_node.schema_column:
-        column_type = column_node.schema_column.category
         column_ct = column_node.schema_column.column_type or _lt.VARCHAR
 
     # Helper function to create a literal timestamp node with the column's type
@@ -612,9 +606,9 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
         lit = Node(
             node_type=NodeType.LITERAL,
             value=dt,
-            type=column_type,
+            type=column_ct,
         )
-        lit.schema_column = ExpressionColumn.from_column_type(name="", column_type=column_ct)
+        lit.schema_column = ExpressionColumn(name="", column_type=column_ct)
         return lit
 
     # Rewrite based on operator and alignment
@@ -635,7 +629,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="GtEq",
             left=column_node,
             right=floor_literal,
-            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
+            schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
         )
 
         lt_pred = Node(
@@ -643,7 +637,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="Lt",
             left=column_node,
             right=next_literal,
-            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
+            schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
         )
 
         # Create AND node
@@ -684,7 +678,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="Lt",
             left=column_node,
             right=make_timestamp_literal(floor_val),
-            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
+            schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
         )
 
         gte_pred = Node(
@@ -692,7 +686,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="GtEq",
             left=column_node,
             right=make_timestamp_literal(next_floor),
-            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
+            schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
         )
 
         predicate.node_type = NodeType.OR
@@ -1002,9 +996,11 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         predicate.node_type == NodeType.COMPARISON_OPERATOR
         and predicate.left.node_type == NodeType.BINARY_OPERATOR
     ):
+        _dt_left = determine_type(predicate.left)
+        _dt_right = determine_type(predicate.right)
         if (
-            determine_type(predicate.left) == LogicalCategory.INTERVAL
-            and determine_type(predicate.right) == LogicalCategory.INTERVAL
+            _dt_left is not None and _dt_left.category == LogicalCategory.INTERVAL
+            and _dt_right is not None and _dt_right.category == LogicalCategory.INTERVAL
         ):
             telemetry.optimization_predicate_rewriter_date_ += 1
             predicate = dispatcher["reorder_interval_calc"](predicate)
@@ -1023,11 +1019,8 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             raise ValueError(f"Unable to resolve rewritten function '{function.value}'")
         function.function_ref = resolved
         if getattr(function, "schema_column", None) is not None and resolved.inferred_return_type:
-            from opteryx.types.logical_type import sql_to_column_type
-            try:
-                function.schema_column.column_type = sql_to_column_type(resolved.inferred_return_type)
-            except Exception:
-                pass
+            # Phase 5: inferred_return_type is ColumnType — use directly.
+            function.schema_column.column_type = resolved.inferred_return_type
 
     def _normalise_dfa_replacement(value):
         if isinstance(value, bytes):
@@ -1078,7 +1071,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             build_literal_node(
                 compiled_program,
                 root=function.parameters[1],
-                suggested_type=LogicalCategory.BLOB,
+                suggested_type=_lt.VARBINARY,
             ),
         ]
         _rebind_function_ref()
@@ -1112,7 +1105,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 value="StringConcat",
                 left=left_node,
                 right=param,
-                schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.VARCHAR),
+                schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
@@ -1128,14 +1121,14 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 value="StringConcat",
                 left=left_node,
                 right=separator,
-                schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.VARCHAR),
+                schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
             )
             left_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=separator_node,
                 right=param,
-                schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.VARCHAR),
+                schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column

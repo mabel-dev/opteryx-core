@@ -88,7 +88,7 @@ def _types_compatible(src, tgt) -> bool:
         return True
     if src_lc is None:
         return True
-    if src_lc == LogicalCategory.INTEGER and tgt_lc == LogicalCategory.DOUBLE:
+    if src_lc == LogicalCategory.INTEGER and tgt_lc == LogicalCategory.FLOAT:
         return True
     return False
 
@@ -177,7 +177,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 )
             flat = SchemaColumn(
                 name=target_name,
-                type=sc.category,
+                column_type=sc.column_type,
                 nullable=getattr(sc, "nullable", True),
             )
             target_columns.append(flat)

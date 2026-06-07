@@ -40,15 +40,14 @@ from .optimization_strategy import (
 # These are the core comparisons, Eq, NotEq, Gt, GtEq, Lt, LtEq
 BASIC_COMPARISON_COSTS = {
     LogicalCategory.ARRAY: 10.00,  # expensive
-    LogicalCategory.BLOB: 0.058,  # varies based on length, this is 50 bytes
-    LogicalCategory.JSONB: 10.00,  # JSONB (treat as expensive)
+    LogicalCategory.VARBINARY: 0.058,  # varies based on length, this is 50 bytes
+    LogicalCategory.NVARCHAR: 10.00,  # JSON/complex text (treat as expensive)
     LogicalCategory.BOOLEAN: 0.003,
     LogicalCategory.DATE: 0.008,
     LogicalCategory.DECIMAL: 1.533,
-    LogicalCategory.DOUBLE: 0.002,
+    LogicalCategory.FLOAT: 0.002,
     LogicalCategory.INTEGER: 0.001,
     LogicalCategory.INTERVAL: 10.00,  # expensive
-    LogicalCategory.STRUCT: 10.00,  # expensive
     LogicalCategory.TIMESTAMP: 0.008,
     LogicalCategory.TIME: 10.00,  # expensive
     LogicalCategory.VARCHAR: 0.231,  # varies based on length, this is 50 chars
@@ -231,8 +230,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             _old_elem_ct_po = new_node.left.type
             _arr_ct_po = _lt.ARRAY(_old_elem_ct_po) if isinstance(_old_elem_ct_po, ColumnType) else _lt.ARRAY(_lt.VARIANT)
             new_node.left.type = _arr_ct_po
-            new_node.left.element_type = None
-            new_node.left.schema_column = ConstantColumn.from_column_type(
+            new_node.left.schema_column = ConstantColumn(
                 name=new_node.left.name,
                 column_type=_arr_ct_po,
                 value=new_node.left.value,

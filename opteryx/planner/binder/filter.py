@@ -23,9 +23,11 @@ def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # Verify the predicate evaluates to a boolean — non-boolean expressions (e.g.
     # bitwise arithmetic) are not valid WHERE conditions without an explicit comparison.
     _condition_sc = getattr(node.condition, "schema_column", None)
-    _condition_type = (
-        _condition_sc.category if _condition_sc is not None else getattr(node.condition, "type", None)
-    )
+    if _condition_sc is not None:
+        _condition_type = _condition_sc.category
+    else:
+        _ct = getattr(node.condition, "type", None)
+        _condition_type = _ct.category if _ct is not None else None
     if _condition_type not in (
         None,
         LogicalCategory.BOOLEAN,

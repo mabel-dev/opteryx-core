@@ -156,31 +156,25 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 if raw_element_type is None and isinstance(column, dict):
                     raw_element_type = column.get("element_type") or column.get("element-type")
 
-                # D-4 Phase 2: build via from_column_type (single authoritative
-                # type carrier). Resolve the remote schema's type + params via the
-                # bridge, with a legacy fallback for types the bridge can't map.
-                from opteryx.types.logical_type import sql_to_column_type as _otoct
                 from opteryx.types import logical_type as _lt
+                from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
                 _ot = cls._normalize_type(raw_type, default=LogicalCategory.VARCHAR)
                 _et = (cls._normalize_type(raw_element_type, default=None)
                        if raw_element_type is not None else None)
                 _p = getattr(column, "precision", None)
                 _s = getattr(column, "scale", None)
-                try:
-                    # Use the bridge: handles DECIMAL(p,s) and ARRAY<elem>.
-                    _ct = _otoct(_ot, precision=_p, scale=_s, element_type=_et)
-                    normalized = SchemaColumn.from_column_type(
-                        name=name,
-                        column_type=_ct,
-                        nullable=getattr(column, "nullable", True),
-                    )
-                except Exception:
-                    # Unmappable type (VECTOR with no dimension, etc.) — fall back.
-                    normalized = SchemaColumn(
-                        name=name,
-                        type=_ot,
-                        nullable=getattr(column, "nullable", True),
-                    )
+                if _ot == LogicalCategory.DECIMAL and _p is not None and _s is not None:
+                    _ct = _lt.DECIMAL(_p, _s)
+                elif _ot == LogicalCategory.ARRAY:
+                    _elem = _CATEGORY_TO_CANONICAL.get(_et, _lt.VARIANT) if _et is not None else _lt.VARIANT
+                    _ct = _lt.ARRAY(_elem)
+                else:
+                    _ct = _CATEGORY_TO_CANONICAL.get(_ot)
+                normalized = SchemaColumn(
+                    name=name,
+                    column_type=_ct,
+                    nullable=getattr(column, "nullable", True),
+                )
 
             columns.append(normalized)
 

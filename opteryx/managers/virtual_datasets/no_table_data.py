@@ -31,5 +31,5 @@ def read(at_date=None, variables=None) -> Morsel:
 
 def schema():
     # fmt:off
-    return RelationSchema(name="$no_table", columns=[SchemaColumn.from_column_type(name="$column", column_type=_lt.INT64)])
+    return RelationSchema(name="$no_table", columns=[SchemaColumn(name="$column", column_type=_lt.INT64)])
     # fmt:on

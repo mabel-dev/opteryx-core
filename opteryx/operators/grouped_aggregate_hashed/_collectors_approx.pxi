@@ -76,7 +76,7 @@ cdef class ApproxCountDistinctCollector(BaseCollector):
             sketches[state_indices[i]].add_hash(hashes[i])
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
+        from draken.interop.vector_sequence import vector_from_sequence
         cdef list vals = []
         cdef Py_ssize_t i
         for i in range(num_groups):
@@ -142,7 +142,7 @@ cdef class ApproxPercentileCollector(BaseCollector):
                     td_add(hists[si], f64[sel[i]], 1)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
+        from draken.interop.vector_sequence import vector_from_sequence
         cdef list vals = []
         cdef Py_ssize_t i
         cdef td_histogram_t* h
@@ -190,7 +190,7 @@ cdef class ArrayAggCollector(BaseCollector):
             groups[state_indices[i]].append(col[i])
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
+        from draken.interop.vector_sequence import vector_from_sequence
         cdef list result = []
         cdef list vals
         cdef Py_ssize_t i

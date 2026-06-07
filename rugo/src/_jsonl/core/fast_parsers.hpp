@@ -9,33 +9,15 @@
 
 namespace rugo::_jsonl {
 
-// Fast integer parser (no exceptions, pure computation)
-// Returns false if input is not a valid integer
+// Fast integer parser via fast_float::from_chars — overflow-safe, same contract
+// as the float parser below. Returns false if the input is not a valid integer
+// or if it overflows int64_t.
 inline bool fast_parse_int64(const uint8_t* data, uint32_t start, uint32_t end, int64_t& out) noexcept {
     if (start > end) return false;
-
-    int64_t value = 0;
-    int sign = 1;
-    uint32_t i = start;
-
-    if (data[i] == '-') {
-        sign = -1;
-        i++;
-    } else if (data[i] == '+') {
-        i++;
-    }
-
-    if (i > end) return false;
-
-    while (i <= end) {
-        uint8_t c = data[i];
-        if (c < '0' || c > '9') return false;
-        value = value * 10 + (c - '0');
-        i++;
-    }
-
-    out = sign * value;
-    return true;
+    const char* first = reinterpret_cast<const char*>(data + start);
+    const char* last  = reinterpret_cast<const char*>(data + end + 1);
+    auto answer = fast_float::from_chars(first, last, out);
+    return answer.ec == std::errc() && answer.ptr == last;
 }
 
 // Fast float parser. Bounded by [start, end] via fast_float::from_chars — must NOT

@@ -124,7 +124,7 @@ std::vector<CsvMarkerPosition> scan_csv_markers(
     const CsvParseContext& ctx);
 
 // ---------------------------------------------------------------------------
-// Safe-split discovery.
+// Safe-split discovery (serial).
 //
 // Walks a pre-scanned marker list (or rescans if markers is empty) tracking
 // quote FSM state. Returns the byte offset of every '\n' that occurs outside
@@ -139,5 +139,23 @@ std::vector<uint32_t> find_safe_splits(
     size_t                                length,
     const CsvParseContext&                ctx,
     const std::vector<CsvMarkerPosition>& markers = {});
+
+// ---------------------------------------------------------------------------
+// Safe-split discovery (parallel, prefix-sum FSM).
+//
+// Divides the buffer into `nt` equal chunks. Each chunk is independently
+// scanned (SIMD) and run through the 4-state quote FSM four times — once
+// per possible starting state. A tiny O(nt) serial composition step resolves
+// the true initial state for each chunk, then safe \n positions are collected
+// in order. This eliminates the serial scan bottleneck and scales to hardware
+// concurrency for the dominant SIMD + FSM phase.
+//
+// Falls back to the serial version when nt <= 1.
+// ---------------------------------------------------------------------------
+std::vector<uint32_t> find_safe_splits_parallel(
+    const uint8_t*         data,
+    size_t                 length,
+    const CsvParseContext& ctx,
+    size_t                 nt);
 
 }  // namespace rugo::_csv

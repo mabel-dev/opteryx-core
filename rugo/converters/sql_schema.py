@@ -29,13 +29,13 @@ PARQUET_LOGICAL_TYPE_MAP = {
     "varchar": LogicalCategory.VARCHAR,
     "date": LogicalCategory.DATE,
     "date32[day]": LogicalCategory.DATE,
-    "json": LogicalCategory.JSONB,
-    "jsonb": LogicalCategory.JSONB,
-    "struct": LogicalCategory.JSONB,
+    "json": LogicalCategory.NVARCHAR,
+    "jsonb": LogicalCategory.NVARCHAR,
+    "struct": LogicalCategory.NVARCHAR,
     "boolean": LogicalCategory.BOOLEAN,
-    "binary": LogicalCategory.BLOB,
-    "byte_array": LogicalCategory.BLOB,
-    "fixed_len_byte_array": LogicalCategory.BLOB,
+    "binary": LogicalCategory.VARBINARY,
+    "byte_array": LogicalCategory.VARBINARY,
+    "fixed_len_byte_array": LogicalCategory.VARBINARY,
     "uint_8": LogicalCategory.INTEGER,
     "uint_16": LogicalCategory.INTEGER,
     "uint_32": LogicalCategory.INTEGER,
@@ -54,22 +54,22 @@ PARQUET_PHYSICAL_TYPE_MAP = {
     "int16": LogicalCategory.INTEGER,
     "int32": LogicalCategory.INTEGER,
     "int64": LogicalCategory.INTEGER,
-    "float": LogicalCategory.DOUBLE,
-    "float32": LogicalCategory.DOUBLE,
-    "float64": LogicalCategory.DOUBLE,
-    "double": LogicalCategory.DOUBLE,
-    "byte_array": LogicalCategory.BLOB,
-    "fixed_len_byte_array": LogicalCategory.BLOB,
+    "float": LogicalCategory.FLOAT,
+    "float32": LogicalCategory.FLOAT,
+    "float64": LogicalCategory.FLOAT,
+    "double": LogicalCategory.FLOAT,
+    "byte_array": LogicalCategory.VARBINARY,
+    "fixed_len_byte_array": LogicalCategory.VARBINARY,
     "boolean": LogicalCategory.BOOLEAN,
 }
 
 JSONL_TYPE_MAP = {
     "int64": LogicalCategory.INTEGER,
-    "double": LogicalCategory.DOUBLE,
-    "bytes": LogicalCategory.BLOB,
+    "double": LogicalCategory.FLOAT,
+    "bytes": LogicalCategory.VARBINARY,
     "boolean": LogicalCategory.BOOLEAN,
-    "null": LogicalCategory.BLOB,  # Default null to varchar
-    "object": LogicalCategory.JSONB,
+    "null": LogicalCategory.VARBINARY,  # Default null to varbinary
+    "object": LogicalCategory.NVARCHAR,
 }
 
 JSONL_ARRAY_INNER_TYPE_ALIASES = {
@@ -258,14 +258,13 @@ def rugo_to_relation_schema(
         # (e.g. "decimal(15,2)"); schema metadata carries no explicit fields.
         precision, scale = _parse_decimal_params(logical_type)
 
-        # D-4 Phase 2: construct via from_column_type for DECIMAL (carries p,s in
-        # the unified column_type); plain types go through the regular constructor.
+        from opteryx.types import logical_type as _lt
+        from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
         if sql_type == LogicalCategory.DECIMAL and precision is not None and scale is not None:
-            from opteryx.types import logical_type as _lt
             _ct = _lt.DECIMAL(precision, scale)
-            columns.append(SchemaColumn.from_column_type(name=name, column_type=_ct, nullable=nullable))
         else:
-            columns.append(SchemaColumn(name=name, type=sql_type, nullable=nullable))
+            _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
+        columns.append(SchemaColumn(name=name, column_type=_ct, nullable=nullable))
 
     if not columns:
         raise ValueError("No columns could be derived from rugo metadata")
@@ -336,9 +335,9 @@ def _map_jsonl_type_to_sql(jsonl_type: str) -> str:
         try:
             return parse_column_type(normalized).category
         except ValueError:
-            return LogicalCategory.BLOB
+            return LogicalCategory.VARBINARY
 
-    return LogicalCategory.BLOB
+    return LogicalCategory.VARBINARY
 
 
 def jsonl_to_sql_schema(
@@ -373,7 +372,8 @@ def jsonl_to_sql_schema(
         nullable = bool(entry.get("nullable", True))
 
         sql_type = _map_jsonl_type_to_sql(jsonl_type)
-        columns.append(SchemaColumn(name=name, type=sql_type, nullable=nullable))
+        from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
+        columns.append(SchemaColumn(name=name, column_type=_CATEGORY_TO_CANONICAL.get(sql_type), nullable=nullable))
 
     if not columns:
         raise ValueError("No columns could be derived from jsonl schema")

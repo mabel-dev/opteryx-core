@@ -71,9 +71,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     }
 
     PUSHABLE_TYPES = {
-        LogicalCategory.BLOB,
+        LogicalCategory.VARBINARY,
         LogicalCategory.BOOLEAN,
-        LogicalCategory.DOUBLE,
+        LogicalCategory.FLOAT,
         LogicalCategory.INTEGER,
         LogicalCategory.VARCHAR,
         LogicalCategory.TIMESTAMP,

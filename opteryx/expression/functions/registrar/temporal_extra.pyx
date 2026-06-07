@@ -8,7 +8,6 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.types.logical_type import LogicalCategory
 
 
 def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:

@@ -29,6 +29,7 @@ from opteryx.types.logical_type import (
     NULL as _CT_NULL, TIMESTAMP as _CT_TIMESTAMP, DATE as _CT_DATE,
     VARCHAR as _CT_VARCHAR, INTERVAL as _CT_INTERVAL,
     ColumnType as _ColumnType,
+    parse_column_type,
 )
 from opteryx.types.value_parsing import parse_value
 from opteryx.types.schema import ConstantColumn, SchemaColumn, FunctionColumn, RelationSchema
@@ -91,15 +92,20 @@ def _operand_column_type(operand):
     return None
 
 
-def _aggregate_return_type(node: Node) -> Optional[LogicalCategory]:
-    """Best-effort result-type inference for aggregate functions."""
+def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
+    """Best-effort result-type inference for aggregate functions.
+
+    Returns ColumnType or None (never LogicalCategory — callers use the result
+    directly as a ColumnType carrier).
+    """
     name = node.value
     if name in _AGGREGATE_RESULT_INTEGER:
-        return LogicalCategory.INTEGER
+        return _CT_INT64
     if name in _AGGREGATE_RESULT_DOUBLE:
-        return LogicalCategory.DOUBLE
+        return _CT_FLOAT64
     if name == "ARRAY_AGG":
-        return LogicalCategory.ARRAY
+        # Element type is unknown at bind time; VARIANT is a safe placeholder.
+        return _lt.ARRAY(_lt.VARIANT)
     if name in _AGGREGATE_RESULT_PASSTHROUGH or name == "AVG":
         # SUM/MIN/MAX/ANY_VALUE pass through the input column's type. AVG is a ratio,
         # not a value drawn from the data, so it returns DOUBLE for both INTEGER and
@@ -108,19 +114,18 @@ def _aggregate_return_type(node: Node) -> Optional[LogicalCategory]:
         # runtime — an earlier DECIMAL passthrough was a latent lie.
         if node.parameters:
             param = node.parameters[0]
-            param_type = None  # ColumnType | LogicalCategory
-            if param.node_type == NodeType.LITERAL:
-                _pt = getattr(param, "type", None)
-                param_type = _pt  # ColumnType from Phase 2
-            elif getattr(param, "schema_column", None) is not None:
-                param_type = param.schema_column.category  # LogicalCategory
-            # Normalize to LogicalCategory for comparisons.
-            param_cat = param_type.category if isinstance(param_type, _ColumnType) else param_type
-            if param_cat in (None, LogicalCategory.NULL):
+            sc = getattr(param, "schema_column", None)
+            if sc is not None:
+                param_type = sc.column_type  # ColumnType or None
+            elif param.node_type == NodeType.LITERAL:
+                param_type = getattr(param, "type", None)  # ColumnType from Phase 2
+            else:
+                param_type = None
+            if param_type is None or param_type.category in (None, LogicalCategory.NULL):
                 return None
-            if name == "AVG" and param_cat in (LogicalCategory.INTEGER, LogicalCategory.DECIMAL):
-                return LogicalCategory.DOUBLE
-            return param_type
+            if name == "AVG" and param_type.category in (LogicalCategory.INTEGER, LogicalCategory.DECIMAL):
+                return _CT_FLOAT64
+            return param_type  # ColumnType
     return None
 
 
@@ -270,7 +275,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         new_node = Node(
             node_type=NodeType.LITERAL,
             schema_column=column,
-            type=column.type,
+            type=column.column_type,
             value=column.value,
         )
         return new_node, context
@@ -383,7 +388,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
     # Now do the node we're at
     if node_type == NodeType.LITERAL:
-        schema_column = ConstantColumn.from_column_type(
+        schema_column = ConstantColumn(
             name=column_name,
             column_type=node.type,
             aliases=[node.alias] if node.alias else [],
@@ -403,34 +408,17 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             if len(node.parameters) == 0:
                 result_type, fixed_function_result = fixed_value_function(node.value, context)
             if result_type:
-                # Some functions return constants, so return the constant
-                from opteryx.types.logical_type import sql_to_column_type as _otoct_fvf
-                try:
-                    _ct_fvf = _otoct_fvf(result_type)
-                except Exception:
-                    _ct_fvf = None
-                if _ct_fvf is not None:
-                    schema_column = ConstantColumn.from_column_type(
-                        name=column_name,
-                        column_type=_ct_fvf,
-                        aliases=aliases,
-                        value=fixed_function_result,
-                        nullable=False,
-                    )
-                    node.node_type = NodeType.LITERAL
-                    node.type = _ct_fvf
-                    node.value = fixed_function_result
-                else:
-                    schema_column = ConstantColumn(
-                        name=column_name,
-                        aliases=aliases,
-                        type=result_type,
-                        value=fixed_function_result,
-                        nullable=False,
-                    )
-                    node.node_type = NodeType.LITERAL
-                    node.type = result_type
-                    node.value = fixed_function_result
+                # fixed_value_function returns (ColumnType, value) directly — no lookup needed.
+                schema_column = ConstantColumn(
+                    name=column_name,
+                    column_type=result_type,
+                    aliases=aliases,
+                    value=fixed_function_result,
+                    nullable=False,
+                )
+                node.node_type = NodeType.LITERAL
+                node.type = result_type
+                node.value = fixed_function_result
             else:
                 element_type = None  # for types with elements (ARRAYs)
                 precision = 38  # Maximum precision for Decimal128
@@ -457,13 +445,12 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     # downstream comparisons type-check correctly.
                     result_type = _aggregate_return_type(node)
                     if result_type is None:
-                        result_type = LogicalCategory.NULL
+                        result_type = _CT_NULL
                 else:
-                    result_type = LogicalCategory.NULL  # unknown function; type resolved at runtime
+                    result_type = _CT_NULL  # unknown function; type resolved at runtime
 
-                # Phase 2: result_type may be ColumnType (from find_compatible_type) or
-                # LogicalCategory. Normalize to category for comparisons.
-                _result_type_lc = result_type.category if isinstance(result_type, _ColumnType) else result_type
+                # Phase 5: result_type is always ColumnType (catalog + aggregate + fallback).
+                _result_type_lc = result_type.category if result_type is not None else None
 
                 # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
                 # This is NOT type inference; it's making literals consistent with the
@@ -472,14 +459,6 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     None,
                     LogicalCategory.NULL,
                 ):
-                    from opteryx.types.logical_type import sql_to_column_type as _otoct2
-                    if isinstance(result_type, _ColumnType):
-                        _result_type_ct = result_type
-                    else:
-                        try:
-                            _result_type_ct = _otoct2(result_type)
-                        except Exception:
-                            _result_type_ct = None
                     parameters = []
                     for param in node.parameters:
                         if (
@@ -488,44 +467,19 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                             and param.value != set()
                         ):
                             param.value = parse_value(_result_type_lc, param.value)
-                            param.type = _result_type_ct if _result_type_ct is not None else result_type
-                            if param.schema_column is not None and _result_type_ct is not None:
-                                param.schema_column.column_type = _result_type_ct
+                            param.type = result_type
+                            if param.schema_column is not None:
+                                param.schema_column.column_type = result_type
                         parameters.append(param)
                     node.parameters = parameters
 
-                # D-4 Phase 2: construct via column_type when buildable. result_type
-                # may be ColumnType (from catalog) or LogicalCategory. ColumnType is used
-                # directly; LogicalCategory goes through the bridge.
-                from opteryx.types import logical_type as _lt
-                from opteryx.types.logical_type import sql_to_column_type as _otoct
-                _ct = None
-                try:
-                    if isinstance(result_type, _ColumnType):
-                        _ct = result_type  # Already ColumnType — use directly.
-                    elif _result_type_lc == LogicalCategory.DECIMAL:
-                        _ct = _lt.DECIMAL(precision, scale)
-                    elif _result_type_lc == LogicalCategory.ARRAY:
-                        _elem_ct = _otoct(element_type) if element_type else _lt.VARIANT
-                        _ct = _lt.ARRAY(_elem_ct)
-                    else:
-                        _ct = _otoct(result_type)
-                except Exception:
-                    _ct = None
-                if _ct is not None:
-                    schema_column = FunctionColumn.from_column_type(
-                        name=column_name,
-                        column_type=_ct,
-                        aliases=aliases,
-                    )
-                else:
-                    # _ct is None — bridge can't map this type (VECTOR without
-                    # dimension, etc.). Fall back to bare type tag only.
-                    schema_column = FunctionColumn(
-                        name=column_name,
-                        type=result_type,
-                        aliases=aliases,
-                    )
+                # Phase 5: result_type is ColumnType — use directly.
+                _ct = result_type
+                schema_column = FunctionColumn(
+                    name=column_name,
+                    column_type=_ct,
+                    aliases=aliases,
+                )
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column
@@ -537,37 +491,29 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             # D-4 Phase 2: inherit the full ColumnType from the first matching
             # branch — carries precision/scale/element_type uniformly instead of
             # unpacking sidecars.
-            result_type = LogicalCategory.NULL
             result_ct = None
             branch_nodes = list(node.results or [])
             if node.else_result is not None:
                 branch_nodes.append(node.else_result)
             for branch in branch_nodes:
                 sc = getattr(branch, "schema_column", None)
-                if sc is not None and sc.category not in (LogicalCategory.NULL, None):
-                    result_type = sc.category
+                if sc is not None and sc.column_type is not None and sc.column_type != _CT_NULL:
                     result_ct = sc.column_type
                     break
             # Coerce LITERAL branches to the resolved result type
-            if result_type not in (None, LogicalCategory.NULL):
+            if result_ct is not None:
+                _result_cat = result_ct.category
                 for branch in branch_nodes:
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
-                        branch.value = parse_value(result_type, branch.value)
-                        branch.type = result_ct  # ColumnType (from sc.column_type)
-                        if branch.schema_column is not None and result_ct is not None:
+                        branch.value = parse_value(_result_cat, branch.value)
+                        branch.type = result_ct  # ColumnType
+                        if branch.schema_column is not None:
                             branch.schema_column.column_type = result_ct
-            if result_ct is not None:
-                schema_column = FunctionColumn.from_column_type(
-                    name=column_name,
-                    column_type=result_ct,
-                    aliases=aliases,
-                )
-            else:
-                schema_column = FunctionColumn(
-                    name=column_name,
-                    type=result_type,
-                    aliases=aliases,
-                )
+            schema_column = FunctionColumn(
+                name=column_name,
+                column_type=result_ct,
+                aliases=aliases,
+            )
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column
@@ -608,15 +554,10 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                         "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, `CAST(expr AS TIMESTAMP[us])`, or `CAST(expr AS TIMESTAMP[d])`."
                     )
 
-            # VARBINARY is not a canonical LogicalCategory — map to BLOB
-            if target_type_name == "VARBINARY":
-                target_type_name = "BLOB"
-            result_type = LogicalCategory[target_type_name]
-
             # Validate TIMESTAMP casts from INTEGER — require explicit unit
             if target_type_name == "TIMESTAMP" and node.left:
                 source_type = determine_type(node.left)
-                if source_type == LogicalCategory.INTEGER:
+                if source_type is not None and source_type.category == LogicalCategory.INTEGER:
                     if unit is None:
                         raise IncompatibleTypesError(
                             message="Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
@@ -651,40 +592,22 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 # CAST(expr AS ARRAY(element_type)) - extract the element type
                 element_param = node.parameters[0]
                 if element_param.node_type == NodeType.LITERAL and element_param.value is not None:
-                    element_type = LogicalCategory[str(element_param.value).upper()]
+                    element_type = parse_column_type(str(element_param.value).upper())
                 else:
-                    element_type = LogicalCategory.VARIANT
+                    element_type = _lt.VARIANT
 
-            # D-4 Phase 2: construct via the unified column_type when we can build
-            # one cleanly. The CAST target is fully known here (result_type +
-            # explicit precision/scale for DECIMAL, element_type for ARRAY), so the
-            # column_type round-trip is exact. Falls back to legacy construction
-            # for cases the bridge can't yet map (VECTOR with no dimension etc.).
             from opteryx.types import logical_type as _lt
-            from opteryx.types.logical_type import sql_to_column_type as _otoct
-            _ct = None
-            try:
-                if target_type_name == "DECIMAL":
-                    _ct = _lt.DECIMAL(precision, scale)
-                elif target_type_name == "ARRAY":
-                    _elem_ct = _otoct(element_type) if element_type else _lt.VARIANT
-                    _ct = _lt.ARRAY(_elem_ct)
-                else:
-                    _ct = _otoct(result_type)
-            except Exception:
-                _ct = None
-            if _ct is not None:
-                schema_column = FunctionColumn.from_column_type(
-                    name=column_name,
-                    column_type=_ct,
-                    aliases=aliases,
-                )
+            if target_type_name == "DECIMAL":
+                _ct = _lt.DECIMAL(precision, scale)
+            elif target_type_name == "ARRAY":
+                _ct = _lt.ARRAY(element_type if element_type is not None else _lt.VARIANT)
             else:
-                schema_column = FunctionColumn(
-                    name=column_name,
-                    type=result_type,
-                    aliases=aliases,
-                )
+                _ct = parse_column_type(target_type_name)
+            schema_column = FunctionColumn(
+                name=column_name,
+                column_type=_ct,
+                aliases=aliases,
+            )
             schema_column.identity = column_name.encode("utf-8") if isinstance(column_name, str) else column_name
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
@@ -721,7 +644,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                             raise IncompatibleTypesError(
                                 message=f"LIKE patterns must be strings, got {type(pat).__name__}."
                             )
-            schema_column = ExpressionColumn.from_column_type(name=column_name, column_type=_lt.BOOLEAN)
+            schema_column = ExpressionColumn(name=column_name, column_type=_lt.BOOLEAN)
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)
         else:
@@ -732,12 +655,12 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
                 left_type = getattr(getattr(node.left, "schema_column", None), "category", None)
                 _COERCE = {
-                    _OT.DOUBLE: float,
+                    _OT.FLOAT: float,
                     _OT.INTEGER: int,
                     _OT.BOOLEAN: bool,
                     _OT.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
                     _OT.NVARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                    _OT.BLOB: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
+                    _OT.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
                 }
                 coerce = _COERCE.get(left_type, lambda v: v)
                 node.right.value = [
@@ -753,7 +676,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             # determine_type() now returns ColumnType; use .category for LogicalCategory
             # comparisons. Only attempt parameter derivation for binary arithmetic on
             # numeric operands — other results (BOOLEAN comparisons, etc.) don't land here.
-            _result_cat = result_type.category if isinstance(result_type, _ColumnType) else result_type
+            _result_cat = result_type.category if result_type is not None else None
             result_ct_final = None
             if (_result_cat == LogicalCategory.DECIMAL
                     and node.value in ("Plus", "Minus", "Multiply", "Divide")
@@ -774,23 +697,13 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 if centre_sc is not None and centre_sc.column_type is not None:
                     result_ct_final = centre_sc.column_type
 
-            # Phase 2: result_type is ColumnType; use from_column_type to avoid legacy
-            # InitVar bridge (which silently drops non-LogicalCategory types).
             _schema_ct = result_ct_final if result_ct_final is not None else result_type
-            if isinstance(_schema_ct, _ColumnType):
-                schema_column = ExpressionColumn.from_column_type(
-                    name=column_name,
-                    column_type=_schema_ct,
-                    aliases=[node.alias] if node.alias else [],
-                    expression=node.value,
-                )
-            else:
-                schema_column = ExpressionColumn(
-                    name=column_name,
-                    aliases=[node.alias] if node.alias else [],
-                    type=_schema_ct,
-                    expression=node.value,
-                )
+            schema_column = ExpressionColumn(
+                name=column_name,
+                column_type=_schema_ct,
+                aliases=[node.alias] if node.alias else [],
+                expression=node.value,
+            )
             schemas["$derived"].columns.append(schema_column)
             node.schema_column = schema_column
             node.query_column = node.alias or column_name

@@ -137,9 +137,9 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
 
     # Type coercion: DECIMAL + INTEGER
     if left_type == LogicalCategory.DECIMAL and right_type == LogicalCategory.INTEGER:
-        right_type = LogicalCategory.DOUBLE
+        right_type = LogicalCategory.FLOAT
     elif right_type == LogicalCategory.DECIMAL and left_type == LogicalCategory.INTEGER:
-        left_type = LogicalCategory.DOUBLE
+        left_type = LogicalCategory.FLOAT
 
     # Temporal type coercions — reject INT vs temporal comparisons.
     temporal_types = {LogicalCategory.DATE, LogicalCategory.TIMESTAMP}

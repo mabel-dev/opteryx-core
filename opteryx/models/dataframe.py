@@ -51,7 +51,7 @@ class DataFrame:
             self._schema = schema
         elif isinstance(schema, (list, tuple)):
             # Convert list of column names to RelationSchema
-            columns = [SchemaColumn.from_column_type(name=str(col), column_type=_lt.VARCHAR) for col in schema]
+            columns = [SchemaColumn(name=str(col), column_type=_lt.VARCHAR) for col in schema]
             self._schema = RelationSchema(name="table", columns=columns)
         else:
             self._schema = schema

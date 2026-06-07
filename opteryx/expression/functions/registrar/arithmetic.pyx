@@ -14,7 +14,7 @@ from opteryx.expression.functions import (
 )
 from opteryx.expression.functions.implementations import arithmetic as number_functions
 from opteryx.expression.functions.implementations import temporal as date_functions
-from opteryx.types.logical_type import LogicalCategory
+# LogicalCategory imported via __init__.pyx (textually included); canonical ColumnTypes also in scope.
 
 
 def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
@@ -33,7 +33,7 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="ROUND_1",
                     parameters=(ParameterSpec(name="num", type_family="numeric"),),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -47,7 +47,7 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                         ParameterSpec(name="num", type_family="numeric"),
                         ParameterSpec(name="precision", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -98,7 +98,7 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                             name="scale", type_family="integer", variadic=True, optional=True
                         ),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -126,7 +126,7 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                             name="scale", type_family="integer", variadic=True, optional=True
                         ),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -149,7 +149,7 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="SQRT_1",
                     parameters=(ParameterSpec(name="num", type_family="numeric"),),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -184,7 +184,7 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                 FunctionOverload(
                     id="SIGN_1",
                     parameters=(_num,),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.INTEGER),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -212,7 +212,7 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                             name="scale", type_family="integer", variadic=True, optional=True
                         ),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="numeric",
@@ -226,7 +226,7 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                         _date_value,
                         _temporal_unit,
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.TIMESTAMP),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_TIMESTAMP()),
                     kernel=KernelSpec(
                         engine="draken",
                         id="date",
@@ -240,7 +240,7 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                         _timestamp_value,
                         _temporal_unit,
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=LogicalCategory.TIMESTAMP),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_TIMESTAMP()),
                     kernel=KernelSpec(
                         engine="draken",
                         id="timestamp",
@@ -253,7 +253,7 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         _make(
             "POWER",
             number_functions.safe_power,
-            LogicalCategory.DOUBLE,
+            _CT_FLOAT64,
             (_num, ParameterSpec(name="exp", type_family="numeric")),
             cost=0.86,
             summary="Raise base to exponent (SQL-92).",
@@ -261,7 +261,7 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         _make(
             "LOG",
             number_functions.log,
-            LogicalCategory.DOUBLE,
+            _CT_FLOAT64,
             (_num, ParameterSpec(name="base", type_family="numeric")),
             summary="Logarithm with arbitrary base.",
             cost=1.04,

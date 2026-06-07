@@ -83,7 +83,7 @@ _NULL_CONSTRUCTORS = _build_null_constructors()
 
 cdef inline object _create_null_vector(object column, Py_ssize_t num_rows):
     """Create a null vector of the correct type for a schema column."""
-    ctor = _NULL_CONSTRUCTORS.get(column.type)
+    ctor = _NULL_CONSTRUCTORS.get(column.category)
     if ctor is None:
         return _draken_native.vector_null_from_length(<uint32_t>num_rows)
     return ctor(<uint32_t>num_rows)

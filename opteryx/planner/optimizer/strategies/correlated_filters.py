@@ -32,7 +32,7 @@ def _write_filters(left_column, right_column):
     new_filters = []
     highest_literal = _literal_node_from_statistics(
         left_column.schema_column.highest_value,
-        left_column.schema_column.category,
+        left_column.schema_column.column_type,
     )
     if highest_literal is not None:
         a_side = right_column
@@ -49,7 +49,7 @@ def _write_filters(left_column, right_column):
 
     lowest_literal = _literal_node_from_statistics(
         left_column.schema_column.lowest_value,
-        left_column.schema_column.category,
+        left_column.schema_column.column_type,
     )
     if lowest_literal is not None:
         a_side = right_column
@@ -152,9 +152,10 @@ def _literal_node_from_statistics(stat_value, column_type):
     if stat_value is None:
         return None
     literal_value = stat_value
-    if column_type == LogicalCategory.VARCHAR:
+    _cat = column_type.category if column_type is not None else None
+    if _cat == LogicalCategory.VARCHAR:
         literal_value = _decode_string_prefix(stat_value)
-    elif column_type == LogicalCategory.BLOB:
+    elif _cat == LogicalCategory.VARBINARY:
         literal_value = _decode_string_prefix(stat_value, as_bytes=True)
     return build_literal_node(literal_value, suggested_type=column_type)
 

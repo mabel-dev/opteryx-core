@@ -301,7 +301,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         result_vector = execute_bytecode(bc, table)
         result = result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
-        return build_literal_node(result, root, root.schema_column.category)
+        return build_literal_node(result, root, root.schema_column.column_type)
 
     return root
 

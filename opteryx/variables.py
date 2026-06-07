@@ -23,7 +23,7 @@ from opteryx.__version__ import __version__
 from opteryx.compiled.simd_probe import cpu_architecture
 from opteryx.constants.character_set import CharacterSet, Collation
 from opteryx.exceptions import PermissionsError, VariableNotFoundError
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import BOOLEAN, INT64, VARCHAR, ARRAY, VARIANT
 
 
 class VariableOwner(int, Enum):
@@ -43,46 +43,46 @@ VariableSchema = Tuple[Type, Any, VariableOwner, Visibility]
 # fmt: off
 SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # These are the MySQL set of variables - we don't use all of them but have them for compatibility
-    "auto_increment_increment": (LogicalCategory.INTEGER, 1, VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
-    "autocommit": (LogicalCategory.BOOLEAN, True, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "character_set_client": (LogicalCategory.VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "character_set_connection": (LogicalCategory.VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "character_set_database": (LogicalCategory.VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "character_set_results": (LogicalCategory.VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "character_set_server": (LogicalCategory.VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "collation_connection": (LogicalCategory.VARCHAR, Collation.utf8mb4_general_ci.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "collation_database": (LogicalCategory.VARCHAR, Collation.utf8mb4_general_ci.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "collation_server": (LogicalCategory.VARCHAR, Collation.utf8mb4_general_ci.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "external_user": (LogicalCategory.VARCHAR, "", VariableOwner.INTERNAL, Visibility.RESTRICTED),
-    "init_connect": (LogicalCategory.VARCHAR, "", VariableOwner.SERVER, Visibility.RESTRICTED),
-    "interactive_timeout": (LogicalCategory.INTEGER, 28800, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "license": (LogicalCategory.VARCHAR, "MIT", VariableOwner.SERVER, Visibility.RESTRICTED),
-    "lower_case_table_names": (LogicalCategory.INTEGER, 0, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "max_allowed_packet": (LogicalCategory.INTEGER, 67108864, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "max_execution_time": (LogicalCategory.INTEGER, 0, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "net_buffer_length": (LogicalCategory.INTEGER, 16384, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "net_write_timeout": (LogicalCategory.INTEGER, 28800, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "performance_schema": (LogicalCategory.BOOLEAN, False, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "sql_auto_is_null": (LogicalCategory.BOOLEAN, False, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "sql_mode": (LogicalCategory.VARCHAR, "ANSI", VariableOwner.SERVER, Visibility.RESTRICTED),
-    "sql_select_limit": (LogicalCategory.INTEGER, None, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "system_time_zone": (LogicalCategory.VARCHAR, "UTC", VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "time_zone": (LogicalCategory.VARCHAR, "UTC", VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "transaction_read_only": (LogicalCategory.BOOLEAN, False, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "transaction_isolation": (LogicalCategory.VARCHAR, "READ-COMMITTED", VariableOwner.SERVER, Visibility.RESTRICTED),
-    "version": (LogicalCategory.VARCHAR, __version__, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "version_comment": (LogicalCategory.VARCHAR, "mesos", VariableOwner.SERVER, Visibility.RESTRICTED),
-    "wait_timeout": (LogicalCategory.INTEGER, 28800, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "event_scheduler": (LogicalCategory.VARCHAR, "OFF", VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "default_storage_engine": (LogicalCategory.VARCHAR, "opteryx", VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    "default_tmp_storage_engine": (LogicalCategory.VARCHAR, "opteryx", VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "auto_increment_increment": (INT64, 1, VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
+    "autocommit": (BOOLEAN, True, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "character_set_client": (VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "character_set_connection": (VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "character_set_database": (VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "character_set_results": (VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "character_set_server": (VARCHAR, CharacterSet.utf8mb4.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "collation_connection": (VARCHAR, Collation.utf8mb4_general_ci.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "collation_database": (VARCHAR, Collation.utf8mb4_general_ci.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "collation_server": (VARCHAR, Collation.utf8mb4_general_ci.name, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "external_user": (VARCHAR, "", VariableOwner.INTERNAL, Visibility.RESTRICTED),
+    "init_connect": (VARCHAR, "", VariableOwner.SERVER, Visibility.RESTRICTED),
+    "interactive_timeout": (INT64, 28800, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "license": (VARCHAR, "MIT", VariableOwner.SERVER, Visibility.RESTRICTED),
+    "lower_case_table_names": (INT64, 0, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "max_allowed_packet": (INT64, 67108864, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "max_execution_time": (INT64, 0, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "net_buffer_length": (INT64, 16384, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "net_write_timeout": (INT64, 28800, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "performance_schema": (BOOLEAN, False, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "sql_auto_is_null": (BOOLEAN, False, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "sql_mode": (VARCHAR, "ANSI", VariableOwner.SERVER, Visibility.RESTRICTED),
+    "sql_select_limit": (INT64, None, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "system_time_zone": (VARCHAR, "UTC", VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "time_zone": (VARCHAR, "UTC", VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "transaction_read_only": (BOOLEAN, False, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "transaction_isolation": (VARCHAR, "READ-COMMITTED", VariableOwner.SERVER, Visibility.RESTRICTED),
+    "version": (VARCHAR, __version__, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "version_comment": (VARCHAR, "mesos", VariableOwner.SERVER, Visibility.RESTRICTED),
+    "wait_timeout": (INT64, 28800, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "event_scheduler": (VARCHAR, "OFF", VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "default_storage_engine": (VARCHAR, "opteryx", VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "default_tmp_storage_engine": (VARCHAR, "opteryx", VariableOwner.SERVER, Visibility.UNRESTRICTED),
 
     # These are Opteryx specific variables
-    "disable_optimizer": (LogicalCategory.BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
-    "concurrent_reads": (LogicalCategory.INTEGER, config.CONCURRENT_READS, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "user_memberships": (LogicalCategory.ARRAY, [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
-    "morsel_size": (LogicalCategory.INTEGER, config.MORSEL_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "architecture": (LogicalCategory.ARRAY, cpu_architecture(), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "disable_optimizer": (BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
+    "concurrent_reads": (INT64, config.CONCURRENT_READS, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "user_memberships": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
+    "morsel_size": (INT64, config.MORSEL_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.SERVER, Visibility.RESTRICTED),
 }
 # fmt: on
 
@@ -142,7 +142,7 @@ class SystemVariablesContainer:
         variable = self._variables[key[2:]] if key.startswith("@@") else self._variables.get(key)
         if not variable:
             raise VariableNotFoundError(key)
-        return ConstantColumn(name=key, type=variable[0], value=variable[1])
+        return ConstantColumn(name=key, column_type=variable[0], value=variable[1])
 
 
 # load the base set

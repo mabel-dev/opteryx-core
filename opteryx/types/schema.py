@@ -56,17 +56,13 @@ class SchemaColumn:
 
     Attributes:
         name: Column name (required)
-        type: LogicalCategory for this column (required)
+        column_type: Unified ColumnType carrier (physical DrakenType + optional logical descriptor)
         identity: Unique identifier for this column (default: auto-generated from name)
         nullable: Whether NULL values are allowed (default: True)
         default: Default value if not provided (default: None)
         description: Human-readable description (default: None)
         disposition: Special treatment flag (default: None)
         aliases: Alternative names for this column (default: None)
-        element_type: For ARRAY types, type of elements (default: None)
-        precision: For DECIMAL, total digits (default: None)
-        scale: For DECIMAL, fractional digits (default: None)
-        length: For VARCHAR/BLOB, max length (default: None)
 
     Advanced fields (unused in current Opteryx, kept for future compatibility):
         highest_value: Estimated max value for statistics
@@ -78,11 +74,6 @@ class SchemaColumn:
     """
 
     name: str
-    # `type` is a transient constructor parameter for backward-compat — callers that
-    # haven't migrated to from_column_type yet can still pass type=LogicalCategory.X.
-    # The value is forwarded to the bridge in __post_init__ to derive column_type.
-    # Once all callers use from_column_type, this InitVar can be removed.
-    type: dataclasses.InitVar[Optional[Any]] = None
     nullable: bool = True
     identity: Optional[bytes] = None
     default: Optional[Any] = None
@@ -96,15 +87,12 @@ class SchemaColumn:
     expectations: Optional[Any] = None  # Deferred to Phase 9
     origin: Optional[List[str]] = None  # Deferred to Phase 9
     # column_type is the authoritative unified type carrier (physical DrakenType +
-    # optional LogicalType descriptor + optional ARRAY element). Computed once in
-    # __post_init__ from the InitVar parameters. `init=False` keeps it out of the
-    # positional signature; it is the only stored type field besides `type` (the
-    # legacy LogicalCategory tag, retained until the wider LogicalCategory removal). Deepcopy
+    # optional LogicalType descriptor + optional ARRAY element). Deepcopy
     # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
-    column_type: Optional[Any] = dataclasses.field(default=None, init=False, repr=False, compare=False)
+    column_type: Optional[Any] = dataclasses.field(default=None, repr=False, compare=False)
 
-    def __post_init__(self, type):
-        """Normalize identity. Derive column_type from legacy type= InitVar if given."""
+    def __post_init__(self):
+        """Normalize identity."""
         if self.identity is None:
             raw = self.name
         else:
@@ -113,13 +101,6 @@ class SchemaColumn:
             self.identity = raw.encode("utf-8")
         else:
             self.identity = raw
-        # If a legacy type= was passed and column_type wasn't injected yet, derive it.
-        if self.column_type is None and type is not None and type != 0:
-            try:
-                from opteryx.types.logical_type import sql_to_column_type
-                self.column_type = sql_to_column_type(type)
-            except Exception:
-                self.column_type = None
 
     @property
     def category(self):
@@ -132,25 +113,6 @@ class SchemaColumn:
             return None
         return self.column_type.category
 
-    @classmethod
-    def from_column_type(cls, name, column_type, **kwargs):
-        """Construct a SchemaColumn (or subclass) with `column_type` as the type carrier.
-
-        D-4 Phase 2: the authoritative construction path. Satisfies the DECIMAL
-        invariant by threading precision/scale from the ColumnType's LogicalType
-        descriptor into the InitVar params — no caller needs to unpack them manually.
-        After construction, `column_type` is injected directly, superseding whatever
-        `__post_init__` derived (they agree; the injection is a no-op correctness
-        guarantee, not a double-computation).
-        """
-        # Strip legacy kwargs — the type field is gone.
-        for removed in ("type", "precision", "scale", "length", "element_type"):
-            kwargs.pop(removed, None)
-        kwargs["name"] = name
-        instance = cls(**kwargs)
-        instance.column_type = column_type
-        return instance
-
     def __str__(self) -> str:
         """String representation: name."""
         ct = self.column_type
@@ -159,13 +121,7 @@ class SchemaColumn:
         return self.name
 
     def _to_plain_flatcolumn(self) -> "SchemaColumn":
-        """Build a plain SchemaColumn mirroring this column's type + metadata.
-
-        D-4 Phase 2: the type is carried by `column_type` (single source of truth),
-        so we reconstruct via `from_column_type` rather than copying deleted
-        side-cars. Falls back to the bare `type` for columns the bridge couldn't
-        map (column_type is None — unknown/unresolved type).
-        """
+        """Build a plain SchemaColumn mirroring this column's type + metadata."""
         common = dict(
             identity=self.identity,
             nullable=self.nullable,
@@ -175,9 +131,7 @@ class SchemaColumn:
             aliases=self.aliases,
             origin=self.origin,
         )
-        return SchemaColumn.from_column_type(
-            name=self.name, column_type=self.column_type, **common
-        )
+        return SchemaColumn(name=self.name, column_type=self.column_type, **common)
 
     def to_schema_column(self) -> "SchemaColumn":
         """Convert to a SchemaColumn (returns self when already a plain SchemaColumn)."""
@@ -219,7 +173,7 @@ class SchemaColumn:
             # Canonical column_type string is authoritative; `type` (bare LogicalCategory
             # name) is kept for the rare column_type==None case and human readability.
             "column_type": serialize_column_type(self.column_type),
-            "type": self.type.value,
+            "type": self.column_type.category.name if self.column_type is not None else None,
             "identity": self.identity.decode("utf-8") if isinstance(self.identity, bytes) else self.identity,
             "nullable": self.nullable,
             "default": self.default,
@@ -241,7 +195,7 @@ class SchemaColumn:
 
             data.pop("type", None)  # column_type supersedes the bare type tag
             column_type = parse_column_type(ct_str)
-            return cls.from_column_type(name=data.pop("name"), column_type=column_type, **data)
+            return cls(name=data.pop("name"), column_type=column_type, **data)
 
         # v1 fallback: legacy "type" string (e.g. "DECIMAL(10,2)", "ARRAY<VARCHAR>").
         # parse_column_type handles the parameterized/element forms directly.
@@ -255,9 +209,9 @@ class SchemaColumn:
 
         if isinstance(raw_type, str):
             column_type = parse_column_type(raw_type)
-            return cls.from_column_type(name=data.pop("name"), column_type=column_type, **data)
+            return cls(name=data.pop("name"), column_type=column_type, **data)
         # already a type object, or unknown — pass through
-        return cls.from_column_type(name=data.pop("name"), column_type=raw_type, **data)
+        return cls(name=data.pop("name"), column_type=raw_type, **data)
 
 
 @dataclasses.dataclass
@@ -295,16 +249,6 @@ class FunctionColumn(SchemaColumn):
         """Convert to a SchemaColumn, stripping function metadata."""
         return self._to_plain_flatcolumn()
 
-
-# `type` is an InitVar constructor param; dataclasses leaves a `type = None` class
-# attribute behind. Delete it so a stale `column.type` READ fails loud (AttributeError)
-# instead of silently returning None — there is no `.type` on a SchemaColumn, only
-# `.category` (the projection) and `.column_type` (the carrier). Construction via
-# `type=` still works (the InitVar default is baked into __init__).
-for _cls in (SchemaColumn, ConstantColumn, FunctionColumn):
-    if "type" in _cls.__dict__:
-        delattr(_cls, "type")
-del _cls
 
 
 @dataclasses.dataclass
