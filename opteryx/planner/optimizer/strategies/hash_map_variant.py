@@ -143,7 +143,9 @@ class HashMapVariantStrategy(OptimizationStrategy):
                 return None
             try:
                 count = manifest.get_record_count()
-            except Exception:
+            except (AttributeError, TypeError):
+                # Malformed manifest file stats — fall back to the default join
+                # variant rather than failing the query (perf signal only).
                 return None
             if count is None:
                 return None
@@ -202,7 +204,9 @@ class HashMapVariantStrategy(OptimizationStrategy):
                 return None
             try:
                 estimate = manifest.estimate_cardinality(col_name)
-            except Exception:
+            except (AttributeError, TypeError, ZeroDivisionError):
+                # Malformed/degenerate KMV stats — fall back to the default join
+                # variant rather than failing the query (perf signal only).
                 return None
             if estimate is None:
                 return None

@@ -174,12 +174,9 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             # Propagate dataset commit timestamp from the connector to the
             # logical node so it becomes available to physical nodes
             # (and ultimately shown as `committed_at` in telemetry).
-            try:
-                dc = getattr(node.connector, "dataset_committed_at", None)
-                if dc is not None:
-                    node.dataset_committed_at = dc
-            except (AttributeError, TypeError):
-                pass
+            dc = getattr(node.connector, "dataset_committed_at", None)
+            if dc is not None:
+                node.dataset_committed_at = dc
         else:
             # Fallback for connectors that don't have manifest support yet
             node.schema = node.connector.get_dataset_schema()

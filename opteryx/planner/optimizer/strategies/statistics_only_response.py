@@ -596,55 +596,44 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Replace any lingering AGGREGATOR expressions in Project/Exit nodes with
         # the corresponding literal, to ensure no node still references aggregators
         # after the rewrite. Match by schema identity or alias.
-        try:
-            # Build a mapping from aggregator schema identity to replacement literal
-            agg_identity_to_literal = {}
-            for agg_node, literal in zip(aggregate_node.aggregates, literals):
-                agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
-                if agg_id is not None:
-                    agg_identity_to_literal[agg_id] = literal
+        # Build a mapping from aggregator schema identity to replacement literal
+        agg_identity_to_literal = {}
+        for agg_node, literal in zip(aggregate_node.aggregates, literals):
+            agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
+            if agg_id is not None:
+                agg_identity_to_literal[agg_id] = literal
 
-            # Also build a mapping from alias to literal
-            alias_to_literal = {}
-            for alias, literal in zip(column_aliases, literals):
-                alias_to_literal[alias] = literal
+        # Also build a mapping from alias to literal
+        alias_to_literal = {}
+        for alias, literal in zip(column_aliases, literals):
+            alias_to_literal[alias] = literal
 
-            for nid, n in plan.nodes(data=True):
-                cols = getattr(n, "columns", None)
-                if not cols:
-                    continue
-                changed = False
-                new_cols = []
-                for c in cols:
-                    # Try to match by schema identity first
-                    expr_id = getattr(getattr(c, "schema_column", None), "identity", None)
-                    replacement = None
+        for nid, n in plan.nodes(data=True):
+            cols = getattr(n, "columns", None)
+            if not cols:
+                continue
+            changed = False
+            new_cols = []
+            for c in cols:
+                # Try to match by schema identity first
+                expr_id = getattr(getattr(c, "schema_column", None), "identity", None)
+                replacement = None
 
-                    if expr_id in agg_identity_to_literal:
-                        replacement = agg_identity_to_literal[expr_id]
-                    elif getattr(c, "alias", None) in alias_to_literal:
-                        replacement = alias_to_literal[getattr(c, "alias", None)]
+                if expr_id in agg_identity_to_literal:
+                    replacement = agg_identity_to_literal[expr_id]
+                elif getattr(c, "alias", None) in alias_to_literal:
+                    replacement = alias_to_literal[getattr(c, "alias", None)]
 
-                    if replacement is not None:
-                        new_cols.append(replacement)
-                        changed = True
-                    else:
-                        new_cols.append(c)
+                if replacement is not None:
+                    new_cols.append(replacement)
+                    changed = True
+                else:
+                    new_cols.append(c)
 
-                if changed:
-                    try:
-                        n.columns = new_cols
-                    except Exception:
-                        # best-effort - if mutation fails, continue
-                        pass
-            if self.telemetry is not None:
-                try:
-                    self.telemetry._after_replace_agg = True
-                except Exception:
-                    pass
-        except Exception:
-            # conservative: on unexpected errors, bail out and keep plan unchanged
-            return plan
+            if changed:
+                n.columns = new_cols
+        if self.telemetry is not None:
+            self.telemetry._after_replace_agg = True
 
         # Order the literal columns to match the Exit node's column order. The
         # executor takes the rewritten Project's column order as the output order,
@@ -683,37 +672,33 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Point the source(s) to $no_table so physical planner / executor treat
         # this as a projection-only plan (no table scanning required). We apply
         # the change to all Scan nodes found to be conservative.
-        try:
-            # We located the relevant scan node earlier; set it directly. This
-            # avoids potential iterator-side-effects and is consistent with the
-            # conservative single-scan expectation in `is_statistics_only_query`.
-            scan_node.relation = "$no_table"
-            scan_node.alias = "$no_table"
+        # We located the relevant scan node earlier; set it directly. This
+        # avoids potential iterator-side-effects and is consistent with the
+        # conservative single-scan expectation in `is_statistics_only_query`.
+        scan_node.relation = "$no_table"
+        scan_node.alias = "$no_table"
 
-            # Replace the connector with the virtual `$no_table` table engine so
-            # the ReaderNode will produce the one-row $no_table morsel. This
-            # avoids relying on the original connector's behavior after we
-            # rewrote the plan to a projection-only query.
-            from opteryx.connectors import connector_factory
+        # Replace the connector with the virtual `$no_table` table engine so
+        # the ReaderNode will produce the one-row $no_table morsel. This
+        # avoids relying on the original connector's behavior after we
+        # rewrote the plan to a projection-only query.
+        from opteryx.connectors import connector_factory
 
-            virt_gateway = connector_factory("$no_table", telemetry=self.telemetry)
-            scan_node.connector = virt_gateway.table_engine("$no_table", telemetry=self.telemetry)
+        virt_gateway = connector_factory("$no_table", telemetry=self.telemetry)
+        scan_node.connector = virt_gateway.table_engine("$no_table", telemetry=self.telemetry)
 
-            # Ensure schema is the virtual dataset schema so ReaderNode
-            # normalization succeeds and downstream nodes see the
-            # expected column identities.
-            scan_node.schema = scan_node.connector.get_dataset_schema()
-            # Ensure origin is set for schema columns
-            for col in getattr(scan_node.schema, "columns", []) or []:
-                col.origin = [scan_node.alias]
+        # Ensure schema is the virtual dataset schema so ReaderNode
+        # normalization succeeds and downstream nodes see the
+        # expected column identities.
+        scan_node.schema = scan_node.connector.get_dataset_schema()
+        # Ensure origin is set for schema columns
+        for col in getattr(scan_node.schema, "columns", []) or []:
+            col.origin = [scan_node.alias]
 
-            # Finally, clear the manifest to avoid file-based readers from
-            # providing file lists (we prefer virtual connector semantics
-            # instead)
-            scan_node.manifest = None
-        except Exception:
-            # If we cannot mutate scan node safely, leave the plan unchanged
-            return plan
+        # Finally, clear the manifest to avoid file-based readers from
+        # providing file lists (we prefer virtual connector semantics
+        # instead)
+        scan_node.manifest = None
 
         # Update exit node columns so aliasing is preserved
         if exit_node is not None:
@@ -724,11 +709,8 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             self.telemetry.optimization_statistics_only_response += 1
 
         # Record connector assignment status on the plan for diagnostic purposes
-        try:
-            plan._stats_assigned_connector_type = getattr(scan_node, "connector", None) and getattr(
-                scan_node.connector, "__type__", None
-            )
-        except Exception:
-            plan._stats_assigned_connector_type = None
+        plan._stats_assigned_connector_type = getattr(scan_node, "connector", None) and getattr(
+            scan_node.connector, "__type__", None
+        )
 
         return plan

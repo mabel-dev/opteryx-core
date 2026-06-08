@@ -135,7 +135,7 @@ class TraceWriter:
 
                     if _cfg.OPTERYX_TRACE_SAMPLE_RATE != 1.0:
                         print(f"[TRACE] Sampling rate: {_cfg.OPTERYX_TRACE_SAMPLE_RATE}")
-                except Exception:
+                except (ImportError, AttributeError):
                     pass
                 print(f"[TRACE] View waterfall chart:")
                 print(f"[TRACE]   PYTHONPATH=dev python -m io_waterfall trace {self.output_file}")

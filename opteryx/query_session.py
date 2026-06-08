@@ -169,8 +169,9 @@ class Session(DataFrame):
                             for proj_col in node_config.get("projection", []):
                                 col_bytes = proj_col.get("total-bytes") or 0
                                 processing_bytes_estimate += col_bytes
-                    except Exception:
-                        # If extraction fails, continue without bytes for this node
+                    except (AttributeError, TypeError):
+                        # Malformed node config (non-dict entries); skip byte
+                        # estimate for this node rather than failing the query.
                         pass
 
         except RuntimeError as err:  # pragma: no cover

@@ -216,13 +216,10 @@ def query_planner(
     # check user has permission for this query type
     query_type = next(iter(ast))
     # Special-case DROP VIEW -> treat as DropView permission
-    if query_type == "Drop":
-        try:
-            # ast["Drop"]["object_type"] is expected to be the object type (e.g., "View")
-            if ast["Drop"].get("object_type") == "View":
-                query_type = "DropView"
-        except Exception:
-            pass
+    # ast["Drop"]["object_type"] is the object type (e.g., "View") when Drop is a mapping
+    if query_type == "Drop" and isinstance(ast["Drop"], dict):
+        if ast["Drop"].get("object_type") == "View":
+            query_type = "DropView"
 
     # The Binder adds schema information to the logical plan
     start = time.monotonic_ns()
