@@ -70,7 +70,7 @@ def _get_thread_buffer():
     """Get or create the thread-local ring buffer for this thread."""
     from opteryx.tracing.ring_buffer import RingBuffer
 
-    if not hasattr(_thread_local, "buffer"):
+    if getattr(_thread_local, "buffer", None) is None:
         _thread_local.buffer = RingBuffer(max_events=10000)
     return _thread_local.buffer
 
@@ -188,7 +188,7 @@ def reset() -> None:
     """Reset the tracing system for testing."""
     global _trace_writer
 
-    if hasattr(_thread_local, "buffer"):
+    if getattr(_thread_local, "buffer", None) is not None:
         _thread_local.buffer.clear()
 
     with _global_lock:

@@ -8,7 +8,7 @@
 //
 // Edge marshalling (boxing/unboxing) lives ONLY in this file.
 // No object in compiled paths between the edges.
-// No import opteryx. No fallback to draken_old.
+// No import opteryx. No fallback to a legacy implementation.
 
 #include <Python.h>
 #include <datetime.h>
@@ -5225,7 +5225,7 @@ NB_MODULE(draken_native, m) {
         })
         // hash() — single-column hash. One uint64_t per logical row.
         // Null rows receive the NULL_HASH sentinel mixed through simd_hash_i64
-        // (same convention as draken_old c_hash_single). Boxing at this edge only.
+        // (NULL_HASH-sentinel convention). Boxing at this edge only.
         .def("hash", [](const VectorOwner& v) {
             if (v.vec.type == DRAKEN_ARRAY)
                 throw std::invalid_argument("hash: not supported for DRAKEN_ARRAY");
@@ -5585,7 +5585,7 @@ NB_MODULE(draken_native, m) {
         DRAKEN_BINOP_CROSS(div, draken_div, draken_div_scalar, draken_float_div_scalar, decimal_div_dispatch)
         DRAKEN_BINOP_CROSS(mod, draken_mod, draken_mod_scalar, draken_float_mod_scalar, decimal_mod_dispatch)
 #undef DRAKEN_BINOP_CROSS
-        // neg: unary negation; neg(INT64_MIN) wraps for integers (matches draken_old).
+        // neg: unary negation; neg(INT64_MIN) wraps for integers.
         // E.32: DECIMAL neg raises on INT64_MIN (financial data; no silent wrap).
         .def("neg", [](const VectorOwner& v) -> VectorOwner {
             if (v.vec.type == DRAKEN_ARRAY)
@@ -6103,6 +6103,41 @@ NB_MODULE(draken_native, m) {
                 if (is_float_type(v.vec.type)) {
                     return vecresult_to_owner(draken_float_between(
                         v.vec, nb::cast<double>(lo), nb::cast<double>(hi),
+                        lo_inclusive, hi_inclusive));
+                }
+                if (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR) {
+                    // Build lo and hi bound slots at the Python edge — same
+                    // construction path as compare_scalar string case.
+                    auto make_str_slot = [](nb::object pyobj, const char* which) {
+                        struct SlotAndBytes {
+                            DrakenStringSlot slot;
+                            const uint8_t*   bytes;
+                        };
+                        PyObject* pystr = pyobj.ptr();
+                        if (!PyUnicode_Check(pystr))
+                            throw std::invalid_argument(
+                                std::string("between: string vector requires str bound for ") + which);
+                        Py_ssize_t slen = 0;
+                        const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
+                        if (!utf8) throw nb::python_error();
+                        const uint8_t* ubytes = reinterpret_cast<const uint8_t*>(utf8);
+                        const uint32_t ulen   = static_cast<uint32_t>(slen);
+                        SlotAndBytes sb;
+                        if (ulen <= STR_INLINE_MAX) {
+                            str_init_inline(&sb.slot, ubytes, ulen);
+                        } else {
+                            str_init_extern(&sb.slot, ubytes, ulen,
+                                            (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
+                        }
+                        sb.bytes = ubytes;
+                        return sb;
+                    };
+                    auto lo_sb = make_str_slot(lo, "lo");
+                    auto hi_sb = make_str_slot(hi, "hi");
+                    return vecresult_to_owner(draken_str_between(
+                        v.vec,
+                        lo_sb.slot, lo_sb.bytes,
+                        hi_sb.slot, hi_sb.bytes,
                         lo_inclusive, hi_inclusive));
                 }
                 return vecresult_to_owner(

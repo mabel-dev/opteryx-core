@@ -660,121 +660,56 @@ cdef Py_ssize_t _linearize(
             p.value for p in (cast_py_node.parameters or [])
         )
 
-        # Phase 5: get the source operand's type from schema_column for bind-time resolution.
-        source_sql_name = None
-        source_sql = None
+        # Phase 5: get the source operand's physical type from schema_column for
+        # bind-time resolution. source_phys_name is the physical DrakenType name —
+        # the discriminant both resolve_cast (closure) and _c_native_cast (C kernel)
+        # key on. None when the binder left the source untyped (e.g. ARRAY columns).
+        source_phys_name = None
         if node.left.schema_column != NULL:
             src_sc = <object>node.left.schema_column
             if src_sc is not None:
                 source_sql = src_sc.column_type
                 if source_sql is not None:
-                    # Extract the LogicalCategory name string (e.g., "INT64", "VARCHAR").
-                    source_sql_name = getattr(source_sql.category, "name", None)
+                    source_phys_name = getattr(source_sql.physical, "name", None)
 
         from opteryx.expression.casts import resolve_cast
         try:
-            cast_kernel = resolve_cast(source_sql_name, cast_target_type, cast_params, unit=cast_unit, safe=cast_is_try)
+            cast_kernel, _cast_needs_nb_input, _cast_returns_raw = resolve_cast(
+                source_phys_name, cast_target_type, cast_params, unit=cast_unit, safe=cast_is_try
+            )
         except (NotImplementedError, ValueError) as e:
-            raise ValueError(f"Unsupported CAST: {source_sql_name} → {cast_target_type}: {e}")
+            raise ValueError(f"Unsupported CAST: {source_phys_name} → {cast_target_type}: {e}")
 
         slot = bc._push_instr()
         slot.opcode = BC_CAST
-        # Phase 5: determine NEEDS_NB_WRAP based on resolved kernel return type.
         slot.flags = 0
         _ensure_sql_types()
 
-        # Check if this is a no-op cast (source == target).
+        # X (thin closures): wrap / input-unwrap are driven by the resolver, not by
+        # per-morsel type dispatch.
+        #   returns_raw  → kernel yields a raw nanobind Vector; executor wraps it.
+        #   needs_nb_input → kernel wants a raw nanobind Vector; executor unwraps the
+        #                    Cython shim to ._nb before the call (slot.bool_value flag).
         cast_target_sql = getattr(cast_py_node, "inferred_type", None)
-        is_noop_cast = (source_sql_name == cast_target_type or
-                        (source_sql == cast_target_sql and cast_target_sql is not None))
-
-        # Determine if the resolved kernel returns a nanobind Vector that needs wrapping.
-        # - Passthrough (no-op) casts return Cython Vectors → no wrap
-        # - cast_to_boolean returns a BoolVector (Cython) → no wrap
-        # - cast_to_varchar, cast_to_int, cast_to_double return nanobind Vectors → wrap
-        # - Native kernels (vector_cast_*) return nanobind Vectors → wrap
-        needs_nb_wrap = False
-        if not is_noop_cast and cast_target_type != "BOOLEAN":
-            # Non-trivial casts (except BOOLEAN) return nanobind Vectors.
-            needs_nb_wrap = True
-
-        if needs_nb_wrap:
+        if _cast_returns_raw:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
-
         if cast_target_sql is _LogicalCategory_BOOLEAN:
             slot.flags |= BC_RESULT_WRAP_AS_BOOL
+        slot.bool_value = 1 if _cast_needs_nb_input else 0
 
-        # Phase 9b: Resolve C kernel function pointer for cast operations.
-        # Build kernel name from source and target types.
-        # Map LogicalCategory enum names (e.g., "INTEGER", "DOUBLE") to registry type tokens (e.g., "int64", "float64").
-        _sql_to_type_name = {
-            "INTEGER": "int64",
-            "DOUBLE": "float64",
-            "VARCHAR": "string",
-            "BOOLEAN": "bool",
-            "DATE": "date32",
-            "TIMESTAMP": "timestamp",
-            "BLOB": "string",
-        }
-        # Map target types to dispatch kernels for unsupported source types.
-        _dispatch_kernels = {
-            "VARCHAR": "draken_cast_to_varchar",
-            "INTEGER": "draken_cast_to_int64",
-            "DOUBLE": "draken_cast_to_float64",
-            "BOOLEAN": "draken_cast_to_bool",
-            "DATE": "draken_cast_to_date",
-            "TIMESTAMP": "draken_cast_to_timestamp",
-            "DECIMAL": "draken_cast_to_decimal",
-            "ARRAY": "draken_cast_to_array",
-            "VECTOR": "draken_cast_to_vector",
-        }
-
-        src_type_name = _sql_to_type_name.get(source_sql_name)
-        dst_type_name = _sql_to_type_name.get(cast_target_type)
-
-        kernel_name = None
-        context_allocator = None
-        context_args = ()
-
-        # Try specific source→target kernel if both types are supported.
-        if src_type_name and dst_type_name:
-            # Check for identity cast first (source == target).
-            if source_sql_name == cast_target_type:
-                kernel_name = "draken_cast_identity"
-            else:
-                kernel_name = f"draken_cast_{src_type_name}_to_{dst_type_name}"
-
-            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(kernel_name, None, None)
-            if fn_ptr is None:
-                # Fail-fast: supported type combo but kernel missing is a bug.
-                raise ValueError(
-                    f"Kernel '{kernel_name}' not found in registry for cast {source_sql_name} → {cast_target_type}. "
-                    f"This is a supported combination but kernel is missing or incorrectly named."
-                )
-        else:
-            # Unsupported source type or parameterized cast; try dispatch kernel.
-            if cast_target_type == "TIMESTAMP" and cast_unit is not None:
-                # Parameterized TIMESTAMP cast uses dispatch kernel with context.
-                from draken.ops.kernels._kernel_registry import alloc_cast_timestamp_ctx
-                unit_code = {"ns": 1, "us": 2, "ms": 3, "s": 4, "days": 5}.get(cast_unit, 0)
-                context_allocator = alloc_cast_timestamp_ctx
-                context_args = (unit_code,)
-                kernel_name = "draken_cast_to_timestamp"
-            else:
-                # Generic dispatch kernel for target type.
-                kernel_name = _dispatch_kernels.get(cast_target_type)
-
-            if kernel_name:
-                fn_ptr, ctx_wrapper = _resolve_kernel_and_context(kernel_name, context_allocator, context_args[0] if context_args else None)
-            else:
-                fn_ptr, ctx_wrapper = None, None
-
-        if fn_ptr is not None:
-            slot.kernel_fn = <void*>fn_ptr
-            if ctx_wrapper is not None:
-                bc._hold(ctx_wrapper)
-                slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
-            slot.flags |= BC_INSTR_C_NATIVE
+        # Y (executor flip): resolve the C-native kernel for this pair. When one
+        # exists (real + registered, fixed-width result), the executor dispatches
+        # it directly via BC_INSTR_C_NATIVE — no Python object per morsel. The
+        # resolve_cast closure remains in callable_ref as the fallback for every
+        # cast not yet C-native (strings, timestamps, DECIMAL/VECTOR/ARRAY, the
+        # late-bound escape hatch). _c_native_cast is the single source of truth.
+        from opteryx.expression.casts import _c_native_cast
+        _cn = _c_native_cast(source_phys_name, cast_target_type, safe=cast_is_try)
+        if _cn is not None:
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(_cn[0], None, None)
+            if fn_ptr is not None:
+                slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
+                slot.flags |= BC_INSTR_C_NATIVE
 
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel

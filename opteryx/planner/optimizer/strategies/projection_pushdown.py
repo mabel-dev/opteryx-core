@@ -80,8 +80,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 LogicalPlanStepType.Subquery,
                 LogicalPlanStepType.Union,
             )
-            and hasattr(node, "schema")
-            and hasattr(node.schema, "columns")
+            and getattr(node.schema, "columns", None) is not None
         ):
             # Push all of the projections
             node_columns = [

@@ -640,6 +640,7 @@ from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
 
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
@@ -666,6 +667,7 @@ from draken.core.frame_arena cimport (
     draken_frame_arena_destroy,
     draken_frame_arena_alloc,
     draken_frame_arena_release,
+    draken_frame_arena_adopt,
 )
 from draken.ops.compare_dv cimport draken_compare_dv
 from draken.ops.arithmetic_dv cimport draken_arithmetic_dv
@@ -694,6 +696,12 @@ cdef extern from "ops/kernels/error_handling.h":
     const char* draken_get_error_message() nogil
     void draken_error_message_clear() nogil
     bint draken_has_error() nogil
+
+# VecResult → Python Vector (VectorOwner) trampoline. Declared returning `object`
+# so Cython manages the new reference; honors validity_embedded + ts_unit, which a
+# bare arena DV* cannot carry (string consolidated block / timestamp unit descriptor).
+cdef extern from "core/draken_bridge.h":
+    object draken_vecresult_own_c(VecResult res)
 
 
 # ---------------------------------------------------------------------------
@@ -1361,6 +1369,8 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef uint8_t* right_null
     cdef uint32_t result_len_u32
     cdef DrakenType result_dtype
+    cdef VecResult cast_vr
+    cdef object cast_err_msg
     cdef int dv_op
     cdef int had_null
     cdef uint8_t* cur_data
@@ -2002,7 +2012,48 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             if opcode == BC_CAST:
                 sp -= 1
                 dv_left_ptr = dv_stack[sp]
+                # Y (executor flip): when a C-native kernel is wired (fixed-width
+                # result) and the input is a real DV*, call it directly — no closure
+                # call, no input/output Python Vector. The kernel's draken_malloc'd
+                # buffers are adopted into the frame arena and exposed as a dense
+                # DV*; the result Vector is materialized lazily only if consumed at
+                # frame exit (_slot_to_pyobj). Zero Python objects per morsel.
+                if (slot.flags & BC_INSTR_C_NATIVE) != 0 and dv_left_ptr != NULL:
+                    cast_vr = (<cast_fn_t>slot.kernel_fn)(<void*>slot.ctx_ptr, dv_left_ptr)
+                    if cast_vr.data == NULL:
+                        cast_err_msg = (
+                            draken_get_error_message().decode("utf-8", "replace")
+                            if draken_has_error() else "C cast kernel error"
+                        )
+                        draken_error_message_clear()
+                        raise ValueError(cast_err_msg)
+                    if (cast_vr.type == DRAKEN_VARCHAR or cast_vr.type == DRAKEN_NVARCHAR
+                            or cast_vr.type == DRAKEN_VARBINARY):
+                        # String result: consolidated block with embedded validity —
+                        # own it as a Vector (the canonical owner; carries the block).
+                        # Input still handled C-native (no closure, no materialization).
+                        legacy_result = Vector(draken_vecresult_own_c(cast_vr))
+                        anchor[sp] = legacy_result
+                        dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
+                    else:
+                        # Fixed-width result: fold buffers into the frame arena and
+                        # expose a dense DV* — zero Python objects per morsel.
+                        draken_frame_arena_adopt(arena, cast_vr.data)
+                        if cast_vr.validity != NULL:
+                            draken_frame_arena_adopt(arena, cast_vr.validity)
+                        dv_store[sp] = draken_vector_from_dense(
+                            cast_vr.data, cast_vr.length, cast_vr.type, cast_vr.validity
+                        )
+                        dv_stack[sp] = &dv_store[sp]
+                        anchor[sp] = None
+                    sp += 1
+                    continue
                 py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
+                # X (thin closures): when the resolved kernel is a raw-nanobind cast
+                # fn (slot.bool_value != 0), hand it the unwrapped ._nb directly —
+                # no Python getattr, mirrors the BC_EXTRACTION unwrap.
+                if slot.bool_value != 0 and isinstance(py_left, Vector):
+                    py_left = (<Vector>py_left)._nb
                 legacy_result = (<object>slot.callable_ref)(py_left)
                 # Phase 5: wrap based on flags set at bind time.
                 if slot.flags & BC_RESULT_NEEDS_NB_WRAP:

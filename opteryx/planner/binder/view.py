@@ -43,7 +43,7 @@ def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, 
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to create view {node.view_name}")
 
-    if hasattr(node.connector, "variables"):
+    if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables
 
     node.columns = []
@@ -68,7 +68,7 @@ def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, B
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to alter view {node.view_name}")
 
-    if hasattr(node.connector, "variables"):
+    if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables
 
     node.columns = []
@@ -97,7 +97,7 @@ def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
         if not can_perform_action(context.execution_context, view_name, action="WRITE"):
             raise PermissionError(f"User does not have permission to drop view {view_name}")
 
-        if hasattr(connector, "variables"):
+        if "variables" in dir(connector):
             connector.variables = context.execution_context.variables
 
         node.connectors[view_name] = connector

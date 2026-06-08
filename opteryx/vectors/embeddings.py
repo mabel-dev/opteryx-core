@@ -144,7 +144,7 @@ class _StaticHashEmbeddingProvider:
         return vv
 
     def _extract_active_texts(self, values):
-        if hasattr(values, "to_arrow"):
+        if getattr(values, "to_arrow", None) is not None:
             values = values.to_arrow().to_pylist()
         positions = []
         texts = []

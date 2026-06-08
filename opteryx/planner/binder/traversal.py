@@ -24,7 +24,7 @@ def post_bind(self, node):
         elif branch.schema_column:
             seen[branch.schema_column.identity] = branch.copy()
         for attr in ("left", "right", "centre"):
-            if hasattr(branch, attr) and getattr(branch, attr) is not None:
+            if getattr(branch, attr) is not None:
                 setattr(branch, attr, _inner(getattr(branch, attr)))
         if branch.parameters:
             branch.parameters = [_inner(p) for p in branch.parameters]

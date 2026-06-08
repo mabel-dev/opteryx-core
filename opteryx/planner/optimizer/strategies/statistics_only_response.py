@@ -97,13 +97,13 @@ def is_simple_aggregate(aggregate_node) -> bool:
         return False
 
     # Check that we have at least one aggregate
-    if not hasattr(aggregate_node, "aggregates") or not aggregate_node.aggregates:
+    if not aggregate_node.aggregates:
         return False
 
     # Validate each aggregate in the list
     for aggregate in aggregate_node.aggregates:
         # Check that it's an aggregator node
-        if not hasattr(aggregate, "node_type") or aggregate.node_type != NodeType.AGGREGATOR:
+        if aggregate.node_type != NodeType.AGGREGATOR:
             return False
 
         agg_func = getattr(aggregate, "value", "").upper()
@@ -136,11 +136,11 @@ def is_simple_aggregate(aggregate_node) -> bool:
 
         # MIN/MAX - must have expression (column reference) and be a supported type
         if agg_func in ("MIN", "MAX"):
-            if not hasattr(aggregate, "parameters") or not aggregate.parameters:
+            if not aggregate.parameters:
                 return False
             # Get the column reference from parameters[0]
             expr = aggregate.parameters[0]
-            if not hasattr(expr, "schema_column") or expr.schema_column is None:
+            if expr.schema_column is None:
                 return False
             col_type = getattr(expr.schema_column, "category", None)
             if col_type is None:
@@ -196,7 +196,7 @@ def is_statistics_only_query(logical_plan) -> bool:
         return False
 
     # Check no GROUP BY (groups should be None or empty)
-    if hasattr(aggregate_node, "groups") and aggregate_node.groups:
+    if aggregate_node.groups:
         return False
 
     # Check no Filter nodes between Scan and Aggregate
@@ -248,7 +248,7 @@ def extract_column_alias(logical_plan) -> str:
     if not exit_node:
         return "COUNT(*)"
 
-    if not hasattr(exit_node, "columns") or not exit_node.columns:
+    if not exit_node.columns:
         return "COUNT(*)"
 
     # Get the first (and should be only) column
@@ -259,11 +259,11 @@ def extract_column_alias(logical_plan) -> str:
     first_column = columns[0]
 
     # Try to get the alias
-    if hasattr(first_column, "alias") and first_column.alias:
+    if first_column.alias:
         return first_column.alias
 
     # Try to get the source_column
-    if hasattr(first_column, "source_column") and first_column.source_column:
+    if first_column.source_column:
         return first_column.source_column
 
     # Default to COUNT(*)
@@ -287,16 +287,16 @@ def extract_all_column_aliases(logical_plan) -> list:
     if not exit_node:
         return []
 
-    if not hasattr(exit_node, "columns") or not exit_node.columns:
+    if not exit_node.columns:
         return []
 
     aliases = []
     for column in exit_node.columns:
         # Try to get the alias
-        if hasattr(column, "alias") and column.alias:
+        if column.alias:
             aliases.append(column.alias)
         # Try to get the source_column
-        elif hasattr(column, "source_column") and column.source_column:
+        elif column.source_column:
             aliases.append(column.source_column)
         else:
             # Default fallback
@@ -383,13 +383,13 @@ def get_all_aggregate_metadata(aggregate_node) -> list:
         agg_func = getattr(agg, "value", "").upper()
 
         if agg_func == "COUNT":
-            param = agg.parameters[0] if hasattr(agg, "parameters") and agg.parameters else None
+            param = agg.parameters[0] if agg.parameters else None
             if param is not None and getattr(param, "node_type", None) != NodeType.WILDCARD:
                 column_name = getattr(param, "source_column", "") or ""
             else:
                 column_name = ""
         elif agg_func in ("MIN", "MAX"):
-            param = agg.parameters[0] if hasattr(agg, "parameters") and agg.parameters else None
+            param = agg.parameters[0] if agg.parameters else None
             column_name = getattr(param, "source_column", "") if param else ""
         else:
             column_name = ""
@@ -412,12 +412,10 @@ def get_column_name_from_aggregate(aggregate_node) -> str:
     if not aggregate_node or not aggregate_node.aggregates:
         return ""
     agg = aggregate_node.aggregates[0]
-    if not hasattr(agg, "parameters") or not agg.parameters:
+    if not agg.parameters:
         return ""
     param = agg.parameters[0]
-    if not hasattr(param, "source_column"):
-        return ""
-    return param.source_column
+    return param.source_column or ""
 
 
 def get_min_max_from_manifest(manifest, column_name: str, operation: str):

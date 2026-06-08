@@ -1319,7 +1319,7 @@ cdef class HeapSortNode(BasePlanNode):
         free(query_buf)
 
         # Normalise scores to Python list
-        if hasattr(scores_mv, 'tolist'):
+        if getattr(scores_mv, 'tolist', None) is not None:
             scores = scores_mv.tolist()
         else:
             scores = list(scores_mv)

@@ -75,10 +75,10 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
         first_join_nid, join_node = join_nodes[0]
 
         # Only process INNER JOINs
-        if not (hasattr(join_node, "type") and join_node.type == "inner"):
+        if join_node.type != "inner":
             return optimized_plan
 
-        if not (hasattr(join_node, "on") and join_node.on is not None):
+        if join_node.on is None:
             return optimized_plan
 
         # Collect left and right join key columns
@@ -185,10 +185,10 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
         join_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
         for join_nid, join_node in join_nodes:
             # Only process INNER JOINs
-            if not hasattr(join_node, "type") or join_node.type != "inner":
+            if join_node.type != "inner":
                 continue
 
-            if not hasattr(join_node, "on") or join_node.on is None:
+            if join_node.on is None:
                 continue
 
             # Extract equality comparisons from ON expression
@@ -235,10 +235,8 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
         null_filtered_columns = set()
 
         filter_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))
-        for filter_nid in filter_nodes:
-            filter_node = plan[filter_nid]
-
-            if not hasattr(filter_node, "condition") or filter_node.condition is None:
+        for _filter_nid, filter_node in filter_nodes:
+            if filter_node.condition is None:
                 continue
 
             # Look for IS NOT NULL nodes in the filter condition

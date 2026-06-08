@@ -81,13 +81,13 @@ class PhysicalPlan(Graph):
                         provider, reverse=True
                     )
                 }
-                if hasattr(self[provider], "uuid"):
+                if getattr(self[provider], "uuid", None) is not None:
                     reader_edges.add((provider, provider_target, provider_relation))
 
                 labelled = False
                 for s, t, r in reader_edges:
                     node = self[s]
-                    if not hasattr(node, "uuid"):
+                    if getattr(node, "uuid", None) is None:
                         continue
                     if node.uuid in join.left_readers:
                         self.add_edge(provider, nid, "left")

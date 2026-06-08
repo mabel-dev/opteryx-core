@@ -122,6 +122,163 @@ static inline int str_eq_slots(const DrakenStringSlot* a,
 }
 
 // ---------------------------------------------------------------------------
+// str_constant_bool_result — architect-approved constant fast-path helper.
+//
+// Mirrors cmp_constant_bool_result in int64_compare.h; uses str_ prefix helpers
+// to stay ODR-clean when both headers land in the same translation unit.
+// ---------------------------------------------------------------------------
+static inline VecResult str_constant_bool_result(
+    bool bit, const uint8_t* src_null, uint32_t n)
+{
+    uint8_t* dst = str_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr) {
+        try { out_null = str_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); throw; }
+    }
+    if (bit) {
+        const uint32_t nb = (n + 7u) >> 3;
+        if (src_null == nullptr) {
+            memset(dst, 0xFFu, nb);
+            if (n & 7u) dst[nb - 1u] = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        } else {
+            memcpy(dst, src_null, nb);
+            if (n & 7u) dst[nb - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        }
+    }
+    VecResult r;
+    r.data = dst; r.validity = out_null;
+    r.selection = draken_identity_sel(n); r.owns_selection = false;
+    r.data_length = n; r.length = n;
+    r.type = DRAKEN_BOOL;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// str_dict_scatter / str_dict_bool_result — architect-approved dict fast-path.
+//
+// Mirrors cmp_dict_scatter/cmp_dict_bool_result in int64_compare.h; str_ prefix
+// avoids ODR clashes when both headers land in the same translation unit.
+// ---------------------------------------------------------------------------
+static inline void str_dict_scatter(
+    const uint8_t*  dict_bytes,
+    const uint32_t* selection,
+    const uint8_t*  src_null,
+    uint8_t*        dst,
+    uint32_t        n)
+{
+    const uint32_t whole_bytes = n >> 3;
+    if (src_null == nullptr) {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            dst[b] = static_cast<uint8_t>(
+                (dict_bytes[selection[base+0]] << 0) |
+                (dict_bytes[selection[base+1]] << 1) |
+                (dict_bytes[selection[base+2]] << 2) |
+                (dict_bytes[selection[base+3]] << 3) |
+                (dict_bytes[selection[base+4]] << 4) |
+                (dict_bytes[selection[base+5]] << 5) |
+                (dict_bytes[selection[base+6]] << 6) |
+                (dict_bytes[selection[base+7]] << 7));
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if (dict_bytes[selection[i]])
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            const uint8_t m = static_cast<uint8_t>(
+                (dict_bytes[selection[base+0]] << 0) |
+                (dict_bytes[selection[base+1]] << 1) |
+                (dict_bytes[selection[base+2]] << 2) |
+                (dict_bytes[selection[base+3]] << 3) |
+                (dict_bytes[selection[base+4]] << 4) |
+                (dict_bytes[selection[base+5]] << 5) |
+                (dict_bytes[selection[base+6]] << 6) |
+                (dict_bytes[selection[base+7]] << 7));
+            dst[b] = static_cast<uint8_t>(m & src_null[b]);
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if ((src_null[i >> 3] >> (i & 7)) & 1u)
+                if (dict_bytes[selection[i]])
+                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+}
+
+static inline VecResult str_dict_bool_result(
+    const uint8_t* dict_bytes, const DrakenVector& v)
+{
+    const uint32_t n        = v.length;
+    const uint8_t* src_null = v.validity;
+
+    uint8_t* dst = str_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr) {
+        try { out_null = str_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); throw; }
+    }
+    str_dict_scatter(dict_bytes, v.selection, src_null, dst, n);
+
+    VecResult r;
+    r.data = dst; r.validity = out_null;
+    r.selection = draken_identity_sel(n); r.owns_selection = false;
+    r.data_length = n; r.length = n;
+    r.type = DRAKEN_BOOL;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// str_dict_cross_scatter — both-dict vector scatter (str_ prefix for ODR safety).
+// Mirrors cmp_dict_cross_scatter; body is identical.
+static inline void str_dict_cross_scatter(
+    const uint8_t*  cross,
+    uint32_t        dl_b,
+    const uint32_t* a_sel,
+    const uint32_t* b_sel,
+    const uint8_t*  comb_null,
+    uint8_t*        dst,
+    uint32_t        n)
+{
+    const uint32_t whole_bytes = n >> 3;
+    if (comb_null == nullptr) {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            dst[b] = static_cast<uint8_t>(
+                (cross[a_sel[base+0] * dl_b + b_sel[base+0]] << 0) |
+                (cross[a_sel[base+1] * dl_b + b_sel[base+1]] << 1) |
+                (cross[a_sel[base+2] * dl_b + b_sel[base+2]] << 2) |
+                (cross[a_sel[base+3] * dl_b + b_sel[base+3]] << 3) |
+                (cross[a_sel[base+4] * dl_b + b_sel[base+4]] << 4) |
+                (cross[a_sel[base+5] * dl_b + b_sel[base+5]] << 5) |
+                (cross[a_sel[base+6] * dl_b + b_sel[base+6]] << 6) |
+                (cross[a_sel[base+7] * dl_b + b_sel[base+7]] << 7));
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if (cross[a_sel[i] * dl_b + b_sel[i]])
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            const uint8_t m = static_cast<uint8_t>(
+                (cross[a_sel[base+0] * dl_b + b_sel[base+0]] << 0) |
+                (cross[a_sel[base+1] * dl_b + b_sel[base+1]] << 1) |
+                (cross[a_sel[base+2] * dl_b + b_sel[base+2]] << 2) |
+                (cross[a_sel[base+3] * dl_b + b_sel[base+3]] << 3) |
+                (cross[a_sel[base+4] * dl_b + b_sel[base+4]] << 4) |
+                (cross[a_sel[base+5] * dl_b + b_sel[base+5]] << 5) |
+                (cross[a_sel[base+6] * dl_b + b_sel[base+6]] << 6) |
+                (cross[a_sel[base+7] * dl_b + b_sel[base+7]] << 7));
+            dst[b] = static_cast<uint8_t>(m & comb_null[b]);
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if ((comb_null[i >> 3] >> (i & 7)) & 1u)
+                if (cross[a_sel[i] * dl_b + b_sel[i]])
+                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // compare_scalar inner kernels.
 //
 // Two specializations selected at call-site (no per-row branch on path):
@@ -286,6 +443,38 @@ static inline VecResult str_compare_scalar(
     const DrakenStringSlot* slots = sa->slots;
     const uint8_t* arena = sa->arena;
     const uint8_t* src_null = v.validity;
+
+    if (draken_is_constant(&v)) {
+        bool bit;
+        if (op == 0)      bit =  str_eq_slots(&slots[0], arena, &scalar_slot, scalar_bytes);
+        else if (op == 1) bit = !str_eq_slots(&slots[0], arena, &scalar_slot, scalar_bytes);
+        else if (op == 2) bit = str_compare(&slots[0], arena, &scalar_slot, scalar_bytes) >  0;
+        else if (op == 3) bit = str_compare(&slots[0], arena, &scalar_slot, scalar_bytes) >= 0;
+        else if (op == 4) bit = str_compare(&slots[0], arena, &scalar_slot, scalar_bytes) <  0;
+        else              bit = str_compare(&slots[0], arena, &scalar_slot, scalar_bytes) <= 0;
+        return str_constant_bool_result(bit, src_null, n);
+    }
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k) {
+            bool bit;
+            if (op == 0)      bit =  str_eq_slots(&slots[k], arena, &scalar_slot, scalar_bytes);
+            else if (op == 1) bit = !str_eq_slots(&slots[k], arena, &scalar_slot, scalar_bytes);
+            else if (op == 2) bit = str_compare(&slots[k], arena, &scalar_slot, scalar_bytes) >  0;
+            else if (op == 3) bit = str_compare(&slots[k], arena, &scalar_slot, scalar_bytes) >= 0;
+            else if (op == 4) bit = str_compare(&slots[k], arena, &scalar_slot, scalar_bytes) <  0;
+            else              bit = str_compare(&slots[k], arena, &scalar_slot, scalar_bytes) <= 0;
+            db[k] = bit ? 1u : 0u;
+        }
+        VecResult r;
+        try { r = str_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
 
     uint8_t* out_null = nullptr;
     if (src_null != nullptr) {
@@ -475,6 +664,62 @@ static inline VecResult str_compare_vector(
     const DrakenStringSlot* b_slots = sa_b->slots;
     const uint8_t*          a_arena = sa_a->arena;
     const uint8_t*          b_arena = sa_b->arena;
+
+    if (draken_is_constant(&a) && draken_is_constant(&b)) {
+        bool bit;
+        if (op == 0)      bit =  str_eq_slots(&a_slots[0], a_arena, &b_slots[0], b_arena);
+        else if (op == 1) bit = !str_eq_slots(&a_slots[0], a_arena, &b_slots[0], b_arena);
+        else if (op == 2) bit = str_compare(&a_slots[0], a_arena, &b_slots[0], b_arena) >  0;
+        else if (op == 3) bit = str_compare(&a_slots[0], a_arena, &b_slots[0], b_arena) >= 0;
+        else if (op == 4) bit = str_compare(&a_slots[0], a_arena, &b_slots[0], b_arena) <  0;
+        else              bit = str_compare(&a_slots[0], a_arena, &b_slots[0], b_arena) <= 0;
+        uint8_t* comb = str_and_validity(a.validity, b.validity, n);
+        VecResult r;
+        try { r = str_constant_bool_result(bit, comb, n); }
+        catch (...) { if (comb) draken_free(comb); throw; }
+        if (comb) draken_free(comb);
+        return r;
+    }
+
+    if (draken_is_dict(&a) && draken_is_dict(&b) &&
+        (uint64_t)a.data_length * b.data_length <= (uint64_t)n) {
+        const uint32_t dl_a = a.data_length;
+        const uint32_t dl_b = b.data_length;
+        uint8_t* cross = static_cast<uint8_t*>(draken_malloc(dl_a * dl_b));
+        if (!cross) throw std::bad_alloc();
+        for (uint32_t j = 0; j < dl_a; ++j) {
+            for (uint32_t k = 0; k < dl_b; ++k) {
+                bool bit;
+                if (op == 0)      bit =  str_eq_slots(&a_slots[j], a_arena, &b_slots[k], b_arena);
+                else if (op == 1) bit = !str_eq_slots(&a_slots[j], a_arena, &b_slots[k], b_arena);
+                else if (op == 2) bit = str_compare(&a_slots[j], a_arena, &b_slots[k], b_arena) >  0;
+                else if (op == 3) bit = str_compare(&a_slots[j], a_arena, &b_slots[k], b_arena) >= 0;
+                else if (op == 4) bit = str_compare(&a_slots[j], a_arena, &b_slots[k], b_arena) <  0;
+                else              bit = str_compare(&a_slots[j], a_arena, &b_slots[k], b_arena) <= 0;
+                cross[j * dl_b + k] = bit ? 1u : 0u;
+            }
+        }
+        uint8_t* comb = nullptr;
+        uint8_t* dst = nullptr;
+        try {
+            comb = str_and_validity(a.validity, b.validity, n);
+            dst  = str_alloc_bool_buf(n);
+        } catch (...) {
+            draken_free(cross);
+            if (comb) draken_free(comb);
+            if (dst)  draken_free(dst);
+            throw;
+        }
+        str_dict_cross_scatter(cross, dl_b, a.selection, b.selection, comb, dst, n);
+        draken_free(cross);
+        VecResult r;
+        r.data = dst; r.validity = comb;
+        r.selection = draken_identity_sel(n); r.owns_selection = false;
+        r.data_length = n; r.length = n;
+        r.type = DRAKEN_BOOL;
+        r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return r;
+    }
 
     uint8_t* out_null = str_and_validity(a.validity, b.validity, n);
     uint8_t* dst = nullptr;

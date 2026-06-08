@@ -38,17 +38,14 @@ VecResult draken_cast_date32_to_int64(void* ctx, const DrakenVector* v) {
         if (!v) return draken_error_sentinel("Input vector is null");
         if (v->type != DRAKEN_DATE32)
             return draken_error_sentinel_fmt("cast date32->int64: expected DATE32, got %d", v->type);
-        const uint32_t n = v->length;
+        const uint32_t k = v->data_length;
         const int32_t* src = static_cast<const int32_t*>(v->data);
-        uint8_t* val = kernel_copy_validity(v);
-        int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
-        if (!out) { draken_free(val); return draken_error_sentinel("Allocation failed"); }
-        for (uint32_t i = 0u; i < n; ++i)
-            out[i] = kernel_row_is_null(v, i) ? 0 : static_cast<int64_t>(src[v->selection[i]]);
+        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < k; ++j) out[j] = static_cast<int64_t>(src[j]);
         VecResult r;
-        r.data = out; r.validity = val; r.selection = draken_identity_sel(n);
-        r.owns_selection = false; r.data_length = n; r.length = n;
-        r.type = DRAKEN_INT64; r.flags = 0;
+        r.data = out; r.type = DRAKEN_INT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
         return r;
     });
 }
@@ -58,17 +55,14 @@ VecResult draken_cast_timestamp_to_int64(void* ctx, const DrakenVector* v) {
         if (!v) return draken_error_sentinel("Input vector is null");
         if (v->type != DRAKEN_TIMESTAMP64)
             return draken_error_sentinel_fmt("cast timestamp->int64: expected TIMESTAMP64, got %d", v->type);
-        const uint32_t n = v->length;
+        const uint32_t k = v->data_length;
         const int64_t* src = static_cast<const int64_t*>(v->data);
-        uint8_t* val = kernel_copy_validity(v);
-        int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
-        if (!out) { draken_free(val); return draken_error_sentinel("Allocation failed"); }
-        for (uint32_t i = 0u; i < n; ++i)
-            out[i] = kernel_row_is_null(v, i) ? 0 : src[v->selection[i]];
+        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < k; ++j) out[j] = src[j];
         VecResult r;
-        r.data = out; r.validity = val; r.selection = draken_identity_sel(n);
-        r.owns_selection = false; r.data_length = n; r.length = n;
-        r.type = DRAKEN_INT64; r.flags = 0;
+        r.data = out; r.type = DRAKEN_INT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
         return r;
     });
 }
@@ -96,47 +90,42 @@ VecResult draken_cast_int64_to_timestamp(void* ctx, const DrakenVector* v) {
             default: return draken_error_sentinel_fmt("cast int64->timestamp: bad unit %d", unit_code);
         }
 
-        const uint32_t n = v->length;
+        const uint32_t k = v->data_length;
         const int64_t* src = static_cast<const int64_t*>(v->data);
-        uint8_t* val = kernel_copy_validity(v);
-        int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
-        if (!out) { draken_free(val); return draken_error_sentinel("Allocation failed"); }
-        for (uint32_t i = 0u; i < n; ++i) {
-            if (kernel_row_is_null(v, i)) { out[i] = 0; continue; }
-            const int64_t raw = src[v->selection[i]];
-            out[i] = scale_days ? raw * 86'400'000'000LL : raw;
-        }
+        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < k; ++j)
+            out[j] = scale_days ? src[j] * 86'400'000'000LL : src[j];
         VecResult r;
-        r.data = out; r.validity = val; r.selection = draken_identity_sel(n);
-        r.owns_selection = false; r.data_length = n; r.length = n;
-        r.type = DRAKEN_TIMESTAMP64; r.flags = 0;
+        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
         r.ts_unit = static_cast<uint8_t>(ts_unit);
+        kernel_preserve_shape(r, v);
         return r;
     });
 }
 
-// DATE32 → VARCHAR: "YYYY-MM-DD" (10 chars, always inline).
+// DATE32 → VARCHAR: "YYYY-MM-DD" (10 chars, always inline). Fixed-width: every
+// output is 10 bytes, so no arena and the block size is known up front — write
+// slots straight into the consolidated block (no separate-buffers consolidation).
 VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
         if (v->type != DRAKEN_DATE32)
             return draken_error_sentinel_fmt("cast date->string: expected DATE32, got %d", v->type);
-        const uint32_t n = v->length;
+        const uint32_t k = v->data_length;
         const int32_t* src = static_cast<const int32_t*>(v->data);
 
-        const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-        DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-        if (!slots) return draken_error_sentinel("Allocation failed");
-        std::memset(slots, 0, slots_sz);
-        uint8_t* arena = static_cast<uint8_t*>(draken_malloc(1u));
-        if (!arena) { draken_free(slots); return draken_error_sentinel("Allocation failed"); }
-        uint8_t* validity = kernel_copy_validity(v);
+        DrakenStringSlot* slots;
+        uint8_t* arena;
+        uint8_t* vunused;
+        uint8_t* block = vecresult_string_block_alloc(k, 0u, 0, &slots, &arena, &vunused);
+        if (!block) return draken_error_sentinel("Allocation failed");
+        (void)arena; (void)vunused;  // all-inline: no arena; validity preserved separately
 
         uint8_t buf[10];
-        for (uint32_t i = 0u; i < n; ++i) {
-            if (kernel_row_is_null(v, i)) { str_init_null(&slots[i]); continue; }
+        for (uint32_t j = 0u; j < k; ++j) {
             int32_t y; int32_t m; int32_t d;
-            days_to_ymd(src[v->selection[i]], y, m, d);
+            days_to_ymd(src[j], y, m, d);
             buf[0] = static_cast<uint8_t>('0' + (y / 1000) % 10);
             buf[1] = static_cast<uint8_t>('0' + (y / 100)  % 10);
             buf[2] = static_cast<uint8_t>('0' + (y / 10)   % 10);
@@ -147,38 +136,39 @@ VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* v) {
             buf[7] = '-';
             buf[8] = static_cast<uint8_t>('0' + d / 10);
             buf[9] = static_cast<uint8_t>('0' + d % 10);
-            draken_build_string_slot(&slots[i], buf, 10u, 0u);
+            draken_build_string_slot(&slots[j], buf, 10u, 0u);
         }
-        return vecresult_from_string_buffers(slots, arena, 0u, validity, n, DRAKEN_VARCHAR);
+        VecResult r = vecresult_from_string_block(block, k, 0u, 0, DRAKEN_VARCHAR);
+        kernel_preserve_shape(r, v);
+        return r;
     });
 }
 
 // TIMESTAMP64 → VARCHAR: "YYYY-MM-DD HH:MM:SS.ffffff+0000" (31 chars, extern).
+// Compression-aware: format the K physical values into a K-slot value block, then
+// preserve the input's selection + validity (dict timestamp → dict string).
 VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
         if (v->type != DRAKEN_TIMESTAMP64)
             return draken_error_sentinel_fmt("cast timestamp->string: expected TIMESTAMP64, got %d", v->type);
-        const uint32_t n = v->length;
+        const uint32_t k = v->data_length;
         const int64_t* src = static_cast<const int64_t*>(v->data);
 
-        uint32_t valid_count = 0u;
-        for (uint32_t i = 0u; i < n; ++i) if (!kernel_row_is_null(v, i)) ++valid_count;
-        const size_t total_arena = static_cast<size_t>(valid_count) * 31u;
-
-        const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-        DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-        if (!slots) return draken_error_sentinel("Allocation failed");
-        std::memset(slots, 0, slots_sz);
-        uint8_t* arena = static_cast<uint8_t*>(draken_malloc(total_arena > 0u ? total_arena : 1u));
-        if (!arena) { draken_free(slots); return draken_error_sentinel("Allocation failed"); }
-        uint8_t* validity = kernel_copy_validity(v);
+        // Every physical value formats to exactly 31 bytes (extern), so the K-slot
+        // value block size is known up front: K slots + K*31 arena, no embedded validity.
+        const size_t total_arena = static_cast<size_t>(k) * 31u;
+        DrakenStringSlot* slots;
+        uint8_t* arena;
+        uint8_t* vunused;
+        uint8_t* block = vecresult_string_block_alloc(k, total_arena, 0, &slots, &arena, &vunused);
+        if (!block) return draken_error_sentinel("Allocation failed");
+        (void)vunused;
 
         size_t arena_used = 0u;
         uint8_t buf[31];
-        for (uint32_t i = 0u; i < n; ++i) {
-            if (kernel_row_is_null(v, i)) { str_init_null(&slots[i]); continue; }
-            int64_t us = src[v->selection[i]];
+        for (uint32_t j = 0u; j < k; ++j) {
+            int64_t us = src[j];
             int64_t sec = us / 1000000LL;
             int32_t usec = static_cast<int32_t>(us % 1000000LL);
             if (usec < 0) { sec -= 1; usec += 1000000; }
@@ -203,10 +193,12 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
             buf[24]=static_cast<uint8_t>('0'+(usec/10)%10);     buf[25]=static_cast<uint8_t>('0'+usec%10);
             buf[26]='+'; buf[27]='0'; buf[28]='0'; buf[29]='0'; buf[30]='0';
             std::memcpy(arena + arena_used, buf, 31u);
-            draken_build_string_slot(&slots[i], buf, 31u, static_cast<uint32_t>(arena_used));
+            draken_build_string_slot(&slots[j], buf, 31u, static_cast<uint32_t>(arena_used));
             arena_used += 31u;
         }
-        return vecresult_from_string_buffers(slots, arena, arena_used, validity, n, DRAKEN_VARCHAR);
+        VecResult r = vecresult_from_string_block(block, k, total_arena, 0, DRAKEN_VARCHAR);
+        kernel_preserve_shape(r, v);
+        return r;
     });
 }
 

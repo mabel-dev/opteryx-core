@@ -572,7 +572,7 @@ class Graph(object):
                 return {_inner_copy(item) for item in obj}
             if obj_type is dict:
                 return {key: _inner_copy(value) for key, value in obj.items()}
-            if hasattr(obj, "copy"):
+            if getattr(obj, "copy", None) is not None:
                 return obj.copy()
             try:
                 return copy.deepcopy(obj)

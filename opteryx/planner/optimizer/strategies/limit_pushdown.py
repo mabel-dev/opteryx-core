@@ -157,16 +157,10 @@ class LimitPushdownStrategy(OptimizationStrategy):
         elif join_type == "right outer":
             new_targets = targets & right_relations
         elif join_type == "cross join":
-            left_size = getattr(join_node, "left_size", float("inf"))
-            right_size = getattr(join_node, "right_size", float("inf"))
-            left_choice = targets & left_relations
-            right_choice = targets & right_relations
-            if left_choice and right_choice:
-                new_targets = left_choice if left_size <= right_size else right_choice
-            elif left_choice:
-                new_targets = left_choice
-            elif right_choice:
-                new_targets = right_choice
+            # A LIMIT over a cross product cannot be satisfied by limiting one
+            # input: limiting one side to n still yields |other side| * n rows.
+            # The LIMIT must stay above the cross join, so refuse to push it.
+            return False
         else:
             return False
 

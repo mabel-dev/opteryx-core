@@ -7,14 +7,6 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 
 
-def get_nodes_of_type_from_logical_plan(plan: LogicalPlan, types: tuple):
-    matches = []
-    for node in plan.nodes(True):
-        if node[1].node_type in types:
-            matches.append(node)
-    return matches
-
-
 class PlanRewriteContext:
     def __init__(self, plan: LogicalPlan, ctes: dict):
         self.pre_rewrite_tree: LogicalPlan = plan

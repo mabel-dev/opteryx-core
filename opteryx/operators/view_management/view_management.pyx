@@ -133,7 +133,7 @@ class ViewManagementNode(BasePlanNode):
 
             # Store the comment via the connector's generic comment API
             # Ensure the connector implements the API before calling.
-            if not hasattr(self.connector, "set_comment"):
+            if getattr(self.connector, "set_comment", None) is None:
                 raise NotImplementedError("Connector does not support updating comments")
 
             self.connector.set_comment(self.object_name, self.comment, describer="system")

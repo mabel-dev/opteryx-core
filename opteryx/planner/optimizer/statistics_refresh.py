@@ -787,7 +787,7 @@ def _literal_value(node):
     if node is None or getattr(node, "node_type", None) != NodeType.LITERAL:
         return None
     value = getattr(node, "value", None)
-    if hasattr(value, "item"):
+    if getattr(value, "item", None) is not None:
         try:
             return value.item()
         except (ValueError, TypeError):

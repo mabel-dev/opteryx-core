@@ -288,7 +288,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # move the filter before the UNNEST so we reduce the number of rows expanded.
                 if (
                     predicate.relations
-                    and hasattr(node.unnest_column, "source")
+                    and node.unnest_column is not None
                     and predicate.relations.issubset({node.unnest_column.source})
                     and node.unnest_target.schema_column.identity not in known_columns
                 ):
@@ -837,7 +837,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     continue
 
-                if hasattr(expression_template, "copy"):
+                if getattr(expression_template, "copy", None) is not None:
                     expression = expression_template.copy()
                 else:
                     expression = expression_template

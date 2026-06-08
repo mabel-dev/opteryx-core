@@ -229,7 +229,7 @@ cdef class ThreadLocalMetrics:
 
     cpdef void increment(self, str key, long long value=1):
         """Thread-safe increment without lock (thread-local storage)."""
-        if not hasattr(self._local, 'metrics'):
+        if getattr(self._local, 'metrics', None) is None:
             self._local.metrics = {}
         if key not in self._local.metrics:
             self._local.metrics[key] = 0
@@ -237,7 +237,7 @@ cdef class ThreadLocalMetrics:
 
     cpdef void append(self, str key, object value):
         """Append to list without lock (thread-local)."""
-        if not hasattr(self._local, 'lists'):
+        if getattr(self._local, 'lists', None) is None:
             self._local.lists = {}
         if key not in self._local.lists:
             self._local.lists[key] = []
@@ -248,9 +248,9 @@ cdef class ThreadLocalMetrics:
         result = {}
         # In a real implementation, would iterate over all threads
         # For now, return local thread data
-        if hasattr(self._local, 'metrics'):
+        if getattr(self._local, 'metrics', None) is not None:
             result.update(self._local.metrics)
-        if hasattr(self._local, 'lists'):
+        if getattr(self._local, 'lists', None) is not None:
             for key, lst in self._local.lists.items():
                 result[key] = lst
         return result

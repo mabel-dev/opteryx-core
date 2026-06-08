@@ -162,7 +162,7 @@ class Session(DataFrame):
                         # Get structured config directly without full dict conversion
                         node_config = (
                             node.plan_config()
-                            if hasattr(node, "plan_config")
+                            if getattr(node, "plan_config", None) is not None
                             else getattr(node, "config", None)
                         )
                         if isinstance(node_config, dict) and "projection" in node_config:
@@ -210,7 +210,7 @@ class Session(DataFrame):
     ):
         self._telemetry.start_time = time.time_ns()
 
-        if hasattr(operation, "decode"):
+        if getattr(operation, "decode", None) is not None:
             operation = operation.decode()
 
         operation = sql.remove_comments(operation)
@@ -373,7 +373,7 @@ class Session(DataFrame):
             try:
                 config_val = (
                     node.plan_config()
-                    if hasattr(node, "plan_config")
+                    if getattr(node, "plan_config", None) is not None
                     else getattr(node, "config", None)
                 )
             except (AttributeError, TypeError, ValueError) as err:
@@ -544,7 +544,7 @@ class Session(DataFrame):
         pending = []
         pending_rows = 0
 
-        for item in result_data if hasattr(result_data, "__iter__") else [result_data]:
+        for item in result_data if getattr(result_data, "__iter__", None) is not None else [result_data]:
             if item is None or item is EOS:
                 continue
 

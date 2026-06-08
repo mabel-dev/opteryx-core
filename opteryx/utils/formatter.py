@@ -198,7 +198,7 @@ def format_sql(sql):  # pragma: no cover
 
         return _COMMENT_PATTERN.sub(_replacer, string)
 
-    if hasattr(sql, "decode"):
+    if getattr(sql, "decode", None) is not None:
         sql = sql.decode()
     words = tokenize_string(sql)
 

@@ -61,14 +61,20 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_float64_to_string", (kernel_fn_t)&draken_cast_float64_to_string},
     {"draken_cast_float64_to_bool", (kernel_fn_t)&draken_cast_float64_to_bool},
 
+    // Narrow-integer widening (INT32/INT16/INT8 → FLOAT64 / INT64)
+    {"draken_cast_integer_to_float64", (kernel_fn_t)&draken_cast_integer_to_float64},
+    {"draken_cast_integer_to_int64", (kernel_fn_t)&draken_cast_integer_to_int64},
+
     // String type-specific casts (cast_string.cpp)
     {"draken_cast_string_to_int64", (kernel_fn_t)&draken_cast_string_to_int64},
-    {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},
     {"draken_cast_string_to_bool", (kernel_fn_t)&draken_cast_string_to_bool},
+    {"draken_cast_string_to_date32", (kernel_fn_t)&draken_cast_string_to_date32},
+    {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},
 
     // Temporal type-specific casts (cast_temporal.cpp)
-    // NOTE: draken_cast_date32_to_string is declared in header but implemented as draken_cast_date_to_string
-    // (naming mismatch). Not registered until the naming is aligned.
+    // DATE32 → VARCHAR ("YYYY-MM-DD"); registered under its real name (the header's
+    // draken_cast_date32_to_string is an alias that is not separately defined).
+    {"draken_cast_date_to_string", (kernel_fn_t)&draken_cast_date_to_string},
     {"draken_cast_int64_to_timestamp", (kernel_fn_t)&draken_cast_int64_to_timestamp},
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},

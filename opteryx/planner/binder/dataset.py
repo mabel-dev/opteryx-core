@@ -148,7 +148,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
     # Create table-specific engine
     engine_kwargs = {}
-    if hasattr(gateway, "variables"):
+    if "variables" in dir(gateway):
         engine_kwargs["variables"] = context.execution_context.variables
     if gateway.supports_diachronic:
         engine_kwargs["at_date"] = node.at_date
@@ -161,7 +161,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if not can_perform_action(context.execution_context, node.relation, action="READ"):
         raise PermissionError(f"User does not have permission to read {node.relation}")
 
-    if hasattr(node.connector, "variables"):
+    if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables
     if gateway.supports_diachronic:
         node.connector.start_date = node.start_date
@@ -169,7 +169,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     try:
         # Get dataset schema and build manifest (if supported by connector)
         # For Opteryx catalog connectors, this creates a Manifest with file-level stats
-        if hasattr(node.connector, "get_dataset_metadata"):
+        if getattr(node.connector, "get_dataset_metadata", None) is not None:
             node.schema, node.manifest = node.connector.get_dataset_metadata()
             # Propagate dataset commit timestamp from the connector to the
             # logical node so it becomes available to physical nodes

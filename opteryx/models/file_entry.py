@@ -58,7 +58,7 @@ class FileEntry:
         """
         # Handle different datafile structures
         # PyIceberg catalog returns Datafile with an 'entry' attribute
-        if hasattr(datafile, "entry") and isinstance(datafile.entry, dict):
+        if isinstance(getattr(datafile, "entry", None), dict):
             entry = datafile.entry
             file_path = entry.get("file_path")
             record_count = entry.get("record_count", 0)
@@ -104,9 +104,9 @@ class FileEntry:
 
             # Convert to dict if needed
             if lower_bounds and not isinstance(lower_bounds, dict):
-                lower_bounds = dict(lower_bounds) if hasattr(lower_bounds, "__iter__") else None
+                lower_bounds = dict(lower_bounds) if getattr(lower_bounds, "__iter__", None) is not None else None
             if upper_bounds and not isinstance(upper_bounds, dict):
-                upper_bounds = dict(upper_bounds) if hasattr(upper_bounds, "__iter__") else None
+                upper_bounds = dict(upper_bounds) if getattr(upper_bounds, "__iter__", None) is not None else None
 
             min_k_hashes = getattr(datafile, "min_k_hashes", None)
             histogram_counts = getattr(datafile, "histogram_counts", None)

@@ -10,12 +10,10 @@
 //   compare_vector: output row is null if EITHER operand row is null.
 //     Output validity is the AND of both input validities; nullptr when both are non-null.
 //
-//   draken_old's _compare_scalar copies validity to out_null and uses branchless AND —
-//   our implementation matches this for correct rows. For null rows, both produce
-//   result=0 in the data and validity=0 in the bitmap. No known divergence from
-//   draken_old's null behavior (the existing parity harness verified this).
+//   compare_scalar copies validity to out_null and uses branchless AND. For null
+//   rows the data is result=0 and the bitmap is validity=0.
 //
-// OP CODES (matching draken_old convention):
+// OP CODES:
 //   0=eq  1=ne  2=gt  3=ge  4=lt  5=le
 //
 // ACCESS PATTERN: data[v.selection[i]] for i in [0, v.length).
@@ -187,6 +185,173 @@ static inline uint8_t* cmp_and_validity(
 }
 
 // ---------------------------------------------------------------------------
+// cmp_constant_bool_result — architect-approved constant fast-path helper.
+//
+// Builds a dense DRAKEN_BOOL VecResult from a single comparison bit. The input
+// vector has data_length==1, so one comparison replaces n; output fill is O(n/8).
+//
+// bit=true, no nulls : memset 0xFF (partial last byte masked).
+// bit=true, nulls    : memcpy validity → data  (valid=1, null=0).
+// bit=false          : dst is pre-zeroed by alloc — nothing extra needed.
+// ---------------------------------------------------------------------------
+static inline VecResult cmp_constant_bool_result(
+    bool bit, const uint8_t* src_null, uint32_t n)
+{
+    uint8_t* dst = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr) {
+        try { out_null = cmp_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); throw; }
+    }
+    if (bit) {
+        const uint32_t nb = (n + 7u) >> 3;
+        if (src_null == nullptr) {
+            memset(dst, 0xFFu, nb);
+            if (n & 7u) dst[nb - 1u] = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        } else {
+            memcpy(dst, src_null, nb);
+            if (n & 7u) dst[nb - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        }
+    }
+    VecResult r;
+    r.data = dst; r.validity = out_null;
+    r.selection = draken_identity_sel(n); r.owns_selection = false;
+    r.data_length = n; r.length = n;
+    r.type = DRAKEN_BOOL;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// cmp_dict_scatter — architect-approved dict fast-path scatter step.
+//
+// Maps each logical row i to dict_bytes[selection[i]] and packs into dst.
+// dict_bytes has data_length entries: 1 = comparison true, 0 = false.
+// dst must be pre-zeroed (cmp_alloc_bool_buf guarantees this).
+// Used by cmp_dict_bool_result and str_dict_bool_result.
+// ---------------------------------------------------------------------------
+static inline void cmp_dict_scatter(
+    const uint8_t*  dict_bytes,
+    const uint32_t* selection,
+    const uint8_t*  src_null,
+    uint8_t*        dst,
+    uint32_t        n)
+{
+    const uint32_t whole_bytes = n >> 3;
+    if (src_null == nullptr) {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            dst[b] = static_cast<uint8_t>(
+                (dict_bytes[selection[base+0]] << 0) |
+                (dict_bytes[selection[base+1]] << 1) |
+                (dict_bytes[selection[base+2]] << 2) |
+                (dict_bytes[selection[base+3]] << 3) |
+                (dict_bytes[selection[base+4]] << 4) |
+                (dict_bytes[selection[base+5]] << 5) |
+                (dict_bytes[selection[base+6]] << 6) |
+                (dict_bytes[selection[base+7]] << 7));
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if (dict_bytes[selection[i]])
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            const uint8_t m = static_cast<uint8_t>(
+                (dict_bytes[selection[base+0]] << 0) |
+                (dict_bytes[selection[base+1]] << 1) |
+                (dict_bytes[selection[base+2]] << 2) |
+                (dict_bytes[selection[base+3]] << 3) |
+                (dict_bytes[selection[base+4]] << 4) |
+                (dict_bytes[selection[base+5]] << 5) |
+                (dict_bytes[selection[base+6]] << 6) |
+                (dict_bytes[selection[base+7]] << 7));
+            dst[b] = static_cast<uint8_t>(m & src_null[b]);
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if ((src_null[i >> 3] >> (i & 7)) & 1u)
+                if (dict_bytes[selection[i]])
+                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+}
+
+// cmp_dict_cross_scatter — both-dict vector scatter.
+//
+// cross[j * dl_b + k] = comparison result for a_data[j] OP b_data[k].
+// For each logical row i: output bit = cross[a_sel[i]*dl_b + b_sel[i]].
+static inline void cmp_dict_cross_scatter(
+    const uint8_t*  cross,
+    uint32_t        dl_b,
+    const uint32_t* a_sel,
+    const uint32_t* b_sel,
+    const uint8_t*  comb_null,
+    uint8_t*        dst,
+    uint32_t        n)
+{
+    const uint32_t whole_bytes = n >> 3;
+    if (comb_null == nullptr) {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            dst[b] = static_cast<uint8_t>(
+                (cross[a_sel[base+0] * dl_b + b_sel[base+0]] << 0) |
+                (cross[a_sel[base+1] * dl_b + b_sel[base+1]] << 1) |
+                (cross[a_sel[base+2] * dl_b + b_sel[base+2]] << 2) |
+                (cross[a_sel[base+3] * dl_b + b_sel[base+3]] << 3) |
+                (cross[a_sel[base+4] * dl_b + b_sel[base+4]] << 4) |
+                (cross[a_sel[base+5] * dl_b + b_sel[base+5]] << 5) |
+                (cross[a_sel[base+6] * dl_b + b_sel[base+6]] << 6) |
+                (cross[a_sel[base+7] * dl_b + b_sel[base+7]] << 7));
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if (cross[a_sel[i] * dl_b + b_sel[i]])
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            const uint8_t m = static_cast<uint8_t>(
+                (cross[a_sel[base+0] * dl_b + b_sel[base+0]] << 0) |
+                (cross[a_sel[base+1] * dl_b + b_sel[base+1]] << 1) |
+                (cross[a_sel[base+2] * dl_b + b_sel[base+2]] << 2) |
+                (cross[a_sel[base+3] * dl_b + b_sel[base+3]] << 3) |
+                (cross[a_sel[base+4] * dl_b + b_sel[base+4]] << 4) |
+                (cross[a_sel[base+5] * dl_b + b_sel[base+5]] << 5) |
+                (cross[a_sel[base+6] * dl_b + b_sel[base+6]] << 6) |
+                (cross[a_sel[base+7] * dl_b + b_sel[base+7]] << 7));
+            dst[b] = static_cast<uint8_t>(m & comb_null[b]);
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if ((comb_null[i >> 3] >> (i & 7)) & 1u)
+                if (cross[a_sel[i] * dl_b + b_sel[i]])
+                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+}
+
+// Builds a dense DRAKEN_BOOL result from pre-computed dict_bytes + the source
+// vector's selection, validity, and length.
+static inline VecResult cmp_dict_bool_result(
+    const uint8_t* dict_bytes, const DrakenVector& v)
+{
+    const uint32_t n        = v.length;
+    const uint8_t* src_null = v.validity;
+
+    uint8_t* dst = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr) {
+        try { out_null = cmp_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); throw; }
+    }
+    cmp_dict_scatter(dict_bytes, v.selection, src_null, dst, n);
+
+    VecResult r;
+    r.data = dst; r.validity = out_null;
+    r.selection = draken_identity_sel(n); r.owns_selection = false;
+    r.data_length = n; r.length = n;
+    r.type = DRAKEN_BOOL;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // compare_scalar inner kernel (template on Op)
 //
 // Reads data[selection[i]] for each logical row i and compares against scalar.
@@ -258,6 +423,22 @@ static inline VecResult compare_scalar_impl(const DrakenVector& v, int64_t scala
     const uint32_t  n        = v.length;
     const int64_t*  data     = static_cast<const int64_t*>(v.data);
     const uint8_t*  src_null = v.validity;
+
+    if (draken_is_constant(&v))
+        return cmp_constant_bool_result(Op::apply(data[0], scalar), src_null, n);
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k)
+            db[k] = Op::apply(data[k], scalar) ? 1u : 0u;
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
 
     uint8_t* dst = cmp_alloc_bool_buf(n);
 
@@ -361,6 +542,46 @@ static inline VecResult compare_vector_impl(const DrakenVector& a, const DrakenV
 
     const int64_t* a_data = static_cast<const int64_t*>(a.data);
     const int64_t* b_data = static_cast<const int64_t*>(b.data);
+
+    if (draken_is_constant(&a) && draken_is_constant(&b)) {
+        uint8_t* comb = cmp_and_validity(a.validity, b.validity, n);
+        VecResult r;
+        try { r = cmp_constant_bool_result(Op::apply(a_data[0], b_data[0]), comb, n); }
+        catch (...) { if (comb) draken_free(comb); throw; }
+        if (comb) draken_free(comb);
+        return r;
+    }
+
+    if (draken_is_dict(&a) && draken_is_dict(&b) &&
+        (uint64_t)a.data_length * b.data_length <= (uint64_t)n) {
+        const uint32_t dl_a = a.data_length;
+        const uint32_t dl_b = b.data_length;
+        uint8_t* cross = static_cast<uint8_t*>(draken_malloc(dl_a * dl_b));
+        if (!cross) throw std::bad_alloc();
+        for (uint32_t j = 0; j < dl_a; ++j)
+            for (uint32_t k = 0; k < dl_b; ++k)
+                cross[j * dl_b + k] = Op::apply(a_data[j], b_data[k]) ? 1u : 0u;
+        uint8_t* comb = nullptr;
+        uint8_t* dst = nullptr;
+        try {
+            comb = cmp_and_validity(a.validity, b.validity, n);
+            dst  = cmp_alloc_bool_buf(n);
+        } catch (...) {
+            draken_free(cross);
+            if (comb) draken_free(comb);
+            if (dst)  draken_free(dst);
+            throw;
+        }
+        cmp_dict_cross_scatter(cross, dl_b, a.selection, b.selection, comb, dst, n);
+        draken_free(cross);
+        VecResult r;
+        r.data = dst; r.validity = comb;
+        r.selection = draken_identity_sel(n); r.owns_selection = false;
+        r.data_length = n; r.length = n;
+        r.type = DRAKEN_BOOL;
+        r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return r;
+    }
 
     // Combined validity (AND of both — nullptr if no nulls on either side).
     uint8_t* out_null = cmp_and_validity(a.validity, b.validity, n);

@@ -8,11 +8,10 @@
 //
 // This header is FROZEN for the duration of the C++-first rebuild. ~95 compiled
 // `cimport draken.core.buffers` sites bind `DrakenVector`'s layout at compile
-// time, and the new `draken` must stay byte-identical to `draken_old` (40 bytes
-// on LP64) so the two can coexist as the rebuild proceeds. ABI drift (a silent
-// field reorder or enum renumber) segfaults consumers instead of failing the
-// build, so the layout is pinned by the static_asserts at the bottom of this
-// file (mirrored in draken_old/src/core/buffers.h).
+// time, so the layout must stay byte-identical (40 bytes on LP64). ABI drift (a
+// silent field reorder or enum renumber) segfaults consumers instead of failing
+// the build, so the layout is pinned by the static_asserts at the bottom of this
+// file.
 //
 // Logical-type descriptor (06) and value statistics (05) are deliberately
 // out-of-band, keyed by column — NOT fields on these structs. Adding either
@@ -135,9 +134,13 @@ typedef struct {
 // `selection` is never NULL. For dense vectors it points at the lazy-grown
 // global identity permutation; for constant vectors at the lazy-grown global
 // zero vector; for dict-encoded vectors at owned uint32 codes. The choice of
-// pointer is owned by the C constructors in vector_alloc.h. No operator,
-// kernel, or wrapper may specialize on encoding shape — there is no
-// "dense fast-path", no `data_length == 1` shortcut, no NULL check.
+// pointer is owned by the C constructors in vector_alloc.h.
+//
+// Default posture: uniform data[selection[i]] — no shape discrimination.
+// Shape-specialized fast paths (constant, dict) require explicit architect
+// approval (CLAUDE.md §11). Approved exceptions: compare kernels
+// (int64_compare.h, fixed_int_ops.h, string_compare.h) and predicate kernels
+// (int64_predicates.h, fixed_int_ops.h, string_predicates.h).
 //
 // Memory-layout hints (informational only — never used in hot loops):
 //   former-dense    => selection points at draken_identity_sel,  data_length == length
@@ -188,7 +191,7 @@ static inline int draken_is_dict(const DrakenVector* v) {
 // ABI guard — frozen layout (CLAUDE.md §11, 09_delivery.md risk #1).
 // sizeof alone won't catch a field reorder, and a renumbered enum is as fatal
 // as a layout shift, so every shared field offset and a few tag values are
-// pinned here. These asserts must stay identical in draken_old/src/core/buffers.h.
+// pinned here.
 // =============================================================================
 DRAKEN_STATIC_ASSERT(sizeof(DrakenVector) == 40, "DrakenVector must be 40 bytes on LP64");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, data)        == 0,  "DrakenVector.data offset drift");

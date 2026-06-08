@@ -223,7 +223,7 @@ def _inner_filter_operations(arr, operator, value):
     if operator in ("InStr", "NotInStr", "IInStr", "NotIInStr"):
         ignore_case = operator in ("IInStr", "NotIInStr")
         negate = operator in ("NotInStr", "NotIInStr")
-        raw_value = value[0] if hasattr(value, "__len__") and len(value) == 1 else value
+        raw_value = value[0] if getattr(value, "__len__", None) is not None and len(value) == 1 else value
         needle = raw_value if isinstance(raw_value, bytes) else str(raw_value).encode("utf-8")
         result = raw_arr.contains(needle, ignore_case=ignore_case)
         return result.not_vector() if negate else result

@@ -260,7 +260,7 @@ def _identifier_name(node) -> Optional[str]:
 
 def _literal_scalar(node):
     value = getattr(node, "value", None)
-    if hasattr(value, "item") and not isinstance(value, (list, tuple, set, frozenset)):
+    if getattr(value, "item", None) is not None and not isinstance(value, (list, tuple, set, frozenset)):
         try:
             return value.item()
         except (ValueError, TypeError):

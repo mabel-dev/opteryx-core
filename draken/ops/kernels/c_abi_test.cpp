@@ -132,7 +132,7 @@ void test_draken_cast_int64_to_timestamp() { int64_t d[] = {1000000}; DrakenVect
 void test_draken_cast_bool_to_string() { uint8_t d[] = {0}; DrakenVector* v = create_bool_vector(d, 1); VecResult r = draken_cast_bool_to_string(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1); free_vector(v); draken_free(r.data); }
 void test_draken_cast_float64_to_string() { double d[] = {1.5}; DrakenVector* v = create_float64_vector(d, 1); VecResult r = draken_cast_float64_to_string(nullptr, v); assert(is_error(r)); free_vector(v); }
 void test_draken_cast_string_to_int64() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_int64(nullptr, v); free(v); }
-void test_draken_cast_string_to_float64() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_float64(nullptr, v); free(v); }
+
 void test_draken_cast_string_to_bool() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_bool(nullptr, v); free(v); }
 void test_draken_cast_date32_to_int64() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_DATE32; VecResult r = draken_cast_date32_to_int64(nullptr, v); free(v); }
 void test_draken_cast_date32_to_timestamp() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_DATE32; VecResult r = draken_cast_date32_to_timestamp(nullptr, v); free(v); }
@@ -173,7 +173,7 @@ int main() {
         {"draken_cast_to_bool", test_draken_cast_to_bool},
         {"draken_cast_int64_to_string", test_draken_cast_int64_to_string}, {"draken_cast_int64_to_timestamp", test_draken_cast_int64_to_timestamp},
         {"draken_cast_bool_to_string", test_draken_cast_bool_to_string}, {"draken_cast_float64_to_string", test_draken_cast_float64_to_string},
-        {"draken_cast_string_to_int64", test_draken_cast_string_to_int64}, {"draken_cast_string_to_float64", test_draken_cast_string_to_float64},
+        {"draken_cast_string_to_int64", test_draken_cast_string_to_int64},
         {"draken_cast_string_to_bool", test_draken_cast_string_to_bool}, {"draken_cast_date32_to_int64", test_draken_cast_date32_to_int64},
         {"draken_cast_date32_to_timestamp", test_draken_cast_date32_to_timestamp}, {"draken_cast_timestamp_to_int64", test_draken_cast_timestamp_to_int64},
         {"draken_cast_timestamp_to_string", test_draken_cast_timestamp_to_string}, {"draken_cast_timestamp_to_date32", test_draken_cast_timestamp_to_date32},

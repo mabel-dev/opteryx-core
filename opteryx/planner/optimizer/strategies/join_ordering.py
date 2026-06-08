@@ -49,14 +49,14 @@ def get_column_cardinality_estimates(plan, relation_names, column_names):
 
     estimates = []
     for relation_name in relation_names:
-        # Find the Scan node for this relation
+        # Find the Scan node for this relation. nodes() yields (nid, node) tuples.
         scan_node = None
-        for node in scan_nodes:
-            if hasattr(node, "relation") and node.relation == relation_name:
-                scan_node = node
+        for _nid, candidate in scan_nodes:
+            if candidate.relation == relation_name:
+                scan_node = candidate
                 break
 
-        if not scan_node or not hasattr(scan_node, "manifest") or not scan_node.manifest:
+        if not scan_node or not scan_node.manifest:
             return None
 
         # Get cardinality estimates from manifest
@@ -87,12 +87,12 @@ def get_column_null_fractions(plan, relation_names, column_names):
     null_fracs = []
     for relation_name in relation_names:
         scan_node = None
-        for node in scan_nodes:
-            if hasattr(node, "relation") and node.relation == relation_name:
-                scan_node = node
+        for _nid, candidate in scan_nodes:
+            if candidate.relation == relation_name:
+                scan_node = candidate
                 break
 
-        if not scan_node or not hasattr(scan_node, "manifest") or not scan_node.manifest:
+        if not scan_node or not scan_node.manifest:
             return None
 
         manifest = scan_node.manifest

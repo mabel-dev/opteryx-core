@@ -43,7 +43,7 @@ def _is_integer_like(v) -> bool:
     if isinstance(v, float):
         return False
     # Catch integer-like types (e.g. objects with __index__) via duck typing
-    return hasattr(v, "__index__")
+    return getattr(v, "__index__", None) is not None
 
 
 def numeric_range(*args) -> list:

@@ -18,6 +18,7 @@ All compiled into opteryx.operators._operators via the umbrella _operators.pyx.
 
 def __getattr__(name):
     from opteryx.operators import _operators
-    if hasattr(_operators, name):
-        return getattr(_operators, name)
+    attr = getattr(_operators, name, None)
+    if attr is not None:
+        return attr
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -5,16 +5,16 @@
 // Result type: always int64 (VecResult with type == DRAKEN_INT64).
 //
 // div semantics (SURFACE TO ARCHITECT):
-//   draken_old uses Cython cdivision=True which maps to C truncation-toward-zero.
-//   This file matches that: (-7)/2 == -3, not -4 (Python floor).
+//   Integer division uses cdivision=True / C truncation-toward-zero:
+//   (-7)/2 == -3, not -4 (Python floor).
 //   "True division" returning float64 is deferred until float64 is built.
 //   A separate slot or op-code covers true-div when that type lands.
 //
 // Overflow:
-//   add/sub/mul overflow: silent wrap (C signed arithmetic, same as draken_old).
+//   add/sub/mul overflow: silent wrap (C signed arithmetic).
 //   neg(INT64_MIN): wraps to INT64_MIN (signed overflow, platform-deterministic
 //   on NEON/AVX2 x86; documents the behaviour rather than masking it).
-//   div/mod by zero: result = 0 (matches draken_old's floordiv/modulo kernels).
+//   div/mod by zero: result = 0.
 //
 // Null propagation: any null input → null output for that row.
 //   result_valid[i] = a_valid[i] AND b_valid[i].
@@ -167,7 +167,7 @@ static inline VecResult i64_mul_scalar(const DrakenVector& a, int64_t scalar) {
 
 // ---------------------------------------------------------------------------
 // DIV — integer division, C truncation toward zero, div-by-zero → 0.
-// Matches draken_old _int64_int64_floordiv_dense (cdivision=True).
+// (cdivision=True semantics.)
 // Note: true-division returning float64 is out of scope until float64 is built.
 // ---------------------------------------------------------------------------
 static inline VecResult i64_div(const DrakenVector& a, const DrakenVector& b) {
@@ -228,7 +228,7 @@ static inline VecResult i64_mod_scalar(const DrakenVector& a, int64_t scalar) {
 // ---------------------------------------------------------------------------
 // NEG — unary negation.
 // neg(INT64_MIN) wraps to INT64_MIN (signed overflow, platform-deterministic
-// on all our targets; matches draken_old cdivision=True behaviour).
+// on all our targets).
 // ---------------------------------------------------------------------------
 static inline VecResult i64_neg(const DrakenVector& a) {
     const uint32_t n = a.length;

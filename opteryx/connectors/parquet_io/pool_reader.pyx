@@ -662,7 +662,7 @@ def iter_row_groups_ipc(
                 k: len(v)
                 for k, v in row_group.items()
                 if not (isinstance(k, str) and k.startswith('__'))
-                   and hasattr(v, '__len__')
+                   and getattr(v, '__len__', None) is not None
             }
             if col_lengths:
                 lengths = list(col_lengths.values())

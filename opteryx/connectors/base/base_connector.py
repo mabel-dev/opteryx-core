@@ -84,7 +84,7 @@ class BaseConnector:
             raise DatasetNotFoundError(connector=self, dataset=object_name)
 
         # Prefer a generic `set_comment` if connector implements it
-        if hasattr(self, "set_comment"):
+        if getattr(self, "set_comment", None) is not None:
             return self.set_comment(object_name, comment, describer=describer)
 
         raise NotImplementedError("Connector does not support updating comments for this object")

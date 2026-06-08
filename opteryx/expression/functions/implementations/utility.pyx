@@ -370,7 +370,7 @@ def array_contains(arr, val):
     """Check if array contains value. Assumes Draken vectors."""
     from draken.interop.vector_sequence import vector_from_sequence
 
-    needle = val[0] if hasattr(val, "__getitem__") else val
+    needle = val[0] if getattr(val, "__getitem__", None) is not None else val
     bool_list = []
     for row in arr:
         if row is None:

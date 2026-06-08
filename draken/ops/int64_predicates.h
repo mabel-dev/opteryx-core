@@ -132,6 +132,23 @@ static inline VecResult between_impl(
     const int64_t*  data     = static_cast<const int64_t*>(v.data);
     const uint8_t*  src_null = v.validity;
 
+    if (draken_is_constant(&v))
+        return cmp_constant_bool_result(
+            BetweenOp<lo_incl, hi_incl>::apply(data[0], lo, hi), src_null, n);
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k)
+            db[k] = BetweenOp<lo_incl, hi_incl>::apply(data[k], lo, hi) ? 1u : 0u;
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
+
     uint8_t* dst = cmp_alloc_bool_buf(n);
 
     uint8_t* out_null = nullptr;
@@ -188,6 +205,35 @@ static inline VecResult i64_in_list(
     const uint32_t  n        = v.length;
     const int64_t*  data     = static_cast<const int64_t*>(v.data);
     const uint8_t*  src_null = v.validity;
+
+    if (draken_is_constant(&v)) {
+        uint64_t raw = static_cast<uint64_t>(data[0]);
+        uint64_t h;
+        simd_hash_i64(&raw, &h, 1);
+        return cmp_constant_bool_result(set.contains(h), src_null, n);
+    }
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        uint64_t scratch[1024], hashes[1024];
+        uint32_t done = 0;
+        while (done < dl) {
+            const uint32_t block = (dl - done < 1024u) ? (dl - done) : 1024u;
+            for (uint32_t j = 0; j < block; ++j)
+                scratch[j] = static_cast<uint64_t>(data[done + j]);
+            simd_hash_i64(scratch, hashes, block);
+            for (uint32_t j = 0; j < block; ++j)
+                db[done + j] = set.contains(hashes[j]) ? 1u : 0u;
+            done += block;
+        }
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
 
     uint8_t* dst = cmp_alloc_bool_buf(n);
 

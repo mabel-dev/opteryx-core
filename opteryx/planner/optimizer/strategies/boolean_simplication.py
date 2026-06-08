@@ -308,11 +308,7 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
                 is_duplicate = False
                 for existing in unique_conditions:
                     # Simple check: compare node structure (UUIDs should be same for duplicates)
-                    if (
-                        hasattr(condition, "uuid")
-                        and hasattr(existing, "uuid")
-                        and condition.uuid == existing.uuid
-                    ):
+                    if condition.uuid == existing.uuid:
                         telemetry.optimization_boolean_rewrite_and_redundant += 1
                         is_duplicate = True
                         break

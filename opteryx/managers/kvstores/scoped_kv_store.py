@@ -94,7 +94,7 @@ class ScopedKeyValueStore(BaseKeyValueStore):
         return self._store.touch(scoped_key)
 
     def layer_for_key(self, key: bytes, **context):
-        if not hasattr(self._store, "layer_for_key"):
+        if getattr(self._store, "layer_for_key", None) is None:
             return None
         scoped_key = self._compose_scoped_key(key, context, require_all_fields=False)
         return self._store.layer_for_key(scoped_key)

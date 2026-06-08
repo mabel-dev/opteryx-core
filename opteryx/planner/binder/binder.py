@@ -306,7 +306,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 def traversive_recursive_bind(node: Node, context: Any) -> Tuple[Node, Any]:
     # First recurse and do this for all the sub parts of the evaluation plan
     for attr in ("left", "right", "centre"):
-        if hasattr(node, attr) and getattr(node, attr) is not None:
+        if getattr(node, attr) is not None:
             value, context = inner_binder(getattr(node, attr), context)
             setattr(node, attr, value)
     if node.parameters:

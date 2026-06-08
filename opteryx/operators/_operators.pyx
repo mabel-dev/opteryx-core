@@ -468,7 +468,8 @@ cdef class JoinNode(BasePlanNode):
         if not self._join_key_cast_plan:
             return morsel
         from draken.morsels.morsel import Morsel as _Morsel
-        from opteryx.expression.casts import cast_to_double, cast_to_int
+        from opteryx.expression.casts import resolve_cast
+        from draken.vectors.vector import Vector
         names = list(morsel.column_names)
         vectors = [morsel.column(n) for n in names]
         changed = False
@@ -480,11 +481,20 @@ cdef class JoinNode(BasePlanNode):
             target_type = cast_rule["target_type"]
             # Phase 2: target_type is ColumnType; compare via .category
             target_cat = target_type.category if isinstance(target_type, ColumnType) else target_type
+            _join_tgt = None
             if target_cat == LogicalCategory.FLOAT:
-                vectors[idx] = cast_to_double(vectors[idx])
-                changed = True
+                _join_tgt = "DOUBLE"
             elif target_cat == LogicalCategory.INTEGER:
-                vectors[idx] = cast_to_int(vectors[idx])
+                _join_tgt = "INTEGER"
+            if _join_tgt is not None:
+                # Resolve the exact native kernel from the column's physical type
+                # (bind-style, once per join build — not per row), then apply it the
+                # same way the bytecode executor does (input/result handling).
+                v = vectors[idx]
+                kern, needs_nb, returns_raw = resolve_cast(v.type.name, _join_tgt, (), None)
+                inp = v._nb if (needs_nb and isinstance(v, Vector)) else v
+                res = kern(inp)
+                vectors[idx] = Vector(res) if returns_raw else res
                 changed = True
             if changed:
                 self.readings["feature_implicit_join_key_cast"] = \

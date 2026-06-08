@@ -15,7 +15,7 @@
 //   This reads the arena, but hash-table consumers that treat row hashes as key
 //   identity get a full-content 64-bit string hash rather than the slot hash32.
 //
-// NULL rows: row hash == NULL_HASH sentinel (matches draken_old convention).
+// NULL rows: row hash == NULL_HASH sentinel.
 //
 // ACCESS PATTERN: slots[v.selection[i]] for i in [0, v.length).
 // No shape discrimination — uniform access; works for dict shape automatically.
@@ -55,7 +55,7 @@ static inline uint64_t str_hash_seed(const DrakenStringSlot* s,
 // Fills out[0..n) with one uint64_t per logical row.
 // Builds seeds in ≤1024-row chunks, then calls simd_hash_i64 for mixing —
 // same chunked pattern as hash_int64 so parity tests can reuse infrastructure.
-// Null rows: seed = NULL_HASH before mixing (matches draken_old null sentinel).
+// Null rows: seed = NULL_HASH before mixing.
 // ---------------------------------------------------------------------------
 static inline void hash_string(const DrakenVector& v, uint64_t* out, uint32_t n) {
     if (n == 0) return;

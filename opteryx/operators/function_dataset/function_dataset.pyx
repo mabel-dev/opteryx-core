@@ -79,9 +79,9 @@ def _column_metadata(columns):
 def _as_list(values):
     if values is None:
         return []
-    if hasattr(values, "to_pylist"):
+    if getattr(values, "to_pylist", None) is not None:
         return values.to_pylist()
-    if hasattr(values, "tolist"):
+    if getattr(values, "tolist", None) is not None:
         return values.tolist()
     if isinstance(values, list):
         return values

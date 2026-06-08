@@ -4,46 +4,53 @@ The `expression` module handles SQL expression evaluation after parsing and bind
 
 ## Overview
 
+Sources are Cython (`.pyx`); a few function-definition leaves remain plain
+Python (`.py`). Generated `.c`/`.cpp`/`.so` artefacts are not listed.
+
 ```
 expression/
 ├── Core Evaluation
-│   ├── __init__.py                 # Main evaluate() dispatcher, NodeType enum
-│   ├── binary_operators.py         # Binary operator implementations
-│   ├── unary_operations.py         # Unary operator implementations
-│   ├── casts.py                    # Type casting utilities
-│   └── formatter.py                # Expression formatting/display
+│   ├── __init__.pyx                # Main evaluate() dispatcher, NodeType enum
+│   ├── binary_operators.pyx        # Binary operator implementations
+│   ├── unary_operations.pyx        # Unary operator implementations
+│   ├── casts.pyx                   # Type casting utilities
+│   └── formatter.pyx               # Expression formatting/display
 │
 ├── Functions (Database Functions)
 │   ├── functions/
-│   │   ├── catalog.py              # FunctionCatalog: registry, resolution, metadata
-│   │   ├── compat.py               # Backward-compat layer for legacy imports
-│   │   ├── implementations/        # Kernel implementations (text, arithmetic, etc.)
+│   │   ├── catalog.pyx             # FunctionCatalog: registry, resolution, metadata
+│   │   ├── implementations/        # Kernel implementations
+│   │   │   ├── arithmetic.py
+│   │   │   ├── temporal.py
+│   │   │   ├── text.pyx
+│   │   │   ├── logical.pyx
+│   │   │   └── utility.pyx
 │   │   └── registrar/              # Function definitions by category
-│   │       ├── arithmetic.py
-│   │       ├── text.py
-│   │       ├── temporal.py
-│   │       └── ...
+│   │       ├── arithmetic.pyx
+│   │       ├── text.pyx
+│   │       ├── temporal.pyx / temporal_extra.pyx
+│   │       ├── aggregate.pyx
+│   │       ├── logical.pyx
+│   │       ├── hash_encoding.pyx
+│   │       ├── constant.pyx
+│   │       └── utility.pyx
 │
 ├── Filter Operations (Vector Operations)
-│   ├── operations/                 # Modular package for filter operations
-│   │   ├── __init__.py             # Main filter_operations() dispatcher
-│   │   ├── comparisons.py          # Eq, NotEq, Lt, Gt, etc.
-│   │   ├── list_ops.py             # InList, NotInList
-│   │   ├── string_matching.py      # Like, RLike, InStr patterns
-│   │   ├── array_ops.py            # AnyOp*, AllOp*, array contains
-│   │   ├── special_ops.py          # JSON path queries
-│   │   ├── fastpath_constant.py    # Constant-encoded vector optimization
-│   │   ├── fastpath_dictionary.py  # Dictionary-encoded vector optimization
-│   │   ├── fastpath_telemetry.py   # Performance metrics
-│   │   └── type_coercion.py        # Type conversion utilities
-│   └── ops.py                      # (LEGACY - to be deprecated)
+│   └── operations/                 # Modular package for filter operations
+│       ├── __init__.pyx            # Main filter_operations() dispatcher
+│       ├── comparisons.pyx         # Eq, NotEq, Lt, Gt, etc.
+│       ├── list_ops.pyx            # InList, NotInList
+│       ├── string_matching.pyx     # Like, RLike, InStr patterns
+│       ├── array_ops.pyx           # AnyOp*, AllOp*, array contains
+│       └── special_ops.pyx         # JSON path queries
 │
 ├── Evaluation Engine
 │   └── evaluator/
+│       ├── __init__.py             # Package entry / legacy submodule aliases
 │       ├── _impl.pyx               # Compiled evaluator entry points
 │       ├── evaluation.pyx          # Bytecode/evaluation orchestration
+│       ├── _c_kernel_dispatch.pyx  # Native C function-pointer kernel dispatch
 │       ├── arithmetic.pyx          # Arithmetic kernels
-│       ├── arithmetic_dispatch.pyx # Arithmetic dispatch helpers
 │       ├── comparisons.pyx         # Comparison kernels
 │       ├── string_ops.pyx          # String expression kernels
 │       ├── temporal_ops.pyx        # Temporal expression kernels
@@ -53,13 +60,13 @@ expression/
 │       └── function_execution.pyx  # Function kernel dispatch
 │
 ├── Metadata & Catalogs
-│   ├── operator_catalog.py         # Operator definitions and metadata
-│   └── intervals.py                # INTERVAL type operations
+│   ├── operator_catalog.pyx        # Operator definitions and metadata
+│   └── intervals.pyx               # INTERVAL type operations
 ```
 
 ## Key Components
 
-### Core Evaluation (`__init__.py`)
+### Core Evaluation (`__init__.pyx`)
 
 - **`evaluate()`** - Main entry point for evaluating expressions against data morsels
 - **`NodeType`** - Enum of all AST node types (FUNCTION, BINARY_OPERATOR, LITERAL, etc.)
@@ -93,16 +100,17 @@ Each operation category is a separate module with clear responsibility:
 
 | Module | Operators |
 |--------|-----------|
-| `comparisons.py` | `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq` |
-| `list_ops.py` | `InList`, `NotInList` |
-| `string_matching.py` | `Like`, `RLike`, `InStr`, `ILike`, etc. |
-| `array_ops.py` | `AnyOp*`, `AllOp*`, `@>`, `@>>` |
-| `special_ops.py` | `@?` (JSON path) |
+| `comparisons.pyx` | `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq` |
+| `list_ops.pyx` | `InList`, `NotInList` |
+| `string_matching.pyx` | `Like`, `RLike`, `InStr`, `ILike`, etc. |
+| `array_ops.pyx` | `AnyOp*`, `AllOp*`, `@>`, `@>>` |
+| `special_ops.pyx` | `@?` (JSON path) |
 
-**Fastpath Optimization:**
-- **Constant encoding** (`fastpath_constant.py`) - Vectors where all values are identical
-- **Dictionary encoding** (`fastpath_dictionary.py`) - Dictionary-compressed string vectors
-- **Telemetry** (`fastpath_telemetry.py`) - Performance metrics for fastpath usage
+**Encoding shapes:** All vectors are `DrakenVector` in the unified format
+(dense / constant / dict), accessed uniformly as `data[selection[i]]`. The
+uniform path is the correctness contract; shape-specialized fast paths are the
+exception, permitted only with architect sign-off (see Draken Vector Model in
+the root `CLAUDE.md`).
 
 **Key Function:**
 ```python
@@ -117,19 +125,19 @@ Returns a boolean array for filtering rows, with proper null semantics (tri-stat
 - Splits arithmetic, comparison, string, temporal, JSON, CASE, coercion, and function execution into separate modules
 - Uses bytecode/evaluation helpers for the hot path rather than a Python tree walk
 
-**Function Execution** (`evaluator/function_execution.py`)
+**Function Execution** (`evaluator/function_execution.pyx`)
 - Kernel dispatch: maps FunctionDefinition to callable
-- Type coercion for kernel parameters (Arrow ↔ Draken ↔ NumPy)
+- Type coercion for kernel parameters (Draken vectors only in the hot path)
 - Null handling policies (compress, passthrough, bypass, etc.)
 
 ### Supporting Modules
 
-**`binary_operators.py`** - Binary operator kernels (arithmetic, comparison, logical)
-**`unary_operations.py`** - Unary operator kernels (NOT, negation)
-**`casts.py`** - Type casting functions (CAST, implicit coercions)
-**`formatter.py`** - Pretty-print expressions for error messages
-**`operator_catalog.py`** - Operator metadata (precedence, associativity)
-**`intervals.py`** - INTERVAL arithmetic and type operations
+**`binary_operators.pyx`** - Binary operator kernels (arithmetic, comparison, logical)
+**`unary_operations.pyx`** - Unary operator kernels (NOT, negation)
+**`casts.pyx`** - Type casting functions (CAST, implicit coercions)
+**`formatter.pyx`** - Pretty-print expressions for error messages
+**`operator_catalog.pyx`** - Operator metadata (precedence, associativity)
+**`intervals.pyx`** - INTERVAL arithmetic and type operations
 
 ## Data Flow
 
@@ -148,7 +156,7 @@ Evaluator.evaluate(expression, morsel)
     │  ├─ CAST → casts module
     │  └─ LITERAL → constant value
     ↓
-Result vector (PyArrow or Draken)
+Result DrakenVector
 ```
 
 ### Function Resolution Flow
@@ -198,20 +206,13 @@ Result vector
 
 ## Performance Considerations
 
-### Fastpath Optimizations
-
-1. **Constant Encoding** - All-same-value vectors skip comparisons
-2. **Dictionary Encoding** - String vectors use dictionary indices instead of full strings
-3. **Null Compression** - Remove nulls before operation, restore after (for non-null-sensitive ops)
-4. **Draken Vectors** - Native vector types keep hot paths out of PyArrow/Python object loops
-
-### Telemetry
-
-The `fastpath_telemetry` module tracks:
-- Dictionary fastpath hits/fallbacks
-- Constant fastpath hits/fallbacks
-
-Useful for profiling and identifying optimization opportunities.
+1. **Uniform vector access** - The `data[selection[i]]` pattern covers dense,
+   constant, and dict-encoded shapes through one path; constant/dict layouts
+   give compression for free without shape-specific branches.
+2. **Null Compression** - Remove nulls before operation, restore after (for
+   non-null-sensitive ops).
+3. **Native kernels** - Compiled Cython/C kernels keep hot paths out of Python
+   object loops; numpy/pyarrow are banned from execution paths.
 
 ## Adding New Operations
 
@@ -225,21 +226,21 @@ To add a new filter operation (e.g., `NewOp`):
 
 Example:
 ```python
-# In operations/comparisons.py (or new module)
+# In operations/comparisons.pyx (or new module)
 def my_new_operation(arr, value, dict_candidate=False):
     # Implementation
     pass
 
-# In operations/__init__.py dispatcher
+# In operations/__init__.pyx dispatcher
 if operator == "MyNewOp":
     return comparisons.my_new_operation(arr, value, dict_candidate)
 ```
 
 ## Current Maintenance Notes
 
-1. **`ops.py`** - Legacy import paths may still exist in older code or generated artefacts; new predicate work should use `operations/`.
-2. **Null handling** - Fastpath modules still carry some duplicated null semantics; keep behavior aligned with SQL tri-state logic.
-3. **Generated C/C++ files** - Many `.c`/`.cpp` files are Cython outputs. Edit the `.pyx` sources unless you are intentionally inspecting generated code.
+1. **Null handling** - Keep tri-state SQL semantics (`NULL AND TRUE = NULL`)
+   consistent across comparison, list, and string-matching operations.
+2. **Generated C/C++ files** - Many `.c`/`.cpp` files are Cython outputs. Edit the `.pyx` sources unless you are intentionally inspecting generated code.
 
 ## Related Modules
 

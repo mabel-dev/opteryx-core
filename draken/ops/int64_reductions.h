@@ -8,11 +8,11 @@
 // Manual NEON / AVX2 intrinsics are a follow-up; a time-boxed performance waiver
 // per 09_delivery.md §3 covers the gap until that lands.
 //
-// Semantics match draken_old/vectors/integer64_vector.pyx:
+// Semantics:
 //   sum:  empty or all-null → returns 0, count = 0.
 //   min:  empty or all-null → count = 0; caller must raise ValueError.
 //   max:  empty or all-null → count = 0; caller must raise ValueError.
-//   sum overflow: wraps (signed C arithmetic; matches draken_old's cdivision=True).
+//   sum overflow: wraps (signed C arithmetic).
 
 #include <stdint.h>
 #include <stddef.h>
@@ -36,7 +36,7 @@ static inline bool row_valid(const uint8_t* validity, uint32_t i) noexcept {
 //   all-valid:  out_value = sum of all rows.
 //   some nulls: out_value = sum of valid rows (null rows contribute 0).
 //   all null / empty: out_value = 0, return = 0.
-// Overflow wraps (C signed — same as draken_old with cdivision=True).
+// Overflow wraps (C signed).
 // ---------------------------------------------------------------------------
 static inline uint32_t i64_sum(const DrakenVector& v, int64_t* out_value) noexcept {
     const uint32_t n = v.length;

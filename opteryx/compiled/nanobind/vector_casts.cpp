@@ -515,6 +515,13 @@ static nb::object string_to_bool_apply(nb::object obj) {
     return wrap_cast_result(draken_cast_string_to_bool(nullptr, dv), /*parse_error_as_value=*/true);
 }
 
+// STRING → DATE32: "YYYY-MM-DD" (and short variants "YYYY-M-D" etc.) → int32 days-since-epoch.
+// Raises ValueError on malformed rows.
+static nb::object string_to_date32_apply(nb::object obj) {
+    const DrakenVector* dv = unwrap_string(obj);
+    return wrap_cast_result(draken_cast_string_to_date32(nullptr, dv), /*parse_error_as_value=*/true);
+}
+
 // ---------------------------------------------------------------------------
 // NB_MODULE — four functions, one module.
 // ---------------------------------------------------------------------------
@@ -645,4 +652,10 @@ NB_MODULE(vector_casts, m) {
         nb::arg("v"),
         "CAST(v AS BOOL): 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' (case-insensitive). "
         "Raises ValueError on unrecognized values. Null rows propagate.");
+
+    m.def("vector_cast_string_to_date32",
+        [](nb::object v) -> nb::object { return string_to_date32_apply(v); },
+        nb::arg("v"),
+        "CAST(v AS DATE): 'YYYY-MM-DD' (and short variants 'YYYY-M-D') → DATE32 (int32 days-since-epoch). "
+        "Raises ValueError on malformed rows. Null rows propagate.");
 }

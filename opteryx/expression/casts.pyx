@@ -21,17 +21,6 @@ import draken.draken_native as _draken_native_casts
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.value_parsing import parse_value, parser_for
 from opteryx.types._datetime_conversion import timestamp_to_int64_us
-from opteryx.utils.vector_types import (
-    VectorType,
-    get_vector_type,
-    is_draken_vector as is_draken_vector_fn,
-)
-
-
-cdef inline object _unwrap_nb(object arr):
-    """Return the raw nanobind Vector from either a Cython shim (has ._nb) or a raw nanobind Vector."""
-    cdef object nb = getattr(arr, '_nb', None)
-    return nb if nb is not None else arr
 
 
 cpdef bint _is_nullish(value):
@@ -123,81 +112,6 @@ def _parse_array_value(value, element_type, bint safe_cast=False):
     return [caster(item) if item is not None else None for item in value]
 
 
-def cast_to_double(arr, *args):
-    """Cast `arr` to FLOAT64.
-
-    Primary: Draken vectors (FLOAT64 / INT64 / string-family).
-    Fallback: Python scalar or list.
-    Fails on PyArrow/NumPy arrays per the architectural contract.
-    """
-    from opteryx.compiled.nanobind.vector_casts import (
-        vector_cast_int64_to_float64,
-        vector_cast_bool_to_float64,
-        vector_cast_integer_to_float64,
-    )
-    cdef object v_type
-    if is_draken_vector_fn(arr):
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.FLOAT64:
-            return arr
-        if v_type == VectorType.INT64:
-            return vector_cast_int64_to_float64(_unwrap_nb(arr))
-        if v_type == VectorType.INTEGER:
-            return vector_cast_integer_to_float64(_unwrap_nb(arr))
-        if v_type == VectorType.BOOL:
-            return vector_cast_bool_to_float64(_unwrap_nb(arr))
-        if v_type == VectorType.STRING:
-            return _draken_native_casts.vector_cast_string_to_float64(_unwrap_nb(arr))
-
-    if isinstance(arr, (list, tuple)):
-        caster = parser_for(LogicalCategory.FLOAT)
-        return [caster(i) if i is not None else None for i in arr]
-
-    if isinstance(arr, (int, float)):
-        return parse_value(LogicalCategory.FLOAT, arr)
-
-    raise TypeError(f"Unsupported type for cast_to_double: {type(arr).__name__}")
-
-
-def cast_to_int(arr, *args):
-    """Cast `arr` to INT64."""
-    from opteryx.compiled.nanobind.vector_casts import (
-        vector_cast_string_to_int as vector_cast_ascii_to_int,
-        vector_cast_bool_to_int64,
-        vector_cast_date32_to_int64,
-        vector_cast_timestamp_to_int64,
-        vector_cast_integer_to_int64,
-        vector_cast_float64_to_int64,
-    )
-
-    cdef object v_type
-    if is_draken_vector_fn(arr):
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.INT64:
-            return arr
-        if v_type == VectorType.INTEGER:
-            return vector_cast_integer_to_int64(_unwrap_nb(arr))
-        if v_type == VectorType.FLOAT64:
-            return vector_cast_float64_to_int64(_unwrap_nb(arr))
-        if v_type == VectorType.STRING:
-            return vector_cast_ascii_to_int(_unwrap_nb(arr))
-        if v_type == VectorType.BOOL:
-            return vector_cast_bool_to_int64(_unwrap_nb(arr))
-        if v_type == VectorType.TIMESTAMP:
-            return vector_cast_timestamp_to_int64(_unwrap_nb(arr))
-        if v_type == VectorType.DATE32:
-            return vector_cast_date32_to_int64(_unwrap_nb(arr))
-
-    if isinstance(arr, (list, tuple)):
-        caster = parser_for(LogicalCategory.INTEGER)
-        return [caster(i) if i is not None else None for i in arr]
-
-    if isinstance(arr, int):
-        return arr
-
-    raise TypeError(f"Unsupported type for cast_to_int: {type(arr).__name__}")
-
-
 cdef str _array_row_to_json(object row):
     """Encode a list row (from ArrayVector.to_pylist) as a JSON array string.
 
@@ -220,125 +134,13 @@ cdef str _array_row_to_json(object row):
     return "[" + ", ".join(parts) + "]"
 
 
-def cast_to_varchar(arr, *args):
-    """Cast `arr` to VARCHAR / StringVector."""
-    from opteryx.compiled.nanobind.vector_casts import (
-        vector_cast_int64_to_string,
-        vector_cast_bool_to_string,
-        vector_cast_date_to_string,
-        vector_cast_timestamp_to_string,
-    )
-    cdef object v_type
+def _build_array_to_json(arr):
+    """CAST(array AS VARCHAR): encode each ARRAY row as a JSON string. ARRAY is the
+    one cast path excused from zero-Python (CLAUDE.md carve-out)."""
     cdef object row
-    if is_draken_vector_fn(arr):
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.STRING:
-            return arr
-        if v_type == VectorType.FLOAT64:
-            return _draken_native_casts.vector_cast_float64_to_string(_unwrap_nb(arr))
-        if v_type == VectorType.INT64:
-            return vector_cast_int64_to_string(_unwrap_nb(arr))
-        if v_type == VectorType.BOOL:
-            return vector_cast_bool_to_string(_unwrap_nb(arr))
-        if v_type == VectorType.TIMESTAMP:
-            return vector_cast_timestamp_to_string(_unwrap_nb(arr))
-        if v_type == VectorType.DATE32:
-            return vector_cast_date_to_string(_unwrap_nb(arr))
-        rows = arr.to_pylist()
-        if v_type == VectorType.ARRAY:
-            result = [_array_row_to_json(row) if row is not None else None for row in rows]
-        else:
-            result = [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in rows]
-        return _draken_native_casts.vector_from_string_sequence(result)
-
-    if isinstance(arr, (list, tuple)):
-        result = [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in arr]
-        return _draken_native_casts.vector_from_string_sequence(result)
-
-    if isinstance(arr, str):
-        return arr
-
-    raise TypeError(f"Unsupported type for cast_to_varchar: {type(arr).__name__}")
-
-
-def cast_to_nvarchar(arr, bint safe=False):
-    """Cast `arr` to NVARCHAR — validate UTF-8 and re-tag as the Unicode string type.
-
-    Non-string sources are stringified first (via cast_to_varchar), then their
-    bytes are validated as UTF-8. `safe=True` (TRY_CAST) maps invalid rows to
-    NULL; otherwise invalid UTF-8 raises.
-    """
-    from opteryx.compiled.nanobind.vector_casts import vector_cast_string_to_nvarchar
-
-    cdef object v_type
-    cdef object string_vec
-    if is_draken_vector_fn(arr):
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.STRING:
-            return vector_cast_string_to_nvarchar(_unwrap_nb(arr), safe)
-        string_vec = cast_to_varchar(arr)
-        return vector_cast_string_to_nvarchar(_unwrap_nb(string_vec), safe)
-
-    # Python list / scalar: build a VARCHAR vector first, then validate + re-tag.
-    string_vec = cast_to_varchar(arr)
-    return vector_cast_string_to_nvarchar(_unwrap_nb(string_vec), safe)
-
-
-def cast_to_boolean(arr, *args):
-    """Cast `arr` to BOOL / BoolVector."""
-    from draken.vectors.bool_vector import BoolVector
-    from opteryx.compiled.nanobind.vector_casts import (
-        vector_cast_int64_to_bool,
-        vector_cast_float64_to_bool,
-        vector_cast_string_to_bool,
-    )
-
-    cdef object v_type
-    if is_draken_vector_fn(arr):
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.BOOL:
-            return arr
-        if v_type == VectorType.INT64:
-            return BoolVector(vector_cast_int64_to_bool(_unwrap_nb(arr)))
-        if v_type == VectorType.FLOAT64:
-            return BoolVector(vector_cast_float64_to_bool(_unwrap_nb(arr)))
-        if v_type == VectorType.STRING:
-            return BoolVector(vector_cast_string_to_bool(_unwrap_nb(arr)))
-        return BoolVector.from_list(
-            [bool(v) if v is not None else None for v in arr.to_pylist()]
-        )
-
-    if isinstance(arr, (list, tuple)):
-        return BoolVector.from_list(
-            [bool(v) if v is not None else None for v in arr]
-        )
-
-    if isinstance(arr, bool):
-        return arr
-
-    raise TypeError(f"Unsupported type for cast_to_boolean: {type(arr).__name__}")
-
-
-def cast_to_date(arr, *args):
-    """Cast `arr` to DATE32. Note: returns a Python list when input is not
-    already a Date32Vector — callers materialise via vector_from_sequence
-    when they need a vector back. Matches the legacy behaviour."""
-    cdef object v_type
-    if is_draken_vector_fn(arr):
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.DATE32:
-            return arr
-        caster = parser_for(LogicalCategory.DATE)
-        return [caster(v) if v is not None else None for v in arr.to_pylist()]
-
-    if isinstance(arr, (list, tuple)):
-        caster = parser_for(LogicalCategory.DATE)
-        return [caster(v) if v is not None else None for v in arr]
-
-    if isinstance(arr, datetime.date):
-        return arr
-
-    raise TypeError(f"Unsupported type for cast_to_date: {type(arr).__name__}")
+    rows = arr.to_pylist()
+    result = [_array_row_to_json(row) if row is not None else None for row in rows]
+    return _draken_native_casts.vector_from_string_sequence(result)
 
 
 def safe(func, value, **kwargs):
@@ -419,17 +221,126 @@ def _cast_result_to_draken(result, resolved_type, args=()):
     )
 
 
-def resolve_cast(source_sql, target_type, args=(), unit=None, bint safe=False):
-    """Bind-time resolver: return a callable for casting source_sql → target_type.
+# String-family and narrow-integer physical-type sets (DrakenType.name tokens).
+_CAST_STRINGS = ("VARCHAR", "NVARCHAR", "VARBINARY")
+_CAST_NARROW_INT = ("INT8", "INT16", "INT32")
 
-    Called once per CAST node at bind time. The returned callable takes a single
-    argument (the vector to cast) and returns the cast result as a Draken vector.
 
-    Returns:
-    - A native kernel callable (for direct casts with no parameters).
-    - A specialized closure (for parametrized casts like DECIMAL(p,s), ARRAY(T), etc.).
+def _c_native_cast(source_physical, target_type, bint safe=False):
+    """Return (c_kernel_name, ctx_unit_code) for casts that have a REAL, REGISTERED
+    C-ABI kernel the executor can dispatch zero-Python via BC_INSTR_C_NATIVE, or
+    None (those fall back to the resolve_cast closure).
 
-    Raises NotImplementedError if no kernel is registered for the pair.
+    Y, increment 1: only kernels producing a FIXED-WIDTH result (INT64/FLOAT64/
+    BOOL) — these fold into the frame arena as a dense DV* with no Python object.
+    String- and timestamp-producing kernels (and parametrized/closure casts) are
+    NOT listed yet; they stay on the closure path until later increments wire
+    their result handling. TRY_CAST stays on the closure path (conservative).
+
+    The set grows as kernels become real+registered. This table is the single
+    source of truth for which casts run C-native.
+    """
+    cdef str s = source_physical
+    cdef str t = "BLOB" if target_type == "VARBINARY" else target_type
+    if s is None or safe:
+        return None
+    if t in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
+        if s == "INT64":
+            return ("draken_cast_int64_to_float64", 0)
+        if s in _CAST_NARROW_INT:
+            return ("draken_cast_integer_to_float64", 0)
+        if s == "BOOL":
+            return ("draken_cast_bool_to_float64", 0)
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_float64", 0)
+        return None
+    if t in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
+        if s in _CAST_NARROW_INT:
+            return ("draken_cast_integer_to_int64", 0)
+        if s in ("FLOAT64", "FLOAT32"):
+            return ("draken_cast_float64_to_int64", 0)
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_int64", 0)
+        if s == "BOOL":
+            return ("draken_cast_bool_to_int64", 0)
+        if s == "TIMESTAMP64":
+            return ("draken_cast_timestamp_to_int64", 0)
+        if s == "DATE32":
+            return ("draken_cast_date32_to_int64", 0)
+        return None
+    if t in ("DATE", "DATE32"):
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_date32", 0)
+        return None
+    if t == "BOOLEAN":
+        if s == "INT64":
+            return ("draken_cast_int64_to_bool", 0)
+        if s in ("FLOAT64", "FLOAT32"):
+            return ("draken_cast_float64_to_bool", 0)
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_bool", 0)
+        return None
+    # → VARCHAR / BLOB (string result; executor owns it as a Vector). NVARCHAR is
+    # excluded (validate+retag, different kernel) and stays on the closure path.
+    if t in ("VARCHAR", "BLOB"):
+        if s == "INT64":
+            return ("draken_cast_int64_to_string", 0)
+        if s in ("FLOAT64", "FLOAT32"):
+            return ("draken_cast_float64_to_string", 0)
+        if s == "BOOL":
+            return ("draken_cast_bool_to_string", 0)
+        if s == "TIMESTAMP64":
+            return ("draken_cast_timestamp_to_string", 0)
+        if s == "DATE32":
+            return ("draken_cast_date_to_string", 0)
+        return None
+    return None
+
+
+def _late_bound_cast(target_type, args, unit, bint safe):
+    """Escape hatch for CAST whose source type the binder left unresolved.
+
+    The binder does not attach a column_type to every cast source operand (ARRAY
+    columns are the known case — ARRAY is the cast path excused from zero-Python).
+    When that happens we cannot pick the kernel at bind time, so we resolve it from
+    the runtime vector's *physical* type on first use. This is the only type
+    dispatch left in the cast path; it fires solely for binder-untyped sources.
+    """
+    from draken.vectors.vector import Vector
+    from draken.vectors.bool_vector import BoolVector
+
+    def _lb(arr):
+        fn, needs_nb, returns_raw = resolve_cast(arr.type.name, target_type, args, unit, safe)
+        inp = arr._nb if (needs_nb and isinstance(arr, Vector)) else arr
+        res = fn(inp)
+        if not returns_raw:
+            return res
+        if target_type == "BOOLEAN":
+            return BoolVector(res)
+        return Vector(res)
+
+    return _lb
+
+
+def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=False):
+    """Bind-time resolver: (source physical type, target category) → cast kernel.
+
+    Called once per CAST node at bind time. `source_physical` is the source
+    ColumnType.physical DrakenType name string (e.g. "INT64", "FLOAT64",
+    "VARCHAR"); None when the source type is unknown.
+
+    Returns a 3-tuple ``(kernel, needs_nb_input, returns_raw_nb)``:
+      kernel          — callable taking ONE vector arg, returning the cast result.
+      needs_nb_input  — True if the kernel expects a raw nanobind Vector (the
+                        executor unwraps the Cython shim to ``._nb`` before the
+                        call); False if it takes the Cython shim / iterates it.
+      returns_raw_nb  — True if the kernel returns a raw nanobind Vector (the
+                        executor wraps it in Vector()/BoolVector()); False if it
+                        returns an already-wrapped Cython Vector / passthrough.
+
+    There is no per-morsel type dispatch: the exact native kernel is chosen here,
+    at bind time, from the physical source type. Raises NotImplementedError for
+    unsupported pairs — no row-loop fallback.
     """
     from opteryx.compiled.nanobind.vector_casts import (
         vector_cast_int64_to_float64,
@@ -448,6 +359,8 @@ def resolve_cast(source_sql, target_type, args=(), unit=None, bint safe=False):
         vector_cast_int64_to_bool,
         vector_cast_float64_to_bool,
         vector_cast_string_to_bool,
+        vector_cast_string_to_date32,
+        vector_cast_string_to_nvarchar,
         vector_cast_int64_to_timestamp,
     )
     from opteryx.compiled.nanobind.vector_temporal_convert import (
@@ -455,116 +368,128 @@ def resolve_cast(source_sql, target_type, args=(), unit=None, bint safe=False):
         vector_timestamp_to_date32,
     )
 
-    # Normalize VARBINARY to BLOB for lookup purposes.
-    _resolved_target = "BLOB" if target_type == "VARBINARY" else target_type
+    cdef str s = source_physical
+    cdef str t = "BLOB" if target_type == "VARBINARY" else target_type
 
-    # Passthrough: no-op casts (source == target)
-    if source_sql == _resolved_target:
-        return lambda arr: arr
+    # Binder left the source untyped (e.g. ARRAY columns) — resolve from the runtime
+    # vector's physical type on first use. Only dispatch left in the cast path.
+    if s is None:
+        return _late_bound_cast(target_type, args, unit, safe), False, False
 
-    # NVARCHAR target: validate UTF-8 and re-tag (any source is stringified first).
-    # `safe` carries TRY_CAST semantics (invalid UTF-8 → NULL instead of raising).
-    if _resolved_target == "NVARCHAR":
-        return lambda arr: cast_to_nvarchar(arr, safe)
-
-    # Direct kernel map for specific type pairs.
-    # Uses canonical LogicalCategory names (INTEGER, DOUBLE, VARCHAR, etc.)
-    # For INTEGER → numeric, we use dispatch helpers that handle both INT64 and INT8/16/32.
-    if source_sql == "INTEGER":
-        if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
-            # INTEGER → DOUBLE: dispatch helper that calls cast_to_double internally
-            return cast_to_double
-        if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-            return lambda arr: arr  # Passthrough
-        if _resolved_target == "BOOLEAN":
-            return cast_to_boolean
-        if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
-            return cast_to_varchar
-
-    if source_sql == "DOUBLE" or source_sql in ("FLOAT64", "FLOAT32", "FLOAT"):
-        if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-            return cast_to_int
-        if _resolved_target == "BOOLEAN":
-            return cast_to_boolean
-        if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
-            return cast_to_varchar
-
-    if source_sql == "BOOLEAN":
-        if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
-            return cast_to_double
-        if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-            return cast_to_int
-        if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
-            return cast_to_varchar
-
-    if source_sql in ("VARCHAR", "STRING", "BLOB"):
-        if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
-            return cast_to_double
-        if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-            return cast_to_int
-        if _resolved_target == "BOOLEAN":
-            return cast_to_boolean
-
-    # DATE/TIMESTAMP conversions
-    if source_sql in ("DATE", "DATE32"):
-        if _resolved_target == "TIMESTAMP":
-            return lambda arr: vector_date32_to_timestamp(arr)
-        if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-            return cast_to_int
-        if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
-            return cast_to_varchar
-
-    if source_sql == "TIMESTAMP":
-        if _resolved_target in ("DATE", "DATE32"):
-            return lambda arr: vector_timestamp_to_date32(arr)
-        if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-            return cast_to_int
-        if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
-            return cast_to_varchar
-
-    # Parametrized casts: need specialized closures.
-    if _resolved_target == "TIMESTAMP" and unit is not None:
-        if source_sql in ("INT64", "INTEGER", "BIGINT"):
-            def _int_to_timestamp_with_unit(arr):
-                nb = _unwrap_nb(arr)
-                if is_draken_vector_fn(arr) and get_vector_type(arr) == VectorType.INTEGER:
-                    nb = vector_cast_integer_to_int64(nb)
-                return vector_cast_int64_to_timestamp(nb, unit=unit)
-            return _int_to_timestamp_with_unit
-
-    if _resolved_target == "DECIMAL":
-        return _build_decimal_closure(args)
-
-    if _resolved_target == "ARRAY":
+    # ---- Parametrized / non-native targets (separate-track + excused closures) ----
+    if t == "DECIMAL":
+        # DECIMAL has no native kernel yet — Python row-loop (separate track).
+        return _build_decimal_closure(args), False, True
+    if t == "ARRAY":
         if len(args) < 1:
             raise ValueError("CAST to ARRAY requires element_type parameter")
         element_type = args[0]
-        return lambda arr: _build_array_cast(arr, element_type)
+        return (lambda arr: _build_array_cast(arr, element_type)), False, True
+    if t == "VECTOR":
+        # VECTOR (FP16) has no native kernel yet — Python row-loop (separate track).
+        return (lambda arr: _build_vector_cast(arr)), False, True
 
-    if _resolved_target == "VECTOR":
-        return lambda arr: _build_vector_cast(arr)
+    # ---- NVARCHAR: validate UTF-8 per row + retag (non-string sources stringified) ----
+    if t == "NVARCHAR":
+        if s in _CAST_STRINGS:
+            return (lambda nb: vector_cast_string_to_nvarchar(nb, safe)), True, True
+        vfn, _vni, _vrr = resolve_cast(s, "VARCHAR", (), None)
+        return (lambda nb: vector_cast_string_to_nvarchar(vfn(nb), safe)), True, True
 
-    if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
-        if len(args) >= 1:
-            # VARCHAR with length constraint; fall through to row-loop for validation.
-            return lambda arr: _build_varchar_cast_with_length(arr, args[0])
-        # No length constraint; use cast_to_varchar which has native paths for vectors.
-        return cast_to_varchar
+    # ---- TIMESTAMP target (parametrized unit for integer sources) ----
+    if t == "TIMESTAMP":
+        if s == "TIMESTAMP64":
+            return (lambda arr: arr), False, False
+        if s == "DATE32":
+            return vector_date32_to_timestamp, True, True
+        if s == "INT64" or s in _CAST_NARROW_INT:
+            if unit is None:
+                raise NotImplementedError(
+                    "CAST to TIMESTAMP from an integer requires a unit (e.g. ::TIMESTAMP[us])"
+                )
+            _narrow = s in _CAST_NARROW_INT
+            def _int_to_timestamp_with_unit(nb):
+                if _narrow:
+                    nb = vector_cast_integer_to_int64(nb)
+                return vector_cast_int64_to_timestamp(nb, unit=unit)
+            return _int_to_timestamp_with_unit, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} → TIMESTAMP")
 
-    # Fallback to row-loop for numeric → BOOLEAN or other residual cases.
-    # These should be covered above; if we reach here, it's a gap in the table.
-    if _resolved_target == "BOOLEAN":
-        return cast_to_boolean
+    # ---- DATE target ----
+    if t in ("DATE", "DATE32"):
+        if s == "DATE32":
+            return (lambda arr: arr), False, False
+        if s in _CAST_STRINGS:
+            return vector_cast_string_to_date32, True, True
+        if s == "TIMESTAMP64":
+            return vector_timestamp_to_date32, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} → DATE")
 
-    if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
-        return cast_to_int
+    # ---- DOUBLE / FLOAT target (→ float64) ----
+    if t in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
+        if s in ("FLOAT64", "FLOAT32"):
+            return (lambda arr: arr), False, False
+        if s == "INT64":
+            return vector_cast_int64_to_float64, True, True
+        if s in _CAST_NARROW_INT:
+            return vector_cast_integer_to_float64, True, True
+        if s == "BOOL":
+            return vector_cast_bool_to_float64, True, True
+        if s in _CAST_STRINGS:
+            return _draken_native_casts.vector_cast_string_to_float64, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} → DOUBLE")
 
-    if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
-        return cast_to_double
+    # ---- INTEGER target (→ int64) ----
+    if t in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
+        if s == "INT64":
+            return (lambda arr: arr), False, False
+        if s in _CAST_NARROW_INT:
+            return vector_cast_integer_to_int64, True, True
+        if s in ("FLOAT64", "FLOAT32"):
+            return vector_cast_float64_to_int64, True, True
+        if s in _CAST_STRINGS:
+            return vector_cast_string_to_int, True, True
+        if s == "BOOL":
+            return vector_cast_bool_to_int64, True, True
+        if s == "TIMESTAMP64":
+            return vector_cast_timestamp_to_int64, True, True
+        if s == "DATE32":
+            return vector_cast_date32_to_int64, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} → INTEGER")
 
-    # Residual row-loop for unspecialized pairs.
-    # These will be flagged in the PR as candidates for native kernel implementation.
-    return _build_residual_cast(target_type, args)
+    # ---- BOOLEAN target ----
+    if t == "BOOLEAN":
+        if s == "BOOL":
+            return (lambda arr: arr), False, False
+        if s == "INT64":
+            return vector_cast_int64_to_bool, True, True
+        if s in ("FLOAT64", "FLOAT32"):
+            return vector_cast_float64_to_bool, True, True
+        if s in _CAST_STRINGS:
+            return vector_cast_string_to_bool, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} → BOOLEAN")
+
+    # ---- VARCHAR / BLOB target (→ string) ----
+    if t in ("VARCHAR", "BLOB"):
+        if s in _CAST_STRINGS:
+            return (lambda arr: arr), False, False
+        if s == "INT64":
+            return vector_cast_int64_to_string, True, True
+        if s in ("FLOAT64", "FLOAT32"):
+            return _draken_native_casts.vector_cast_float64_to_string, True, True
+        if s == "BOOL":
+            return vector_cast_bool_to_string, True, True
+        if s == "TIMESTAMP64":
+            return vector_cast_timestamp_to_string, True, True
+        if s == "DATE32":
+            return vector_cast_date_to_string, True, True
+        if s == "ARRAY":
+            return _build_array_to_json, False, True
+        raise NotImplementedError(f"No native CAST {source_physical} → VARCHAR")
+
+    raise NotImplementedError(
+        f"No native CAST kernel for {source_physical} → {target_type}"
+    )
 
 
 def _build_decimal_closure(args):
@@ -608,44 +533,6 @@ def _build_vector_cast(arr):
     caster = parser_for(LogicalCategory.VECTOR)
     result = [caster(i) for i in arr]
     return _draken_native_casts.vector_fp16_from_sequence(result)
-
-
-def _build_varchar_cast_with_length(arr, length_arg):
-    """Build a closure for CAST to VARCHAR(length) with length enforcement."""
-    # For now, enforce length only if needed; otherwise use cast_to_varchar.
-    # Length enforcement could be added here if needed.
-    return cast_to_varchar(arr)
-
-
-def _build_residual_cast(target_type, args):
-    """Build a closure for residual (unspecialized) casts via row-loop.
-
-    These casts fall through to parser_for(LogicalCategory[target_type]) and are
-    flagged in the PR as candidates for native kernel implementation.
-    """
-    resolved_type = "BLOB" if target_type == "VARBINARY" else target_type
-    caster = parser_for(LogicalCategory[resolved_type])
-
-    def _residual_cast(arr):
-        # Row-loop: each value is parsed individually.
-        result = [caster(i) if i is not None else None for i in arr]
-        return _cast_result_to_draken(result, resolved_type, args)
-
-    return _residual_cast
-
-
-def cast(arr, _type, args=(), unit=None):
-    """Compatibility wrapper: resolve_cast returns a callable; this factory form
-    is kept for any legacy callers (constant folding, etc.).
-
-    At bind time, resolve_cast should be used directly.
-    At runtime (constant folding), this invokes the resolver and applies the result.
-    """
-    # For compatibility, fall back to the old behavior if source_sql can't be determined.
-    # This handles constant-folding and other plan-time evaluations.
-    source_sql = None  # Not available in legacy path; resolver uses fallbacks.
-    kernel = resolve_cast(source_sql, _type, args, unit)
-    return kernel
 
 
 def try_cast(target_type):

@@ -69,11 +69,11 @@ def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:
     import itertools
 
     # Broadcast scalars to iterables
-    if not hasattr(from_pos, "__iter__") or isinstance(from_pos, (str, bytes)):
+    if getattr(from_pos, "__iter__", None) is None or isinstance(from_pos, (str, bytes)):
         from_pos = itertools.repeat(from_pos)
     if count is None:
         count = itertools.repeat(None)
-    elif not hasattr(count, "__iter__") or isinstance(count, (str, bytes)):
+    elif getattr(count, "__iter__", None) is None or isinstance(count, (str, bytes)):
         count = itertools.repeat(count)
 
     def _inner(val, _from, _for):

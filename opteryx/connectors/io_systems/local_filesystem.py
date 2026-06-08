@@ -145,7 +145,7 @@ class OpteryxLocalFileSystem:
         from opteryx.connectors.io_systems._file_info import FileInfoLike
 
         # Handle FileSelector-like object (duck-typed: has base_dir + recursive)
-        if hasattr(paths, "base_dir"):
+        if getattr(paths, "base_dir", None) is not None:
             return [
                 FileInfoLike(path=p, size=os.path.getsize(p))
                 for p in self.list_files(

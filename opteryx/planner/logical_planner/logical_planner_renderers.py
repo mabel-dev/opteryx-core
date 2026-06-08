@@ -119,7 +119,7 @@ def render_unnest(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.AggregateAndGroup)
 def render_aggregate_and_group(node: LogicalPlanNode) -> str:
     result = f"AGGREGATE [{', '.join(format_expression(col) for col in node.aggregates)}] GROUP BY [{', '.join(format_expression(col) for col in node.groups)}]"
-    if hasattr(node, "having_condition") and node.having_condition is not None:
+    if node.having_condition is not None:
         result += f" ({format_expression(node.having_condition)})"
     return result
 
@@ -169,8 +169,10 @@ def render_order(node: LogicalPlanNode) -> str:
 def render_scan(node: LogicalPlanNode) -> str:
     from opteryx.expression import NodeType, get_all_nodes_of_type
 
-    io_async = "ASYNC " if hasattr(node.connector, "async_read_blob") else ""
-    connector = " " if not hasattr(node.connector, "__type__") else f" [{node.connector.__type__}] "
+    io_async = "ASYNC " if getattr(node.connector, "async_read_blob", None) is not None else ""
+    connector = (
+        " " if getattr(node.connector, "__type__", None) is None else f" [{node.connector.__type__}] "
+    )
     date_range = ""
     if node.at_date is not None:
         date_range = f" AT ('{node.at_date.isoformat()}')"

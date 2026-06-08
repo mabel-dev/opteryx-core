@@ -11,15 +11,14 @@
 //   int32+int32 → int64 (DRAKEN_INT64)
 //   Cross-width: promote narrower to the wider type first (lossless), then
 //   the wider type's "next power" rule applies.
-//   Rationale: draken_old has no native narrow-int arithmetic kernels;
-//   the architect chose "widen to next power" for the new draken.
+//   Rationale: there are no narrow-int arithmetic kernels to inherit;
+//   the architect chose "widen to next power" for draken.
 //
 // COMPARE / BETWEEN / IN_LIST:
-//   T values are widened to int64_t before comparison against int64_t scalar,
-//   matching _integer_compare.hpp in draken_old.
+//   T values are widened to int64_t before comparison against int64_t scalar.
 //
 // SUM / MIN / MAX:
-//   Accumulate into int64_t (matches draken_old int8_vector.sum/min/max).
+//   Accumulate into int64_t (avoids narrow-type overflow in reductions).
 //
 // GATHER (take / materialize / compress):
 //   Result type stays T (same width). Compact T elements in output.
@@ -232,6 +231,23 @@ static inline VecResult fi_compare_scalar_impl(const DrakenVector& v, int64_t sc
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
 
+    if (draken_is_constant(&v))
+        return cmp_constant_bool_result(
+            Op::apply(static_cast<int64_t>(data[0]), scalar), src_null, n);
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k)
+            db[k] = Op::apply(static_cast<int64_t>(data[k]), scalar) ? 1u : 0u;
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
+
     uint8_t* dst      = cmp_alloc_bool_buf(n);
     uint8_t* out_null = nullptr;
     if (src_null != nullptr) {
@@ -328,6 +344,18 @@ static inline VecResult fi_compare_vector_impl(
     const T* a_data = static_cast<const T*>(a.data);
     const T* b_data = static_cast<const T*>(b.data);
 
+    if (draken_is_constant(&a) && draken_is_constant(&b)) {
+        uint8_t* comb = cmp_and_validity(a.validity, b.validity, n);
+        VecResult r;
+        try {
+            r = cmp_constant_bool_result(
+                Op::apply(static_cast<int64_t>(a_data[0]),
+                          static_cast<int64_t>(b_data[0])), comb, n);
+        } catch (...) { if (comb) draken_free(comb); throw; }
+        if (comb) draken_free(comb);
+        return r;
+    }
+
     uint8_t* out_null = cmp_and_validity(a.validity, b.validity, n);
     uint8_t* dst = nullptr;
     try { dst = cmp_alloc_bool_buf(n); }
@@ -363,7 +391,7 @@ static inline VecResult fixed_int_compare_vector(
 }
 
 // ===========================================================================
-// REDUCTIONS — accumulate into int64_t (matches draken_old int8_vector)
+// REDUCTIONS — accumulate into int64_t
 // ===========================================================================
 
 template<typename T>
@@ -808,6 +836,25 @@ static inline VecResult fi_between_impl(
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
 
+    if (draken_is_constant(&v))
+        return cmp_constant_bool_result(
+            BetweenOp<lo_incl, hi_incl>::apply(static_cast<int64_t>(data[0]), lo, hi),
+            src_null, n);
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k)
+            db[k] = BetweenOp<lo_incl, hi_incl>::apply(
+                        static_cast<int64_t>(data[k]), lo, hi) ? 1u : 0u;
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
+
     uint8_t* dst      = cmp_alloc_bool_buf(n);
     uint8_t* out_null = nullptr;
     if (src_null != nullptr) {
@@ -888,6 +935,36 @@ static inline VecResult fixed_int_in_list(
     const uint32_t n        = v.length;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
+
+    if (draken_is_constant(&v)) {
+        uint64_t raw = static_cast<uint64_t>(static_cast<int64_t>(data[0]));
+        uint64_t h;
+        simd_hash_i64(&raw, &h, 1);
+        return cmp_constant_bool_result(set.contains(h), src_null, n);
+    }
+
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        uint64_t scratch[1024], hashes[1024];
+        uint32_t done = 0;
+        while (done < dl) {
+            const uint32_t block = (dl - done < 1024u) ? (dl - done) : 1024u;
+            for (uint32_t j = 0; j < block; ++j)
+                scratch[j] = static_cast<uint64_t>(
+                    static_cast<int64_t>(data[done + j]));
+            simd_hash_i64(scratch, hashes, block);
+            for (uint32_t j = 0; j < block; ++j)
+                db[done + j] = set.contains(hashes[j]) ? 1u : 0u;
+            done += block;
+        }
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
 
     uint8_t* dst      = cmp_alloc_bool_buf(n);
     uint8_t* out_null = nullptr;

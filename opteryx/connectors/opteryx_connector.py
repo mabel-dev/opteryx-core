@@ -115,10 +115,10 @@ class OpteryxTable(Diachronic, PredicatePushable):
             return raw_type
 
         candidate = raw_type
-        if hasattr(raw_type, "name"):
-            candidate = getattr(raw_type, "name")
-        elif hasattr(raw_type, "value"):
-            candidate = getattr(raw_type, "value")
+        if getattr(raw_type, "name", None) is not None:
+            candidate = raw_type.name
+        elif getattr(raw_type, "value", None) is not None:
+            candidate = raw_type.value
 
         if candidate is None:
             return default
@@ -347,7 +347,7 @@ class OpteryxConnector(Eidetic, PredicatePushable):
             raise ValueError("Opteryx connector requires a catalog parameter")
 
         # Ensure we have a per-connector cache for instantiated catalogs
-        if not hasattr(self, "_catalog_cache"):
+        if getattr(self, "_catalog_cache", None) is None:
             self._catalog_cache = {}
 
         # Return cached instance when available

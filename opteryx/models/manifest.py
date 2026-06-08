@@ -120,7 +120,7 @@ class Manifest:
                     literal_value = predicate.right.value
 
                     # Normalize literal value
-                    if hasattr(literal_value, "item"):
+                    if getattr(literal_value, "item", None) is not None:
                         literal_value = literal_value.item()
 
                     p = literal_value
@@ -163,9 +163,9 @@ class Manifest:
                     column_name = predicate.left.source_column
                     lower = predicate.right.value
                     upper = predicate.centre.value
-                    if hasattr(lower, "item"):
+                    if getattr(lower, "item", None) is not None:
                         lower = lower.item()
-                    if hasattr(upper, "item"):
+                    if getattr(upper, "item", None) is not None:
                         upper = upper.item()
 
                     field_id = None
@@ -280,7 +280,7 @@ class Manifest:
             if col_hist is None or col_min is None or col_max is None:
                 continue
 
-            if not hasattr(col_hist, "__iter__"):
+            if getattr(col_hist, "__iter__", None) is None:
                 continue
             counts = list(col_hist)
 
@@ -464,7 +464,7 @@ class Manifest:
         # Note: This assumes schema has field_id information
         # May need adjustment based on actual schema structure
         for column in self.schema.columns:
-            if hasattr(column, "field_id"):
+            if getattr(column, "field_id", None) is not None:
                 field_id = column.field_id
                 self._field_id_to_name[field_id] = column.name
                 self._name_to_field_id[column.name] = field_id

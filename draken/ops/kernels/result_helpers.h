@@ -44,6 +44,42 @@ VecResult vecresult_from_string_buffers(
     uint32_t          length,
     DrakenType        type);
 
+// Direct-write variant for kernels whose output size is known BEFORE formatting
+// (fixed-width casts: date/timestamp/bool, or any kernel that sized its arena in a
+// prior pass). Allocates the single consolidated block up front and hands back
+// pointers to write slots / arena / validity IN PLACE — skipping the
+// separate-buffers-then-consolidate copy (the n*16 slot memcpy) that
+// vecresult_from_string_buffers performs.
+//
+// Usage:
+//   DrakenStringSlot* slots; uint8_t* arena; uint8_t* validity;
+//   uint8_t* block = vecresult_string_block_alloc(n, arena_len, want_validity,
+//                                                 &slots, &arena, &validity);
+//   if (!block) return draken_error_sentinel("Allocation failed");
+//   // ... write slots[i], arena bytes, and (if want_validity) the bitmap ...
+//   return vecresult_from_string_block(block, n, arena_len, want_validity, type);
+//
+//   arena_len      — EXACT long-form byte count (0 when every slot is inline).
+//   want_validity  — non-zero reserves an embedded null bitmap for the caller to fill.
+//   out_arena      — null when arena_len == 0; out_validity — null when !want_validity.
+// Block is draken_malloc'd and zeroed. Returns nullptr on OOM.
+uint8_t* vecresult_string_block_alloc(
+    uint32_t           length,
+    size_t             arena_len,
+    int                want_validity,
+    DrakenStringSlot** out_slots,
+    uint8_t**          out_arena,
+    uint8_t**          out_validity);
+
+// Finalize a vecresult_string_block_alloc block into a string VecResult. arena_len
+// and has_validity MUST match the values passed to the alloc call (same layout).
+VecResult vecresult_from_string_block(
+    uint8_t*    block,
+    uint32_t    length,
+    size_t      arena_len,
+    int         has_validity,
+    DrakenType  type);
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -53,6 +89,7 @@ VecResult vecresult_from_string_buffers(
 // DRAKEN_KERNEL_TRY, which converts std::exception to an error sentinel).
 // ---------------------------------------------------------------------------
 #include "core/alloc.h"
+#include "core/vector_alloc.h"   // draken_identity_sel / draken_zero_sel
 #include <cstring>
 #include <new>
 
@@ -76,5 +113,38 @@ static inline uint8_t* kernel_copy_validity(const DrakenVector* dv) {
     if (!out) throw std::bad_alloc();
     std::memcpy(out, dv->validity, vbytes);
     return out;
+}
+
+// Compression-preserving finalizer. A compression-aware cast produces
+// in->data_length PHYSICAL cast values in r.data (one per dictionary entry, 1 for
+// a constant, or `length` for dense); this carries the INPUT's selection and
+// per-logical-row validity onto the result so the output keeps the input's
+// encoding (dense stays dense, constant stays constant, dict stays dict). The
+// input's selection points at the immortal global identity/zero arrays for
+// dense/constant (shared, not owned) — only dict codes are copied.
+//
+// The caller sets r.data, r.type, r.ts_unit, r.validity_embedded before calling;
+// this sets length / data_length / flags / selection / owns_selection / validity.
+// ONLY valid for non-null-introducing casts (validity preserved 1:1). Throws
+// std::bad_alloc on failure (caught by DRAKEN_KERNEL_TRY).
+static inline void kernel_preserve_shape(VecResult& r, const DrakenVector* in) {
+    r.length      = in->length;
+    r.data_length = in->data_length;
+    r.flags       = in->flags;
+    r.validity    = kernel_copy_validity(in);
+    if (in->flags & DRAKEN_SEL_IDENTITY) {
+        r.selection      = draken_identity_sel(in->length);   // dense: global identity
+        r.owns_selection = false;
+    } else if (in->data_length == 1u) {
+        r.selection      = draken_zero_sel(in->length);       // constant: global zero
+        r.owns_selection = false;
+    } else {
+        const size_t cn = (size_t)(in->length > 0u ? in->length : 1u);
+        uint32_t* codes = static_cast<uint32_t*>(draken_malloc(cn * sizeof(uint32_t)));
+        if (!codes) throw std::bad_alloc();
+        std::memcpy(codes, in->selection, (size_t)in->length * sizeof(uint32_t));
+        r.selection      = codes;                              // dict: copy owned codes
+        r.owns_selection = true;
+    }
 }
 #endif

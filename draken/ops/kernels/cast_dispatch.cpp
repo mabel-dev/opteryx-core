@@ -16,7 +16,7 @@ extern "C" {
 // (implemented in separate files or existing nanobind)
 extern VecResult draken_cast_int64_to_float64(void* ctx, const DrakenVector* vector);
 extern VecResult draken_cast_bool_to_float64(void* ctx, const DrakenVector* vector);
-extern VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* vector);
+
 
 extern VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* vector);
 extern VecResult draken_cast_bool_to_int64(void* ctx, const DrakenVector* vector);
@@ -53,9 +53,6 @@ VecResult draken_cast_to_float64(void* ctx, const DrakenVector* vector) {
                 return draken_cast_int64_to_float64(ctx, vector);
             case DRAKEN_BOOL:
                 return draken_cast_bool_to_float64(ctx, vector);
-            case DRAKEN_VARCHAR:
-            case DRAKEN_NVARCHAR:
-                return draken_cast_string_to_float64(ctx, vector);
             default:
                 return draken_error_sentinel_fmt(
                     "Cannot cast type %d to FLOAT64", input_type);

@@ -278,7 +278,11 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 # attach a copy of the filter between each resolved reader and the join
                 for reader_nid in resolved_nids:
                     new_nid = random_string()
-                    new_node = new_filter.copy() if hasattr(new_filter, "copy") else new_filter
+                    new_node = (
+                        new_filter.copy()
+                        if getattr(new_filter, "copy", None) is not None
+                        else new_filter
+                    )
                     if new_node is None:
                         continue
                     context.optimized_plan.insert_node_after(new_nid, new_node, reader_nid)

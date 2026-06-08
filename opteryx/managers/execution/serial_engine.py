@@ -104,7 +104,7 @@ def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
         # EXPLAIN ANALYZE wants per-operator wall-time. Flip the trace flag
         # on every node so push() emits clock_gettime + execution_time.
         for nid, node in plan.depth_first_search_flat():
-            if hasattr(node, "enable_tracing"):
+            if getattr(node, "enable_tracing", None) is not None:
                 node.enable_tracing(True)
     for scan, chain_head in chains:
         # Consume drive_scan but discard all yielded morsels.

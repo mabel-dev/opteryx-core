@@ -42,7 +42,7 @@ def simplify_cast_node(node):
 
     # Pattern 1: CAST(CAST(expr AS T1) AS T2) → CAST(expr AS T2)
     # This collapses nested casts to a single cast to the final type
-    if hasattr(source, "node_type") and source.node_type == NodeType.CAST:
+    if source.node_type == NodeType.CAST:
         inner_target = getattr(source, "value", "").upper()
         if inner_target:
             inner_safe = inner_target.startswith("TRY_")
@@ -62,20 +62,20 @@ def simplify_expression(expr):
     """
     Recursively simplify CAST nodes in an expression tree.
     """
-    if expr is None or not hasattr(expr, "node_type"):
+    if expr is None:
         return expr
 
     # Recursively process sub-expressions if they exist
-    if hasattr(expr, "left") and expr.left is not None:
+    if expr.left is not None:
         expr.left = simplify_expression(expr.left)
 
-    if hasattr(expr, "right") and expr.right is not None:
+    if expr.right is not None:
         expr.right = simplify_expression(expr.right)
 
-    if hasattr(expr, "centre") and expr.centre is not None:
+    if expr.centre is not None:
         expr.centre = simplify_expression(expr.centre)
 
-    if hasattr(expr, "parameters") and expr.parameters:
+    if expr.parameters:
         expr.parameters = [simplify_expression(p) if p else p for p in expr.parameters]
 
     # Apply CAST-specific simplification
@@ -105,7 +105,7 @@ class CastSimplificationStrategy(OptimizationStrategy):
         # Only optimize filter nodes (which contain conditions with CAST expressions)
         if node_type == LogicalPlanStepType.Filter:
             # Simplify CAST nodes in filter condition
-            if hasattr(node, "condition") and node.condition:
+            if node.condition:
                 simplified_condition = simplify_expression(node.condition)
                 if simplified_condition is not node.condition:
                     node.condition = simplified_condition

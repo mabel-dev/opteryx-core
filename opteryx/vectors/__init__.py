@@ -67,7 +67,7 @@ def __getattr__(name: str) -> Any:
     # Otherwise, search submodules in order and return the first match
     for _name in _SUBMODULE_NAMES:
         _mod = globals().get(_name)
-        if _mod is not None and hasattr(_mod, name):
+        if _mod is not None and getattr(_mod, name, None) is not None:
             return getattr(_mod, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

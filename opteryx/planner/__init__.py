@@ -94,7 +94,11 @@ def build_literal_node(
         list,
         tuple,
     )
-    if not isinstance(value, _PYTHON_NATIVE) and value is not None and hasattr(value, "item"):
+    if (
+        not isinstance(value, _PYTHON_NATIVE)
+        and value is not None
+        and getattr(value, "item", None) is not None
+    ):
         value = value.item()
 
     if root is None:
@@ -280,7 +284,7 @@ def execute_logical_plan(
     # Determine execution context for binder
     if connection is None:
         conn_context = ExecutionContext(memberships=[])
-    elif hasattr(connection, "context"):
+    elif "context" in dir(connection):
         conn_context = connection.context
     else:
         conn_context = connection

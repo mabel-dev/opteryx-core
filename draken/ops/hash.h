@@ -14,8 +14,7 @@
 //   Add an op:   add a slot to TypeOps and mirror it in draken_hash and
 //                the equivalent per-op dispatcher.
 //
-// ALGORITHM (int64 — must match draken_old/vectors/integer64_vector.pyx
-//            c_hash_single exactly so parity holds):
+// ALGORITHM (int64):
 //   For each chunk of ≤ 1024 rows:
 //     fill scratch[j] = data[selection[i+j]] (valid) | NULL_HASH (null)
 //     simd_hash_i64(scratch, out+i, block)  — same as zeroed dest + simd_mix_hash
@@ -94,6 +93,17 @@ typedef VecResult (*StrCmpScalarFn)(const DrakenVector& v,
                                     const uint8_t* scalar_bytes,
                                     int op);
 
+// D.x — string-specific between (slot+arena bounds, incompatible with int64 BetweenFn).
+// lo_slot/lo_bytes: pre-built lower bound slot + literal bytes (same construction as
+// StrCmpScalarFn scalar_slot/scalar_bytes — arena_offset==0 for long strings).
+// hi_slot/hi_bytes: same for upper bound.
+typedef VecResult (*StrBetweenFn)(const DrakenVector& v,
+                                  const DrakenStringSlot& lo_slot,
+                                  const uint8_t* lo_bytes,
+                                  const DrakenStringSlot& hi_slot,
+                                  const uint8_t* hi_bytes,
+                                  bool lo_incl, bool hi_incl);
+
 // D.7 — float-specific function pointer types (double scalars / double output).
 // Used for FLOAT32 and FLOAT64 where the int64 scalar/output types are wrong.
 typedef uint32_t (*FloatReduceFn)(const DrakenVector&, double*);
@@ -135,6 +145,8 @@ struct TypeOps {
     InListFn    in_list;
     // D.2 — string-specific compare_scalar (different signature from CmpScalarFn).
     StrCmpScalarFn str_compare_scalar;
+    // D.x — string-specific between (slot+arena bounds, incompatible with int64 BetweenFn).
+    StrBetweenFn   str_between;
     // D.7 — float-specific ops (double scalar/output; incompatible with int64 slots).
     FloatReduceFn    float_sum;
     FloatReduceFn    float_min_r;
@@ -160,7 +172,7 @@ struct TypeOps {
 //
 // Reads data[selection[i+j]] for valid rows; substitutes NULL_HASH sentinel
 // for null rows before passing the scratch block to simd_hash_i64.
-// The branchless null-select formula matches c_hash_into in draken_old:
+// The branchless null-select formula is:
 //   scratch = (cast_u64(data[sel]) * is_valid) | (NULL_HASH * (1 - is_valid))
 // ---------------------------------------------------------------------------
 static inline void hash_int64(const DrakenVector& v, uint64_t* out, uint32_t n) {
@@ -471,6 +483,8 @@ struct OpsTable {
         entries[DRAKEN_VARCHAR].compress           = draken::ops::str_compress;
         // D.4 — VARCHAR: in_list (hash-only; §1 exception same as str eq/hash)
         entries[DRAKEN_VARCHAR].in_list            = draken::ops::str_in_list;
+        // D.x — VARCHAR: between (lexicographic; slot+arena bounds)
+        entries[DRAKEN_VARCHAR].str_between        = draken::ops::str_between;
 
         // E.7 — NVARCHAR: identical storage; same ops as VARCHAR
         entries[DRAKEN_NVARCHAR].hash               = draken::ops::hash_string;
@@ -481,6 +495,7 @@ struct OpsTable {
         entries[DRAKEN_NVARCHAR].materialize        = draken::ops::str_materialize;
         entries[DRAKEN_NVARCHAR].compress           = draken::ops::str_compress;
         entries[DRAKEN_NVARCHAR].in_list            = draken::ops::str_in_list;
+        entries[DRAKEN_NVARCHAR].str_between        = draken::ops::str_between;
 
         // E.7 — VARBINARY: identical storage; same ops as VARCHAR
         entries[DRAKEN_VARBINARY].hash               = draken::ops::hash_string;
@@ -876,6 +891,23 @@ static inline VecResult draken_str_compare_scalar(
     if (idx >= OpsTable::kSize || g_ops_table().entries[idx].str_compare_scalar == nullptr)
         throw std::invalid_argument("draken_str_compare_scalar: unsupported type");
     return g_ops_table().entries[idx].str_compare_scalar(v, scalar_slot, scalar_bytes, op);
+}
+
+// D.x — string between dispatcher.
+// lo_slot/lo_bytes and hi_slot/hi_bytes: pre-built bound slots (arena_offset==0
+// for long strings) + literal bytes. Built at the Python edge the same way as
+// draken_str_compare_scalar's scalar_slot/scalar_bytes.
+static inline VecResult draken_str_between(
+    const DrakenVector&     v,
+    const DrakenStringSlot& lo_slot, const uint8_t* lo_bytes,
+    const DrakenStringSlot& hi_slot, const uint8_t* hi_bytes,
+    bool lo_incl, bool hi_incl)
+{
+    const unsigned idx = static_cast<unsigned>(v.type);
+    if (idx >= OpsTable::kSize || g_ops_table().entries[idx].str_between == nullptr)
+        throw std::invalid_argument("draken_str_between: unsupported type");
+    return g_ops_table().entries[idx].str_between(
+        v, lo_slot, lo_bytes, hi_slot, hi_bytes, lo_incl, hi_incl);
 }
 
 // E.2 — bitwise dispatch entry points (OpsTable-based, for hash.h consumers).

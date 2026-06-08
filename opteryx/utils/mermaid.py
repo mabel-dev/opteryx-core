@@ -34,17 +34,17 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
                 node_stat["columns_read"] = getattr(node.telemetry, "columns_read", 0)
 
             # Add node-specific attributes
-            if hasattr(node, "columns") and node.columns:
+            if getattr(node, "columns", None):
                 node_stat["columns"] = len(node.columns)
-            if hasattr(node, "limit") and node.limit is not None:
+            if getattr(node, "limit", None) is not None:
                 node_stat["limit"] = node.limit
-            if hasattr(node, "predicates") and node.predicates:
+            if getattr(node, "predicates", None):
                 node_stat["has_filters"] = True
-            if hasattr(node, "left_filter") and node.left_filter is not None:
+            if getattr(node, "left_filter", None) is not None:
                 node_stat["bloom_filter"] = True
-            if hasattr(node, "at_date") and node.at_date:
+            if getattr(node, "at_date", None):
                 node_stat["at_date"] = str(node.at_date)
-            if hasattr(node, "committed_at") and node.committed_at:
+            if getattr(node, "committed_at", None):
                 node_stat["committed_at"] = node.committed_at
 
             stats.append(node_stat)
@@ -198,7 +198,7 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         # Prefer telemetry for final counts when present
         final_rows = getattr(exit_node.telemetry, "rows_read", None) or exit_node.records_out
         final_bytes = getattr(exit_node.telemetry, "bytes_processed", None) or exit_node.bytes_out
-        final_columns = len(exit_node.columns) if hasattr(exit_node, "columns") else 0
+        final_columns = len(exit_node.columns) if getattr(exit_node, "columns", None) is not None else 0
 
         builder += f'  NODE_TERMINUS(["{final_rows} rows<br />{final_columns} columns<br />({total_duration:,.2f}ms)"])\n'
 
