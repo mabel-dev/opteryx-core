@@ -24,7 +24,7 @@ included before it.  The include order below is topologically sorted.
   _node.pxi              → GroupedAggregateHashedNode (Python class)
 """
 
-from libc.stdint cimport int8_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, INT64_MAX, INT64_MIN
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, INT64_MAX, INT64_MIN
 from libc.math cimport HUGE_VAL
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy

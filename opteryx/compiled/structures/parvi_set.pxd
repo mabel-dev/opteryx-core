@@ -2,13 +2,11 @@
 
 from libc.stdint cimport uint64_t, int32_t, int64_t
 from libc.stddef cimport size_t
-from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
+from libcpp cimport bool as cpp_bool
+from libcpp.pair cimport pair
+from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapper
 
-cdef extern from "parvi.hpp" namespace "opteryx::carchar":
-    cdef cppclass CarcharSet:
-        pass
-
-cdef extern from "parvi.hpp" namespace "opteryx::parvi":
+cdef extern from "parvi.hpp" namespace "opteryx::parvi" nogil:
     cdef struct ParviSetResult:
         bint is_new
         bint overflow
@@ -21,7 +19,11 @@ cdef extern from "parvi.hpp" namespace "opteryx::parvi":
         ParviSetResult insert_or_ignore(uint64_t key)
         void clear()
         void drain_into(CarcharSet& target) const
-        # mark_new_indices is a template, handled via extern from * in .pyx
+        # Template hot-path method — callable directly under nogil. Returns
+        # (count_new, overflow). Carchar's equivalent is mark_new_indices_32.
+        pair[size_t, cpp_bool] mark_new_indices[IndexT](
+            const uint64_t* keys, IndexT* out_indices, size_t length
+        ) noexcept
 
 cdef class ParviSetWrapper:
     cdef ParviSet* _ptr
@@ -29,23 +31,5 @@ cdef class ParviSetWrapper:
     cpdef bint full(self)
     cpdef bint contains(self, uint64_t key)
     cpdef bint insert(self, uint64_t key)
-    cpdef tuple mark_new_indices_32_public(
-        self,
-        uint64_t[::1] keys_view,
-        int32_t[::1] indices_view,
-        size_t length,
-    )
     cpdef void drain_into_carchar(self, CarcharSetWrapper target)
     cpdef void clear(self)
-    cdef tuple mark_new_indices_32(
-        self,
-        uint64_t* keys,
-        int32_t* out_indices,
-        size_t length,
-    ) noexcept
-    cdef tuple mark_new_indices_64(
-        self,
-        uint64_t* keys,
-        int64_t* out_indices,
-        size_t length,
-    ) noexcept

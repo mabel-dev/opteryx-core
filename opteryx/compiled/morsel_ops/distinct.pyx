@@ -25,10 +25,13 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 from libc.stdint cimport int32_t, uint64_t
 from libc.stddef cimport size_t
+from libcpp cimport bool as cpp_bool
+from libcpp.pair cimport pair
 
 from draken.morsels.morsel cimport Morsel
 from draken.core.buffers cimport DrakenVector
 from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapper
+from opteryx.compiled.structures.parvi_set cimport ParviSet, ParviSetWrapper
 
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
@@ -58,8 +61,6 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
         In that case the morsel is left unchanged so the caller can promote
         and replay safely.
     """
-    from opteryx.compiled.structures.parvi_set import ParviSetWrapper
-
     cdef Py_ssize_t n = morsel.ptr.num_rows
     cdef uint64_t* hashes_ptr = NULL
     cdef int32_t* idx_buf = NULL
@@ -69,17 +70,15 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
     cdef size_t count
     cdef bint hash_requires_gil
     cdef bint is_parvi
-    cdef CarcharSetWrapper carchar_set
     cdef CarcharSet* cs
-    cdef uint64_t[::1] hashes_memview
-    cdef int32_t[::1] idx_memview
+    cdef ParviSet* ps
+    cdef pair[size_t, cpp_bool] parvi_result
     cdef bint overflow = False
 
     if n == 0:
         return
 
     # ── Check set variant (WITH GIL) ──────────────────────────────────────────
-    from opteryx.compiled.structures.parvi_set import ParviSetWrapper
     is_parvi = isinstance(seen_hashes, ParviSetWrapper)
 
     # ── Resolve column names → C int array (WITH GIL, once) ──────────────────
@@ -118,18 +117,17 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
                 "DISTINCT: one or more key columns have a type that cannot be "
                 "hashed (array/null/fp16)")
 
-        # Call mark_new_indices on the appropriate set type
+        # Extract the C++ pointer (WITH GIL: typed cast over the Python handle),
+        # then call the native hot-path method directly under nogil. No Cython
+        # method wraps either set — the wrapper is just an owning handle.
         if is_parvi:
-            # ParviSet path: create memoryviews from pointers and call cpdef wrapper
-            hashes_memview = <uint64_t[:n]>hashes_ptr
-            idx_memview = <int32_t[:n]>idx_buf
-            count, overflow = seen_hashes.mark_new_indices_32_public(
-                hashes_memview, idx_memview, <size_t>n
-            )
+            ps = (<ParviSetWrapper>seen_hashes)._ptr
+            with nogil:
+                parvi_result = ps.mark_new_indices[int32_t](hashes_ptr, idx_buf, <size_t>n)
+                count = parvi_result.first
+                overflow = parvi_result.second
         else:
-            # CarcharSet path
-            carchar_set = <CarcharSetWrapper>seen_hashes
-            cs = carchar_set._ptr
+            cs = (<CarcharSetWrapper>seen_hashes)._ptr
             with nogil:
                 count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)
 

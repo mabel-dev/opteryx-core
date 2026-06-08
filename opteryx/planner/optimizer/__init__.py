@@ -108,8 +108,8 @@ class OptimizerVisitor:
             PredicateOrderingStrategy(telemetry),
             RedundantOperationsStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
-            # Runs last: all other strategies have had their say, and we have
-            # the final set of scans + group columns for cardinality estimation.
+            # Runs last: all other strategies have had their say.
+            # Uses FileEntry.stats_by_name for range detection — projection-stable.
             HashMapVariantStrategy(telemetry),
         ]
 

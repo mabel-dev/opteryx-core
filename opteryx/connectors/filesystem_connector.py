@@ -306,6 +306,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 min_values = None
                 max_values = None
                 null_value_counts = None
+                stats_by_name = None
 
                 try:
                     from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
@@ -316,7 +317,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     if file_size == 0:
                         file_size = footer_size
 
-                    min_values, max_values, null_value_counts = self._extract_column_stats_compact(
+                    min_values, max_values, null_value_counts, stats_by_name = self._extract_column_stats_compact(
                         col_stats, schema
                     )
                 except Exception:
@@ -336,6 +337,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     max_values=max_values,
                     null_value_counts=null_value_counts,
                     min_k_hashes=min_k_hashes,
+                    stats_by_name=stats_by_name,
                 )
                 file_entries.append(entry)
 
@@ -349,11 +351,19 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
     def _extract_column_stats_compact(self, col_stats: dict, schema: RelationSchema) -> tuple:
         """Extract planning statistics from the compact {name: (min, max, null_count)} dict
-        returned by fetch_column_stats. Already aggregated across row groups by C++."""
+        returned by fetch_column_stats. Already aggregated across row groups by C++.
+
+        Returns (min_values, max_values, null_value_counts, stats_by_name) where
+        stats_by_name is {col_name: (min, max)} keyed by name.  The positional
+        min_values/max_values lists are indexed by schema column order at *creation*
+        time, which drifts from manifest.schema after projection pushdown.  Always
+        use stats_by_name for range lookups — it is stable across plan rewrites.
+        """
         num_columns = len(schema.columns)
         min_values = [None] * num_columns
         max_values = [None] * num_columns
         null_counts = {}
+        stats_by_name = {}
 
         for i, col in enumerate(schema.columns):
             entry = col_stats.get(col.name)
@@ -362,6 +372,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             min_val, max_val, null_count = entry
             min_values[i] = min_val
             max_values[i] = max_val
+            if min_val is not None and max_val is not None:
+                stats_by_name[col.name] = (min_val, max_val)
             if null_count is not None:
                 null_counts[i] = null_count
 
@@ -370,6 +382,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             min_values if any(v is not None for v in min_values) else None,
             max_values if any(v is not None for v in max_values) else None,
             null_value_counts,
+            stats_by_name if stats_by_name else None,
         )
 
     def _extract_column_stats(self, footer_meta: dict, schema: RelationSchema) -> tuple:

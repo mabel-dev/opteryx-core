@@ -497,6 +497,7 @@ include_dirs = [
     "draken/core",  # draken C++ headers, quote-include form (e.g. #include "buffers.h")
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
+    "third_party/mabel/perfect_hash",
     "third_party/fastfloat",
     "third_party/fastfloat/fast_float",
     "rugo/src/parquet",
@@ -1078,7 +1079,21 @@ extensions = [
         "opteryx.compiled.structures.perfect_hash_set",
         sources=["opteryx/compiled/structures/perfect_hash_set.pyx"],
         include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/perfect_hash/perfect_hash_set.hpp",
+        ],
+    ),
+    Extension(
+        "opteryx.compiled.structures.perfect_hash_map",
+        sources=["opteryx/compiled/structures/perfect_hash_map.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/perfect_hash/perfect_hash_map.hpp",
+        ],
     ),
     # evaluator/* leaf modules are textually included by evaluator/_impl.pyx
     # and built into a single .so at opteryx/expression/evaluator/_impl.so.

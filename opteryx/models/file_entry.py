@@ -41,6 +41,11 @@ class FileEntry:
     # raw min/max lists (for direct access if needed)
     min_values: Optional[List] = None
     max_values: Optional[List] = None
+    # Name-keyed stats: {col_name: (min, max)}.  Populated by the filesystem
+    # connector from the compact stats dict.  Use this for range lookups instead
+    # of the positional min_values/max_values lists, which are indexed by the
+    # full schema at creation time and break after projection pushdown.
+    stats_by_name: Optional[Dict[str, tuple]] = None
     # Per-column uncompressed sizes (aligned with schema field order)
     column_uncompressed_sizes_in_bytes: Optional[List[int]] = None
 

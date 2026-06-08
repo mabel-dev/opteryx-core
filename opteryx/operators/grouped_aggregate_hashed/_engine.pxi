@@ -255,20 +255,6 @@ cdef class GroupHashEngine:
         # Ensure scratch buffers are large enough.
         if <Py_ssize_t>self._state_indices_buf.size() < n_rows:
             self._state_indices_buf.resize(n_rows)
-        self._new_row_scratch.clear()
-
-        if self._telemetry_enabled:
-            phase_start = _now_ns()
-        # Shape-preserving keying hash. Compressed (single dict/constant key) →
-        # data holds k distinct hashes addressed by per-row codes; dense/multi →
-        # data holds n hashes with identity selection. Read uniformly as
-        # khashes[codes[i]] for any shape. hv kept alive for the whole ingest.
-        cdef object hv = morsel.hash_keys(self._group_columns)
-        cdef DrakenVector* huv = (<Vector>hv).unified()
-        cdef const uint64_t* khashes = <const uint64_t*>huv.data
-        cdef const uint32_t* codes = huv.selection
-        if self._telemetry_enabled:
-            self._time_hash_ns += _now_ns() - phase_start
 
         cdef uint32_t* si_buf = self._state_indices_buf.data()
         cdef int64_t state_idx
@@ -279,18 +265,36 @@ cdef class GroupHashEngine:
         cdef uint64_t cache_keys[8]
         cdef int64_t cache_vals[8]
         cdef uint8_t cache_used[8]
+        cdef object hv
+        cdef DrakenVector* huv
+        cdef const uint64_t* khashes
+        cdef const uint32_t* codes
+        cdef bint compressed
+        cdef Py_ssize_t k, c
+        cdef int64_t* code_state
+        cdef bint _is_new
+        cdef ParviResult pr
+        cdef bint _hot_is_new
+
+        self._new_row_scratch.clear()
+        if self._telemetry_enabled:
+            phase_start = _now_ns()
+        # Shape-preserving keying hash. Compressed (single dict/constant key) →
+        # data holds k distinct hashes addressed by per-row codes; dense/multi →
+        # data holds n hashes with identity selection. Read uniformly as
+        # khashes[codes[i]] for any shape. hv kept alive for the whole ingest.
+        hv = morsel.hash_keys(self._group_columns)
+        huv = (<Vector>hv).unified()
+        khashes = <const uint64_t*>huv.data
+        codes = huv.selection
+        if self._telemetry_enabled:
+            self._time_hash_ns += _now_ns() - phase_start
 
         # Compressed fast path: probe each of the k distinct hashes ONCE (on its
         # first-occurrence row), not once per row. Collapses the random hash-table
         # probing from n to k. Only when carchar is the active map — parvi keeps
         # its per-row loop (its 8-slot cache already absorbs repeats at tiny k).
-        cdef bint compressed = (not self._use_parvi) and (draken_is_compressed(huv) != 0)
-        cdef Py_ssize_t k, c
-        cdef int64_t* code_state
-        cdef bint _is_new
-
-        cdef ParviResult pr
-        cdef bint _hot_is_new
+        compressed = (not self._use_parvi) and (draken_is_compressed(huv) != 0)
         if self._telemetry_enabled:
             phase_start = _now_ns()
 
