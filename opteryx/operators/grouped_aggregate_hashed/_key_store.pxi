@@ -246,8 +246,18 @@ cdef inline void gs_accum_free(GsAccum* a) noexcept nogil:
 
 
 cdef inline void _gs_reserve_slots(GsAccum* a, Py_ssize_t need) except *:
+    # Invariant: a non-NULL a.nulls validity bitmap always covers slots_cap rows,
+    # so it grows here in lockstep with the slots buffer (new bytes 0xFF = all
+    # valid; that fill is semantic). This lets gs_accum_append's per-row null
+    # branch be a cheap bit-clear instead of a realloc-per-null-row — the old
+    # per-row _ks_ensure_bitmap_capacity recomputed "current bytes" from the
+    # logical row count, not the allocated capacity, so it reallocated roughly
+    # every 8 null rows even though capacity already existed.
     cdef Py_ssize_t newcap
+    cdef Py_ssize_t old_bm_bytes
+    cdef Py_ssize_t new_bm_bytes
     cdef void* p
+    cdef uint8_t* nb
     if need <= a.slots_cap:
         return
     newcap = a.slots_cap * 2 if a.slots_cap > 0 else 16
@@ -257,6 +267,15 @@ cdef inline void _gs_reserve_slots(GsAccum* a, Py_ssize_t need) except *:
     if p == NULL:
         raise MemoryError()
     a.slots = <DrakenStringSlot*>p
+    if a.nulls != NULL:
+        old_bm_bytes = _ks_bitmap_nbytes(a.slots_cap)
+        new_bm_bytes = _ks_bitmap_nbytes(newcap)
+        if new_bm_bytes > old_bm_bytes:
+            nb = <uint8_t*>realloc(a.nulls, <size_t>new_bm_bytes)
+            if nb == NULL:
+                raise MemoryError()
+            memset(nb + old_bm_bytes, 0xFF, <size_t>(new_bm_bytes - old_bm_bytes))
+            a.nulls = nb
     a.slots_cap = newcap
 
 
@@ -287,7 +306,11 @@ cdef inline void gs_accum_append(GsAccum* a, const DrakenStringSlot* src_slot,
     dst = &a.slots[row]
     if not valid:
         str_init_null(dst)
-        _ks_ensure_bitmap_capacity(&a.nulls, row, row + 1)
+        # _gs_reserve_slots(row + 1) above guarantees slots_cap > row, and keeps
+        # a non-NULL bitmap sized to slots_cap. Lazily allocate (all-valid) on the
+        # first null, covering the full current capacity — no per-row realloc.
+        if a.nulls == NULL:
+            a.nulls = _ks_alloc_all_valid_bitmap(a.slots_cap)
         _ks_bitmap_clear(a.nulls, row)
     elif str_is_inline(src_slot):
         str_clone_with_offset(dst, src_slot, 0)   # inline bytes self-contained
@@ -353,28 +376,31 @@ cdef inline Py_ssize_t _ks_growth_target(Py_ssize_t current_size, Py_ssize_t req
 
 cdef inline void _ks_ensure_fixed_capacity(
     DrakenFixedBuffer* buf,
-    Py_ssize_t current_rows,
     Py_ssize_t required_rows,
 ) except *:
+    # During accumulation buf.length holds the allocated capacity in rows;
+    # reconstruct_vectors overwrites it with the logical row count before any
+    # consume helper reads it. Growth is amortized doubling against that
+    # capacity — comparing against the logical row count instead would realloc
+    # on every call, which is quadratic over the run.
+    #
+    # No tail memset: every store path writes each slot it exposes (null rows
+    # write 0 explicitly), and rows past the logical count are never exposed.
     cdef void* new_data
     cdef Py_ssize_t new_rows_cap
-    cdef Py_ssize_t old_bytes
     cdef Py_ssize_t new_bytes
+    cdef Py_ssize_t cap_rows = <Py_ssize_t>buf.length
 
-    if required_rows <= current_rows:
+    if required_rows <= cap_rows:
         return
 
-    new_rows_cap = _ks_growth_target(current_rows, required_rows, 8)
-
-    old_bytes = current_rows * <Py_ssize_t>buf.itemsize
+    new_rows_cap = _ks_growth_target(cap_rows, required_rows, 8)
     new_bytes = new_rows_cap * <Py_ssize_t>buf.itemsize
 
     new_data = realloc(buf.data, new_bytes)
     if new_data == NULL:
         raise MemoryError()
     buf.data = new_data
-    if new_bytes > old_bytes:
-        memset(<uint8_t*>buf.data + old_bytes, 0, new_bytes - old_bytes)
     buf.length = <size_t>new_rows_cap
 
 
@@ -420,7 +446,7 @@ cdef inline void _ks_reserve_fixed_direct(
 ) except *:
     cdef Py_ssize_t required_rows = current_rows + additional_rows
 
-    _ks_ensure_fixed_capacity(buf, current_rows, required_rows)
+    _ks_ensure_fixed_capacity(buf, required_rows)
     if needs_null_bitmap:
         _ks_ensure_bitmap_capacity(null_bitmap_ref, current_rows, required_rows)
 
@@ -435,7 +461,7 @@ cdef inline void _ks_append_fixed_direct(
     cdef Py_ssize_t row_idx = row_count_ref[0]
     cdef int64_t* data
 
-    _ks_ensure_fixed_capacity(buf, row_count_ref[0], row_idx + 1)
+    _ks_ensure_fixed_capacity(buf, row_idx + 1)
     data = <int64_t*>buf.data
     data[row_idx] = value
 
@@ -540,7 +566,7 @@ cdef inline void _ks_store_fixed_bulk_dict(
     cdef const int16_t* d2 = <const int16_t*>dict_data
     cdef const int8_t*  d1 = <const int8_t*>dict_data
 
-    _ks_ensure_fixed_capacity(buf, start_row, start_row + n_new)
+    _ks_ensure_fixed_capacity(buf, start_row + n_new)
 
     dst = <int64_t*>buf.data
     for ri in range(n_new):
@@ -594,7 +620,7 @@ cdef inline void _ks_store_fixed128_bulk_dict(
     cdef int128_t* dst
     cdef const int128_t* src = <const int128_t*>dict_data
 
-    _ks_ensure_fixed_capacity(buf, start_row, start_row + n_new)
+    _ks_ensure_fixed_capacity(buf, start_row + n_new)
 
     dst = <int128_t*>buf.data
     for ri in range(n_new):
@@ -658,7 +684,7 @@ cdef inline void _ks_store_multi_bool_bulk(
     cdef uint32_t code
     cdef int64_t* dst
 
-    _ks_ensure_fixed_capacity(buf, start_row, start_row + n_new)
+    _ks_ensure_fixed_capacity(buf, start_row + n_new)
     dst = <int64_t*>buf.data
 
     for ri in range(n_new):
@@ -838,6 +864,13 @@ cdef class KeyStore:
         morsel; the inner per-row loop contains only integer comparisons.
         """
         if n_new == 0:
+            return
+
+        # Zero group columns — a GROUP BY whose keys are all constant literals
+        # (e.g. `GROUP BY 1`). The binder strips the literals, leaving every row
+        # in a single group. There is no key material to store; the one group's
+        # identity is implicit.
+        if self._n_cols == 0:
             return
 
         cdef Py_ssize_t col_idx
@@ -1092,6 +1125,13 @@ cdef class KeyStore:
         cdef void* new_data
         cdef uint8_t* new_validity
         cdef Vector fixed_iv
+
+        # ---- Zero group columns ----
+        # All-constant-literal GROUP BY (e.g. `GROUP BY 1`): the binder stripped
+        # the literals, so there is a single group with no key columns. Emit no
+        # key vectors; the aggregate values alone form the one output row.
+        if self._n_cols == 0:
+            return
 
         # ---- Single-column fast paths ----
         if self._n_cols == 1:

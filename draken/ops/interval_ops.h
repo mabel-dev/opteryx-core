@@ -77,6 +77,22 @@ static inline void iv_set_valid(uint8_t* bitmap, uint32_t i) noexcept {
     bitmap[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
 }
 
+// Normalize: if every logical bit is set (all valid), free it and return nullptr
+// so downstream code can take the validity==nullptr fast path. Mirrors
+// int64_gather.h::normalize_validity.
+static inline uint8_t* iv_normalize_validity(uint8_t* validity, uint32_t n) noexcept {
+    if (validity == nullptr) return nullptr;
+    const uint32_t nb = (n + 7u) >> 3;
+    for (uint32_t k = 0; k < nb; ++k) {
+        uint8_t expected = 0xFFu;
+        if (k == nb - 1 && (n & 7u) != 0)
+            expected = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        if (validity[k] != expected) return validity;
+    }
+    draken_free(validity);
+    return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Bool result allocation helper
 // ---------------------------------------------------------------------------
@@ -493,7 +509,9 @@ static inline VecResult interval_slice(const DrakenVector& v, uint32_t start, ui
     DrakenIntervalSlot* dst = static_cast<DrakenIntervalSlot*>(draken_malloc(data_bytes));
     if (!dst) throw std::bad_alloc();
 
-    if (v.data_length == v.length) {
+    // Physical memcpy valid ONLY when selection is identity; data_length==length
+    // also admits a PERMUTATION which would silently reorder. Require IDENTITY.
+    if (draken_is_dense(&v) && (v.flags & DRAKEN_SEL_IDENTITY)) {
         std::memcpy(dst, data + start, n * sizeof(DrakenIntervalSlot));
     } else {
         for (uint32_t i = 0; i < n; ++i)
@@ -506,6 +524,7 @@ static inline VecResult interval_slice(const DrakenVector& v, uint32_t start, ui
         out_null = static_cast<uint8_t*>(draken_malloc(nb));
         if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
         copy_validity_range(out_null, src_null, start, n);
+        out_null = iv_normalize_validity(out_null, n);
     }
 
     VecResult r;

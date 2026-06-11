@@ -392,6 +392,29 @@ cdef inline void _coerce_logical_types(
                 row_group[col_name] = _int64_to_timestamp(v_nb)
 
 
+cdef list _set_bit_positions(bytes mask_bytes):
+    """Return the ascending positions of set bits in a pass-1 survival mask.
+
+    Bit i lives in byte i>>3 at bit i&7 (LSB-first), matching the packing the
+    C++ masked decoder consumes (pool_reader.submit_work_native_masked). The
+    k-th set position is the original row index of the k-th pass-1 survivor, so
+    `_set_bit_positions(mask)[survivor_idx]` maps a survivor back to its row.
+    """
+    cdef list out = []
+    cdef Py_ssize_t byte_i
+    cdef Py_ssize_t base
+    cdef int k
+    cdef unsigned char b
+    for byte_i in range(len(mask_bytes)):
+        b = mask_bytes[byte_i]
+        if b:
+            base = byte_i * 8
+            for k in range(8):
+                if (b >> k) & 1:
+                    out.append(base + k)
+    return out
+
+
 cdef class _Pass1Result:
     """Outcome of evaluating one row group's pass-1 filter columns.
 
@@ -478,6 +501,10 @@ cdef class ParquetReadNode(ReaderNode):
     cdef public object _planner_name_to_identity_cached
     cdef public object _filter_column_names_cached
     cdef public ScanReadings scan_readings
+    # WP-2 top-N scan pushdown spec (set by TopNScanPushdownStrategy via node properties).
+    cdef public object _topn_sort_name
+    cdef public bint _topn_descending
+    cdef public object _topn_limit
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
@@ -487,6 +514,11 @@ cdef class ParquetReadNode(ReaderNode):
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
         self.scan_readings = ScanReadings()
+        # WP-2: physical sort column name, direction, and N. None unless the
+        # optimizer matched ORDER BY <physical col> LIMIT n directly over this scan.
+        self._topn_sort_name = parameters.get("topn_sort_name")
+        self._topn_descending = bool(parameters.get("topn_descending", False))
+        self._topn_limit = parameters.get("topn_limit")
 
     @property
     def name(self) -> str:  # pragma: no cover
@@ -657,6 +689,68 @@ cdef class ParquetReadNode(ReaderNode):
         self.scan_readings.record_pass1_skipped()
         self._mark_file_seen(r.path)
 
+    def _apply_topn(self, list pass2_work, dict p1_cache, object sort_identity,
+                    int n, bint descending):
+        """WP-2: shrink pass-2 work to only the rows that can be in the top-n.
+
+        Keeps every surviving row whose sort key is at-least-as-good as the n-th
+        best value (i.e. n rows plus any ties exactly at the boundary). Every row
+        dropped here is strictly worse than the true top-n, so the downstream
+        HeapSort produces an identical result to the un-pushed plan — ties at the
+        boundary can never change which n rows HeapSort finally keeps.
+
+        Returns (new_pass2_work, winners_by_rg):
+          - new_pass2_work: [(path, rg_idx, reduced_mask_bytes)] for winning row
+            groups only (row groups with no surviving top-n candidate are dropped
+            and never decoded in pass 2).
+          - winners_by_rg: {(path, rg_idx): [survivor_idx, ...]} (ascending), used
+            to gather the matching pass-1 column values for assembly.
+
+        NULLs sort last (matching HeapSort), so they only enter the result when
+        fewer than n non-null rows exist; in that case every survivor is kept.
+        """
+        cdef list candidates = []          # (value, (path, rg_idx), survivor_idx)
+        cdef Py_ssize_t nonnull = 0
+        cdef Py_ssize_t i
+        for key in p1_cache:
+            p1_filtered = p1_cache[key][0]
+            vals = p1_filtered.column(sort_identity).to_pylist()
+            for i in range(len(vals)):
+                v = vals[i]
+                candidates.append((v, key, i))
+                if v is not None:
+                    nonnull += 1
+
+        cdef dict winners_by_rg = {}
+        if nonnull <= n:
+            for (v, key, i) in candidates:
+                winners_by_rg.setdefault(key, []).append(i)
+        else:
+            vals_only = sorted(
+                (v for (v, key, i) in candidates if v is not None),
+                reverse=descending,
+            )
+            boundary = vals_only[n - 1]
+            for (v, key, i) in candidates:
+                if v is None:
+                    continue
+                if (v >= boundary) if descending else (v <= boundary):
+                    winners_by_rg.setdefault(key, []).append(i)
+
+        cdef dict mask_by_rg = {(p, rg): mb for (p, rg, mb) in pass2_work}
+        cdef list new_pass2_work = []
+        cdef Py_ssize_t pos
+        for key in list(winners_by_rg.keys()):
+            idxs = sorted(winners_by_rg[key])     # ascending survivor idx == ascending row pos
+            winners_by_rg[key] = idxs
+            set_positions = _set_bit_positions(mask_by_rg[key])
+            reduced = bytearray(len(mask_by_rg[key]))
+            for i in idxs:
+                pos = set_positions[i]
+                reduced[pos >> 3] |= (1 << (pos & 7))
+            new_pass2_work.append((key[0], key[1], bytes(reduced)))
+        return new_pass2_work, winners_by_rg
+
     cdef tuple _extract_row_group_metadata(self, object scan_rg, dict row_group):
         """Extract (path, rg_idx) from ScanRowGroup and funnel telemetry into ScanReadings.
 
@@ -754,19 +848,36 @@ cdef class ParquetReadNode(ReaderNode):
         # between self.columns (planner) and base_schema.columns (schema loader).
         _filter_names = filter_column_names  # Use cached value instead of extracting again
         _projected_names = {col.schema_column.name for col in (self.columns or [])}
-        _pass2_names = _projected_names - _filter_names
+
+        # WP-2: top-N is active only when the optimizer stamped a single physical
+        # sort column that this scan actually projects. The sort column is read in
+        # pass 1 (alongside the filters) so the top-N can be evaluated before the
+        # expensive projection-only columns are materialized in pass 2.
+        topn_active = (
+            self._topn_sort_name is not None
+            and self._topn_limit is not None
+            and self._topn_sort_name in _projected_names
+        )
+        _pass1_only_names = set(_filter_names)
+        if topn_active:
+            _pass1_only_names = _pass1_only_names | {self._topn_sort_name}
+        _pass2_names = _projected_names - _pass1_only_names
         two_pass_eligible = (
             config.features.parquet_late_materialization
             and bool(predicate_root)
             and bool(_filter_names)
             and bool(_pass2_names)
         )
+        # Top-N only engages on the two-pass path (it needs a filter to define the
+        # candidate set). If the scan isn't two-pass eligible, fall back silently —
+        # the downstream HeapSort still produces the correct result.
+        topn_active = topn_active and two_pass_eligible
         pass1_column_names: list = []
         pass2_column_names: list = []
         pass1_name_to_identity: dict = {}
         pass2_name_to_identity: dict = {}
         if two_pass_eligible:
-            _p1_cols = [c for c in base_schema.columns if c.name in _filter_names]
+            _p1_cols = [c for c in base_schema.columns if c.name in _pass1_only_names]
             _p2_cols = [c for c in base_schema.columns if c.name in _pass2_names]
             pass1_column_names = [c.name for c in _p1_cols]
             pass2_column_names = [c.name for c in _p2_cols]
@@ -877,6 +988,21 @@ cdef class ParquetReadNode(ReaderNode):
                     else:
                         self._record_pass1_skip(result)
 
+                # ── WP-2: top-N reduction ──────────────────────────────────────────────
+                # Trim pass-2 work to only the rows that can survive ORDER BY .. LIMIT n,
+                # so the projection-only columns are decoded for ~n rows instead of every
+                # filter survivor. Drops whole row groups that hold no top-n candidate.
+                _topn_winners = None
+                if topn_active:
+                    _topn_sort_identity = _planner_name_to_identity[self._topn_sort_name]
+                    pass2_work, _topn_winners = self._apply_topn(
+                        pass2_work,
+                        p1_cache,
+                        _topn_sort_identity,
+                        int(self._topn_limit),
+                        self._topn_descending,
+                    )
+
                 # ── Phase 2: parallel pass-2 decode via C++ pipeline ──────────────────────
                 for _rg_tuple in iter_pass2_row_groups_ipc(
                     filesystem,
@@ -900,6 +1026,11 @@ cdef class ParquetReadNode(ReaderNode):
                     _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
 
                     p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
+
+                    # WP-2: reduce pass-1 survivors to the same top-n winners pass 2
+                    # decoded (ascending row order on both sides keeps them aligned).
+                    if _topn_winners is not None:
+                        p1_filtered = p1_filtered.take(_topn_winners[(path, rg_idx)])
 
                     p1_vectors_by_identity = {n: p1_filtered.column(n) for n in p1_identity_names}
                     # Positional pairing: pass2_column_names order matches row_group.values() order.

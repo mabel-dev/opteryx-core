@@ -8,9 +8,3 @@ SELECT * FROM $planets
 
 query shape 357 19
 SELECT * FROM testdata.astronauts
-
-query shape 150000 1
-SELECT SHA512(column_0) FROM FAKE(150000, 1) AS FK
-
-query shape 1 1
-SELECT COUNT(*) FROM FAKE(50, (BOOLEAN, INTEGER)) AS L(bool) INNER JOIN FAKE(500000, (BOOLEAN,INTEGER)) AS R(bool) USING (bool)

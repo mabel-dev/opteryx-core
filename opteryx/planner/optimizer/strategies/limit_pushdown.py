@@ -27,6 +27,8 @@ from .optimization_strategy import get_nodes_of_type_from_logical_plan
 class LimitPushdownStrategy(OptimizationStrategy):
     """Push LIMIT operators towards scans when it is safe to do so."""
 
+    provides = ("limits-pushed",)
+
     _BARRIER_TYPES = {
         LogicalPlanStepType.Aggregate,
         LogicalPlanStepType.AggregateAndGroup,
@@ -48,7 +50,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
             if node.offset is not None or node.limit in (None, 0):
                 return context
             node.nid = context.node_id
-            if not hasattr(node, "pushdown_targets"):
+            if getattr(node, "pushdown_targets", None) is None:
                 node.pushdown_targets = set(node.all_relations or [])
             context.collected_limits.append(node)
             return context
@@ -70,9 +72,12 @@ class LimitPushdownStrategy(OptimizationStrategy):
                 continue
 
             if node.node_type == LogicalPlanStepType.Join:
-                if self._refine_targets_for_join(limit_node, node):
-                    remaining_limits.append(limit_node)
-                    continue
+                # A LIMIT must never be pushed below a join. Every join type can
+                # multiply rows relative to a single input: cross joins produce
+                # |left| * |right|, and outer/inner equi-joins match a preserved
+                # row against N rows on the other side (1:N). Limiting (or
+                # relocating the LIMIT onto) one input therefore does not cap the
+                # join's output, so the LIMIT stays directly above the join.
                 self._place_before_node(limit_node, node, context)
                 continue
 
@@ -133,43 +138,6 @@ class LimitPushdownStrategy(OptimizationStrategy):
             return True
 
         return False
-
-    def _refine_targets_for_join(
-        self, limit_node: LogicalPlanNode, join_node: LogicalPlanNode
-    ) -> bool:
-        join_type = getattr(join_node, "type", None)
-        if not join_type:
-            return False
-
-        targets: Set[str] = getattr(
-            limit_node, "pushdown_targets", set(limit_node.all_relations or [])
-        )
-        if not targets:
-            targets = set(limit_node.all_relations or [])
-
-        left_relations = set(getattr(join_node, "left_relation_names", []) or [])
-        right_relations = set(getattr(join_node, "right_relation_names", []) or [])
-
-        new_targets: Optional[Set[str]] = None
-
-        if join_type == "left outer":
-            new_targets = targets & left_relations
-        elif join_type == "right outer":
-            new_targets = targets & right_relations
-        elif join_type == "cross join":
-            # A LIMIT over a cross product cannot be satisfied by limiting one
-            # input: limiting one side to n still yields |other side| * n rows.
-            # The LIMIT must stay above the cross join, so refuse to push it.
-            return False
-        else:
-            return False
-
-        if not new_targets:
-            return False
-
-        limit_node.pushdown_targets = new_targets
-        limit_node.all_relations = set(new_targets)
-        return True
 
     def _place_before_node(
         self, limit_node: LogicalPlanNode, _: LogicalPlanNode, context: OptimizerContext

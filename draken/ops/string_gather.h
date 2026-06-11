@@ -145,7 +145,9 @@ static inline StrBlock sg_alloc_str_block(uint32_t n_slots,
 
     uint8_t* block = static_cast<uint8_t*>(draken_malloc(alloc));
     if (!block) throw std::bad_alloc();
-    std::memset(block, 0, alloc);
+    // Zero only struct + slots; the arena [arena_off, total) is written by the
+    // caller for valid long strings and its unused tail is never read, so skip it.
+    std::memset(block, 0, arena_off);
 
     StrBlock sb;
     sb.block       = block;

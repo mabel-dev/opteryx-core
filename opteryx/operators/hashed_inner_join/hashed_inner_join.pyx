@@ -19,9 +19,6 @@ This node is deliberately narrower than the legacy Arrow-first inner join:
 - it keeps both sides in Draken morsels
 - it uses the compiled Carchar join state directly
 - it aligns output with Draken align_tables
-
-Unsupported shapes fail in the physical planner rather than adding more
-Arrow conversions here.
 """
 from typing import Generator, Optional
 
@@ -33,7 +30,7 @@ from array import array
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, int64_t, uint64_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t, uint64_t
 from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 
@@ -41,7 +38,11 @@ from time import perf_counter_ns
 
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter, create_bloom_filter_from_hashes
 from draken.morsels.morsel cimport align_tables
-from draken.vectors.vector cimport NULL_HASH
+from draken.vectors.vector cimport NULL_HASH, Vector
+from draken.core.buffers cimport DrakenVector
+
+cdef extern from "core/buffers.h" nogil:
+    int draken_is_compressed(const DrakenVector* v)
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
@@ -456,6 +457,23 @@ cdef public Py_ssize_t last_draken_inner_join_build_unique_keys = 0
 cdef public Py_ssize_t last_draken_inner_join_build_total_rows = 0
 cdef public double last_draken_inner_join_build_avg_chain_length = 0.0
 
+# WP-13 — single-column shaped-key probe. The compressed (dict/constant) fast
+# path hashes the k unique key values once and probes each once, scattering each
+# probe result to all NON-NULL rows that share its code. Null keys are excluded
+# by reading the KEY COLUMN validity (NOT a hash-sentinel compare) — this is the
+# §11 "consult key validity" contract and fixes the NULL=NULL inner-join P0 for
+# single-column keys (both dense and compressed). Multi-column composite keys are
+# OUT OF SCOPE for WP-13 and retain the legacy per-row hash() path.
+#
+# k-gate: the compressed fast path is taken only when the key compresses by at
+# least this ratio (data_length * ratio <= length). Below it, the k-probe setup
+# (CSR build over n rows) is not worth the saved probes, so we fall back to the
+# dense validity-based per-row path. Tunable via FEATURE_JOIN_KPROBE_MIN_RATIO.
+cdef double _WP13_KPROBE_MIN_RATIO = 2.0
+# Telemetry: 1 if the last probe used the compressed k-probe fast path, 0 if it
+# used the dense/validity per-row path (k-gated or genuinely dense).
+cdef public Py_ssize_t last_draken_inner_join_kprobe_used = 0
+
 
 cdef class DrakenCarcharJoinMap:
     cdef CarcharJoinEngine* engine
@@ -533,6 +551,46 @@ cdef inline void _append_bloom_filtered_rows_and_hashes(
                 candidate_hashes.push_back(h)
 
 
+cdef inline void _shaped_build_rows_and_hashes(
+    Morsel relation,
+    list join_columns,
+    vector[uint64_t]& valid_hashes,
+    vector[int64_t]& valid_rows,
+):
+    """Single-column build: shaped keying hash (k unique values hashed once) +
+    validity-based null exclusion. Emits one (hash, row) per NON-NULL logical
+    row; null keys are dropped by reading the KEY COLUMN validity, never a hash
+    sentinel. Bit-parity (hash_keys == hash) means these hashes interoperate with
+    any probe side that still uses the per-row hash()."""
+    cdef Py_ssize_t num_rows = relation.num_rows
+    if num_rows == 0:
+        return
+
+    cdef Vector hv = <Vector>relation.hash_keys(join_columns)
+    cdef DrakenVector* huv = hv.unified()
+    cdef const uint64_t* khashes = <const uint64_t*>huv.data
+    cdef const uint32_t* codes = huv.selection
+
+    cdef Vector keycol = <Vector>relation.column(join_columns[0])
+    cdef uint8_t* validity = keycol.null_bitmap_ptr()
+
+    cdef Py_ssize_t i
+    valid_hashes.reserve(num_rows)
+    valid_rows.reserve(num_rows)
+
+    if validity == NULL:
+        with nogil:
+            for i in range(num_rows):
+                valid_hashes.push_back(khashes[codes[i]])
+                valid_rows.push_back(i)
+    else:
+        with nogil:
+            for i in range(num_rows):
+                if validity[i >> 3] & (<uint8_t>1 << (i & 7)):
+                    valid_hashes.push_back(khashes[codes[i]])
+                    valid_rows.push_back(i)
+
+
 cdef object _int32_array_from_vector(const vector[int64_t]& values):
     cdef Py_ssize_t length = <Py_ssize_t> values.size()
     cdef object out = array('i', [0]) * length
@@ -595,8 +653,15 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
         ht.seal()
         return ht
 
-    row_hashes = relation.hash(join_columns)
-    _append_valid_rows_and_hashes(row_hashes, valid_hashes, valid_rows)
+    if len(join_columns) == 1:
+        # Single-column: shaped hash + validity-based null exclusion (fixes the
+        # NULL=NULL P0 on the build side; null rows never enter the table).
+        _shaped_build_rows_and_hashes(relation, join_columns, valid_hashes, valid_rows)
+    else:
+        # Multi-column composite key — OUT OF SCOPE for WP-13. Legacy per-row
+        # hash() path; its null handling is unchanged (tracked separately).
+        row_hashes = relation.hash(join_columns)
+        _append_valid_rows_and_hashes(row_hashes, valid_hashes, valid_rows)
 
     if valid_rows.size() != 0:
         ht.engine.insert_batch(
@@ -720,6 +785,318 @@ cpdef tuple inner_join_carchar_morsel(
     return left_indices, right_indices
 
 
+cdef inline object _materialize_aligned(
+    Morsel left_relation,
+    Morsel right_relation,
+    vector[int64_t]& left_rows,
+    vector[int64_t]& right_rows,
+):
+    """Convert the (build_row, probe_row) result vectors to int32 views and
+    align. Sets materialize/align timing globals. Returns None on empty."""
+    global last_draken_inner_join_materialize_time_ns
+    global last_draken_inner_join_align_time_ns
+    cdef int32_t* left_indices_ptr = NULL
+    cdef int32_t* right_indices_ptr = NULL
+    cdef int32_t[::1] left_indices_view
+    cdef int32_t[::1] right_indices_view
+    cdef long long t0
+    cdef long long t_before_align = 0
+    if left_rows.size() == 0:
+        last_draken_inner_join_materialize_time_ns = 0
+        last_draken_inner_join_align_time_ns = 0
+        return None
+    t0 = perf_counter_ns()
+    try:
+        left_indices_view = _int32_view_from_vector(left_rows, &left_indices_ptr)
+        right_indices_view = _int32_view_from_vector(right_rows, &right_indices_ptr)
+        last_draken_inner_join_materialize_time_ns = perf_counter_ns() - t0
+        t_before_align = perf_counter_ns()
+        return align_tables(left_relation, right_relation,
+                            left_indices_view, right_indices_view)
+    finally:
+        if left_indices_ptr != NULL:
+            PyMem_Free(left_indices_ptr)
+        if right_indices_ptr != NULL:
+            PyMem_Free(right_indices_ptr)
+        if t_before_align != 0:
+            last_draken_inner_join_align_time_ns = perf_counter_ns() - t_before_align
+
+
+cdef object _probe_dense_validity(
+    Morsel left_relation,
+    Morsel right_relation,
+    DrakenCarcharJoinMap left_hash_table,
+    Vector hv,
+    uint8_t* validity,
+    Py_ssize_t num_rows,
+    long long hash_ns,
+):
+    """Single-column DENSE (or k-gated) probe. khashes is one-per-row; null rows
+    are excluded by KEY COLUMN validity (fixes the NULL=NULL P0 for dense keys).
+    Reuses the engine's per-row probe_join_indices unchanged."""
+    global last_draken_inner_join_hash_time_ns
+    global last_draken_inner_join_probe_time_ns
+    global last_draken_inner_join_bloom_filter_time_ns
+    global last_draken_inner_join_rows_hashed
+    global last_draken_inner_join_candidate_rows
+    global last_draken_inner_join_result_rows
+    global last_draken_inner_join_rows_eliminated_by_bloom_filter
+
+    cdef DrakenVector* huv = hv.unified()
+    cdef const uint64_t* khashes = <const uint64_t*>huv.data
+    cdef const uint32_t* codes = huv.selection
+    cdef vector[uint64_t] probe_hashes
+    cdef vector[int64_t] probe_rows
+    cdef pair[vector[int64_t], vector[int64_t]] matches
+    cdef Py_ssize_t i
+    cdef uint64_t h
+    cdef bint has_validity = (validity != NULL)
+    cdef bint has_bloom = left_hash_table.bloom_filter is not None
+    cdef BloomFilter bloom_filter = None
+    cdef long long bloom_start = perf_counter_ns()
+    cdef long long t_after_probe
+
+    probe_hashes.reserve(num_rows)
+    probe_rows.reserve(num_rows)
+    if has_bloom:
+        bloom_filter = <BloomFilter>left_hash_table.bloom_filter
+        with nogil:
+            for i in range(num_rows):
+                if has_validity and not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                    continue
+                h = khashes[codes[i]]
+                if bloom_filter._possibly_contains_fast(h):
+                    probe_rows.push_back(i)
+                    probe_hashes.push_back(h)
+    else:
+        with nogil:
+            for i in range(num_rows):
+                if has_validity and not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                    continue
+                probe_rows.push_back(i)
+                probe_hashes.push_back(khashes[codes[i]])
+
+    last_draken_inner_join_hash_time_ns = hash_ns
+    last_draken_inner_join_bloom_filter_time_ns = (
+        perf_counter_ns() - bloom_start if has_bloom else 0
+    )
+    last_draken_inner_join_rows_hashed = num_rows
+    last_draken_inner_join_candidate_rows = <Py_ssize_t>probe_rows.size()
+    last_draken_inner_join_rows_eliminated_by_bloom_filter = (
+        num_rows - <Py_ssize_t>probe_rows.size() if has_bloom else 0
+    )
+
+    if probe_rows.size() == 0:
+        last_draken_inner_join_probe_time_ns = 0
+        last_draken_inner_join_result_rows = 0
+        last_draken_inner_join_materialize_time_ns = 0
+        last_draken_inner_join_align_time_ns = 0
+        return None
+
+    bloom_start = perf_counter_ns()
+    matches = left_hash_table.engine.probe_join_indices(
+        &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size())
+    t_after_probe = perf_counter_ns()
+    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_start
+    last_draken_inner_join_result_rows = <Py_ssize_t>matches.first.size()
+
+    return _materialize_aligned(left_relation, right_relation,
+                                matches.first, matches.second)
+
+
+cdef object _probe_compressed_scatter(
+    Morsel left_relation,
+    Morsel right_relation,
+    DrakenCarcharJoinMap left_hash_table,
+    Vector hv,
+    uint8_t* validity,
+    Py_ssize_t num_rows,
+    long long hash_ns,
+):
+    """Single-column COMPRESSED probe — the WP-13 win. Probe each of the k unique
+    key hashes ONCE (probe_join_indices over the unique hashes paired with synthetic
+    code-ids), then scatter each (build_row, code) result to every NON-NULL probe
+    row that carries that code via a CSR index. Null keys are excluded by KEY
+    COLUMN validity; the baked null slot is never probed (no non-null row maps to
+    it, so its CSR count is 0)."""
+    global last_draken_inner_join_hash_time_ns
+    global last_draken_inner_join_probe_time_ns
+    global last_draken_inner_join_bloom_filter_time_ns
+    global last_draken_inner_join_rows_hashed
+    global last_draken_inner_join_candidate_rows
+    global last_draken_inner_join_result_rows
+    global last_draken_inner_join_rows_eliminated_by_bloom_filter
+
+    cdef DrakenVector* huv = hv.unified()
+    cdef const uint64_t* khashes = <const uint64_t*>huv.data
+    cdef const uint32_t* codes = huv.selection
+    cdef Py_ssize_t k_out = <Py_ssize_t>huv.data_length
+
+    cdef vector[int64_t] counts
+    cdef vector[int64_t] offsets
+    cdef vector[int32_t] rows_by_code
+    cdef vector[int64_t] cursor
+    cdef vector[uint64_t] uniq_hashes
+    cdef vector[int64_t] uniq_codeids
+    cdef pair[vector[int64_t], vector[int64_t]] matches
+    cdef vector[int64_t] out_left
+    cdef vector[int64_t] out_right
+
+    cdef Py_ssize_t i, cc, p, j, acc
+    cdef uint32_t c
+    cdef int64_t b, cid
+    cdef uint64_t h
+    cdef bint has_validity = (validity != NULL)
+    cdef bint has_bloom = left_hash_table.bloom_filter is not None
+    cdef BloomFilter bloom_filter = None
+    cdef Py_ssize_t rows_elim = 0
+    cdef long long bloom_start
+    cdef long long t_after_probe
+
+    counts.assign(k_out, 0)
+    offsets.assign(k_out + 1, 0)
+    if has_bloom:
+        bloom_filter = <BloomFilter>left_hash_table.bloom_filter
+
+    bloom_start = perf_counter_ns()
+    with nogil:
+        # 1. Count non-null rows per code.
+        for i in range(num_rows):
+            if has_validity and not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                continue
+            counts[codes[i]] += 1
+        # 2. Prefix-sum to CSR offsets.
+        acc = 0
+        for cc in range(k_out):
+            offsets[cc] = acc
+            acc += counts[cc]
+        offsets[k_out] = acc
+        # 3. Scatter non-null row indices into the CSR buckets.
+        if acc > 0:
+            rows_by_code.resize(<size_t>acc)
+            cursor = offsets
+            for i in range(num_rows):
+                if has_validity and not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                    continue
+                c = codes[i]
+                rows_by_code[cursor[c]] = <int32_t>i
+                cursor[c] += 1
+        # 4. Unique non-null hashes to probe (one per live code), bloom-filtered.
+        for cc in range(k_out):
+            if counts[cc] > 0:
+                h = khashes[cc]
+                if has_bloom and not bloom_filter._possibly_contains_fast(h):
+                    rows_elim += counts[cc]
+                    continue
+                uniq_hashes.push_back(h)
+                uniq_codeids.push_back(cc)
+
+    last_draken_inner_join_hash_time_ns = hash_ns
+    last_draken_inner_join_bloom_filter_time_ns = (
+        perf_counter_ns() - bloom_start if has_bloom else 0
+    )
+    last_draken_inner_join_rows_hashed = num_rows
+    last_draken_inner_join_candidate_rows = <Py_ssize_t>uniq_hashes.size()
+    last_draken_inner_join_rows_eliminated_by_bloom_filter = rows_elim
+
+    if uniq_hashes.size() == 0:
+        last_draken_inner_join_probe_time_ns = 0
+        last_draken_inner_join_result_rows = 0
+        last_draken_inner_join_materialize_time_ns = 0
+        last_draken_inner_join_align_time_ns = 0
+        return None
+
+    bloom_start = perf_counter_ns()
+    matches = left_hash_table.engine.probe_join_indices(
+        &uniq_hashes[0], &uniq_codeids[0], <size_t>uniq_hashes.size())
+    t_after_probe = perf_counter_ns()
+    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_start
+
+    if matches.first.size() == 0:
+        last_draken_inner_join_result_rows = 0
+        last_draken_inner_join_materialize_time_ns = 0
+        last_draken_inner_join_align_time_ns = 0
+        return None
+
+    # 5. Scatter: each unique match expands to all rows sharing its code.
+    with nogil:
+        for p in range(<Py_ssize_t>matches.first.size()):
+            b = matches.first[p]
+            cid = matches.second[p]
+            for j in range(offsets[cid], offsets[cid + 1]):
+                out_left.push_back(b)
+                out_right.push_back(<int64_t>rows_by_code[j])
+
+    last_draken_inner_join_result_rows = <Py_ssize_t>out_left.size()
+    return _materialize_aligned(left_relation, right_relation, out_left, out_right)
+
+
+cdef object _probe_multicol_legacy(
+    Morsel left_relation,
+    Morsel right_relation,
+    list join_columns,
+    DrakenCarcharJoinMap left_hash_table,
+    Py_ssize_t num_rows,
+):
+    """Multi-column composite key — OUT OF SCOPE for WP-13. Legacy per-row hash()
+    probe; null handling unchanged (tracked separately)."""
+    global last_draken_inner_join_hash_time_ns
+    global last_draken_inner_join_probe_time_ns
+    global last_draken_inner_join_bloom_filter_time_ns
+    global last_draken_inner_join_rows_hashed
+    global last_draken_inner_join_candidate_rows
+    global last_draken_inner_join_result_rows
+    global last_draken_inner_join_rows_eliminated_by_bloom_filter
+
+    cdef uint64_t[::1] row_hashes
+    cdef vector[uint64_t] probe_hashes
+    cdef vector[int64_t] probe_rows
+    cdef pair[vector[int64_t], vector[int64_t]] matches
+    cdef long long t_start
+    cdef long long t_after_hash
+    cdef long long t_after_probe
+    cdef long long bloom_end
+    cdef BloomFilter bloom_filter
+
+    t_start = perf_counter_ns()
+    row_hashes = right_relation.hash(join_columns)
+    t_after_hash = perf_counter_ns()
+
+    if left_hash_table.bloom_filter is not None:
+        bloom_filter = <BloomFilter>left_hash_table.bloom_filter
+        _append_bloom_filtered_rows_and_hashes(
+            row_hashes, bloom_filter, probe_hashes, probe_rows)
+        bloom_end = perf_counter_ns()
+        last_draken_inner_join_bloom_filter_time_ns = bloom_end - t_after_hash
+        last_draken_inner_join_rows_eliminated_by_bloom_filter = (
+            num_rows - <Py_ssize_t>probe_rows.size())
+    else:
+        _append_valid_rows_and_hashes(row_hashes, probe_hashes, probe_rows)
+        bloom_end = perf_counter_ns()
+        last_draken_inner_join_bloom_filter_time_ns = 0
+        last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
+
+    last_draken_inner_join_hash_time_ns = t_after_hash - t_start
+    last_draken_inner_join_rows_hashed = num_rows
+    last_draken_inner_join_candidate_rows = <Py_ssize_t>probe_rows.size()
+
+    if probe_rows.size() == 0:
+        last_draken_inner_join_probe_time_ns = 0
+        last_draken_inner_join_result_rows = 0
+        last_draken_inner_join_materialize_time_ns = 0
+        last_draken_inner_join_align_time_ns = 0
+        return None
+
+    matches = left_hash_table.engine.probe_join_indices(
+        &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size())
+    t_after_probe = perf_counter_ns()
+    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_end
+    last_draken_inner_join_result_rows = <Py_ssize_t>matches.first.size()
+
+    return _materialize_aligned(left_relation, right_relation,
+                                matches.first, matches.second)
+
+
 cpdef object inner_join_carchar_morsel_aligned(
     Morsel left_relation,
     Morsel right_relation,
@@ -735,23 +1112,15 @@ cpdef object inner_join_carchar_morsel_aligned(
     global last_draken_inner_join_candidate_rows
     global last_draken_inner_join_result_rows
     global last_draken_inner_join_rows_eliminated_by_bloom_filter
+    global last_draken_inner_join_kprobe_used
 
     cdef Py_ssize_t num_rows = right_relation.num_rows
-    cdef uint64_t[::1] row_hashes
-    cdef vector[uint64_t] probe_hashes
-    cdef vector[int64_t] probe_rows
-    cdef pair[vector[int64_t], vector[int64_t]] matches
+    cdef Vector hv
+    cdef DrakenVector* huv
+    cdef Vector keycol
+    cdef uint8_t* validity
     cdef long long t_start
-    cdef long long t_after_hash
-    cdef long long t_after_probe
-    cdef long long t_before_align = 0
-    cdef long long bloom_start
-    cdef long long bloom_end
-    cdef BloomFilter bloom_filter
-    cdef int32_t* left_indices_ptr = NULL
-    cdef int32_t* right_indices_ptr = NULL
-    cdef int32_t[::1] left_indices_view
-    cdef int32_t[::1] right_indices_view
+    cdef long long hash_ns
 
     if num_rows == 0:
         last_draken_inner_join_hash_time_ns = 0
@@ -763,77 +1132,47 @@ cpdef object inner_join_carchar_morsel_aligned(
         last_draken_inner_join_candidate_rows = 0
         last_draken_inner_join_result_rows = 0
         last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
+        last_draken_inner_join_kprobe_used = 0
         return None
 
+    if len(join_columns) != 1:
+        last_draken_inner_join_kprobe_used = 0
+        return _probe_multicol_legacy(
+            left_relation, right_relation, join_columns, left_hash_table, num_rows)
+
+    # Single-column: shaped keying hash once, then choose the compressed k-probe
+    # fast path or the dense validity path. Both exclude null keys by KEY COLUMN
+    # validity (the §11 contract; fixes the NULL=NULL P0).
     t_start = perf_counter_ns()
-    row_hashes = right_relation.hash(join_columns)
-    t_after_hash = perf_counter_ns()
+    hv = <Vector>right_relation.hash_keys(join_columns)
+    hash_ns = perf_counter_ns() - t_start
+    huv = hv.unified()
+    keycol = <Vector>right_relation.column(join_columns[0])
+    validity = keycol.null_bitmap_ptr()
 
-    if left_hash_table.bloom_filter is not None:
-        bloom_filter = <BloomFilter>left_hash_table.bloom_filter
-        bloom_start = perf_counter_ns()
-        _append_bloom_filtered_rows_and_hashes(
-            row_hashes,
-            bloom_filter,
-            probe_hashes,
-            probe_rows,
-        )
-        bloom_end = perf_counter_ns()
-        last_draken_inner_join_bloom_filter_time_ns = bloom_end - bloom_start
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = (
-            num_rows - <Py_ssize_t>probe_rows.size()
-        )
-    else:
-        _append_valid_rows_and_hashes(
-            row_hashes,
-            probe_hashes,
-            probe_rows,
-        )
-        bloom_end = perf_counter_ns()
-        last_draken_inner_join_bloom_filter_time_ns = 0
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
+    # k-gate: compressed AND compresses by at least _WP13_KPROBE_MIN_RATIO.
+    if (draken_is_compressed(huv) != 0
+            and (<double>huv.data_length) * _WP13_KPROBE_MIN_RATIO <= <double>num_rows):
+        last_draken_inner_join_kprobe_used = 1
+        return _probe_compressed_scatter(
+            left_relation, right_relation, left_hash_table,
+            hv, validity, num_rows, hash_ns)
+    last_draken_inner_join_kprobe_used = 0
+    return _probe_dense_validity(
+        left_relation, right_relation, left_hash_table,
+        hv, validity, num_rows, hash_ns)
 
-    if probe_rows.size() == 0:
-        last_draken_inner_join_hash_time_ns = t_after_hash - t_start
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
-        last_draken_inner_join_rows_hashed = num_rows
-        last_draken_inner_join_candidate_rows = 0
-        last_draken_inner_join_result_rows = 0
-        return None
 
-    matches = left_hash_table.engine.probe_join_indices(
-        &probe_hashes[0],
-        &probe_rows[0],
-        <size_t> probe_rows.size(),
-    )
-    t_after_probe = perf_counter_ns()
+cpdef void set_kprobe_min_ratio(double ratio):
+    """Tune the single-column compressed k-probe gate. The fast path is taken
+    only when data_length * ratio <= length. Set very high to force the dense
+    per-row path (used for benchmarking / k-gating)."""
+    global _WP13_KPROBE_MIN_RATIO
+    _WP13_KPROBE_MIN_RATIO = ratio
 
-    last_draken_inner_join_hash_time_ns = t_after_hash - t_start
-    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_end
-    last_draken_inner_join_rows_hashed = num_rows
-    last_draken_inner_join_candidate_rows = probe_rows.size()
-    last_draken_inner_join_result_rows = matches.first.size()
 
-    if matches.first.size() == 0:
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
-        return None
-
-    try:
-        left_indices_view = _int32_view_from_vector(matches.first, &left_indices_ptr)
-        right_indices_view = _int32_view_from_vector(matches.second, &right_indices_ptr)
-        last_draken_inner_join_materialize_time_ns = perf_counter_ns() - t_after_probe
-        t_before_align = perf_counter_ns()
-        return align_tables(left_relation, right_relation, left_indices_view, right_indices_view)
-    finally:
-        if left_indices_ptr != NULL:
-            PyMem_Free(left_indices_ptr)
-        if right_indices_ptr != NULL:
-            PyMem_Free(right_indices_ptr)
-        if t_before_align != 0:
-            last_draken_inner_join_align_time_ns = perf_counter_ns() - t_before_align
+cpdef double get_kprobe_min_ratio():
+    return _WP13_KPROBE_MIN_RATIO
 
 
 cpdef tuple get_last_draken_inner_join_metrics():

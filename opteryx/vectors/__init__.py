@@ -24,7 +24,7 @@ from typing import Any, List, Set
 
 # Submodules that compose the vectors package. Add future vector-specific modules
 # here to have them automatically imported and re-exported.
-_SUBMODULE_NAMES = ("embeddings", "vector_types", "vector_ranking")
+_SUBMODULE_NAMES = ("embeddings", "vector_ranking")
 
 # Import submodules and bind them into this package namespace.
 for _name in _SUBMODULE_NAMES:

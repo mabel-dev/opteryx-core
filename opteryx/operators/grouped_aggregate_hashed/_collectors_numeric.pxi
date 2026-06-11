@@ -8,14 +8,15 @@
 # buffers without copying. No Python in accumulate().
 #
 
-from libc.stdint cimport int64_t, uint8_t, uint32_t, INT64_MAX, INT64_MIN
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint32_t, INT64_MAX, INT64_MIN
 from libc.stddef cimport size_t
 from libc.math cimport HUGE_VAL
 from libc.string cimport memset, memcpy
-from libc.stdlib cimport malloc, free
+from libc.stdlib cimport malloc, realloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
 from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_DECIMAL
 from draken.core.buffers cimport DRAKEN_DECIMAL128
@@ -53,6 +54,85 @@ cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
     return ((bm[i >> 3] >> (i & 7)) & 1) != 0
 
 
+# Fused integer source type for width-aware accumulation. Narrow-integer inputs
+# (INT8/INT16/INT32) reach the grouped aggregators from sources that emit native
+# widths (e.g. virtual datasets); the int64 collectors must read them at their
+# true width and sign-extend, mirroring the scalar path's _exact_int_sum_as_double
+# and the KeyStore's _ks_store_fixed_bulk_dict. Cython compiles one branch-free
+# loop per specialization, so the width decision stays hoisted out of the hot loop.
+ctypedef fused _int_src:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+
+
+cdef inline void _sum_accumulate_int(
+    const _int_src* data,
+    const uint32_t* sel,
+    uint8_t* nulls,
+    const uint32_t* state_indices,
+    int64_t* sums,
+    uint8_t* seen,
+    Py_ssize_t n_rows,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    cdef int64_t si
+    for i in range(n_rows):
+        if _num_bitmap_valid(nulls, i):
+            si = state_indices[i]
+            sums[si] += <int64_t>data[sel[i]]
+            _bitmap_set(seen, si)
+
+
+cdef inline void _minmax_accumulate_int(
+    const _int_src* data,
+    const uint32_t* sel,
+    uint8_t* nulls,
+    const uint32_t* state_indices,
+    int64_t* values,
+    uint8_t* seen,
+    Py_ssize_t n_rows,
+    int8_t direction,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    cdef int64_t si, v
+    if direction == 1:   # MIN
+        for i in range(n_rows):
+            if _num_bitmap_valid(nulls, i):
+                si = state_indices[i]
+                v = <int64_t>data[sel[i]]
+                if not _num_bitmap_valid(seen, si) or v < values[si]:
+                    values[si] = v
+                _bitmap_set(seen, si)
+    else:                # MAX
+        for i in range(n_rows):
+            if _num_bitmap_valid(nulls, i):
+                si = state_indices[i]
+                v = <int64_t>data[sel[i]]
+                if not _num_bitmap_valid(seen, si) or v > values[si]:
+                    values[si] = v
+                _bitmap_set(seen, si)
+
+
+cdef inline void _avg_accumulate_int(
+    const _int_src* data,
+    const uint32_t* sel,
+    uint8_t* nulls,
+    const uint32_t* state_indices,
+    double* sums,
+    int64_t* counts,
+    Py_ssize_t n_rows,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    cdef int64_t si
+    for i in range(n_rows):
+        if _num_bitmap_valid(nulls, i):
+            si = state_indices[i]
+            sums[si] += <double>data[sel[i]]
+            counts[si] += 1
+
+
 cdef inline Py_ssize_t _bitmap_nbytes(int64_t length) noexcept nogil:
     return <Py_ssize_t>((length + 7) >> 3)
 
@@ -84,6 +164,9 @@ cdef inline void _ensure_validity_bitmap(DrakenFixedBuffer* buf) except *:
 
 
 cdef inline void _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, int64_t new_count) except *:
+    # realloc rather than malloc+memcpy: at large sizes the allocator extends
+    # the mapping in place, skipping the copy of the live prefix. The tail
+    # memset is semantic, not hygiene — counts/sums must start at zero.
     cdef void* new_data
     cdef Py_ssize_t old_bytes
     cdef Py_ssize_t new_bytes
@@ -95,17 +178,20 @@ cdef inline void _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, i
     old_bytes = <Py_ssize_t>(old_count * <int64_t>buf.itemsize)
     new_bytes = <Py_ssize_t>(new_count * <int64_t>buf.itemsize)
 
-    new_data = malloc(new_bytes) if new_bytes > 0 else NULL
-    if new_bytes > 0 and new_data == NULL:
+    if new_bytes == 0:
+        if buf.data != NULL:
+            free(buf.data)
+        buf.data = NULL
+        buf.length = <size_t>new_count
+        return
+
+    new_data = realloc(buf.data, new_bytes)
+    if new_data == NULL:
         raise MemoryError()
 
-    if old_bytes > 0 and buf.data != NULL:
-        memcpy(new_data, buf.data, old_bytes)
     if new_bytes > old_bytes:
         memset(<uint8_t*>new_data + old_bytes, 0, new_bytes - old_bytes)
 
-    if buf.data != NULL:
-        free(buf.data)
     buf.data = new_data
     buf.length = <size_t>new_count
 
@@ -129,14 +215,17 @@ cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t n
             bitmap_ref[0] = NULL
         return
 
-    new_bitmap = <uint8_t*>malloc(new_bytes)
+    # realloc preserves the live prefix; only the new tail needs the fill
+    # byte. A fresh bitmap (NULL in) has no prefix, so fill everything.
+    if bitmap_ref[0] == NULL:
+        old_bytes = 0
+
+    new_bitmap = <uint8_t*>realloc(bitmap_ref[0], new_bytes)
     if new_bitmap == NULL:
         raise MemoryError()
 
-    memset(new_bitmap, fill_byte, new_bytes)
-    if old_bytes > 0 and bitmap_ref[0] != NULL:
-        memcpy(new_bitmap, bitmap_ref[0], old_bytes)
-        free(bitmap_ref[0])
+    if new_bytes > old_bytes:
+        memset(new_bitmap + old_bytes, fill_byte, new_bytes - old_bytes)
 
     bitmap_ref[0] = new_bitmap
 
@@ -391,23 +480,25 @@ cdef class SumInt64Collector(BaseCollector):
         cdef Vector vec = morsel._get_column(self._col_idx)
         cdef int64_t* sums = <int64_t*>self._sums.data
         cdef uint8_t* seen = self._seen
-        cdef int64_t* data
         cdef const uint32_t* sel
         cdef uint8_t* nulls
-        cdef Py_ssize_t i
-        cdef int64_t si
         cdef DrakenVector* uv
+        cdef DrakenType t
 
         uv = vec.unified()
-        data = <int64_t*>uv.data
         sel = uv.selection
         nulls = uv.validity
+        t = uv.type
+        # Width-aware read: narrow ints are sign-extended into the int64 sum.
         with nogil:
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    sums[si] += data[sel[i]]
-                    _bitmap_set(seen, si)
+            if t == DRAKEN_INT8:
+                _sum_accumulate_int(<const int8_t*>uv.data, sel, nulls, state_indices, sums, seen, n_rows)
+            elif t == DRAKEN_INT16:
+                _sum_accumulate_int(<const int16_t*>uv.data, sel, nulls, state_indices, sums, seen, n_rows)
+            elif t == DRAKEN_INT32:
+                _sum_accumulate_int(<const int32_t*>uv.data, sel, nulls, state_indices, sums, seen, n_rows)
+            else:
+                _sum_accumulate_int(<const int64_t*>uv.data, sel, nulls, state_indices, sums, seen, n_rows)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef long long start_ns = _now_ns()
@@ -629,35 +720,26 @@ cdef class MinMaxInt64Collector(BaseCollector):
         cdef Vector vec = morsel._get_column(self._col_idx)
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
-        cdef int64_t* data
         cdef const uint32_t* sel
         cdef uint8_t* nulls
-        cdef Py_ssize_t i
-        cdef int64_t si, v
         cdef DrakenVector* uv
+        cdef DrakenType t
 
         uv = vec.unified()
-        data = <int64_t*>uv.data
         sel = uv.selection
         nulls = uv.validity
+        t = uv.type
         cdef int8_t direction = self._direction
+        # Width-aware read: narrow ints are sign-extended before compare.
         with nogil:
-            if direction == 1:   # MIN
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
-                        v = data[sel[i]]
-                        if not _num_bitmap_valid(seen, si) or v < values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            else:                # MAX
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
-                        v = data[sel[i]]
-                        if not _num_bitmap_valid(seen, si) or v > values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
+            if t == DRAKEN_INT8:
+                _minmax_accumulate_int(<const int8_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
+            elif t == DRAKEN_INT16:
+                _minmax_accumulate_int(<const int16_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
+            elif t == DRAKEN_INT32:
+                _minmax_accumulate_int(<const int32_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
+            else:
+                _minmax_accumulate_int(<const int64_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._values
@@ -1200,25 +1282,28 @@ cdef class AvgCollector(BaseCollector):
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef int64_t* i64
         cdef double* f64
         cdef uint8_t* nulls = uv.validity
         cdef const uint32_t* sel = uv.selection
 
         # DECIMAL columns are routed to AvgDecimalCollector (exact int64 sum) by the
-        # deferred resolver, so they never reach here. INT64 accumulates in double
-        # (overflow-safe for large-magnitude columns like AVG(UserID)); everything
-        # else reinterprets as FLOAT64.
-        if t == DRAKEN_INT64:
-            i64 = <int64_t*>uv.data
+        # deferred resolver, so they never reach here. Integer widths accumulate in
+        # double (overflow-safe for large-magnitude columns like AVG(UserID)) and are
+        # read at their true width; FLOAT64 reads as double directly.
+        if t == DRAKEN_INT8:
             with nogil:
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
-                        sums[si] += i64[sel[i]]
-                        counts[si] += 1
+                _avg_accumulate_int(<const int8_t*>uv.data, sel, nulls, state_indices, sums, counts, n_rows)
+        elif t == DRAKEN_INT16:
+            with nogil:
+                _avg_accumulate_int(<const int16_t*>uv.data, sel, nulls, state_indices, sums, counts, n_rows)
+        elif t == DRAKEN_INT32:
+            with nogil:
+                _avg_accumulate_int(<const int32_t*>uv.data, sel, nulls, state_indices, sums, counts, n_rows)
+        elif t == DRAKEN_INT64:
+            with nogil:
+                _avg_accumulate_int(<const int64_t*>uv.data, sel, nulls, state_indices, sums, counts, n_rows)
         else:
-            # Default to FLOAT64 (also handles other numerics via reinterpret).
+            # FLOAT64 (and other 8-byte numerics via reinterpret).
             f64 = <double*>uv.data
             with nogil:
                 for i in range(n_rows):

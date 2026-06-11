@@ -19,9 +19,9 @@ from opteryx.models import QueryProperties
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 from opteryx.tracing.event_recorder import record_event as _trace_record
-from opteryx.vectors.vector_types import get_vector_source_identifier
-from opteryx.vectors.vector_types import node_is_numeric_vector
-from opteryx.vectors.vector_types import node_is_vector_query_expression
+from opteryx.types.vector_types import get_vector_source_identifier
+from opteryx.types.vector_types import node_is_numeric_vector
+from opteryx.types.vector_types import node_is_vector_query_expression
 
 # BasePlanNode in scope via textual include from _operators.pyx.
 
@@ -37,7 +37,7 @@ from draken.core.buffers cimport (
     DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
     DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_DECIMAL,
     DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_DATE32, DRAKEN_TIMESTAMP64,
-    DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_BOOL,
+    DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_BOOL, DRAKEN_INTERVAL,
 )
 
 # you may not use this file except in compliance with the License.
@@ -483,8 +483,10 @@ cdef inline int64_t _num_read_i64(void* data, DrakenType t, uint32_t idx) noexce
         return <int64_t>(<int16_t*>data)[idx]
     elif t == DRAKEN_INT8:
         return <int64_t>(<int8_t*>data)[idx]
-    else:  # DRAKEN_BOOL
-        return <int64_t>((<uint8_t*>data)[idx] & 1)
+    else:  # DRAKEN_BOOL — bit-packed 1 bit/row LSB-first, NOT a byte array.
+        # Byte-indexing here read the value of row idx*8 and overran the
+        # ~n/8-byte buffer for idx >= n/8.
+        return <int64_t>(((<uint8_t*>data)[idx >> 3] >> (idx & 7)) & 1)
 
 
 cdef inline double _num_read_f64(void* data, DrakenType t, uint32_t idx) noexcept nogil:
@@ -572,6 +574,22 @@ cdef struct ColMeta:
     void*              data        # numeric data ptr (kind 0/1)
 
 
+# INTERVAL total-order key: months * INTERVAL_MONTH_MS + ms (matches
+# draken_vector_compare_at's DRAKEN_INTERVAL branch). The slot is laid out as
+# [int64 months][int64 ms], so we read it as int64 pairs without the struct type.
+DEF _INTERVAL_MONTH_MS = 2592000000
+
+cdef inline void _build_interval_keys(DrakenVector* dv, int64_t* out) noexcept nogil:
+    cdef int64_t* d = <int64_t*>dv.data
+    cdef const uint32_t* sel = dv.selection
+    cdef Py_ssize_t n = dv.length
+    cdef Py_ssize_t i
+    cdef uint32_t s
+    for i in range(n):
+        s = sel[i]
+        out[i] = d[2 * s] * <int64_t>_INTERVAL_MONTH_MS + d[2 * s + 1]
+
+
 cdef inline int _cmp_multi(ColMeta* cols, Py_ssize_t ncols, Py_ssize_t a, Py_ssize_t b) noexcept nogil:
     cdef Py_ssize_t c
     cdef ColMeta* m
@@ -594,6 +612,10 @@ cdef inline int _cmp_multi(ColMeta* cols, Py_ssize_t ncols, Py_ssize_t a, Py_ssi
                 cc = -1 if ka < kb else 1
             else:
                 cc = str_compare(&m.slots[m.sel[a]], m.arena, &m.slots[m.sel[b]], m.arena)
+        elif m.kind == 3:
+            # interval: full order is the precomputed total_ms key (no tiebreak).
+            ka = m.pkeys[a]; kb = m.pkeys[b]
+            cc = 0 if ka == kb else (-1 if ka < kb else 1)
         elif m.kind == 1:
             cc = _num_cmp_f64(_num_read_f64(m.data, m.dtype, m.sel[a]),
                               _num_read_f64(m.data, m.dtype, m.sel[b]))
@@ -841,6 +863,13 @@ cdef class HeapSortNode(BasePlanNode):
                       or t == DRAKEN_TIME32 or t == DRAKEN_TIME64 or t == DRAKEN_BOOL):
                     cols[c].kind = 0
                     cols[c].data = dv.data
+                elif t == DRAKEN_INTERVAL:
+                    cols[c].kind = 3
+                    cols[c].data = NULL
+                    cols[c].pkeys = <int64_t*>PyMem_Malloc(n * sizeof(int64_t))
+                    if cols[c].pkeys == NULL:
+                        raise MemoryError()
+                    _build_interval_keys(dv, cols[c].pkeys)
                 else:
                     supported = False
                     break
@@ -902,6 +931,13 @@ cdef class HeapSortNode(BasePlanNode):
         fast_path = self._top_n_single_key_compressed(morsel, vector, descending, k)
         if fast_path is not None:
             return fast_path
+
+        # INTERVAL (and any other type the native multi-key comparator supports):
+        # reuse _top_n_multi_key_keyed, which handles ncols==1, instead of the
+        # per-comparison compare_at heap below.
+        keyed = self._top_n_multi_key_keyed(morsel, k)
+        if keyed is not None:
+            return keyed
 
         return self._top_n_single_key_vector(morsel, vector, descending, k)
 

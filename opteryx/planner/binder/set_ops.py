@@ -263,7 +263,8 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         else:
             elem_ct_unnest = _lt.VARCHAR
 
-        schema_column = SchemaColumn(name=node.unnest_alias, column_type=elem_ct_unnest)
+        from opteryx.types.schema import mint_column_identity
+        schema_column = SchemaColumn(name=node.unnest_alias, column_type=elem_ct_unnest, identity=mint_column_identity(node.unnest_alias, node.unnest_alias))
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
             node_type=NodeType.IDENTIFIER,

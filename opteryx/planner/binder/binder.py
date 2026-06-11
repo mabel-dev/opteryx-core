@@ -129,6 +129,39 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
     return None
 
 
+def _copy_relation_schema(schema: RelationSchema) -> RelationSchema:
+    """Copy a RelationSchema for branch isolation during expression binding.
+
+    ``merge_schemas`` previously ``deepcopy``'d each schema, which recursed into
+    every column's ``column_type`` (ColumnType + LogicalType) — by far the most
+    expensive part of binding a wide relation. That deep recursion is
+    unnecessary: ``column_type`` is only ever *replaced* on a column during
+    binding (binder.py rebinds the attribute), never mutated in place, so the
+    type carrier can be shared by reference.
+
+    What *is* mutated in place during binding is the column's own metadata —
+    ``identity``, ``aliases`` (appended to), and ``origin`` (assigned). Each
+    column therefore gets its own ``SchemaColumn`` with detached mutable lists,
+    while the immutable ``column_type`` is shared. Nested STRUCT ``fields`` are
+    rare and may themselves be rebound, so they are deep-copied when present.
+    """
+    new_schema = copy.copy(schema)  # shallow: shares the columns/aliases lists we overwrite below
+    new_columns = []
+    for col in schema.columns:
+        c = copy.copy(col)  # new column object; shares column_type, aliases, origin, fields refs
+        if c.aliases is not None:
+            c.aliases = list(c.aliases)
+        if c.origin is not None:
+            c.origin = list(c.origin)
+        if c.fields is not None:
+            c.fields = copy.deepcopy(c.fields)
+        new_columns.append(c)
+    new_schema.columns = new_columns
+    if schema.aliases is not None:
+        new_schema.aliases = list(schema.aliases)
+    return new_schema
+
+
 def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:
     """
     Handles the merging of relations, requiring a custom merge function.
@@ -153,7 +186,7 @@ def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSche
                         "Internal Error - merge_schemas expects schemas"
                     )
             else:
-                merged_dict[key] = copy.deepcopy(value)
+                merged_dict[key] = _copy_relation_schema(value)
     return merged_dict
 
 

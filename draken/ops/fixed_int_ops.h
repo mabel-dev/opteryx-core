@@ -88,6 +88,19 @@ static inline uint8_t* fi_copy_validity(const uint8_t* src, uint32_t n) {
     return dst;
 }
 
+static inline uint8_t* fi_normalize_validity(uint8_t* validity, uint32_t n) noexcept {
+    if (validity == nullptr) return nullptr;
+    const uint32_t nb = (n + 7u) >> 3;
+    for (uint32_t k = 0; k < nb; ++k) {
+        uint8_t expected = 0xFFu;
+        if (k == nb - 1u && (n & 7u) != 0u)
+            expected = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        if (validity[k] != expected) return validity;
+    }
+    draken_free(validity);
+    return nullptr;
+}
+
 static inline uint8_t* fi_combine_validity(
     const uint8_t* a, const uint8_t* b, uint32_t n)
 {
@@ -102,20 +115,8 @@ static inline uint8_t* fi_combine_validity(
         memcpy(out, a, nb);
     else
         memcpy(out, b, nb);
-    return out;
-}
-
-static inline uint8_t* fi_normalize_validity(uint8_t* validity, uint32_t n) noexcept {
-    if (validity == nullptr) return nullptr;
-    const uint32_t nb = (n + 7u) >> 3;
-    for (uint32_t k = 0; k < nb; ++k) {
-        uint8_t expected = 0xFFu;
-        if (k == nb - 1u && (n & 7u) != 0u)
-            expected = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
-        if (validity[k] != expected) return validity;
-    }
-    draken_free(validity);
-    return nullptr;
+    // Drop a fully-valid result so downstream takes the validity==nullptr path.
+    return fi_normalize_validity(out, n);
 }
 
 template<typename T>
@@ -168,6 +169,42 @@ static inline void fixed_int_hash(
             for (uint32_t j = 0; j < block; ++j)
                 scratch[j] = static_cast<uint64_t>(
                     static_cast<int64_t>(data[v.selection[i + j]]));
+        }
+        simd_hash_i64(scratch, out + i, block);
+        i += block;
+    }
+}
+
+// ===========================================================================
+// HASH — DRAKEN_BOOL: bit-packed (1 bit/value), accessed via the uniform
+// pattern data[selection[i]] at bit granularity:
+//   bit = (data[code >> 3] >> (code & 7)) & 1   where code = selection[i]
+// Seed is the bit value (0 or 1) widened to uint64_t; null rows bake NULL_HASH.
+// Matches fixed_int_hash's branchless null-select so true/false/null collide
+// consistently across the dense and compressed (data_length distinct) paths.
+// ===========================================================================
+static inline void hash_bool(const DrakenVector& v, uint64_t* out, uint32_t n) {
+    if (n == 0) return;
+    const uint8_t* data     = static_cast<const uint8_t*>(v.data);
+    const uint8_t* validity = v.validity;
+    uint64_t scratch[1024];
+
+    uint32_t i = 0;
+    while (i < n) {
+        const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+        if (validity != nullptr) {
+            for (uint32_t j = 0; j < block; ++j) {
+                const uint64_t is_valid =
+                    (validity[(i + j) >> 3] >> ((i + j) & 7)) & 1u;
+                const uint32_t code = v.selection[i + j];
+                const uint64_t raw  = (data[code >> 3] >> (code & 7u)) & 1u;
+                scratch[j] = (raw * is_valid) | (NULL_HASH * (1u - is_valid));
+            }
+        } else {
+            for (uint32_t j = 0; j < block; ++j) {
+                const uint32_t code = v.selection[i + j];
+                scratch[j] = (data[code >> 3] >> (code & 7u)) & 1u;
+            }
         }
         simd_hash_i64(scratch, out + i, block);
         i += block;
@@ -1092,7 +1129,9 @@ static inline VecResult fixed_int_slice(const DrakenVector& v, uint32_t start, u
 
     T* dst = fi_alloc<T>(n);
 
-    if (v.data_length == v.length) {
+    // Physical memcpy valid ONLY when selection is identity; data_length==length
+    // also admits a PERMUTATION which would silently reorder. Require IDENTITY.
+    if (draken_is_dense(&v) && (v.flags & DRAKEN_SEL_IDENTITY)) {
         std::memcpy(dst, data + start, n * sizeof(T));
     } else {
         for (uint32_t i = 0; i < n; ++i)

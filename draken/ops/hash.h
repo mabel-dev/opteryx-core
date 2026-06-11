@@ -194,6 +194,10 @@ static inline void hash_int64(const DrakenVector& v, uint64_t* out, uint32_t n) 
                     (static_cast<uint64_t>(data[v.selection[i + j]]) * is_valid)
                     | (NULL_HASH * (1u - is_valid));
             }
+        } else if (v.flags & DRAKEN_SEL_IDENTITY) {
+            // Identity selection → contiguous copy (vectorisable), no gather.
+            for (uint32_t j = 0; j < block; ++j)
+                scratch[j] = static_cast<uint64_t>(data[i + j]);
         } else {
             for (uint32_t j = 0; j < block; ++j) {
                 scratch[j] = static_cast<uint64_t>(data[v.selection[i + j]]);
@@ -281,6 +285,11 @@ struct OpsTable {
         // C.4 — predicates
         entries[DRAKEN_INT64].between        = draken::ops::i64_between;
         entries[DRAKEN_INT64].in_list        = draken::ops::i64_in_list;
+
+        // BOOL — bit-packed hash kernel; keying for GROUP BY / DISTINCT / JOIN
+        // on a boolean key. Storage/compare/take handled elsewhere; only the
+        // keying hash slot lives here.
+        entries[DRAKEN_BOOL].hash          = draken::ops::hash_bool;
 
         // D.6 — INT8
         entries[DRAKEN_INT8].hash          = draken::ops::hash_int8;

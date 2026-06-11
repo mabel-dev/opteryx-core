@@ -264,7 +264,8 @@ def rugo_to_relation_schema(
             _ct = _lt.DECIMAL(precision, scale)
         else:
             _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
-        columns.append(SchemaColumn(name=name, column_type=_ct, nullable=nullable))
+        from opteryx.types.schema import mint_column_identity
+        columns.append(SchemaColumn(name=name, column_type=_ct, nullable=nullable, identity=mint_column_identity(schema_name, name)))
 
     if not columns:
         raise ValueError("No columns could be derived from rugo metadata")
@@ -373,7 +374,8 @@ def jsonl_to_sql_schema(
 
         sql_type = _map_jsonl_type_to_sql(jsonl_type)
         from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
-        columns.append(SchemaColumn(name=name, column_type=_CATEGORY_TO_CANONICAL.get(sql_type), nullable=nullable))
+        from opteryx.types.schema import mint_column_identity
+        columns.append(SchemaColumn(name=name, column_type=_CATEGORY_TO_CANONICAL.get(sql_type), nullable=nullable, identity=mint_column_identity(schema_name, name)))
 
     if not columns:
         raise ValueError("No columns could be derived from jsonl schema")

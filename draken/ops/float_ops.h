@@ -136,20 +136,6 @@ static inline uint8_t* fp_copy_validity(const uint8_t* src, uint32_t n) {
     return dst;
 }
 
-static inline uint8_t* fp_combine_validity(
-    const uint8_t* a, const uint8_t* b, uint32_t n)
-{
-    if (a == nullptr && b == nullptr) return nullptr;
-    const uint32_t nb = (n + 7u) >> 3;
-    uint8_t* out = static_cast<uint8_t*>(draken_malloc(nb > 0u ? nb : 1u));
-    if (!out) throw std::bad_alloc();
-    if (a != nullptr && b != nullptr)
-        for (uint32_t k = 0; k < nb; ++k) out[k] = a[k] & b[k];
-    else if (a != nullptr) std::memcpy(out, a, nb);
-    else                   std::memcpy(out, b, nb);
-    return out;
-}
-
 static inline uint8_t* fp_normalize_validity(uint8_t* validity, uint32_t n) noexcept {
     if (validity == nullptr) return nullptr;
     const uint32_t nb = (n + 7u) >> 3;
@@ -161,6 +147,21 @@ static inline uint8_t* fp_normalize_validity(uint8_t* validity, uint32_t n) noex
     }
     draken_free(validity);
     return nullptr;
+}
+
+static inline uint8_t* fp_combine_validity(
+    const uint8_t* a, const uint8_t* b, uint32_t n)
+{
+    if (a == nullptr && b == nullptr) return nullptr;
+    const uint32_t nb = (n + 7u) >> 3;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc(nb > 0u ? nb : 1u));
+    if (!out) throw std::bad_alloc();
+    if (a != nullptr && b != nullptr)
+        for (uint32_t k = 0; k < nb; ++k) out[k] = a[k] & b[k];
+    else if (a != nullptr) std::memcpy(out, a, nb);
+    else                   std::memcpy(out, b, nb);
+    // Drop a fully-valid result so downstream takes the validity==nullptr path.
+    return fp_normalize_validity(out, n);
 }
 
 template<typename T>
@@ -226,11 +227,79 @@ struct FpCmpGe { template<typename T> static bool apply(T a, T b) noexcept { ret
 struct FpCmpLt { template<typename T> static bool apply(T a, T b) noexcept { return fp_total_lt(a, b); } };
 struct FpCmpLe { template<typename T> static bool apply(T a, T b) noexcept { return fp_total_le(a, b); } };
 
+// Inner kernel: 8-way byte-pack. Identity==true indexes data[pos] directly
+// (vectorisable); false gathers data[selection[pos]]. Same answer (hint, §11).
+template<typename T, typename Op, bool Identity>
+static inline void fp_cmp_scalar_kernel(
+    const T* data, const uint32_t* selection, T scalar,
+    const uint8_t* src_null, uint8_t* dst, uint32_t n)
+{
+    const uint32_t whole_bytes = n >> 3;
+    auto at = [&](uint32_t pos) -> T {
+        if constexpr (Identity) return data[pos];
+        else                    return data[selection[pos]];
+    };
+    if (src_null == nullptr) {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            dst[b] = static_cast<uint8_t>(
+                (static_cast<unsigned>(Op::template apply<T>(at(base+0), scalar)) << 0) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+1), scalar)) << 1) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+2), scalar)) << 2) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+3), scalar)) << 3) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+4), scalar)) << 4) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+5), scalar)) << 5) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+6), scalar)) << 6) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+7), scalar)) << 7));
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if (Op::template apply<T>(at(i), scalar))
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            const uint8_t m = static_cast<uint8_t>(
+                (static_cast<unsigned>(Op::template apply<T>(at(base+0), scalar)) << 0) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+1), scalar)) << 1) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+2), scalar)) << 2) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+3), scalar)) << 3) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+4), scalar)) << 4) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+5), scalar)) << 5) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+6), scalar)) << 6) |
+                (static_cast<unsigned>(Op::template apply<T>(at(base+7), scalar)) << 7));
+            dst[b] = static_cast<uint8_t>(m & src_null[b]);
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if ((src_null[i >> 3] >> (i & 7)) & 1u)
+                if (Op::template apply<T>(at(i), scalar))
+                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+}
+
 template<typename T, typename Op>
 static inline VecResult fp_compare_scalar_impl(const DrakenVector& v, T scalar) {
     const uint32_t n        = v.length;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
+
+    // Constant: one predicate broadcast (CLAUDE.md §11, approved 2026-06-11).
+    if (draken_is_constant(&v))
+        return cmp_constant_bool_result(Op::template apply<T>(data[0], scalar), src_null, n);
+
+    // Dict: evaluate the predicate once per unique value, scatter through codes.
+    // Uses the identical Op as the dense path, so NaN/-0 handling matches exactly.
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k)
+            db[k] = Op::template apply<T>(data[k], scalar) ? 1u : 0u;
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
 
     uint8_t* dst      = cmp_alloc_bool_buf(n);
     uint8_t* out_null = nullptr;
@@ -239,42 +308,10 @@ static inline VecResult fp_compare_scalar_impl(const DrakenVector& v, T scalar) 
         catch (...) { draken_free(dst); throw; }
     }
 
-    const uint32_t whole_bytes = n >> 3;
-    if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+0]], scalar)) << 0) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+1]], scalar)) << 1) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+2]], scalar)) << 2) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+3]], scalar)) << 3) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+4]], scalar)) << 4) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+5]], scalar)) << 5) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+6]], scalar)) << 6) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+7]], scalar)) << 7));
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i)
-            if (Op::template apply<T>(data[v.selection[i]], scalar))
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-    } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+0]], scalar)) << 0) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+1]], scalar)) << 1) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+2]], scalar)) << 2) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+3]], scalar)) << 3) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+4]], scalar)) << 4) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+5]], scalar)) << 5) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+6]], scalar)) << 6) |
-                (static_cast<unsigned>(Op::template apply<T>(data[v.selection[base+7]], scalar)) << 7));
-            dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i)
-            if ((src_null[i >> 3] >> (i & 7)) & 1u)
-                if (Op::template apply<T>(data[v.selection[i]], scalar))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-    }
+    if (v.flags & DRAKEN_SEL_IDENTITY)
+        fp_cmp_scalar_kernel<T, Op, true >(data, v.selection, scalar, src_null, dst, n);
+    else
+        fp_cmp_scalar_kernel<T, Op, false>(data, v.selection, scalar, src_null, dst, n);
 
     VecResult r;
     r.data = dst; r.validity = out_null;
@@ -789,6 +826,29 @@ static inline VecResult fp_between_impl(const DrakenVector& v, T lo, T hi) {
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
 
+    // Per-value BETWEEN predicate (identical to the dense loop below, so the
+    // shape fast paths produce byte-identical answers incl. NaN/-0).
+    auto pred = [&](T val) -> bool {
+        const bool lo_ok = lo_incl ? fp_total_le(lo, val) : fp_total_lt(lo, val);
+        const bool hi_ok = hi_incl ? fp_total_le(val, hi) : fp_total_lt(val, hi);
+        return lo_ok && hi_ok;
+    };
+
+    // Constant / dict shape fast paths (CLAUDE.md §11, approved 2026-06-11).
+    if (draken_is_constant(&v))
+        return cmp_constant_bool_result(pred(data[0]), src_null, n);
+    if (draken_is_dict(&v)) {
+        const uint32_t dl = v.data_length;
+        uint8_t* db = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!db) throw std::bad_alloc();
+        for (uint32_t k = 0; k < dl; ++k) db[k] = pred(data[k]) ? 1u : 0u;
+        VecResult r;
+        try { r = cmp_dict_bool_result(db, v); }
+        catch (...) { draken_free(db); throw; }
+        draken_free(db);
+        return r;
+    }
+
     uint8_t* dst      = cmp_alloc_bool_buf(n);
     uint8_t* out_null = nullptr;
     if (src_null != nullptr) {
@@ -965,7 +1025,9 @@ static inline VecResult float_slice(const DrakenVector& v, uint32_t start, uint3
 
     T* dst = fp_alloc<T>(n);
 
-    if (v.data_length == v.length) {
+    // Physical memcpy valid ONLY when selection is identity; data_length==length
+    // also admits a PERMUTATION which would silently reorder. Require IDENTITY.
+    if (draken_is_dense(&v) && (v.flags & DRAKEN_SEL_IDENTITY)) {
         std::memcpy(dst, data + start, n * sizeof(T));
     } else {
         for (uint32_t i = 0; i < n; ++i)

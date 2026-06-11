@@ -15,6 +15,13 @@ from opteryx.utils import random_string
 class ExpressionColumn(SchemaColumn):
     expression: object = None
 
+    def __post_init__(self):
+        # Expression/predicate columns are computed, not relation-sourced; mint a
+        # unique `$derived_` identity rather than hitting the base-class raise.
+        if self.identity is None:
+            self.identity = f"$derived_{random_string(8)}".encode("utf-8")
+        super().__post_init__()
+
 
 cpdef str _format_interval(value):
     """Render an interval (months, microseconds) as a SQL INTERVAL literal."""

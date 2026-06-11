@@ -1,0 +1,84 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+"""WP-9: EXPLAIN renders a readable operator tree + optimizer-decision trace.
+
+Previously plain EXPLAIN emitted an opaque ``identity / bytes_in / bytes_out``
+table with no operator names or structure. It now emits:
+  * a ``tree`` column — the indented operator tree (with ├─/└─ branches),
+  * a ``details`` column — each operator's config,
+  * an OPTIMIZATIONS section listing which optimizer rules fired,
+  * and, for EXPLAIN ANALYZE, ``rows`` and ``time_ms`` columns.
+"""
+
+import os
+import sys
+
+sys.path.insert(1, os.path.join(sys.path[0], "../.."))
+
+import pytest
+
+import opteryx
+
+
+def _explain(sql):
+    """Return (column_names, {col: [values]}) for the first EXPLAIN morsel."""
+    morsel = list(opteryx.session().execute_to_morsels(sql))[0]
+    names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
+    data = {n: morsel.column(morsel.column_names[i]).to_pylist() for i, n in enumerate(names)}
+    return names, data
+
+
+_JOIN_QUERY = (
+    "SELECT r_name, COUNT(*) FROM testdata.tpch_001.region r "
+    "JOIN testdata.tpch_001.nation n ON r.r_regionkey = n.n_regionkey "
+    "WHERE n.n_nationkey > 2 GROUP BY r_name"
+)
+
+
+def test_explain_has_tree_and_details_columns():
+    names, _ = _explain("EXPLAIN SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
+    assert names[:2] == ["tree", "details"]
+    # plain EXPLAIN must NOT carry analyze-only columns
+    assert "time_ms" not in names
+
+
+def test_explain_tree_shows_operator_names_and_branches():
+    _, data = _explain("EXPLAIN " + _JOIN_QUERY)
+    tree = data["tree"]
+    joined = "\n".join(tree)
+    # operator names appear (not opaque identity hashes)
+    assert any("Parquet Read" in line for line in tree), tree
+    assert any("Join" in line for line in tree), tree
+    assert any("Aggregate" in line for line in tree), tree
+    # the tree is actually indented with branch characters
+    assert "├─ " in joined or "└─ " in joined, joined
+
+
+def test_explain_lists_optimizations():
+    _, data = _explain("EXPLAIN " + _JOIN_QUERY)
+    tree = data["tree"]
+    assert "OPTIMIZATIONS" in tree, tree
+    # at least one named optimizer rule under the section (predicate pushdown fires here)
+    idx = tree.index("OPTIMIZATIONS")
+    rules = tree[idx + 1 :]
+    assert any("predicate pushdown" in r for r in rules), rules
+
+
+def test_explain_analyze_adds_stats_columns():
+    names, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
+    assert names == ["tree", "details", "rows", "time_ms"]
+    # the single scan's row count surfaces (5 nations in region 1)
+    assert max(data["rows"]) == 5, data["rows"]
+
+
+def test_explain_mermaid_unchanged():
+    names, data = _explain("EXPLAIN ANALYZE FORMAT MERMAID SELECT name FROM $planets")
+    assert names == ["plan"]
+    assert data["plan"][0].startswith("flowchart")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-v"])

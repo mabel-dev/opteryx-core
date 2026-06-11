@@ -58,7 +58,7 @@ VecResult draken_add(void* ctx, const DrakenVector* left, const DrakenVector* ri
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
         }
 
@@ -101,7 +101,7 @@ VecResult draken_add(void* ctx, const DrakenVector* left, const DrakenVector* ri
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
 
             return result;
         } else if ((left->type == DRAKEN_INT64 || left->type == DRAKEN_FLOAT64) &&
@@ -141,12 +141,12 @@ VecResult draken_add(void* ctx, const DrakenVector* left, const DrakenVector* ri
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_FLOAT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
 
             return result;
         } else {
@@ -183,12 +183,12 @@ VecResult draken_subtract(void* ctx, const DrakenVector* left, const DrakenVecto
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
         }
 
@@ -223,14 +223,15 @@ VecResult draken_subtract(void* ctx, const DrakenVector* left, const DrakenVecto
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
-        } else {
+        } else if ((left->type == DRAKEN_INT64 || left->type == DRAKEN_FLOAT64) &&
+                   (right->type == DRAKEN_INT64 || right->type == DRAKEN_FLOAT64)) {
             // Mixed or FLOAT64 → FLOAT64
             uint32_t n = left->length;
             auto* out_data = static_cast<double*>(draken_malloc(n * sizeof(double)));
@@ -265,13 +266,17 @@ VecResult draken_subtract(void* ctx, const DrakenVector* left, const DrakenVecto
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_FLOAT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
+        } else {
+            return draken_error_sentinel_fmt(
+                "Unsupported types for subtraction: left=%d, right=%d",
+                left->type, right->type);
         }
     });
 }
@@ -302,12 +307,12 @@ VecResult draken_multiply(void* ctx, const DrakenVector* left, const DrakenVecto
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
         }
 
@@ -342,14 +347,15 @@ VecResult draken_multiply(void* ctx, const DrakenVector* left, const DrakenVecto
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
-        } else {
+        } else if ((left->type == DRAKEN_INT64 || left->type == DRAKEN_FLOAT64) &&
+                   (right->type == DRAKEN_INT64 || right->type == DRAKEN_FLOAT64)) {
             uint32_t n = left->length;
             auto* out_data = static_cast<double*>(draken_malloc(n * sizeof(double)));
             if (!out_data) return draken_error_sentinel("Allocation failed");
@@ -383,13 +389,17 @@ VecResult draken_multiply(void* ctx, const DrakenVector* left, const DrakenVecto
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_FLOAT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
+        } else {
+            return draken_error_sentinel_fmt(
+                "Unsupported types for multiplication: left=%d, right=%d",
+                left->type, right->type);
         }
     });
 }
@@ -421,13 +431,20 @@ VecResult draken_divide(void* ctx, const DrakenVector* left, const DrakenVector*
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_FLOAT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
+        }
+
+        if ((left->type != DRAKEN_INT64 && left->type != DRAKEN_FLOAT64) ||
+            (right->type != DRAKEN_INT64 && right->type != DRAKEN_FLOAT64)) {
+            return draken_error_sentinel_fmt(
+                "Unsupported types for division: left=%d, right=%d",
+                left->type, right->type);
         }
 
         uint32_t n = left->length;
@@ -468,12 +485,12 @@ VecResult draken_divide(void* ctx, const DrakenVector* left, const DrakenVector*
         VecResult result;
         result.data = out_data;
         result.validity = out_validity;
-        result.selection = left->selection;
+        result.selection = draken_identity_sel(n);
         result.owns_selection = false;
         result.data_length = n;
         result.length = n;
         result.type = DRAKEN_FLOAT64;
-        result.flags = 0;
+        result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
         return result;
     });
 }
@@ -505,12 +522,12 @@ VecResult draken_modulo(void* ctx, const DrakenVector* left, const DrakenVector*
             VecResult result;
             result.data = out_data;
             result.validity = out_validity;
-            result.selection = left->selection;
+            result.selection = draken_identity_sel(n);
             result.owns_selection = false;
             result.data_length = n;
             result.length = n;
             result.type = DRAKEN_INT64;
-            result.flags = 0;
+            result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             return result;
         }
 
@@ -556,12 +573,12 @@ VecResult draken_modulo(void* ctx, const DrakenVector* left, const DrakenVector*
         VecResult result;
         result.data = out_data;
         result.validity = out_validity;
-        result.selection = left->selection;
+        result.selection = draken_identity_sel(n);
         result.owns_selection = false;
         result.data_length = n;
         result.length = n;
         result.type = DRAKEN_INT64;
-        result.flags = 0;
+        result.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
         return result;
     });
 }

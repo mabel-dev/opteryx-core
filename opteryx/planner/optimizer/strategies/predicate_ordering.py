@@ -10,20 +10,21 @@ Type: Cost
 Goal: Faster Execution
 
 We combine adjacent predicates into chains of ANDed conditions in a single
-filtering step. We use cost estimates based on the data type to determine
-a good order to execute the filters.
+filtering step. We order the filters by estimated cost-per-row weighted by
+selectivity, so the cheapest, most-reducing predicates run first.
 
-NOTE: This currently doesn't account for a few very important things which
-means this may create an order that is slower than the order that would have
-been run if this strategy didn't run.
+Selectivity is statistics-driven (histograms / NDV / null fractions) when the
+input relation carries refreshed ``RelationStatistics``; otherwise it falls
+back to conservative operator-keyed constants.
 
-- The selectivity of the filter
-- How to handle complex sub conditions or ORed conditions
+NOTE: still limited for ORed conditions and complex sub-conditions, which are
+appended after the simple predicates in their original order.
 """
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
+from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
@@ -147,27 +148,37 @@ def _order_complex_predicates(predicates, telemetry):
     return ordered
 
 
-def _resolve_predicate_stats(condition) -> PredicateStats:
+def _resolve_predicate_stats(condition, relation_stats=None) -> PredicateStats:
     """Build pre-resolved selectivity/cost for a single simple predicate.
 
-    Selectivity comes from ``DEFAULT_SELECTIVITY`` keyed on the comparison
-    operator; cost comes from ``OPERATION_COSTS`` (op-specific override) or
-    ``BASIC_COMPARISON_COSTS`` keyed on the column type. Manifest-driven
-    selectivity is a planned follow-up and not wired here.
+    Selectivity is statistics-driven when ``relation_stats`` (the input
+    relation's ``RelationStatistics``) is available: ``estimate_selectivity``
+    consults histograms, NDV and null fractions, degrading internally to
+    textbook constants. When no statistics are attached we fall back to the
+    operator-keyed ``DEFAULT_SELECTIVITY`` constants. Cost comes from
+    ``OPERATION_COSTS`` (op-specific override) or ``BASIC_COMPARISON_COSTS``
+    keyed on the column type.
     """
+    if relation_stats is not None:
+        selectivity = estimate_selectivity(condition, relation_stats)
+    else:
+        selectivity = _estimate_selectivity(condition)
     return PredicateStats(
-        selectivity=_estimate_selectivity(condition),
+        selectivity=selectivity,
         cost=_base_cost(condition),
     )
 
 
-def _order_simple_predicates(predicates, telemetry):
+def _order_simple_predicates(predicates, telemetry, relation_stats=None):
     """Order simple (non-function) predicates via the cost-estimation module."""
 
     if len(predicates) <= 1:
         return predicates
 
-    indexed = [(i, _resolve_predicate_stats(p.condition)) for i, p in enumerate(predicates)]
+    indexed = [
+        (i, _resolve_predicate_stats(p.condition, relation_stats))
+        for i, p in enumerate(predicates)
+    ]
     order = _order_predicates(indexed)
     ordered = [predicates[i] for i in order]
 
@@ -253,12 +264,14 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
     return predicate
 
 
-def order_predicates(predicates: list, telemetry) -> list:
+def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:
     """
-    Order predicates using simple selectivity/cost heuristics.
+    Order predicates using selectivity/cost heuristics.
 
     - Simple column-vs-literal comparisons are ordered first using brute-force
-      (up to small N) with conservative selectivities.
+      (up to small N). Selectivity is statistics-driven via ``relation_stats``
+      (the input relation's ``RelationStatistics``) when available, else
+      conservative constants.
     - Predicates involving functions (or non-comparison forms) are appended
       after the ordered simple predicates, preserving their original order.
     """
@@ -277,7 +290,7 @@ def order_predicates(predicates: list, telemetry) -> list:
 
         simple.append(pred)
 
-    ordered_simple = _order_simple_predicates(simple, telemetry)
+    ordered_simple = _order_simple_predicates(simple, telemetry, relation_stats)
     ordered_complex = _order_complex_predicates(complex_preds, telemetry)
 
     # Maintain original order for complex/function predicates appended after simples
@@ -303,8 +316,11 @@ class PredicateOrderingStrategy(OptimizationStrategy):
 
             new_node = LogicalPlanNode(LogicalPlanStepType.Filter)
             new_node.condition = Node(node_type=NodeType.DNF)
+            # `node` is the node feeding the collected filter chain; its refreshed
+            # statistics are the input relation the predicates filter against.
+            relation_stats = getattr(node, "statistics", None)
             context.collected_predicates = order_predicates(
-                context.collected_predicates, self.telemetry
+                context.collected_predicates, self.telemetry, relation_stats
             )
             new_node.condition.parameters = [c.condition for c in context.collected_predicates]
             new_node.columns = []

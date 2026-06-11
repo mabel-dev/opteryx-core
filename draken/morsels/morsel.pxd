@@ -1,9 +1,9 @@
 # Morsel cdef-class for Cython consumers.
 #
-# Morsel wraps a nanobind Morsel handle (_nb), a Python list of column names,
-# and a C++ vector of column Vector objects (strong references). Cdef methods
-# declared here give operator code (distinct, hash joins, group-by) C-level
-# access without GIL acquisition per row.
+# Morsel holds a Python list of column names and a C++ vector of column Vector
+# objects (strong references) — the single authoritative column store. Cdef
+# methods declared here give operator code (distinct, hash joins, group-by)
+# C-level access without GIL acquisition per row.
 
 from libc.stdint cimport int32_t, uint64_t
 
@@ -14,7 +14,6 @@ from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 
 cdef class Morsel:
-    cdef object _nb
     cdef public list _col_names
     # Column store: C++ vector of borrowed-then-INCREF'd Vector objects. NOT a
     # Python list — indexing one would force a GIL acquisition per access in

@@ -52,22 +52,47 @@
 
 namespace rugo {
 
+// ── ByteSink: one writer, two modes ─────────────────────────────────────────
+// A serialize pass runs over a ByteSink. With buf == nullptr it COUNTS (advance
+// only bumps pos); with buf set it WRITES into that buffer. Size and write use
+// the EXACT SAME code path, so the computed size and the bytes written can never
+// diverge — the only way to break it is to forget an `if (p)` guard around a
+// raw-pointer write loop, which null-derefs on the very first count pass (loud,
+// caught immediately) rather than corrupting memory.
+//
+// This lets a worker compute the exact serialized size, reserve precisely that
+// many bytes from the MemoryPool, and serialize directly into the reserved
+// region — eliminating the intermediate heap vector + the commit() memcpy.
+struct ByteSink {
+    uint8_t* buf;   // nullptr → count-only mode
+    size_t   pos;   // bytes written (write mode) / would-be written (count mode)
+
+    // Return a write pointer for the next n bytes (nullptr in count mode) and
+    // advance the position. Callers writing through the returned pointer MUST
+    // guard with `if (p)`.
+    inline uint8_t* advance(size_t n) {
+        uint8_t* p = buf ? buf + pos : nullptr;
+        pos += n;
+        return p;
+    }
+};
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
-static inline void write_u8(std::vector<uint8_t>& out, uint8_t v) {
-    out.push_back(v);
+static inline void write_u8(ByteSink& out, uint8_t v) {
+    uint8_t* p = out.advance(1);
+    if (p) *p = v;
 }
 
-static inline void write_u32(std::vector<uint8_t>& out, uint32_t v) {
-    out.resize(out.size() + 4);
-    std::memcpy(out.data() + out.size() - 4, &v, 4);
+static inline void write_u32(ByteSink& out, uint32_t v) {
+    uint8_t* p = out.advance(4);
+    if (p) std::memcpy(p, &v, 4);
 }
 
-static inline void write_bytes(std::vector<uint8_t>& out, const void* src, size_t n) {
+static inline void write_bytes(ByteSink& out, const void* src, size_t n) {
     if (n == 0) return;
-    size_t pos = out.size();
-    out.resize(pos + n);
-    std::memcpy(out.data() + pos, src, n);
+    uint8_t* p = out.advance(n);
+    if (p) std::memcpy(p, src, n);
 }
 
 static inline uint8_t code_width_for(size_t dict_size) {
@@ -77,12 +102,11 @@ static inline uint8_t code_width_for(size_t dict_size) {
 }
 
 // Pack plain int32 codes into code_width bytes each.
-static inline void pack_codes(std::vector<uint8_t>& out,
+static inline void pack_codes(ByteSink& out,
                                const std::vector<int32_t>& codes,
                                uint8_t cw) {
-    size_t pos = out.size();
-    out.resize(pos + codes.size() * cw);
-    uint8_t* dst = out.data() + pos;
+    uint8_t* dst = out.advance(codes.size() * cw);
+    if (!dst) return;
     for (size_t i = 0; i < codes.size(); ++i) {
         uint32_t c = static_cast<uint32_t>(codes[i]);
         if (cw == 1) {
@@ -98,7 +122,7 @@ static inline void pack_codes(std::vector<uint8_t>& out,
 
 // ── null bitmap ────────────────────────────────────────────────────────────
 
-static inline void write_null_bitmap(std::vector<uint8_t>& out,
+static inline void write_null_bitmap(ByteSink& out,
                                      const DecodedColumn& col) {
     uint32_t nbytes = 0;
     if (!col.valid_bits.empty()) {
@@ -116,7 +140,7 @@ static inline void write_null_bitmap(std::vector<uint8_t>& out,
 // the usual int32_values / dict_indices / dict_codes_array layout. The IPC
 // format is dense, so we expand here at serialize time.
 
-static void serialize_rle_int_as_int64(std::vector<uint8_t>& out,
+static void serialize_rle_int_as_int64(ByteSink& out,
                                        const DecodedColumn& col) {
     write_u8(out, 1);  // TAG_INT64
     write_u32(out, static_cast<uint32_t>(col.num_rows));
@@ -124,21 +148,21 @@ static void serialize_rle_int_as_int64(std::vector<uint8_t>& out,
 
     uint32_t data_len = static_cast<uint32_t>(col.num_rows) * 8;
     write_u32(out, data_len);
-    size_t pos = out.size();
-    out.resize(pos + data_len);
-    int64_t* dst = reinterpret_cast<int64_t*>(out.data() + pos);
-
-    size_t off = 0;
-    const size_t n_runs = col.rle_run_lengths.size();
-    for (size_t r = 0; r < n_runs; ++r) {
-        const int64_t v = col.rle_int64_values[r];
-        const int32_t cnt = col.rle_run_lengths[r];
-        for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
-        off += static_cast<size_t>(cnt);
+    uint8_t* raw = out.advance(data_len);
+    if (raw) {
+        int64_t* dst = reinterpret_cast<int64_t*>(raw);
+        size_t off = 0;
+        const size_t n_runs = col.rle_run_lengths.size();
+        for (size_t r = 0; r < n_runs; ++r) {
+            const int64_t v = col.rle_int64_values[r];
+            const int32_t cnt = col.rle_run_lengths[r];
+            for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
+            off += static_cast<size_t>(cnt);
+        }
     }
 }
 
-static void serialize_rle_float_as_float64(std::vector<uint8_t>& out,
+static void serialize_rle_float_as_float64(ByteSink& out,
                                            const DecodedColumn& col) {
     write_u8(out, 4);  // TAG_FLOAT64
     write_u32(out, static_cast<uint32_t>(col.num_rows));
@@ -146,21 +170,21 @@ static void serialize_rle_float_as_float64(std::vector<uint8_t>& out,
 
     uint32_t data_len = static_cast<uint32_t>(col.num_rows) * 8;
     write_u32(out, data_len);
-    size_t pos = out.size();
-    out.resize(pos + data_len);
-    double* dst = reinterpret_cast<double*>(out.data() + pos);
-
-    size_t off = 0;
-    const size_t n_runs = col.rle_run_lengths.size();
-    for (size_t r = 0; r < n_runs; ++r) {
-        const double v = col.rle_float64_values[r];
-        const int32_t cnt = col.rle_run_lengths[r];
-        for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
-        off += static_cast<size_t>(cnt);
+    uint8_t* raw = out.advance(data_len);
+    if (raw) {
+        double* dst = reinterpret_cast<double*>(raw);
+        size_t off = 0;
+        const size_t n_runs = col.rle_run_lengths.size();
+        for (size_t r = 0; r < n_runs; ++r) {
+            const double v = col.rle_float64_values[r];
+            const int32_t cnt = col.rle_run_lengths[r];
+            for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
+            off += static_cast<size_t>(cnt);
+        }
     }
 }
 
-static void serialize_rle_string_as_dict(std::vector<uint8_t>& out,
+static void serialize_rle_string_as_dict(ByteSink& out,
                                          const DecodedColumn& col) {
     // Preserve RLE-encoded strings as TAG_STR_DICT (6): runs are the dict
     // entries, per-row codes index the run.  This keeps data_length == num_runs
@@ -181,22 +205,22 @@ static void serialize_rle_string_as_dict(std::vector<uint8_t>& out,
     write_u32(out, codes_len);
 
     // Per-row codes: every row in run r gets code r.
-    size_t pos = out.size();
-    out.resize(pos + codes_len);
-    uint8_t* dst = out.data() + pos;
-    uint32_t row = 0;
-    for (uint32_t r = 0; r < dict_size; ++r) {
-        const int32_t cnt = col.rle_run_lengths[r];
-        for (int32_t j = 0; j < cnt; ++j) {
-            if (cw == 1) {
-                dst[row] = static_cast<uint8_t>(r);
-            } else if (cw == 2) {
-                uint16_t v = static_cast<uint16_t>(r);
-                std::memcpy(dst + row * 2, &v, 2);
-            } else {
-                std::memcpy(dst + row * 4, &r, 4);
+    uint8_t* dst = out.advance(codes_len);
+    if (dst) {
+        uint32_t row = 0;
+        for (uint32_t r = 0; r < dict_size; ++r) {
+            const int32_t cnt = col.rle_run_lengths[r];
+            for (int32_t j = 0; j < cnt; ++j) {
+                if (cw == 1) {
+                    dst[row] = static_cast<uint8_t>(r);
+                } else if (cw == 2) {
+                    uint16_t v = static_cast<uint16_t>(r);
+                    std::memcpy(dst + row * 2, &v, 2);
+                } else {
+                    std::memcpy(dst + row * 4, &r, 4);
+                }
+                ++row;
             }
-            ++row;
         }
     }
 
@@ -222,7 +246,7 @@ static void serialize_rle_string_as_dict(std::vector<uint8_t>& out,
 //        codes_len, codes[], values_len, values[].
 // dict_values must be a contiguous buffer of dict_size elements of width value_stride.
 
-static void serialize_numeric_dict(std::vector<uint8_t>& out,
+static void serialize_numeric_dict(ByteSink& out,
                                    uint8_t tag,
                                    const DecodedColumn& col,
                                    const void* dict_values,
@@ -244,21 +268,21 @@ static void serialize_numeric_dict(std::vector<uint8_t>& out,
         write_bytes(out, col.dict_codes_array.data(), codes_len);
     } else {
         // Sparse path: dict_indices contains only non-null entries; null rows get code 0.
-        size_t pos = out.size();
-        out.resize(pos + codes_len);
-        uint8_t* dst = out.data() + pos;
-        int32_t di_idx = 0;
-        for (int32_t row = 0; row < col.num_rows; ++row) {
-            bool is_null = !col.valid_bits.empty() &&
-                           !((col.valid_bits[row >> 3] >> (row & 7)) & 1);
-            uint32_t c = is_null ? 0 : static_cast<uint32_t>(col.dict_indices[di_idx++]);
-            if (cw == 1) {
-                dst[row] = static_cast<uint8_t>(c);
-            } else if (cw == 2) {
-                uint16_t v = static_cast<uint16_t>(c);
-                std::memcpy(dst + row * 2, &v, 2);
-            } else {
-                std::memcpy(dst + row * 4, &c, 4);
+        uint8_t* dst = out.advance(codes_len);
+        if (dst) {
+            int32_t di_idx = 0;
+            for (int32_t row = 0; row < col.num_rows; ++row) {
+                bool is_null = !col.valid_bits.empty() &&
+                               !((col.valid_bits[row >> 3] >> (row & 7)) & 1);
+                uint32_t c = is_null ? 0 : static_cast<uint32_t>(col.dict_indices[di_idx++]);
+                if (cw == 1) {
+                    dst[row] = static_cast<uint8_t>(c);
+                } else if (cw == 2) {
+                    uint16_t v = static_cast<uint16_t>(c);
+                    std::memcpy(dst + row * 2, &v, 2);
+                } else {
+                    std::memcpy(dst + row * 4, &c, 4);
+                }
             }
         }
     }
@@ -268,7 +292,7 @@ static void serialize_numeric_dict(std::vector<uint8_t>& out,
     write_bytes(out, dict_values, values_len);
 }
 
-static void serialize_int64(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_int64(ByteSink& out, const DecodedColumn& col) {
     if (!col.rle_int64_values.empty()) {
         serialize_rle_int_as_int64(out, col);
         return;
@@ -289,7 +313,7 @@ static void serialize_int64(std::vector<uint8_t>& out, const DecodedColumn& col)
     write_bytes(out, col.int64_values.data(), data_len);
 }
 
-static void serialize_int32(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_int32(ByteSink& out, const DecodedColumn& col) {
     if (!col.rle_int64_values.empty()) {
         // RLE path widened int32 → int64 in C++; emit as plain int64.
         serialize_rle_int_as_int64(out, col);
@@ -315,7 +339,7 @@ static void serialize_int32(std::vector<uint8_t>& out, const DecodedColumn& col)
     write_bytes(out, col.int32_values.data(), data_len);
 }
 
-static void serialize_float32(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_float32(ByteSink& out, const DecodedColumn& col) {
     if (!col.rle_float64_values.empty()) {
         // RLE path widened float32 → float64 in C++; emit as plain float64.
         serialize_rle_float_as_float64(out, col);
@@ -337,7 +361,7 @@ static void serialize_float32(std::vector<uint8_t>& out, const DecodedColumn& co
     write_bytes(out, col.float32_values.data(), data_len);
 }
 
-static void serialize_float64(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_float64(ByteSink& out, const DecodedColumn& col) {
     if (!col.rle_float64_values.empty()) {
         serialize_rle_float_as_float64(out, col);
         return;
@@ -364,7 +388,7 @@ static void serialize_float64(std::vector<uint8_t>& out, const DecodedColumn& co
 //              (same convention as TAG_INT64); the deserialiser scatters to positional.
 // precision and scale are carried so the deserialiser can attach the LogicalType directly,
 // without a schema-driven coerce pass (DECIMAL128 vectors cannot be reinterpreted from i64).
-static void serialize_int128(std::vector<uint8_t>& out, const DecodedColumn& col,
+static void serialize_int128(ByteSink& out, const DecodedColumn& col,
                               uint8_t precision, uint8_t scale) {
     write_u8(out, 12);   // TAG_INT128
     write_u32(out, static_cast<uint32_t>(col.num_rows));
@@ -376,17 +400,31 @@ static void serialize_int128(std::vector<uint8_t>& out, const DecodedColumn& col
     write_bytes(out, col.int128_values.data(), data_len);
 }
 
-static void serialize_bool(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_bool(ByteSink& out, const DecodedColumn& col) {
     write_u8(out, 5);
     write_u32(out, static_cast<uint32_t>(col.num_rows));
     write_null_bitmap(out, col);
 
-    uint32_t data_len = static_cast<uint32_t>(col.boolean_values.size());
+    // DRAKEN_BOOL is bit-packed (1 bit/value, LSB-first) — enforce the contract
+    // here at the producer rather than shipping one byte per value. boolean_values
+    // holds the K present (non-null) values compactly (parquet omits null rows from
+    // the value stream); we pack those K bits. For a non-nullable column K == num_rows
+    // so the packed buffer is already positional; for a nullable column the
+    // deserialiser bit-scatters these K bits to their row positions.
+    const size_t k = col.boolean_values.size();
+    const uint32_t data_len = static_cast<uint32_t>((k + 7) / 8);
     write_u32(out, data_len);
-    write_bytes(out, col.boolean_values.data(), data_len);
+    uint8_t* dst = out.advance(data_len);
+    if (dst) {
+        std::memset(dst, 0, data_len);   // zero-fill: unset bits must read as false
+        for (size_t i = 0; i < k; ++i) {
+            if (col.boolean_values[i] & 1)
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    }
 }
 
-static void serialize_string_dict(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_string_dict(ByteSink& out, const DecodedColumn& col) {
     // Uses the flat arena (string_dict_arena / string_dict_offsets / string_dict_lens)
     // plus either dict_codes_array (pre-packed, nullable path) or dict_indices (sparse path).
     write_u8(out, 6);
@@ -407,22 +445,22 @@ static void serialize_string_dict(std::vector<uint8_t>& out, const DecodedColumn
         write_bytes(out, col.dict_codes_array.data(), codes_len);
     } else {
         // Validity-aware path: null rows get code 0, non-null rows advance di_idx.
-        size_t pos = out.size();
-        out.resize(pos + codes_len);
-        uint8_t* dst = out.data() + pos;
-        int32_t di_idx = 0;
-        for (int32_t row = 0; row < col.num_rows; ++row) {
-            bool is_null = !col.valid_bits.empty() &&
-                           !((col.valid_bits[row >> 3] >> (row & 7)) & 1);
-            uint32_t c = is_null ? 0
-                                 : static_cast<uint32_t>(col.dict_indices[di_idx++]);
-            if (cw == 1) {
-                dst[row] = static_cast<uint8_t>(c);
-            } else if (cw == 2) {
-                uint16_t v = static_cast<uint16_t>(c);
-                std::memcpy(dst + row * 2, &v, 2);
-            } else {
-                std::memcpy(dst + row * 4, &c, 4);
+        uint8_t* dst = out.advance(codes_len);
+        if (dst) {
+            int32_t di_idx = 0;
+            for (int32_t row = 0; row < col.num_rows; ++row) {
+                bool is_null = !col.valid_bits.empty() &&
+                               !((col.valid_bits[row >> 3] >> (row & 7)) & 1);
+                uint32_t c = is_null ? 0
+                                     : static_cast<uint32_t>(col.dict_indices[di_idx++]);
+                if (cw == 1) {
+                    dst[row] = static_cast<uint8_t>(c);
+                } else if (cw == 2) {
+                    uint16_t v = static_cast<uint16_t>(c);
+                    std::memcpy(dst + row * 2, &v, 2);
+                } else {
+                    std::memcpy(dst + row * 4, &c, 4);
+                }
             }
         }
     }
@@ -432,17 +470,15 @@ static void serialize_string_dict(std::vector<uint8_t>& out, const DecodedColumn
     // sentinel = total arena size.
     uint32_t offsets_count = dict_size + 1;
     write_u32(out, offsets_count);
-    size_t pos = out.size();
-    out.resize(pos + offsets_count * 4);
-    // Use memcpy for each 4-byte write: the byte-vector buffer is not
-    // guaranteed to be 4-byte aligned, and reinterpret_cast<int32_t*> would
-    // trigger UBSAN "store to misaligned address".
-    uint8_t* dst_off = out.data() + pos;
-    for (uint32_t i = 0; i < dict_size; ++i) {
-        int32_t tmp = static_cast<int32_t>(col.string_dict_offsets[i]);
-        std::memcpy(dst_off + i * 4, &tmp, sizeof(int32_t));
-    }
-    {
+    // Use memcpy for each 4-byte write: the buffer is not guaranteed to be
+    // 4-byte aligned, and reinterpret_cast<int32_t*> would trigger UBSAN
+    // "store to misaligned address".
+    uint8_t* dst_off = out.advance(static_cast<size_t>(offsets_count) * 4);
+    if (dst_off) {
+        for (uint32_t i = 0; i < dict_size; ++i) {
+            int32_t tmp = static_cast<int32_t>(col.string_dict_offsets[i]);
+            std::memcpy(dst_off + i * 4, &tmp, sizeof(int32_t));
+        }
         int32_t tmp = static_cast<int32_t>(col.string_dict_arena.size());
         std::memcpy(dst_off + dict_size * 4, &tmp, sizeof(int32_t));
     }
@@ -451,7 +487,7 @@ static void serialize_string_dict(std::vector<uint8_t>& out, const DecodedColumn
     write_bytes(out, col.string_dict_arena.data(), col.string_dict_arena.size());
 }
 
-static void serialize_string_plain(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_string_plain(ByteSink& out, const DecodedColumn& col) {
     // Fallback: plain std::string values (no dict).
     write_u8(out, 7);
     write_u32(out, static_cast<uint32_t>(col.num_rows));
@@ -489,7 +525,7 @@ static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx
                                 (static_cast<uint32_t>(arr[4*idx+3]) << 24));
 }
 
-static void serialize_list_column(std::vector<uint8_t>& out, const DecodedColumn& col) {
+static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
     int32_t max_def = col.max_def_level;
     size_t  n_levels = col.rep_levels.size();
 
@@ -586,18 +622,12 @@ static void serialize_list_column(std::vector<uint8_t>& out, const DecodedColumn
     }
 }
 
-// ── public entry point ──────────────────────────────────────────────────────
+// ── dispatch core (runs over a ByteSink: count or write) ─────────────────────
 
-/**
- * Serialize a DecodedColumn to a flat byte buffer for MemoryPool IPC.
- * Called from C++ worker threads — no GIL, no Python, no allocator contention.
- */
-static void serialize_decoded_column(const DecodedColumn& col,
-                                     std::vector<uint8_t>& out,
-                                     uint8_t decimal_precision = 38,
-                                     uint8_t decimal_scale = 0) {
-    out.clear();
-
+static void serialize_core(const DecodedColumn& col,
+                           ByteSink& out,
+                           uint8_t decimal_precision,
+                           uint8_t decimal_scale) {
     // List columns (rep_levels present) take precedence over the flat byte_array path.
     if (!col.rep_levels.empty()) {
         serialize_list_column(out, col);
@@ -656,6 +686,47 @@ static void serialize_decoded_column(const DecodedColumn& col,
         write_u32(out, 0);
         write_u32(out, 0);
     }
+}
+
+// ── public entry points ─────────────────────────────────────────────────────
+
+/**
+ * Exact serialized byte length of `col`. Runs the serializer in count-only mode
+ * (no buffer), so it cannot disagree with what serialize_into() actually writes.
+ */
+static inline size_t serialized_size(const DecodedColumn& col,
+                                     uint8_t decimal_precision = 38,
+                                     uint8_t decimal_scale = 0) {
+    ByteSink counter{nullptr, 0};
+    serialize_core(col, counter, decimal_precision, decimal_scale);
+    return counter.pos;
+}
+
+/**
+ * Serialize `col` directly into `dst`, which MUST be at least
+ * serialized_size(col, ...) bytes. Returns the number of bytes written (== the
+ * size). Called from C++ worker threads — no GIL, no allocator, no copy: the
+ * destination is the MemoryPool-reserved region itself.
+ */
+static inline size_t serialize_decoded_column_into(const DecodedColumn& col,
+                                                   uint8_t* dst,
+                                                   uint8_t decimal_precision = 38,
+                                                   uint8_t decimal_scale = 0) {
+    ByteSink writer{dst, 0};
+    serialize_core(col, writer, decimal_precision, decimal_scale);
+    return writer.pos;
+}
+
+/**
+ * Vector-producing variant retained for non-pool callers (tests, tools).
+ * Two passes (size then write); production uses the *_into path above.
+ */
+static inline void serialize_decoded_column(const DecodedColumn& col,
+                                            std::vector<uint8_t>& out,
+                                            uint8_t decimal_precision = 38,
+                                            uint8_t decimal_scale = 0) {
+    out.resize(serialized_size(col, decimal_precision, decimal_scale));
+    serialize_decoded_column_into(col, out.data(), decimal_precision, decimal_scale);
 }
 
 } // namespace rugo

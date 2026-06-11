@@ -1,16 +1,28 @@
 # Opteryx Engineering Contract 
 
+The most important engineering principle is that failure allows us to see what works and what doesn't - avoiding or hiding failure lies about state and is a major source of wasted time.
+
+The most important work principle is that the user is the architect, if work is agreed with the user any deviation is unacceptable and will be deleted as soon as detected.
+
+## 0. Goals
+
+We are writing: 
+- A high performance SQL query engine.
+
 ## 1. Core Principles (Non-negotiable)
 
-- Opteryx is not a Python application.
+- Opteryx is not a Python application, it is a Cython/C++ application with Python orchestration.
 - Correctness is non-negotiable; Always engineer for performance.
 - Fail fast, fail clean. Never silently degrade behaviour.
+- Broken but honest always beats green but fake.
 - No hidden behaviour. No fallbacks. No “magic”.
 - The system is designed, not grown. If something feels accidental, it likely is wrong.
 - The user is the architect. All design-impacting decisions must be surfaced, not assumed.
-- Be clear about what you are doing, and do not be affraid to ask for direction.
-- If you cannot do ask asked, stop, explain why and offer solutions.
+- Be clear about what you are doing, and do not be afraid to ask for direction.
+- If you cannot do as asked, stop, explain why and offer solutions.
 - DO NOT commit changes to git.
+- You are not trusted to use git commands; git stash, git pull, git push are forbidden.
+- Dead code rots the system from the inside - cut it out as soon as it's found.
 
 ---
 
@@ -30,7 +42,7 @@
 
 - This is a performance-first codebase:
   - Prefer complexity over runtime cost.
-  - Prefer specialization, but do not blindly duplicate code.
+  - Prefer specialization, but do not blindly duplicate code (see §11).
   - Prefer compile-time decisions over runtime decisions.
   - Prefer zero-copy/buffer views.
 - Operations must be batch-orientated, not row-orientated.
@@ -39,22 +51,16 @@
 - Memory layout and access patterns matter more than API elegance.
 - Assume data scale; optimize for worst-case realistic workloads.
 - If unsure, bias toward fewer allocations and fewer passes over data.
+- Benchmark code before making performance improvements to verify improvements.
 
 ---
 
 ## 4. Dependency Policy
 
-**PyArrow is strictly banned. Zero tolerance. Build fails if detected.**
-
 Rules:
-- The goal is zero dependencies.
-- We vendor third party capability after agreement with user.
-- **Build-time check scans production code for any PyArrow usage.**
-  - `import pyarrow` → BUILD FAILS
-  - `from pyarrow` → BUILD FAILS
-  - `pa.` references → BUILD FAILS
-  - Including indirect usage (e.g., `StringVector.from_arrow()` internally uses PyArrow)
-- **Why:** PyArrow leaked into the C++ ParquetIOPipeline implementation without being obvious, regressing the architecture. Build check prevents this regression.
+- The system has zero installed dependencies (`pip install` is forbidden).
+- We vendor third party capability only after agreement with user.
+- PyArrow and NumPy are aggressively banned from the engine (`opteryx/`, `rugo/`, `draken/`)- although they can be used for testing (`tests/`) and development (`dev/`), for example, to generate test data.
 
 ---
 
@@ -71,7 +77,6 @@ The application is a SQL Query engine, it has all of the core components of an q
 Ownership:
 - Opteryx
 - Mabel (Draken, Rugo, Carchar, Parvi)
-- Orso
 
 Naming:
 - When colocating `.pyx` and C/C++:
@@ -106,10 +111,13 @@ opteryx-core/
 
 - Dev: ARM (Apple Silicon)
 - Prod: x86 (GCP Cloud Run)
+- Aspirational: RISC-V
+- Aspirational: ARM (Raspberry Pi)
 
 When writing CPU-specific optimizations:
 - Target NEON (ARM)
 - Target AVX2 (x86)
+- Target RISC-V (aspirational)
 
 Do not assume architecture-specific behaviour unless guarded and intentional.
 
@@ -155,13 +163,16 @@ Rule:
   - Call out assumptions
   - Ask before making architectural changes
 
+If there is a bug or a failure, do not waste effort trying to attribute it - we fix forward, always.
+
 ---
 
 ## 9. Imports & Error Handling
 
 - Do not use `try/except` to control flow or silently handle errors.
-- Do not silently ignore failures
-- Errors should be explicit, actionable, and early
+- `hasattr` is banned.
+- Do not silently ignore failures.
+- Errors should be explicit, actionable, and early.
 
 ---
 
@@ -186,7 +197,63 @@ for _ in morsels:
 
 ---
 
-## 11. Approach to Optimizing Data Processing
+## 11. Vector Model (Draken Unified Format)
+
+All columnar data in execution is represented by `DrakenVector`. The
+authoritative definition is in [`draken/core/buffers.h`](../draken/core/buffers.h)
+(see the comment block above the struct). If this section and buffers.h
+disagree, buffers.h is right and this section is stale — fix the doc.
+
+```c
+typedef struct {
+    void*             data;
+    const uint32_t*   selection;   // never NULL
+    uint32_t          data_length; // unique values in data
+    uint32_t          length;      // logical row count
+    uint8_t*          validity;    // 1-bit-per-logical-row null mask; NULL = all valid
+    DrakenType        type;
+} DrakenVector;
+```
+
+**Access pattern is uniform:** `data[selection[i]]` for `i in [0, length)`.
+Codes in `selection` are always `uint32_t`.
+
+**`selection` is never NULL.** The three encoding shapes differ only in
+*which* buffer `selection` points at — this is a layout hint, not a
+dispatch signal:
+
+| Shape    | what `selection` points at         | `data_length` |
+|----------|------------------------------------|---------------|
+| Dense    | global identity permutation        | == `length`   |
+| Constant | global zero vector                 | == 1          |
+| Dict     | owned per-vector codes             | <  `length`   |
+
+These shape labels are layout hints, not dispatch signals.
+
+**Shape-based dispatch is the exception, not the default.** The uniform
+access pattern (`data[selection[i]]`) is the correctness contract: every
+kernel and operator must produce the right answer for any of the three
+shapes via that uniform path. By default, no operator, kernel, or wrapper
+should specialize on encoding shape.
+
+**Specialized dispatch on encoding shape is permitted only for targeted
+optimization, and only when agreed with the architect.** It is not an
+assumed, default, or generally acceptable pattern; cases where it is
+permissible are the exception. The default posture is: write the uniform
+path. If you believe a shape-specialized variant is justified, **stop and
+surface it before implementing**.
+
+What remains absolute, even under an agreed specialization: a shape
+discriminant must not change the *answer* or silently skip rows (the old
+`ptr.data == NULL` class of bug). A "fast-path" whose result differs from
+the uniform path is a bug, never an optimization.
+
+RLE does not exist past the scan boundary. Rugo expands RLE into one of
+the three shapes above before handing data to the execution engine.
+
+---
+
+## 12. Approach to Optimizing Data Processing  <!-- was §11 -->
 
 1. Faster queries read less data – The less data you read, the faster the query will be. Optimise indexes around common filters to minimise data reads.
 
@@ -196,7 +263,7 @@ for _ in morsels:
 
 ---
 
-## 12. Meta Rule
+## 13. Meta Rule
 
 If a rule is broken:
 - Call it out explicitly
@@ -204,7 +271,30 @@ If a rule is broken:
 
 ---
 
-## 13. Cultural Note
+## 14. Type System (Single Vocabulary)
+
+There is one type object, from schema through AST to kernels:
+
+```python
+ColumnType(
+    physical: DrakenType,           # execution tag — same enum the vectors carry
+    logical:  LogicalType | None,   # precision/scale, timestamp unit, etc.
+    element:  ColumnType | None,    # ARRAY child
+)
+```
+
+Rules:
+- `DrakenType` and `LogicalType` are **Draken's** — imported, never copied.
+- `LogicalCategory` is a **derived projection only**: `ColumnType.category`. ~15 canonical members, no aliases, no behaviours. Operator map keys are the only sanctioned direct use.
+- `vector_from_sequence(values, dtype: DrakenType)` — always pass `DrakenType` (or `column_type.physical`). Never pass `LogicalCategory` or string aliases.
+- Nothing constructs or stores a `LogicalCategory` except operator map keys.
+- `_native_types.py` is deleted. `ColumnType.physical` is the native type.
+
+Authoritative source: `opteryx/types/logical_type.py`.
+
+---
+
+## 15. Cultural Note
 
 Every time you break one of these rules, a fairy loses its wings.
 

@@ -415,11 +415,11 @@ def _join_stats(
     right_col = right.get_column(right_key)
     left_key_stats = KeyStats(
         ndv=left_col.distinct_count if left_col else None,
-        null_fraction=None,
+        null_fraction=left_col.null_fraction if left_col else None,
     )
     right_key_stats = KeyStats(
         ndv=right_col.distinct_count if right_col else None,
-        null_fraction=None,
+        null_fraction=right_col.null_fraction if right_col else None,
     )
     out_rows = estimate_join_cardinality(
         left_rows=left.row_count,

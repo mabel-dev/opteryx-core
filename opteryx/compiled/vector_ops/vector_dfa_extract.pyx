@@ -70,7 +70,7 @@ This file is designed to be included from `vector_ops.pyx`.
 """
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, uint8_t, uint32_t
+from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport free, malloc, getenv
 from libc.string cimport memcmp, memcpy, memset
 
@@ -78,9 +78,9 @@ from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.object cimport PyObject
 from libcpp.string cimport string
 
-cdef extern from "simd_search.h":
-    int neon_search(const char* data, size_t length, char target)
-    int avx_search(const char* data, size_t length, char target)
+cdef extern from "dfa_simd_dispatch.h":
+    # Compile-time NEON/AVX dispatch — no per-call function-pointer indirection.
+    int dfa_find_char(const char* data, size_t length, char target) noexcept nogil
 
 cdef extern from "re2/stringpiece.h" namespace "re2":
     cdef cppclass StringPiece:
@@ -168,16 +168,6 @@ cdef extern from "re2/regexp.h" namespace "re2::Regexp":
 
 cdef int DFA_MAX_LITERAL_BYTES = 64
 
-import platform
-
-cdef int (*simd_find_char)(const char*, size_t, char)
-
-_arch = platform.machine().lower()
-if _arch in ("arm64", "aarch64"):
-    simd_find_char = neon_search
-else:
-    simd_find_char = avx_search
-
 from draken.core.buffers cimport (
     DrakenVector,
     DrakenStringArena,
@@ -187,6 +177,8 @@ from draken.core.buffers cimport (
     str_length,
     str_data,
     str_init_null,
+    str_is_inline,
+    str_clone_with_offset,
     STR_INLINE_MAX,
 )
 from draken.vectors.vector cimport Vector
@@ -224,6 +216,12 @@ cdef struct DfaOp:
     const char* literal
     Py_ssize_t literal_len
     char target_char
+    # For literals <= 8 bytes: the literal packed into a uint64 (native-endian,
+    # zero-padded) plus a byte mask, so the hot loop compares with a single
+    # register op instead of an out-of-line memcmp call. packed/mask are only
+    # valid when literal_len <= 8; longer literals use the literal pointer path.
+    uint64_t packed
+    uint64_t mask
 
 
 cdef struct DfaProcedure:
@@ -291,6 +289,8 @@ cdef inline void _decode_procedure(
         proc.ops[i].literal = NULL
         proc.ops[i].literal_len = 0
         proc.ops[i].target_char = <char>0
+        proc.ops[i].packed = 0
+        proc.ops[i].mask = 0
 
         if op_type == DFA_OP_CONSUME_LITERAL or op_type == DFA_OP_CONSUME_OPTIONAL_LITERAL:
             if end - p < 4:
@@ -302,6 +302,14 @@ cdef inline void _decode_procedure(
                 raise ValueError("vector_dfa_extract: compiled literal payload truncated")
             proc.ops[i].literal = p
             proc.ops[i].literal_len = <Py_ssize_t>literal_len
+            # Precompute the packed/mask register form for short literals once,
+            # here, rather than per row in the hot loop.
+            if literal_len <= 8:
+                memcpy(&proc.ops[i].packed, p, <size_t>literal_len)
+                if literal_len == 8:
+                    proc.ops[i].mask = <uint64_t>0xFFFFFFFFFFFFFFFF
+                else:
+                    proc.ops[i].mask = ((<uint64_t>1) << (8 * literal_len)) - <uint64_t>1
             p += literal_len
 
         elif op_type == DFA_OP_CAPTURE_UNTIL_CHAR:
@@ -798,7 +806,7 @@ cdef inline bint _execute_procedure(
     DfaProcedure* proc,
     const char** out_ptr,
     Py_ssize_t* out_len,
-) noexcept:
+) noexcept nogil:
     cdef const char* p = src
     cdef const char* end = src + src_len
     cdef const char* capture_ptr = NULL
@@ -807,7 +815,7 @@ cdef inline bint _execute_procedure(
     cdef int char_pos
     cdef DfaOp* op
     cdef Py_ssize_t remaining
-    cdef const char* scan
+    cdef uint64_t loaded
 
     out_ptr[0] = NULL
     out_len[0] = 0
@@ -819,32 +827,42 @@ cdef inline bint _execute_procedure(
             remaining = <Py_ssize_t>(end - p)
             if remaining < op.literal_len:
                 return False
-            if memcmp(p, op.literal, <size_t>op.literal_len) != 0:
+            if op.literal_len <= 8 and remaining >= 8:
+                # Fast path: one unaligned 8-byte load + masked register compare.
+                # Safe only when >= 8 bytes remain (tight arenas have no slack);
+                # the rare <8-byte tail falls through to memcmp below.
+                memcpy(&loaded, p, 8)
+                if (loaded & op.mask) != op.packed:
+                    return False
+            elif memcmp(p, op.literal, <size_t>op.literal_len) != 0:
                 return False
             p += op.literal_len
 
         elif op.op_type == DFA_OP_CONSUME_OPTIONAL_LITERAL:
             remaining = <Py_ssize_t>(end - p)
-            if remaining >= op.literal_len and memcmp(p, op.literal, <size_t>op.literal_len) == 0:
+            if remaining < op.literal_len:
+                pass
+            elif op.literal_len <= 8 and remaining >= 8:
+                memcpy(&loaded, p, 8)
+                if (loaded & op.mask) == op.packed:
+                    p += op.literal_len
+            elif memcmp(p, op.literal, <size_t>op.literal_len) == 0:
                 p += op.literal_len
 
         elif op.op_type == DFA_OP_CAPTURE_UNTIL_CHAR:
-            if p >= end:
-                return False
             remaining = <Py_ssize_t>(end - p)
             if remaining <= 0:
                 return False
-            char_pos = simd_find_char(p, <size_t>remaining, op.target_char)
-            if char_pos < 0:
-                return False
-            if char_pos == 0:
-                return False
-            scan = p + char_pos
-            if scan < p or scan >= end:
+            # dfa_find_char returns the first match index in [0, remaining), or
+            # -1. char_pos <= 0 covers both "not found" and "empty capture";
+            # char_pos > 0 guarantees p < p+char_pos < end, so no further bounds
+            # check is needed.
+            char_pos = dfa_find_char(p, <size_t>remaining, op.target_char)
+            if char_pos <= 0:
                 return False
             capture_ptr = p
-            capture_len = <Py_ssize_t>(scan - p)
-            p = scan
+            capture_len = <Py_ssize_t>char_pos
+            p = p + char_pos
 
         elif op.op_type == DFA_OP_CONSUME_TO_END:
             if p >= end:
@@ -909,21 +927,25 @@ cdef object _vector_dfa_extract_compressed(
         free(cap_lens)
         raise MemoryError("vector_dfa_extract: cache allocation failed")
 
-    for j in range(k):
-        slot = &src_arena.slots[j]
-        slen = str_length(slot)
-        sdata = str_data(slot, src_arena.arena)
-        row_ptr = <const char*>sdata
-        row_len = <Py_ssize_t>slen
+    with nogil:
+        for j in range(k):
+            slot = &src_arena.slots[j]
+            slen = str_length(slot)
+            sdata = str_data(slot, src_arena.arena)
+            row_ptr = <const char*>sdata
+            row_len = <Py_ssize_t>slen
 
-        if _execute_procedure(row_ptr, row_len, proc, &out_ptr, &out_len):
-            cap_ptrs[j] = out_ptr
-            cap_lens[j] = <int32_t>out_len
-            total_bytes += out_len
-        else:
-            cap_ptrs[j] = row_ptr
-            cap_lens[j] = <int32_t>(-row_len - 1)
-            total_bytes += row_len
+            if _execute_procedure(row_ptr, row_len, proc, &out_ptr, &out_len):
+                cap_ptrs[j] = out_ptr
+                cap_lens[j] = <int32_t>out_len
+                # Only long (> 12 byte) strings occupy the arena.
+                if out_len > STR_INLINE_MAX:
+                    total_bytes += out_len
+            else:
+                cap_ptrs[j] = row_ptr
+                cap_lens[j] = <int32_t>(-row_len - 1)
+                if row_len > STR_INLINE_MAX:
+                    total_bytes += row_len
 
     # Allocate value-array slots (k), arena, codes (n), and validity (n).
     cdef size_t slots_sz = <size_t>k * sizeof(DrakenStringSlot) if k > 0 else sizeof(DrakenStringSlot)
@@ -961,21 +983,31 @@ cdef object _vector_dfa_extract_compressed(
     cdef uint32_t copy_len
     cdef size_t arena_used = 0
 
-    for j in range(k):
-        cached_ptr = cap_ptrs[j]
-        cached_len = cap_lens[j]
+    cdef DrakenStringSlot* psrc
+    with nogil:
+        for j in range(k):
+            cached_ptr = cap_ptrs[j]
+            cached_len = cap_lens[j]
 
-        if cached_len >= 0:
-            copy_len = <uint32_t>cached_len
-        else:
-            copy_len = <uint32_t>(-cached_len - 1)
-
-        if copy_len > <uint32_t>STR_INLINE_MAX:
-            memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
-            draken_build_string_slot(&out_slots[j], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
-            arena_used += <size_t>copy_len
-        else:
-            draken_build_string_slot(&out_slots[j], <const uint8_t*>cached_ptr, copy_len, 0)
+            if cached_len >= 0:
+                # Matched capture: fresh substring — build it (hash unknown).
+                copy_len = <uint32_t>cached_len
+                if copy_len > <uint32_t>STR_INLINE_MAX:
+                    memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+                    draken_build_string_slot(&out_slots[j], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
+                    arena_used += <size_t>copy_len
+                else:
+                    draken_build_string_slot(&out_slots[j], <const uint8_t*>cached_ptr, copy_len, 0)
+            else:
+                # Passthrough: clone the source slot verbatim (reuse prefix + hash32).
+                psrc = &src_arena.slots[j]
+                if str_is_inline(psrc):
+                    str_clone_with_offset(&out_slots[j], psrc, 0)
+                else:
+                    copy_len = <uint32_t>(-cached_len - 1)
+                    memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+                    str_clone_with_offset(&out_slots[j], psrc, <uint32_t>arena_used)
+                    arena_used += <size_t>copy_len
 
     free(cap_ptrs)
     free(cap_lens)
@@ -1035,26 +1067,31 @@ cpdef object vector_dfa_extract(
         free(cap_lens)
         raise MemoryError("vector_dfa_extract: cache allocation failed")
 
-    for i in range(n):
-        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
-            cap_ptrs[i] = NULL
-            cap_lens[i] = 0
-            continue
+    with nogil:
+        for i in range(n):
+            if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+                cap_ptrs[i] = NULL
+                cap_lens[i] = 0
+                continue
 
-        slot = &src_arena.slots[sel[i]]
-        slen = str_length(slot)
-        sdata = str_data(slot, src_arena.arena)
-        row_ptr = <const char*>sdata
-        row_len = <Py_ssize_t>slen
+            slot = &src_arena.slots[sel[i]]
+            slen = str_length(slot)
+            sdata = str_data(slot, src_arena.arena)
+            row_ptr = <const char*>sdata
+            row_len = <Py_ssize_t>slen
 
-        if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
-            cap_ptrs[i] = out_ptr
-            cap_lens[i] = <int32_t>out_len
-            total_bytes += out_len
-        else:
-            cap_ptrs[i] = row_ptr
-            cap_lens[i] = <int32_t>(-row_len - 1)
-            total_bytes += row_len
+            if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
+                cap_ptrs[i] = out_ptr
+                cap_lens[i] = <int32_t>out_len
+                # Only long (> 12 byte) strings occupy the arena; inline ones
+                # live in the slot. Size the arena to exactly the long bytes.
+                if out_len > STR_INLINE_MAX:
+                    total_bytes += out_len
+            else:
+                cap_ptrs[i] = row_ptr
+                cap_lens[i] = <int32_t>(-row_len - 1)
+                if row_len > STR_INLINE_MAX:
+                    total_bytes += row_len
 
     # Allocate output slots and arena.
     cdef size_t slots_sz = <size_t>n * sizeof(DrakenStringSlot) if n > 0 else sizeof(DrakenStringSlot)
@@ -1087,25 +1124,36 @@ cpdef object vector_dfa_extract(
     cdef uint32_t copy_len
     cdef size_t arena_used = 0
 
-    for i in range(n):
-        cached_ptr = cap_ptrs[i]
-        cached_len = cap_lens[i]
+    cdef DrakenStringSlot* psrc
+    with nogil:
+        for i in range(n):
+            cached_ptr = cap_ptrs[i]
+            cached_len = cap_lens[i]
 
-        if cached_ptr == NULL:
-            str_init_null(&out_slots[i])
-            continue
+            if cached_ptr == NULL:
+                str_init_null(&out_slots[i])
+                continue
 
-        if cached_len >= 0:
-            copy_len = <uint32_t>cached_len
-        else:
-            copy_len = <uint32_t>(-cached_len - 1)
-
-        if copy_len > <uint32_t>STR_INLINE_MAX:
-            memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
-            draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
-            arena_used += <size_t>copy_len
-        else:
-            draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, 0)
+            if cached_len >= 0:
+                # Matched capture: a fresh substring, hash not known — build it.
+                copy_len = <uint32_t>cached_len
+                if copy_len > <uint32_t>STR_INLINE_MAX:
+                    memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+                    draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
+                    arena_used += <size_t>copy_len
+                else:
+                    draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, 0)
+            else:
+                # Passthrough: identical bytes to the source row. Clone the source
+                # slot verbatim (precomputed prefix + hash32) instead of rehashing.
+                psrc = &src_arena.slots[sel[i]]
+                if str_is_inline(psrc):
+                    str_clone_with_offset(&out_slots[i], psrc, 0)
+                else:
+                    copy_len = <uint32_t>(-cached_len - 1)
+                    memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+                    str_clone_with_offset(&out_slots[i], psrc, <uint32_t>arena_used)
+                    arena_used += <size_t>copy_len
 
     free(cap_ptrs)
     free(cap_lens)

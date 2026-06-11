@@ -175,10 +175,12 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                     f"CTAS column '{target_name}' has unresolved type; "
                     "specify the SELECT's column types explicitly"
                 )
+            from opteryx.types.schema import mint_column_identity
             flat = SchemaColumn(
                 name=target_name,
                 column_type=sc.column_type,
                 nullable=getattr(sc, "nullable", True),
+                identity=mint_column_identity(getattr(node, "relation_name", None), target_name),
             )
             target_columns.append(flat)
 

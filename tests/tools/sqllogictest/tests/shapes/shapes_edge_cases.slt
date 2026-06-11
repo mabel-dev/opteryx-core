@@ -1,9 +1,9 @@
 # Source: test_shapes_edge_cases.py
 
-statement error sql failed IncompatibleTypesError: DATEDIFF arg3 \(''2022\-07\-07''\): expected TEMPORAL, got VARCHAR \- use `'2022\-07\-07'::TIMESTAMP`\.
+statement error sql failed IncompatibleTypesError: DATEDIFF arg3.*expected TEMPORAL, got VARCHAR.*TIMESTAMP
 SELECT DATEDIFF('months', birth_date, '2022-07-07') FROM testdata.astronauts
 
-statement error sql failed IncompatibleTypesError: DATEDIFF arg3 \(''2022\-07\-07''\): expected TEMPORAL, got VARCHAR \- use `'2022\-07\-07'::TIMESTAMP`\.
+statement error sql failed IncompatibleTypesError: DATEDIFF arg3.*expected TEMPORAL, got VARCHAR.*TIMESTAMP
 SELECT DATEDIFF('months', birth_date, '2022-07-07') FROM testdata.astronauts
 
 statement error ColumnNotFoundError

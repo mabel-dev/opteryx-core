@@ -280,9 +280,16 @@ static inline VecResult str_contains(
         return _ss_make_result(dst, out_null, n);
     }
 
-    VolnitskyTable* tbl = volnitsky_alloc();
-    if (!tbl) throw std::bad_alloc();
-    volnitsky_build(tbl, needle, ndl_len);
+    // ndl_len==1 degenerates to the first-byte sieve: volnitsky_contains_cs
+    // returns right after _find_first_byte and never dereferences the table.
+    // Skip the 128 KB alloc+build+free entirely — nullptr is never read for a
+    // 1-byte needle, and volnitsky_free(nullptr) is a no-op.
+    VolnitskyTable* tbl = nullptr;
+    if (ndl_len >= 2) {
+        tbl = volnitsky_alloc();
+        if (!tbl) throw std::bad_alloc();
+        volnitsky_build(tbl, needle, ndl_len);
+    }
 
     // Compressed-shape fast path (dict / constant), all-valid input only.
     // Probe each DISTINCT slot once — not once per logical row — then return a
@@ -367,14 +374,16 @@ static inline VecResult str_contains_ci(
     const uint32_t*          sel      = v.selection;
     const uint8_t*           src_null = v.validity;
 
-    uint8_t* dst = cmp_alloc_bool_buf(n);
-    uint8_t* out_null = nullptr;
-    if (src_null) {
-        try { out_null = cmp_copy_validity(src_null, n); }
-        catch (...) { draken_free(dst); throw; }
-    }
-
+    // Empty needle matches every non-null row (encoding-independent). Dense, as
+    // in str_contains — the match is universal so distinct-slot probing buys
+    // nothing here.
     if (ndl_len == 0) {
+        uint8_t* dst = cmp_alloc_bool_buf(n);
+        uint8_t* out_null = nullptr;
+        if (src_null) {
+            try { out_null = cmp_copy_validity(src_null, n); }
+            catch (...) { draken_free(dst); throw; }
+        }
         for (uint32_t i = 0; i < n; ++i) {
             if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
@@ -382,10 +391,86 @@ static inline VecResult str_contains_ci(
         return _ss_make_result(dst, out_null, n);
     }
 
-    VolnitskyTable* tbl = volnitsky_alloc();
-    if (!tbl) { draken_free(dst); draken_free(out_null); throw std::bad_alloc(); }
-    volnitsky_build(tbl, needle_lower, ndl_len);
+    // ndl_len==1 degenerates to the first-byte sieve (see str_contains): the
+    // table is never dereferenced, so skip the 128 KB alloc+build+free.
+    VolnitskyTable* tbl = nullptr;
+    if (ndl_len >= 2) {
+        tbl = volnitsky_alloc();
+        if (!tbl) throw std::bad_alloc();
+        volnitsky_build(tbl, needle_lower, ndl_len);
+    }
 
+    // Compressed-shape fast path (dict / constant). Probe each DISTINCT slot
+    // once into a per-slot bitmap, then:
+    //   - all-valid input → return a COMPRESSED bool reusing the input's codes
+    //     (mirrors str_contains; same all-valid rationale — a compressed bit is
+    //     shared by every row with that code and cannot carry a per-row null);
+    //   - nullable input → build a DENSE result by looking up slot_bits[code]
+    //     per row (a cheap bit test, not a Volnitsky probe) and copying
+    //     validity. Null rows stay 0/null via the validity gate, so sharing a
+    //     slot with matching non-null rows is correct. This is the genuinely
+    //     new (architect-approved) extension over the CS path's all-valid gate.
+    // Either way the expensive scan runs nd times, not n.
+    if (draken_is_compressed(&v)) {
+        const uint32_t nd = v.data_length;
+        uint8_t* slot_bits = nullptr;
+        try { slot_bits = cmp_alloc_bool_buf(nd); }
+        catch (...) { volnitsky_free(tbl); throw; }
+
+        for (uint32_t k = 0; k < nd; ++k) {
+            const DrakenStringSlot* slot = &sa->slots[k];
+            if (volnitsky_contains_ci(str_data(slot, sa->arena), str_length(slot),
+                                      needle_lower, ndl_len, tbl))
+                slot_bits[k >> 3u] |= static_cast<uint8_t>(1u << (k & 7u));
+        }
+        volnitsky_free(tbl);
+        tbl = nullptr;
+
+        if (_ss_all_valid(src_null, n)) {
+            uint32_t* codes = static_cast<uint32_t*>(
+                                  draken_malloc(static_cast<size_t>(n) * sizeof(uint32_t)));
+            if (codes != nullptr) {
+                memcpy(codes, sel, static_cast<size_t>(n) * sizeof(uint32_t));
+                VecResult r;
+                r.data           = slot_bits;   // owned by the result
+                r.validity       = nullptr;     // all-valid (gated)
+                r.selection      = codes;
+                r.owns_selection = true;
+                r.data_length    = nd;
+                r.length         = n;
+                r.type           = DRAKEN_BOOL;
+                r.flags          = 0u;          // codes: neither identity nor permutation
+                return r;
+            }
+            // codes alloc failed → fall through to the dense build below.
+        }
+
+        // Nullable input (or codes-alloc failure): dense output via slot_bits
+        // lookup. slot_bits is scratch here — freed after the build.
+        uint8_t* dst = nullptr;
+        uint8_t* out_null = nullptr;
+        try {
+            dst = cmp_alloc_bool_buf(n);
+            if (src_null) out_null = cmp_copy_validity(src_null, n);
+        } catch (...) { draken_free(dst); draken_free(slot_bits); throw; }
+
+        for (uint32_t i = 0; i < n; ++i) {
+            if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+            const uint32_t c = sel[i];
+            if ((slot_bits[c >> 3u] >> (c & 7u)) & 1u)
+                dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+        draken_free(slot_bits);
+        return _ss_make_result(dst, out_null, n);
+    }
+
+    // Dense path: data_length == length, or alloc fallback.
+    uint8_t* dst = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null) {
+        try { out_null = cmp_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); volnitsky_free(tbl); throw; }
+    }
     for (uint32_t i = 0; i < n; ++i) {
         if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
         const DrakenStringSlot* slot = &sa->slots[sel[i]];

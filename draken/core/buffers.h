@@ -139,8 +139,11 @@ typedef struct {
 // Default posture: uniform data[selection[i]] — no shape discrimination.
 // Shape-specialized fast paths (constant, dict) require explicit architect
 // approval (CLAUDE.md §11). Approved exceptions: compare kernels
-// (int64_compare.h, fixed_int_ops.h, string_compare.h) and predicate kernels
-// (int64_predicates.h, fixed_int_ops.h, string_predicates.h).
+// (int64_compare.h, fixed_int_ops.h, string_compare.h, float_ops.h), predicate
+// kernels (int64_predicates.h, fixed_int_ops.h, string_predicates.h,
+// float_ops.h), and arithmetic kernels (int64_arithmetic.h — constant-operand
+// folding + dict/constant-preserving scalar/unary ops). float_ops.h compare/
+// between gained constant/dict/identity paths; approved 2026-06-11.
 //
 // Memory-layout hints (informational only — never used in hot loops):
 //   former-dense    => selection points at draken_identity_sel,  data_length == length
@@ -149,7 +152,11 @@ typedef struct {
 typedef struct {
     void*             data;        // typed payload (cast at Cython typed-wrapper level)
     const uint32_t*   selection;   // always valid; indices into data
-    uint32_t          data_length; // number of unique values in data
+    uint32_t          data_length; // size of the data array (physical value count).
+                                   // Uniqueness is guaranteed only by the *compress*
+                                   // builders; other dict constructors may admit
+                                   // duplicates, so do NOT assume data values are
+                                   // distinct (kernels read data[selection[i]] regardless).
     uint32_t          length;      // logical row count
     uint8_t*          validity;    // 1-bit-per-logical-row null mask; NULL = all valid
     DrakenType        type;

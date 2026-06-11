@@ -4,7 +4,7 @@ Opteryx Core is the SQL execution engine behind [opteryx.app](https://opteryx.ap
 
 This library is designed for fast, read-heavy analytical queries over Parquet-backed data. It handles SQL parsing, planning, predicate pushdown, projection pruning, and execution so you can query datasets from Python without standing up a separate warehouse.
 
-This project is opinionated toward the needs of `opteryx.app`. It is still useful as a standalone library if you want to query local Parquet-backed datasets via registered workspaces, embed SQL into a Python service or notebook, or experiment with engine internals directly.
+This project is opinionated toward the needs of `opteryx.app`. It is still useful as a standalone library if you want to query local Parquet, NDJSON, and CSV datasets, embed SQL into a Python service or notebook, or experiment with engine internals directly.
 
 ## Requirements
 
@@ -131,4 +131,6 @@ If you use Opteryx-Core yourself, we want to hear from you.
 
 This project is being actively built, and outside usage helps make it better.
 
-Docs: https://docs.opteryx.app/  •  Source: https://github.com/mabel-dev/opteryx-core  •  License: Apache-2.0
+Docs: https://docs.opteryx.app/
+Source: https://github.com/mabel-dev/opteryx-core
+License: Apache-2.0

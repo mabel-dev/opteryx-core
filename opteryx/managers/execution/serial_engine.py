@@ -59,7 +59,7 @@ def execute(
     # ── Non-pipeline special cases ───────────────────────────────────────────
     if isinstance(head_node, ExplainNode):
         return (
-            explain(plan, analyze=head_node.analyze, _format=head_node.format),
+            explain(plan, analyze=head_node.analyze, _format=head_node.format, telemetry=telemetry),
             ResultType.TABULAR,
         )
     if isinstance(head_node, SetVariableNode):
@@ -114,11 +114,17 @@ def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
             break
 
 
-def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel, None, None]:
+def explain(
+    plan: PhysicalPlan,
+    analyze: bool,
+    _format: str,
+    telemetry: QueryTelemetry = None,
+) -> Generator[Morsel, None, None]:
     from opteryx.operators import BasePlanNode
     from opteryx.operators.exit import ExitNode
     from opteryx.operators.explain import ExplainNode
 
+    # Record stream consumed by the MERMAID renderer (one dict per operator).
     def _inner_explain(node, depth):
         incoming_operators = plan.ingoing_edges(node)
         for operator_name in incoming_operators:
@@ -143,40 +149,107 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
                 yield record
                 yield from _inner_explain(operator_name[0], depth + 1)
 
+    # Real operator children of a node, transparently skipping the Exit/Explain
+    # wrappers so the rendered tree starts at the first data operator.
+    def _real_children(node_id):
+        kids = []
+        for edge in plan.ingoing_edges(node_id):
+            child_id = edge[0]
+            child = plan[child_id]
+            if isinstance(child, (ExitNode, ExplainNode)):
+                kids.extend(_real_children(child_id))
+            elif isinstance(child, BasePlanNode):
+                kids.append(child_id)
+        return kids
+
+    # Build the indented operator tree (label, details, operator) bottom-up.
+    def _tree_rows(node_id, prefix, is_last, is_root, out):
+        operator = plan[node_id]
+        name = operator.name or type(operator).__name__
+        if is_root:
+            label = name
+            child_prefix = ""
+        else:
+            label = prefix + ("└─ " if is_last else "├─ ") + name
+            child_prefix = prefix + ("   " if is_last else "│  ")
+        out.append((label, str(operator.config) if operator.config else "", operator))
+        children = _real_children(node_id)
+        for index, child_id in enumerate(children):
+            _tree_rows(child_id, child_prefix, index == len(children) - 1, False, out)
+
     head = list(dict.fromkeys(plan.get_exit_points()))
     if len(head) != 1:
         raise InvalidInternalStateError(f"Problem with the plan - it has {len(head)} heads.")
 
     if analyze:
         # Drive the underlying query for telemetry but discard the result rows.
-        head_node = plan.get_exit_points()[0]
-        query_head_edges = plan.ingoing_edges(head_node)
+        query_head_edges = plan.ingoing_edges(head[0])
         if query_head_edges:
             _drain_pipeline(plan, enable_tracing=True)
 
-    explained = list(_inner_explain(head[0], 1))
-
-    if _format == "TEXT":
-        table = Morsel.from_vectors(
-            ["identity", "bytes_in", "bytes_out"],
-            [
-                vector_from_sequence(
-                    [row["identity"] for row in explained], dtype=DrakenType.VARCHAR
-                ),
-                vector_from_sequence(
-                    [row.get("bytes_in", 0) for row in explained], dtype=DrakenType.INT64
-                ),
-                vector_from_sequence(
-                    [row.get("bytes_out", 0) for row in explained], dtype=DrakenType.INT64
-                ),
-            ],
-        )
-    else:
+    if _format != "TEXT":
+        explained = list(_inner_explain(head[0], 1))
         from opteryx.utils import mermaid
 
         mermaid_plan = mermaid.plan_to_mermaid(plan, explained)
-        table = Morsel.from_vectors(
+        yield Morsel.from_vectors(
             ["plan"], [vector_from_sequence([mermaid_plan], dtype=DrakenType.VARCHAR)]
         )
+        return
 
-    yield table
+    # ── TEXT: tabular operator tree ──────────────────────────────────────────
+    op_rows: list = []
+    tops = _real_children(head[0])
+    for index, top in enumerate(tops):
+        _tree_rows(top, "", index == len(tops) - 1, True, op_rows)
+
+    def _row_count(operator):
+        # Scan nodes report their output via telemetry.rows_read rather than
+        # records_out (mirrors the MERMAID renderer).
+        count = int(getattr(operator, "records_out", 0) or 0)
+        if count == 0 and getattr(operator, "is_scan", False):
+            count = int(getattr(getattr(operator, "telemetry", None), "rows_read", 0) or 0)
+        return count
+
+    tree_col = [row[0] for row in op_rows]
+    details_col = [row[1] for row in op_rows]
+    rows_col = [_row_count(row[2]) for row in op_rows]
+    time_col = [round((getattr(row[2], "execution_time", 0) or 0) / 1e6, 3) for row in op_rows]
+
+    # ── OPTIMIZATIONS: which optimizer rules fired, from telemetry counters ───
+    readings = getattr(telemetry, "_reading", None) or {}
+    opt_items = []
+    for key in sorted(readings):
+        value = readings[key]
+        if not isinstance(value, int) or value <= 0:
+            continue
+        if key.startswith("optimization_"):
+            opt_items.append((key[len("optimization_") :].replace("_", " "), value))
+        elif key == "files_pruned":
+            opt_items.append(("files pruned", value))
+
+    if opt_items:
+        tree_col.append("OPTIMIZATIONS")
+        details_col.append("")
+        rows_col.append(0)
+        time_col.append(0.0)
+        for index, (label, count) in enumerate(opt_items):
+            connector = "└─ " if index == len(opt_items) - 1 else "├─ "
+            tree_col.append(connector + label)
+            details_col.append(f"applied {count}×" if count > 1 else "applied")
+            rows_col.append(0)
+            time_col.append(0.0)
+
+    columns = ["tree", "details"]
+    vectors = [
+        vector_from_sequence(tree_col, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(details_col, dtype=DrakenType.VARCHAR),
+    ]
+    if analyze:
+        columns += ["rows", "time_ms"]
+        vectors += [
+            vector_from_sequence(rows_col, dtype=DrakenType.INT64),
+            vector_from_sequence(time_col, dtype=DrakenType.FLOAT64),
+        ]
+
+    yield Morsel.from_vectors(columns, vectors)

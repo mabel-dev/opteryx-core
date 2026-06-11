@@ -45,6 +45,10 @@ cdef class CppIOPipeline:
                   int64_t pool_size=256*1024*1024):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
         self.pool = MemoryPool(pool_size, name="parquet-io", auto_resize=False)
+        self.committed_bytes = 0
+        # Workers serialize decoded columns directly into this pool's reserved
+        # memory — no intermediate heap buffer, no consumer-side commit() copy.
+        wire_pool_sink(self.pipeline, self.pool._pool)
 
     def __dealloc__(self):
         if self.pipeline:
@@ -170,33 +174,13 @@ cdef class CppIOPipeline:
                 'rg_idx': result.rg_idx,
             }
 
+        # Columns were serialized straight into the pool by the worker; the
+        # MorselRef already carries one ref_id per column. No commit copy here.
         cdef dict ref_ids = {}
-        cdef int64_t ref_id
         cdef bytes col_name
-        cdef const uint8_t* col_ptr
-        cdef Py_ssize_t col_len
-
-        for i in range(result.column_ipc_bytes.size()):
-            col_name = result.column_names[i]   # bytes — no decode; names are bytes throughout
-            # Zero-copy handoff: commit raw pointer + length directly to the
-            # pool. Skips the typed-memoryview / buffer-protocol overhead and
-            # runs the actual commit under nogil.
-            col_len = result.column_ipc_bytes[i].size()
-            if col_len == 0:
-                with nogil:
-                    ref_id = self.pool.commit(NULL, 0)
-            else:
-                col_ptr = result.column_ipc_bytes[i].data()
-                with nogil:
-                    ref_id = self.pool.commit(<const void*>col_ptr, col_len)
-            if ref_id == -1:
-                return {
-                    'success': False,
-                    'error': f'MemoryPool exhausted storing column {col_name!r}',
-                    'path': result.path.decode('utf-8'),
-                    'rg_idx': result.rg_idx,
-                }
-            ref_ids[col_name] = ref_id
+        for i in range(result.column_ref_ids.size()):
+            col_name = result.column_names[i]   # bytes — names are bytes throughout
+            ref_ids[col_name] = result.column_ref_ids[i]
 
         return {
             'success': True,
@@ -227,30 +211,13 @@ cdef class CppIOPipeline:
                 'rg_idx': result.rg_idx,
             }
 
+        # Columns were serialized straight into the pool by the worker; the
+        # MorselRef already carries one ref_id per column. No commit copy here.
         cdef dict ref_ids = {}
-        cdef int64_t ref_id
         cdef bytes col_name
-        cdef const uint8_t* col_ptr
-        cdef Py_ssize_t col_len
-
-        for i in range(result.column_ipc_bytes.size()):
-            col_name = result.column_names[i]   # bytes — no decode; names are bytes throughout
-            col_len = result.column_ipc_bytes[i].size()
-            if col_len == 0:
-                with nogil:
-                    ref_id = self.pool.commit(NULL, 0)
-            else:
-                col_ptr = result.column_ipc_bytes[i].data()
-                with nogil:
-                    ref_id = self.pool.commit(<const void*>col_ptr, col_len)
-            if ref_id == -1:
-                return {
-                    'success': False,
-                    'error': f'MemoryPool exhausted storing column {col_name!r}',
-                    'path': result.path.decode('utf-8'),
-                    'rg_idx': result.rg_idx,
-                }
-            ref_ids[col_name] = ref_id
+        for i in range(result.column_ref_ids.size()):
+            col_name = result.column_names[i]   # bytes — names are bytes throughout
+            ref_ids[col_name] = result.column_ref_ids[i]
 
         return {
             'success': True,
@@ -267,10 +234,23 @@ cdef class CppIOPipeline:
             self.pipeline.wait_shutdown()
 
     def diagnostics(self):
+        cdef int i
+        cdef int n_buckets = self.pipeline.http_latency_bucket_count()
+        # Histogram as [(upper_bound_ms, count), ...]; bound 0 = overflow bucket.
+        cdef list latency_histogram = [
+            (self.pipeline.http_latency_bucket_bound_ms(i), self.pipeline.http_latency_bucket(i))
+            for i in range(n_buckets)
+        ]
         return {
             "spin_iterations": self.pipeline.spin_iterations(),
             "enqueue_count": self.pipeline.enqueue_count(),
             "queue_high_watermark": self.pipeline.queue_high_watermark(),
+            "http_request_count": self.pipeline.http_request_count(),
+            "http_fetch_ops": self.pipeline.http_fetch_ops(),
+            "http_latency_histogram_ms": latency_histogram,
+            "worker_blocked_ns": self.pipeline.worker_blocked_ns(),
+            "ipc_bytes_serialized": self.pipeline.ipc_bytes_serialized(),
+            "ipc_bytes_committed": self.committed_bytes,
         }
 
 
@@ -455,6 +435,16 @@ cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates):
                 elif op == "LtEq":
                     if min_val > value:
                         return False
+                elif op == "InList":
+                    # Prune only when no candidate value falls in [min, max].
+                    # Mirrors predicates._can_prune_rowgroup; an empty list
+                    # matches nothing so any() is False -> prune.
+                    if not any(min_val <= v <= max_val for v in value):
+                        return False
+                elif op == "NotInList":
+                    # Prune only when the whole group is a single excluded value.
+                    if min_val == max_val and min_val in value:
+                        return False
             except TypeError:
                 pass
             break
@@ -506,6 +496,7 @@ def iter_row_groups_ipc(
     cdef uint64_t t_submit_ns = 0
     cdef uint64_t t_consume_ns = 0
     cdef uint64_t t_get_result_ns = 0
+    cdef uint64_t t_deserialize_ns = 0
     cdef uint64_t _t0, _t1, _ts
     cdef unordered_map[string, FileStats] local_footers_native
     cdef string path_bytes_cpp
@@ -562,9 +553,11 @@ def iter_row_groups_ipc(
         # column-chunk size; a 2x factor pads for dict-code widening (RLE → u32
         # codes) and IPC framing. The historical 256MB stays as a floor so small
         # reads behave exactly as before. Combined with the in-flight bound
-        # below, peak pool occupancy is in_flight_limit row groups, so memory
-        # scales with per-row-group size × concurrency — never with total file
-        # or dataset size.
+        # below, peak pool occupancy is in_flight_limit + 1 row groups (the
+        # in-flight window plus the one dequeued-but-not-yet-deserialized
+        # result whose pool bytes are still held while the window is refilled),
+        # so memory scales with per-row-group size × concurrency — never with
+        # total file or dataset size.
         # proj_set for prefetched-footer path (str); proj_set_bytes for C++ native path (bytes).
         # Column names from the operator are str (schema); C++ footer returns bytes.
         proj_set = set(column_names)
@@ -591,7 +584,7 @@ def iter_row_groups_ipc(
 
         in_flight_limit = decode_workers + 2
         est_rg = max_rg_bytes * 2
-        dyn_pool_size = est_rg * in_flight_limit
+        dyn_pool_size = est_rg * (in_flight_limit + 1)
         if dyn_pool_size < 256*1024*1024:
             dyn_pool_size = 256*1024*1024
 
@@ -602,16 +595,22 @@ def iter_row_groups_ipc(
         )
 
         # ── Bounded submission + consume (#1) ────────────────────────────────
-        # At most in_flight_limit row groups are submitted-but-not-yet-consumed
-        # at any instant. Each consumed row group is deserialized (which copies
-        # its columns out of the pool and releases the pool bytes) before the
-        # next is submitted, so peak pool occupancy never exceeds
-        # in_flight_limit row groups — the producer cannot outrun the consumer.
+        # At most in_flight_limit row groups are submitted-but-not-yet-received
+        # at any instant. Each loop iteration does exactly one of two things:
+        # receive a result from the C++ queue, or deserialize the previously
+        # received (pending) result. The window top-up runs at the head of
+        # every iteration, so after a result is received — and before this
+        # thread spends time deserializing it and the downstream operators
+        # consume the yielded morsel — replacement work is already submitted
+        # and the C++ workers stay fed. Peak pool occupancy is bounded by
+        # in_flight_limit + 1 row groups (window + the pending result), which
+        # the pool sizing above accounts for.
         _t0 = time.monotonic_ns()
         n_items = len(work_items)
         next_to_submit = 0
         results_received = 0
-        while results_received < n_items:
+        pending_result = None
+        while results_received < n_items or pending_result is not None:
             # Top up the in-flight window.
             while next_to_submit < n_items and (next_to_submit - results_received) < in_flight_limit:
                 _ts = time.monotonic_ns()
@@ -639,20 +638,34 @@ def iter_row_groups_ipc(
                 t_submit_ns += time.monotonic_ns() - _ts
                 next_to_submit += 1
 
+            if pending_result is None:
+                # Receive phase: block for the next result, count it against
+                # the window, then loop back so the top-up above refills the
+                # window before any Python-side consumption happens.
+                _ts = time.monotonic_ns()
+                result = pipeline.wait_result()
+                t_get_result_ns += time.monotonic_ns() - _ts
+                if result is None:
+                    # Pipeline drained before all work completed — should not happen.
+                    raise RuntimeError(
+                        f"Parquet pipeline drained with {n_items - results_received} "
+                        f"result(s) missing"
+                    )
+
+                if not result['success']:
+                    raise RuntimeError(f"Parquet pipeline error: {result.get('error', 'unknown')}")
+
+                results_received += 1
+                pending_result = result
+                continue
+
+            # Consume phase: deserialize the pending result and yield it.
+            result = pending_result
+            pending_result = None
+
             _ts = time.monotonic_ns()
-            result = pipeline.wait_result()
-            t_get_result_ns += time.monotonic_ns() - _ts
-            if result is None:
-                # Pipeline drained before all work completed — should not happen.
-                raise RuntimeError(
-                    f"Parquet pipeline drained with {n_items - results_received} "
-                    f"result(s) missing"
-                )
-
-            if not result['success']:
-                raise RuntimeError(f"Parquet pipeline error: {result.get('error', 'unknown')}")
-
             row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
+            t_deserialize_ns += time.monotonic_ns() - _ts
 
             # Defensive: detect columns decoded to 0 rows in a non-empty row group.
             # List columns (max_repetition_level > 0) have more values than rows and
@@ -683,7 +696,6 @@ def iter_row_groups_ipc(
             }
             scan_rg = _make_scan_row_group(path_str, result['rg_idx'], 'cpp-pipeline', telemetry_dict)
             # row_group is now pure {col: Vector}; clean for the operator.
-            results_received += 1
             yield (scan_rg, row_group)
         t_consume_ns = time.monotonic_ns() - _t0
 
@@ -697,18 +709,41 @@ def iter_row_groups_ipc(
                 sys.stderr.write(
                     "\n[io_diag] paths=%d rgs=%d  phase1=%.1fms phase2=%.1fms consume=%.1fms\n"
                     "         footer_total=%.1fms  submit_total=%.3fms\n"
-                    "         wait_result_total=%.1fms\n"
+                    "         wait_result_total=%.1fms deserialize_total=%.1fms\n"
                     "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
+                    "         http: requests=%d fetch_ops=%d  worker_blocked=%.1fms\n"
+                    "         handoff: serialized=%d committed=%d bytes\n"
                     % (
                         len(set(p for p, _ in work_items)) if work_items else 0,
                         len(work_items),
                         t_phase1_ns / 1e6, t_phase2_ns / 1e6, t_consume_ns / 1e6,
                         t_footer_ns / 1e6, t_submit_ns / 1e6,
-                        t_get_result_ns / 1e6,
+                        t_get_result_ns / 1e6, t_deserialize_ns / 1e6,
                         diag["enqueue_count"], diag["queue_high_watermark"],
                         diag["spin_iterations"],
+                        diag["http_request_count"], diag["http_fetch_ops"],
+                        diag["worker_blocked_ns"] / 1e6,
+                        diag["ipc_bytes_serialized"], diag["ipc_bytes_committed"],
                     )
                 )
+            diag_json_path = os.environ.get("OPTERYX_IO_DIAG_JSON")
+            if diag_json_path:
+                # Machine-readable diag for the dev benchmark harness: one JSON
+                # object per scan, appended as a line (JSONL). Dev tooling only.
+                import json
+                record = pipeline.diagnostics()
+                record.update({
+                    "paths": len(set(p for p, _ in work_items)) if work_items else 0,
+                    "row_groups": len(work_items),
+                    "phase1_ns": t_phase1_ns,
+                    "footer_ns": t_footer_ns,
+                    "submit_ns": t_submit_ns,
+                    "consume_ns": t_consume_ns,
+                    "wait_result_ns": t_get_result_ns,
+                    "deserialize_ns": t_deserialize_ns,
+                })
+                with open(diag_json_path, "a") as diag_file:
+                    diag_file.write(json.dumps(record) + "\n")
             pipeline.close()
 
 

@@ -20,6 +20,35 @@ cdef extern from *:
     """static inline void _morsel_decref(PyObject* op) { Py_XDECREF(op); }"""
     void _morsel_decref(PyObject* op)
 
+# Native take over a raw int32 index buffer — no per-row PyObject boxing.
+# PyObject* in/out keeps `object` out of the .pyx (CLAUDE.md §3); the returned
+# handle is a NEW reference (balanced below in _take_native).
+cdef extern from "core/draken_bridge.h":
+    PyObject* draken_vector_take_buffer(PyObject* vec_obj,
+                                        const int32_t* indices, uint32_t n)
+    PyObject* draken_vector_take_with_null_buffer(PyObject* vec_obj,
+                                        const int32_t* indices, uint32_t n)
+
+
+cdef inline Vector _take_native(Vector col, const int32_t* idx, uint32_t n):
+    """Gather rows from `col` at the typed indices, fully native (no boxed list)."""
+    cdef PyObject* raw = draken_vector_take_buffer(<PyObject*>col._nb, idx, n)
+    if raw == NULL:
+        raise RuntimeError("draken_vector_take_buffer failed")
+    cdef object nb_obj = <object>raw   # Cython incref → refcount = 2
+    _morsel_decref(raw)                # balance the NEW ref → refcount = 1
+    return Vector(nb_obj)
+
+
+cdef inline Vector _take_native_with_null(Vector col, const int32_t* idx, uint32_t n):
+    """Gather rows from `col`; index < 0 yields a NULL output row. Native."""
+    cdef PyObject* raw = draken_vector_take_with_null_buffer(<PyObject*>col._nb, idx, n)
+    if raw == NULL:
+        raise RuntimeError("draken_vector_take_with_null_buffer failed")
+    cdef object nb_obj = <object>raw
+    _morsel_decref(raw)
+    return Vector(nb_obj)
+
 # C++ hash functions for the cdef c_hash method. draken_hash dispatches per
 # DrakenType; simd_mix_hash mixes per-column hashes into a running buffer.
 # draken_hash lives in the global namespace (static inline in ops/hash.h).
@@ -51,20 +80,13 @@ cdef inline Vector _wrap(object v):
 
 cdef Morsel _make_morsel():
     cdef Morsel m = Morsel.__new__(Morsel)
-    from draken.draken_native import Morsel as NbMorsel
-    m._nb = NbMorsel()
     m._col_names = []
     m._zero_col_num_rows = 0
     return m
 
 
 cdef class Morsel:
-    def __cinit__(self, object nb_morsel=None):
-        if nb_morsel is None:
-            from draken.draken_native import Morsel as NbMorsel
-            self._nb = NbMorsel()
-        else:
-            self._nb = nb_morsel
+    def __cinit__(self):
         self._col_names = []
         # self._columns is a C++ vector[PyObject*] — default-constructed empty.
         self._zero_col_num_rows = 0
@@ -403,7 +425,6 @@ cdef class Morsel:
 
     def append(self, vec):
         cdef Vector wrapped = _wrap(vec)
-        self._nb.append(wrapped._nb)
         self._append_column(wrapped)
 
     cdef void _empty_inplace(self):
@@ -414,26 +435,26 @@ cdef class Morsel:
             self._zero_col_num_rows = 0
             return
         for i in range(n):
-            nb_empty = self._get_column(i)._nb.take([])
-            self._set_column(i, Vector(nb_empty))
+            # n==0 take: the kernels never deref the index pointer when n==0.
+            self._set_column(i, _take_native(self._get_column(i), NULL, 0))
 
     cdef void _take_inplace(self, int32_t[::1] indices):
-        """Filter all columns to the given row indices, in place."""
+        """Filter all columns to the given row indices, in place. Native gather
+        straight off the typed memoryview — no boxed index list."""
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
-        idx_list = [indices[i] for i in range(indices.shape[0])]
+        cdef uint32_t ni = <uint32_t>indices.shape[0]
         if n == 0:
             self._zero_col_num_rows = indices.shape[0]
             return
+        cdef const int32_t* idx = &indices[0] if ni > 0 else NULL
         for i in range(n):
-            nb_taken = self._get_column(i)._nb.take(idx_list)
-            self._set_column(i, Vector(nb_taken))
+            self._set_column(i, _take_native(self._get_column(i), idx, ni))
 
     def append_vector(self, name, vec):
         if isinstance(name, str):
             name = name.encode("utf-8")
         cdef Vector wrapped = _wrap(vec)
-        self._nb.append(wrapped._nb)
         self._col_names.append(name)
         self._append_column(wrapped)
 
@@ -458,7 +479,6 @@ cdef class Morsel:
                 name = name.encode("utf-8")
             for i, n in enumerate(self._col_names):
                 if n == name:
-                    result._nb.append(self._get_column(i)._nb)
                     result._col_names.append(n)
                     result._append_column(self._get_column(i))
                     break
@@ -471,7 +491,6 @@ cdef class Morsel:
         for i, name in enumerate(new_names):
             if isinstance(name, str):
                 name = name.encode("utf-8")
-            result._nb.append(self._get_column(i)._nb)
             result._col_names.append(name)
             result._append_column(self._get_column(i))
         if result._num_columns() == 0:
@@ -498,7 +517,6 @@ cdef class Morsel:
             return result
         for i in range(n):
             nb_masked = self._get_column(i)._nb.mask(mask_nb)
-            result._nb.append(nb_masked)
             result._append_column(Vector(nb_masked))
         return result
 
@@ -507,14 +525,23 @@ cdef class Morsel:
         result._col_names = list(self._col_names)
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
+        # Materialise the index iterable into a typed int32 buffer ONCE, then
+        # gather every column natively (no per-column re-boxing of a list).
         idx_list = list(indices)
+        cdef uint32_t ni = <uint32_t>len(idx_list)
         if n == 0:
-            result._zero_col_num_rows = len(idx_list)
+            result._zero_col_num_rows = ni
             return result
-        for i in range(n):
-            nb_taken = self._get_column(i)._nb.take(idx_list)
-            result._nb.append(nb_taken)
-            result._append_column(Vector(nb_taken))
+        cdef int32_t* idx = <int32_t*>malloc(<size_t>(ni if ni > 0 else 1) * sizeof(int32_t))
+        if idx == NULL:
+            raise MemoryError()
+        try:
+            for i in range(ni):
+                idx[i] = <int32_t>idx_list[i]
+            for i in range(n):
+                result._append_column(_take_native(self._get_column(i), idx, ni))
+        finally:
+            free(idx)
         return result
 
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):
@@ -528,7 +555,6 @@ cdef class Morsel:
             return result
         for i in range(n):
             nb_sliced = self._get_column(i)._nb.slice(<uint32_t>real_start, <uint32_t>length)
-            result._nb.append(nb_sliced)
             result._append_column(Vector(nb_sliced))
         return result
 
@@ -546,10 +572,8 @@ cdef class Morsel:
                 if self._col_names[i] in col_set:
                     if mask is not None:
                         nb_v = self._get_column(i)._nb.take(mask)
-                        result._nb.append(nb_v)
                         result._append_column(Vector(nb_v))
                     else:
-                        result._nb.append(self._get_column(i)._nb)
                         result._append_column(self._get_column(i))
                     result._col_names.append(self._col_names[i])
             if result._num_columns() == 0:
@@ -558,14 +582,12 @@ cdef class Morsel:
             result._col_names = list(self._col_names)
             for i in range(n):
                 nb_v = self._get_column(i)._nb.take(mask)
-                result._nb.append(nb_v)
                 result._append_column(Vector(nb_v))
             if result._num_columns() == 0:
                 result._zero_col_num_rows = len(mask)
         else:
             result._col_names = list(self._col_names)
             for i in range(n):
-                result._nb.append(self._get_column(i)._nb)
                 result._append_column(self._get_column(i))
             if result._num_columns() == 0:
                 result._zero_col_num_rows = self._zero_col_num_rows
@@ -595,24 +617,19 @@ cdef class Morsel:
                 for mi in range(nmorsels)
             ]
             nb_v = _nb_concat(col_parts)
-            result._nb.append(nb_v)
             result._append_column(Vector(nb_v))
         return result
 
     @classmethod
     def from_vectors(cls, col_names, col_vecs):
-
-        from draken.draken_native import Morsel as NbMorsel
         cdef Morsel result = cls.__new__(cls)
         cdef Vector wrapped
-        result._nb = NbMorsel()
         result._col_names = []
         result._zero_col_num_rows = 0
         for name, vec in zip(col_names, col_vecs):
             if isinstance(name, str):
                 name = name.encode("utf-8")
             wrapped = _wrap(vec)
-            result._nb.append(wrapped._nb)
             result._col_names.append(name)
             result._append_column(wrapped)
         return result
@@ -622,9 +639,10 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
                            int32_t[::1] left_view, int32_t[::1] right_view):
     """Materialise a join result by taking rows from left and right at the given indices.
 
-    left_view:  int32 indices into left_morsel — always non-negative.
+    left_view:  int32 indices into left_morsel — negative values produce null rows
+                (used by RIGHT/FULL outer-join callers for unmatched right rows).
     right_view: int32 indices into right_morsel — negative values produce null rows
-                (used by outer-join callers for unmatched left rows).
+                (used by LEFT/FULL outer-join callers for unmatched left rows).
 
     Returns a new Morsel with all left_morsel columns followed by all right_morsel
     columns. Number of rows equals len(left_view).
@@ -634,71 +652,51 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
     cdef Py_ssize_t i, j
     cdef int ncols_left, ncols_right
     cdef object nb_taken, nb_new
-    cdef bint has_neg
+    cdef bint left_has_neg, right_has_neg
 
-    # Left columns: indices are always valid — use take directly.
-    left_idx = [left_view[i] for i in range(n)]
+    # Left columns: may contain -1 for unmatched right rows (RIGHT/FULL outer).
+    left_has_neg = False
+    for i in range(n):
+        if left_view[i] < 0:
+            left_has_neg = True
+            break
+
     ncols_left = left_morsel._num_columns()
-    for j in range(ncols_left):
-        nb_taken = left_morsel._get_column(j)._nb.take(left_idx)
-        result._nb.append(nb_taken)
-        result._col_names.append(left_morsel._col_names[j])
-        result._append_column(Vector(nb_taken))
+    cdef const int32_t* lidx = &left_view[0] if n > 0 else NULL
+    if not left_has_neg:
+        for j in range(ncols_left):
+            result._col_names.append(left_morsel._col_names[j])
+            result._append_column(_take_native(left_morsel._get_column(j), lidx, <uint32_t>n))
+    else:
+        for j in range(ncols_left):
+            result._col_names.append(left_morsel._col_names[j])
+            result._append_column(
+                _take_native_with_null(left_morsel._get_column(j), lidx, <uint32_t>n))
 
-    # Right columns: may contain -1 for unmatched outer-join rows.
-    has_neg = False
+    # Right columns: may contain -1 for unmatched left rows (LEFT/FULL outer).
+    right_has_neg = False
     for i in range(n):
         if right_view[i] < 0:
-            has_neg = True
+            right_has_neg = True
             break
 
     ncols_right = right_morsel._num_columns()
 
-    if not has_neg:
-        # Fast path: no null rows — take directly.
-        right_idx = [right_view[i] for i in range(n)]
+    cdef const int32_t* ridx
+    if not right_has_neg:
+        # Fast path: no null rows — native gather off the memoryview.
+        ridx = &right_view[0] if n > 0 else NULL
         for j in range(ncols_right):
-            nb_taken = right_morsel._get_column(j)._nb.take(right_idx)
-            result._nb.append(nb_taken)
             result._col_names.append(right_morsel._col_names[j])
-            result._append_column(Vector(nb_taken))
+            result._append_column(_take_native(right_morsel._get_column(j), ridx, <uint32_t>n))
     else:
-        # Slow path: replace -1 with 0, take, then null out unmatched rows.
-        import draken.draken_native as _nb_dn
-        from draken.draken_native import DrakenType as _DrakenType
-        safe_right = [right_view[i] if right_view[i] >= 0 else 0 for i in range(n)]
-        null_mask  = [right_view[i] < 0 for i in range(n)]
+        # Unmatched-row path: native gather where right_view[i] < 0 → NULL row.
+        # No to_pylist round-trip, no per-type reconstruction; ALL types
+        # supported (incl. ARRAY / INTERVAL / VARBINARY).
+        ridx = &right_view[0] if n > 0 else NULL
         for j in range(ncols_right):
-            nb_taken = right_morsel._get_column(j)._nb.take(safe_right)
-            taken_list = nb_taken.to_pylist()
-            for i in range(n):
-                if null_mask[i]:
-                    taken_list[i] = None
-            # Dispatch to the type-appropriate constructor based on source column type
-            vec_type = nb_taken.type
-            if vec_type in (_DrakenType.INT64, _DrakenType.INT32, _DrakenType.INT16, _DrakenType.INT8):
-                nb_new = _nb_dn.vector_from_sequence(taken_list)
-            elif vec_type == _DrakenType.FLOAT64:
-                nb_new = _nb_dn.vector_float64_from_sequence(taken_list)
-            elif vec_type in (_DrakenType.VARCHAR, _DrakenType.NVARCHAR):
-                nb_new = _nb_dn.vector_from_string_sequence(taken_list)
-            elif vec_type == _DrakenType.BOOL:
-                from draken.vectors.bool_vector import BoolVector as _BoolVec
-                nb_new = _BoolVec.from_list(taken_list)._nb
-            elif vec_type == _DrakenType.DATE32:
-                nb_new = _nb_dn.vector_date32_from_sequence(taken_list)
-            elif vec_type == _DrakenType.TIMESTAMP64:
-                nb_new = _nb_dn.vector_timestamp_from_sequence(taken_list)
-            elif vec_type == _DrakenType.DECIMAL:
-                prec = nb_taken.logical_type_precision
-                scale = nb_taken.logical_type_scale
-                nb_new = _nb_dn.vector_decimal_from_sequence(taken_list, prec, scale)
-            else:
-                raise TypeError(
-                    f"align_tables: outer-join null path unsupported for vector type {vec_type!r}"
-                )
-            result._nb.append(nb_new)
             result._col_names.append(right_morsel._col_names[j])
-            result._append_column(Vector(nb_new))
+            result._append_column(
+                _take_native_with_null(right_morsel._get_column(j), ridx, <uint32_t>n))
 
     return result

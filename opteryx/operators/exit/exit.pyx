@@ -57,6 +57,11 @@ cdef class ExitNode(BasePlanNode):
             final_columns.append(column.schema_column.identity)
             final_names.append(column.alias)
 
+        # A result with two columns sharing an output name is ambiguous — reject it.
+        # Note: once column identities became genuinely unique, `SELECT *` over a join
+        # of relations that share a column name produces distinct columns with the same
+        # name; per architect decision this errors here (rather than emit duplicate
+        # names or auto-suffix). Queries must qualify/alias such columns explicitly.
         if len(set(final_names)) != len(final_names):
             from collections import Counter
 

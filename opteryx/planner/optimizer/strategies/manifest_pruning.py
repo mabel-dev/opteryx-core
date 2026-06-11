@@ -51,6 +51,8 @@ class ManifestPruningStrategy(OptimizationStrategy):
     4. Stores pruned files in node properties for execution
     """
 
+    requires = ("predicates-pushed",)
+
     def __init__(self, telemetry):
         super().__init__(telemetry)
         self.collected_predicates = []

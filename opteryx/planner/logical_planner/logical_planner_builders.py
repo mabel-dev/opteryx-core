@@ -1336,11 +1336,22 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
         centre = build(branch["expr"])
         return Node(node_type=NodeType.NOT, centre=centre)
     if branch["op"] == "Minus":
-        node = literal_number(branch["expr"]["Value"]["value"]["Number"], alias=alias)
-        node.value = 0 - node.value
-        return node
+        centre = build(branch["expr"], alias=alias)
+        # Constant-fold numeric literals (e.g. `-5`).
+        if centre.node_type == NodeType.LITERAL and isinstance(centre.value, (int, float)):
+            centre.value = 0 - centre.value
+            return centre
+        # General case: lower unary minus on an expression to `0 - expr`.
+        zero = Node(NodeType.LITERAL, type=_CT_INT64, value=0)
+        return Node(
+            get_operator_node_type("Minus"),
+            value="Minus",
+            left=zero,
+            right=centre,
+            alias=alias,
+        )
     if branch["op"] == "Plus":
-        return literal_number(branch["expr"]["Value"]["value"]["Number"], alias=alias)
+        return build(branch["expr"], alias=alias)
     if branch["op"] == "BitwiseNot":
         centre = build(branch["expr"])
         return Node(node_type=NodeType.UNARY_OPERATOR, value="BitwiseNot", centre=centre)

@@ -315,7 +315,7 @@ cdef inline int64_t _dict_value_as_int64(
             fbits = fbits ^ <int32_t>0x7FFFFFFF
         return <int64_t>fbits
     if value_type == DRAKEN_BOOL:
-        return <int64_t>((<uint8_t*>dv.data)[code] != 0)
+        return <int64_t>(((<uint8_t*>dv.data)[code >> 3] >> (code & 7)) & 1)
     # Unknown type: return code as key (preserves existing GROUP BY behaviour).
     return <int64_t>code
 

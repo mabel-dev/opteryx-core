@@ -15,6 +15,7 @@ from opteryx.expression.functions.implementations.logical import (
     array_contains as _lf_array_contains,
 )
 from opteryx.expression.functions.implementations.logical import if_null as _lf_if_null
+from opteryx.expression.functions.implementations.logical import if_not_null as _lf_if_not_null
 from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
 from opteryx.expression.functions.implementations.utility import (
     cosine_similarity as _lf_cosine_similarity,
@@ -42,6 +43,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
     class other_functions:
         array_contains = staticmethod(_lf_array_contains)
         if_null = staticmethod(_lf_if_null)
+        if_not_null = staticmethod(_lf_if_not_null)
         null_if = staticmethod(_lf_null_if)
         cosine_similarity = staticmethod(_lf_cosine_similarity)
         humanize = staticmethod(_lf_humanize)
@@ -127,7 +129,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=other_functions.if_null,  # same kernel, semantics handled by evaluator
+                        callable_ref=other_functions.if_not_null,
                         null_policy="passthru",
                         cost_us_per_million=0.74,
                     ),

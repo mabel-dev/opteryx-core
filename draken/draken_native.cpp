@@ -328,8 +328,13 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
     uint8_t* block = static_cast<uint8_t*>(
         draken_malloc(total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena)));
     if (!block) throw std::bad_alloc();
-    // Zero the whole block: ensures inline slot padding and validity bits are clean.
-    std::memset(block, 0, total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena));
+    // Zero struct + slots (clean inline-slot padding / null slots) and, separately,
+    // the validity region. The arena [arena_start, validity_start) is fully written
+    // by the payload memcpys below for valid long strings; its unused tail beyond
+    // arena_used is never read, so it does not need zeroing.
+    std::memset(block, 0, arena_start);
+    if (has_nulls)
+        std::memset(block + validity_start, 0, validity_bytes);
     OwnedBuffer<void> data_buf(block);
 
     DrakenStringArena* sa     = reinterpret_cast<DrakenStringArena*>(block);
@@ -4920,6 +4925,137 @@ static VectorOwner decimal_mod_dispatch(const VectorOwner& a, const VectorOwner&
 }
 
 // ---------------------------------------------------------------------------
+// take — shared dispatch over a raw int32 index buffer. The nb::list `take`
+// binding boxes into a std::vector and calls this; the C bridge
+// (draken_vector_take_buffer) passes a typed memoryview pointer directly, so
+// hot-path Cython callers (Morsel.take / _take_inplace / align_tables) avoid
+// per-row PyObject boxing entirely.
+// ---------------------------------------------------------------------------
+static VectorOwner vector_take_impl(const VectorOwner& v, const int32_t* idx, uint32_t n) {
+    // D.11: null — taking from null always produces a null vector of length n.
+    if (v.vec.type == DRAKEN_NULL) return make_null_vector(n);
+    // D.13: array — gather rows with owned child copy.
+    if (v.vec.type == DRAKEN_ARRAY) return make_array_take(v, idx, n);
+    // D.11: fp16 — gather rows by index.
+    if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx, n);
+    // D.12: bool — bit-packed gather.
+    if (v.vec.type == DRAKEN_BOOL) return make_bool_take(v, idx, n);
+    auto result = vecresult_to_owner(draken_take(v.vec, idx, n));
+    // Typed kernels hardcode their own type tag in VecResult (e.g. i64_take
+    // always emits DRAKEN_INT64). Restore the original physical type so that
+    // TIMESTAMP64 (and any future aliased type) stays correct after gather.
+    result.vec.type     = v.vec.type;
+    result.logical_type = v.logical_type;
+    return result;
+}
+
+// take_with_null — gather where index < 0 yields a NULL output row (outer-join
+// unmatched rows). Negative indices are gathered with a safe substitute (0) and
+// then forced null in the result's validity bitmap. Type-uniform: works for every
+// type vector_take_impl handles, including ARRAY / INTERVAL / VARBINARY that the
+// old to_pylist round-trip could not.
+static VectorOwner vector_take_with_null_impl(const VectorOwner& v, const int32_t* idx, uint32_t n) {
+    std::vector<int32_t> safe(n > 0u ? n : 1u);
+    bool any_neg = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (idx[i] < 0) { safe[i] = 0; any_neg = true; }
+        else            { safe[i] = idx[i]; }
+    }
+    VectorOwner result = vector_take_impl(v, n > 0u ? safe.data() : nullptr, n);
+    // DRAKEN_NULL is already all-null; nothing to force.
+    if (!any_neg || result.vec.type == DRAKEN_NULL) return result;
+
+    uint8_t* val = result.vec.validity;
+    if (val == nullptr) {
+        const uint32_t nb = (n + 7u) >> 3;
+        val = static_cast<uint8_t*>(draken_malloc(nb > 0u ? nb : 1u));
+        if (!val) throw std::bad_alloc();
+        std::memset(val, 0xFF, nb > 0u ? nb : 1u);
+        result.vec.validity = val;
+        result.validity_buf.reset(val);   // VectorOwner now frees it on GC
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (idx[i] < 0)
+            val[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+    }
+    return result;
+}
+
+// draken_vector_take_buffer — C-bridge take over a raw int32 index buffer.
+//
+// vec_obj must be a draken.draken_native.Vector. `indices` is a caller-owned
+// int32_t[n] buffer (e.g. a Cython typed memoryview); it is only read, never
+// retained. Returns a NEW reference to a Python Vector, or NULL + exception.
+extern "C" PyObject* draken_vector_take_buffer(
+    PyObject* vec_obj, const int32_t* indices, uint32_t n)
+{
+    if (!vec_obj || vec_obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_vector_take_buffer: expected Vector, got None");
+        return nullptr;
+    }
+    nb::handle h(vec_obj);
+    if (!nb::isinstance<VectorOwner>(h)) {
+        PyErr_Format(PyExc_TypeError,
+            "draken_vector_take_buffer: expected Vector, got %.100s",
+            Py_TYPE(vec_obj)->tp_name);
+        return nullptr;
+    }
+    try {
+        const VectorOwner& v = *nb::inst_ptr<VectorOwner>(h);
+        nb::object obj = nb::cast(vector_take_impl(v, indices, n));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
+// draken_vector_take_with_null_buffer — like draken_vector_take_buffer, but
+// index < 0 produces a NULL output row (outer-join unmatched rows). Returns a
+// NEW reference to a Python Vector, or NULL + exception.
+extern "C" PyObject* draken_vector_take_with_null_buffer(
+    PyObject* vec_obj, const int32_t* indices, uint32_t n)
+{
+    if (!vec_obj || vec_obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_vector_take_with_null_buffer: expected Vector, got None");
+        return nullptr;
+    }
+    nb::handle h(vec_obj);
+    if (!nb::isinstance<VectorOwner>(h)) {
+        PyErr_Format(PyExc_TypeError,
+            "draken_vector_take_with_null_buffer: expected Vector, got %.100s",
+            Py_TYPE(vec_obj)->tp_name);
+        return nullptr;
+    }
+    try {
+        const VectorOwner& v = *nb::inst_ptr<VectorOwner>(h);
+        nb::object obj = nb::cast(vector_take_with_null_impl(v, indices, n));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------
 
@@ -5681,32 +5817,19 @@ NB_MODULE(draken_native, m) {
         // as the input (the physical instant values are reordered, not reinterpreted).
         .def("take", [](const VectorOwner& v, nb::list indices) -> VectorOwner {
             const uint32_t n = static_cast<uint32_t>(indices.size());
-            // D.11: null — taking from null always produces a null vector of length n.
-            if (v.vec.type == DRAKEN_NULL) return make_null_vector(n);
             std::vector<int32_t> idx_vec(n);
             for (uint32_t i = 0; i < n; ++i)
                 idx_vec[i] = nb::cast<int32_t>(indices[i]);
-            // D.13: array — gather rows with owned child copy.
-            if (v.vec.type == DRAKEN_ARRAY)
-                return make_array_take(v, idx_vec.data(), n);
-            // D.11: fp16 — gather rows by index.
-            if (v.vec.type == DRAKEN_VECTOR_FP16)
-                return make_fp16_take(v, idx_vec.data(), n);
-            // D.12: bool — bit-packed gather.
-            if (v.vec.type == DRAKEN_BOOL)
-                return make_bool_take(v, idx_vec.data(), n);
-            auto result = vecresult_to_owner(draken_take(v.vec, idx_vec.data(), n));
-            // Typed kernels hardcode their own type tag in VecResult (e.g. i64_take
-            // always emits DRAKEN_INT64).  Restore the original physical type so that
-            // TIMESTAMP64 (and any future aliased type) stays correct after gather.
-            result.vec.type     = v.vec.type;
-            result.logical_type = v.logical_type;
-            return result;
+            return vector_take_impl(v, idx_vec.data(), n);
         })
         // slice(start, length) — contiguous subrange. No Python index list; direct
         // memcpy for dense vectors. Equivalent to take(range(start, start+length))
         // but without materialising an index array at any level.
         .def("slice", [](const VectorOwner& v, uint32_t start, uint32_t length) -> VectorOwner {
+            // O(1) bounds guard: fail loud rather than read past the vector
+            // (a denormalised start+length silently returned garbage before).
+            if (static_cast<uint64_t>(start) + length > v.vec.length)
+                throw std::out_of_range("Vector.slice: start + length exceeds vector length");
             if (v.vec.type == DRAKEN_NULL) return make_null_vector(length);
             // Special types fall back to index-based take to avoid adding slice
             // overloads for array/fp16/bool (uncommon in the slice call sites).

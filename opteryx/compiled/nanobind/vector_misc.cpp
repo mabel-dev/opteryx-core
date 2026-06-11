@@ -49,6 +49,7 @@
 #include "ops/vec_result.h"
 #include "ops/float_log.h"          // draken::ops::float_log
 #include "ops/int64_predicates.h"   // draken::ops::i64_in_list
+#include "ops/fixed_int_ops.h"      // draken::ops::i8_in_list, i16_in_list, i32_in_list
 #include "ops/string_predicates.h"  // draken::ops::str_in_list
 #include "ops/float_ops.h"          // draken::ops::f32_in_list, f64_in_list, fp_canon, fp_bits64
 #include "ops/bool_logical.h"       // bool_get_val
@@ -283,12 +284,25 @@ static VecResult dispatch_in_list(
     const DrakenVector& v, const CarcharSet& set)
 {
     switch (v.type) {
+        // Narrow ints must use their own-width kernels: i64_in_list reads
+        // v.data as int64_t*, which over-reads a 1/2/4-byte buffer and probes
+        // garbage. Each fixed-width kernel reads the correct element width.
         case DRAKEN_INT8:
+            return draken::ops::i8_in_list(v, set);
         case DRAKEN_INT16:
+            return draken::ops::i16_in_list(v, set);
         case DRAKEN_INT32:
-        case DRAKEN_INT64:
+        // DATE32 and TIME32 are 4-byte (int32) storage. They must use the
+        // 4-byte kernel: i64_in_list reads v.data as int64_t*, which over-reads
+        // a 4-byte buffer and probes garbage hashes. i32_in_list reads int32 and
+        // sign-extends to int64 before hashing — the same int64 hash path the
+        // set-builder (build_carchar_from_list, is_int_family) uses for the
+        // literals, so build and probe hashes match.
         case DRAKEN_DATE32:
         case DRAKEN_TIME32:
+            return draken::ops::i32_in_list(v, set);
+        case DRAKEN_INT64:
+        // TIME64 and TIMESTAMP64 are genuinely 8-byte; they stay on i64_in_list.
         case DRAKEN_TIME64:
         case DRAKEN_TIMESTAMP64:
             return draken::ops::i64_in_list(v, set);

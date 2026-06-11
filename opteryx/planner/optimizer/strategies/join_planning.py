@@ -161,6 +161,7 @@ def _apply_join_tree(
 
 class JoinPlanningStrategy(OptimizationStrategy):
     optimization_technique = "cost"
+    provides = ("joins-planned",)
 
     """Cost-based join enumeration via DPccp.
 

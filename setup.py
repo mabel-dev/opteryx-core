@@ -2273,6 +2273,8 @@ extensions.append(
             "rugo/src/parquet/decode.hpp",
             "rugo/src/parquet/metadata.hpp",
             "src/cpp/http_client.hpp",
+            "src/cpp/pool_sink_adapter.hpp",
+            "src/cpp/memory_pool.hpp",
         ],
     )
 )

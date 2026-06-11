@@ -58,6 +58,18 @@ static inline uint8_t* combine_validity(
     } else {
         memcpy(out, b_val, nb);
     }
+
+    // Normalize: if every logical bit is set (both inputs fully valid over their
+    // overlap), drop the bitmap so downstream code takes the validity==nullptr
+    // fast path instead of carrying a dead all-0xFF mask.
+    bool all_valid = true;
+    for (uint32_t k = 0; k < nb && all_valid; ++k) {
+        uint8_t expected = 0xFFu;
+        if (k == nb - 1u && (n & 7u) != 0u)
+            expected = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        if (out[k] != expected) all_valid = false;
+    }
+    if (all_valid) { draken_free(out); return nullptr; }
     return out;
 }
 
@@ -95,12 +107,75 @@ static inline VecResult make_dense_result(
     return r;
 }
 
+// Shape-preserving result (CLAUDE.md §11, architect-approved for arithmetic).
+// `values` holds src.data_length computed results (one per physical value);
+// this grafts src's encoding shape — selection + per-logical-row validity — onto
+// the result so dense→dense, constant→constant, dict→dict. Mirrors
+// kernels/result_helpers.h::kernel_preserve_shape, kept self-contained for ops/.
+// `values` is owned and freed on the error path.
+static inline VecResult make_shaped_result(int64_t* values, const DrakenVector& src) {
+    VecResult r;
+    r.data        = values;
+    r.type        = DRAKEN_INT64;
+    r.length      = src.length;
+    r.data_length = src.data_length;
+    r.flags       = src.flags;
+    r.validity    = copy_validity(src.validity, src.length);
+    if (src.flags & DRAKEN_SEL_IDENTITY) {
+        r.selection      = draken_identity_sel(src.length);   // dense: shared global
+        r.owns_selection = false;
+    } else if (src.data_length == 1u) {
+        r.selection      = draken_zero_sel(src.length);       // constant: shared global
+        r.owns_selection = false;
+    } else {
+        const size_t cn = src.length > 0u ? src.length : 1u;  // dict: copy owned codes
+        uint32_t* codes = static_cast<uint32_t*>(draken_malloc(cn * sizeof(uint32_t)));
+        if (!codes) { draken_free(values); throw std::bad_alloc(); }
+        memcpy(codes, src.selection, static_cast<size_t>(src.length) * sizeof(uint32_t));
+        r.selection      = codes;
+        r.owns_selection = true;
+    }
+    return r;
+}
+
+// Constant-operand fast path for a binary op. When exactly one operand is a
+// non-null constant (draken_is_constant gate), compute over the OTHER operand's
+// data_length physical values and preserve its shape; when both are constant,
+// the result is constant. Returns true + fills `out` when applied. A null
+// constant (validity != nullptr) is NOT folded — it falls through to the general
+// path, which propagates the all-null result correctly.
+template <typename Op>
+static inline bool i64_const_fold(const DrakenVector& a, const DrakenVector& b,
+                                  Op op, VecResult& out) {
+    const bool a_const = draken_is_constant(&a) && a.validity == nullptr;
+    const bool b_const = draken_is_constant(&b) && b.validity == nullptr;
+    if (!a_const && !b_const) return false;
+    const int64_t* ad = static_cast<const int64_t*>(a.data);
+    const int64_t* bd = static_cast<const int64_t*>(b.data);
+    if (b_const) {                       // a varies (or is also constant) — shape from a
+        const int64_t s = bd[0];
+        const uint32_t k = a.data_length;
+        int64_t* dst = alloc_i64(k);
+        for (uint32_t j = 0; j < k; ++j) dst[j] = op(ad[j], s);
+        out = make_shaped_result(dst, a);
+    } else {                             // a constant, b varies — shape from b
+        const int64_t s = ad[0];
+        const uint32_t k = b.data_length;
+        int64_t* dst = alloc_i64(k);
+        for (uint32_t j = 0; j < k; ++j) dst[j] = op(s, bd[j]);
+        out = make_shaped_result(dst, b);
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // ADD
 // ---------------------------------------------------------------------------
 static inline VecResult i64_add(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_add: length mismatch");
+    VecResult out;
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return x + y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
@@ -110,13 +185,14 @@ static inline VecResult i64_add(const DrakenVector& a, const DrakenVector& b) {
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
-// Scalar variant: b is a single int64 constant (no validity).
+// Scalar variant: b is a single int64 constant (no validity). Shape-preserving:
+// computes over a.data_length physical values (dict→dict, constant→constant).
 static inline VecResult i64_add_scalar(const DrakenVector& a, int64_t scalar) {
-    const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i) dst[i] = ad[a.selection[i]] + scalar;
-    return make_dense_result(dst, copy_validity(a.validity, n), n);
+    const uint32_t k = a.data_length;
+    int64_t* dst = alloc_i64(k);
+    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] + scalar;
+    return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +201,8 @@ static inline VecResult i64_add_scalar(const DrakenVector& a, int64_t scalar) {
 static inline VecResult i64_sub(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_sub: length mismatch");
+    VecResult out;
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return x - y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
@@ -135,11 +213,11 @@ static inline VecResult i64_sub(const DrakenVector& a, const DrakenVector& b) {
 }
 
 static inline VecResult i64_sub_scalar(const DrakenVector& a, int64_t scalar) {
-    const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i) dst[i] = ad[a.selection[i]] - scalar;
-    return make_dense_result(dst, copy_validity(a.validity, n), n);
+    const uint32_t k = a.data_length;
+    int64_t* dst = alloc_i64(k);
+    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] - scalar;
+    return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +226,8 @@ static inline VecResult i64_sub_scalar(const DrakenVector& a, int64_t scalar) {
 static inline VecResult i64_mul(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_mul: length mismatch");
+    VecResult out;
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return x * y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
@@ -158,11 +238,11 @@ static inline VecResult i64_mul(const DrakenVector& a, const DrakenVector& b) {
 }
 
 static inline VecResult i64_mul_scalar(const DrakenVector& a, int64_t scalar) {
-    const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i) dst[i] = ad[a.selection[i]] * scalar;
-    return make_dense_result(dst, copy_validity(a.validity, n), n);
+    const uint32_t k = a.data_length;
+    int64_t* dst = alloc_i64(k);
+    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] * scalar;
+    return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +253,8 @@ static inline VecResult i64_mul_scalar(const DrakenVector& a, int64_t scalar) {
 static inline VecResult i64_div(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_div: length mismatch");
+    VecResult out;
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return y == 0 ? (int64_t)0 : x / y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
@@ -185,15 +267,15 @@ static inline VecResult i64_div(const DrakenVector& a, const DrakenVector& b) {
 }
 
 static inline VecResult i64_div_scalar(const DrakenVector& a, int64_t scalar) {
-    const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
+    const uint32_t k = a.data_length;
+    int64_t* dst = alloc_i64(k);
     if (scalar == 0) {
-        for (uint32_t i = 0; i < n; ++i) dst[i] = 0;
+        for (uint32_t j = 0; j < k; ++j) dst[j] = 0;
     } else {
-        for (uint32_t i = 0; i < n; ++i) dst[i] = ad[a.selection[i]] / scalar;
+        for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] / scalar;
     }
-    return make_dense_result(dst, copy_validity(a.validity, n), n);
+    return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +284,8 @@ static inline VecResult i64_div_scalar(const DrakenVector& a, int64_t scalar) {
 static inline VecResult i64_mod(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_mod: length mismatch");
+    VecResult out;
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return y == 0 ? (int64_t)0 : x % y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
@@ -214,15 +298,15 @@ static inline VecResult i64_mod(const DrakenVector& a, const DrakenVector& b) {
 }
 
 static inline VecResult i64_mod_scalar(const DrakenVector& a, int64_t scalar) {
-    const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
+    const uint32_t k = a.data_length;
+    int64_t* dst = alloc_i64(k);
     if (scalar == 0) {
-        for (uint32_t i = 0; i < n; ++i) dst[i] = 0;
+        for (uint32_t j = 0; j < k; ++j) dst[j] = 0;
     } else {
-        for (uint32_t i = 0; i < n; ++i) dst[i] = ad[a.selection[i]] % scalar;
+        for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] % scalar;
     }
-    return make_dense_result(dst, copy_validity(a.validity, n), n);
+    return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,12 +315,13 @@ static inline VecResult i64_mod_scalar(const DrakenVector& a, int64_t scalar) {
 // on all our targets).
 // ---------------------------------------------------------------------------
 static inline VecResult i64_neg(const DrakenVector& a) {
-    const uint32_t n = a.length;
+    // Unary → always shape-preserving: negate the data_length physical values and
+    // reuse a's selection (dense→dense, constant→constant, dict→dict).
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = -ad[a.selection[i]];
-    return make_dense_result(dst, copy_validity(a.validity, n), n);
+    const uint32_t k = a.data_length;
+    int64_t* dst = alloc_i64(k);
+    for (uint32_t j = 0; j < k; ++j) dst[j] = -ad[j];
+    return make_shaped_result(dst, a);
 }
 
 }} // namespace draken::ops

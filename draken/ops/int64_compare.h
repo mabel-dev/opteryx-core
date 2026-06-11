@@ -366,7 +366,12 @@ static inline VecResult cmp_dict_bool_result(
 // Tail (n % 8 != 0) is handled scalar; partial byte starts zeroed, only true
 // bits are OR'd in — bit-boundary correctness is guaranteed.
 // ---------------------------------------------------------------------------
-template<typename Op>
+// Identity == true: selection is the identity permutation, so index data[pos]
+// directly — contiguous loads the compiler can auto-vectorise (NEON/AVX2 cannot
+// vectorise the gather form). Identity == false: gather data[selection[pos]].
+// Same answer either way (CLAUDE.md §11 hint-based dispatch). The caller selects
+// the Identity specialisation from the input's DRAKEN_SEL_IDENTITY flag.
+template<typename Op, bool Identity>
 static inline void cmp_scalar_kernel(
     const int64_t*  data,
     const uint32_t* selection,
@@ -376,22 +381,26 @@ static inline void cmp_scalar_kernel(
     uint32_t        n)
 {
     const uint32_t whole_bytes = n >> 3;
+    auto at = [&](uint32_t pos) -> int64_t {
+        if constexpr (Identity) return data[pos];
+        else                    return data[selection[pos]];
+    };
 
     if (src_null == nullptr) {
         for (uint32_t b = 0; b < whole_bytes; ++b) {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(data[selection[base+0]], scalar)) << 0) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+1]], scalar)) << 1) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+2]], scalar)) << 2) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+3]], scalar)) << 3) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+4]], scalar)) << 4) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+5]], scalar)) << 5) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+6]], scalar)) << 6) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+7]], scalar)) << 7));
+                (static_cast<unsigned>(Op::apply(at(base+0), scalar)) << 0) |
+                (static_cast<unsigned>(Op::apply(at(base+1), scalar)) << 1) |
+                (static_cast<unsigned>(Op::apply(at(base+2), scalar)) << 2) |
+                (static_cast<unsigned>(Op::apply(at(base+3), scalar)) << 3) |
+                (static_cast<unsigned>(Op::apply(at(base+4), scalar)) << 4) |
+                (static_cast<unsigned>(Op::apply(at(base+5), scalar)) << 5) |
+                (static_cast<unsigned>(Op::apply(at(base+6), scalar)) << 6) |
+                (static_cast<unsigned>(Op::apply(at(base+7), scalar)) << 7));
         }
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (Op::apply(data[selection[i]], scalar))
+            if (Op::apply(at(i), scalar))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     } else {
@@ -399,19 +408,19 @@ static inline void cmp_scalar_kernel(
         for (uint32_t b = 0; b < whole_bytes; ++b) {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(data[selection[base+0]], scalar)) << 0) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+1]], scalar)) << 1) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+2]], scalar)) << 2) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+3]], scalar)) << 3) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+4]], scalar)) << 4) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+5]], scalar)) << 5) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+6]], scalar)) << 6) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+7]], scalar)) << 7));
+                (static_cast<unsigned>(Op::apply(at(base+0), scalar)) << 0) |
+                (static_cast<unsigned>(Op::apply(at(base+1), scalar)) << 1) |
+                (static_cast<unsigned>(Op::apply(at(base+2), scalar)) << 2) |
+                (static_cast<unsigned>(Op::apply(at(base+3), scalar)) << 3) |
+                (static_cast<unsigned>(Op::apply(at(base+4), scalar)) << 4) |
+                (static_cast<unsigned>(Op::apply(at(base+5), scalar)) << 5) |
+                (static_cast<unsigned>(Op::apply(at(base+6), scalar)) << 6) |
+                (static_cast<unsigned>(Op::apply(at(base+7), scalar)) << 7));
             dst[b] = static_cast<uint8_t>(m & src_null[b]);
         }
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if ((src_null[i >> 3] >> (i & 7)) & 1u) {
-                if (Op::apply(data[selection[i]], scalar))
+                if (Op::apply(at(i), scalar))
                     dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
             }
         }
@@ -452,7 +461,12 @@ static inline VecResult compare_scalar_impl(const DrakenVector& v, int64_t scala
         }
     }
 
-    cmp_scalar_kernel<Op>(data, v.selection, scalar, src_null, dst, n);
+    // Identity-gated: contiguous direct-index path when selection is identity
+    // (auto-vectorisable), else the gather path. Same answer (hint-based, §11).
+    if (v.flags & DRAKEN_SEL_IDENTITY)
+        cmp_scalar_kernel<Op, true>(data, v.selection, scalar, src_null, dst, n);
+    else
+        cmp_scalar_kernel<Op, false>(data, v.selection, scalar, src_null, dst, n);
 
     VecResult r;
     r.data           = dst;

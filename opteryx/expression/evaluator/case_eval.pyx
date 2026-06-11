@@ -115,6 +115,7 @@ cdef _compute_compiled(list result_bcs, else_bc, morsel, rows_per_branch, unmatc
     cdef list parts = []
     cdef Py_ssize_t i
     cdef Py_ssize_t num_results = len(result_bcs)
+    cdef object _null_type = _draken_native.DrakenType.NULL
 
     for i in range(num_results):
         rows_i = rows_per_branch[i]
@@ -122,12 +123,22 @@ cdef _compute_compiled(list result_bcs, else_bc, morsel, rows_per_branch, unmatc
             parts.append(None)
             continue
         sub = _sub_morsel(morsel, rows_i)
-        parts.append(execute_bytecode(result_bcs[i], sub))
+        part = execute_bytecode(result_bcs[i], sub)
+        # A bare `THEN NULL` yields an untyped DRAKEN_NULL vector (all rows null,
+        # data == NULL). The typed assemble kernels (bool/fixed) C-cast the part to
+        # the output type and would mis-read it — a heap-corrupting type confusion.
+        # Normalise it to Python None: every assemble kernel already skips None
+        # parts, leaving those rows null, which is the correct CASE semantics.
+        if part is not None and getattr(part, "type", None) is _null_type:
+            part = None
+        parts.append(part)
 
     else_part = None
     if else_bc is not None and len(unmatched) > 0:
         sub_else = _sub_morsel(morsel, unmatched)
         else_part = execute_bytecode(else_bc, sub_else)
+        if else_part is not None and getattr(else_part, "type", None) is _null_type:
+            else_part = None
 
     return parts, else_part
 

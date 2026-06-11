@@ -14,6 +14,9 @@ from libc.stdint cimport int64_t
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport (
     DrakenType,
+    DRAKEN_INT8,
+    DRAKEN_INT16,
+    DRAKEN_INT32,
     DRAKEN_INT64,
     DRAKEN_FLOAT64,
     DRAKEN_VARCHAR,
@@ -163,7 +166,9 @@ cpdef void resolve_deferred_collectors(
         if isinstance(c, _DeferredSumCollector):
             vec = morsel.column(c.column_name)
             t = vec.unified().type
-            if t == DRAKEN_INT64:
+            if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
+                # Narrow ints sum into an int64 accumulator (width-aware read),
+                # matching the scalar SUM path which widens INT8/16/32 → INT64.
                 typed_c = SumInt64Collector()
             elif t == DRAKEN_DECIMAL:
                 typed_c = SumDecimalCollector()
@@ -181,7 +186,7 @@ cpdef void resolve_deferred_collectors(
         elif isinstance(c, _DeferredMinCollector):
             vec = morsel.column(c.column_name)
             t = vec.unified().type
-            if t == DRAKEN_INT64:
+            if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = 1
             elif t == DRAKEN_FLOAT64:
@@ -210,7 +215,7 @@ cpdef void resolve_deferred_collectors(
         elif isinstance(c, _DeferredMaxCollector):
             vec = morsel.column(c.column_name)
             t = vec.unified().type
-            if t == DRAKEN_INT64:
+            if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = -1
             elif t == DRAKEN_FLOAT64:

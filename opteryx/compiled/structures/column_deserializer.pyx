@@ -158,6 +158,50 @@ cdef inline Vector _wrap_raw_pyobj(PyObject* raw):
 
 # ─── Fixed-column wrapper ─────────────────────────────────────────────────────
 
+cdef inline Vector _wrap_decoded_bool(DecodedFixedColumn& dc):
+    """Wrap a TAG_BOOL fixed column into a bit-packed DRAKEN_BOOL Vector.
+
+    The IPC payload carries K present (non-null) values bit-packed 1 bit/value
+    LSB-first (rugo's serialize_bool). DRAKEN_BOOL wants a POSITIONAL bit-packed
+    buffer of (num_rows + 7) // 8 bytes with row i at bit i.
+
+      Non-nullable: K == num_rows, so the compact payload is already positional —
+                    wrap dc.data directly.
+      Nullable:     K < num_rows; scatter the K present bits to their row
+                    positions (null rows stay 0; the validity bitmap masks them).
+    """
+    cdef uint32_t num_rows = dc.num_rows
+    cdef uint32_t pos_bytes = (num_rows + 7) >> 3
+    cdef void*    pos_data
+    cdef uint8_t* src
+    cdef uint8_t* dst
+    cdef uint32_t row_i
+    cdef uint32_t compact_i
+
+    if dc.null_bitmap == NULL or num_rows == 0:
+        # Non-nullable (or empty): compact payload == positional payload.
+        return _vector_from_decoded(dc.data, dc.null_bitmap, num_rows, DRAKEN_BOOL)
+
+    pos_data = draken_malloc(<size_t>(pos_bytes if pos_bytes > 0 else 1))
+    if pos_data == NULL:
+        draken_free(dc.data)
+        draken_free(dc.null_bitmap)
+        raise MemoryError()
+    memset(<uint8_t*>pos_data, 0, <size_t>(pos_bytes if pos_bytes > 0 else 1))
+
+    src = <uint8_t*>dc.data   # may be NULL when every row is null (K == 0)
+    dst = <uint8_t*>pos_data
+    compact_i = 0
+    if src != NULL:
+        for row_i in range(num_rows):
+            if (dc.null_bitmap[row_i >> 3] >> (row_i & 7)) & 1:
+                if (src[compact_i >> 3] >> (compact_i & 7)) & 1:
+                    dst[row_i >> 3] |= <uint8_t>(1 << (row_i & 7))
+                compact_i += 1
+    draken_free(dc.data)
+    return _vector_from_decoded(pos_data, dc.null_bitmap, num_rows, DRAKEN_BOOL)
+
+
 cdef inline Vector _wrap_decoded_fixed(DecodedFixedColumn& dc):
     """Transfer ownership of draken_malloc'd buffers in dc into a new Vector.
 
@@ -166,8 +210,8 @@ cdef inline Vector _wrap_decoded_fixed(DecodedFixedColumn& dc):
     POSITIONAL buffer of num_rows slots (row i at slot i), with null slots holding
     zero. When dc.null_bitmap is set and data_len < num_rows * element_size we
     scatter the compact values to their row positions here, at the Draken boundary.
-    Bool columns use bit-packed data where the byte count doesn't map 1:1 to rows —
-    they skip the scatter (their null bitmap already governs access).
+    Bool columns are bit-packed (byte count doesn't map 1:1 to rows) and need a
+    bit-granular scatter, so they are handled separately by _wrap_decoded_bool.
     """
     cdef DrakenType dtype
     cdef uint32_t elem_size
@@ -184,8 +228,9 @@ cdef inline Vector _wrap_decoded_fixed(DecodedFixedColumn& dc):
         dtype = DRAKEN_FLOAT32
         elem_size = 4
     elif dc.kind == IpcKind_Bool:
-        dtype = DRAKEN_BOOL
-        elem_size = 0   # bit-packed; skip scatter
+        # Bit-packed; the byte count doesn't map 1:1 to rows, so the generic
+        # byte-granular scatter below cannot serve it. Handle it bit-wise.
+        return _wrap_decoded_bool(dc)
     elif dc.kind == IpcKind_Int128:
         # DECIMAL128: 16-byte __int128 per slot. Scatter (compact→positional) handled
         # below. After building the vector we attach the (precision, scale) descriptor
@@ -556,12 +601,16 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
             raise MemoryError("draken_vector_own_string failed (empty)")
         return _wrap_raw_pyobj(raw)
 
-    # First pass: compute total arena size.
+    # First pass: compute total arena size. Only long strings (len > 12) live in
+    # the arena — inline strings (len <= STR_INLINE_MAX=12) are stored in the slot
+    # and never reference the arena. Sizing from all lengths over-allocates and
+    # forces every later dict-preserving take/slice to re-copy the dead bytes.
     cdef const uint8_t* scan = p
     cdef uint32_t slen, i, total_arena = 0
     for i in range(n):
         scan = _read_u32(scan, &slen)
-        total_arena += slen
+        if slen > 12:
+            total_arena += slen
         scan += slen
 
     # Allocate draken_malloc'd buffers — all transferred to draken_vector_own_string.
@@ -594,15 +643,18 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
             # Null row: init null slot, still skip the string bytes in the stream.
             str_init_null(slot_ptr)
             p += slen
-        else:
-            if slen > 0:
-                memcpy(arena_buf + arena_pos, p, slen)
-            # draken_build_string_slot reads bytes from p (IPC buffer), sets slot.
-            # For inline (slen <= 12): stored inline, arena_pos unused but harmless.
-            # For long  (slen  > 12): hash computed from p; arena_pos is the offset.
+        elif slen > 12:
+            # Long string → arena. draken_build_string_slot computes the hash from
+            # p and records arena_pos as the offset; the bytes must live in the arena.
+            memcpy(arena_buf + arena_pos, p, slen)
             draken_build_string_slot(slot_ptr, p, slen, arena_pos)
             p += slen
             arena_pos += slen
+        else:
+            # Inline string (len <= STR_INLINE_MAX): bytes stored in the slot; the
+            # arena is not touched and arena_pos is not advanced (offset ignored).
+            draken_build_string_slot(slot_ptr, p, slen, arena_pos)
+            p += slen
 
     # All three draken_malloc'd buffers transferred on call (even on failure).
     raw = draken_vector_own_string(

@@ -53,7 +53,7 @@ from libc.stdint cimport uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 from libc.stddef cimport size_t
-from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport DrakenVector, DRAKEN_SEL_IDENTITY
 from draken.vectors.bool_vector cimport (
     BoolVector,
     c_and_bitmap,
@@ -267,7 +267,7 @@ cdef inline const uint8_t* _bv_bitmap_ptr(
 ) except NULL:
     """Return a dense uint8_t* bitmap for `bv`.
 
-    Dense vectors (data_length == length): returns dv.data directly; *scratch_out = NULL.
+    Dense-identity vectors: returns dv.data directly; *scratch_out = NULL.
     Constant-shape (data_length == 1): expands into a malloc'd buffer; *scratch_out = that buffer.
 
     Caller must free(*scratch_out) if it is non-NULL.
@@ -277,7 +277,10 @@ cdef inline const uint8_t* _bv_bitmap_ptr(
     cdef uint8_t fill
     cdef uint8_t* out
     scratch_out[0] = NULL
-    if dv.data_length == dv.length:
+    # Returning dv.data directly is valid ONLY when selection is identity.
+    # data_length == length also admits a PERMUTATION, whose bits sit in physical
+    # (not logical) order — returning dv.data would silently reorder them.
+    if dv.data_length == dv.length and (dv.flags & DRAKEN_SEL_IDENTITY):
         return <const uint8_t*>dv.data
     if dv.data_length == 1:
         out = <uint8_t*>malloc(<size_t>nbytes)

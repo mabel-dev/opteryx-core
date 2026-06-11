@@ -1466,6 +1466,39 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             result.rle_str_arena.clear();
             result.rle_str_offsets.clear();
             result.rle_str_lens.clear();
+          } else if (int64_dict_mode && !result.rle_int64_values.empty() &&
+                     result.rle_total_length > 0 &&
+                     (static_cast<double>(result.dict_int64_values.size()) /
+                      static_cast<double>(result.rle_total_length)) >= 0.8) {
+            // WP-1: int64 dict worth-it gate (non-nullable path only; mirrors the
+            // byte_array gate below). The dictionary has spilled to PLAIN and is
+            // no longer paying for itself (savings < 20%): interning every PLAIN
+            // value into an unordered_map dominates decode time on high-cardinality
+            // columns. Materialise the RLE runs decoded so far to dense int64
+            // values, abandon the dictionary, and let the PLAIN branch below append
+            // straight to int64_values for the rest of the chunk.
+            //
+            // This branch is the rle_path (max_definition_level == 0, non-nullable),
+            // so int64_values is row-aligned with no null scatter needed, and the
+            // serializer takes the dense int64 path once dict state is cleared.
+            // The nullable (dict_codes_array) path is intentionally NOT gated here:
+            // abandoning a packed code array would require a def-level-aware gather
+            // back to dense, which is out of scope for this change.
+            //
+            // Standard Parquet dictionary fallback is one-way per column chunk (all
+            // dict pages precede all PLAIN pages), so no dict page follows this flip
+            // — the same assumption the byte_array gate relies on.
+            result.int64_values.reserve(result.int64_values.size() +
+                                        result.rle_total_length);
+            const size_t n_runs = result.rle_run_lengths.size();
+            for (size_t r = 0; r < n_runs; ++r) {
+              const int64_t val = result.rle_int64_values[r];
+              const int32_t cnt = result.rle_run_lengths[r];
+              for (int32_t j = 0; j < cnt; ++j) result.int64_values.push_back(val);
+            }
+            result.rle_int64_values.clear();
+            result.dict_int64_values.clear();
+            int64_dict_mode = false;
           } else if ((int32_dict_mode || int64_dict_mode) &&
                      !result.rle_int64_values.empty()) {
             const bool is_i32 = int32_dict_mode;

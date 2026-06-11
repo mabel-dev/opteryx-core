@@ -93,6 +93,11 @@ DISABLE_OPTIMIZER: bool = bool(get("DISABLE_OPTIMIZER", False))
 OPTERYX_DEBUG: bool = bool(get("OPTERYX_DEBUG", False))
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
 
+VALIDATE_OPTIMIZER_PLANS: bool = bool(get("VALIDATE_OPTIMIZER_PLANS", False))
+"""Debug guardrail: when set, the optimizer checks plan structural invariants
+after every strategy and raises (naming the offending strategy) on corruption.
+Off by default — adds per-strategy validation cost only when enabled."""
+
 OPTERYX_TRACE: bool = bool(get("OPTERYX_TRACE", "").lower() in ("1", "true", "yes"))
 """Enable IO layer tracing.  When true, events are recorded in memory and
 can be retrieved via :func:`~opteryx.query_session.Session.trace`."""

@@ -70,7 +70,9 @@ struct BetweenOp {
 
 // Inner kernel: 8-way byte-pack, two paths (non-null / null).
 // dst must be pre-zeroed (cmp_alloc_bool_buf guarantees this).
-template<bool lo_incl, bool hi_incl>
+// Identity == true indexes data[pos] directly (vectorisable); false gathers
+// data[selection[pos]]. Same answer (hint-based dispatch, §11).
+template<bool lo_incl, bool hi_incl, bool Identity>
 static inline void between_kernel(
     const int64_t*  data,
     const uint32_t* selection,
@@ -82,22 +84,26 @@ static inline void between_kernel(
 {
     using Op = BetweenOp<lo_incl, hi_incl>;
     const uint32_t whole_bytes = n >> 3;
+    auto at = [&](uint32_t pos) -> int64_t {
+        if constexpr (Identity) return data[pos];
+        else                    return data[selection[pos]];
+    };
 
     if (src_null == nullptr) {
         for (uint32_t b = 0; b < whole_bytes; ++b) {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(data[selection[base+0]], lo, hi)) << 0) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+1]], lo, hi)) << 1) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+2]], lo, hi)) << 2) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+3]], lo, hi)) << 3) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+4]], lo, hi)) << 4) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+5]], lo, hi)) << 5) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+6]], lo, hi)) << 6) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+7]], lo, hi)) << 7));
+                (static_cast<unsigned>(Op::apply(at(base+0), lo, hi)) << 0) |
+                (static_cast<unsigned>(Op::apply(at(base+1), lo, hi)) << 1) |
+                (static_cast<unsigned>(Op::apply(at(base+2), lo, hi)) << 2) |
+                (static_cast<unsigned>(Op::apply(at(base+3), lo, hi)) << 3) |
+                (static_cast<unsigned>(Op::apply(at(base+4), lo, hi)) << 4) |
+                (static_cast<unsigned>(Op::apply(at(base+5), lo, hi)) << 5) |
+                (static_cast<unsigned>(Op::apply(at(base+6), lo, hi)) << 6) |
+                (static_cast<unsigned>(Op::apply(at(base+7), lo, hi)) << 7));
         }
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (Op::apply(data[selection[i]], lo, hi))
+            if (Op::apply(at(i), lo, hi))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     } else {
@@ -105,19 +111,19 @@ static inline void between_kernel(
         for (uint32_t b = 0; b < whole_bytes; ++b) {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(data[selection[base+0]], lo, hi)) << 0) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+1]], lo, hi)) << 1) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+2]], lo, hi)) << 2) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+3]], lo, hi)) << 3) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+4]], lo, hi)) << 4) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+5]], lo, hi)) << 5) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+6]], lo, hi)) << 6) |
-                (static_cast<unsigned>(Op::apply(data[selection[base+7]], lo, hi)) << 7));
+                (static_cast<unsigned>(Op::apply(at(base+0), lo, hi)) << 0) |
+                (static_cast<unsigned>(Op::apply(at(base+1), lo, hi)) << 1) |
+                (static_cast<unsigned>(Op::apply(at(base+2), lo, hi)) << 2) |
+                (static_cast<unsigned>(Op::apply(at(base+3), lo, hi)) << 3) |
+                (static_cast<unsigned>(Op::apply(at(base+4), lo, hi)) << 4) |
+                (static_cast<unsigned>(Op::apply(at(base+5), lo, hi)) << 5) |
+                (static_cast<unsigned>(Op::apply(at(base+6), lo, hi)) << 6) |
+                (static_cast<unsigned>(Op::apply(at(base+7), lo, hi)) << 7));
             dst[b] = static_cast<uint8_t>(m & src_null[b]);
         }
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if ((src_null[i >> 3] >> (i & 7)) & 1u) {
-                if (Op::apply(data[selection[i]], lo, hi))
+                if (Op::apply(at(i), lo, hi))
                     dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
             }
         }
@@ -161,7 +167,11 @@ static inline VecResult between_impl(
         }
     }
 
-    between_kernel<lo_incl, hi_incl>(data, v.selection, lo, hi, src_null, dst, n);
+    // Identity-gated: contiguous direct-index when selection is identity.
+    if (v.flags & DRAKEN_SEL_IDENTITY)
+        between_kernel<lo_incl, hi_incl, true >(data, v.selection, lo, hi, src_null, dst, n);
+    else
+        between_kernel<lo_incl, hi_incl, false>(data, v.selection, lo, hi, src_null, dst, n);
 
     VecResult r;
     r.data           = dst;

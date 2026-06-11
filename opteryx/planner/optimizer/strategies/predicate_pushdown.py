@@ -36,6 +36,52 @@ from opteryx.utils import random_string
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
+def _emitted_identities(plan, nid, memo):
+    """Column identities emitted by the subtree rooted at `nid`.
+
+    A predicate may only be placed (as a Filter) above a node that emits every
+    column it references — otherwise it would reference a column not present in
+    that node's output. Scans/FunctionDatasets originate their schema columns;
+    Project emits exactly its projected (+ order-by) columns; Aggregate emits its
+    aggregates + group keys; everything else passes its children's columns through.
+    Memoised per call; safe because emitted sets are determined by these
+    column-defining nodes, which Filter removal/insertion doesn't change.
+    """
+    cached = memo.get(nid)
+    if cached is not None:
+        return cached
+    memo[nid] = frozenset()  # cycle guard
+    node = plan[nid]
+    nt = node.node_type
+    if nt in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset):
+        sch = node.schema
+        ids = frozenset(c.identity for c in sch.columns) if sch is not None else frozenset()
+    elif nt == LogicalPlanStepType.Project:
+        cols = list(node.columns or []) + list(getattr(node, "order_by_columns", None) or [])
+        ids = frozenset(c.schema_column.identity for c in cols if c.schema_column is not None)
+    elif nt in (LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup):
+        cols = list(node.aggregates or []) + list(node.groups or [])
+        ids = frozenset(c.schema_column.identity for c in cols if c.schema_column is not None)
+    else:
+        acc = set()
+        for child, _, _ in plan.ingoing_edges(nid):
+            acc |= _emitted_identities(plan, child, memo)
+        ids = frozenset(acc)
+    memo[nid] = ids
+    return ids
+
+
+def _predicate_column_ids(predicate):
+    """The set of column identities a predicate references."""
+    cond = predicate.condition if getattr(predicate, "condition", None) is not None else predicate
+    out = set()
+    for ident in get_all_nodes_of_type(cond, (NodeType.IDENTIFIER,)):
+        sc = getattr(ident, "schema_column", None)
+        if sc is not None and sc.identity is not None:
+            out.add(sc.identity)
+    return out
+
+
 def _add_condition(existing_condition, new_condition):
     if not existing_condition:
         return new_condition
@@ -201,6 +247,8 @@ def _try_normalize_cast_predicate(condition: Node):
 
 
 class PredicatePushdownStrategy(OptimizationStrategy):
+    provides = ("predicates-pushed",)
+
     def should_i_run(self, plan):
         from opteryx import config
 
@@ -489,34 +537,44 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
             if context.collected_predicates:
                 # push predicates which reference multiple relations here
+                _emit_memo = {}
 
-                if node.type.startswith("left"):
-                    for predicate in context.collected_predicates:
-                        identifiers = get_all_nodes_of_type(
-                            predicate.condition, (NodeType.IDENTIFIER,)
-                        )
-                        # 1887 - add avoid pushing not only if it's on the right side, but also
-                        # if we don't know where the relation came from (usually subqueries)
-                        if any(
-                            i.source in node.right_relation_names
-                            or i.source not in node.all_relations
-                            for i in identifiers
-                        ):
-                            for predicate in context.collected_predicates:
-                                self.telemetry.optimization_predicate_pushdown += 1
-                                context.optimized_plan.insert_node_after(
-                                    predicate.nid, predicate, context.node_id
-                                )
-                            context.collected_predicates = []
-                elif node.type not in ("cross join", "inner"):
-                    # dump all the predicates
-                    # IMPROVE: push past SEMI and ANTI joins
-                    for predicate in context.collected_predicates:
+                def _dump_above(predicate):
+                    """Materialise a predicate above this join — but only if the join
+                    emits every column it references. Availability is ground truth: the
+                    alias soup makes a leg-internal predicate (e.g. one consumed inside
+                    an aggregate) look like it belongs here. Returns True if placed;
+                    False means keep it collected so complete() restores it validly."""
+                    if _predicate_column_ids(predicate) <= _emitted_identities(
+                        context.optimized_plan, context.node_id, _emit_memo
+                    ):
                         self.telemetry.optimization_predicate_pushdown += 1
                         context.optimized_plan.insert_node_after(
                             predicate.nid, predicate, context.node_id
                         )
-                    context.collected_predicates = []
+                        return True
+                    return False
+
+                if node.type.startswith("left"):
+                    problematic = any(
+                        i.source in node.right_relation_names
+                        or i.source not in node.all_relations
+                        for predicate in context.collected_predicates
+                        for i in get_all_nodes_of_type(predicate.condition, (NodeType.IDENTIFIER,))
+                    )
+                    # 1887 - if anything can't be pushed past this (outer) join, keep the
+                    # pushable-here ones above it and let the rest fall through to be
+                    # restored to their valid origins.
+                    if problematic:
+                        context.collected_predicates = [
+                            p for p in context.collected_predicates if not _dump_above(p)
+                        ]
+                elif node.type not in ("cross join", "inner"):
+                    # dump all the predicates
+                    # IMPROVE: push past SEMI and ANTI joins
+                    context.collected_predicates = [
+                        p for p in context.collected_predicates if not _dump_above(p)
+                    ]
                 elif node.type in ("cross join",):  # , "inner"):
                     # IMPROVE: add predicates to INNER JOIN conditions
                     # we may be able to rewrite as an inner join or non-equi join
@@ -557,13 +615,16 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     predicate.nid, predicate, context.node_id
                                 )
                         elif predicate.relations.intersection(all_join_rels) and not predicate.relations.issubset(all_join_rels):
-                            # Predicate has some relations inside the join AND external
-                            # relations (e.g. an outer subquery alias). Cannot push past
-                            # the join — the external alias dissolves after inlining.
-                            self.telemetry.optimization_predicate_pushdown += 1
-                            context.optimized_plan.insert_node_after(
-                                predicate.nid, predicate, context.node_id
-                            )
+                            # Looks like it references something outside this join. But
+                            # the alias soup (a relation known by several names — CTE
+                            # name, subquery aliases) produces false positives: a
+                            # leg-internal predicate (e.g. one consumed inside an
+                            # aggregate) can look external. Availability is the ground
+                            # truth — only materialise above the join if the join emits
+                            # every column the predicate needs; otherwise keep it
+                            # collected so complete() restores it to its valid origin.
+                            if not _dump_above(predicate):
+                                remaining_predicates.append(predicate)
                         else:
                             # Single-relation predicates can be pushed past the join
                             remaining_predicates.append(predicate)

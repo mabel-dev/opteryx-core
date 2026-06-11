@@ -32,6 +32,7 @@ def if_null(values, replacements):
     """
     from opteryx.compiled.nanobind.vector_selection_concat import vector_iif
     from opteryx.compiled.nanobind.vector_bool_ops import bool_vector_from_int8_mask
+    from draken.vectors.vector import Vector as _ShimVector
 
     if not values.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNULL expects Draken vector input, got {type(values).__name__}.")
@@ -42,7 +43,13 @@ def if_null(values, replacements):
     n = len(values)
     null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
     null_boolvec = bool_vector_from_int8_mask(null_mask, n)
-    return vector_iif(null_boolvec, replacements, values)
+
+    # vector_iif is a nanobind kernel: it unwraps raw draken_native Vectors. The
+    # non-nb function-call path hands us Cython shims (draken.vectors.vector), so
+    # unwrap to ._nb before the call and re-wrap the raw result in a shim — the
+    # convention every non-nb function follows (see null_if).
+    result = vector_iif(null_boolvec, replacements._nb, values._nb)
+    return _ShimVector(result)
 
 
 def if_not_null(values, replacements):
@@ -58,6 +65,7 @@ def if_not_null(values, replacements):
 
     from opteryx.compiled.nanobind.vector_selection_concat import vector_iif
     from opteryx.compiled.nanobind.vector_bool_ops import bool_vector_from_int8_mask
+    from draken.vectors.vector import Vector as _ShimVector
 
     if not values.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNOTNULL expects Draken vector input, got {type(values).__name__}.")
@@ -72,7 +80,11 @@ def if_not_null(values, replacements):
     # Invert: 1 = not null (true → use replacement), 0 = null (false → keep null)
     inv_mask = _array("b", [0 if b else 1 for b in null_mask])
     not_null_boolvec = bool_vector_from_int8_mask(inv_mask, n)
-    return vector_iif(not_null_boolvec, replacements, values)
+
+    # vector_iif is a nanobind kernel: unwrap shims to ._nb and re-wrap the raw
+    # result (see if_null / null_if for the non-nb function convention).
+    result = vector_iif(not_null_boolvec, replacements._nb, values._nb)
+    return _ShimVector(result)
 
 
 def null_if(col1, col2):
@@ -109,9 +121,25 @@ def null_if(col1, col2):
                 message=f"`NULLIF` called with input arrays of different types, {col1_type} and {col2_type}.",
             )
 
-    # Element-wise: return None where equal, else col1
+    # Element-wise: None where equal, else col1.
     if len(col2_list) == 1:
         eq_val = col2_list[0]
-        return [None if c1 == eq_val else c1 for c1 in col1_list]
+        result_list = [None if c1 == eq_val else c1 for c1 in col1_list]
+    else:
+        result_list = [None if c1 == c2 else c1 for c1, c2 in zip(col1_list, col2_list)]
 
-    return [None if c1 == c2 else c1 for c1, c2 in zip(col1_list, col2_list)]
+    # NULLIF returns "same type as value" (col1). Build a typed Draken Vector —
+    # returning a raw Python list produces a column that fails to wrap (and a
+    # heap-corrupting type confusion when the null-bearing result is consumed by
+    # string kernels). vector_from_sequence dispatches on col1's physical
+    # DrakenType, so the result carries col1's type and null rows are real nulls.
+    #
+    # Wrap in the Cython shim Vector (draken.vectors.vector): the executor stores
+    # this Python-function result without an NB_WRAP step, and a shim is what every
+    # downstream consumer expects — from_vectors keeps it as-is, and an nb-function
+    # parent unwraps it via ._nb. A raw nanobind Vector here would be cast as a shim
+    # by an nb-parent and crash.
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.vectors.vector import Vector as _ShimVector
+
+    return _ShimVector(vector_from_sequence(result_list, dtype=col1.type))

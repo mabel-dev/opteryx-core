@@ -280,6 +280,13 @@ class PerfectHashSet {
     std::int64_t min_val_;
     std::int64_t range_;
     std::vector<std::uint64_t> words_;
+
+   public:
+     // Getters for _rebuild_carchar_from_phash fallback path.
+    std::int64_t min_val()  const noexcept { return min_val_; }
+    std::int64_t range()    const noexcept { return range_; }
+    std::size_t  n_words()  const noexcept { return words_.size(); }
+    std::uint64_t word_at(std::size_t i) const noexcept { return words_[i]; }
 };
 
 }  // namespace opteryx::perfect_hash

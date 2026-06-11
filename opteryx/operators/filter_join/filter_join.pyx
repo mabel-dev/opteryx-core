@@ -49,16 +49,130 @@ possible join modes:
 from typing import Generator, Optional
 import time
 
-from libc.stdint cimport int32_t
+from libc.stdint cimport int32_t, uint8_t, uint32_t
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from libcpp.vector cimport vector
 from draken.vectors.vector cimport Vector, mix_hash, NULL_HASH
+from draken.core.buffers cimport DrakenVector
 
 from opteryx.models import QueryProperties
 
 # EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
+# draken_is_compressed extern is declared in hashed_inner_join.pyx (same umbrella
+# module), so it is visible here.
 
 cdef uint64_t _NULL_HASH = <uint64_t>0x73d59cff8f94d86cULL
+
+# WP-13 Stage 2 — single-column compressed-key shaped k-probe for semi/anti. Probe
+# each unique key hash ONCE, then scatter the found/not-found verdict to every row
+# sharing that code. Null semantics are UNCHANGED from the per-row path (already
+# correct): semi (IN) always excludes null probe rows (NULL IN = UNKNOWN); plain
+# anti follows set membership of the null hash; null-aware anti (NOT IN) early-exits
+# when the build set contains a null. Toggle for differential testing / kill-switch.
+cdef bint _WP13_FILTER_KPROBE = True
+
+
+cpdef void set_filter_kprobe_enabled(bint enabled):
+    global _WP13_FILTER_KPROBE
+    _WP13_FILTER_KPROBE = enabled
+
+
+cpdef bint get_filter_kprobe_enabled():
+    return _WP13_FILTER_KPROBE
+
+
+# Probe modes for _filter_probe_compressed.
+DEF _FILTER_MODE_SEMI = 0            # left semi  (IN)
+DEF _FILTER_MODE_ANTI = 1            # left anti  (EXCEPT / INTERSECT anti)
+DEF _FILTER_MODE_ANTI_NULL_AWARE = 2  # left anti null-aware (NOT IN)
+
+
+cdef object _filter_probe_compressed(
+    Morsel relation,
+    list join_columns,
+    CarcharSetWrapper seen,
+    int mode,
+):
+    """Shaped k-probe for a single-column COMPRESSED probe key. Returns the
+    filtered Morsel, or None to signal "not applicable" (multi-column, dense, or
+    kill-switched) so the caller uses the per-row path.
+
+    Correctness is identical to the per-row kernels — the only change is probing k
+    unique hashes instead of n row hashes, then scattering through the codes."""
+    if not _WP13_FILTER_KPROBE or len(join_columns) != 1:
+        return None
+
+    cdef Vector hv = <Vector>relation.hash_keys(join_columns)
+    cdef DrakenVector* huv = hv.unified()
+    if draken_is_compressed(huv) == 0:
+        return None  # dense — no per-unique win; use per-row path
+
+    cdef const uint64_t* khashes = <const uint64_t*>huv.data
+    cdef const uint32_t* codes = huv.selection
+    cdef Py_ssize_t k_out = <Py_ssize_t>huv.data_length
+    cdef Py_ssize_t n = relation.num_rows
+
+    cdef Vector keycol = <Vector>relation.column(join_columns[0])
+    cdef uint8_t* validity = keycol.null_bitmap_ptr()
+    cdef bint has_validity = (validity != NULL)
+
+    # NOT IN with a null anywhere on the right → every left row is UNKNOWN → empty.
+    if mode == _FILTER_MODE_ANTI_NULL_AWARE and seen.contains(_NULL_HASH):
+        return relation.slice(0, 0)
+
+    # Probe the k unique hashes once → found[] bitmap over codes.
+    cdef int32_t* found_pos = <int32_t*>PyMem_Malloc(<size_t>(k_out if k_out > 0 else 1) * sizeof(int32_t))
+    if found_pos == NULL:
+        raise MemoryError()
+    cdef vector[uint8_t] found
+    found.assign(k_out, 0)
+    cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(<size_t>(n if n > 0 else 1) * sizeof(int32_t))
+    if out_buf == NULL:
+        PyMem_Free(found_pos)
+        raise MemoryError()
+
+    cdef Py_ssize_t nf, j, i
+    cdef Py_ssize_t w = 0
+    with nogil:
+        nf = seen.probe_found_32_nogil(<uint64_t*>khashes, k_out, found_pos)
+        for j in range(nf):
+            found[found_pos[j]] = 1
+
+        if mode == _FILTER_MODE_SEMI:
+            # IN: keep found AND non-null (NULL IN (...) = UNKNOWN, always excluded).
+            for i in range(n):
+                if has_validity and not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                    continue
+                if found[codes[i]]:
+                    out_buf[w] = <int32_t>i
+                    w += 1
+        elif mode == _FILTER_MODE_ANTI:
+            # Plain anti: keep not-found. Null rows follow set membership of the
+            # null hash via found[null_slot] — identical to the per-row path.
+            for i in range(n):
+                if not found[codes[i]]:
+                    out_buf[w] = <int32_t>i
+                    w += 1
+        else:
+            # NOT IN, right has no null (early-exit above handled the null case):
+            # keep not-found AND non-null (NULL NOT IN (...) = UNKNOWN).
+            for i in range(n):
+                if has_validity and not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                    continue
+                if not found[codes[i]]:
+                    out_buf[w] = <int32_t>i
+                    w += 1
+
+    PyMem_Free(found_pos)
+
+    cdef Morsel result
+    if w > 0:
+        result = relation.take(<int32_t[:w]>out_buf)
+    else:
+        result = relation.slice(0, 0)
+    PyMem_Free(out_buf)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -153,34 +267,10 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
 
 
 # ---------------------------------------------------------------------------
-# Rebuild CarcharSetWrapper from PerfectHashSet (rare fallback path)
+# Rebuild CarcharSetWrapper from PerfectHashSet: shared helper
+# `_rebuild_carchar_from_phash` defined in _operators.pyx (also used by
+# distinct's demotion path).
 # ---------------------------------------------------------------------------
-
-cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
-    """Reconstruct a hash-based CarcharSetWrapper from an existing PerfectHashSet.
-
-    Called only when the probe side turns out to have a column encoding the
-    PerfectHashSet path can't handle (e.g. nullable or non-dense). Iterates the
-    bit-array and inserts the int64 row-hash of each stored value directly —
-    mix_hash(0, v) is identically the int64 hash kernel's output for value v
-    (the same equivalence the probe path produces), so no per-value constant
-    vector or Python hash() round-trip is needed.
-    """
-    cdef CarcharSetWrapper result = CarcharSetWrapper(<size_t>phs._range * 2 + 8)
-    cdef Py_ssize_t w, bit
-    cdef uint64_t word, mask
-    cdef int64_t slot, val
-    for w in range(phs._n_words):
-        word = phs._words[w]
-        if word == 0:
-            continue
-        for bit in range(64):
-            mask = <uint64_t>1 << bit
-            if word & mask:
-                slot = <int64_t>w * 64 + <int64_t>bit
-                val = phs._min_val + slot
-                result.insert(mix_hash(0, <uint64_t>val))
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +301,11 @@ cdef Morsel _semi_join_filter(
     CarcharSetWrapper seen_hashes,
     bint right_has_null,
 ):
+    cdef object fast = _filter_probe_compressed(
+        relation, join_columns, seen_hashes, _FILTER_MODE_SEMI)
+    if fast is not None:
+        return fast
+
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes = relation.hash(join_columns)
     cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(num_rows * sizeof(int32_t))
@@ -238,6 +333,11 @@ cdef Morsel _anti_join_filter(
     list join_columns,
     CarcharSetWrapper seen_hashes,
 ):
+    cdef object fast = _filter_probe_compressed(
+        relation, join_columns, seen_hashes, _FILTER_MODE_ANTI)
+    if fast is not None:
+        return fast
+
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes = relation.hash(join_columns)
     cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(num_rows * sizeof(int32_t))
@@ -265,6 +365,11 @@ cdef Morsel _anti_join_null_aware_filter(
 ):
     if seen_hashes.contains(_NULL_HASH):
         return relation.slice(0, 0)
+
+    cdef object fast = _filter_probe_compressed(
+        relation, join_columns, seen_hashes, _FILTER_MODE_ANTI_NULL_AWARE)
+    if fast is not None:
+        return fast
 
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes = relation.hash(join_columns)

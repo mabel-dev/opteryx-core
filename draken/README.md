@@ -54,7 +54,7 @@ The three physical shapes differ only in what `selection` points at:
 | Constant | global zero vector              | `== 1`         |
 | Dict     | owned per-vector codes          | `< length`     |
 
-No operator or kernel specializes on shape. The access pattern above works for all three.
+Specialization is not required for correctness - the access pattern above works for all three.
 
 ---
 
@@ -324,9 +324,6 @@ print(adults.to_pylist())   # [False, True, True, False, True]
 
 ## Key Rules
 
-- **Never specialize on shape.** Code that checks `data_length == 1`, inspects `selection`, or
-  dispatches on layout hints violates the contract. The access pattern `data[selection[i]]` is
-  universal.
 - **`selection` is never NULL.** Do not NULL-check it.
 - **`validity == NULL` means all-valid.** Do not allocate a validity bitmap for all-non-null columns.
 - **No fallbacks.** Fail fast and explicitly on type mismatches. Do not silently coerce.

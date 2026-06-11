@@ -31,5 +31,6 @@ def read(at_date=None, variables=None) -> Morsel:
 
 def schema():
     # fmt:off
-    return RelationSchema(name="$no_table", columns=[SchemaColumn(name="$column", column_type=_lt.INT64)])
+    from opteryx.types.schema import mint_column_identity
+    return RelationSchema(name="$no_table", columns=[SchemaColumn(name="$column", column_type=_lt.INT64, identity=mint_column_identity("$no_table", "$column"))])
     # fmt:on

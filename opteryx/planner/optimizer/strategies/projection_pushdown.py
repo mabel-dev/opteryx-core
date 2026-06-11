@@ -32,6 +32,8 @@ from .optimization_strategy import OptimizerContext
 
 
 class ProjectionPushdownStrategy(OptimizationStrategy):
+    provides = ("projection-pushed",)
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         """
         Optimize the given node by pushing projections down in the plan.

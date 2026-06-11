@@ -16,12 +16,13 @@
 
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector, mix_hash
 from draken.core.buffers cimport (
     DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
     DRAKEN_FLOAT32, DRAKEN_FLOAT64,
     DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
     DRAKEN_BOOL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_INTERVAL,
+    DRAKEN_SEL_IDENTITY,
     DrakenType, DrakenVector,
 )
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
@@ -33,6 +34,47 @@ import draken.draken_native as _draken_native
 from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
+
+
+# -----------------------------------------------------------------------------
+# Shared helper: rebuild a CarcharSetWrapper from a PerfectHashSet.
+#
+# Used by the PerfectHashSet fast paths in filter_join (semi/anti probe) and
+# distinct when a mid-stream morsel turns out to have an encoding the
+# PerfectHashSet path can't handle (nullable / non-dense / type drift): the
+# narrow-int values already marked as seen are re-inserted as int64 row-hashes
+# so the standard carchar path recognises them.
+# -----------------------------------------------------------------------------
+
+cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
+    """Reconstruct a hash-based CarcharSetWrapper from an existing PerfectHashSet.
+
+    Iterates the bit-array and inserts the int64 row-hash of each stored value
+    directly — mix_hash(0, v) is identically the int64 hash kernel's output for
+    value v (the same equivalence the probe path produces), so no per-value
+    constant vector or Python hash() round-trip is needed.
+    """
+    cdef CarcharSetWrapper result = CarcharSetWrapper(<size_t>phs.range() * 2 + 8)
+    cdef Py_ssize_t w, bit
+    cdef uint64_t word, mask, h
+    cdef int64_t slot, val
+    cdef int64_t min_val = phs.min_val()
+    for w in range(phs.n_words()):
+        word = phs.word_at(w)
+        if word == 0:
+            continue
+        for bit in range(64):
+            mask = <uint64_t>1 << bit
+            if word & mask:
+                slot = <int64_t>w * 64 + <int64_t>bit
+                val = min_val + slot
+                # Must equal simd_hash_i64(val) exactly so probe-side hashes
+                # match: mix_hash supplies `val * C + 1`; the int64 kernel then
+                # applies the final avalanche `h ^ (h >> 32)`. Omitting it (as a
+                # prior version did) leaves the rebuilt set unmatchable.
+                h = mix_hash(0, <uint64_t>val)
+                result.insert(h ^ (h >> 32))
+    return result
 
 # -----------------------------------------------------------------------------
 # Foundation: shared types and the BasePlanNode hierarchy.

@@ -38,11 +38,26 @@
 
 namespace rugo {
 
+// C-ABI sink for streaming serialized columns straight into a caller-owned
+// MemoryPool. Pure C types only — rugo must not depend on opteryx; the opteryx
+// side fills these pointers in (see opteryx/compiled/structures/pool_sink_adapter.hpp).
+//   reserve(ctx, size, &ptr) -> ref_id : reserve `size` bytes, set *ptr to the
+//       writable region; returns a ref_id (>=0) or -1 on exhaustion.
+//   finalize(ctx, ref_id, actual_len)  : commit the reserved segment.
+struct PoolSink {
+    void*   ctx = nullptr;
+    int64_t (*reserve)(void* ctx, int64_t size, void** out_ptr) = nullptr;
+    void    (*finalize)(void* ctx, int64_t ref_id, int64_t actual_len) = nullptr;
+};
+
 struct MorselRef {
     std::string path;
     int rg_idx = -1;
     std::vector<std::string> column_names;
-    std::vector<std::vector<uint8_t>> column_ipc_bytes;
+    // One MemoryPool ref_id per column (serialized straight into the pool by the
+    // worker — no intermediate heap buffer, no commit() copy on the consumer).
+    std::vector<int64_t> column_ref_ids;
+    std::vector<int64_t> column_byte_lens;
     int64_t bytes_fetched = 0;
     uint64_t read_ns = 0;
     uint64_t decode_ns = 0;
@@ -79,10 +94,48 @@ class ParquetIOPipeline {
     std::atomic<int> pending_work_{0};
     std::atomic<bool> shutdown_{false};
 
+    // Destination pool for serialized columns. Set once before any submit via
+    // set_pool_sink(); workers reserve+serialize+finalize through it.
+    PoolSink pool_sink_;
+
     // Diagnostic counters for queue-contention investigation.
     std::atomic<uint64_t> spin_iterations_{0};
     std::atomic<uint64_t> enqueue_count_{0};
     std::atomic<size_t>   queue_high_watermark_{0};
+
+    // IO/handoff observability counters (all relaxed atomics; aggregated at
+    // diagnostics time, zero coordination cost in the hot path).
+    //
+    // http_request_count_: total individual byte ranges requested from remote
+    // storage (one per column chunk), whether issued singly or in a batch.
+    // http_lat_buckets_: histogram of fetch *operations* — one entry per
+    // read_range() single GET or per get_many() batch — bucketed by wall time
+    // (upper bounds in ms below, last bucket is overflow). Request count and
+    // operation count differ once batching is in play: a 4-column batch is
+    // 4 requests but 1 operation.
+    // worker_blocked_ns_: time workers spend blocked on the back-pressure CV
+    // waiting for the consumer to drain — the consumer-bound signal.
+    // ipc_bytes_serialized_: bytes written by serialize_decoded_column — the
+    // first of the handoff copies (serialize → pool commit → deserialize).
+    static constexpr int kHttpLatBuckets = 9;
+    static constexpr uint64_t kHttpLatBoundsMs[kHttpLatBuckets - 1] =
+        {1, 10, 50, 100, 250, 500, 1000, 5000};
+    std::atomic<uint64_t> http_request_count_{0};
+    std::atomic<uint64_t> http_fetch_ops_{0};
+    std::atomic<uint64_t> http_lat_buckets_[kHttpLatBuckets] = {};
+    std::atomic<uint64_t> worker_blocked_ns_{0};
+    std::atomic<uint64_t> ipc_bytes_serialized_{0};
+
+    // Record one fetch operation covering n_requests byte ranges that took
+    // elapsed_ns wall time. n_requests=1 for a single GET, N for a batch.
+    void record_http_fetch(uint64_t elapsed_ns, uint64_t n_requests) {
+        http_request_count_.fetch_add(n_requests, std::memory_order_relaxed);
+        http_fetch_ops_.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t ms = elapsed_ns / 1000000ULL;
+        int b = 0;
+        while (b < kHttpLatBuckets - 1 && ms >= kHttpLatBoundsMs[b]) ++b;
+        http_lat_buckets_[b].fetch_add(1, std::memory_order_relaxed);
+    }
 
     /**
      * Convert gs://bucket/path to https://storage.googleapis.com/bucket/path.
@@ -101,14 +154,17 @@ class ParquetIOPipeline {
 
         auto t0 = std::chrono::steady_clock::now();
         std::vector<uint8_t> bytes;
+        bool is_remote = false;
 
         if (path.substr(0, 5) == "gs://") {
+            is_remote = true;
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
             bytes = tl_http_client().get(url, {{"Range", range_hdr}});
 
         } else if (path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
+            is_remote = true;
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
             bytes = tl_http_client().get(path, {{"Range", range_hdr}});
@@ -134,7 +190,19 @@ class ParquetIOPipeline {
 
         uint64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t0).count();
+        if (is_remote) {
+            record_http_fetch(elapsed, 1);
+        }
         return {std::move(bytes), elapsed};
+    }
+
+    /**
+     * Build the fetch URL for a path: gs:// is rewritten to the GCS HTTPS
+     * endpoint; http(s):// is used verbatim. Mirrors read_range()'s dispatch.
+     */
+    static std::string fetch_url_for(const std::string& path) {
+        if (path.substr(0, 5) == "gs://") return gcs_to_https(path);
+        return path;
     }
 
     void decode_row_group(const WorkItem& item) {
@@ -189,15 +257,52 @@ class ParquetIOPipeline {
         // Precompute mask pointer once — shared across all columns in this row group.
         const uint8_t* mask_ptr = item.row_mask.empty() ? nullptr : item.row_mask.data();
 
+        // Per-column base offset (dictionary page if it precedes the data page,
+        // else the data page). Computed once here and reused for both the
+        // remote batch request and the in-loop chunk slicing.
+        std::vector<int64_t> base_offsets(item.column_stats.size());
+        for (size_t i = 0; i < item.column_stats.size(); ++i) {
+            int64_t base = item.column_stats[i].data_page_offset;
+            if (item.column_stats[i].dictionary_page_offset >= 0 &&
+                item.column_stats[i].dictionary_page_offset < base) {
+                base = item.column_stats[i].dictionary_page_offset;
+            }
+            base_offsets[i] = base;
+        }
+
+        // Remote batch prefetch: for HTTP/GCS, fetch every column chunk for
+        // this row group concurrently in a single get_many() call rather than
+        // one blocking GET per column (which serialized C round-trips per row
+        // group). Local files use mmap (above) or per-column pread (in-loop).
+        // The path is already a signed/self-authenticating URL when needed, so
+        // no auth header is attached here.
+        const bool remote = !is_local;
+        std::vector<std::vector<uint8_t>> remote_buffers;
+
         try {
+            if (remote && !item.column_stats.empty()) {
+                const std::string url = fetch_url_for(item.path);
+                std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
+                reqs.reserve(item.column_stats.size());
+                for (size_t i = 0; i < item.column_stats.size(); ++i) {
+                    int64_t chunk_size = item.column_stats[i].total_compressed_size;
+                    std::string range_hdr = "bytes=" + std::to_string(base_offsets[i]) +
+                        "-" + std::to_string(base_offsets[i] + chunk_size - 1);
+                    reqs.emplace_back(url, std::map<std::string, std::string>{{"Range", range_hdr}});
+                }
+                auto t_fetch = std::chrono::steady_clock::now();
+                remote_buffers = tl_http_client().get_many(reqs);
+                uint64_t batch_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - t_fetch).count();
+                total_read_ns += batch_ns;
+                // One fetch operation covering reqs.size() concurrent ranges.
+                record_http_fetch(batch_ns, reqs.size());
+            }
+
             for (size_t i = 0; i < item.column_stats.size(); ++i) {
                 const auto& col_stats = item.column_stats[i];
 
-                int64_t base_offset = col_stats.data_page_offset;
-                if (col_stats.dictionary_page_offset >= 0 &&
-                    col_stats.dictionary_page_offset < base_offset) {
-                    base_offset = col_stats.dictionary_page_offset;
-                }
+                int64_t base_offset = base_offsets[i];
                 int64_t chunk_size = col_stats.total_compressed_size;
 
                 ColumnStats adjusted = col_stats;
@@ -216,8 +321,17 @@ class ParquetIOPipeline {
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     result.bytes_fetched += chunk_size;
+                } else if (remote) {
+                    // Batch-prefetched above: decode straight from the buffer.
+                    const std::vector<uint8_t>& raw = remote_buffers[i];
+                    result.bytes_fetched += chunk_size;
+                    auto t_dec = std::chrono::steady_clock::now();
+                    decoded = DecodeColumnFromChunk(
+                        raw.data(), raw.size(), &adjusted, mask_ptr);
+                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dec).count();
                 } else {
-                    // Fallback: pread for HTTP/GCS or if mmap failed.
+                    // Local file whose mmap failed: per-column pread fallback.
                     auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
                     result.bytes_fetched += chunk_size;
                     total_read_ns += read_ns;
@@ -234,7 +348,6 @@ class ParquetIOPipeline {
                     break;
                 }
 
-                std::vector<uint8_t> ipc_bytes;
                 // Parse precision/scale from the logical_type string (e.g. "decimal(15,2)")
                 // for DECIMAL128 columns. ColumnStats carries no separate fields; parse inline.
                 uint8_t dec_precision = 38, dec_scale = 0;
@@ -248,8 +361,27 @@ class ParquetIOPipeline {
                         dec_scale     = static_cast<uint8_t>(std::stoi(lt.substr(cm + 1, rp - cm - 1)));
                     }
                 }
-                rugo::serialize_decoded_column(decoded, ipc_bytes, dec_precision, dec_scale);
-                result.column_ipc_bytes.push_back(std::move(ipc_bytes));
+
+                // Serialize straight into a MemoryPool-reserved region — no
+                // intermediate heap buffer, no consumer-side commit() copy.
+                // Exact size first (count pass), then a single write pass into
+                // the reserved bytes; the two cannot disagree (same code path).
+                size_t sz = rugo::serialized_size(decoded, dec_precision, dec_scale);
+                void* dst = nullptr;
+                int64_t ref_id = pool_sink_.reserve
+                    ? pool_sink_.reserve(pool_sink_.ctx, static_cast<int64_t>(sz), &dst)
+                    : -1;
+                if (ref_id < 0 || dst == nullptr) {
+                    result.success = false;
+                    result.error = "MemoryPool exhausted serializing column: " + col_stats.name;
+                    break;
+                }
+                size_t written = rugo::serialize_decoded_column_into(
+                    decoded, static_cast<uint8_t*>(dst), dec_precision, dec_scale);
+                pool_sink_.finalize(pool_sink_.ctx, ref_id, static_cast<int64_t>(written));
+                ipc_bytes_serialized_.fetch_add(written, std::memory_order_relaxed);
+                result.column_ref_ids.push_back(ref_id);
+                result.column_byte_lens.push_back(static_cast<int64_t>(written));
             }
         } catch (const std::exception& e) {
             result.success = false;
@@ -264,10 +396,15 @@ class ParquetIOPipeline {
         // Apply soft back-pressure: if the consumer is far behind, block
         // on the condition variable until it drains rather than spin-yielding.
         {
+            auto t_bp = std::chrono::steady_clock::now();
             std::unique_lock<std::mutex> lk(queue_mutex_);
             queue_cv_.wait(lk, [this]() {
                 return result_queue_.size() < queue_capacity_ || shutdown_.load(std::memory_order_relaxed);
             });
+            worker_blocked_ns_.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - t_bp).count(),
+                std::memory_order_relaxed);
             if (!shutdown_.load(std::memory_order_relaxed)) {
                 result_queue_.push_back(std::move(result));
                 size_t sz = result_queue_.size();
@@ -290,6 +427,12 @@ class ParquetIOPipeline {
 
     ~ParquetIOPipeline() {
         wait_shutdown();
+    }
+
+    // Wire the destination MemoryPool. Must be called before any submit; the
+    // workers serialize decoded columns directly into pool-reserved regions.
+    void set_pool_sink(PoolSink sink) {
+        pool_sink_ = sink;
     }
 
     /**
@@ -387,6 +530,30 @@ class ParquetIOPipeline {
     }
     size_t queue_high_watermark() const {
         return queue_high_watermark_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t http_request_count() const {
+        return http_request_count_.load(std::memory_order_relaxed);
+    }
+    uint64_t http_fetch_ops() const {
+        return http_fetch_ops_.load(std::memory_order_relaxed);
+    }
+    int http_latency_bucket_count() const {
+        return kHttpLatBuckets;
+    }
+    // Upper bound (ms) of bucket i; the final bucket is overflow and returns 0.
+    uint64_t http_latency_bucket_bound_ms(int i) const {
+        return (i >= 0 && i < kHttpLatBuckets - 1) ? kHttpLatBoundsMs[i] : 0;
+    }
+    uint64_t http_latency_bucket(int i) const {
+        return (i >= 0 && i < kHttpLatBuckets)
+            ? http_lat_buckets_[i].load(std::memory_order_relaxed) : 0;
+    }
+    uint64_t worker_blocked_ns() const {
+        return worker_blocked_ns_.load(std::memory_order_relaxed);
+    }
+    uint64_t ipc_bytes_serialized() const {
+        return ipc_bytes_serialized_.load(std::memory_order_relaxed);
     }
 };
 

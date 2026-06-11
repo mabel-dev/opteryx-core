@@ -166,7 +166,7 @@ SELECT name, id, name FROM testdata.satellites
 query shape 357 1
 SELECT DISTINCT name FROM testdata.astronauts
 
-query shape 357 19
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT * FROM testdata.astronauts
 
 query shape 357 1
@@ -190,7 +190,7 @@ SELECT DISTINCT birth_place FROM testdata.astronauts
 query shape 2 1
 SELECT DISTINCT gender FROM testdata.astronauts
 
-query shape 210 1
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT alma_mater FROM testdata.astronauts
 
 query shape 84 1
@@ -217,7 +217,7 @@ SELECT DISTINCT space_walks FROM testdata.astronauts
 query shape 52 1
 SELECT DISTINCT space_walks_hours FROM testdata.astronauts
 
-query shape 247 1
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT missions FROM testdata.astronauts
 
 query shape 39 1
@@ -226,7 +226,7 @@ SELECT DISTINCT death_date FROM testdata.astronauts
 query shape 4 1
 SELECT DISTINCT death_mission FROM testdata.astronauts
 
-query shape 357 5
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT name, birth_date, missions, birth_place, group FROM testdata.astronauts
 
 query shape 357 2
@@ -247,22 +247,22 @@ SELECT DISTINCT year, birth_date FROM testdata.astronauts
 query shape 357 2
 SELECT DISTINCT name, birth_place FROM testdata.astronauts
 
-query shape 357 2
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT name, alma_mater FROM testdata.astronauts
 
 query shape 346 2
 SELECT DISTINCT year, birth_place FROM testdata.astronauts
 
-query shape 304 2
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT year, alma_mater FROM testdata.astronauts
 
 query shape 356 2
 SELECT DISTINCT birth_date, birth_place FROM testdata.astronauts
 
-query shape 357 2
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT birth_date, alma_mater FROM testdata.astronauts
 
-query shape 354 2
+query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
 SELECT DISTINCT birth_place, alma_mater FROM testdata.astronauts
 
 query shape 177 1
@@ -277,10 +277,10 @@ SELECT name as NAME FROM testdata.satellites WHERE name = 'Calypso'
 query shape 177 1
 SELECT name as NAME FROM testdata.satellites GROUP BY name
 
-query error sql failed AttributeError: 'NoneType' object has no attribute 'append'
+query shape 177 1
 SELECT id as id FROM testdata.satellites
 
-query error sql failed AttributeError: 'NoneType' object has no attribute 'append'
+query shape 177 1
 SELECT planetId as planetId FROM testdata.satellites
 
 query shape 177 2
@@ -289,7 +289,7 @@ SELECT id as ID, planetId as PLANETID FROM testdata.satellites
 query shape 67 2
 SELECT id as iD, name as nAME FROM testdata.satellites WHERE planetId = 5
 
-query error sql failed AttributeError: 'NoneType' object has no attribute 'append'
+query shape 177 1
 SELECT id as ID, planetId as planetId FROM testdata.satellites WHERE name = 'Io'
 
 query shape 177 3
@@ -298,7 +298,7 @@ SELECT name as NAME, id as ID, planetId as PLANETID FROM testdata.satellites
 query shape 177 1
 SELECT id as ID FROM testdata.satellites GROUP BY id
 
-query error sql failed AttributeError: 'NoneType' object has no attribute 'append'
+query shape 177 1
 SELECT planetId as planetId FROM testdata.satellites GROUP BY planetId
 
 query shape 1 2

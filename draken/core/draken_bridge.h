@@ -75,6 +75,23 @@ const DrakenVector* draken_array_child_unwrap(PyObject* obj);
 PyObject* draken_vector_own_raw(
     void* data, uint8_t* validity, uint32_t length, DrakenType type);
 
+// draken_vector_take_buffer — native take over a raw int32 index buffer.
+//
+// vec_obj must be a draken.draken_native.Vector. `indices` is a caller-owned
+// int32_t[n] buffer (e.g. a Cython typed memoryview &view[0]); it is read only
+// and never retained. Dispatches the same per-type take as Vector.take but with
+// ZERO per-row PyObject boxing — the hot path for Morsel.take / _take_inplace /
+// align_tables. Returns a NEW reference to a Python Vector, or NULL + exception.
+PyObject* draken_vector_take_buffer(
+    PyObject* vec_obj, const int32_t* indices, uint32_t n);
+
+// draken_vector_take_with_null_buffer — take where index < 0 yields a NULL
+// output row (outer-join unmatched rows). Same contract as the above; the
+// negative rows are gathered with a safe substitute then forced null in the
+// result validity. Type-uniform (works for ARRAY/INTERVAL/VARBINARY too).
+PyObject* draken_vector_take_with_null_buffer(
+    PyObject* vec_obj, const int32_t* indices, uint32_t n);
+
 // draken_vector_own_dict_i64 — wrap hand-allocated dict-encoded int64 buffers in a new Vector.
 //
 // Creates a dict-encoded (selection = owned codes) int64 Vector.

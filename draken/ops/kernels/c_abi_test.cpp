@@ -65,6 +65,34 @@ void free_vector(DrakenVector* vec) {
     free(vec);
 }
 
+// Dict-shaped INT64 vector: `values` holds `data_length` unique entries,
+// `codes` holds `length` indices into values (1 < data_length < length is the
+// canonical dict shape). Logical row i is values[codes[i]].
+DrakenVector* create_int64_dict_vector(const int64_t* values, uint32_t data_length,
+                                       const uint32_t* codes, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* vec_data = static_cast<int64_t*>(malloc(data_length * sizeof(int64_t)));
+    auto* selection = static_cast<uint32_t*>(malloc(length * sizeof(uint32_t)));
+    memcpy(vec_data, values, data_length * sizeof(int64_t));
+    memcpy(selection, codes, length * sizeof(uint32_t));
+    vec->data = vec_data; vec->selection = selection; vec->data_length = data_length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_INT64; vec->flags = 0;
+    return vec;
+}
+
+// Constant-shaped INT64 vector: one value broadcast to `length` rows
+// (data_length == 1, selection all zeros).
+DrakenVector* create_int64_constant_vector(int64_t value, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* vec_data = static_cast<int64_t*>(malloc(sizeof(int64_t)));
+    auto* selection = static_cast<uint32_t*>(malloc(length * sizeof(uint32_t)));
+    vec_data[0] = value;
+    for (uint32_t i = 0; i < length; ++i) selection[i] = 0;
+    vec->data = vec_data; vec->selection = selection; vec->data_length = 1;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_INT64; vec->flags = 0;
+    return vec;
+}
+
 bool is_error(const VecResult& result) {
     return result.data == nullptr && result.type == DRAKEN_NULL;
 }
@@ -155,6 +183,94 @@ void test_draken_array_map_access() { int64_t d[] = {1}; DrakenVector* v = creat
 void test_draken_json_extract() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); DrakenVector* k = create_int64_vector(d, 1); VecResult r = draken_json_extract(nullptr, v, k); free_vector(v); free_vector(k); }
 void test_draken_pointer_extract() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); DrakenVector* k = create_int64_vector(d, 1); VecResult r = draken_pointer_extract(nullptr, v, k); free_vector(v); free_vector(k); }
 
+// ── Shape-parity tests (WP-03 regression) ──────────────────────────────────
+// Binary arith writes a DENSE output buffer but historically returned the
+// LEFT input's selection. For dict/constant left operands that selection
+// indexes into the (smaller/different) input layout, so a consumer reading
+// result.data[result.selection[i]] got wrong values or an OOB read. The fix
+// returns an identity selection; these tests verify the LOGICAL answer via the
+// uniform access pattern for non-dense left operands.
+//
+// dict left: values {5,10}, codes {0,1,0,1} → logical {5,10,5,10}.
+void test_arith_add_dict_left() {
+    int64_t lv[] = {5, 10}; uint32_t codes[] = {0, 1, 0, 1};
+    int64_t r[] = {1, 2, 3, 4}, e[] = {6, 12, 8, 14};
+    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_add(nullptr, L, R);
+    assert(!is_error(res) && vectors_equal_int64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+// constant left: 7 broadcast, right {1,2,3,4} → {8,9,10,11}.
+void test_arith_add_constant_left() {
+    int64_t r[] = {1, 2, 3, 4}, e[] = {8, 9, 10, 11};
+    DrakenVector* L = create_int64_constant_vector(7, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_add(nullptr, L, R);
+    assert(!is_error(res) && vectors_equal_int64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+// dict left with FLOAT64 right exercises the mixed→float branch.
+void test_arith_add_dict_left_float_right() {
+    int64_t lv[] = {5, 10}; uint32_t codes[] = {0, 1, 0, 1};
+    double r[] = {1.0, 2.0, 3.0, 4.0}, e[] = {6.0, 12.0, 8.0, 14.0};
+    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
+    DrakenVector* R = create_float64_vector(r, 4);
+    VecResult res = draken_add(nullptr, L, R);
+    assert(!is_error(res) && res.type == DRAKEN_FLOAT64 && vectors_equal_float64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+void test_arith_subtract_dict_left() {
+    int64_t lv[] = {20, 30}; uint32_t codes[] = {0, 1, 0, 1};
+    int64_t r[] = {1, 2, 3, 4}, e[] = {19, 28, 17, 26};
+    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_subtract(nullptr, L, R);
+    assert(!is_error(res) && vectors_equal_int64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+void test_arith_multiply_constant_left() {
+    int64_t r[] = {1, 2, 3, 4}, e[] = {3, 6, 9, 12};
+    DrakenVector* L = create_int64_constant_vector(3, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_multiply(nullptr, L, R);
+    assert(!is_error(res) && vectors_equal_int64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+void test_arith_divide_dict_left() {
+    int64_t lv[] = {10, 20}; uint32_t codes[] = {0, 1, 0, 1};
+    int64_t r[] = {2, 4, 5, 8}; double e[] = {5.0, 5.0, 2.0, 2.5};
+    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_divide(nullptr, L, R);
+    assert(!is_error(res) && res.type == DRAKEN_FLOAT64 && vectors_equal_float64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+void test_arith_modulo_dict_left() {
+    int64_t lv[] = {10, 21}; uint32_t codes[] = {0, 1, 0, 1};
+    int64_t r[] = {3, 5, 4, 6}, e[] = {1, 1, 2, 3};
+    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_modulo(nullptr, L, R);
+    assert(!is_error(res) && vectors_equal_int64(res, e, 4));
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+// Result must carry an identity selection + IDENTITY|PERMUTATION flags, never
+// the borrowed dict codes.
+void test_arith_result_is_identity_shaped() {
+    int64_t lv[] = {5, 10}; uint32_t codes[] = {0, 1, 0, 1};
+    int64_t r[] = {1, 2, 3, 4};
+    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
+    DrakenVector* R = create_int64_vector(r, 4);
+    VecResult res = draken_add(nullptr, L, R);
+    assert(!is_error(res));
+    assert(res.data_length == res.length);            // dense
+    for (uint32_t i = 0; i < res.length; ++i)
+        assert(res.selection[i] == i);                // identity, not dict codes
+    assert((res.flags & DRAKEN_SEL_IDENTITY) != 0);
+    free_vector(L); free_vector(R); draken_free(res.data);
+}
+
 void test_error_handling() { draken_error_message_clear(); assert(!draken_has_error()); VecResult s = draken_error_sentinel("Test"); assert(is_error(s) && draken_has_error()); draken_error_message_clear(); }
 void test_context_passing() { binary_op_ctx ctx{1}; int64_t l[] = {1}, r[] = {10}, e[] = {11}; DrakenVector* lv = create_int64_vector(l, 1); DrakenVector* rv = create_int64_vector(r, 1); VecResult res = draken_binary_arith(&ctx, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 1)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 
@@ -188,7 +304,21 @@ int main() {
         {"error_handling", test_error_handling}, {"context_passing", test_context_passing}
     };
 
+    // Shape-parity tests (WP-03) — exercise existing kernels with dict/constant
+    // inputs; they do NOT add to the registered-kernel count.
+    const struct { const char* name; void (*fn)(); } shape_tests[] = {
+        {"arith_add_dict_left", test_arith_add_dict_left},
+        {"arith_add_constant_left", test_arith_add_constant_left},
+        {"arith_add_dict_left_float_right", test_arith_add_dict_left_float_right},
+        {"arith_subtract_dict_left", test_arith_subtract_dict_left},
+        {"arith_multiply_constant_left", test_arith_multiply_constant_left},
+        {"arith_divide_dict_left", test_arith_divide_dict_left},
+        {"arith_modulo_dict_left", test_arith_modulo_dict_left},
+        {"arith_result_is_identity_shaped", test_arith_result_is_identity_shaped},
+    };
+
     const int TOTAL = sizeof(tests) / sizeof(tests[0]);
+    const int SHAPE_TOTAL = sizeof(shape_tests) / sizeof(shape_tests[0]);
     const int KERNELS = TOTAL - 2;
     const int EXPECTED_KERNELS = 48;
     int passed = 0, failed = 0;
@@ -204,8 +334,20 @@ int main() {
         }
     }
 
+    std::cout << "\n  -- shape-parity (dict/constant inputs) --\n";
+    for (int i = 0; i < SHAPE_TOTAL; ++i) {
+        try {
+            shape_tests[i].fn();
+            std::cout << "  ✓ " << shape_tests[i].name << "\n";
+            passed++;
+        } catch (...) {
+            std::cout << "  ✗ " << shape_tests[i].name << "\n";
+            failed++;
+        }
+    }
+
     std::cout << "\n" << std::string(70, '=') << "\n";
-    std::cout << "Results: " << passed << "/" << TOTAL << " passed\n";
+    std::cout << "Results: " << passed << "/" << (TOTAL + SHAPE_TOTAL) << " passed\n";
     std::cout << "Kernel coverage: " << KERNELS << "/" << EXPECTED_KERNELS << "\n";
     std::cout << std::string(70, '=') << "\n";
     return (failed > 0 || KERNELS != EXPECTED_KERNELS) ? 1 : 0;

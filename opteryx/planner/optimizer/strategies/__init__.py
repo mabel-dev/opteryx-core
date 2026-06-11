@@ -27,6 +27,7 @@ from .projection_pushdown import ProjectionPushdownStrategy
 from .redundant_operators import RedundantOperationsStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
 from .statistics_only_response import StatisticsOnlyResponseStrategy
+from .topn_scan_pushdown import TopNScanPushdownStrategy
 
 __all__ = [
     "BooleanSimplificationStrategy",
@@ -58,4 +59,5 @@ __all__ = [
     "RedundantOperationsStrategy",
     "SplitConjunctivePredicatesStrategy",
     "StatisticsOnlyResponseStrategy",
+    "TopNScanPushdownStrategy",
 ]

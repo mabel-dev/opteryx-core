@@ -51,7 +51,8 @@ class DataFrame:
             self._schema = schema
         elif isinstance(schema, (list, tuple)):
             # Convert list of column names to RelationSchema
-            columns = [SchemaColumn(name=str(col), column_type=_lt.VARCHAR) for col in schema]
+            from opteryx.types.schema import mint_column_identity
+            columns = [SchemaColumn(name=str(col), column_type=_lt.VARCHAR, identity=mint_column_identity("table", str(col))) for col in schema]
             self._schema = RelationSchema(name="table", columns=columns)
         else:
             self._schema = schema

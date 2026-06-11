@@ -22,12 +22,6 @@ from opteryx.types._null_handling import (
     nulls_to_default,
     remove_nulls,
 )
-from opteryx.types.logical_type import (
-    SQL_TO_PYTHON_MAP,
-    PYTHON_TO_SQL_MAP,
-    LogicalCategory,
-    find_compatible_type,
-)
 from opteryx.types._scalar_types import (
     ScalarType,
     classify_scalar,
@@ -37,6 +31,21 @@ from opteryx.types._scalar_types import (
     is_scalar,
     is_temporal_scalar,
     unwrap_scalar,
+)
+from opteryx.types.logical_type import (
+    PYTHON_TO_SQL_MAP,
+    SQL_TO_PYTHON_MAP,
+    LogicalCategory,
+    find_compatible_type,
+)
+from opteryx.types.vector_types import (
+    get_vector_source_identifier,
+    is_numeric_vector_type,
+    node_is_constant_embed_call,
+    node_is_literal_numeric_vector,
+    node_is_numeric_vector,
+    node_is_vector_query_expression,
+    resolve_node_type,
 )
 
 __all__ = [
@@ -65,4 +74,12 @@ __all__ = [
     "has_nulls",
     "remove_nulls",
     "nulls_to_default",
+    # Vector type helpers
+    "get_vector_source_identifier",
+    "is_numeric_vector_type",
+    "node_is_constant_embed_call",
+    "node_is_literal_numeric_vector",
+    "node_is_numeric_vector",
+    "node_is_vector_query_expression",
+    "resolve_node_type",
 ]

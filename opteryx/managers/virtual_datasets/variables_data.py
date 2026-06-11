@@ -60,14 +60,17 @@ def read(at_date=None, variables=None):
 
 def schema():
     # fmt:off
+    from opteryx.types.schema import mint_column_identity
+    def sc(name):
+        return SchemaColumn(name=name, column_type=_lt.VARCHAR, identity=mint_column_identity("$variables", name))
     return  RelationSchema(
         name="$variables",
         columns=[
-            SchemaColumn(name="name", column_type=_lt.VARCHAR),
-            SchemaColumn(name="value", column_type=_lt.VARCHAR),
-            SchemaColumn(name="type", column_type=_lt.VARCHAR),
-            SchemaColumn(name="owner", column_type=_lt.VARCHAR),
-            SchemaColumn(name="visibility", column_type=_lt.VARCHAR),
+            sc("name"),
+            sc("value"),
+            sc("type"),
+            sc("owner"),
+            sc("visibility"),
         ],
     )
     # fmt:on

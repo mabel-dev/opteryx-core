@@ -98,15 +98,14 @@ static inline size_t _find_first_byte(
     const uint8x16_t vp = vdupq_n_u8(c);
     size_t i = 0;
     for (; i + 16 <= hay_len; i += 16) {
-        const uint8x16_t chunk = vld1q_u8(hay + i);
-        const uint8x16_t cmp = vceqq_u8(chunk, vp);
-        uint64x2_t v64 = vreinterpretq_u64_u8(cmp);
-        if (vgetq_lane_u64(v64, 0) | vgetq_lane_u64(v64, 1)) {
-            // Find exact byte within the 16-byte vector
-            for (size_t j = 0; j < 16; ++j) {
-                if (hay[i + j] == c) return i + j;
-            }
-        }
+        const uint8x16_t cmp = vceqq_u8(vld1q_u8(hay + i), vp);
+        // NEON has no movemask; narrow each 0x00/0xFF lane to a nibble via
+        // vshrn (right-shift+narrow), giving a 64-bit value whose (4·j)th nibble
+        // is set iff lane j matched. ctzll>>2 = first matching lane — no scalar
+        // rescan of the 16 bytes.
+        const uint64_t mask = vget_lane_u64(
+            vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(cmp), 4)), 0);
+        if (mask) return i + (__builtin_ctzll(mask) >> 2);
     }
     for (; i < hay_len; ++i) {
         if (hay[i] == c) return i;
@@ -159,13 +158,10 @@ static inline size_t _find_first_byte_ci(
         const uint8x16_t cmp = two_cases
             ? vorrq_u8(vceqq_u8(chunk, vlo), vceqq_u8(chunk, vhi))
             : vceqq_u8(chunk, vlo);
-        uint64x2_t v64 = vreinterpretq_u64_u8(cmp);
-        if (vgetq_lane_u64(v64, 0) | vgetq_lane_u64(v64, 1)) {
-            for (size_t j = 0; j < 16; ++j) {
-                uint8_t b = hay[i + j];
-                if (b == lo || b == hi) return i + j;
-            }
-        }
+        // vshrn nibble-mask (see _find_first_byte): ctzll>>2 = first match lane.
+        const uint64_t mask = vget_lane_u64(
+            vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(cmp), 4)), 0);
+        if (mask) return i + (__builtin_ctzll(mask) >> 2);
     }
     for (; i < hay_len; ++i) {
         if (hay[i] == lo || hay[i] == hi) return i;

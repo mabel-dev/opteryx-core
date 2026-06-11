@@ -33,91 +33,66 @@ DISABLE_NESTED_LOOP_JOIN: bool = features.disable_nested_loop_join
 FORCE_NESTED_LOOP_JOIN: bool = features.force_nested_loop_join
 
 
-def get_column_cardinality_estimates(plan, relation_names, column_names):
-    """
-    Get cardinality estimates for join columns from Scan node manifests.
-
-    Args:
-        plan: Logical plan to search for Scan nodes
-        relation_names: List of relation names to find
-        column_names: List of column names to estimate cardinality for
-
-    Returns:
-        List of estimated cardinalities, or None if not available
-    """
-    scan_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,))
-
-    estimates = []
-    for relation_name in relation_names:
-        # Find the Scan node for this relation. nodes() yields (nid, node) tuples.
-        scan_node = None
-        for _nid, candidate in scan_nodes:
-            if candidate.relation == relation_name:
-                scan_node = candidate
-                break
-
-        if not scan_node or not scan_node.manifest:
-            return None
-
-        # Get cardinality estimates from manifest
-        manifest = scan_node.manifest
-        column_estimates = []
-
-        for col_name in column_names:
-            cardinality = manifest.estimate_cardinality(col_name)
-            if cardinality is not None:
-                column_estimates.append(cardinality)
-
-        if column_estimates:
-            estimates.append(min(column_estimates))
-        else:
-            return None
-
-    return estimates if len(estimates) == len(relation_names) else None
-
-
-def get_column_null_fractions(plan, relation_names, column_names):
-    """
-    Get null fractions for join columns from Scan node manifests.
-
-    Returns a list of max null fractions per relation (one per relation_name), or None if unavailable.
-    """
-    scan_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,))
-
-    null_fracs = []
-    for relation_name in relation_names:
-        scan_node = None
-        for _nid, candidate in scan_nodes:
-            if candidate.relation == relation_name:
-                scan_node = candidate
-                break
-
-        if not scan_node or not scan_node.manifest:
-            return None
-
-        manifest = scan_node.manifest
-        col_nulls = []
-        for col_name in column_names:
-            frac = manifest.estimate_null_fraction(col_name)
-            if frac is not None:
-                col_nulls.append(frac)
-
-        if col_nulls:
-            # Use the worst-case (highest) null fraction across join cols
-            null_fracs.append(max(col_nulls))
-        else:
-            return None
-
-    return null_fracs if len(null_fracs) == len(relation_names) else None
-
-
 def _col_value(col):
     """Return the underlying column identifier regardless of object shape."""
     return getattr(col, "value", col)
 
 
+def _join_key_name(col):
+    """Best-effort physical name of a join-key column, matching how
+    RelationStatistics.columns is keyed (see statistics_refresh._column_name).
+    Returns None when no name can be resolved (NDV/null then go unknown)."""
+    schema_column = getattr(col, "schema_column", None)
+    if schema_column is not None:
+        name = getattr(schema_column, "name", None)
+        if isinstance(name, str):
+            return name
+    name = getattr(col, "source_column", None) or getattr(col, "value", None)
+    if isinstance(name, str):
+        return name
+    name = getattr(col, "name", None)
+    return name if isinstance(name, str) else None
+
+
+def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_null):
+    """Decide whether to swap the join's sides so the smaller/cheaper relation
+    ends up on the left (build) side.
+
+    Pure function of per-side row counts, join-key NDVs and join-key null
+    fractions. Row counts are *post-filter* ``statistics.row_count`` when
+    available (so a heavily-filtered large table is correctly seen as small),
+    falling back to the binder's pre-filter row estimate otherwise. The 3x and
+    1% thresholds are unchanged from the previous size-only implementation, and
+    with unknown NDV/null this reduces to "smaller side on the left" exactly as
+    before.
+    """
+    # Rule 1: memory pressure — one side dominates the other in rows.
+    if left_rows > 3 * right_rows:
+        return True
+    if right_rows > 3 * left_rows:
+        return False
+
+    # Effective rows discount join keys that are partly NULL (worst-case side).
+    left_eff = left_rows * (1.0 - left_null) if left_null else left_rows
+    right_eff = right_rows * (1.0 - right_null) if right_null else right_rows
+
+    # Rules 2 & 3: cardinality-aware when both join-key NDVs are known.
+    if left_ndv is not None and right_ndv is not None:
+        denom = max(left_ndv, right_ndv)
+        card_diff_pct = (abs(left_ndv - right_ndv) / denom * 100.0) if denom else 0.0
+        if card_diff_pct <= 1.0:
+            # Rule 2: near-equal cardinality — smaller effective rows on the left.
+            return left_eff > right_eff
+        # Rule 3: prefer smaller cardinality left; tie-break on effective rows.
+        return left_ndv > right_ndv or (left_ndv == right_ndv and left_eff > right_eff)
+
+    # Fallback: no cardinality data — smaller effective rows on the left.
+    return right_eff < left_eff
+
+
 class JoinOrderingStrategy(OptimizationStrategy):
     optimization_technique = "cost"
+    requires = ("joins-planned",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
@@ -128,64 +103,22 @@ class JoinOrderingStrategy(OptimizationStrategy):
             pass
 
         if node.node_type == LogicalPlanStepType.Join and node.type == "inner":
-            # Apply join ordering rules from COST-BASED-OPTIMIZER.md
-            should_swap = False
+            # Apply join ordering rules from COST-BASED-OPTIMIZER.md, fed from the
+            # refreshed per-node statistics (post-filter row counts and join-key
+            # NDV/null fractions) rather than the binder's pre-filter size estimate.
+            left_stats, right_stats = self._side_statistics(
+                context.pre_optimized_tree, context.node_id
+            )
+            left_rows = self._side_rows(left_stats, node.left_size)
+            right_rows = self._side_rows(right_stats, node.right_size)
+            left_ndv = self._key_ndv(left_stats, node.left_columns)
+            right_ndv = self._key_ndv(right_stats, node.right_columns)
+            left_null = self._key_null_fraction(left_stats, node.left_columns)
+            right_null = self._key_null_fraction(right_stats, node.right_columns)
 
-            # Rule 1: Memory pressure heuristic - if one table is >3x bytes of the other
-            if node.left_size > 3 * node.right_size:
-                should_swap = True
-            elif node.right_size > 3 * node.left_size:
-                should_swap = False
-            else:
-                # Rule 2 & 3: Use cardinality and null-aware effective rows if available
-                left_cards = get_column_cardinality_estimates(
-                    context.pre_optimized_tree,
-                    node.left_relation_names,
-                    [_col_value(col) for col in node.left_columns],
-                )
-                right_cards = get_column_cardinality_estimates(
-                    context.pre_optimized_tree,
-                    node.right_relation_names,
-                    [_col_value(col) for col in node.right_columns],
-                )
-
-                left_nulls = get_column_null_fractions(
-                    context.pre_optimized_tree,
-                    node.left_relation_names,
-                    [_col_value(col) for col in node.left_columns],
-                )
-                right_nulls = get_column_null_fractions(
-                    context.pre_optimized_tree,
-                    node.right_relation_names,
-                    [_col_value(col) for col in node.right_columns],
-                )
-
-                # Effective rows discounting null join keys (worst-case per side)
-                left_eff_rows = node.left_size
-                right_eff_rows = node.right_size
-                if left_nulls and len(left_nulls) > 0:
-                    left_eff_rows = node.left_size * (1 - max(left_nulls))
-                if right_nulls and len(right_nulls) > 0:
-                    right_eff_rows = node.right_size * (1 - max(right_nulls))
-
-                if left_cards and right_cards:
-                    left_card = min(left_cards)
-                    right_card = min(right_cards)
-
-                    # Rule 2: If cardinalities within 1%, fall back to effective rows
-                    card_diff_pct = abs(left_card - right_card) / max(left_card, right_card) * 100
-                    if card_diff_pct <= 1.0:
-                        if left_eff_rows > right_eff_rows:
-                            should_swap = True
-                    # Rule 3: Otherwise, prefer smaller cardinality (and if tied, smaller effective rows)
-                    elif left_card > right_card or (
-                        left_card == right_card and left_eff_rows > right_eff_rows
-                    ):
-                        should_swap = True
-                else:
-                    # Fallback: No cardinality data, use effective rows
-                    if right_eff_rows < left_eff_rows:
-                        should_swap = True
+            should_swap = _decide_swap(
+                left_rows, right_rows, left_ndv, right_ndv, left_null, right_null
+            )
 
             # Perform the swap if needed
             if should_swap:
@@ -228,3 +161,50 @@ class JoinOrderingStrategy(OptimizationStrategy):
         # only run if there are LIMIT clauses in the plan
         candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
         return len(candidates) > 0
+
+    @staticmethod
+    def _side_statistics(plan, join_nid):
+        """Return (left_stats, right_stats) RelationStatistics for the join's two
+        inputs, identified by the 'left'/'right' edge labels. Either may be None
+        when statistics are absent or a side is unlabelled."""
+        left = right = None
+        for child_nid, _, label in plan.ingoing_edges(join_nid):
+            stats = getattr(plan[child_nid], "statistics", None)
+            if label == "left":
+                left = stats
+            elif label == "right":
+                right = stats
+        return left, right
+
+    @staticmethod
+    def _side_rows(stats, fallback):
+        """Post-filter row count for a side, falling back to the binder estimate."""
+        if stats is not None and getattr(stats, "row_count", None) is not None:
+            return stats.row_count
+        return fallback
+
+    @staticmethod
+    def _key_ndv(stats, key_columns):
+        """Smallest known join-key NDV for a side, or None when unavailable."""
+        if stats is None:
+            return None
+        ndvs = []
+        for col in key_columns or []:
+            name = _join_key_name(col)
+            col_stats = stats.get_column(name) if isinstance(name, str) else None
+            if col_stats is not None and col_stats.distinct_count is not None:
+                ndvs.append(col_stats.distinct_count)
+        return min(ndvs) if ndvs else None
+
+    @staticmethod
+    def _key_null_fraction(stats, key_columns):
+        """Worst-case (highest) join-key null fraction for a side, or None."""
+        if stats is None:
+            return None
+        fractions = []
+        for col in key_columns or []:
+            name = _join_key_name(col)
+            col_stats = stats.get_column(name) if isinstance(name, str) else None
+            if col_stats is not None and col_stats.null_fraction is not None:
+                fractions.append(col_stats.null_fraction)
+        return max(fractions) if fractions else None

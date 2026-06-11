@@ -64,6 +64,15 @@ class OptimizationStrategy:
     The optimizer refreshes statistics before running a "cost" strategy when the
     plan's ``statistics_are_stale`` flag is set."""
 
+    provides: Tuple[str, ...] = ()
+    """Capability tokens this strategy establishes for strategies ordered after it.
+    Consumed by :func:`_validate_strategy_order` to assert pipeline ordering at
+    construction time — purely declarative, it changes no runtime behaviour."""
+
+    requires: Tuple[str, ...] = ()
+    """Capability tokens that must be ``provides``-ed by an earlier strategy in the
+    pipeline. A violation is a loud construction-time error, not a silent misorder."""
+
     def __init__(self, telemetry):
         self.telemetry = telemetry
 

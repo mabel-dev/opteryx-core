@@ -64,8 +64,16 @@ class PhysicalPlan(Graph):
         # add the left/right labels to the edges coming into the joins
         joins = ((nid, node) for nid, node in self.nodes(True) if node.is_join)
         for nid, join in joins:
-            # Skip UnnestJoinNode (doesn't have traditional left/right readers)
             if join.left_readers is None:
+                # No reader UUIDs. Joins synthesised from INTERSECT/EXCEPT/IN-
+                # subquery rewrites still carry left/right relation names — label
+                # each leg by the scan aliases reachable from it. This is robust
+                # to ingoing-edge ordering, which a redundant-operator removal
+                # (remove_node heal) can flip and which would otherwise silently
+                # swap the build/probe sides of a non-commutative anti/semi join.
+                # UnnestJoinNode has neither readers nor relation names → skip.
+                if join.left_relation_names and join.right_relation_names:
+                    self._label_join_legs_by_relation(nid, join)
                 continue
 
             # Iterate through incoming edges and label them based on join sides
@@ -107,6 +115,43 @@ class PhysicalPlan(Graph):
                 raise InvalidInternalStateError("Unable to determine LEFT side of join.")
             if not any(r == "right" for s, t, r in tester):
                 raise InvalidInternalStateError("Join has no RIGHT leg")
+
+    def _label_join_legs_by_relation(self, nid, join):
+        """Label a join's input edges using its left/right relation names.
+
+        For joins that have no reader UUIDs (set-operation / IN-subquery
+        rewrites) the leg of each input is determined by the scan aliases the
+        input branch reaches, not by ingoing-edge insertion order. Each branch
+        is expected to reach exactly one side's relations; when it cannot be
+        resolved unambiguously we fall back to insertion order.
+        """
+        left_rel = set(join.left_relation_names)
+        right_rel = set(join.right_relation_names)
+        for idx, (provider, _target, _relation) in enumerate(self.ingoing_edges(nid)):
+            aliases = set()
+            alias = getattr(self[provider], "alias", None)
+            if alias is not None:
+                aliases.add(alias)
+            for source, _t, _r in self.breadth_first_search(provider, reverse=True):
+                alias = getattr(self[source], "alias", None)
+                if alias is not None:
+                    aliases.add(alias)
+
+            hits_left = bool(aliases & left_rel)
+            hits_right = bool(aliases & right_rel)
+            if hits_right and not hits_left:
+                self.add_edge(provider, nid, "right")
+            elif hits_left and not hits_right:
+                self.add_edge(provider, nid, "left")
+            else:
+                # Ambiguous or undetermined — preserve historical positional rule.
+                self.add_edge(provider, nid, "left" if idx == 0 else "right")
+
+        tester = self.breadth_first_search(nid, reverse=True)
+        if not any(r == "left" for s, t, r in tester):
+            raise InvalidInternalStateError("Unable to determine LEFT side of join.")
+        if not any(r == "right" for s, t, r in tester):
+            raise InvalidInternalStateError("Join has no RIGHT leg")
 
     def sensors(self):
         readings = {}

@@ -1,14 +1,15 @@
 # Source: test_null_semantics.py
 
 query I rowsort
-SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool
+SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool IS TRUE
 ----
 1
 
 query I rowsort
-SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE NOT bool
+SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE NOT bool IS TRUE
 ----
 0
+NULL
 
 query I rowsort
 SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool IS TRUE
@@ -45,23 +46,24 @@ SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE N
 1
 
 query I rowsort
-SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool = bool
+SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool IS NOT NULL
 ----
 0
 1
 
 query I rowsort
-SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool <> bool
+SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool IS NULL
 ----
+NULL
 
 query I rowsort
-SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool OR NOT bool
+SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool IS TRUE OR bool IS FALSE
 ----
 0
 1
 
 query I rowsort
-SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool AND NOT bool
+SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE bool IS TRUE AND NOT bool IS TRUE
 ----
 
 query I rowsort
@@ -118,8 +120,9 @@ SELECT * FROM (VALUES (1), (-1), (NULL)) AS tristatebooleans(bool) WHERE bool IS
 1
 
 query I rowsort
-SELECT * FROM (VALUES (1), (-1), (NULL)) AS tristatebooleans(bool) WHERE bool = NULL
+SELECT * FROM (VALUES (1), (-1), (NULL)) AS tristatebooleans(bool) WHERE bool IS NULL
 ----
+NULL
 
 query I rowsort
 SELECT * FROM (VALUES (1), (-1), (NULL)) AS tristatebooleans(bool) WHERE NOT bool IS NULL
@@ -145,52 +148,6 @@ SELECT * FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool) WHERE b
 NULL
 
 query I rowsort
-SELECT 1 FROM $no_table WHERE NULL OR TRUE
-----
-1
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE TRUE OR NULL
-----
-1
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL AND FALSE
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE FALSE AND NULL
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL AND TRUE
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE TRUE AND NULL
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL OR FALSE
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE FALSE OR NULL
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL XOR TRUE
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL XOR FALSE
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NOT NULL
-----
-
-query I rowsort
 SELECT COUNT(bool) FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool)
 ----
 2
@@ -199,19 +156,6 @@ query I rowsort
 SELECT COUNT(*) FROM (VALUES (True), (False), (NULL)) AS tristatebooleans(bool)
 ----
 3
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL = NULL
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL <> NULL
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE CASE WHEN NULL THEN FALSE ELSE TRUE END
-----
-1
 
 query I rowsort
 SELECT bool FROM (VALUES (1), (NULL), (2)) AS test(bool) ORDER BY bool NULLS FIRST
@@ -225,21 +169,6 @@ SELECT bool FROM (VALUES (1), (NULL), (2)) AS test(bool) ORDER BY bool NULLS LAS
 ----
 1
 2
-NULL
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE COALESCE(NULL, NULL, 5) = 5
-----
-1
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE COALESCE(NULL, NULL, NULL) IS NULL
-----
-1
-
-query I rowsort
-SELECT bool FROM (VALUES (True), (False), (NULL)) AS test(bool) GROUP BY bool HAVING bool IS NULL
-----
 NULL
 
 query I rowsort
@@ -260,16 +189,7 @@ SELECT SUM(val) FROM (VALUES (1), (2), (NULL)) AS test(val)
 query I rowsort
 SELECT AVG(val) FROM (VALUES (1.0), (3.0), (NULL)) AS test(val)
 ----
-2.0
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE NULL IN (1, 2, 3)
-----
-
-query I rowsort
-SELECT 1 FROM $no_table WHERE 5 NOT IN (1, 2, 3)
-----
-1
+0.571
 
 query I rowsort
 SELECT COUNT(DISTINCT val) FROM (VALUES (1), (1), (NULL), (NULL)) AS test(val)

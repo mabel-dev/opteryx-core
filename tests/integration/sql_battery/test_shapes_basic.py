@@ -82,6 +82,14 @@ STATEMENTS = [
         # Does the error tester work
         ("THIS IS NOT VALID SQL", None, None, SqlError),
 
+        # Unary minus on a column expression must not crash the planner [regression]
+        ("SELECT -id FROM $planets", 9, 1, None),
+        ("SELECT -id AS neg FROM $planets", 9, 1, None),
+        ("SELECT +id FROM $planets", 9, 1, None),
+        ("SELECT -(id + 1) FROM $planets", 9, 1, None),
+        ("SELECT -gravity FROM $planets", 9, 1, None),
+        ("SELECT -5 AS a", 1, 1, None),
+
         # PAGING OF DATASETS AFTER A GROUP BY [#179]
         ("SELECT * FROM (SELECT COUNT(*), name FROM testdata.astronauts GROUP BY name ORDER BY COUNT(*)) AS SQ LIMIT 5", 5, 2, None),
         # FILTER CREATION FOR 3 OR MORE ANDED PREDICATES FAILS [#182]

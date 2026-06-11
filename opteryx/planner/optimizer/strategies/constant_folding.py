@@ -35,11 +35,39 @@ from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
 def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
+    from opteryx.expression.functions import get_catalog
+
     node = Node(node_type=NodeType.FUNCTION)
     node.value = "IFNOTNULL"
     node.parameters = [value, value_if_not_null]
     node.schema_column = root.schema_column
     node.query_column = root.query_column
+
+    # The binder runs before the optimizer, so a node minted here is never bound.
+    # Resolve the catalog entry directly — the executor requires function_ref.
+    resolved = get_catalog().resolve(node.value, list(node.parameters))
+    if resolved is None:
+        raise ValueError(f"Unable to resolve folded function '{node.value}'")
+    node.function_ref = resolved
+
+    # Mirror the binder's literal coercion for IFNOTNULL: both branches feed
+    # vector_iif, which rejects mismatched fixed-width types. Coerce literal
+    # parameters to the resolved return type so the constant matches the column.
+    result_type = resolved.inferred_return_type
+    result_lc = result_type.category if result_type is not None else None
+    if result_lc not in (None, LogicalCategory.NULL):
+        from opteryx.types.value_parsing import parse_value
+
+        for param in node.parameters:
+            if (
+                param.node_type == NodeType.LITERAL
+                and param.value is not None
+                and param.value != set()
+            ):
+                param.value = parse_value(result_lc, param.value)
+                param.type = result_type
+                if param.schema_column is not None:
+                    param.schema_column.column_type = result_type
     return node
 
 

@@ -30,8 +30,11 @@ This module aims to enhance query performance through systematic and incremental
 """
 
 from opteryx.config import DISABLE_OPTIMIZER
+from opteryx.config import VALIDATE_OPTIMIZER_PLANS
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.plan_validator import validate_plan
 from opteryx.planner.optimizer.strategies import (
     BooleanSimplificationStrategy,
     CastSimplificationStrategy,
@@ -62,12 +65,52 @@ from opteryx.planner.optimizer.strategies import (
     RedundantOperationsStrategy,
     SplitConjunctivePredicatesStrategy,
     StatisticsOnlyResponseStrategy,
+    TopNScanPushdownStrategy,
 )
 
 from .statistics_refresh import refresh_statistics
 from .strategies.optimization_strategy import OptimizerContext
 
 __all__ = ["do_optimizer"]
+
+
+def _validate_strategy_order(strategies) -> None:
+    """Assert the declared ordering contract between strategies (WP-2).
+
+    Each strategy may declare ``requires`` capability tokens that must be
+    ``provides``-ed by a strategy ordered *earlier* in the pipeline (see the
+    declarations on the strategy classes). This walks the list once and fails
+    loudly if a requirement is unmet, so a careless reorder of
+    ``OptimizerVisitor.strategies`` — or a typo in a token — is caught at
+    construction time rather than surfacing as a wrong plan much later.
+
+    Purely structural: it inspects the list order, never the plan, and runs
+    once per OptimizerVisitor construction.
+    """
+    all_provided: set = set()
+    for strategy in strategies:
+        all_provided.update(strategy.provides)
+
+    provided_so_far: set = set()
+    for strategy in strategies:
+        name = type(strategy).__name__
+        for token in strategy.requires:
+            if token not in all_provided:
+                raise InvalidInternalStateError(
+                    f"Optimizer strategy {name} requires capability '{token}', but no "
+                    "strategy in the pipeline provides it (typo in a requires/provides "
+                    "token, or a missing strategy)."
+                )
+            if token not in provided_so_far:
+                providers = ", ".join(
+                    type(s).__name__ for s in strategies if token in s.provides
+                )
+                raise InvalidInternalStateError(
+                    f"Optimizer strategy {name} requires capability '{token}' (provided "
+                    f"by {providers}) to run before it, but {name} is ordered earlier. "
+                    "Fix the order of OptimizerVisitor.strategies."
+                )
+        provided_so_far.update(strategy.provides)
 
 
 class OptimizerVisitor:
@@ -102,6 +145,7 @@ class OptimizerVisitor:
             JoinOrderingStrategy(telemetry),
             DistinctPushdownStrategy(telemetry),
             OperatorFusionStrategy(telemetry),
+            TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
             LimitPushdownStrategy(telemetry),
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
             #            EmptyTableStrategy(telemetry),
@@ -112,6 +156,7 @@ class OptimizerVisitor:
             # Uses FileEntry.stats_by_name for range detection — projection-stable.
             HashMapVariantStrategy(telemetry),
         ]
+        _validate_strategy_order(self.strategies)
 
     def traverse(self, plan: LogicalPlan, strategy) -> LogicalPlan:
         """
@@ -169,6 +214,10 @@ class OptimizerVisitor:
                 ):
                     current_plan = refresh_statistics(current_plan)
                 current_plan = self.traverse(current_plan, strategy)
+                if VALIDATE_OPTIMIZER_PLANS:
+                    # Debug guardrail (WP-3): localise plan corruption to the
+                    # strategy that produced it. Off by default; zero cost then.
+                    validate_plan(current_plan, where=strategy.__class__.__name__)
                 if strategy.optimization_technique != "cost":
                     # Heuristic strategies that ran may have rewritten the plan;
                     # invalidate stats so the next cost-based strategy refreshes.

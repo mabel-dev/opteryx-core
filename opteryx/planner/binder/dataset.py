@@ -15,7 +15,7 @@ from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.logical_type import LogicalCategory, ColumnType, _NUMERIC_TYPES, _TEMPORAL_TYPES
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import SchemaColumn, RelationSchema, mint_column_identity
 from opteryx.utils import random_string
 
 
@@ -43,10 +43,11 @@ def visit_function_dataset(
                         element_types[column] = _elem
         def _build_value_column(column):
             ct = types.get(column)  # ColumnType or None
+            ident = mint_column_identity(relation_name, column)
             if isinstance(ct, ColumnType):
-                return SchemaColumn(name=column, column_type=ct)
+                return SchemaColumn(name=column, column_type=ct, identity=ident)
             from opteryx.types import logical_type as _lt2
-            return SchemaColumn(name=column, column_type=_lt2.NULL)
+            return SchemaColumn(name=column, column_type=_lt2.NULL, identity=ident)
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -72,7 +73,7 @@ def visit_function_dataset(
                 node_type=NodeType.IDENTIFIER,
                 source_column=node.unnest_target,
                 source=relation_name,
-                schema_column=SchemaColumn(name=node.unnest_target),
+                schema_column=SchemaColumn(name=node.unnest_target, identity=mint_column_identity(relation_name, node.unnest_target)),
             )
         ]
         schema = RelationSchema(name=relation_name, columns=[c.schema_column for c in columns])
@@ -104,7 +105,7 @@ def visit_function_dataset(
             element_type = _lt.TIMESTAMP()
 
         node.relation_name = node.alias
-        _gs_schema_col = SchemaColumn(name=node.alias, column_type=element_type if isinstance(element_type, ColumnType) else None)
+        _gs_schema_col = SchemaColumn(name=node.alias, column_type=element_type if isinstance(element_type, ColumnType) else None, identity=mint_column_identity(node.relation_name, node.alias))
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,

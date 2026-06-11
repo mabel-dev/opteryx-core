@@ -139,7 +139,11 @@ static inline VecResult i64_slice(const DrakenVector& v, uint32_t start, uint32_
     int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
     if (!dst) throw std::bad_alloc();
 
-    if (v.data_length == v.length) {
+    // Physical memcpy is valid ONLY when selection is identity (selection[i]==i).
+    // data_length==length alone admits a PERMUTATION (e.g. take after sort), which
+    // would memcpy rows in physical order and silently reorder/drop. Require the
+    // IDENTITY flag; permutations fall through to the selection-honouring path.
+    if (draken_is_dense(&v) && (v.flags & DRAKEN_SEL_IDENTITY)) {
         std::memcpy(dst, data + start, n * sizeof(int64_t));
     } else {
         for (uint32_t i = 0; i < n; ++i)

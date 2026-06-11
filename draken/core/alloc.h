@@ -35,17 +35,39 @@
 extern "C" {
 #endif
 
-static inline void* draken_malloc(size_t size) {
-    void* p = malloc(size);
-    const char* trace_env = getenv("OPTERYX_FREE_TRACE");
-    if (trace_env && trace_env[0] && p != nullptr) {
-        size_t asize = DRAKEN_USABLE_SIZE(p);
+// Diagnostic-trace configuration, resolved from the environment EXACTLY ONCE
+// per process (magic-static init is thread-safe). getenv is a linear scan of
+// `environ`; calling it on every malloc/free — the hottest allocation path in
+// the engine — cost 2–6 environ scans per vector op. Mid-process toggling of
+// OPTERYX_FREE_TRACE* is no longer honoured (it never needed to be); the vars
+// must be set at process start.
+struct DrakenTraceConfig {
+    int    enabled;
+    size_t min_sz;
+    size_t max_sz;
+};
+
+static inline const DrakenTraceConfig* draken_trace_config(void) {
+    static const DrakenTraceConfig cfg = []() {
+        DrakenTraceConfig c;
+        const char* trace_env = getenv("OPTERYX_FREE_TRACE");
+        c.enabled = (trace_env && trace_env[0]) ? 1 : 0;
         const char* min_env = getenv("OPTERYX_FREE_TRACE_MIN");
         const char* max_env = getenv("OPTERYX_FREE_TRACE_MAX");
-        size_t min_sz = 0;
-        size_t max_sz = (size_t)-1;
-        if (min_env) min_sz = (size_t)strtoull(min_env, NULL, 10);
-        if (max_env) max_sz = (size_t)strtoull(max_env, NULL, 10);
+        c.min_sz = min_env ? (size_t)strtoull(min_env, NULL, 10) : (size_t)0;
+        c.max_sz = max_env ? (size_t)strtoull(max_env, NULL, 10) : (size_t)-1;
+        return c;
+    }();
+    return &cfg;
+}
+
+static inline void* draken_malloc(size_t size) {
+    void* p = malloc(size);
+    const DrakenTraceConfig* tc = draken_trace_config();
+    if (tc->enabled && p != nullptr) {
+        size_t asize = DRAKEN_USABLE_SIZE(p);
+        size_t min_sz = tc->min_sz;
+        size_t max_sz = tc->max_sz;
         if (asize >= min_sz && asize <= max_sz) {
             fprintf(stderr, "DRAKEN_MALLOC TRACE: ptr=%p req=%zu size=%zu\n", p, size, asize);
             void* bt[32];
@@ -64,15 +86,11 @@ static inline void* draken_aligned_malloc(size_t size, size_t alignment) {
     if (alignment < sizeof(void*)) alignment = sizeof(void*);
     void* p = nullptr;
     if (posix_memalign(&p, alignment, size) != 0) p = nullptr;
-    const char* trace_env = getenv("OPTERYX_FREE_TRACE");
-    if (trace_env && trace_env[0] && p != nullptr) {
+    const DrakenTraceConfig* tc = draken_trace_config();
+    if (tc->enabled && p != nullptr) {
         size_t asize = DRAKEN_USABLE_SIZE(p);
-        const char* min_env = getenv("OPTERYX_FREE_TRACE_MIN");
-        const char* max_env = getenv("OPTERYX_FREE_TRACE_MAX");
-        size_t min_sz = 0;
-        size_t max_sz = (size_t)-1;
-        if (min_env) min_sz = (size_t)strtoull(min_env, NULL, 10);
-        if (max_env) max_sz = (size_t)strtoull(max_env, NULL, 10);
+        size_t min_sz = tc->min_sz;
+        size_t max_sz = tc->max_sz;
         if (asize >= min_sz && asize <= max_sz) {
             fprintf(stderr, "DRAKEN_ALIGNED_MALLOC TRACE: ptr=%p req=%zu align=%zu size=%zu\n", p, size, alignment, asize);
             void* bt[32];
@@ -92,16 +110,13 @@ static inline void draken_free(void* ptr) {
 
     /* Optional diagnostic tracing: set OPTERYX_FREE_TRACE=1 to enable.
      * Further filtering is supported via OPTERYX_FREE_TRACE_MIN / _MAX (bytes).
+     * Config is resolved once at process start (see draken_trace_config).
      */
-    const char* trace_env = getenv("OPTERYX_FREE_TRACE");
-    if (trace_env && trace_env[0]) {
+    const DrakenTraceConfig* tc = draken_trace_config();
+    if (tc->enabled) {
         size_t asize = DRAKEN_USABLE_SIZE(ptr);
-        const char* min_env = getenv("OPTERYX_FREE_TRACE_MIN");
-        const char* max_env = getenv("OPTERYX_FREE_TRACE_MAX");
-        size_t min_sz = 0;
-        size_t max_sz = (size_t)-1;
-        if (min_env) min_sz = (size_t)strtoull(min_env, NULL, 10);
-        if (max_env) max_sz = (size_t)strtoull(max_env, NULL, 10);
+        size_t min_sz = tc->min_sz;
+        size_t max_sz = tc->max_sz;
 
         if (asize >= min_sz && asize <= max_sz) {
             fprintf(stderr, "DRAKEN_FREE TRACE: ptr=%p size=%zu\n", ptr, asize);

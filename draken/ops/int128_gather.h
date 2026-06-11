@@ -93,7 +93,9 @@ static inline VecResult i128_slice(const DrakenVector& v, uint32_t start, uint32
         draken_malloc((n > 0u ? n : 1u) * sizeof(__int128)));
     if (!dst) throw std::bad_alloc();
 
-    if (v.data_length == v.length) {
+    // Physical memcpy valid ONLY when selection is identity; data_length==length
+    // also admits a PERMUTATION which would silently reorder. Require IDENTITY.
+    if (draken_is_dense(&v) && (v.flags & DRAKEN_SEL_IDENTITY)) {
         std::memcpy(dst, data + start, n * sizeof(__int128));
     } else {
         for (uint32_t i = 0; i < n; ++i)

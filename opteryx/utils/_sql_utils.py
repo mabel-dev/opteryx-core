@@ -35,6 +35,7 @@ def random_string(length: int = 8, charset: str = None) -> str:
     function does not fall back — importing the compiled helper is required.
     """
     from opteryx.compiled.functions.random_helper import random_string_c
+
     return random_string_c(length, charset)
 
 

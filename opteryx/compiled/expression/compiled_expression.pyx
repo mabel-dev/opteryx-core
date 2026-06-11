@@ -840,9 +840,27 @@ cdef Py_ssize_t _linearize(
         result_bcs = [build_bytecode(lower(r)) for r in src.results]
         else_bc = build_bytecode(lower(src.else_result)) if src.else_result is not None else None
 
-        # Phase 7: resolve output type from inferred types at bind time
+        # Phase 7: resolve output type at bind time.
+        #
+        # The binder resolves the CASE output type and records it on
+        # src.schema_column.column_type (the first non-NULL THEN/ELSE branch
+        # type — see binder.py NodeType.CASE). That is the authoritative
+        # output type and the source of truth for kernel selection.
+        #
+        # `src.inferred_type` is never populated on a CASE node (Node.__getattr__
+        # returns None for unset attributes), so relying on it left kernel_type
+        # at the -1 runtime-dispatch sentinel for EVERY case. Runtime dispatch
+        # picks the kernel from the first non-None branch result vector, which is
+        # wrong when the first branch is a typed-NULL: a string CASE whose first
+        # THEN is NULL (e.g. `CASE WHEN .. THEN NULL ELSE str_col END`) was
+        # dispatched to the FIXED kernel, producing a fixed-width vector mislabelled
+        # as the string output column — a heap-corrupting type confusion downstream.
         _ensure_sql_types()
         case_inferred_type = getattr(src, "inferred_type", None)
+        if case_inferred_type is None:
+            _case_sc = getattr(src, "schema_column", None)
+            _case_ct = _case_sc.column_type if _case_sc is not None else None
+            case_inferred_type = _case_ct.category if _case_ct is not None else None
 
         # Select the assembly kernel based on the inferred result type.
         # All THEN/ELSE branches must agree on type (enforced by binder).
@@ -856,11 +874,11 @@ cdef Py_ssize_t _linearize(
         # Determine kernel type from inferred type
         if case_inferred_type is _LogicalCategory_BOOLEAN:
             kernel_type = _ASSEMBLE_BOOL
-        elif case_inferred_type in (_LogicalCategory_VARCHAR, _LogicalCategory_BLOB):
+        elif case_inferred_type in _STRING_FAMILY:
             kernel_type = _ASSEMBLE_STRING
         elif case_inferred_type is None:
-            # Fallback when inferred_type is None: defer to runtime type dispatch.
-            # Use -1 as a sentinel to trigger runtime dispatch in build_case_fn.
+            # Output type unresolved (e.g. every branch is NULL). Defer to runtime
+            # type dispatch via the -1 sentinel in build_case_fn.
             kernel_type = -1
         else:
             # Fixed-width (numeric, date, timestamp, etc.)

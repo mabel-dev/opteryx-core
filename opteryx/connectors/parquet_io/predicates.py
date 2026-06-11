@@ -19,9 +19,9 @@ Design contract
   false in SQL, so a row that would have matched is never a null row.
 - Type errors or unsupported operators silently suppress pruning for that
   predicate — correctness over performance.
-- Only column-op-literal comparisons (AND-combined) are handled.  OR clauses
-  and non-literal expressions are passed through untouched (i.e. row group is
-  not pruned for them).
+- Column-op-literal comparisons, ``BETWEEN`` and ``IN (literal, ...)`` (all
+  AND-combined) are handled.  OR clauses and non-literal expressions are passed
+  through untouched (i.e. row group is not pruned for them).
 """
 
 from __future__ import annotations
@@ -67,10 +67,58 @@ def extract_predicate_stats(conditions) -> List[Tuple[str, str, Any]]:
         if between_stats:
             result.extend(between_stats)
             continue
+        in_stat = _try_extract_in(node)
+        if in_stat is not None:
+            result.append(in_stat)
+            continue
         stat = _try_extract(node)
         if stat is not None:
             result.append(stat)
     return result
+
+
+def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
+    """Return ``(col_name, "InList"/"NotInList", [values])`` for an IN node, or None.
+
+    Only ``identifier IN (literal, literal, ...)`` is extracted: the right-hand
+    side must be a single LITERAL whose value is a concrete list/tuple/set of
+    scalars. Anything else (subquery IN, expression IN) is skipped.
+    """
+    if node is None:
+        return None
+
+    from opteryx.expression import NodeType
+
+    if node.node_type != NodeType.COMPARISON_OPERATOR:
+        return None
+    op = node.value
+    if op not in ("InList", "NotInList"):
+        return None
+
+    left, right = node.left, node.right
+    if left is None or right is None:
+        return None
+    if left.node_type != NodeType.IDENTIFIER or right.node_type != NodeType.LITERAL:
+        return None
+
+    col_sc = getattr(left, "schema_column", None)
+    if col_sc is None:
+        return None
+    col_name = getattr(col_sc, "name", None)
+    if not col_name:
+        return None
+
+    values = right.value
+    if not isinstance(values, (list, tuple, set)):
+        return None
+
+    normalized = []
+    for value in values:
+        if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+            value = datetime.datetime.combine(value, datetime.time.min)
+        normalized.append(value)
+
+    return (col_name, op, normalized)
 
 
 def _try_extract_between(node) -> List[Tuple[str, str, Any]]:
@@ -169,7 +217,11 @@ def _can_prune_rowgroup(op: str, value: Any, col_min: Any, col_max: Any) -> bool
     | LtEq   | col_min >  value  (nothing <= value)    |
     | Eq     | value < col_min or value > col_max      |
     | NotEq  | col_min == col_max == value (all equal) |
+    | InList | no list value in [col_min, col_max]     |
+    | NotInList | col_min == col_max and it is excluded|
     +--------+-----------------------------------------+
+
+    For ``InList``/``NotInList`` ``value`` is the list of candidate literals.
     """
     if col_min is None or col_max is None:
         return False
@@ -186,8 +238,16 @@ def _can_prune_rowgroup(op: str, value: Any, col_min: Any, col_max: Any) -> bool
             return col_min >= value
         if op == "LtEq":
             return col_min > value
+        if op == "InList":
+            # Prune only when *no* candidate value can fall in [col_min, col_max].
+            # An empty list matches nothing, so any() is False -> prune.
+            return not any(col_min <= v <= col_max for v in value)
+        if op == "NotInList":
+            # Safe to prune only when the whole group is a single value that the
+            # exclusion list removes (mirrors NotEq).
+            return col_min == col_max and col_min in value
     except TypeError:
-        # Incomparable types — don't prune.
+        # Incomparable types (incl. a NULL in the IN list) — don't prune.
         pass
     return False
 

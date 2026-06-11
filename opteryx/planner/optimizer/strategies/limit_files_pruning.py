@@ -45,6 +45,8 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
     only the largest files needed to satisfy the limit.
     """
 
+    requires = ("limits-pushed",)
+
     def __init__(self, telemetry: QueryTelemetry):
         """Initialize the strategy with telemetry."""
         super().__init__(telemetry=telemetry)

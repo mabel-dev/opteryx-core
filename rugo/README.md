@@ -222,6 +222,78 @@ rugo/
 
 ---
 
+## Standalone Usage
+
+Rugo can be used independently of Opteryx to read Parquet, JSONL, and CSV files
+and produce Draken vectors. The following examples show standalone usage.
+
+### Read a Parquet file
+
+```python
+from rugo.parquet_reader import read_metadata, read_parquet
+
+# Get schema-only metadata (footer parse, no column data)
+meta = read_metadata("testdata/planets/planets.parquet")
+print(meta["num_rows"])       # e.g. 9
+print(meta["schema_columns"]) # list of {name, physical_type, logical_type, nullable}
+
+# Decode selected columns into Draken Morsels
+with open("testdata/planets/planets.parquet", "rb") as f:
+    morsels = read_parquet(f.read(), column_names=["id", "name"])
+    for morsel in morsels:
+        for vec in morsel.vectors:
+            print(vec.type, vec.length)  # e.g. INT64 9
+```
+
+### Read a JSONL file
+
+```python
+from rugo._jsonl import read_jsonl, get_jsonl_schema
+
+# Infer schema from sample rows
+schema = get_jsonl_schema("testdata/example.jsonl", sample_size=5)
+
+# Read with optional column projection and predicates
+result = read_jsonl(
+    "testdata/example.jsonl",
+    columns=["id", "name"],
+    predicates=[("status", "==", "active")],
+    infer_schema=True,
+)
+for vec in result["columns"]:  # list[draken Vector]
+    print(vec.to_pylist())
+```
+
+### Read a CSV file
+
+```python
+from rugo._csv import read_csv
+
+result = read_csv(
+    "testdata/data.csv",
+    columns=["col1", "col2"],
+)
+for vec in result["columns"]:  # list[draken Vector]
+    print(vec.to_pylist())
+```
+
+### Write Draken vectors to JSON
+
+```python
+import json
+import draken.draken_native as dn
+
+# Create vectors from Python sequences
+vec = dn.vector_from_string_sequence(["hello", "world", None])
+
+# Convert to Python list, then to JSON
+rows = vec.to_pylist()
+json_output = json.dumps(rows)
+print(json_output)  # '["hello", "world", null]'
+```
+
+---
+
 ## Notes
 
 - Rugo is internal engine infrastructure. Prefer querying through `opteryx.session()` unless you are

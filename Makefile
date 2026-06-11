@@ -46,10 +46,18 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et q reference
 
 # Default target
 .DEFAULT_GOAL := help
+
+# === REFERENCE CATALOGS ===
+
+reference: check-python ## Regenerate all reference catalogs (JSON + catalog Python files)
+	$(call print_blue,"Regenerating reference catalogs...")
+	@$(PYTHON) dev/generate_reference.py
+
+# === LINTING AND FORMATTING ===
 
 # Enforce Python 3.13 for CI and developer tools. This will abort early if the configured
 # python interpreter is not 3.13; set PYTHON to override or install 3.13 via your environment.
@@ -110,14 +118,12 @@ update: ## Update all dependencies
 
 # === TESTING ===
 
-test: check-python compile dev-install ## Run full test suite with compiled extensions
+test: ## Run full test suite with compiled extensions
 	@$(PIP) install --upgrade pytest pytest-xdist
 	@clear || true
 	@MANUAL_TEST=1 $(PYTEST) -n auto --color=yes
 
-test-quick: check-python compile ## Run quick test (alias: t)
-	@clear || true
-	@$(PYTHON) tests/integration/sql_battery/run_shapes_battery.py
+
 
 q:
 	@clear || true
@@ -221,8 +227,7 @@ medicare1: ## Run Medicare1 benchmark vs DuckDB
 medicare1-duckdb: ## Re-run DuckDB Medicare1 calibration (regenerates duckdb/results.json)
 	@$(PYTHON) tests/performance/medicare1/duckdb/runner.py
 
-# Aliases for backward compatibility
-t: test-quick
+
 
 coverage: ## Generate test coverage report
 	$(call print_blue,"Running coverage analysis...")

@@ -20,13 +20,13 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
-from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _plt
-from opteryx.utils import dnf, random_string
-from opteryx.vectors.vector_types import (
+from opteryx.types.logical_type import ColumnType, LogicalCategory
+from opteryx.types.vector_types import (
     get_vector_source_identifier,
     node_is_vector_query_expression,
 )
+from opteryx.utils import dnf, random_string
 
 
 class LogicalPlanStepType(int, Enum):
@@ -521,7 +521,9 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         _by_partition: dict = {}
         for _i, _agg_node, _partition_by in _window_specs:
             _key = tuple(
-                getattr(pb, "source_column", None) or getattr(pb, "value", None) or format_expression(pb)
+                getattr(pb, "source_column", None)
+                or getattr(pb, "value", None)
+                or format_expression(pb)
                 for pb in _partition_by
             )
             if _key not in _by_partition:
@@ -626,9 +628,14 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         and _projection[0].value is None
     ):
         for column in _projection:
-            if column.node_type == NodeType.LITERAL and column.type is not None and column.type.category in (
-                LogicalCategory.ARRAY,
-                LogicalCategory.VECTOR,
+            if (
+                column.node_type == NodeType.LITERAL
+                and column.type is not None
+                and column.type.category
+                in (
+                    LogicalCategory.ARRAY,
+                    LogicalCategory.VECTOR,
+                )
             ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
@@ -889,9 +896,7 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         if isinstance(constraint, dict) and "On" in constraint:
             join_step.on = logical_planner_builders.build(constraint["On"])
         elif isinstance(constraint, dict) and "Using" in constraint:
-            join_step.using = [
-                logical_planner_builders.build(i[0]) for i in constraint["Using"]
-            ]
+            join_step.using = [logical_planner_builders.build(i[0]) for i in constraint["Using"]]
     else:
         join_step.on, join_step.using = extract_join_condition(join)
 
@@ -1119,6 +1124,7 @@ def plan_query(statement: dict) -> LogicalPlan:
 
         left_plan = inner_query_planner(set_operation["left"])
         from opteryx.planner.binder import rename_relations
+
         left_plan = rename_relations(left_plan, prefix="$union-")
         plan += left_plan
         subquery_entry_id = left_plan.get_exit_points()[0]
@@ -1480,7 +1486,7 @@ def plan_create_table(statement, **kwargs):
 
     Maps sqloxide column types to LogicalCategory and constructs a RelationSchema.
     """
-    from opteryx.types.schema import SchemaColumn, RelationSchema
+    from opteryx.types.schema import RelationSchema, SchemaColumn
 
     root_node = "CreateTable"
     plan = LogicalPlan()
@@ -1506,9 +1512,7 @@ def plan_create_table(statement, **kwargs):
     if query_ast is not None:
         column_defs = statement[root_node].get("columns", [])
         if column_defs:
-            raise UnsupportedSyntaxError(
-                "CREATE TABLE AS SELECT cannot specify column definitions"
-            )
+            raise UnsupportedSyntaxError("CREATE TABLE AS SELECT cannot specify column definitions")
         return _plan_ctas(
             relation_name=create_table_node.relation_name,
             if_not_exists=create_table_node.if_not_exists,
@@ -1561,13 +1565,13 @@ def plan_create_table(statement, **kwargs):
             )
 
         if type_key not in type_mapping:
-            raise UnsupportedSyntaxError(
-                f"unsupported column type in CREATE TABLE: {type_key}"
-            )
+            raise UnsupportedSyntaxError(f"unsupported column type in CREATE TABLE: {type_key}")
 
         # Map to LogicalCategory then to canonical ColumnType
         sql_type_str = type_mapping[type_key]
-        from opteryx.types.logical_type import LogicalCategory as _LC, _CATEGORY_TO_CANONICAL
+        from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
+        from opteryx.types.logical_type import LogicalCategory as _LC
+
         sql_type_ct = _CATEGORY_TO_CANONICAL.get(_LC[sql_type_str])
 
         # Check for NOT NULL constraint
@@ -1580,7 +1584,8 @@ def plan_create_table(statement, **kwargs):
                     break
 
         # Create SchemaColumn
-        flat_col = SchemaColumn(name=col_name, column_type=sql_type_ct, nullable=col_nullable)
+        from opteryx.types.schema import mint_column_identity
+        flat_col = SchemaColumn(name=col_name, column_type=sql_type_ct, nullable=col_nullable, identity=mint_column_identity("$create", col_name))
         columns.append(flat_col)
 
     create_table_node.columns = columns
@@ -1640,9 +1645,7 @@ def plan_insert(statement, **kwargs):
 
     # Target relation name
     table_name_parts = insert_stmt["table"]["TableName"]
-    relation_name = ".".join(
-        logical_planner_builders.build(p).value for p in table_name_parts
-    )
+    relation_name = ".".join(logical_planner_builders.build(p).value for p in table_name_parts)
 
     # Explicit column list (may be empty/None)
     explicit_columns = []

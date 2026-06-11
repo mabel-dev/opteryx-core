@@ -89,6 +89,82 @@ static size_t fixed_itemsize(DrakenType t) {
     }
 }
 
+static inline bool is_int_type(DrakenType t) {
+    return t == DRAKEN_INT8 || t == DRAKEN_INT16 ||
+           t == DRAKEN_INT32 || t == DRAKEN_INT64;
+}
+
+static inline bool is_float_type(DrakenType t) {
+    return t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64;
+}
+
+// Promote two fixed-width types to a common output type for null-aware
+// selection (iif/coalesce), mirroring the binder's find_compatible_type: any
+// two integers widen to INT64; anything mixing a float widens to FLOAT64.
+// Equal types pass through unchanged (no conversion). Returns DRAKEN_NULL when
+// the pair cannot be promoted (e.g. mismatched DECIMAL/temporal) — the caller
+// raises. DECIMAL/DATE/TIME/TIMESTAMP/INTERVAL only ever match same-type here;
+// cross-family scaling is genuinely ambiguous and stays an error.
+static inline DrakenType promote_fixed(DrakenType a, DrakenType b) {
+    if (a == b) return a;
+    if (is_int_type(a) && is_int_type(b)) return DRAKEN_INT64;
+    if ((is_int_type(a) || is_float_type(a)) &&
+        (is_int_type(b) || is_float_type(b))) return DRAKEN_FLOAT64;
+    return DRAKEN_NULL;  // incompatible
+}
+
+// Read a row's value from an integer-typed vector, sign-extending to int64.
+// Only INT8/16/32/64 reach here (promote_fixed restricts the promoted path).
+static inline int64_t read_int_row(const DrakenVector* dv, uint32_t row) {
+    const uint8_t* p = static_cast<const uint8_t*>(dv->data)
+        + static_cast<size_t>(dv->selection[row]) * fixed_itemsize(dv->type);
+    switch (dv->type) {
+    case DRAKEN_INT8:  return *reinterpret_cast<const int8_t*>(p);
+    case DRAKEN_INT16: return *reinterpret_cast<const int16_t*>(p);
+    case DRAKEN_INT32: return *reinterpret_cast<const int32_t*>(p);
+    case DRAKEN_INT64: return *reinterpret_cast<const int64_t*>(p);
+    default:           return 0;  // unreachable
+    }
+}
+
+// Read a row's value as double, converting from FLOAT32/FLOAT64 or any integer.
+static inline double read_double_row(const DrakenVector* dv, uint32_t row) {
+    if (dv->type == DRAKEN_FLOAT32) {
+        const uint8_t* p = static_cast<const uint8_t*>(dv->data)
+            + static_cast<size_t>(dv->selection[row]) * 4u;
+        return static_cast<double>(*reinterpret_cast<const float*>(p));
+    }
+    if (dv->type == DRAKEN_FLOAT64) {
+        const uint8_t* p = static_cast<const uint8_t*>(dv->data)
+            + static_cast<size_t>(dv->selection[row]) * 8u;
+        return *reinterpret_cast<const double*>(p);
+    }
+    return static_cast<double>(read_int_row(dv, row));
+}
+
+// Write one source row into the output buffer at `out_type`, converting when
+// the source's physical type differs (the promoted path). Same-type rows take
+// a raw memcpy — zero overhead for the common uniform-type case.
+static inline void write_fixed_row(uint8_t* out_data, uint32_t row,
+                                    DrakenType out_type, const DrakenVector* src) {
+    const size_t osz = fixed_itemsize(out_type);
+    uint8_t* dst = out_data + static_cast<size_t>(row) * osz;
+    if (src->type == out_type) {
+        std::memcpy(dst,
+            static_cast<const uint8_t*>(src->data)
+                + static_cast<size_t>(src->selection[row]) * osz,
+            osz);
+        return;
+    }
+    if (out_type == DRAKEN_INT64) {
+        const int64_t v = read_int_row(src, row);
+        std::memcpy(dst, &v, sizeof(int64_t));
+    } else {  // DRAKEN_FLOAT64
+        const double v = read_double_row(src, row);
+        std::memcpy(dst, &v, sizeof(double));
+    }
+}
+
 // Canonical string type for promotion: DICTIONARY/CONSTANT → VARCHAR.
 static inline DrakenType canon_string_type(DrakenType t) {
     if (t == DRAKEN_NVARCHAR)              return DRAKEN_NVARCHAR;
@@ -265,9 +341,7 @@ static nb::object coalesce_fixed(const std::vector<const DrakenVector*>& vecs,
         bool found = false;
         for (const DrakenVector* dv : vecs) {
             if (!row_is_valid(dv, row)) continue;
-            std::memcpy(out_data + static_cast<size_t>(row) * isz,
-                        static_cast<const uint8_t*>(dv->data) + static_cast<size_t>(dv->selection[row]) * isz,
-                        isz);
+            write_fixed_row(out_data, row, type, dv);
             if (out_valid) set_bit(out_valid, row);
             found = true;
             break;
@@ -298,9 +372,7 @@ static nb::object iif_fixed(const DrakenVector* cond, const DrakenVector* true_v
         bool choose_true = row_is_valid(cond, row) && read_bool_row(cond, row);
         const DrakenVector* src = choose_true ? true_v : false_v;
         if (!row_is_valid(src, row)) { any_null = true; continue; }
-        std::memcpy(out_data + static_cast<size_t>(row) * isz,
-                    static_cast<const uint8_t*>(src->data) + static_cast<size_t>(src->selection[row]) * isz,
-                    isz);
+        write_fixed_row(out_data, row, type, src);
         if (out_valid) set_bit(out_valid, row);
     }
     if (!any_null && out_valid) { draken_free(out_valid); out_valid = nullptr; g.v = nullptr; }
@@ -434,17 +506,24 @@ static nb::object iif_string(const DrakenVector* cond, const DrakenVector* true_
 static nb::object impl_concat(const std::vector<const DrakenVector*>& vecs,
                                uint32_t n, DrakenType out_type) {
     // Pass 1: total extern arena budget per row (sum of non-null row widths).
+    //
+    // The arena holds a row's bytes iff the *concatenated* length exceeds the
+    // inline limit — that is the exact decision Pass 2 makes below. The budget
+    // must use the same predicate on the same quantity (the per-row sum), not
+    // the per-operand length: two individually-inline operands can concatenate
+    // past STR_INLINE_MAX (e.g. 7 + 7 = 14), which still needs arena bytes. A
+    // per-operand test under-budgets those rows and Pass 2 overruns the arena.
     size_t total_bytes = 0u;
     for (uint32_t row = 0u; row < n; ++row) {
         // If any input is null this row → null output; skip arena budget.
         bool row_null = false;
-        size_t row_extern = 0u;
+        size_t row_len = 0u;
         for (const DrakenVector* dv : vecs) {
             if (!row_is_valid(dv, row)) { row_null = true; break; }
             StrView sv = read_string_row(dv, row);
-            if (sv.len > STR_INLINE_MAX) row_extern += sv.len;
+            row_len += sv.len;
         }
-        if (!row_null) total_bytes += row_extern;
+        if (!row_null && row_len > STR_INLINE_MAX) total_bytes += row_len;
     }
 
     const size_t slots_sz  = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
@@ -588,22 +667,30 @@ static nb::object impl_coalesce(nb::args args) {
     }
 
     if (is_fixed_type(t0)) {
-        const size_t isz = fixed_itemsize(t0);
-        if (isz == 0u) {
+        if (fixed_itemsize(t0) == 0u) {
             PyErr_Format(PyExc_TypeError,
                 "vector_coalesce: unsupported fixed-width type %d",
                 static_cast<int>(t0));
             throw nb::python_error();
         }
+        // Promote across branches: narrow ints widen to INT64, int/float mixes
+        // to FLOAT64 (mirrors the binder's declared result type). Equal types
+        // pass through unchanged. The promoted output is always 8 bytes.
+        DrakenType out_type = t0;
         for (Py_ssize_t i = 1; i < argc; ++i) {
-            if (vecs[i]->type != t0) {
+            const DrakenType ti = vecs[i]->type;
+            DrakenType promoted = is_fixed_type(ti) && fixed_itemsize(ti) != 0u
+                                      ? promote_fixed(out_type, ti)
+                                      : DRAKEN_NULL;
+            if (promoted == DRAKEN_NULL) {
                 PyErr_Format(PyExc_TypeError,
-                    "vector_coalesce: argument %zd type %d does not match argument 0 type %d",
-                    i, static_cast<int>(vecs[i]->type), static_cast<int>(t0));
+                    "vector_coalesce: argument %zd type %d cannot be promoted with argument 0 type %d",
+                    i, static_cast<int>(ti), static_cast<int>(t0));
                 throw nb::python_error();
             }
+            out_type = promoted;
         }
-        return coalesce_fixed(vecs, n, t0);
+        return coalesce_fixed(vecs, n, out_type);
     }
 
     PyErr_Format(PyExc_TypeError,
@@ -653,19 +740,22 @@ static nb::object impl_iif(nb::object mask_obj, nb::object true_obj, nb::object 
     }
 
     if (is_fixed_type(tt) && is_fixed_type(ft)) {
-        if (tt != ft) {
+        if (fixed_itemsize(tt) == 0u || fixed_itemsize(ft) == 0u) {
             PyErr_Format(PyExc_TypeError,
-                "vector_iif: fixed-width branch type mismatch (true_v %d, false_v %d)",
+                "vector_iif: unsupported fixed-width type (true_v %d, false_v %d)",
                 static_cast<int>(tt), static_cast<int>(ft));
             throw nb::python_error();
         }
-        const size_t isz = fixed_itemsize(tt);
-        if (isz == 0u) {
+        // Promote mismatched branches (narrow int → INT64, int/float → FLOAT64);
+        // equal types pass through unchanged via the same-type fast path.
+        const DrakenType out_type = promote_fixed(tt, ft);
+        if (out_type == DRAKEN_NULL) {
             PyErr_Format(PyExc_TypeError,
-                "vector_iif: unsupported fixed-width type %d", static_cast<int>(tt));
+                "vector_iif: fixed-width branch types cannot be promoted (true_v %d, false_v %d)",
+                static_cast<int>(tt), static_cast<int>(ft));
             throw nb::python_error();
         }
-        return iif_fixed(cond, true_v, false_v, n, tt);
+        return iif_fixed(cond, true_v, false_v, n, out_type);
     }
 
     PyErr_Format(PyExc_TypeError,

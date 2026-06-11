@@ -79,7 +79,14 @@ cdef class DistinctNode(BasePlanNode):
         return None
 
     cdef bint _distinct_phash(self, Morsel morsel) except -1:
-        """Filter morsel in-place using PerfectHashSet. Returns False always (no overflow)."""
+        """Filter morsel in-place using PerfectHashSet.
+
+        Returns True when the morsel was handled. Returns False — WITHOUT
+        filtering the morsel — when this morsel is ineligible for the
+        PerfectHashSet path (nulls, non-dense encoding, or type drift); the
+        caller MUST then demote to the carchar path and re-run this morsel,
+        or duplicates are silently emitted.
+        """
         cols = self._distinct_on
         col = morsel.column(cols[0])
 
@@ -95,26 +102,32 @@ cdef class DistinctNode(BasePlanNode):
         if getattr(col, "type", None) == _draken_native.INT8:
             if (<Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
-                return False
+                return False  # nulls — caller must demote
             dp = (<Vector>col).unified().data
-            if (<Vector>col).unified().data_length != (<Vector>col).unified().length:
+            # Scanning dp directly is valid ONLY for dense-identity layout. A
+            # PERMUTATION (data_length==length, non-identity selection) would be
+            # deduped in physical order — wrong rows kept. Require IDENTITY.
+            if ((<Vector>col).unified().data_length != (<Vector>col).unified().length
+                    or not ((<Vector>col).unified().flags & DRAKEN_SEL_IDENTITY)):
                 PyMem_Free(idx_buf)
-                return False  # non-dense encoding — fall back
+                return False  # non-dense-identity encoding — caller must demote
             with nogil:
                 count = phs.find_new_indices_out_32_i8(<const int8_t*>dp, idx_buf, n)
         elif getattr(col, "type", None) == _draken_native.INT16:
             if (<Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
-                return False
+                return False  # nulls — caller must demote
             dp = (<Vector>col).unified().data
-            if (<Vector>col).unified().data_length != (<Vector>col).unified().length:
+            # Dense-identity only (see INT8 branch above); permutations demote.
+            if ((<Vector>col).unified().data_length != (<Vector>col).unified().length
+                    or not ((<Vector>col).unified().flags & DRAKEN_SEL_IDENTITY)):
                 PyMem_Free(idx_buf)
-                return False  # non-dense encoding — fall back
+                return False  # non-dense-identity encoding — caller must demote
             with nogil:
                 count = phs.find_new_indices_out_32_i16(<const int16_t*>dp, idx_buf, n)
         else:
             PyMem_Free(idx_buf)
-            return False
+            return False  # type drift — caller must demote
 
         if count == 0:
             morsel._empty_inplace()
@@ -122,7 +135,7 @@ cdef class DistinctNode(BasePlanNode):
             morsel._take_inplace(<int32_t[:<Py_ssize_t>count]>idx_buf)
 
         PyMem_Free(idx_buf)
-        return False  # no overflow concept for PerfectHashSet
+        return True
 
     cdef void _dispatch_push(self, Morsel morsel) except *:
         cdef bint is_active_parvi
@@ -144,8 +157,20 @@ cdef class DistinctNode(BasePlanNode):
         chunk = morsel
 
         if self._use_phash:
-            self._distinct_phash(chunk)
-        else:
+            if not self._distinct_phash(chunk):
+                # Mid-stream ineligible morsel (nulls / non-dense / type
+                # drift). Demote: rebuild a carchar set seeded with every
+                # value already marked seen, then run this chunk through the
+                # standard path below. Emitting the chunk unfiltered here
+                # would silently return duplicate rows.
+                self._hash_set = _rebuild_carchar_from_phash(
+                    <PerfectHashSet>self._hash_set)
+                self._use_phash = False
+                # The rebuilt set is carchar; ensure the parvi logic below
+                # never treats it as a parvi set.
+                self._promoted = True
+
+        if not self._use_phash:
             # Variant is fixed at init; `_promoted` flips parvi → carchar.
             is_active_parvi = (self._set_variant == "parvi") and not self._promoted
             promotion_seed = None
@@ -167,7 +192,9 @@ cdef class DistinctNode(BasePlanNode):
                 self._promoted = True
                 _distinct(chunk, self._hash_set, columns=self._distinct_on)
 
-        if len(chunk) > 0 or not self.at_least_one_yielded:
+        # num_rows, not len(): Morsel.__len__ returns the COLUMN count, so the
+        # old `len(chunk) > 0` guard was always true and emitted 0-row chunks.
+        if chunk.num_rows > 0 or not self.at_least_one_yielded:
             self._emit_cdef(chunk)
 
         self.at_least_one_yielded = True

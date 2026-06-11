@@ -18,7 +18,7 @@ Provides Python-visible constructor and Cython-side hot-path methods.
 All hot-path methods are nogil.
 """
 
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t
 from libc.stddef cimport size_t
 from opteryx.compiled.structures.perfect_hash_set cimport CppPerfectHashSet
 
@@ -27,7 +27,7 @@ cdef class PerfectHashSet:
     """Bit-array set for bounded integer keys.
 
     Constructed with (min_val, max_val); slots cover [min_val, max_val].
-    All values outside that range are a caller error — this class does not
+    All values outside that range are a caller error - this class does not
     bounds-check in the fast path (only int64 batch operations do).
     """
 
@@ -39,25 +39,36 @@ cdef class PerfectHashSet:
             del self._ptr
             self._ptr = NULL
 
+       # Getters for _rebuild_carchar_from_phash fallback path.
+    cpdef Py_ssize_t min_val(self):
+        return self._ptr.min_val()
+
+    cpdef Py_ssize_t range(self):
+        return self._ptr.range()
+
+    cpdef Py_ssize_t n_words(self):
+        return self._ptr.n_words()
+
+    cpdef uint64_t word_at(self, Py_ssize_t i):
+        return self._ptr.word_at(i)
+
     def __repr__(self):
         return f"PerfectHashSet()"
 
-    # ── Single-value ops ──────────────────────────────────────────────────────
-
+       # Single-value ops
     cdef bint insert_i64(self, int64_t val) noexcept nogil:
         return self._ptr.insert_i64(val)
 
     cdef bint contains_i64(self, int64_t val) noexcept nogil:
         return self._ptr.contains_i64(val)
 
-    # ── int8 batch ────────────────────────────────────────────────────────────
-
+      # int8 batch
     cdef Py_ssize_t find_new_indices_out_32_i8(
         self,
         const int8_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.find_new_indices_out_32_i8(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_found_32_i8(
@@ -65,7 +76,7 @@ cdef class PerfectHashSet:
         const int8_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_found_32_i8(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_not_found_32_i8(
@@ -73,17 +84,16 @@ cdef class PerfectHashSet:
         const int8_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_not_found_32_i8(keys, out, <size_t>length)
 
-    # ── int16 batch ───────────────────────────────────────────────────────────
-
+      # int16 batch
     cdef Py_ssize_t find_new_indices_out_32_i16(
         self,
         const int16_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.find_new_indices_out_32_i16(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_found_32_i16(
@@ -91,7 +101,7 @@ cdef class PerfectHashSet:
         const int16_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_found_32_i16(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_not_found_32_i16(
@@ -99,17 +109,16 @@ cdef class PerfectHashSet:
         const int16_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_not_found_32_i16(keys, out, <size_t>length)
 
-    # ── int32 batch ───────────────────────────────────────────────────────────
-
+      # int32 batch
     cdef Py_ssize_t find_new_indices_out_32_i32(
         self,
         const int32_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.find_new_indices_out_32_i32(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_found_32_i32(
@@ -117,7 +126,7 @@ cdef class PerfectHashSet:
         const int32_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_found_32_i32(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_not_found_32_i32(
@@ -125,17 +134,16 @@ cdef class PerfectHashSet:
         const int32_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_not_found_32_i32(keys, out, <size_t>length)
 
-    # ── int64 batch ───────────────────────────────────────────────────────────
-
+      # int64 batch
     cdef Py_ssize_t find_new_indices_out_32_i64(
         self,
         const int64_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.find_new_indices_out_32_i64(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_found_32_i64(
@@ -143,7 +151,7 @@ cdef class PerfectHashSet:
         const int64_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_found_32_i64(keys, out, <size_t>length)
 
     cdef Py_ssize_t probe_not_found_32_i64(
@@ -151,5 +159,5 @@ cdef class PerfectHashSet:
         const int64_t* keys,
         int32_t* out,
         Py_ssize_t length,
-    ) noexcept nogil:
+      ) noexcept nogil:
         return <Py_ssize_t>self._ptr.probe_not_found_32_i64(keys, out, <size_t>length)

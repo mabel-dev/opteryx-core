@@ -54,8 +54,8 @@ def _null_fraction(stat: KeyStats) -> float:
 def _effective_rows(rows: int, keys: List[KeyStats]) -> float:
     """Reduce row count by the worst-case (max) null fraction across keys.
 
-    Mirrors the per-relation null-fraction composition in
-    join_ordering.get_column_null_fractions.
+    Mirrors the per-side null-fraction composition in
+    JoinOrderingStrategy._key_null_fraction.
     """
     if not keys:
         return float(rows)

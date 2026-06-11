@@ -55,6 +55,9 @@ PARVI_CAPACITY = 16
 class HashMapVariantStrategy(OptimizationStrategy):
     """Tag AggregateAndGroup nodes with their preferred hash-map variant."""
 
+    # reads FileEntry.stats_by_name, which is stable only after projection pushdown
+    requires = ("projection-pushed",)
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]

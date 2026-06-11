@@ -170,10 +170,12 @@ class OpteryxTable(Diachronic, PredicatePushable):
                     _ct = _lt.ARRAY(_elem)
                 else:
                     _ct = _CATEGORY_TO_CANONICAL.get(_ot)
+                from opteryx.types.schema import mint_column_identity
                 normalized = SchemaColumn(
                     name=name,
                     column_type=_ct,
                     nullable=getattr(column, "nullable", True),
+                    identity=mint_column_identity(relation_name or getattr(schema, "name", None), name),
                 )
 
             columns.append(normalized)

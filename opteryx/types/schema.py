@@ -21,6 +21,29 @@ import dataclasses
 from typing import Any, Dict, List, Optional
 
 
+def mint_column_identity(relation: Optional[str], column: Optional[str]) -> bytes:
+    """Mint a unique, opaque column identity with a traceable prefix.
+
+    Identities are the engine's per-column handles; they MUST be unique (the
+    name is not — two relations can share a column name). The random suffix
+    guarantees uniqueness; the ``rel_col_`` prefix is a debugging affordance so
+    that an identity leaked into an error/stack trace can be traced back to a
+    physical column. See SchemaColumn.__post_init__.
+    """
+    from opteryx.utils import random_string
+
+    rel = (relation or "")[:3]
+    col = (column or "")[:3]
+    return f"{rel}_{col}_{random_string(8)}".encode("utf-8")
+
+
+def _mint_tagged_identity(tag: str) -> bytes:
+    """Mint a unique identity for a non-relation column (e.g. ``$const``, ``$derived``)."""
+    from opteryx.utils import random_string
+
+    return f"{tag}_{random_string(8)}".encode("utf-8")
+
+
 __all__ = [
     "SchemaColumn",
     "ConstantColumn",
@@ -92,15 +115,25 @@ class SchemaColumn:
     column_type: Optional[Any] = dataclasses.field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
-        """Normalize identity."""
+        """Normalize identity.
+
+        A column identity is a unique, opaque handle — the execution engine keys
+        columns by it, so it must NOT be derived from the (non-unique) name. A
+        ``None`` identity means a mint site failed to assign one; fail loud rather
+        than silently falling back to the name (which collapses distinct columns
+        that share a name — every self-join, and any join of tables with a common
+        column name — into one).
+        """
         if self.identity is None:
-            raw = self.name
-        else:
-            raw = self.identity
-        if isinstance(raw, str):
-            self.identity = raw.encode("utf-8")
-        else:
-            self.identity = raw
+            from opteryx.exceptions import InvalidInternalStateError
+
+            raise InvalidInternalStateError(
+                f"Column '{self.name}' was constructed without an identity. "
+                "Relation-sourced columns must be minted with a unique identity; "
+                "the name is not a valid identity."
+            )
+        if isinstance(self.identity, str):
+            self.identity = self.identity.encode("utf-8")
 
     @property
     def category(self):
@@ -224,6 +257,12 @@ class ConstantColumn(SchemaColumn):
 
     value: Any = None
 
+    def __post_init__(self):
+        # Constant columns are not relation-sourced; mint a unique `$const_` id.
+        if self.identity is None:
+            self.identity = _mint_tagged_identity("$const")
+        super().__post_init__()
+
     def __str__(self) -> str:
         """String representation: name = value."""
         return f"{self.name}={self.value}"
@@ -240,6 +279,15 @@ class FunctionColumn(SchemaColumn):
     Used for computed columns (e.g., SELECT col1 + col2 AS sum_col).
     Inherits from SchemaColumn with additional function expression semantics.
     """
+
+    def __post_init__(self):
+        # Computed columns are not relation-sourced; mint a unique `$derived_` id.
+        # (Expression reuse is matched by name in the binder, not by identity, so
+        # a random id is safe and does not break GROUP BY/SELECT expression
+        # collapse.)
+        if self.identity is None:
+            self.identity = _mint_tagged_identity("$derived")
+        super().__post_init__()
 
     def __str__(self) -> str:
         """String representation: name (computed)."""

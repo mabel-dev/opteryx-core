@@ -492,11 +492,12 @@ class Session(DataFrame):
         }
 
         def _schema_from_morsel(morsel: Morsel):
+            from opteryx.types.schema import mint_column_identity
             columns = []
             for name, dtype in zip(morsel.column_names, morsel.column_types):
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
                 ct = _DRAKEN_TO_LT.get(dtype, _lt.VARCHAR)
-                columns.append(SchemaColumn(name=col_name, column_type=ct))
+                columns.append(SchemaColumn(name=col_name, column_type=ct, identity=mint_column_identity("table", col_name)))
             return RelationSchema(name="table", columns=columns)
 
         self._ensure_open()

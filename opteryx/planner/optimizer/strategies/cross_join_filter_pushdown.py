@@ -383,6 +383,8 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
         Potential 100,000× speedup for large tables.
     """
 
+    requires = ("predicates-pushed",)
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()

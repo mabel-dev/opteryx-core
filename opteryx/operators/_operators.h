@@ -37,6 +37,7 @@ __PYX_EXTERN_C Py_ssize_t last_draken_inner_join_rows_eliminated_by_bloom_filter
 __PYX_EXTERN_C Py_ssize_t last_draken_inner_join_build_unique_keys;
 __PYX_EXTERN_C Py_ssize_t last_draken_inner_join_build_total_rows;
 __PYX_EXTERN_C double last_draken_inner_join_build_avg_chain_length;
+__PYX_EXTERN_C Py_ssize_t last_draken_inner_join_kprobe_used;
 
 #endif /* !__PYX_HAVE_API__opteryx__operators___operators */
 
