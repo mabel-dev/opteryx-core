@@ -30,6 +30,7 @@ cdef class Vector:
     cdef DrakenVector* unified(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef bint c_hash_single(self, uint64_t* out, int32_t n) except -1 nogil
+    cdef bint c_hash_distinct(self, uint64_t* out) except -1 nogil
 
 
 

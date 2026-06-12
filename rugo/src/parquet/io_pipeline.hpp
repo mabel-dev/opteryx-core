@@ -59,22 +59,30 @@ struct PoolSink {
 // rugo-local discriminant for a column's handoff form. Kept as a plain int in
 // ColumnOut so the .pxd sees a stable layout.
 //   0           : pool path — IPC blob in MemoryPool at ref_id (WP-6a).
-//   1/2/3       : direct path — `data` is a Draken-owned positional buffer of
-//                 `length` rows that the consumer wraps via draken_vector_own_raw.
-enum DirectKind { DK_POOL = 0, DK_INT64 = 1, DK_FLOAT32 = 2, DK_FLOAT64 = 3 };
+//   1..5        : direct path — `data` (+ optional `validity`) is a Draken-owned
+//                 POSITIONAL buffer of `length` rows the consumer wraps via
+//                 draken_vector_own_raw (zero copy). The worker has already done
+//                 any compact→positional scatter (WP-6b-2).
+enum DirectKind {
+    DK_POOL = 0, DK_INT64 = 1, DK_FLOAT32 = 2, DK_FLOAT64 = 3,
+    DK_BOOL = 4, DK_DECIMAL128 = 5
+};
 
 struct ColumnOut {
     int      direct_kind = DK_POOL;  // DirectKind
-    void*    data = nullptr;         // direct path: draken_alloc'd, owned until taken
-    uint32_t length = 0;             // direct path: row count
+    void*    data = nullptr;         // direct: draken_alloc'd positional values
+    uint8_t* validity = nullptr;     // direct: draken_alloc'd null bitmap, or NULL
+    uint32_t length = 0;             // direct: row count
     int64_t  ref_id = -1;            // pool path: MemoryPool ref
+    uint8_t  dec_precision = 0;      // DK_DECIMAL128: descriptor
+    uint8_t  dec_scale = 0;
 };
 
-// Owns the direct-path Draken buffers it carries: any ColumnOut.data not "taken"
-// by the consumer (via morsel_take_direct) is draken_free'd on destruction —
-// covering decode-error, LIMIT early-exit, and shutdown-drain paths. Move-only;
-// std::vector move leaves the source's columns empty so a moved-from MorselRef
-// frees nothing.
+// Owns the direct-path Draken buffers (data + validity) it carries: any not
+// "taken" by the consumer (via morsel_take_direct) are draken_free'd on
+// destruction — covering decode-error, LIMIT early-exit, and shutdown-drain
+// paths. Move-only; std::vector move leaves the source's columns empty so a
+// moved-from MorselRef frees nothing.
 struct MorselRef {
     std::string path;
     int rg_idx = -1;
@@ -94,31 +102,40 @@ struct MorselRef {
     MorselRef& operator=(MorselRef&&) = default;
     ~MorselRef() {
         if (free_fn) {
-            for (auto& c : columns)
+            for (auto& c : columns) {
                 if (c.data) free_fn(c.data);
+                if (c.validity) free_fn(c.validity);
+            }
         }
     }
 };
 
-// Take ownership of column i's direct buffer: returns the pointer and nulls the
-// slot so MorselRef's destructor won't free it (the consumer's Vector now owns
-// it). Returns nullptr for a pool-path column.
-static inline void* morsel_take_direct(MorselRef& m, size_t i) {
+// Take ownership of column i's direct buffers: returns `data` and (via out param)
+// `validity`, nulling both slots so MorselRef's destructor won't free them (the
+// consumer's Vector now owns them). Returns nullptr for a pool-path column.
+static inline void* morsel_take_direct(MorselRef& m, size_t i, uint8_t** out_validity) {
     void* p = m.columns[i].data;
+    *out_validity = m.columns[i].validity;
     m.columns[i].data = nullptr;
+    m.columns[i].validity = nullptr;
     return p;
 }
 
-// WP-6b: a column qualifies for the direct (zero-copy-into-Draken) path only
-// when it is a plain, fixed-width numeric column with NO ACTUAL NULLS, no
-// dict/RLE encoding, and not a list. The decoder stores value streams COMPACT
-// (parquet omits null rows), so `values.size() == num_rows` holds iff zero rows
-// were omitted — i.e. there are no nulls and the buffer is already positional.
-// That single equality is the null guard: any null makes the array shorter than
-// num_rows and disqualifies the column (it falls to the scatter-capable IPC
-// path). A present-but-all-valid validity bitmap (parquet OPTIONAL column, no
-// nulls) is fine — the consumer wraps with validity = NULL. These are exactly
-// the cases needing only a literal memcpy (or int32→int64 widen), no scatter.
+// WP-6b: a fixed-width value array qualifies for the direct path if it is either
+// already positional (size == num_rows: no nulls, or an OPTIONAL column that
+// happens to have none) OR compact with a validity bitmap to scatter against
+// (size < num_rows && nullable). The decoder stores value streams COMPACT
+// (parquet omits null rows), so a nullable column has size == K (present count).
+static inline bool _fixed_eligible(size_t vsize, uint32_t n, bool nullable) {
+    if (vsize == n) return true;                 // positional
+    if (vsize < n && nullable) return true;      // compact + bitmap → scatter
+    return false;                                // size > n, or compact w/o bitmap
+}
+
+// WP-6b: classify a decoded column for the direct (zero-copy-into-Draken) path.
+// Excludes dict/RLE/list (no plain positional buffer). int32 widens to INT64;
+// __int128 payload is DECIMAL128. The logical-type gate (date/timestamp and
+// int-backed decimal stay on the IPC path) is applied separately by the caller.
 static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     if (!d.rep_levels.empty()) return DK_POOL;           // list
     if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
@@ -126,11 +143,142 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
         !d.rle_str_lens.empty()) return DK_POOL;         // RLE skip-dense
     const std::string& t = d.type;
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
-    if (t == "int64"   && d.int64_values.size()   == n) return DK_INT64;
-    if (t == "int32"   && d.int32_values.size()   == n) return DK_INT64;  // widened
-    if (t == "float32" && d.float32_values.size() == n) return DK_FLOAT32;
-    if (t == "float64" && d.float64_values.size() == n) return DK_FLOAT64;
+    const bool nullable = !d.valid_bits.empty();
+    if (!d.int128_values.empty() && _fixed_eligible(d.int128_values.size(), n, nullable))
+        return DK_DECIMAL128;
+    if (t == "int64"   && _fixed_eligible(d.int64_values.size(),   n, nullable)) return DK_INT64;
+    if (t == "int32"   && _fixed_eligible(d.int32_values.size(),   n, nullable)) return DK_INT64;
+    if (t == "float32" && _fixed_eligible(d.float32_values.size(), n, nullable)) return DK_FLOAT32;
+    if (t == "float64" && _fixed_eligible(d.float64_values.size(), n, nullable)) return DK_FLOAT64;
+    if (t == "boolean" && _fixed_eligible(d.boolean_values.size(), n, nullable)) return DK_BOOL;
     return DK_POOL;
+}
+
+// Build a positional Draken buffer (+ validity) for a byte-granular fixed-width
+// column, mirroring the Cython _wrap_decoded_fixed scatter EXACTLY: when the
+// value array is compact (K < N) and a validity bitmap is present, allocate a
+// zero-filled N*elem buffer and copy each present value to its row position;
+// otherwise the array is already positional and is copied wholesale. Allocates
+// via `alloc` (the Draken allocator); on failure frees what it took via `freefn`
+// and returns false. dec_* are filled for DK_DECIMAL128.
+static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
+                                      void* (*alloc)(size_t), void (*freefn)(void*),
+                                      ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const bool nullable = !d.valid_bits.empty();
+
+    uint32_t elem;
+    const uint8_t* csrc;
+    size_t compact_count;
+    std::vector<int64_t> widened;        // int32→int64 staging
+    if (dk == DK_INT64 && d.type == "int32") {
+        widened.resize(d.int32_values.size());
+        for (size_t i = 0; i < d.int32_values.size(); ++i)
+            widened[i] = static_cast<int64_t>(d.int32_values[i]);
+        csrc = reinterpret_cast<const uint8_t*>(widened.data());
+        elem = 8; compact_count = widened.size();
+    } else if (dk == DK_INT64) {
+        csrc = reinterpret_cast<const uint8_t*>(d.int64_values.data());
+        elem = 8; compact_count = d.int64_values.size();
+    } else if (dk == DK_FLOAT32) {
+        csrc = reinterpret_cast<const uint8_t*>(d.float32_values.data());
+        elem = 4; compact_count = d.float32_values.size();
+    } else if (dk == DK_FLOAT64) {
+        csrc = reinterpret_cast<const uint8_t*>(d.float64_values.data());
+        elem = 8; compact_count = d.float64_values.size();
+    } else {  // DK_DECIMAL128
+        csrc = reinterpret_cast<const uint8_t*>(d.int128_values.data());
+        elem = 16; compact_count = d.int128_values.size();
+    }
+
+    const size_t full_bytes = static_cast<size_t>(n) * elem;
+    void* pos = alloc(full_bytes ? full_bytes : 1);
+    if (!pos) return false;
+
+    if (nullable && compact_count < n) {
+        std::memset(pos, 0, full_bytes);
+        const uint8_t* nb = d.valid_bits.data();
+        uint8_t* dst = static_cast<uint8_t*>(pos);
+        size_t ci = 0;
+        for (uint32_t r = 0; r < n; ++r) {
+            if ((nb[r >> 3] >> (r & 7)) & 1) {
+                if (ci < compact_count)
+                    std::memcpy(dst + static_cast<size_t>(r) * elem, csrc + ci * elem, elem);
+                ++ci;
+            }
+        }
+    } else if (full_bytes) {
+        std::memcpy(pos, csrc, full_bytes);
+    }
+
+    uint8_t* val = nullptr;
+    if (nullable) {
+        val = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!val) { freefn(pos); return false; }
+        std::memcpy(val, d.valid_bits.data(), d.valid_bits.size());
+    }
+    out.data = pos;
+    out.validity = val;
+    out.length = n;
+    return true;
+}
+
+// Build a positional bit-packed DRAKEN_BOOL buffer (+ validity), combining
+// serialize_bool's byte→bit packing with _wrap_decoded_bool's compact→positional
+// scatter: boolean_values holds K present 0/1 bytes; emit N bits with present
+// row r set iff its value is truthy (null rows stay 0, masked by validity).
+static inline bool build_direct_bool(const DecodedColumn& d,
+                                     void* (*alloc)(size_t), void (*freefn)(void*),
+                                     ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const bool nullable = !d.valid_bits.empty();
+    const size_t pos_bytes = (static_cast<size_t>(n) + 7) >> 3;
+
+    void* pos = alloc(pos_bytes ? pos_bytes : 1);
+    if (!pos) return false;
+    std::memset(pos, 0, pos_bytes ? pos_bytes : 1);
+    uint8_t* dst = static_cast<uint8_t*>(pos);
+    const uint8_t* bv = d.boolean_values.empty() ? nullptr : d.boolean_values.data();
+    const size_t k = d.boolean_values.size();
+
+    if (nullable) {
+        const uint8_t* nb = d.valid_bits.data();
+        size_t ci = 0;
+        if (bv) {
+            for (uint32_t r = 0; r < n; ++r) {
+                if ((nb[r >> 3] >> (r & 7)) & 1) {
+                    if (ci < k && (bv[ci] & 1)) dst[r >> 3] |= static_cast<uint8_t>(1u << (r & 7));
+                    ++ci;
+                }
+            }
+        }
+    } else if (bv) {
+        for (uint32_t r = 0; r < n && r < k; ++r)
+            if (bv[r] & 1) dst[r >> 3] |= static_cast<uint8_t>(1u << (r & 7));
+    }
+
+    uint8_t* val = nullptr;
+    if (nullable) {
+        val = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!val) { freefn(pos); return false; }
+        std::memcpy(val, d.valid_bits.data(), d.valid_bits.size());
+    }
+    out.data = pos;
+    out.validity = val;
+    out.length = n;
+    return true;
+}
+
+// Parse precision/scale from a "decimal(p,s)" logical_type string.
+static inline void parse_decimal_ps(const std::string& lt, uint8_t& precision, uint8_t& scale) {
+    precision = 38; scale = 0;
+    size_t lp = lt.find('(');
+    size_t cm = lt.find(',', lp);
+    size_t rp = lt.find(')', cm);
+    if (lp != std::string::npos && cm != std::string::npos && rp != std::string::npos) {
+        precision = static_cast<uint8_t>(std::stoi(lt.substr(lp + 1, cm - lp - 1)));
+        scale     = static_cast<uint8_t>(std::stoi(lt.substr(cm + 1, rp - cm - 1)));
+    }
 }
 
 class ParquetIOPipeline {
@@ -418,47 +566,37 @@ class ParquetIOPipeline {
                 }
 
                 ColumnOut cout;
-                // Direct path only for columns whose LOGICAL type is a plain
-                // numeric (logical_type == the physical name, e.g. "int64").
-                // DATE / TIMESTAMP / DECIMAL are physically int32/int64 but carry
-                // a distinct logical_type ("date32[day]", "timestamp[ms,UTC]",
-                // "decimal(p,s)") and get reinterpreted downstream
-                // (_coerce_logical_types) from the pool/deserialize
-                // representation — so they stay on the IPC path.
+                // Direct-path logical gate: plain numerics + boolean + int128
+                // DECIMAL128 may go direct. DATE / TIMESTAMP and INT-BACKED
+                // DECIMAL carry distinct logical_types ("date32[day]",
+                // "timestamp[ms,UTC]", "decimal(p,s)" over int32/int64) and are
+                // reinterpreted downstream (_coerce_logical_types) from the pool
+                // representation — so they stay on the IPC path. int128-backed
+                // DECIMAL128 is already typed via its (precision,scale)
+                // descriptor and can go direct.
                 const std::string& lt = col_stats.logical_type;
-                const bool plain_logical = lt.empty() || lt == "int64" ||
-                    lt == "int32" || lt == "float64" || lt == "float32";
-                DirectKind dk = (pool_sink_.draken_alloc && plain_logical)
+                const bool safe_logical =
+                    lt.empty() || lt == "int64" || lt == "int32" ||
+                    lt == "float64" || lt == "float32" || lt == "boolean" ||
+                    (lt.rfind("decimal", 0) == 0 && !decoded.int128_values.empty());
+                DirectKind dk = (pool_sink_.draken_alloc && safe_logical)
                     ? direct_kind_for(decoded) : DK_POOL;
 
                 if (dk != DK_POOL) {
-                    // Direct path: non-nullable fixed-width → a Draken-owned
-                    // positional buffer the consumer wraps with zero copy.
-                    const uint32_t n = static_cast<uint32_t>(decoded.num_rows);
-                    void* buf = nullptr;
-                    if (dk == DK_INT64 && decoded.type == "int32") {
-                        buf = pool_sink_.draken_alloc(static_cast<size_t>(n) * 8);
-                        if (buf) {
-                            int64_t* d64 = static_cast<int64_t*>(buf);
-                            for (uint32_t r = 0; r < n; ++r)
-                                d64[r] = static_cast<int64_t>(decoded.int32_values[r]);
-                        }
-                    } else {
-                        const void* src; size_t bytes;
-                        if (dk == DK_INT64)        { src = decoded.int64_values.data();   bytes = static_cast<size_t>(n) * 8; }
-                        else if (dk == DK_FLOAT32) { src = decoded.float32_values.data(); bytes = static_cast<size_t>(n) * 4; }
-                        else                       { src = decoded.float64_values.data(); bytes = static_cast<size_t>(n) * 8; }
-                        buf = pool_sink_.draken_alloc(bytes);
-                        if (buf && bytes) std::memcpy(buf, src, bytes);
-                    }
-                    if (!buf) {
+                    // Direct path: the worker builds the positional Draken
+                    // buffer (+ validity), doing any compact→positional scatter
+                    // itself; the consumer wraps it with zero copy.
+                    bool ok = (dk == DK_BOOL)
+                        ? build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout)
+                        : build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    if (!ok) {
                         result.success = false;
                         result.error = "draken_alloc failed for column: " + col_stats.name;
                         break;
                     }
                     cout.direct_kind = dk;
-                    cout.data = buf;
-                    cout.length = n;
+                    if (dk == DK_DECIMAL128)
+                        parse_decimal_ps(col_stats.logical_type, cout.dec_precision, cout.dec_scale);
                     // Direct path emits no IPC bytes — ipc_bytes_serialized only
                     // accrues for pool-path columns, so its drop is the WP-6b signal.
                 } else {

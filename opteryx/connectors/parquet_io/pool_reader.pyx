@@ -30,9 +30,11 @@ from opteryx.compiled.structures.column_deserializer cimport deserialize_row_gro
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
 
 # WP-6b direct path: wrap worker-built Draken buffers into Vectors (consumer-side,
-# GIL held). DK_INT64=1, DK_FLOAT32=2, DK_FLOAT64=3 from io_pipeline.hpp.
-from draken.core.buffers cimport DrakenType, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
-from draken.vectors.vector cimport from_decoded as _vector_from_decoded
+# GIL held). DirectKind 1=int64 2=float32 3=float64 4=bool 5=decimal128.
+from draken.core.buffers cimport (
+    DrakenType, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_DECIMAL128
+)
+from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
@@ -59,22 +61,33 @@ cdef inline tuple _split_columns(MorselRef* result):
     cdef DrakenType dtype
     cdef uint32_t dlen
     cdef void* dptr
+    cdef uint8_t* dval
+    cdef Vector vec
     cdef size_t i
     for i in range(result.columns.size()):
         col_name = result.column_names[i]   # bytes — names are bytes throughout
         dk = result.columns[i].direct_kind
         if dk == 0:
             ref_ids[col_name] = result.columns[i].ref_id
-        else:
-            if dk == 1:
-                dtype = DRAKEN_INT64
-            elif dk == 2:
-                dtype = DRAKEN_FLOAT32
-            else:
-                dtype = DRAKEN_FLOAT64
-            dlen = result.columns[i].length
-            dptr = morsel_take_direct(result[0], i)
-            direct[col_name] = _vector_from_decoded(dptr, NULL, dlen, dtype)
+            continue
+        if dk == 1:
+            dtype = DRAKEN_INT64
+        elif dk == 2:
+            dtype = DRAKEN_FLOAT32
+        elif dk == 3:
+            dtype = DRAKEN_FLOAT64
+        elif dk == 4:
+            dtype = DRAKEN_BOOL
+        else:  # dk == 5
+            dtype = DRAKEN_DECIMAL128
+        dlen = result.columns[i].length
+        # Take both data + validity (nulls the slots so the dtor won't free them).
+        dptr = morsel_take_direct(result[0], i, &dval)
+        vec = _vector_from_decoded(dptr, dval, dlen, dtype)
+        if dk == 5 and dlen > 0:
+            vec._nb.set_decimal_descriptor(
+                result.columns[i].dec_precision, result.columns[i].dec_scale)
+        direct[col_name] = vec
     return ref_ids, direct
 
 

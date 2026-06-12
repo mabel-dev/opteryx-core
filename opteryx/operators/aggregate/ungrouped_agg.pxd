@@ -90,6 +90,8 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
     cdef CarcharSetWrapper _set  # typed — needed for nogil insert loop
     cdef uint64_t* _scratch_buf
     cdef Py_ssize_t _scratch_capacity
+    cdef uint8_t* _mask_buf            # compressed-path per-distinct-value referenced flags
+    cdef Py_ssize_t _mask_capacity
 
 cdef class AvgFinalizer:
     cdef bytes  sum_alias

@@ -163,6 +163,43 @@ def test_direct_path_nonnull_numeric_roundtrip():
     assert serialized == 0, f"expected all columns direct (0 IPC bytes), got {serialized}"
 
 
+def test_direct_path_nullable_bool_decimal_roundtrip():
+    """WP-6b-2: nullable fixed-width (compact→positional scatter), nullable bool
+    (bit-scatter), and int128 DECIMAL128 (scatter + descriptor) all take the
+    direct path. Values must match pyarrow exactly through the C++ scatter, and
+    the path must engage (zero IPC bytes)."""
+    from decimal import Decimal
+
+    n = 6000
+    table = pa.table(
+        {
+            # interleaved nulls force the compact→positional scatter
+            "i64n": pa.array([i if i % 4 else None for i in range(n)], type=pa.int64()),
+            "f64n": pa.array([i * 1.5 if i % 3 else None for i in range(n)], type=pa.float64()),
+            "f32n": pa.array([i * 0.5 if i % 5 else None for i in range(n)], type=pa.float32()),
+            "booln": pa.array([None if i % 7 == 0 else (i % 2 == 0) for i in range(n)], type=pa.bool_()),
+            # precision > 18 → int128-backed DECIMAL128 direct path
+            "dec": pa.array(
+                [Decimal(f"{i}.{i % 100:02d}") if i % 6 else None for i in range(n)],
+                type=pa.decimal128(24, 2),
+            ),
+            # all-null and no-null edges of a fixed-width column
+            "allnull": pa.array([None] * n, type=pa.int64()),
+            "nonull": pa.array(list(range(n)), type=pa.float64()),
+        }
+    )
+    cols = ["i64n", "f64n", "f32n", "booln", "dec", "allnull", "nonull"]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(table, tmp, row_group_size=1500, use_dictionary=False)
+        got = _read_all(path, cols, decode_workers=1)
+        serialized = _serialized_bytes(path, cols, decode_workers=1)
+
+    expected = {c: table.column(c).to_pylist() for c in cols}
+    for c in cols:
+        assert got[c] == expected[c], f"direct column {c} diverged from pyarrow"
+    assert serialized == 0, f"expected all columns direct (0 IPC bytes), got {serialized}"
+
+
 def test_direct_path_concurrent_abandon_no_crash():
     """Abandon row groups mid-stream (LIMIT-style early exit) with multiple
     workers, so the result queue holds undrained MorselRefs carrying direct
@@ -171,13 +208,21 @@ def test_direct_path_concurrent_abandon_no_crash():
     from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc
 
     n = 200000
-    table = pa.table({"v": pa.array(list(range(n)), type=pa.int64())})
+    # Mix non-null direct, nullable direct (carries a validity buffer), and a
+    # string (pool) column so abandoned MorselRefs hold data + validity + ref_ids.
+    table = pa.table(
+        {
+            "v": pa.array(list(range(n)), type=pa.int64()),
+            "vn": pa.array([i if i % 3 else None for i in range(n)], type=pa.int64()),
+            "s": pa.array([f"x{i % 100}" for i in range(n)]),
+        }
+    )
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(table, tmp, row_group_size=10000, use_dictionary=False)  # 20 row groups
-        it = iter_row_groups_ipc(None, [path], ["v"], decode_workers=4)
+        it = iter_row_groups_ipc(None, [path], ["v", "vn", "s"], decode_workers=4)
         first = next(it)  # consume one; let workers race ahead on the rest
         assert len(first[1][b"v"]) > 0
-        it.close()  # abandon the rest → MorselRef destructors free direct buffers
+        it.close()  # abandon the rest → MorselRef dtors free direct data + validity
     # Reaching here without a crash is the assertion; ASan catches leaks/UAF.
 
 
@@ -190,6 +235,8 @@ if __name__ == "__main__":
     print("pool exhaustion clean error: OK")
     test_direct_path_nonnull_numeric_roundtrip()
     print("direct path non-null numeric: OK")
+    test_direct_path_nullable_bool_decimal_roundtrip()
+    print("direct path nullable/bool/decimal: OK")
     test_direct_path_concurrent_abandon_no_crash()
     print("direct path concurrent abandon: OK")
     print("all WP-6a/6b tests passed")

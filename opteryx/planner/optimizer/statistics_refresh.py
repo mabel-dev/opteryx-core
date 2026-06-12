@@ -276,15 +276,34 @@ def _scan_stats(
                     estimate_selectivity,
                 )
                 selectivity = 1.0
+                narrowed_columns = base.columns
                 for conj in conjuncts:
                     try:
                         s = float(estimate_selectivity(conj, base))
                     except Exception:
                         s = 1.0
                     selectivity *= s
+                    # Tighten column value_ranges from the filter's bounds so
+                    # range-aware consumers (CorrelatedFilters, join-key
+                    # intersection) see the post-filter range, not just a row count.
+                    narrowed_columns = _narrow_filter_columns(narrowed_columns, conj)
+                new_rows = base.row_count
                 if selectivity != 1.0:
                     new_rows = max(1, int(base.row_count * selectivity))
-                    base = base.with_row_count(new_rows)
+                if new_rows != base.row_count or narrowed_columns is not base.columns:
+                    base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
+
+    # Predicates already pushed onto this scan (post-PredicatePushdown) have no
+    # Filter node for the leaf-local walk to find, so narrow column ranges from
+    # them directly. Row-count selectivity for these is already applied via the
+    # scan's own row estimates upstream; here we only tighten the ranges.
+    scan_predicates = getattr(node, "predicates", None)
+    if scan_predicates:
+        narrowed_columns = base.columns
+        for condition in scan_predicates:
+            narrowed_columns = _narrow_filter_columns(narrowed_columns, condition)
+        if narrowed_columns is not base.columns:
+            base = RelationStatistics(row_count=base.row_count, columns=narrowed_columns)
 
     return base
 
@@ -352,21 +371,25 @@ def _filter_stats(
     from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 
     selectivity = 1.0
+    narrowed_columns = base.columns
     for conj in _split_and_conjuncts(condition):
         sources = _identifier_sources(conj)
         if folded_names and sources and sources <= folded_names:
-            # Already folded into Scan.statistics.row_count by _scan_stats.
+            # Already folded into Scan.statistics (row count AND range) by _scan_stats.
             continue
         try:
             s = float(estimate_selectivity(conj, base))
         except Exception:
             s = 1.0
         selectivity *= s
+        narrowed_columns = _narrow_filter_columns(narrowed_columns, conj)
 
-    if selectivity == 1.0:
+    if selectivity == 1.0 and narrowed_columns is base.columns:
         return base
-    new_rows = estimate_after_filter(base.row_count, selectivity)
-    return base.with_row_count(new_rows)
+    new_rows = base.row_count
+    if selectivity != 1.0:
+        new_rows = estimate_after_filter(base.row_count, selectivity)
+    return RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
 
 def _join_stats(

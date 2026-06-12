@@ -20,10 +20,13 @@ from rugo.parquet_reader cimport ColumnStats, RowGroupStats
 
 cdef extern from "io_pipeline.hpp" namespace "rugo":
     cdef cppclass ColumnOut:
-        int direct_kind      # 0 = pool path; 1=int64, 2=float32, 3=float64 direct
-        void* data           # direct path: draken_alloc'd positional buffer
-        uint32_t length      # direct path: row count
+        int direct_kind      # 0=pool; 1=int64 2=float32 3=float64 4=bool 5=decimal128
+        void* data           # direct: draken_alloc'd positional values
+        uint8_t* validity    # direct: draken_alloc'd null bitmap, or NULL
+        uint32_t length      # direct: row count
         int64_t ref_id       # pool path: MemoryPool ref
+        uint8_t dec_precision # DK_DECIMAL128 descriptor
+        uint8_t dec_scale
 
     cdef cppclass MorselRef:
         string path
@@ -36,9 +39,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         string error
         bint success
 
-    # Take ownership of column i's direct buffer (nulls the slot so MorselRef's
-    # destructor won't free it). Returns NULL for a pool-path column.
-    void* morsel_take_direct(MorselRef& m, size_t i) nogil
+    # Take ownership of column i's direct buffers (data returned, validity via
+    # out param); nulls both slots so MorselRef's destructor won't free them.
+    void* morsel_take_direct(MorselRef& m, size_t i, uint8_t** out_validity) nogil
 
     cdef cppclass ParquetIOPipeline:
         ParquetIOPipeline(int decode_workers, size_t queue_capacity) except +

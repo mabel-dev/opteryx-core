@@ -6,19 +6,28 @@
 """
 Optimization Rule - Correlated Filters
 
-Type: Heuristic
-Goal: Reduce Rows
+Type: Cost-based (consumes propagated statistics)
+Goal: Reduce Rows / IO
 
-When fields are joined on, we can infer ranges of values based on statistics
-or filters. This can be used to reduce the number of rows that need to be read
-and processed.
+For an equi-join ``a.k = b.k`` the matching rows on one side are bounded by the
+realized value range of the join key on the other side. We read that range from
+the propagated ``node.statistics`` (post-filter / post-join-intersection — see
+statistics_refresh) and push it onto the opposite leg's scan as a range
+predicate, so the scan can prune row groups and pre-filter rows before the join.
+
+This runs *after* PredicatePushdown so the original predicates are already on the
+scans and their effect is reflected in the propagated key ranges. The derived
+range predicates are appended directly onto the target scan's ``predicates``
+list (the same channel PredicatePushdown feeds), so no second pushdown pass is
+needed; scans whose connector can't take pushed predicates get a Filter node
+instead. Only inner / nested-loop joins are eligible — the pushed range is a
+necessary condition for a match, which would be unsound for outer joins.
 """
 
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import random_string
 
 from .optimization_strategy import (
@@ -28,42 +37,33 @@ from .optimization_strategy import (
 )
 
 
-def _write_filters(left_column, right_column):
-    new_filters = []
-    highest_literal = _literal_node_from_statistics(
-        left_column.schema_column.highest_value,
-        left_column.schema_column.column_type,
-    )
-    if highest_literal is not None:
-        a_side = right_column
-        new_filter = LogicalPlanNode(
-            node_type=LogicalPlanStepType.Filter,
-            condition=Node(
-                NodeType.COMPARISON_OPERATOR, value="LtEq", left=a_side, right=highest_literal
-            ),
-            columns=[right_column],
-            relations={right_column.source},
-            all_relations={right_column.source},
-        )
-        new_filters.append(new_filter)
+def _phys_name(col):
+    """Physical column name for a join-key identifier, for stats.columns lookup."""
+    schema_column = getattr(col, "schema_column", None)
+    name = getattr(schema_column, "name", None) if schema_column is not None else None
+    if isinstance(name, str):
+        return name
+    value = getattr(col, "value", None)
+    return value if isinstance(value, str) else None
 
-    lowest_literal = _literal_node_from_statistics(
-        left_column.schema_column.lowest_value,
-        left_column.schema_column.column_type,
-    )
-    if lowest_literal is not None:
-        a_side = right_column
-        new_filter = LogicalPlanNode(
-            node_type=LogicalPlanStepType.Filter,
-            condition=Node(
-                NodeType.COMPARISON_OPERATOR, value="GtEq", left=a_side, right=lowest_literal
-            ),
-            columns=[right_column],
-            relations={right_column.source},
-            all_relations={right_column.source},
-        )
-        new_filters.append(new_filter)
-    return new_filters
+
+def _key_value_range(stats, col):
+    """Propagated value_range for *col* from a RelationStatistics, or None when
+    no bound has been established (column absent / range empty)."""
+    if stats is None:
+        return None
+    name = _phys_name(col)
+    if name is None:
+        return None
+    col_stats = stats.columns.get(name)
+    if col_stats is None:
+        return None
+    value_range = col_stats.value_range
+    if value_range is None or (
+        value_range.lower_bound is None and value_range.upper_bound is None
+    ):
+        return None
+    return value_range
 
 
 def _get_equi_join_pairs(on_node):
@@ -87,214 +87,136 @@ def _get_equi_join_pairs(on_node):
     return []
 
 
-def _collect_col_filters_walking_up(plan, start_nid, column):
-    """
-    Walk from start_nid toward the plan root collecting Filter conditions of the
-    form ``col OP literal`` where col matches *column*.  Stops at the first Join
-    boundary so we never cross into the other leg.
-
-    Returns a list of condition Nodes (deduplicated by op + literal value).
-    """
+def _range_conditions(target_col, value_range):
+    """Build GtEq/LtEq COMPARISON_OPERATOR condition Nodes pushing *value_range*
+    (native, post-filter bounds) onto *target_col*, correctly typed."""
+    target_type = getattr(getattr(target_col, "schema_column", None), "column_type", None)
     conditions = []
-    seen = set()
-    current = start_nid
-    while current:
-        edges = plan.outgoing_edges(current)
-        if not edges:
-            break
-        parent_nid = edges[0][1]
-        parent_node = plan[parent_nid]
-        if parent_node is None:
-            break
-        if parent_node.node_type == LogicalPlanStepType.Join:
-            break
-        if parent_node.node_type == LogicalPlanStepType.Filter:
-            cond = parent_node.condition
-            if (
-                cond is not None
-                and cond.node_type == NodeType.COMPARISON_OPERATOR
-                and getattr(cond, "left", None) is not None
-                and getattr(cond, "right", None) is not None
-                and cond.left.node_type == NodeType.IDENTIFIER
-                and cond.right.node_type == NodeType.LITERAL
-                and cond.left.source == column.source
-                and cond.left.value == column.value
-            ):
-                dedup_key = (cond.value, str(cond.right.value))
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
-                    conditions.append(cond)
-        current = parent_nid
+    if value_range.upper_bound is not None:
+        conditions.append(
+            Node(
+                NodeType.COMPARISON_OPERATOR,
+                value="LtEq",
+                left=target_col,
+                right=build_literal_node(value_range.upper_bound, suggested_type=target_type),
+            )
+        )
+    if value_range.lower_bound is not None:
+        conditions.append(
+            Node(
+                NodeType.COMPARISON_OPERATOR,
+                value="GtEq",
+                left=target_col,
+                right=build_literal_node(value_range.lower_bound, suggested_type=target_type),
+            )
+        )
     return conditions
 
 
-def _make_propagated_filter(condition, target_col):
-    """
-    Build a new Filter LogicalPlanNode that mirrors *condition* onto *target_col*.
-    The literal operand is shared (not mutated) and the operator is preserved.
-    """
-    new_cond = Node(
-        NodeType.COMPARISON_OPERATOR,
-        value=condition.value,
-        left=target_col,
-        right=condition.right,
-    )
-    return LogicalPlanNode(
-        node_type=LogicalPlanStepType.Filter,
-        condition=new_cond,
-        columns=[target_col],
-        relations={target_col.source},
-        all_relations={target_col.source},
-    )
-
-
-def _literal_node_from_statistics(stat_value, column_type):
-    if stat_value is None:
-        return None
-    literal_value = stat_value
-    _cat = column_type.category if column_type is not None else None
-    if _cat == LogicalCategory.VARCHAR:
-        literal_value = _decode_string_prefix(stat_value)
-    elif _cat == LogicalCategory.VARBINARY:
-        literal_value = _decode_string_prefix(stat_value, as_bytes=True)
-    return build_literal_node(literal_value, suggested_type=column_type)
-
-
-def _decode_string_prefix(value, *, as_bytes=False):
-    raw_bytes = int(value).to_bytes(8, "big", signed=True)
-    payload = raw_bytes[1:]
-    if as_bytes:
-        return payload
-    # Strip the padding zero bytes that were added when encoding the prefix.
-    return payload.rstrip(b"\x00").decode("utf-8", errors="ignore")
+def _predicate_already_present(predicates, condition):
+    """True if *predicates* already contains an equivalent (op, column, literal)."""
+    op = getattr(condition, "value", None)
+    col = getattr(getattr(condition, "left", None), "value", None)
+    lit = getattr(getattr(condition, "right", None), "value", None)
+    for existing in predicates:
+        if (
+            getattr(existing, "value", None) == op
+            and getattr(getattr(existing, "left", None), "value", None) == col
+            and getattr(getattr(existing, "right", None), "value", None) == lit
+        ):
+            return True
+    return False
 
 
 class CorrelatedFiltersStrategy(OptimizationStrategy):
+    # Cost-typed so the driver propagates statistics (refresh_statistics) before
+    # this runs; requires predicates already pushed onto scans so those ranges
+    # show up in the propagated key statistics.
+    optimization_technique = "cost"
+    requires = ("predicates-pushed",)
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
 
         if node.node_type == LogicalPlanStepType.Join and node.type in ("inner", "nested loop"):
-            # We need exactly two distinct relation sources for this optimization.
-            # `node.all_relations` can contain relation names and aliases, so
-            # compare the logical sources on the join columns instead.
-            left_column = node.on.left
-            right_column = node.on.right
-            distinct_sources = {left_column.source, right_column.source}
-            if len(distinct_sources) != 2:
+            join_stats = getattr(node, "statistics", None)
+            if join_stats is None:
                 return context
-            new_filters = []
 
-            # Empty connectors are FUNCTION datasets, we could push filters down and create
-            # statistics for them, but there are other issues this creates
-            if (
-                left_column.node_type == NodeType.IDENTIFIER
-                and right_column.node_type == NodeType.IDENTIFIER
-                and left_column.source_connector != set()
-            ):
-                new_filters = _write_filters(left_column, right_column)
-            if (
-                left_column.node_type == NodeType.IDENTIFIER
-                and right_column.node_type == NodeType.IDENTIFIER
-                and right_column.source_connector != set()
-            ):
-                new_filters.extend(
-                    _write_filters(left_column=right_column, right_column=left_column)
-                )
-            # Predicate propagation: for each equi-join pair, collect simple
-            # col OP literal filters already present on one leg and mirror them
-            # to the other leg.  This is cheap — if the statistics-based filters
-            # above were vacuous (full-range), a real predicate is far better.
-            _uuid_to_nid = {}
-            for _nid in list(context.optimized_plan.nodes()):
-                _pn = context.optimized_plan[_nid]
-                if _pn is not None:
-                    _uuid = getattr(_pn, "uuid", None)
-                    if _uuid:
-                        _uuid_to_nid[_uuid] = _nid
+            uuid_to_nid = {}
+            for nid in list(context.optimized_plan.nodes()):
+                plan_node = context.optimized_plan[nid]
+                node_uuid = getattr(plan_node, "uuid", None) if plan_node is not None else None
+                if node_uuid:
+                    uuid_to_nid[node_uuid] = nid
 
-            for _left_col, _right_col in _get_equi_join_pairs(node.on):
-                # Filters on left key → mirror to right leg
-                for _uuid in node.left_readers or []:
-                    _start = _uuid_to_nid.get(_uuid)
-                    if _start is None:
-                        continue
-                    for _cond in _collect_col_filters_walking_up(
-                        context.optimized_plan, _start, _left_col
-                    ):
-                        new_filters.append(_make_propagated_filter(_cond, _right_col))
-                # Filters on right key → mirror to left leg
-                for _uuid in node.right_readers or []:
-                    _start = _uuid_to_nid.get(_uuid)
-                    if _start is None:
-                        continue
-                    for _cond in _collect_col_filters_walking_up(
-                        context.optimized_plan, _start, _right_col
-                    ):
-                        new_filters.append(_make_propagated_filter(_cond, _left_col))
-
-            # If we generated any filter candidates, record that the optimization
-            # was considered. We count filter candidates here so tests that assert
-            # the optimization was invoked can observe it even if insertion is
-            # skipped for safety reasons.
-            # Insert each new filter only on the reader(s) for the side it targets.
-            # Using `insert_node_before` rewires ALL incoming edges to the join which
-            # caused filters to be applied to the wrong legs (and raised KeyErrors).
-            for new_filter in new_filters:
-                # determine which relation this filter targets from its relations set
-                target_relation = next(iter(new_filter.relations)) if new_filter.relations else None
-
-                # choose the readers to attach to based on which side contains the source
-                # Use the join's reader UUID lists (left_readers/right_readers) and map
-                # them to the optimized plan node ids. This avoids mistakenly matching
-                # unrelated scan aliases across different subplans.
-
-                # determine readers (UUIDs) for the side targeted by this filter
-                readers = []
-                if target_relation in (node.left_relation_names or []):
-                    readers = node.left_readers or []
-                elif target_relation in (node.right_relation_names or []):
-                    readers = node.right_readers or []
-
-                if not readers:
-                    # no readers to attach to
-                    continue
-
-                # Map reader UUIDs to optimized-plan node ids (nids)
-                resolved_nids = []
-                nodes_list = list(context.optimized_plan.nodes())
-                for nid in nodes_list:
-                    plan_node = context.optimized_plan[nid]
-                    if plan_node is None:
-                        continue
-                    node_uuid = getattr(plan_node, "uuid", None)
-                    if node_uuid in readers:
-                        resolved_nids.append(nid)
-
-                if not resolved_nids:
-                    # nothing we can safely attach to
-                    continue
-
-                # attach a copy of the filter between each resolved reader and the join
-                for reader_nid in resolved_nids:
-                    new_nid = random_string()
-                    new_node = (
-                        new_filter.copy()
-                        if getattr(new_filter, "copy", None) is not None
-                        else new_filter
-                    )
-                    if new_node is None:
-                        continue
-                    context.optimized_plan.insert_node_after(new_nid, new_node, reader_nid)
-                    self.telemetry.optimization_inner_join_correlated_filter += 1
+            for left_key, right_key in _get_equi_join_pairs(node.on):
+                left_range = _key_value_range(join_stats, left_key)
+                right_range = _key_value_range(join_stats, right_key)
+                # Each key's realized range constrains the *other* leg's key.
+                if left_range is not None:
+                    self._push_range(context, node, right_key, left_range, uuid_to_nid)
+                if right_range is not None:
+                    self._push_range(context, node, left_key, right_range, uuid_to_nid)
 
         return context
 
+    def _push_range(self, context, join_node, target_col, value_range, uuid_to_nid):
+        """Push *value_range* onto *target_col*'s scan(s): append to the scan's
+        predicate list when the connector supports it, else add a Filter node."""
+        target_relation = getattr(target_col, "source", None)
+        if target_relation in (join_node.left_relation_names or []):
+            readers = join_node.left_readers or []
+        elif target_relation in (join_node.right_relation_names or []):
+            readers = join_node.right_readers or []
+        else:
+            return
+
+        conditions = _range_conditions(target_col, value_range)
+        if not conditions:
+            return
+
+        for reader_uuid in readers:
+            reader_nid = uuid_to_nid.get(reader_uuid)
+            if reader_nid is None:
+                continue
+            scan = context.optimized_plan[reader_nid]
+            if scan is None:
+                continue
+
+            connector = getattr(scan, "connector", None)
+            if connector is not None and getattr(connector, "supports_predicate_pushdown", False):
+                if not scan.predicates:
+                    scan.predicates = []
+                for condition in conditions:
+                    if not _predicate_already_present(scan.predicates, condition):
+                        scan.predicates.append(condition)
+                        self.telemetry.optimization_inner_join_correlated_filter += 1
+            else:
+                # Fallback for non-pushdown connectors: a Filter node still
+                # filters at execution, just without row-group pruning.
+                for condition in conditions:
+                    filter_node = LogicalPlanNode(
+                        node_type=LogicalPlanStepType.Filter,
+                        condition=condition,
+                        columns=[target_col],
+                        relations={target_relation},
+                        all_relations={target_relation},
+                    )
+                    context.optimized_plan.insert_node_after(
+                        random_string(), filter_node, reader_nid
+                    )
+                    self.telemetry.optimization_inner_join_correlated_filter += 1
+
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
-        # No finalization needed for this strategy
+        # This strategy mutates scan predicates / adds Filter nodes, so the
+        # statistics propagated before it are now stale; flag them so the next
+        # cost strategy refreshes. (Cost strategies don't get the heuristic
+        # auto-invalidation from the driver.)
+        plan.statistics_are_stale = True
         return plan
 
     def should_i_run(self, plan):
-        # only run if there are LIMIT clauses in the plan
         candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
         return len(candidates) > 0

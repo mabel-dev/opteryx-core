@@ -12,6 +12,7 @@ from draken.core.buffers cimport DRAKEN_ARRAY, DRAKEN_NULL, DRAKEN_VECTOR_FP16
 # c_hash_single to fill a caller buffer with zero Python object creation.
 cdef extern from "ops/hash.h" nogil:
     void draken_hash(const DrakenVector& v, uint64_t* out, uint32_t n)
+    void draken_hash_distinct(const DrakenVector& v, uint64_t* out)
 
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
@@ -227,6 +228,23 @@ cdef class Vector:
                     "c_hash_single: unsupported key vector type %d "
                     "(array/null/fp16 cannot be row-hashed)" % <int>dv.type)
         draken_hash(dv[0], out, <uint32_t>n)
+        return 0
+
+    cdef bint c_hash_distinct(self, uint64_t* out) except -1 nogil:
+        # Hash the data_length DISTINCT values of this vector into out[0..data_length).
+        # Reuses the same per-type kernel as c_hash_single via a dense view, so a
+        # value's hash is byte-identical whether it arrives dense or dict-shaped —
+        # the cross-shape invariant COUNT(DISTINCT) relies on to dedup across
+        # morsels. Caller reads data_length from the DrakenVector. Same type guard
+        # as c_hash_single: array/null/fp16 cannot be row-hashed.
+        cdef DrakenVector* dv = <DrakenVector*>self._dv
+        if (dv.type == DRAKEN_ARRAY or dv.type == DRAKEN_NULL
+                or dv.type == DRAKEN_VECTOR_FP16):
+            with gil:
+                raise TypeError(
+                    "c_hash_distinct: unsupported key vector type %d "
+                    "(array/null/fp16 cannot be row-hashed)" % <int>dv.type)
+        draken_hash_distinct(dv[0], out)
         return 0
 
     @property

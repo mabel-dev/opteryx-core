@@ -126,7 +126,6 @@ class OptimizerVisitor:
             CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             DisjunctionSimplificationStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),
-            CorrelatedFiltersStrategy(telemetry),
             NullabilityInferenceStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
             FunctionRewriteStrategy(telemetry),
@@ -137,6 +136,9 @@ class OptimizerVisitor:
             CrossJoinFilterPushdownStrategy(
                 telemetry
             ),  # Convert CROSS JOIN + filters to INNER JOIN
+            # Runs after pushdown so join-key ranges (from scan predicates) are
+            # propagated; pushes the realized range onto the opposite scan.
+            CorrelatedFiltersStrategy(telemetry),
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             FilterImpliedGroupKeyReductionStrategy(telemetry),
             ProjectionPushdownStrategy(telemetry),
