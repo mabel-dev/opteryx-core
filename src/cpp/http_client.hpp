@@ -27,6 +27,17 @@
 
 #include <curl/curl.h>  // needed for curl_lock_data / curl_lock_access in callback signatures
 
+// Thrown on an HTTP/transport failure. `retryable` is true for transient causes
+// (connection/timeout/recv errors and 5xx/429); a non-retryable HttpError (4xx)
+// is a hard failure. Subclass of std::runtime_error so existing Cython `except +`
+// translation and callers that catch std::runtime_error are unaffected.
+struct HttpError : std::runtime_error {
+    bool retryable;
+    long http_status;   // 0 if the failure was a CURL-level error
+    HttpError(const std::string& what, bool retryable_, long status)
+        : std::runtime_error(what), retryable(retryable_), http_status(status) {}
+};
+
 class HttpClient {
 public:
     /**
@@ -93,6 +104,11 @@ public:
     std::vector<std::vector<uint8_t>> get_many(
         const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests
     );
+
+    // Process-cumulative count of individual range requests re-issued by
+    // get_many's transient-failure retry logic. For dev telemetry (surfaced in
+    // the IO pipeline diagnostics); not reset per query.
+    static uint64_t total_retries();
 
 private:
     void*       share_handle_;                   // CURLSH* — shared connection/DNS cache

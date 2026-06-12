@@ -153,6 +153,7 @@ cdef class NestedLoopJoinNode(JoinNode):
         cdef HashIndex* idx
 
         if morsel is _EOS_SENTINEL:
+            self._build_complete = True
             if self.left_morsels:
                 self.left_morsel = Morsel.combine(self.left_morsels)
                 self.left_morsels = []
@@ -187,6 +188,7 @@ cdef class NestedLoopJoinNode(JoinNode):
         cdef Morsel result
         cdef _HashIndexHolder holder
 
+        self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
             return

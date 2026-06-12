@@ -225,8 +225,39 @@ STATEMENTS = [
         # has no FROM clause).
         ("SELECT 1 UNION ALL SELECT 2", 2, 1, None),
         ("SELECT 1, 'a' UNION ALL SELECT 2, 'b'", 2, 2, None),
-        # TODO: Chained UNION (three relations) - WIP: Schema binding issue with nested Union nodes
-        # ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id = 1 UNION SELECT name, id FROM $planets AS B WHERE id = 2 UNION SELECT name, id FROM $planets AS C WHERE id = 3) D", 3, 2, None),
+        # Chained UNION (three+ relations). Two bind-time bugs were fixed here:
+        #   1. rename_relations did not remap the relation-name lists on nested
+        #      Union/Intersect/Except nodes (only Join nodes) — a nested set op
+        #      kept stale scan aliases -> KeyError(['$union-...']) at bind.
+        #   2. _columns_for_side discarded a resolvable side when a sibling
+        #      relation had been collapsed by a nested set op, and its graph-walk
+        #      fallback stopped at a column-less DISTINCT wrapper (FROM-less legs).
+        # Wrapped in a subquery (named relation legs).
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id = 1 UNION SELECT name, id FROM $planets AS B WHERE id = 2 UNION SELECT name, id FROM $planets AS C WHERE id = 3) D", 3, 2, None),
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id = 1 UNION SELECT name, id FROM $planets AS B WHERE id = 2 UNION SELECT name, id FROM $planets AS C WHERE id = 3) D WHERE id > 1", 2, 2, None),
+        # Top-level chained UNION (distinct) — the original repro.
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3", 3, 1, None),
+        ("SELECT id, name FROM $planets WHERE id = 1 UNION SELECT id, name FROM $planets WHERE id = 2 UNION SELECT id, name FROM $planets WHERE id = 3", 3, 2, None),
+        # Four and five legs.
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3 UNION SELECT name FROM $planets WHERE id = 4", 4, 1, None),
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3 UNION SELECT name FROM $planets WHERE id = 4 UNION SELECT name FROM $planets WHERE id = 5", 5, 1, None),
+        # Chained UNION ALL keeps duplicates across all legs.
+        ("SELECT name FROM $planets WHERE id = 1 UNION ALL SELECT name FROM $planets WHERE id = 2 UNION ALL SELECT name FROM $planets WHERE id = 3", 3, 1, None),
+        # Chained distinct UNION dedups across all legs.
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2", 2, 1, None),
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1", 1, 1, None),
+        # Mixed distinct / ALL in a chain: (id=1 UNION id=1) -> 1 row, then UNION ALL id=2.
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1 UNION ALL SELECT name FROM $planets WHERE id = 2", 2, 1, None),
+        # Chained UNION with a trailing ORDER BY / LIMIT.
+        ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3 ORDER BY name LIMIT 2", 2, 1, None),
+        # FROM-less chained UNION (legs collapse $no_table into $project): distinct + ALL.
+        ("SELECT 1 UNION SELECT 2 UNION SELECT 3", 3, 1, None),
+        ("SELECT 1 UNION SELECT 1 UNION SELECT 2", 2, 1, None),
+        ("SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2", 3, 1, None),
+        ("SELECT 1, 'a' UNION SELECT 2, 'b' UNION SELECT 3, 'c'", 3, 2, None),
+        ("SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4", 4, 1, None),
+        # Chained UNION with mismatched column counts must still raise.
+        ("SELECT id, name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3", None, None, ValueError),
 
         # Set operations - INTERSECT (SQL92 compatibility) - NEW, BLOCKED: Operators not compiled
         # INTERSECT keeps only rows in both inputs

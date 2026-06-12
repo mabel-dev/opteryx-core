@@ -27,6 +27,7 @@ This does two things that the projection node doesn't do:
 This node doesn't do any calculations, it is a pure Projection.
 """
 
+from collections import deque
 from typing import Generator, Optional
 from collections.abc import Iterable
 
@@ -40,16 +41,22 @@ from opteryx.models import QueryProperties
 cdef class ExitNode(BasePlanNode):
     """Terminal operator of the push pipeline. Buffers formatted result
     morsels in `_pending`; the engine drains and yields them to the caller
-    one at a time (streaming, not materialised)."""
+    one at a time (streaming, not materialised).
+
+    `_pending` is a deque so the engine's drain (`pop_pending` = popleft) is
+    O(1) per morsel rather than O(n) — a plain list's pop(0) shifts every
+    remaining element. Single-producer/single-consumer under the serial
+    engine; making this drain safe for concurrent producers is deferred to
+    the parallel-execution work."""
     cdef public bint at_least_one
     cdef public list final_columns
     cdef public list final_names
-    cdef public list _pending
+    cdef public object _pending
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.at_least_one = False
-        self._pending = []
+        self._pending = deque()
 
         final_columns = []
         final_names = []
@@ -85,7 +92,7 @@ cdef class ExitNode(BasePlanNode):
         return len(self._pending) > 0
 
     cpdef object pop_pending(self):
-        return self._pending.pop(0)
+        return self._pending.popleft()
 
     cdef void _dispatch_push(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:

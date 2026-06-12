@@ -280,6 +280,13 @@ cdef class CppIOPipeline:
             'decode_ns': result.decode_ns,
         }
 
+    def cancel(self):
+        """WP-8: signal early cancellation so queued-but-unstarted decode tasks
+        bail before doing IO/decode. Non-blocking; the wait for in-flight tasks
+        happens in close(). Idempotent and safe to call before close()."""
+        with nogil:
+            self.pipeline.cancel()
+
     def close(self):
         with nogil:
             self.pipeline.wait_shutdown()
@@ -298,10 +305,12 @@ cdef class CppIOPipeline:
             "queue_high_watermark": self.pipeline.queue_high_watermark(),
             "http_request_count": self.pipeline.http_request_count(),
             "http_fetch_ops": self.pipeline.http_fetch_ops(),
+            "http_retries": self.pipeline.http_retries(),
             "http_latency_histogram_ms": latency_histogram,
             "worker_blocked_ns": self.pipeline.worker_blocked_ns(),
             "ipc_bytes_serialized": self.pipeline.ipc_bytes_serialized(),
             "ipc_bytes_committed": self.committed_bytes,
+            "cancelled_skips": self.pipeline.cancelled_skips(),
         }
 
 
@@ -758,6 +767,12 @@ def iter_row_groups_ipc(
         # pipeline is None if we returned before footer-sized creation
         # (no work items) or failed during sizing.
         if pipeline is not None:
+            # WP-8: cancel first so any row groups submitted-but-not-yet-decoded
+            # bail in the workers instead of being decoded during the close()
+            # wait. On normal exhaustion there is no outstanding work, so this is
+            # a harmless flag flip; on early exit (LIMIT short-circuit, caller
+            # abandonment) it stops the engine paying for unconsumed row groups.
+            pipeline.cancel()
             if os.environ.get("OPTERYX_IO_DIAG"):
                 diag = pipeline.diagnostics()
                 sys.stderr.write(
@@ -765,7 +780,7 @@ def iter_row_groups_ipc(
                     "         footer_total=%.1fms  submit_total=%.3fms\n"
                     "         wait_result_total=%.1fms deserialize_total=%.1fms\n"
                     "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
-                    "         http: requests=%d fetch_ops=%d  worker_blocked=%.1fms\n"
+                    "         http: requests=%d fetch_ops=%d retries=%d  worker_blocked=%.1fms\n"
                     "         handoff: serialized=%d committed=%d bytes\n"
                     % (
                         len(set(p for p, _ in work_items)) if work_items else 0,
@@ -776,6 +791,7 @@ def iter_row_groups_ipc(
                         diag["enqueue_count"], diag["queue_high_watermark"],
                         diag["spin_iterations"],
                         diag["http_request_count"], diag["http_fetch_ops"],
+                        diag["http_retries"],
                         diag["worker_blocked_ns"] / 1e6,
                         diag["ipc_bytes_serialized"], diag["ipc_bytes_committed"],
                     )
@@ -908,4 +924,8 @@ def iter_pass2_row_groups_ipc(
             yield (scan_rg, row_group)
 
     finally:
+        # WP-8: cancel before close so unconsumed pass-2 row groups bail in the
+        # workers rather than decode during wait_shutdown (e.g. on early
+        # abandonment). Harmless flag flip on normal exhaustion.
+        pipeline.cancel()
         pipeline.close()

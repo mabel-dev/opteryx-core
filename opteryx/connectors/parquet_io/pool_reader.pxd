@@ -58,8 +58,10 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         ) nogil
         bint try_get_result(MorselRef& out) nogil
         bint wait_and_get_result(MorselRef& out) nogil
+        void cancel() nogil
         void wait_shutdown() nogil
         int pending_work_count() nogil
+        uint64_t cancelled_skips() nogil
         uint64_t spin_iterations() nogil
         uint64_t enqueue_count() nogil
         size_t queue_high_watermark() nogil
@@ -70,6 +72,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t http_latency_bucket(int i) nogil
         uint64_t worker_blocked_ns() nogil
         uint64_t ipc_bytes_serialized() nogil
+        uint64_t http_retries() nogil
 
 
 cdef extern from "pool_sink_adapter.hpp" namespace "opteryx":

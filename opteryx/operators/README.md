@@ -7,7 +7,8 @@ compiled into a single `_operators.so` module via `_operators.pyx`.
 ## Architecture
 
 Operators are **push-based**: upstream operators push `Morsel` (column batches) downstream through
-edges. The scheduler (see `opteryx/execution/`) orchestrates parallel execution across a DAG.
+typed `_downstream` pointers wired by `opteryx/managers/execution/pipeline_compiler.py`; the serial
+engine (`opteryx/managers/execution/serial_engine.py`) drives each scan's morsels through its chain.
 
 ```
 Reader operators  →  Filter  →  Project  →  Aggregate  →  Sort  →  Limit  →  Result

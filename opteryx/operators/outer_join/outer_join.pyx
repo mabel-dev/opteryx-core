@@ -506,6 +506,7 @@ cdef class OuterJoinNode(JoinNode):
     cpdef void push_left(self, Morsel morsel) except *:
         cdef long long start
         if morsel is _EOS_SENTINEL:
+            self._build_complete = True
             if self.left_morsels:
                 self._left_morsel = Morsel.combine(self.left_morsels)
                 self.left_morsels = []
@@ -531,6 +532,7 @@ cdef class OuterJoinNode(JoinNode):
         cdef Morsel right_morsel
         cdef Py_ssize_t eliminated_rows
 
+        self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             pass_filter_index = self.filter_index
             if self.right_morsels:

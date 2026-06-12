@@ -225,6 +225,7 @@ cdef class NonEquiJoinNode(JoinNode):
 
     cpdef void push_left(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
+            self._build_complete = True
             if self.left_morsels:
                 self.left_morsel = Morsel.combine(self.left_morsels)
                 self.left_morsels = []
@@ -233,6 +234,7 @@ cdef class NonEquiJoinNode(JoinNode):
             self.left_morsels.append(morsel)
 
     cpdef void push_right(self, Morsel morsel) except *:
+        self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
             return

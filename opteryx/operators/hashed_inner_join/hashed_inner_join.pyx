@@ -25,8 +25,6 @@ from typing import Generator, Optional
 import time
 from threading import Lock
 
-from array import array
-
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from libc.stddef cimport size_t
@@ -114,6 +112,32 @@ cdef class JoinReadings:
         readings["time_inner_join_align"]                 = self.time_inner_join_align
 
 
+cdef class InnerJoinKernelMetrics:
+    """Per-call kernel telemetry for the Carchar inner-join kernels.
+
+    Each kernel invocation overwrites the fields it owns ("last call" semantics).
+    The owning operator holds one instance and passes it into every kernel call;
+    there is NO module-level metric state, so concurrent joins (even across
+    queries in one process) cannot corrupt each other's readings.
+    """
+    cdef public long long hash_time_ns
+    cdef public long long probe_time_ns
+    cdef public long long materialize_time_ns
+    cdef public long long align_time_ns
+    cdef public long long build_bloom_time_ns
+    cdef public long long bloom_filter_time_ns
+    cdef public Py_ssize_t rows_hashed
+    cdef public Py_ssize_t candidate_rows
+    cdef public Py_ssize_t result_rows
+    cdef public Py_ssize_t rows_eliminated_by_bloom_filter
+    # Adaptive join statistics — Phase 1 (per docs/adaptive_join_statistics.md).
+    cdef public Py_ssize_t build_unique_keys
+    cdef public Py_ssize_t build_total_rows
+    cdef public double build_avg_chain_length
+    # 1 if the last probe used the compressed k-probe fast path, 0 otherwise.
+    cdef public Py_ssize_t kprobe_used
+
+
 cdef class DrakenInnerJoinNode(JoinNode):
     cdef public list left_columns
     cdef public list right_columns
@@ -126,6 +150,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
     cdef public bint _build_phase
     cdef public double carchar_probe_load_factor
     cdef public JoinReadings join_readings
+    cdef public InnerJoinKernelMetrics kernel_metrics
     cdef public list _compiled_left_evals
     cdef public list _compiled_right_evals
 
@@ -150,6 +175,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
             config.get("FEATURE_CARCHAR_PROBE_LOAD_FACTOR", 0.35)
         )
         self.join_readings = JoinReadings()
+        self.kernel_metrics = InnerJoinKernelMetrics()
 
         # Compile ON-clause expressions for each side at bind time.
         # _collect_expression_nodes_for_side is structural (no runtime data needed).
@@ -262,6 +288,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
         with self.lock:
             if morsel is _EOS_SENTINEL:
                 # Build-side EOS — finalise hash table. Do NOT emit downstream.
+                self._build_complete = True
                 if not self.left_morsels:
                     self.left_is_empty = True
                     return
@@ -302,33 +329,19 @@ cdef class DrakenInnerJoinNode(JoinNode):
                     self.left_morsel,
                     self.left_columns,
                     self.carchar_probe_load_factor,
+                    self.kernel_metrics,
                 )
                 self.join_readings.time_inner_join_build_side_hash_map += (
                     time.monotonic_ns() - start
                 )
                 self.join_readings.feature_inner_join_backend_carchar += 1
                 self.join_readings.feature_inner_join_draken += 1
-                (
-                    _hash_time,
-                    _probe_time,
-                    _bloom_time,
-                    _rows_hashed,
-                    _candidate_rows,
-                    _matched_rows,
-                    _materialize_time,
-                    _align_time,
-                    _rows_eliminated,
-                    bloom_build_time,
-                    build_unique_keys,
-                    build_total_rows,
-                    build_avg_chain_length,
-                ) = get_last_draken_inner_join_metrics()
                 if self.left_hash.has_bloom_filter():
                     self.join_readings.feature_bloom_filter += 1
-                    self.join_readings.time_build_bloom_filter += bloom_build_time
-                self.join_readings.build_unique_keys += build_unique_keys
-                self.join_readings.build_total_rows += build_total_rows
-                self.join_readings.build_avg_chain_length = build_avg_chain_length
+                    self.join_readings.time_build_bloom_filter += self.kernel_metrics.build_bloom_time_ns
+                self.join_readings.build_unique_keys += self.kernel_metrics.build_unique_keys
+                self.join_readings.build_total_rows += self.kernel_metrics.build_total_rows
+                self.join_readings.build_avg_chain_length = self.kernel_metrics.build_avg_chain_length
                 return
 
             # Build-side data morsel — accumulate.
@@ -340,6 +353,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
 
     cpdef void push_right(self, Morsel morsel) except *:
         with self.lock:
+            self._require_build_complete()
             if morsel is _EOS_SENTINEL:
                 # Probe-side EOS — flush telemetry then terminate downstream chain.
                 self.join_readings.flush_into(self.readings)
@@ -384,34 +398,20 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 right_chunk,
                 self.right_columns,
                 self.left_hash,
+                self.kernel_metrics,
             )
             total_join_ns = time.monotonic_ns() - start
 
-            (
-                hash_time,
-                probe_time,
-                bloom_time,
-                rows_hashed,
-                candidate_rows,
-                matched_rows,
-                materialize_time,
-                align_time,
-                rows_eliminated_by_bloom_filter,
-                _bloom_build_time,
-                _build_unique_keys,
-                _build_total_rows,
-                _build_avg_chain_length,
-            ) = get_last_draken_inner_join_metrics()
-            self.join_readings.time_inner_join_hash            += hash_time
-            self.join_readings.time_inner_join_probe           += probe_time
-            self.join_readings.time_inner_join_indices         += materialize_time
-            self.join_readings.time_bloom_filtering            += bloom_time
-            self.join_readings.rows_inner_join_hashed          += rows_hashed
-            self.join_readings.rows_inner_join_candidates      += candidate_rows
-            self.join_readings.rows_inner_join_matched         += matched_rows
-            self.join_readings.rows_eliminated_by_bloom_filter += rows_eliminated_by_bloom_filter
+            self.join_readings.time_inner_join_hash            += self.kernel_metrics.hash_time_ns
+            self.join_readings.time_inner_join_probe           += self.kernel_metrics.probe_time_ns
+            self.join_readings.time_inner_join_indices         += self.kernel_metrics.materialize_time_ns
+            self.join_readings.time_bloom_filtering            += self.kernel_metrics.bloom_filter_time_ns
+            self.join_readings.rows_inner_join_hashed          += self.kernel_metrics.rows_hashed
+            self.join_readings.rows_inner_join_candidates      += self.kernel_metrics.candidate_rows
+            self.join_readings.rows_inner_join_matched         += self.kernel_metrics.result_rows
+            self.join_readings.rows_eliminated_by_bloom_filter += self.kernel_metrics.rows_eliminated_by_bloom_filter
             self.join_readings.time_inner_join_total_kernel    += total_join_ns
-            self.join_readings.time_inner_join_align           += align_time
+            self.join_readings.time_inner_join_align           += self.kernel_metrics.align_time_ns
             if aligned is not None:
                 self.emit(aligned)
 
@@ -440,23 +440,6 @@ cdef extern from "carchar.hpp" namespace "opteryx::carchar":
         ) except +
 
 
-cdef long long NULL_INT64_SENTINEL = -9223372036854775808
-
-cdef public long long last_draken_inner_join_hash_time_ns = 0
-cdef public long long last_draken_inner_join_probe_time_ns = 0
-cdef public long long last_draken_inner_join_materialize_time_ns = 0
-cdef public long long last_draken_inner_join_align_time_ns = 0
-cdef public long long last_draken_inner_join_build_bloom_time_ns = 0
-cdef public long long last_draken_inner_join_bloom_filter_time_ns = 0
-cdef public Py_ssize_t last_draken_inner_join_rows_hashed = 0
-cdef public Py_ssize_t last_draken_inner_join_candidate_rows = 0
-cdef public Py_ssize_t last_draken_inner_join_result_rows = 0
-cdef public Py_ssize_t last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
-# Adaptive join statistics — Phase 1 (per docs/adaptive_join_statistics.md).
-cdef public Py_ssize_t last_draken_inner_join_build_unique_keys = 0
-cdef public Py_ssize_t last_draken_inner_join_build_total_rows = 0
-cdef public double last_draken_inner_join_build_avg_chain_length = 0.0
-
 # WP-13 — single-column shaped-key probe. The compressed (dict/constant) fast
 # path hashes the k unique key values once and probes each once, scattering each
 # probe result to all NON-NULL rows that share its code. Null keys are excluded
@@ -470,9 +453,6 @@ cdef public double last_draken_inner_join_build_avg_chain_length = 0.0
 # (CSR build over n rows) is not worth the saved probes, so we fall back to the
 # dense validity-based per-row path. Tunable via FEATURE_JOIN_KPROBE_MIN_RATIO.
 cdef double _WP13_KPROBE_MIN_RATIO = 2.0
-# Telemetry: 1 if the last probe used the compressed k-probe fast path, 0 if it
-# used the dense/validity per-row path (k-gated or genuinely dense).
-cdef public Py_ssize_t last_draken_inner_join_kprobe_used = 0
 
 
 cdef class DrakenCarcharJoinMap:
@@ -591,18 +571,6 @@ cdef inline void _shaped_build_rows_and_hashes(
                     valid_rows.push_back(i)
 
 
-cdef object _int32_array_from_vector(const vector[int64_t]& values):
-    cdef Py_ssize_t length = <Py_ssize_t> values.size()
-    cdef object out = array('i', [0]) * length
-    cdef int32_t[::1] out_view = out
-    cdef Py_ssize_t i
-
-    for i in range(length):
-        out_view[i] = <int32_t> values[i]
-
-    return out
-
-
 cdef inline int32_t[::1] _int32_view_from_vector(
     const vector[int64_t]& values,
     int32_t** buffer_out,
@@ -630,11 +598,8 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
     Morsel relation,
     list join_columns,
     double probe_load_factor=0.35,
+    InnerJoinKernelMetrics metrics=None,
 ):
-    global last_draken_inner_join_build_bloom_time_ns
-    global last_draken_inner_join_build_unique_keys
-    global last_draken_inner_join_build_total_rows
-    global last_draken_inner_join_build_avg_chain_length
     cdef DrakenCarcharJoinMap ht
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes
@@ -644,11 +609,13 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
     cdef uint64_t* hashes_ptr
     cdef Py_ssize_t hashes_len
 
+    if metrics is None:
+        metrics = InnerJoinKernelMetrics()
     ht = DrakenCarcharJoinMap(num_rows, probe_load_factor)
-    last_draken_inner_join_build_bloom_time_ns = 0
-    last_draken_inner_join_build_unique_keys = 0
-    last_draken_inner_join_build_total_rows = 0
-    last_draken_inner_join_build_avg_chain_length = 0.0
+    metrics.build_bloom_time_ns = 0
+    metrics.build_unique_keys = 0
+    metrics.build_total_rows = 0
+    metrics.build_avg_chain_length = 0.0
     if num_rows == 0:
         ht.seal()
         return ht
@@ -674,115 +641,13 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
             hashes_ptr = valid_hashes.data()
             hashes_len = <Py_ssize_t> valid_hashes.size()
             ht.bloom_filter = create_bloom_filter_from_hashes(<uint64_t[:hashes_len:1]>hashes_ptr)
-            last_draken_inner_join_build_bloom_time_ns = perf_counter_ns() - bloom_start
+            metrics.build_bloom_time_ns = perf_counter_ns() - bloom_start
 
     ht.seal()
-    last_draken_inner_join_build_unique_keys = <Py_ssize_t> ht.engine.unique_key_count()
-    last_draken_inner_join_build_total_rows = <Py_ssize_t> ht.engine.total_row_count()
-    last_draken_inner_join_build_avg_chain_length = ht.engine.average_chain_length()
+    metrics.build_unique_keys = <Py_ssize_t> ht.engine.unique_key_count()
+    metrics.build_total_rows = <Py_ssize_t> ht.engine.total_row_count()
+    metrics.build_avg_chain_length = ht.engine.average_chain_length()
     return ht
-
-
-cpdef tuple inner_join_carchar_morsel(
-    Morsel right_relation,
-    list join_columns,
-    DrakenCarcharJoinMap left_hash_table,
-):
-    global last_draken_inner_join_hash_time_ns
-    global last_draken_inner_join_probe_time_ns
-    global last_draken_inner_join_materialize_time_ns
-    global last_draken_inner_join_align_time_ns
-    global last_draken_inner_join_bloom_filter_time_ns
-    global last_draken_inner_join_rows_hashed
-    global last_draken_inner_join_candidate_rows
-    global last_draken_inner_join_result_rows
-    global last_draken_inner_join_rows_eliminated_by_bloom_filter
-
-    cdef Py_ssize_t num_rows = right_relation.num_rows
-    cdef uint64_t[::1] row_hashes
-    cdef vector[uint64_t] probe_hashes
-    cdef vector[int64_t] probe_rows
-    cdef pair[vector[int64_t], vector[int64_t]] matches
-    cdef object left_indices
-    cdef object right_indices
-    cdef long long t_start
-    cdef long long t_after_hash
-    cdef long long t_after_probe
-    cdef long long t_after_materialize
-    cdef long long bloom_start
-    cdef long long bloom_end
-    cdef BloomFilter bloom_filter
-
-    if num_rows == 0:
-        last_draken_inner_join_hash_time_ns = 0
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
-        last_draken_inner_join_bloom_filter_time_ns = 0
-        last_draken_inner_join_rows_hashed = 0
-        last_draken_inner_join_candidate_rows = 0
-        last_draken_inner_join_result_rows = 0
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
-        return array('i'), array('i')
-
-    t_start = perf_counter_ns()
-    row_hashes = right_relation.hash(join_columns)
-    t_after_hash = perf_counter_ns()
-
-    if left_hash_table.bloom_filter is not None:
-        bloom_filter = <BloomFilter>left_hash_table.bloom_filter
-        bloom_start = perf_counter_ns()
-        _append_bloom_filtered_rows_and_hashes(
-            row_hashes,
-            bloom_filter,
-            probe_hashes,
-            probe_rows,
-        )
-        bloom_end = perf_counter_ns()
-        last_draken_inner_join_bloom_filter_time_ns = bloom_end - bloom_start
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = (
-            num_rows - <Py_ssize_t>probe_rows.size()
-        )
-    else:
-        _append_valid_rows_and_hashes(
-            row_hashes,
-            probe_hashes,
-            probe_rows,
-        )
-        bloom_end = perf_counter_ns()
-        last_draken_inner_join_bloom_filter_time_ns = 0
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
-
-    if probe_rows.size() == 0:
-        last_draken_inner_join_hash_time_ns = t_after_hash - t_start
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
-        last_draken_inner_join_bloom_filter_time_ns = last_draken_inner_join_bloom_filter_time_ns
-        last_draken_inner_join_rows_hashed = num_rows
-        last_draken_inner_join_candidate_rows = 0
-        last_draken_inner_join_result_rows = 0
-        return array('i'), array('i')
-
-    matches = left_hash_table.engine.probe_join_indices(
-        &probe_hashes[0],
-        &probe_rows[0],
-        <size_t> probe_rows.size(),
-    )
-    t_after_probe = perf_counter_ns()
-    left_indices = _int32_array_from_vector(matches.first)
-    right_indices = _int32_array_from_vector(matches.second)
-    t_after_materialize = perf_counter_ns()
-
-    last_draken_inner_join_hash_time_ns = t_after_hash - t_start
-    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_end
-    last_draken_inner_join_materialize_time_ns = t_after_materialize - t_after_probe
-    last_draken_inner_join_align_time_ns = 0
-    last_draken_inner_join_rows_hashed = num_rows
-    last_draken_inner_join_candidate_rows = probe_rows.size()
-    last_draken_inner_join_result_rows = matches.first.size()
-
-    return left_indices, right_indices
 
 
 cdef inline object _materialize_aligned(
@@ -790,11 +655,10 @@ cdef inline object _materialize_aligned(
     Morsel right_relation,
     vector[int64_t]& left_rows,
     vector[int64_t]& right_rows,
+    InnerJoinKernelMetrics metrics,
 ):
     """Convert the (build_row, probe_row) result vectors to int32 views and
-    align. Sets materialize/align timing globals. Returns None on empty."""
-    global last_draken_inner_join_materialize_time_ns
-    global last_draken_inner_join_align_time_ns
+    align. Sets materialize/align timings on `metrics`. Returns None on empty."""
     cdef int32_t* left_indices_ptr = NULL
     cdef int32_t* right_indices_ptr = NULL
     cdef int32_t[::1] left_indices_view
@@ -802,14 +666,14 @@ cdef inline object _materialize_aligned(
     cdef long long t0
     cdef long long t_before_align = 0
     if left_rows.size() == 0:
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
+        metrics.materialize_time_ns = 0
+        metrics.align_time_ns = 0
         return None
     t0 = perf_counter_ns()
     try:
         left_indices_view = _int32_view_from_vector(left_rows, &left_indices_ptr)
         right_indices_view = _int32_view_from_vector(right_rows, &right_indices_ptr)
-        last_draken_inner_join_materialize_time_ns = perf_counter_ns() - t0
+        metrics.materialize_time_ns = perf_counter_ns() - t0
         t_before_align = perf_counter_ns()
         return align_tables(left_relation, right_relation,
                             left_indices_view, right_indices_view)
@@ -819,7 +683,7 @@ cdef inline object _materialize_aligned(
         if right_indices_ptr != NULL:
             PyMem_Free(right_indices_ptr)
         if t_before_align != 0:
-            last_draken_inner_join_align_time_ns = perf_counter_ns() - t_before_align
+            metrics.align_time_ns = perf_counter_ns() - t_before_align
 
 
 cdef object _probe_dense_validity(
@@ -830,18 +694,11 @@ cdef object _probe_dense_validity(
     uint8_t* validity,
     Py_ssize_t num_rows,
     long long hash_ns,
+    InnerJoinKernelMetrics metrics,
 ):
     """Single-column DENSE (or k-gated) probe. khashes is one-per-row; null rows
     are excluded by KEY COLUMN validity (fixes the NULL=NULL P0 for dense keys).
     Reuses the engine's per-row probe_join_indices unchanged."""
-    global last_draken_inner_join_hash_time_ns
-    global last_draken_inner_join_probe_time_ns
-    global last_draken_inner_join_bloom_filter_time_ns
-    global last_draken_inner_join_rows_hashed
-    global last_draken_inner_join_candidate_rows
-    global last_draken_inner_join_result_rows
-    global last_draken_inner_join_rows_eliminated_by_bloom_filter
-
     cdef DrakenVector* huv = hv.unified()
     cdef const uint64_t* khashes = <const uint64_t*>huv.data
     cdef const uint32_t* codes = huv.selection
@@ -876,32 +733,32 @@ cdef object _probe_dense_validity(
                 probe_rows.push_back(i)
                 probe_hashes.push_back(khashes[codes[i]])
 
-    last_draken_inner_join_hash_time_ns = hash_ns
-    last_draken_inner_join_bloom_filter_time_ns = (
+    metrics.hash_time_ns = hash_ns
+    metrics.bloom_filter_time_ns = (
         perf_counter_ns() - bloom_start if has_bloom else 0
     )
-    last_draken_inner_join_rows_hashed = num_rows
-    last_draken_inner_join_candidate_rows = <Py_ssize_t>probe_rows.size()
-    last_draken_inner_join_rows_eliminated_by_bloom_filter = (
+    metrics.rows_hashed = num_rows
+    metrics.candidate_rows = <Py_ssize_t>probe_rows.size()
+    metrics.rows_eliminated_by_bloom_filter = (
         num_rows - <Py_ssize_t>probe_rows.size() if has_bloom else 0
     )
 
     if probe_rows.size() == 0:
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_result_rows = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
+        metrics.probe_time_ns = 0
+        metrics.result_rows = 0
+        metrics.materialize_time_ns = 0
+        metrics.align_time_ns = 0
         return None
 
     bloom_start = perf_counter_ns()
     matches = left_hash_table.engine.probe_join_indices(
         &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size())
     t_after_probe = perf_counter_ns()
-    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_start
-    last_draken_inner_join_result_rows = <Py_ssize_t>matches.first.size()
+    metrics.probe_time_ns = t_after_probe - bloom_start
+    metrics.result_rows = <Py_ssize_t>matches.first.size()
 
     return _materialize_aligned(left_relation, right_relation,
-                                matches.first, matches.second)
+                                matches.first, matches.second, metrics)
 
 
 cdef object _probe_compressed_scatter(
@@ -912,6 +769,7 @@ cdef object _probe_compressed_scatter(
     uint8_t* validity,
     Py_ssize_t num_rows,
     long long hash_ns,
+    InnerJoinKernelMetrics metrics,
 ):
     """Single-column COMPRESSED probe — the WP-13 win. Probe each of the k unique
     key hashes ONCE (probe_join_indices over the unique hashes paired with synthetic
@@ -919,14 +777,6 @@ cdef object _probe_compressed_scatter(
     row that carries that code via a CSR index. Null keys are excluded by KEY
     COLUMN validity; the baked null slot is never probed (no non-null row maps to
     it, so its CSR count is 0)."""
-    global last_draken_inner_join_hash_time_ns
-    global last_draken_inner_join_probe_time_ns
-    global last_draken_inner_join_bloom_filter_time_ns
-    global last_draken_inner_join_rows_hashed
-    global last_draken_inner_join_candidate_rows
-    global last_draken_inner_join_result_rows
-    global last_draken_inner_join_rows_eliminated_by_bloom_filter
-
     cdef DrakenVector* huv = hv.unified()
     cdef const uint64_t* khashes = <const uint64_t*>huv.data
     cdef const uint32_t* codes = huv.selection
@@ -991,31 +841,31 @@ cdef object _probe_compressed_scatter(
                 uniq_hashes.push_back(h)
                 uniq_codeids.push_back(cc)
 
-    last_draken_inner_join_hash_time_ns = hash_ns
-    last_draken_inner_join_bloom_filter_time_ns = (
+    metrics.hash_time_ns = hash_ns
+    metrics.bloom_filter_time_ns = (
         perf_counter_ns() - bloom_start if has_bloom else 0
     )
-    last_draken_inner_join_rows_hashed = num_rows
-    last_draken_inner_join_candidate_rows = <Py_ssize_t>uniq_hashes.size()
-    last_draken_inner_join_rows_eliminated_by_bloom_filter = rows_elim
+    metrics.rows_hashed = num_rows
+    metrics.candidate_rows = <Py_ssize_t>uniq_hashes.size()
+    metrics.rows_eliminated_by_bloom_filter = rows_elim
 
     if uniq_hashes.size() == 0:
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_result_rows = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
+        metrics.probe_time_ns = 0
+        metrics.result_rows = 0
+        metrics.materialize_time_ns = 0
+        metrics.align_time_ns = 0
         return None
 
     bloom_start = perf_counter_ns()
     matches = left_hash_table.engine.probe_join_indices(
         &uniq_hashes[0], &uniq_codeids[0], <size_t>uniq_hashes.size())
     t_after_probe = perf_counter_ns()
-    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_start
+    metrics.probe_time_ns = t_after_probe - bloom_start
 
     if matches.first.size() == 0:
-        last_draken_inner_join_result_rows = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
+        metrics.result_rows = 0
+        metrics.materialize_time_ns = 0
+        metrics.align_time_ns = 0
         return None
 
     # 5. Scatter: each unique match expands to all rows sharing its code.
@@ -1027,8 +877,8 @@ cdef object _probe_compressed_scatter(
                 out_left.push_back(b)
                 out_right.push_back(<int64_t>rows_by_code[j])
 
-    last_draken_inner_join_result_rows = <Py_ssize_t>out_left.size()
-    return _materialize_aligned(left_relation, right_relation, out_left, out_right)
+    metrics.result_rows = <Py_ssize_t>out_left.size()
+    return _materialize_aligned(left_relation, right_relation, out_left, out_right, metrics)
 
 
 cdef object _probe_multicol_legacy(
@@ -1037,17 +887,10 @@ cdef object _probe_multicol_legacy(
     list join_columns,
     DrakenCarcharJoinMap left_hash_table,
     Py_ssize_t num_rows,
+    InnerJoinKernelMetrics metrics,
 ):
     """Multi-column composite key — OUT OF SCOPE for WP-13. Legacy per-row hash()
     probe; null handling unchanged (tracked separately)."""
-    global last_draken_inner_join_hash_time_ns
-    global last_draken_inner_join_probe_time_ns
-    global last_draken_inner_join_bloom_filter_time_ns
-    global last_draken_inner_join_rows_hashed
-    global last_draken_inner_join_candidate_rows
-    global last_draken_inner_join_result_rows
-    global last_draken_inner_join_rows_eliminated_by_bloom_filter
-
     cdef uint64_t[::1] row_hashes
     cdef vector[uint64_t] probe_hashes
     cdef vector[int64_t] probe_rows
@@ -1067,34 +910,34 @@ cdef object _probe_multicol_legacy(
         _append_bloom_filtered_rows_and_hashes(
             row_hashes, bloom_filter, probe_hashes, probe_rows)
         bloom_end = perf_counter_ns()
-        last_draken_inner_join_bloom_filter_time_ns = bloom_end - t_after_hash
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = (
+        metrics.bloom_filter_time_ns = bloom_end - t_after_hash
+        metrics.rows_eliminated_by_bloom_filter = (
             num_rows - <Py_ssize_t>probe_rows.size())
     else:
         _append_valid_rows_and_hashes(row_hashes, probe_hashes, probe_rows)
         bloom_end = perf_counter_ns()
-        last_draken_inner_join_bloom_filter_time_ns = 0
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
+        metrics.bloom_filter_time_ns = 0
+        metrics.rows_eliminated_by_bloom_filter = 0
 
-    last_draken_inner_join_hash_time_ns = t_after_hash - t_start
-    last_draken_inner_join_rows_hashed = num_rows
-    last_draken_inner_join_candidate_rows = <Py_ssize_t>probe_rows.size()
+    metrics.hash_time_ns = t_after_hash - t_start
+    metrics.rows_hashed = num_rows
+    metrics.candidate_rows = <Py_ssize_t>probe_rows.size()
 
     if probe_rows.size() == 0:
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_result_rows = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
+        metrics.probe_time_ns = 0
+        metrics.result_rows = 0
+        metrics.materialize_time_ns = 0
+        metrics.align_time_ns = 0
         return None
 
     matches = left_hash_table.engine.probe_join_indices(
         &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size())
     t_after_probe = perf_counter_ns()
-    last_draken_inner_join_probe_time_ns = t_after_probe - bloom_end
-    last_draken_inner_join_result_rows = <Py_ssize_t>matches.first.size()
+    metrics.probe_time_ns = t_after_probe - bloom_end
+    metrics.result_rows = <Py_ssize_t>matches.first.size()
 
     return _materialize_aligned(left_relation, right_relation,
-                                matches.first, matches.second)
+                                matches.first, matches.second, metrics)
 
 
 cpdef object inner_join_carchar_morsel_aligned(
@@ -1102,18 +945,8 @@ cpdef object inner_join_carchar_morsel_aligned(
     Morsel right_relation,
     list join_columns,
     DrakenCarcharJoinMap left_hash_table,
+    InnerJoinKernelMetrics metrics=None,
 ):
-    global last_draken_inner_join_hash_time_ns
-    global last_draken_inner_join_probe_time_ns
-    global last_draken_inner_join_materialize_time_ns
-    global last_draken_inner_join_align_time_ns
-    global last_draken_inner_join_bloom_filter_time_ns
-    global last_draken_inner_join_rows_hashed
-    global last_draken_inner_join_candidate_rows
-    global last_draken_inner_join_result_rows
-    global last_draken_inner_join_rows_eliminated_by_bloom_filter
-    global last_draken_inner_join_kprobe_used
-
     cdef Py_ssize_t num_rows = right_relation.num_rows
     cdef Vector hv
     cdef DrakenVector* huv
@@ -1122,23 +955,27 @@ cpdef object inner_join_carchar_morsel_aligned(
     cdef long long t_start
     cdef long long hash_ns
 
+    if metrics is None:
+        metrics = InnerJoinKernelMetrics()
+
     if num_rows == 0:
-        last_draken_inner_join_hash_time_ns = 0
-        last_draken_inner_join_probe_time_ns = 0
-        last_draken_inner_join_materialize_time_ns = 0
-        last_draken_inner_join_align_time_ns = 0
-        last_draken_inner_join_bloom_filter_time_ns = 0
-        last_draken_inner_join_rows_hashed = 0
-        last_draken_inner_join_candidate_rows = 0
-        last_draken_inner_join_result_rows = 0
-        last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
-        last_draken_inner_join_kprobe_used = 0
+        metrics.hash_time_ns = 0
+        metrics.probe_time_ns = 0
+        metrics.materialize_time_ns = 0
+        metrics.align_time_ns = 0
+        metrics.bloom_filter_time_ns = 0
+        metrics.rows_hashed = 0
+        metrics.candidate_rows = 0
+        metrics.result_rows = 0
+        metrics.rows_eliminated_by_bloom_filter = 0
+        metrics.kprobe_used = 0
         return None
 
     if len(join_columns) != 1:
-        last_draken_inner_join_kprobe_used = 0
+        metrics.kprobe_used = 0
         return _probe_multicol_legacy(
-            left_relation, right_relation, join_columns, left_hash_table, num_rows)
+            left_relation, right_relation, join_columns, left_hash_table, num_rows,
+            metrics)
 
     # Single-column: shaped keying hash once, then choose the compressed k-probe
     # fast path or the dense validity path. Both exclude null keys by KEY COLUMN
@@ -1153,14 +990,14 @@ cpdef object inner_join_carchar_morsel_aligned(
     # k-gate: compressed AND compresses by at least _WP13_KPROBE_MIN_RATIO.
     if (draken_is_compressed(huv) != 0
             and (<double>huv.data_length) * _WP13_KPROBE_MIN_RATIO <= <double>num_rows):
-        last_draken_inner_join_kprobe_used = 1
+        metrics.kprobe_used = 1
         return _probe_compressed_scatter(
             left_relation, right_relation, left_hash_table,
-            hv, validity, num_rows, hash_ns)
-    last_draken_inner_join_kprobe_used = 0
+            hv, validity, num_rows, hash_ns, metrics)
+    metrics.kprobe_used = 0
     return _probe_dense_validity(
         left_relation, right_relation, left_hash_table,
-        hv, validity, num_rows, hash_ns)
+        hv, validity, num_rows, hash_ns, metrics)
 
 
 cpdef void set_kprobe_min_ratio(double ratio):
@@ -1173,21 +1010,3 @@ cpdef void set_kprobe_min_ratio(double ratio):
 
 cpdef double get_kprobe_min_ratio():
     return _WP13_KPROBE_MIN_RATIO
-
-
-cpdef tuple get_last_draken_inner_join_metrics():
-    return (
-        last_draken_inner_join_hash_time_ns,
-        last_draken_inner_join_probe_time_ns,
-        last_draken_inner_join_bloom_filter_time_ns,
-        last_draken_inner_join_rows_hashed,
-        last_draken_inner_join_candidate_rows,
-        last_draken_inner_join_result_rows,
-        last_draken_inner_join_materialize_time_ns,
-        last_draken_inner_join_align_time_ns,
-        last_draken_inner_join_rows_eliminated_by_bloom_filter,
-        last_draken_inner_join_build_bloom_time_ns,
-        last_draken_inner_join_build_unique_keys,
-        last_draken_inner_join_build_total_rows,
-        last_draken_inner_join_build_avg_chain_length,
-    )

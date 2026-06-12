@@ -240,6 +240,7 @@ cdef class AsofJoinNode(JoinNode):
 
     cpdef void push_left(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
+            self._build_complete = True
             if self.left_morsels:
                 self.left_morsel = Morsel.combine(self.left_morsels)
                 self.left_morsels = []
@@ -250,6 +251,7 @@ cdef class AsofJoinNode(JoinNode):
     cpdef void push_right(self, Morsel morsel) except *:
         cdef Morsel right_morsel, result
 
+        self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             if self.left_morsel is None or self.left_morsel.num_rows == 0:
                 self.emit(_EOS_SENTINEL)

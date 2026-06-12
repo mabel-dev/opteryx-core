@@ -16,11 +16,102 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+namespace {
+
+// ── WP-5 retry / per-request-timeout configuration (env, read once) ──────────
+long http_timeout_floor_ms() {
+    static long v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_TIMEOUT_FLOOR_MS");
+        return e ? std::atol(e) : 10000L;   // 10s floor
+    }();
+    return v;
+}
+double http_min_bw_bytes_per_s() {
+    static double v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_MIN_BW_MBPS");
+        double mbps = e ? std::atof(e) : 20.0;   // assume ≥20 Mbps/stream
+        return mbps * 1.0e6 / 8.0;
+    }();
+    return v;
+}
+int http_max_retries() {
+    static int v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_MAX_RETRIES");
+        return e ? std::atoi(e) : 2;
+    }();
+    return v;
+}
+
+std::atomic<uint64_t> g_http_retries{0};
+
+// A CURL transport result is retryable if it is a transient connection/timeout/
+// partial-transfer condition (vs a definitive protocol/SSL error).
+bool curl_result_retryable(CURLcode c) {
+    switch (c) {
+        case CURLE_OPERATION_TIMEDOUT:
+        case CURLE_COULDNT_CONNECT:
+        case CURLE_COULDNT_RESOLVE_HOST:
+        case CURLE_GOT_NOTHING:
+        case CURLE_RECV_ERROR:
+        case CURLE_SEND_ERROR:
+        case CURLE_PARTIAL_FILE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// HTTP status is retryable for 5xx (server-side transient) and 429 (rate limit);
+// 4xx (except 429) is a hard client error — never retried.
+bool http_status_retryable(long code) {
+    return code >= 500 || code == 429;
+}
+
+// Derive a per-request timeout from the Range header's byte span: a small chunk
+// that stalls should time out in ~floor seconds, not the 60s client default, so
+// it can be retried promptly. Returns the client default when no Range present.
+long request_timeout_ms(const std::map<std::string, std::string>& headers, long fallback_ms) {
+    auto it = headers.find("Range");
+    if (it == headers.end()) return fallback_ms;
+    // "bytes=START-END"
+    const std::string& r = it->second;
+    size_t eq = r.find('=');
+    size_t dash = r.find('-', eq == std::string::npos ? 0 : eq + 1);
+    if (eq == std::string::npos || dash == std::string::npos) return fallback_ms;
+    long start = std::atol(r.c_str() + eq + 1);
+    long end   = std::atol(r.c_str() + dash + 1);
+    long size  = (end >= start) ? (end - start + 1) : 0;
+    double bw  = http_min_bw_bytes_per_s();
+    long derived = bw > 0 ? static_cast<long>(size * 1000.0 / bw) : fallback_ms;
+    long floor   = http_timeout_floor_ms();
+    return std::max(floor, derived);
+}
+
+// Backoff with full jitter: random in [0, base * 2^attempt], capped.
+unsigned backoff_ms(int attempt) {
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    unsigned base = 50u << std::min(attempt, 6);    // 50,100,200,... capped
+    if (base > 2000u) base = 2000u;
+    std::uniform_int_distribution<unsigned> d(0, base);
+    return d(rng);
+}
+
+}  // namespace
+
+uint64_t HttpClient::total_retries() {
+    return g_http_retries.load(std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -292,134 +383,153 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
     const size_t n = requests.size();
     if (n == 0) return {};
 
-    // Per-request context: response buffer, header list, curl result
+    // Per-request context: response buffer + last curl result/status.
     struct RequestCtx {
         ResponseBuffer buf;
-        curl_slist*    hlist    = nullptr;
         CURLcode       res      = CURLE_OK;
         long           http_code = 0;
     };
-
     std::vector<RequestCtx> ctx(n);
-    std::vector<CURL*>      handles(n, nullptr);
 
-    CURLM* multi = curl_multi_init();
-    if (!multi) throw std::runtime_error("get_many: curl_multi_init() failed");
+    // Fetch a subset of requests (by index) concurrently via one local CURLM,
+    // harvesting result + status into ctx[idx]. Resets each buffer first so a
+    // retry does not append to a partial body. Throws only on CURLM-setup
+    // failures (not per-request transport errors — those land in ctx).
+    auto fetch = [&](const std::vector<size_t>& idxs) {
+        std::vector<CURL*>       handles(idxs.size(), nullptr);
+        std::vector<curl_slist*> hlists(idxs.size(), nullptr);
 
-    // Limit per-host concurrent connections so we don't flood a single origin.
-    // max_connections_ is the value passed to the HttpClient constructor.
-    curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, (long)max_connections_);
-    curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
+        CURLM* multi = curl_multi_init();
+        if (!multi) throw std::runtime_error("get_many: curl_multi_init() failed");
+        curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, (long)max_connections_);
+        curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
 
-    // Cleanup helper: removes all handles from multi, frees easy handles and hlists.
-    // Does NOT touch ctx[i].buf.body — those are still needed after cleanup.
-    auto cleanup = [&]() {
-        for (size_t i = 0; i < n; ++i) {
-            if (handles[i]) {
-                curl_multi_remove_handle(multi, handles[i]);
-                curl_easy_cleanup(handles[i]);
-                handles[i] = nullptr;
+        auto cleanup = [&]() {
+            for (size_t j = 0; j < idxs.size(); ++j) {
+                if (handles[j]) {
+                    curl_multi_remove_handle(multi, handles[j]);
+                    curl_easy_cleanup(handles[j]);
+                    handles[j] = nullptr;
+                }
+                if (hlists[j]) { curl_slist_free_all(hlists[j]); hlists[j] = nullptr; }
             }
-            if (ctx[i].hlist) {
-                curl_slist_free_all(ctx[i].hlist);
-                ctx[i].hlist = nullptr;
+            curl_multi_cleanup(multi);
+        };
+
+        for (size_t j = 0; j < idxs.size(); ++j) {
+            const size_t i = idxs[j];
+            ctx[i].buf.body.clear();   // fresh body for this (re)attempt
+            const auto& req_url  = requests[i].first;
+            const auto& req_hdrs = requests[i].second;
+
+            CURL* easy = curl_easy_init();
+            if (!easy) { cleanup(); throw std::runtime_error("get_many: curl_easy_init() failed"); }
+            handles[j] = easy;
+
+            curl_easy_setopt(easy, CURLOPT_URL,            req_url.c_str());
+            curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
+            // Per-request timeout derived from the Range size (WP-5): a stalled
+            // small request times out near the floor, not the 60s client default.
+            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      request_timeout_ms(req_hdrs, timeout_ms_));
+            curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
+            curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
+            curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
+            curl_easy_setopt(easy, CURLOPT_WRITEDATA,       &ctx[i].buf);
+            curl_easy_setopt(easy, CURLOPT_PRIVATE,         reinterpret_cast<void*>(i));
+            configure_ssl(easy);
+            // No CURLOPT_SHARE: the local CURLM reuses connections within the
+            // batch; CURLSH from multi+other-thread-get() could deadlock.
+
+            for (const auto& kv : req_hdrs) {
+                std::string line = kv.first + ": " + kv.second;
+                hlists[j] = curl_slist_append(hlists[j], line.c_str());
+            }
+            if (hlists[j]) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlists[j]);
+
+            CURLMcode mc = curl_multi_add_handle(multi, easy);
+            if (mc != CURLM_OK) {
+                cleanup();
+                throw std::runtime_error(
+                    std::string("get_many: curl_multi_add_handle: ") + curl_multi_strerror(mc));
             }
         }
-        curl_multi_cleanup(multi);
+
+        int running = static_cast<int>(idxs.size());
+        while (running > 0) {
+            CURLMcode mc = curl_multi_perform(multi, &running);
+            if (mc != CURLM_OK) {
+                cleanup();
+                throw std::runtime_error(
+                    std::string("get_many: curl_multi_perform: ") + curl_multi_strerror(mc));
+            }
+            if (running > 0) curl_multi_wait(multi, nullptr, 0, 100, nullptr);
+        }
+
+        int msgs_left = 0;
+        CURLMsg* msg;
+        while ((msg = curl_multi_info_read(multi, &msgs_left)) != nullptr) {
+            if (msg->msg == CURLMSG_DONE) {
+                void* priv = nullptr;
+                curl_easy_getinfo(msg->easy_handle, CURLINFO_PRIVATE, &priv);
+                size_t i = reinterpret_cast<size_t>(priv);
+                ctx[i].res = msg->data.result;
+                ctx[i].http_code = 0;
+                curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &ctx[i].http_code);
+            }
+        }
+        cleanup();
     };
 
-    // Set up all easy handles and add them to the multi handle
-    for (size_t i = 0; i < n; ++i) {
-        const auto& req_url  = requests[i].first;
-        const auto& req_hdrs = requests[i].second;
+    // First attempt: all requests. Then retry only the transient failures.
+    std::vector<size_t> pending(n);
+    for (size_t i = 0; i < n; ++i) pending[i] = i;
 
-        CURL* easy = curl_easy_init();
-        if (!easy) {
-            cleanup();
-            throw std::runtime_error("get_many: curl_easy_init() failed");
-        }
-        handles[i] = easy;
+    const int max_retries = http_max_retries();
+    for (int attempt = 0; ; ++attempt) {
+        fetch(pending);
 
-        curl_easy_setopt(easy, CURLOPT_URL,            req_url.c_str());
-        curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      timeout_ms_);
-        curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
-        curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
-        curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
-        curl_easy_setopt(easy, CURLOPT_WRITEDATA,       &ctx[i].buf);
-        // Tag with index so we can map completion messages back to ctx[i]
-        curl_easy_setopt(easy, CURLOPT_PRIVATE,         reinterpret_cast<void*>(i));
-        configure_ssl(easy);
-        // Do NOT set CURLOPT_SHARE here. The local CURLM already reuses connections
-        // within this batch (all easy handles share the multi's connection pool).
-        // Using CURLSH from inside curl_multi_perform() on one thread while other
-        // threads are doing the same via get() would contend on the CURLSH mutexes
-        // and could deadlock if libcurl acquires two data-type locks on the same thread.
+        std::vector<size_t> retry_next;
+        for (size_t i : pending) {
+            bool curl_ok = (ctx[i].res == CURLE_OK);
+            bool http_ok = curl_ok && ctx[i].http_code < 400;
+            if (http_ok) continue;
 
-        // Build per-request header list
-        for (const auto& kv : req_hdrs) {
-            std::string line = kv.first + ": " + kv.second;
-            ctx[i].hlist = curl_slist_append(ctx[i].hlist, line.c_str());
-        }
-        if (ctx[i].hlist) {
-            curl_easy_setopt(easy, CURLOPT_HTTPHEADER, ctx[i].hlist);
+            bool retryable = curl_ok ? http_status_retryable(ctx[i].http_code)
+                                     : curl_result_retryable(ctx[i].res);
+            if (!retryable) {
+                // Hard failure (4xx or definitive transport error) — fail now.
+                if (!curl_ok)
+                    throw HttpError(std::string("get_many: CURL error: ") +
+                        curl_easy_strerror(ctx[i].res) + " url=" + requests[i].first,
+                        false, 0);
+                throw HttpError(std::string("get_many: HTTP ") +
+                    std::to_string(ctx[i].http_code) + ": " + requests[i].first,
+                    false, ctx[i].http_code);
+            }
+            retry_next.push_back(i);
         }
 
-        CURLMcode mc = curl_multi_add_handle(multi, easy);
-        if (mc != CURLM_OK) {
-            cleanup();
-            throw std::runtime_error(
-                std::string("get_many: curl_multi_add_handle: ") + curl_multi_strerror(mc));
+        if (retry_next.empty()) break;   // everything succeeded
+
+        if (attempt >= max_retries) {
+            size_t i = retry_next.front();
+            std::string cause = (ctx[i].res != CURLE_OK)
+                ? std::string("CURL error: ") + curl_easy_strerror(ctx[i].res)
+                : std::string("HTTP ") + std::to_string(ctx[i].http_code);
+            throw HttpError(
+                "get_many: exhausted " + std::to_string(max_retries) + " retries (" +
+                cause + ") url=" + requests[i].first + " range=" +
+                [&]() { auto it = requests[i].second.find("Range");
+                        return it == requests[i].second.end() ? std::string("full") : it->second; }(),
+                true, ctx[i].http_code);
         }
+
+        g_http_retries.fetch_add(retry_next.size(), std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
+        pending.swap(retry_next);
     }
 
-    // Run the CURLM event loop until all transfers complete
-    int running = static_cast<int>(n);
-    while (running > 0) {
-        CURLMcode mc = curl_multi_perform(multi, &running);
-        if (mc != CURLM_OK) {
-            cleanup();
-            throw std::runtime_error(
-                std::string("get_many: curl_multi_perform: ") + curl_multi_strerror(mc));
-        }
-        if (running > 0) {
-            curl_multi_wait(multi, nullptr, 0, 100, nullptr);
-        }
-    }
-
-    // Harvest completion messages — must happen before curl_multi_cleanup()
-    int msgs_left = 0;
-    CURLMsg* msg;
-    while ((msg = curl_multi_info_read(multi, &msgs_left)) != nullptr) {
-        if (msg->msg == CURLMSG_DONE) {
-            CURL* easy = msg->easy_handle;
-            void* priv = nullptr;
-            curl_easy_getinfo(easy, CURLINFO_PRIVATE, &priv);
-            size_t idx = reinterpret_cast<size_t>(priv);
-            ctx[idx].res = msg->data.result;
-            curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &ctx[idx].http_code);
-        }
-    }
-
-    // Free all CURL handles and the multi handle.
-    // ctx[i].buf.body vectors remain valid — they're owned by ctx, not handles.
-    cleanup();
-
-    // Check for errors and move response bodies into the result vector
     std::vector<std::vector<uint8_t>> results(n);
-    for (size_t i = 0; i < n; ++i) {
-        if (ctx[i].res != CURLE_OK) {
-            throw std::runtime_error(
-                std::string("get_many[") + std::to_string(i) + "]: CURL error: " +
-                curl_easy_strerror(ctx[i].res) + " url=" + requests[i].first);
-        }
-        if (ctx[i].http_code >= 400) {
-            throw std::runtime_error(
-                std::string("get_many[") + std::to_string(i) + "]: HTTP " +
-                std::to_string(ctx[i].http_code) + ": " + requests[i].first);
-        }
-        results[i] = std::move(ctx[i].buf.body);
-    }
-
+    for (size_t i = 0; i < n; ++i) results[i] = std::move(ctx[i].buf.body);
     return results;
 }

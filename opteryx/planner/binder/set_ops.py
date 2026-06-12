@@ -34,16 +34,22 @@ def _columns_for_side(
     and the projected literals end up under a shared `$project` key that gets
     merged across branches. In that case fall back to walking the plan to find
     the branch's direct Project child of the set-op node and use its columns.
+
+    `relation_names` can also over-report: `get_subplan_schemas` walks down to
+    every scan in the branch, but a nested set operation collapses its legs into
+    a single surviving relation at bind time (the others are popped). When that
+    happens, some names resolve and some don't — the resolvable schemas already
+    hold the merged columns, so trust them and ignore the collapsed siblings.
+    Only fall back to the graph walk when *nothing* resolves.
     """
     columns = []
-    missing = False
+    resolved_any = False
     for rel_name in relation_names:
         schema = context.schemas.get(rel_name)
         if schema is not None:
             columns.extend(schema.columns)
-        else:
-            missing = True
-    if not missing:
+            resolved_any = True
+    if resolved_any:
         return columns
 
     graph = getattr(self, "graph", None)
@@ -75,13 +81,28 @@ def _columns_for_side(
             for upstream_nid, _, _ in graph.ingoing_edges(cur):
                 stack.append(upstream_nid)
         if matched:
-            child_node = graph[child_nid]
-            branch_columns = []
-            for col in (child_node.columns or []):
-                schema_column = getattr(col, "schema_column", None)
-                if schema_column is not None:
-                    branch_columns.append(schema_column)
-            return branch_columns
+            # The branch's output columns live on its top node — usually the
+            # direct Project child. With chained set operations the direct child
+            # is a column-less wrapper (e.g. DISTINCT over a nested set op), so
+            # descend through column-less nodes to the first node that carries
+            # schema columns and use those.
+            descent = [child_nid]
+            descent_seen = set()
+            while descent:
+                cur = descent.pop(0)
+                if cur in descent_seen:
+                    continue
+                descent_seen.add(cur)
+                cur_node = graph[cur]
+                branch_columns = []
+                for col in (cur_node.columns or []):
+                    schema_column = getattr(col, "schema_column", None)
+                    if schema_column is not None:
+                        branch_columns.append(schema_column)
+                if branch_columns:
+                    return branch_columns
+                for upstream_nid, _, _ in graph.ingoing_edges(cur):
+                    descent.append(upstream_nid)
 
     raise KeyError(relation_names)
 

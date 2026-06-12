@@ -139,6 +139,20 @@ cdef class BasePlanNode:
 
     The fast path (push → _push_impl → emit → downstream.push) is all typed
     Cython calls dispatched via the C-level vtable.
+
+    Morsel ownership contract
+    -------------------------
+    A pushed morsel is handed to the receiver: once an operator calls
+    `emit(morsel)` (or pushes downstream), it transfers ownership and MUST NOT
+    retain or mutate that morsel afterwards. Symmetrically, a receiver may
+    consume its input however it likes — including in-place mutation (e.g.
+    Distinct's `_take_inplace`) — because no upstream operator will read the
+    morsel again. Morsels are not shared between consumers in the push
+    pipeline (single-output topology), so this exclusive-ownership rule holds
+    without copying. Operators that need to keep input across calls (blocking
+    operators buffering for a sort/aggregate/join build) take ownership by
+    appending to their own state and never emitting those morsels until
+    finalisation.
     """
     # Class-level defaults — operators override via the registry in __init__.
     # Declared as `public bint` instance fields so subclasses' __init__ may set
@@ -151,6 +165,13 @@ cdef class BasePlanNode:
     # Pipeline wiring — set by pipeline_compiler before execution starts.
     cdef BasePlanNode _downstream
     cdef PipelineContext _ctx
+    # Number of upstream input chains that will each push exactly one EOS into
+    # this operator. The pipeline compiler stamps this from the incoming-edge
+    # count; defaults to 1 (single-input operators). Multi-input operators that
+    # gate their downstream EOS on all inputs closing (e.g. Union) count down
+    # against this instead of hardcoding the number of legs.
+    cdef int _expected_input_closes
+    cdef int _seen_input_closes
 
     # Hot-path telemetry counters (typed; no Python attr writes per morsel).
     cdef public uint64_t execution_time      # ns; cumulative
@@ -192,6 +213,8 @@ cdef class BasePlanNode:
         self._trace_capacity = 0
         self._trace_count = 0
         self._morsel_iter = None
+        self._expected_input_closes = 1
+        self._seen_input_closes = 0
 
     def __dealloc__(self):
         if self._trace_buf is not NULL:
@@ -363,12 +386,41 @@ cdef class BasePlanNode:
             self._morsel_iter = iter(self.read_morsels())
         return next(self._morsel_iter, None)
 
+    cpdef void close_source(self) except *:
+        """Close the lazily-created source iterator backing `next_morsel`,
+        running its finally-block cleanup (e.g. the rugo C++ IO pipeline
+        shutdown in `iter_row_groups_ipc`). Called by `drive_scan` on every
+        exit path — normal exhaustion, early termination, exception, or caller
+        abandonment — so source-side resources never leak. Safe to call more
+        than once and on operators that never created an iterator (state-machine
+        source overrides leave `_morsel_iter` None and clean up themselves)."""
+        cdef object it = self._morsel_iter
+        if it is None:
+            return
+        self._morsel_iter = None
+        close = getattr(it, "close", None)
+        if close is not None:
+            close()
+
     # ---- Pipeline wiring (called by pipeline_compiler) --------------------------
     cpdef void set_downstream(self, BasePlanNode node) except *:
         self._downstream = node
 
     cpdef void set_context(self, PipelineContext ctx) except *:
         self._ctx = ctx
+
+    cpdef void set_expected_input_closes(self, int n) except *:
+        """Tell this operator how many upstream input chains will each push one
+        EOS into it. Stamped by the pipeline compiler from the incoming-edge
+        count. Operators that gate downstream EOS on all inputs closing use
+        `_record_input_close()` to count down against this."""
+        self._expected_input_closes = n
+
+    cdef inline bint _record_input_close(self) except -1:
+        """Record one upstream EOS. Returns True once every expected upstream
+        input has closed (i.e. this was the final EOS), False otherwise."""
+        self._seen_input_closes += 1
+        return self._seen_input_closes >= self._expected_input_closes
 
     cpdef void enable_tracing(self, bint enabled) except *:
         self._tracing_enabled = enabled
@@ -415,16 +467,25 @@ cdef class BasePlanNode:
 
 
 cdef class JoinNode(BasePlanNode):
-    """Base class for joins. Two input sides — left feeds build, right feeds
-    probe. Subclasses override `push_left` and `push_right` instead of
-    `_push_impl`. The single `_push_impl` is never called on a JoinNode
-    directly; the pipeline compiler routes inputs through adapter nodes."""
+    """Base class for joins. Two input sides — one feeds build, the other feeds
+    probe (build is the LEFT side for every join except FilterJoinNode, which
+    builds from the RIGHT). Subclasses override `push_left` and `push_right`
+    instead of `_push_impl`. The single `_push_impl` is never called on a
+    JoinNode directly; the pipeline compiler routes inputs through adapter nodes.
+
+    Build-before-probe invariant: the engine must fully drain the build-side
+    input (including its EOS) before any probe-side morsel arrives. Subclasses
+    set `_build_complete = True` on build-side EOS (even when the build side is
+    empty) and call `_require_build_complete()` on every probe-side push. A
+    probe arriving early is a scheduler bug and raises rather than silently
+    probing an absent or partial build table."""
     cdef public object left_readers
     cdef public object right_readers
     cdef public list left_relation_names
     cdef public list right_relation_names
     cdef public object on
     cdef public object _join_key_cast_plan
+    cdef public bint _build_complete
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -435,6 +496,15 @@ cdef class JoinNode(BasePlanNode):
         self.right_relation_names = parameters.get("right_relation_names") or []
         self.on = parameters.get("on")
         self._join_key_cast_plan = None
+        self._build_complete = False
+
+    cdef inline void _require_build_complete(self) except *:
+        if not self._build_complete:
+            from opteryx.exceptions import InvalidInternalStateError
+            raise InvalidInternalStateError(
+                f"{self.name}: probe-side input arrived before the build side "
+                "completed - build-before-probe ordering invariant violated."
+            )
 
     cpdef void push_left(self, Morsel morsel) except *:
         """Build-side input. Subclasses override. MUST NOT call emit(EOS) —
@@ -560,33 +630,43 @@ def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineCo
       * `chain_head.push(...)` — typed push into the chain
       * `exit_node.has_pending()` / `pop_pending()` — typed pending drain
 
-    One Python `yield` per emitted result morsel, not one per scan morsel."""
+    One Python `yield` per emitted result morsel, not one per scan morsel.
+
+    The body runs under try/finally: on EVERY exit path — normal exhaustion,
+    LIMIT short-circuit, an exception raised anywhere in the chain, or the
+    caller abandoning the result generator (GeneratorExit propagating through
+    the `yield from` in the engine) — `scan.close_source()` runs so the
+    source's own cleanup (rugo C++ pipeline shutdown, open file handles) is
+    not leaked. The original exception/GeneratorExit is not suppressed."""
     cdef Morsel morsel
     cdef bint has_exit = exit_node is not None
 
-    while True:
-        morsel = scan.next_morsel()
-        if morsel is None:
-            break
+    try:
+        while True:
+            morsel = scan.next_morsel()
+            if morsel is None:
+                break
+            if ctx.is_terminated():
+                break
+            chain_head.push(morsel)
+            if has_exit:
+                while exit_node.has_pending():
+                    yield exit_node.pop_pending()
+            if ctx.is_terminated():
+                break
+
         if ctx.is_terminated():
-            break
-        chain_head.push(morsel)
+            if has_exit:
+                while exit_node.has_pending():
+                    yield exit_node.pop_pending()
+            return
+
+        chain_head.push(_EOS_SENTINEL)
         if has_exit:
             while exit_node.has_pending():
                 yield exit_node.pop_pending()
-        if ctx.is_terminated():
-            break
-
-    if ctx.is_terminated():
-        if has_exit:
-            while exit_node.has_pending():
-                yield exit_node.pop_pending()
-        return
-
-    chain_head.push(_EOS_SENTINEL)
-    if has_exit:
-        while exit_node.has_pending():
-            yield exit_node.pop_pending()
+    finally:
+        scan.close_source()
 
 
 cdef class JoinLeftAdapter(BasePlanNode):

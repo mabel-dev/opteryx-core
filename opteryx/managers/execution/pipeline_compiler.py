@@ -94,9 +94,17 @@ def compile_pipeline(plan: PhysicalPlan):
             exit_node = candidate
 
     # Attach the shared context to every operator. Wire _downstream pointers.
+    # Stamp each operator with the number of upstream input chains feeding it
+    # (incoming-edge count) so multi-input operators (e.g. Union) gate their
+    # downstream EOS on all legs closing instead of hardcoding the leg count.
+    # Joins route their two inputs through adapters and handle EOS in
+    # push_left/push_right, so the stamped count is inert for them.
     for nid, node in flat:
         if isinstance(node, BasePlanNode):
             node.set_context(ctx)
+            incoming = len(list(plan.ingoing_edges(nid)))
+            if incoming > 1:
+                node.set_expected_input_closes(incoming)
 
     # Wire downstream pointers — for each non-join operator, _downstream is
     # the (single) outgoing edge's target. For joins we keep the join's

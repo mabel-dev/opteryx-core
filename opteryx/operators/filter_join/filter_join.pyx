@@ -515,6 +515,9 @@ cdef class FilterJoinNode(JoinNode):
     cpdef void push_right(self, Morsel morsel) except *:
         cdef long long start
         if morsel is _EOS_SENTINEL:
+            # FilterJoin builds from the RIGHT side; right EOS finalises the
+            # build set. Mark build complete so the left (probe) side may run.
+            self._build_complete = True
             # Finalise: check if right side had any nulls
             if self._use_phash:
                 # Nulls tracked during build; PerfectHashSet has no null slot
@@ -574,6 +577,7 @@ cdef class FilterJoinNode(JoinNode):
         self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
 
     cpdef void push_left(self, Morsel morsel) except *:
+        self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
             return

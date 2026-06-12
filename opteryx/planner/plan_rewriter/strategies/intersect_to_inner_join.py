@@ -39,6 +39,7 @@ from opteryx.models import LogicalColumn, Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_rewriter.strategies._set_op_join_common import live_relations
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewriteContext
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewriteStrategy
 
@@ -135,9 +136,14 @@ class IntersectToSemiJoinStrategy(PlanRewriteStrategy):
                 # Wildcard or unresolvable column names — binder handles this node.
                 continue
 
+            # Reduce each side to the relations that actually survive at this node:
+            # a nested set op / semi-anti join below collapses its legs into one.
+            live_left = live_relations(plan, nid, intersect_node.left_relation_names)
+            live_right = live_relations(plan, nid, intersect_node.right_relation_names)
+
             on_condition = _build_on_condition(
-                intersect_node.left_relation_names,
-                intersect_node.right_relation_names,
+                live_left,
+                live_right,
                 col_names,
             )
 
@@ -145,8 +151,8 @@ class IntersectToSemiJoinStrategy(PlanRewriteStrategy):
             join_node.type = "left semi"
             join_node.on = on_condition
             join_node.using = None
-            join_node.left_relation_names = intersect_node.left_relation_names
-            join_node.right_relation_names = intersect_node.right_relation_names
+            join_node.left_relation_names = live_left
+            join_node.right_relation_names = live_right
             join_node.columns = []
 
             plan[nid] = join_node

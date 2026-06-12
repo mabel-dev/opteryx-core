@@ -87,10 +87,20 @@ def execute(
         # chain_head.push / exit_node.has_pending / exit_node.pop_pending
         # calls, no Python -> cpdef boundary per morsel. We only re-yield
         # the morsels it produces (one yield per emitted result).
-        for scan, chain_head in chains:
-            yield from drive_scan(scan, chain_head, exit_node, ctx)
-            if ctx.is_terminated():
-                return
+        #
+        # try/finally: if the caller abandons this generator (GeneratorExit) or
+        # an operator raises mid-chain, mark the shared context terminated so no
+        # further scan starts. Per-scan source cleanup (closing the rugo
+        # pipeline) is handled by drive_scan's own finally, which runs because
+        # GeneratorExit/exceptions propagate through `yield from`. The original
+        # exception/GeneratorExit is not suppressed.
+        try:
+            for scan, chain_head in chains:
+                yield from drive_scan(scan, chain_head, exit_node, ctx)
+                if ctx.is_terminated():
+                    return
+        finally:
+            ctx.terminate()
 
     return stream(), ResultType.TABULAR
 
@@ -106,12 +116,17 @@ def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
         for nid, node in plan.depth_first_search_flat():
             if getattr(node, "enable_tracing", None) is not None:
                 node.enable_tracing(True)
-    for scan, chain_head in chains:
-        # Consume drive_scan but discard all yielded morsels.
-        for _ in drive_scan(scan, chain_head, exit_node, ctx):
-            pass
-        if ctx.is_terminated():
-            break
+    try:
+        for scan, chain_head in chains:
+            # Consume drive_scan but discard all yielded morsels.
+            for _ in drive_scan(scan, chain_head, exit_node, ctx):
+                pass
+            if ctx.is_terminated():
+                break
+    finally:
+        # On exception, stop any further scan and let drive_scan's own finally
+        # (entered as the generator is collected) close source-side resources.
+        ctx.terminate()
 
 
 def explain(

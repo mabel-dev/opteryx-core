@@ -219,6 +219,7 @@ cdef class CrossJoinNode(JoinNode):
         if not self.continue_executing:
             return
         if morsel is _EOS_SENTINEL:
+            self._build_complete = True
             if self.left_morsels:
                 self.left_table = Morsel.combine(self.left_morsels)
                 self.left_morsels = []
@@ -232,6 +233,7 @@ cdef class CrossJoinNode(JoinNode):
         cdef Morsel right_table
         if not self.continue_executing:
             return
+        self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             if self.left_table is None:
                 self.emit(_EOS_SENTINEL)

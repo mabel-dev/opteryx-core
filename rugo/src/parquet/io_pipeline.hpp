@@ -309,6 +309,15 @@ class ParquetIOPipeline {
 
     std::atomic<int> pending_work_{0};
     std::atomic<bool> shutdown_{false};
+    // Cancellation (WP-8): set by cancel() when the consumer abandons the scan
+    // early (e.g. LIMIT satisfied, or the result generator is dropped). Queued
+    // but not-yet-started decode tasks observe this at the top of
+    // decode_row_group and bail before doing any IO / decode / allocation, so
+    // the engine stops paying for row groups it will never consume. A task
+    // already mid-decode runs to completion (interrupting an in-flight decode
+    // is out of scope) but its result is dropped at the enqueue guard.
+    std::atomic<bool> cancelled_{false};
+    std::atomic<uint64_t> cancelled_skips_{0};
 
     // Destination pool for serialized columns. Set once before any submit via
     // set_pool_sink(); workers reserve+serialize+finalize through it.
@@ -422,6 +431,17 @@ class ParquetIOPipeline {
     }
 
     void decode_row_group(const WorkItem& item) {
+        // WP-8 cancel: a queued task whose work is no longer wanted bails here,
+        // before any IO / decode / allocation. Nothing was reserved yet, so
+        // there is nothing to release; just balance the pending-work ledger and
+        // wake anyone waiting on the queue.
+        if (cancelled_.load(std::memory_order_relaxed)) {
+            cancelled_skips_.fetch_add(1, std::memory_order_relaxed);
+            pending_work_--;
+            queue_cv_.notify_one();
+            return;
+        }
+
         MorselRef result;
         result.path = item.path;
         result.rg_idx = item.rg_idx;
@@ -652,13 +672,20 @@ class ParquetIOPipeline {
             auto t_bp = std::chrono::steady_clock::now();
             std::unique_lock<std::mutex> lk(queue_mutex_);
             queue_cv_.wait(lk, [this]() {
-                return result_queue_.size() < queue_capacity_ || shutdown_.load(std::memory_order_relaxed);
+                return result_queue_.size() < queue_capacity_
+                    || shutdown_.load(std::memory_order_relaxed)
+                    || cancelled_.load(std::memory_order_relaxed);
             });
             worker_blocked_ns_.fetch_add(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - t_bp).count(),
                 std::memory_order_relaxed);
-            if (!shutdown_.load(std::memory_order_relaxed)) {
+            // Drop the result if cancelled or shutting down: a result decoded
+            // after cancel will never be consumed. The MorselRef destructor
+            // frees any direct Draken buffers it holds; pool segments stay
+            // reserved until the per-pipeline pool is torn down at close().
+            if (!shutdown_.load(std::memory_order_relaxed)
+                    && !cancelled_.load(std::memory_order_relaxed)) {
                 result_queue_.push_back(std::move(result));
                 size_t sz = result_queue_.size();
                 enqueue_count_.fetch_add(1, std::memory_order_relaxed);
@@ -763,6 +790,16 @@ class ParquetIOPipeline {
         return true;
     }
 
+    // WP-8: signal early cancellation. Non-blocking — flips the flag and wakes
+    // any back-pressure-blocked workers so queued tasks bail promptly at the
+    // top of decode_row_group. The actual wait for in-flight tasks to finish
+    // happens in wait_shutdown() (called by close()/destructor). Safe to call
+    // more than once and safe to call before wait_shutdown().
+    void cancel() {
+        cancelled_.store(true, std::memory_order_relaxed);
+        queue_cv_.notify_all();
+    }
+
     void wait_shutdown() {
         shutdown_ = true;
         queue_cv_.notify_all();
@@ -773,6 +810,12 @@ class ParquetIOPipeline {
 
     int pending_work_count() const {
         return pending_work_.load(std::memory_order_relaxed);
+    }
+
+    // WP-8: number of queued decode tasks that bailed at the top because the
+    // pipeline was cancelled — i.e. row groups whose IO/decode was skipped.
+    uint64_t cancelled_skips() const {
+        return cancelled_skips_.load(std::memory_order_relaxed);
     }
 
     uint64_t spin_iterations() const {
@@ -807,6 +850,11 @@ class ParquetIOPipeline {
     }
     uint64_t ipc_bytes_serialized() const {
         return ipc_bytes_serialized_.load(std::memory_order_relaxed);
+    }
+    // Process-cumulative count of range requests re-issued on transient failure
+    // (WP-5). Global across all pipelines/workers; not per-query.
+    uint64_t http_retries() const {
+        return HttpClient::total_retries();
     }
 };
 

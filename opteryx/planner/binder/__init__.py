@@ -111,8 +111,17 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
 
     # Remap left/right relation name lists and reader UUID lists on join nodes.
     # _prop only handles LogicalColumn.source; plain string lists need explicit remapping.
+    # Set-operation nodes (Union/Intersect/Except) also carry left/right relation
+    # name lists referencing scan aliases — a nested set operation's lists must be
+    # remapped when its scans are renamed, or the outer set op fails to resolve its
+    # side's columns at bind time.
     for nid, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Join:
+        if node.node_type in (
+            LogicalPlanStepType.Join,
+            LogicalPlanStepType.Union,
+            LogicalPlanStepType.Intersect,
+            LogicalPlanStepType.Except,
+        ):
             if node.left_relation_names:
                 node.left_relation_names = [
                     relations[n][1] if n in relations else n

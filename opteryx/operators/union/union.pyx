@@ -27,14 +27,12 @@ from opteryx.models import QueryProperties
 
 cdef class UnionNode(BasePlanNode):
     cdef public list column_ids
-    cdef public bint seen_first_eos
     cdef public list schema
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.columns = parameters.get("columns", [])
         self.column_ids = [c.schema_column.identity for c in self.columns]
-        self.seen_first_eos = False
         self.schema = None
 
     @property
@@ -46,13 +44,12 @@ cdef class UnionNode(BasePlanNode):
         return ""
 
     cdef void _dispatch_push(self, Morsel morsel) except *:
-        """Union sees two EOS signals (one per leg). Emit downstream EOS only
-        on the second."""
+        """Union receives one EOS per input leg. The pipeline compiler stamps
+        the expected leg count via set_expected_input_closes; emit the single
+        downstream EOS only after every leg has closed."""
         if morsel is _EOS_SENTINEL:
-            if self.seen_first_eos:
+            if self._record_input_close():
                 self._emit_cdef(_EOS_SENTINEL)
-            else:
-                self.seen_first_eos = True
             return
 
         if self.schema is None:
