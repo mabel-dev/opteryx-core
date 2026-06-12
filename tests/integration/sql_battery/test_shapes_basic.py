@@ -275,6 +275,27 @@ STATEMENTS = [
         # EXCEPT with same input should return 0 rows
         ("SELECT * FROM (SELECT name, id FROM $planets AS A EXCEPT SELECT name, id FROM $planets AS B) C", 0, 2, None),
 
+        # Chained INTERSECT / EXCEPT (three+ legs). INTERSECT/EXCEPT are lowered to
+        # left semi / left anti joins; the ON-condition must reference only the
+        # relation that survives a nested set op, not the over-reported scan list
+        # (otherwise the outer join references a consumed relation -> bind error).
+        # Wrapped in a subquery (named relation legs).
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id <= 5 INTERSECT SELECT name, id FROM $planets AS B WHERE id >= 2 INTERSECT SELECT name, id FROM $planets AS C WHERE id <= 3) D", 2, 2, None),
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id <= 6 EXCEPT SELECT name, id FROM $planets AS B WHERE id = 1 EXCEPT SELECT name, id FROM $planets AS C WHERE id = 2) D", 4, 2, None),
+        # Top-level chained INTERSECT (the original repro family).
+        ("SELECT name FROM $planets WHERE id < 5 INTERSECT SELECT name FROM $planets WHERE id < 4 INTERSECT SELECT name FROM $planets WHERE id < 3", 2, 1, None),
+        ("SELECT name FROM $planets WHERE id < 6 INTERSECT SELECT name FROM $planets WHERE id < 5 INTERSECT SELECT name FROM $planets WHERE id < 4 INTERSECT SELECT name FROM $planets WHERE id < 3", 2, 1, None),
+        # Top-level chained EXCEPT.
+        ("SELECT name FROM $planets WHERE id < 6 EXCEPT SELECT name FROM $planets WHERE id = 1 EXCEPT SELECT name FROM $planets WHERE id = 2", 3, 1, None),
+        ("SELECT name FROM $planets WHERE id < 6 EXCEPT SELECT name FROM $planets WHERE id = 1 EXCEPT SELECT name FROM $planets WHERE id = 2 EXCEPT SELECT name FROM $planets WHERE id = 3", 2, 1, None),
+        # Mixed INTERSECT/EXCEPT: INTERSECT binds tighter than EXCEPT.
+        # (id<5 INTERSECT id<4) EXCEPT id=1.
+        ("SELECT name FROM $planets WHERE id < 5 INTERSECT SELECT name FROM $planets WHERE id < 4 EXCEPT SELECT name FROM $planets WHERE id = 1", 2, 1, None),
+        # id<6 EXCEPT (id=1 INTERSECT id<4)  -> exercises right-side reduction.
+        ("SELECT name FROM $planets WHERE id < 6 EXCEPT SELECT name FROM $planets WHERE id = 1 INTERSECT SELECT name FROM $planets WHERE id < 4", 4, 1, None),
+        # Two columns.
+        ("SELECT id, name FROM $planets WHERE id < 5 INTERSECT SELECT id, name FROM $planets WHERE id < 4 INTERSECT SELECT id, name FROM $planets WHERE id < 3", 2, 2, None),
+
         # IN subquery
         ("SELECT name FROM testdata.satellites WHERE id IN (SELECT id FROM $planets)", 9, 1, None),
         ("SELECT name FROM testdata.satellites WHERE id NOT IN (SELECT id FROM $planets)", 168, 1, None),

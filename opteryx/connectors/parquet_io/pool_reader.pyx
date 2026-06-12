@@ -38,7 +38,7 @@ from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
-from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter
+from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchParquetFootersMany
 
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
@@ -347,6 +347,38 @@ cdef tuple _read_footer_payload(
     return envelope, result.bytes_fetched
 
 
+cdef list _fetch_footers_many(list urls, list sizes):
+    """Concurrently fetch footer envelopes for many remote files (one get_many
+    batch in C++). `urls` are the already-rewritten/signed fetch URLs; `sizes`
+    are the known file sizes (no per-file HEAD). Returns envelopes (bytes) in
+    input order.
+    """
+    cdef vector[string] cpp_paths
+    cdef vector[int64_t] cpp_sizes
+    cdef Py_ssize_t i, n = len(urls)
+    cdef str url
+    cpp_paths.reserve(n)
+    cpp_sizes.reserve(n)
+    for i in range(n):
+        url = urls[i]
+        cpp_paths.push_back(url.encode("utf-8"))
+        cpp_sizes.push_back(<int64_t>sizes[i])
+
+    cdef vector[ParquetFooterResult] results
+    with nogil:
+        results = FetchParquetFootersMany(cpp_paths, cpp_sizes)
+
+    cdef list out = []
+    cdef size_t k
+    cdef const uint8_t* env_ptr
+    cdef size_t env_sz
+    for k in range(results.size()):
+        env_sz = results[k].envelope.size()
+        env_ptr = results[k].envelope.data()
+        out.append(env_ptr[:env_sz])
+    return out
+
+
 cpdef dict fetch_column_chunk_info(
     str path,
     int rg_idx,
@@ -577,6 +609,45 @@ def iter_row_groups_ipc(
     try:
         _t0 = time.monotonic_ns()
         work_items = []
+
+        # ── Batch footer prefetch (B) ────────────────────────────────────────
+        # Fetch every (remote, uncached) footer in one concurrent get_many round
+        # via an HTTP suffix range (bytes=-64k) instead of a serial HEAD+GET per
+        # file. No per-file HEAD and no dependency on the manifest carrying file
+        # sizes. Local and prefetched-dict files fall through to the serial loop
+        # below unchanged. Populating local_footers_native here makes that loop
+        # skip the per-file fetch. file_sizes, when present, is still passed so
+        # the C++ side can stat-skip any local files (A); -1 means unknown.
+        batch_orig = []
+        batch_urls = []
+        batch_sizes = []
+        for path in paths:
+            if prefetched_footers and path in prefetched_footers:
+                continue
+            fetch_url = orig_to_cpp.get(path, path)
+            if not (fetch_url.startswith("gs://")
+                    or fetch_url.startswith("http://")
+                    or fetch_url.startswith("https://")):
+                continue
+            if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
+                continue
+            batch_orig.append(path)
+            batch_urls.append(fetch_url)
+            batch_sizes.append(file_sizes.get(path, -1) if file_sizes else -1)
+        if batch_urls:
+            _ts = time.monotonic_ns()
+            envelopes = _fetch_footers_many(batch_urls, batch_sizes)
+            t_footer_ns += time.monotonic_ns() - _ts
+            for bi in range(len(batch_orig)):
+                envelope = envelopes[bi]
+                if footer_bytes_cache is not None:
+                    footer_bytes_cache.put(batch_urls[bi], envelope)
+                footer_buf_ptr = <const uint8_t*>envelope
+                footer_buf_size = len(envelope)
+                local_footers_native[batch_orig[bi].encode('utf-8')] = ReadParquetMetadataFromBuffer(
+                    footer_buf_ptr, footer_buf_size
+                )
+
         for path in paths:
             if prefetched_footers and path in prefetched_footers:
                 # Prefetched dict path — predicate check uses Python dict API
@@ -589,7 +660,11 @@ def iter_row_groups_ipc(
                 path_bytes_cpp = path.encode('utf-8')
                 if local_footers_native.count(path_bytes_cpp) == 0:
                     _ts = time.monotonic_ns()
-                    envelope, _ = _read_footer_payload(orig_to_cpp.get(path, path), -1, footer_bytes_cache)
+                    envelope, _ = _read_footer_payload(
+                        orig_to_cpp.get(path, path),
+                        file_sizes.get(path, -1) if file_sizes else -1,
+                        footer_bytes_cache,
+                    )
                     t_footer_ns += time.monotonic_ns() - _ts
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)

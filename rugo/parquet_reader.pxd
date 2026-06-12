@@ -180,6 +180,7 @@ cdef extern from "filesystem.hpp" namespace "rugo":
 
     ParquetFooterResult FetchParquetFooter(const string& path, int64_t file_size) except +
     ParquetFooterResult FetchParquetFooter(const string& path) except +
+    vector[ParquetFooterResult] FetchParquetFootersMany(const vector[string]& paths, const vector[int64_t]& file_sizes) except + nogil
 
 
 cdef extern from "type_widening.hpp" namespace "parquet_simd":

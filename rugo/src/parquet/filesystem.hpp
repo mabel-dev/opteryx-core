@@ -13,10 +13,13 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -112,6 +115,70 @@ static std::vector<uint8_t> read_range(const std::string& path,
     return buf;
 }
 
+// True for paths the HttpClient can fetch via Range GET (gs:// is rewritten
+// to a storage.googleapis.com URL; http(s):// are already URLs).
+static inline bool is_remote_path(const std::string& path) {
+    return path.substr(0, 5) == "gs://"
+        || path.substr(0, 7) == "http://"
+        || path.substr(0, 8) == "https://";
+}
+
+// The URL passed to HttpClient for a remote path (gs:// → signed-bucket HTTPS).
+static inline std::string footer_http_url(const std::string& path) {
+    if (path.substr(0, 5) == "gs://") return gcs_to_https(path);
+    return path;
+}
+
+// Corruption guard for footer length when the true file size is unknown
+// (suffix-range fetch). Real Parquet footers are far below this.
+static constexpr int64_t kMaxFooterLength = 512LL * 1024 * 1024;
+
+// Validate the trailing PAR1 magic and decode the 4-byte little-endian footer
+// length that precedes it. `tail` must contain the final bytes of the file.
+// `max_footer_length` bounds the decoded length (file_size - 8 when known, or
+// kMaxFooterLength as a corruption guard when the size is unknown).
+static inline uint32_t parse_footer_length(const std::vector<uint8_t>& tail,
+                                           int64_t max_footer_length,
+                                           const std::string& path) {
+    size_t n = tail.size();
+    if (n < static_cast<size_t>(kParquetFooterSuffix) ||
+        tail[n-4] != 0x50 || tail[n-3] != 0x41 ||
+        tail[n-2] != 0x52 || tail[n-1] != 0x31) {
+        throw std::runtime_error("Missing Parquet magic bytes (PAR1) at EOF: " + path);
+    }
+    size_t lp = n - static_cast<size_t>(kParquetFooterSuffix);
+    uint32_t footer_length_u32 =
+        static_cast<uint32_t>(tail[lp])
+        | (static_cast<uint32_t>(tail[lp+1]) << 8)
+        | (static_cast<uint32_t>(tail[lp+2]) << 16)
+        | (static_cast<uint32_t>(tail[lp+3]) << 24);
+    if (footer_length_u32 == 0 ||
+        static_cast<int64_t>(footer_length_u32) > max_footer_length)
+        throw std::runtime_error("Invalid footer length " +
+            std::to_string(footer_length_u32) + " in: " + path);
+    return footer_length_u32;
+}
+
+// Assemble the envelope ReadParquetMetadataFromBuffer expects:
+//   PAR1 + footer_thrift + footer_len_le32 + PAR1
+static inline std::vector<uint8_t> build_footer_envelope(
+        const uint8_t* footer_ptr, uint32_t footer_length_u32) {
+    size_t fl = static_cast<size_t>(footer_length_u32);
+    std::vector<uint8_t> envelope(4 + fl + 4 + 4);
+    size_t off = 0;
+    envelope[off++] = 0x50; envelope[off++] = 0x41;
+    envelope[off++] = 0x52; envelope[off++] = 0x31;
+    std::memcpy(envelope.data() + off, footer_ptr, fl);
+    off += fl;
+    envelope[off++] = static_cast<uint8_t>( footer_length_u32        & 0xff);
+    envelope[off++] = static_cast<uint8_t>((footer_length_u32 >>  8) & 0xff);
+    envelope[off++] = static_cast<uint8_t>((footer_length_u32 >> 16) & 0xff);
+    envelope[off++] = static_cast<uint8_t>((footer_length_u32 >> 24) & 0xff);
+    envelope[off++] = 0x50; envelope[off++] = 0x41;
+    envelope[off++] = 0x52; envelope[off++] = 0x31;
+    return envelope;
+}
+
 /**
  * Fetch and assemble the Parquet footer envelope for `path`.
  *
@@ -132,31 +199,15 @@ inline ParquetFooterResult FetchParquetFooter(const std::string& path,
     std::vector<uint8_t> tail = read_range(path, prefetch_offset, prefetch_size);
     int64_t bytes_fetched = prefetch_size;
 
-    size_t n = tail.size();
-    if (n < static_cast<size_t>(kParquetFooterSuffix) ||
-        tail[n-4] != 0x50 || tail[n-3] != 0x41 ||
-        tail[n-2] != 0x52 || tail[n-1] != 0x31) {
-        throw std::runtime_error("Missing Parquet magic bytes (PAR1) at EOF: " + path);
-    }
-
-    size_t lp = n - static_cast<size_t>(kParquetFooterSuffix);
-    uint32_t footer_length_u32 =
-        static_cast<uint32_t>(tail[lp])
-        | (static_cast<uint32_t>(tail[lp+1]) << 8)
-        | (static_cast<uint32_t>(tail[lp+2]) << 16)
-        | (static_cast<uint32_t>(tail[lp+3]) << 24);
+    uint32_t footer_length_u32 = parse_footer_length(tail, file_size - kParquetFooterSuffix, path);
     int64_t footer_length = static_cast<int64_t>(footer_length_u32);
-
-    if (footer_length == 0 || footer_length > file_size - kParquetFooterSuffix)
-        throw std::runtime_error("Invalid footer length " +
-            std::to_string(footer_length) + " in: " + path);
 
     const uint8_t* footer_ptr;
     std::vector<uint8_t> extra_buf;
 
     int64_t total_footer_payload = footer_length + kParquetFooterSuffix;
     if (total_footer_payload <= prefetch_size) {
-        footer_ptr = tail.data() + (n - static_cast<size_t>(total_footer_payload));
+        footer_ptr = tail.data() + (tail.size() - static_cast<size_t>(total_footer_payload));
     } else {
         int64_t extra_offset = file_size - kParquetFooterSuffix - footer_length;
         extra_buf = read_range(path, extra_offset, footer_length);
@@ -164,22 +215,94 @@ inline ParquetFooterResult FetchParquetFooter(const std::string& path,
         footer_ptr = extra_buf.data();
     }
 
-    // Assemble envelope: PAR1 + footer_thrift + footer_len_le32 + PAR1
-    size_t env_size = 4 + static_cast<size_t>(footer_length) + 4 + 4;
-    std::vector<uint8_t> envelope(env_size);
-    size_t off = 0;
-    envelope[off++] = 0x50; envelope[off++] = 0x41;
-    envelope[off++] = 0x52; envelope[off++] = 0x31;
-    std::memcpy(envelope.data() + off, footer_ptr, static_cast<size_t>(footer_length));
-    off += static_cast<size_t>(footer_length);
-    envelope[off++] = static_cast<uint8_t>( footer_length_u32        & 0xff);
-    envelope[off++] = static_cast<uint8_t>((footer_length_u32 >>  8) & 0xff);
-    envelope[off++] = static_cast<uint8_t>((footer_length_u32 >> 16) & 0xff);
-    envelope[off++] = static_cast<uint8_t>((footer_length_u32 >> 24) & 0xff);
-    envelope[off++] = 0x50; envelope[off++] = 0x41;
-    envelope[off++] = 0x52; envelope[off++] = 0x31;
+    return {build_footer_envelope(footer_ptr, footer_length_u32), bytes_fetched};
+}
 
-    return {std::move(envelope), bytes_fetched};
+// First-round suffix-range size: the last N bytes of each file, fetched
+// without knowing the file size or issuing a HEAD. 64KB covers the vast
+// majority of Parquet footers; oversized footers trigger one extra round.
+static constexpr int64_t kFooterSuffixPrefetch = 64 * 1024;
+
+/**
+ * Batch-fetch footer envelopes for many files concurrently — no per-file HEAD,
+ * no dependency on knowing file sizes.
+ *
+ * Every remote file's tail is fetched with an HTTP suffix range (bytes=-64k)
+ * in a single concurrent get_many() round; files whose footer exceeds 64KB are
+ * completed in a second batched suffix-range round. Local files fall back to
+ * per-file pread (no network — already cheap). `file_sizes` is only consulted
+ * for local files (pass -1 when unknown); it is ignored for remote files.
+ *
+ * Returns one ParquetFooterResult per input path, in input order.
+ */
+inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
+        const std::vector<std::string>& paths,
+        const std::vector<int64_t>& file_sizes) {
+    const size_t count = paths.size();
+    std::vector<ParquetFooterResult> results(count);
+
+    std::vector<size_t> remote_idx;
+    std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
+    remote_idx.reserve(count);
+    reqs.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        if (!is_remote_path(paths[i])) {
+            int64_t sz = (i < file_sizes.size()) ? file_sizes[i] : -1;
+            results[i] = FetchParquetFooter(paths[i], sz);
+            continue;
+        }
+        remote_idx.push_back(i);
+        reqs.emplace_back(footer_http_url(paths[i]),
+                          std::map<std::string, std::string>{
+                              {"Range", "bytes=-" + std::to_string(kFooterSuffixPrefetch)}});
+    }
+
+    if (remote_idx.empty())
+        return results;
+
+    std::vector<std::vector<uint8_t>> tails = footer_http_client().get_many(reqs);
+
+    // Round 2: footers larger than the 64KB suffix window — fetch footer+suffix
+    // exactly, again via a suffix range so no file size is needed.
+    std::vector<size_t> extra_remote;  // index into remote_idx
+    std::vector<uint32_t> extra_len;
+    std::vector<std::pair<std::string, std::map<std::string, std::string>>> extra_reqs;
+
+    for (size_t k = 0; k < remote_idx.size(); ++k) {
+        size_t i = remote_idx[k];
+        const std::vector<uint8_t>& tail = tails[k];
+        uint32_t fl = parse_footer_length(tail, kMaxFooterLength, paths[i]);
+        int64_t total = static_cast<int64_t>(fl) + kParquetFooterSuffix;
+        if (total <= static_cast<int64_t>(tail.size())) {
+            const uint8_t* fp = tail.data() + (tail.size() - static_cast<size_t>(total));
+            results[i].envelope = build_footer_envelope(fp, fl);
+            results[i].bytes_fetched = static_cast<int64_t>(tail.size());
+        } else {
+            extra_remote.push_back(k);
+            extra_len.push_back(fl);
+            extra_reqs.emplace_back(footer_http_url(paths[i]),
+                                    std::map<std::string, std::string>{
+                                        {"Range", "bytes=-" + std::to_string(total)}});
+        }
+    }
+
+    if (!extra_reqs.empty()) {
+        std::vector<std::vector<uint8_t>> extras = footer_http_client().get_many(extra_reqs);
+        for (size_t e = 0; e < extra_remote.size(); ++e) {
+            size_t k = extra_remote[e];
+            size_t i = remote_idx[k];
+            uint32_t fl = extra_len[e];
+            const std::vector<uint8_t>& ex = extras[e];
+            // ex holds [footer_thrift(fl)][len32][PAR1]; the footer starts at 0.
+            if (static_cast<int64_t>(ex.size()) < static_cast<int64_t>(fl) + kParquetFooterSuffix)
+                throw std::runtime_error("Short footer fetch for: " + paths[i]);
+            results[i].envelope = build_footer_envelope(ex.data(), fl);
+            results[i].bytes_fetched = static_cast<int64_t>(ex.size());
+        }
+    }
+
+    return results;
 }
 
 }  // namespace rugo
