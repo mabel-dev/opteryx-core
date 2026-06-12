@@ -2275,6 +2275,7 @@ extensions.append(
             "src/cpp/http_client.hpp",
             "src/cpp/pool_sink_adapter.hpp",
             "src/cpp/memory_pool.hpp",
+            "draken/core/alloc.h",
         ],
     )
 )

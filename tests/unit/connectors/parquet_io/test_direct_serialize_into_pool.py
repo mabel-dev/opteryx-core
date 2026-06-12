@@ -117,6 +117,70 @@ def test_pool_exhaustion_is_clean_error():
             pipe.close()
 
 
+def _serialized_bytes(path, columns, **kw):
+    """Read once with the IO diag JSON enabled; return ipc_bytes_serialized."""
+    import json
+    import tempfile
+
+    diag = os.path.join(tempfile.gettempdir(), f"wp6b_diag_{os.getpid()}.jsonl")
+    os.environ["OPTERYX_IO_DIAG_JSON"] = diag
+    try:
+        for _s, rg in __import__(
+            "opteryx.connectors.parquet_io.pool_reader", fromlist=["iter_row_groups_ipc"]
+        ).iter_row_groups_ipc(None, [path], columns, **kw):
+            pass
+    finally:
+        del os.environ["OPTERYX_IO_DIAG_JSON"]
+    with open(diag) as f:
+        rec = json.loads(f.read().strip().splitlines()[-1])
+    os.remove(diag)
+    return rec["ipc_bytes_serialized"]
+
+
+def test_direct_path_nonnull_numeric_roundtrip():
+    """WP-6b: non-nullable plain int64/int32/float32/float64 take the direct
+    (worker-built Draken buffer) path. Verify exact values AND that the path
+    actually engaged (zero IPC bytes serialized)."""
+    n = 8000
+    table = pa.table(
+        {
+            "i64": pa.array(list(range(n)), type=pa.int64()),
+            "i32": pa.array([(-i) for i in range(n)], type=pa.int32()),
+            "f64": pa.array([i * 0.5 for i in range(n)], type=pa.float64()),
+            "f32": pa.array([i * 0.25 for i in range(n)], type=pa.float32()),
+        }
+    )
+    cols = ["i64", "i32", "f64", "f32"]
+    with tempfile.TemporaryDirectory() as tmp:
+        # use_dictionary=False, no nulls → every column is plain positional.
+        path = _write(table, tmp, row_group_size=2000, use_dictionary=False)
+        got = _read_all(path, cols, decode_workers=1)
+        serialized = _serialized_bytes(path, cols, decode_workers=1)
+
+    expected = {c: table.column(c).to_pylist() for c in cols}
+    for c in cols:
+        assert got[c] == expected[c], f"direct column {c} diverged"
+    assert serialized == 0, f"expected all columns direct (0 IPC bytes), got {serialized}"
+
+
+def test_direct_path_concurrent_abandon_no_crash():
+    """Abandon row groups mid-stream (LIMIT-style early exit) with multiple
+    workers, so the result queue holds undrained MorselRefs carrying direct
+    Draken buffers. Closing the pipeline must free them without crash or
+    double-free (run under ASan to prove no leak/UAF)."""
+    from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc
+
+    n = 200000
+    table = pa.table({"v": pa.array(list(range(n)), type=pa.int64())})
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(table, tmp, row_group_size=10000, use_dictionary=False)  # 20 row groups
+        it = iter_row_groups_ipc(None, [path], ["v"], decode_workers=4)
+        first = next(it)  # consume one; let workers race ahead on the rest
+        assert len(first[1][b"v"]) > 0
+        it.close()  # abandon the rest → MorselRef destructors free direct buffers
+    # Reaching here without a crash is the assertion; ASan catches leaks/UAF.
+
+
 if __name__ == "__main__":
     test_mixed_types_with_nulls_roundtrip()
     print("mixed types + nulls: OK")
@@ -124,4 +188,8 @@ if __name__ == "__main__":
     print("high-cardinality strings: OK")
     test_pool_exhaustion_is_clean_error()
     print("pool exhaustion clean error: OK")
-    print("all WP-6a tests passed")
+    test_direct_path_nonnull_numeric_roundtrip()
+    print("direct path non-null numeric: OK")
+    test_direct_path_concurrent_abandon_no_crash()
+    print("direct path concurrent abandon: OK")
+    print("all WP-6a/6b tests passed")

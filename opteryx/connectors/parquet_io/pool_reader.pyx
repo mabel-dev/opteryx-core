@@ -28,6 +28,11 @@ import time
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
+
+# WP-6b direct path: wrap worker-built Draken buffers into Vectors (consumer-side,
+# GIL held). DK_INT64=1, DK_FLOAT32=2, DK_FLOAT64=3 from io_pipeline.hpp.
+from draken.core.buffers cimport DrakenType, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
+from draken.vectors.vector cimport from_decoded as _vector_from_decoded
 from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
@@ -36,6 +41,41 @@ from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
 _FOOTER_PREFETCH = 65536
+
+
+cdef inline tuple _split_columns(MorselRef* result):
+    """Split a result's columns into (pool ref_ids, direct Vectors).
+
+    Pool-path columns (direct_kind == 0) return their MemoryPool ref_id for the
+    deserializer. Direct-path columns (WP-6b: non-nullable fixed-width) are
+    wrapped here into a Draken Vector via ownership transfer — morsel_take_direct
+    hands the draken_alloc'd buffer to the Vector and nulls the MorselRef slot so
+    its destructor won't double-free.
+    """
+    cdef dict ref_ids = {}
+    cdef dict direct = {}
+    cdef bytes col_name
+    cdef int dk
+    cdef DrakenType dtype
+    cdef uint32_t dlen
+    cdef void* dptr
+    cdef size_t i
+    for i in range(result.columns.size()):
+        col_name = result.column_names[i]   # bytes — names are bytes throughout
+        dk = result.columns[i].direct_kind
+        if dk == 0:
+            ref_ids[col_name] = result.columns[i].ref_id
+        else:
+            if dk == 1:
+                dtype = DRAKEN_INT64
+            elif dk == 2:
+                dtype = DRAKEN_FLOAT32
+            else:
+                dtype = DRAKEN_FLOAT64
+            dlen = result.columns[i].length
+            dptr = morsel_take_direct(result[0], i)
+            direct[col_name] = _vector_from_decoded(dptr, NULL, dlen, dtype)
+    return ref_ids, direct
 
 
 cdef class CppIOPipeline:
@@ -174,19 +214,18 @@ cdef class CppIOPipeline:
                 'rg_idx': result.rg_idx,
             }
 
-        # Columns were serialized straight into the pool by the worker; the
-        # MorselRef already carries one ref_id per column. No commit copy here.
-        cdef dict ref_ids = {}
-        cdef bytes col_name
-        for i in range(result.column_ref_ids.size()):
-            col_name = result.column_names[i]   # bytes — names are bytes throughout
-            ref_ids[col_name] = result.column_ref_ids[i]
+        # Pool columns → ref_ids (deserialized later); direct columns (WP-6b) →
+        # Vectors wrapped here via ownership transfer.
+        cdef dict ref_ids
+        cdef dict direct
+        ref_ids, direct = _split_columns(&result)
 
         return {
             'success': True,
             'path': result.path.decode('utf-8'),
             'rg_idx': result.rg_idx,
             'ref_ids': ref_ids,
+            'direct': direct,
             'bytes_fetched': result.bytes_fetched,
             'read_ns': result.read_ns,
             'decode_ns': result.decode_ns,
@@ -211,19 +250,18 @@ cdef class CppIOPipeline:
                 'rg_idx': result.rg_idx,
             }
 
-        # Columns were serialized straight into the pool by the worker; the
-        # MorselRef already carries one ref_id per column. No commit copy here.
-        cdef dict ref_ids = {}
-        cdef bytes col_name
-        for i in range(result.column_ref_ids.size()):
-            col_name = result.column_names[i]   # bytes — names are bytes throughout
-            ref_ids[col_name] = result.column_ref_ids[i]
+        # Pool columns → ref_ids (deserialized later); direct columns (WP-6b) →
+        # Vectors wrapped here via ownership transfer.
+        cdef dict ref_ids
+        cdef dict direct
+        ref_ids, direct = _split_columns(&result)
 
         return {
             'success': True,
             'path': result.path.decode('utf-8'),
             'rg_idx': result.rg_idx,
             'ref_ids': ref_ids,
+            'direct': direct,
             'bytes_fetched': result.bytes_fetched,
             'read_ns': result.read_ns,
             'decode_ns': result.decode_ns,
@@ -665,6 +703,9 @@ def iter_row_groups_ipc(
 
             _ts = time.monotonic_ns()
             row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
+            # WP-6b: direct columns are already Vectors (wrapped in wait_result);
+            # merge them in. Keyed by column-name bytes, same as the pool columns.
+            row_group.update(result['direct'])
             t_deserialize_ns += time.monotonic_ns() - _ts
 
             # Defensive: detect columns decoded to 0 rows in a non-empty row group.
@@ -838,6 +879,7 @@ def iter_pass2_row_groups_ipc(
                 raise RuntimeError(f"Parquet pass-2 pipeline error: {result.get('error', 'unknown')}")
 
             row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
+            row_group.update(result['direct'])  # WP-6b direct columns
 
             # Build typed metadata object; remove all __*__ keys from dict.
             # Yield (ScanRowGroup, {col: Vector}) to separate metadata from data.

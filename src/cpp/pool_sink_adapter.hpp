@@ -12,8 +12,16 @@
 
 #include "memory_pool.hpp"   // opteryx::MemoryPool  (src/cpp)
 #include "io_pipeline.hpp"   // rugo::PoolSink, rugo::ParquetIOPipeline (rugo/src/parquet)
+#include "core/alloc.h"      // draken_malloc / draken_free (draken/)
 
 namespace opteryx {
+
+// WP-6b direct path: the worker allocates non-nullable fixed-width column
+// buffers with the Draken allocator so the consumer can transfer ownership to a
+// Vector (freed by draken_free on GC). draken_malloc/free are extern "C" static
+// inline; wrap them as plain function pointers for the C-ABI sink.
+inline void* pool_sink_draken_alloc(size_t n) noexcept { return draken_malloc(n); }
+inline void  pool_sink_draken_free(void* p) noexcept { draken_free(p); }
 
 // noexcept: a throw here would cross the C-ABI function-pointer boundary, which
 // is undefined. reserve_for_write never throws (returns a {-1,nullptr,0}
@@ -35,9 +43,11 @@ inline void pool_sink_finalize(void* ctx, int64_t ref_id, int64_t actual_len) no
 // construction, before any row group is submitted.
 inline void wire_pool_sink(rugo::ParquetIOPipeline* pipe, MemoryPool* pool) {
     rugo::PoolSink sink;
-    sink.ctx      = static_cast<void*>(pool);
-    sink.reserve  = &pool_sink_reserve;
-    sink.finalize = &pool_sink_finalize;
+    sink.ctx          = static_cast<void*>(pool);
+    sink.reserve      = &pool_sink_reserve;
+    sink.finalize     = &pool_sink_finalize;
+    sink.draken_alloc = &pool_sink_draken_alloc;
+    sink.draken_free  = &pool_sink_draken_free;
     pipe->set_pool_sink(sink);
 }
 

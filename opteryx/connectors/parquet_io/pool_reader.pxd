@@ -8,7 +8,8 @@
 #   _read_footer_payload     (cdef function → sequential footer fetch)
 #   _rg_passes_predicates_native (cdef function → row-group pruning)
 
-from libc.stdint cimport uint8_t, int32_t, int64_t, uint64_t
+from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
+from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -18,17 +19,26 @@ from rugo.parquet_reader cimport ColumnStats, RowGroupStats
 
 
 cdef extern from "io_pipeline.hpp" namespace "rugo":
+    cdef cppclass ColumnOut:
+        int direct_kind      # 0 = pool path; 1=int64, 2=float32, 3=float64 direct
+        void* data           # direct path: draken_alloc'd positional buffer
+        uint32_t length      # direct path: row count
+        int64_t ref_id       # pool path: MemoryPool ref
+
     cdef cppclass MorselRef:
         string path
         int rg_idx
         vector[string] column_names
-        vector[int64_t] column_ref_ids
-        vector[int64_t] column_byte_lens
+        vector[ColumnOut] columns
         int64_t bytes_fetched
         uint64_t read_ns
         uint64_t decode_ns
         string error
         bint success
+
+    # Take ownership of column i's direct buffer (nulls the slot so MorselRef's
+    # destructor won't free it). Returns NULL for a pool-path column.
+    void* morsel_take_direct(MorselRef& m, size_t i) nogil
 
     cdef cppclass ParquetIOPipeline:
         ParquetIOPipeline(int decode_workers, size_t queue_capacity) except +

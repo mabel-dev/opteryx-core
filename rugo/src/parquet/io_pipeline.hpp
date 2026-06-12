@@ -38,32 +38,100 @@
 
 namespace rugo {
 
-// C-ABI sink for streaming serialized columns straight into a caller-owned
-// MemoryPool. Pure C types only — rugo must not depend on opteryx; the opteryx
-// side fills these pointers in (see opteryx/compiled/structures/pool_sink_adapter.hpp).
-//   reserve(ctx, size, &ptr) -> ref_id : reserve `size` bytes, set *ptr to the
-//       writable region; returns a ref_id (>=0) or -1 on exhaustion.
+// C-ABI sink for handing decoded columns to the opteryx side. Pure C types only
+// — rugo must not depend on opteryx/draken; the opteryx adapter fills these in
+// (opteryx/compiled/structures/pool_sink_adapter.hpp).
+//   reserve(ctx, size, &ptr) -> ref_id : reserve `size` MemoryPool bytes, set
+//       *ptr to the writable region; returns ref_id (>=0) or -1 on exhaustion.
 //   finalize(ctx, ref_id, actual_len)  : commit the reserved segment.
+//   draken_alloc / draken_free         : the Draken allocator (WP-6b direct
+//       path). Non-nullable fixed-width columns are serialized as raw Draken
+//       buffers the consumer wraps into a Vector with zero copy; abandoned
+//       buffers are freed via draken_free in MorselRef's destructor.
 struct PoolSink {
     void*   ctx = nullptr;
     int64_t (*reserve)(void* ctx, int64_t size, void** out_ptr) = nullptr;
     void    (*finalize)(void* ctx, int64_t ref_id, int64_t actual_len) = nullptr;
+    void*   (*draken_alloc)(size_t n) = nullptr;
+    void    (*draken_free)(void* p) = nullptr;
 };
 
+// rugo-local discriminant for a column's handoff form. Kept as a plain int in
+// ColumnOut so the .pxd sees a stable layout.
+//   0           : pool path — IPC blob in MemoryPool at ref_id (WP-6a).
+//   1/2/3       : direct path — `data` is a Draken-owned positional buffer of
+//                 `length` rows that the consumer wraps via draken_vector_own_raw.
+enum DirectKind { DK_POOL = 0, DK_INT64 = 1, DK_FLOAT32 = 2, DK_FLOAT64 = 3 };
+
+struct ColumnOut {
+    int      direct_kind = DK_POOL;  // DirectKind
+    void*    data = nullptr;         // direct path: draken_alloc'd, owned until taken
+    uint32_t length = 0;             // direct path: row count
+    int64_t  ref_id = -1;            // pool path: MemoryPool ref
+};
+
+// Owns the direct-path Draken buffers it carries: any ColumnOut.data not "taken"
+// by the consumer (via morsel_take_direct) is draken_free'd on destruction —
+// covering decode-error, LIMIT early-exit, and shutdown-drain paths. Move-only;
+// std::vector move leaves the source's columns empty so a moved-from MorselRef
+// frees nothing.
 struct MorselRef {
     std::string path;
     int rg_idx = -1;
     std::vector<std::string> column_names;
-    // One MemoryPool ref_id per column (serialized straight into the pool by the
-    // worker — no intermediate heap buffer, no commit() copy on the consumer).
-    std::vector<int64_t> column_ref_ids;
-    std::vector<int64_t> column_byte_lens;
+    std::vector<ColumnOut> columns;
+    void (*free_fn)(void* p) = nullptr;   // = PoolSink.draken_free
     int64_t bytes_fetched = 0;
     uint64_t read_ns = 0;
     uint64_t decode_ns = 0;
     std::string error;
     bool success = false;
+
+    MorselRef() = default;
+    MorselRef(const MorselRef&) = delete;
+    MorselRef& operator=(const MorselRef&) = delete;
+    MorselRef(MorselRef&&) = default;
+    MorselRef& operator=(MorselRef&&) = default;
+    ~MorselRef() {
+        if (free_fn) {
+            for (auto& c : columns)
+                if (c.data) free_fn(c.data);
+        }
+    }
 };
+
+// Take ownership of column i's direct buffer: returns the pointer and nulls the
+// slot so MorselRef's destructor won't free it (the consumer's Vector now owns
+// it). Returns nullptr for a pool-path column.
+static inline void* morsel_take_direct(MorselRef& m, size_t i) {
+    void* p = m.columns[i].data;
+    m.columns[i].data = nullptr;
+    return p;
+}
+
+// WP-6b: a column qualifies for the direct (zero-copy-into-Draken) path only
+// when it is a plain, fixed-width numeric column with NO ACTUAL NULLS, no
+// dict/RLE encoding, and not a list. The decoder stores value streams COMPACT
+// (parquet omits null rows), so `values.size() == num_rows` holds iff zero rows
+// were omitted — i.e. there are no nulls and the buffer is already positional.
+// That single equality is the null guard: any null makes the array shorter than
+// num_rows and disqualifies the column (it falls to the scatter-capable IPC
+// path). A present-but-all-valid validity bitmap (parquet OPTIONAL column, no
+// nulls) is fine — the consumer wraps with validity = NULL. These are exactly
+// the cases needing only a literal memcpy (or int32→int64 widen), no scatter.
+static inline DirectKind direct_kind_for(const DecodedColumn& d) {
+    if (!d.rep_levels.empty()) return DK_POOL;           // list
+    if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
+    if (!d.rle_int64_values.empty() || !d.rle_float64_values.empty() ||
+        !d.rle_str_lens.empty()) return DK_POOL;         // RLE skip-dense
+    const std::string& t = d.type;
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    if (t == "int64"   && d.int64_values.size()   == n) return DK_INT64;
+    if (t == "int32"   && d.int32_values.size()   == n) return DK_INT64;  // widened
+    if (t == "float32" && d.float32_values.size() == n) return DK_FLOAT32;
+    if (t == "float64" && d.float64_values.size() == n) return DK_FLOAT64;
+    return DK_POOL;
+}
 
 class ParquetIOPipeline {
  private:
@@ -210,6 +278,7 @@ class ParquetIOPipeline {
         result.path = item.path;
         result.rg_idx = item.rg_idx;
         result.column_names = item.column_names;
+        result.free_fn = pool_sink_.draken_free;   // owns abandoned direct buffers
         result.success = true;
 
         uint64_t total_read_ns = 0;
@@ -348,40 +417,86 @@ class ParquetIOPipeline {
                     break;
                 }
 
-                // Parse precision/scale from the logical_type string (e.g. "decimal(15,2)")
-                // for DECIMAL128 columns. ColumnStats carries no separate fields; parse inline.
-                uint8_t dec_precision = 38, dec_scale = 0;
-                if (!decoded.int128_values.empty()) {
-                    const std::string& lt = col_stats.logical_type;
-                    size_t lp = lt.find('(');
-                    size_t cm = lt.find(',', lp);
-                    size_t rp = lt.find(')', cm);
-                    if (lp != std::string::npos && cm != std::string::npos && rp != std::string::npos) {
-                        dec_precision = static_cast<uint8_t>(std::stoi(lt.substr(lp + 1, cm - lp - 1)));
-                        dec_scale     = static_cast<uint8_t>(std::stoi(lt.substr(cm + 1, rp - cm - 1)));
-                    }
-                }
+                ColumnOut cout;
+                // Direct path only for columns whose LOGICAL type is a plain
+                // numeric (logical_type == the physical name, e.g. "int64").
+                // DATE / TIMESTAMP / DECIMAL are physically int32/int64 but carry
+                // a distinct logical_type ("date32[day]", "timestamp[ms,UTC]",
+                // "decimal(p,s)") and get reinterpreted downstream
+                // (_coerce_logical_types) from the pool/deserialize
+                // representation — so they stay on the IPC path.
+                const std::string& lt = col_stats.logical_type;
+                const bool plain_logical = lt.empty() || lt == "int64" ||
+                    lt == "int32" || lt == "float64" || lt == "float32";
+                DirectKind dk = (pool_sink_.draken_alloc && plain_logical)
+                    ? direct_kind_for(decoded) : DK_POOL;
 
-                // Serialize straight into a MemoryPool-reserved region — no
-                // intermediate heap buffer, no consumer-side commit() copy.
-                // Exact size first (count pass), then a single write pass into
-                // the reserved bytes; the two cannot disagree (same code path).
-                size_t sz = rugo::serialized_size(decoded, dec_precision, dec_scale);
-                void* dst = nullptr;
-                int64_t ref_id = pool_sink_.reserve
-                    ? pool_sink_.reserve(pool_sink_.ctx, static_cast<int64_t>(sz), &dst)
-                    : -1;
-                if (ref_id < 0 || dst == nullptr) {
-                    result.success = false;
-                    result.error = "MemoryPool exhausted serializing column: " + col_stats.name;
-                    break;
+                if (dk != DK_POOL) {
+                    // Direct path: non-nullable fixed-width → a Draken-owned
+                    // positional buffer the consumer wraps with zero copy.
+                    const uint32_t n = static_cast<uint32_t>(decoded.num_rows);
+                    void* buf = nullptr;
+                    if (dk == DK_INT64 && decoded.type == "int32") {
+                        buf = pool_sink_.draken_alloc(static_cast<size_t>(n) * 8);
+                        if (buf) {
+                            int64_t* d64 = static_cast<int64_t*>(buf);
+                            for (uint32_t r = 0; r < n; ++r)
+                                d64[r] = static_cast<int64_t>(decoded.int32_values[r]);
+                        }
+                    } else {
+                        const void* src; size_t bytes;
+                        if (dk == DK_INT64)        { src = decoded.int64_values.data();   bytes = static_cast<size_t>(n) * 8; }
+                        else if (dk == DK_FLOAT32) { src = decoded.float32_values.data(); bytes = static_cast<size_t>(n) * 4; }
+                        else                       { src = decoded.float64_values.data(); bytes = static_cast<size_t>(n) * 8; }
+                        buf = pool_sink_.draken_alloc(bytes);
+                        if (buf && bytes) std::memcpy(buf, src, bytes);
+                    }
+                    if (!buf) {
+                        result.success = false;
+                        result.error = "draken_alloc failed for column: " + col_stats.name;
+                        break;
+                    }
+                    cout.direct_kind = dk;
+                    cout.data = buf;
+                    cout.length = n;
+                    // Direct path emits no IPC bytes — ipc_bytes_serialized only
+                    // accrues for pool-path columns, so its drop is the WP-6b signal.
+                } else {
+                    // Pool path (WP-6a): serialize straight into a MemoryPool
+                    // region — no heap buffer, no consumer-side commit() copy.
+                    // Parse precision/scale from the logical_type string
+                    // (e.g. "decimal(15,2)") for DECIMAL128 columns.
+                    uint8_t dec_precision = 38, dec_scale = 0;
+                    if (!decoded.int128_values.empty()) {
+                        const std::string& lt = col_stats.logical_type;
+                        size_t lp = lt.find('(');
+                        size_t cm = lt.find(',', lp);
+                        size_t rp = lt.find(')', cm);
+                        if (lp != std::string::npos && cm != std::string::npos && rp != std::string::npos) {
+                            dec_precision = static_cast<uint8_t>(std::stoi(lt.substr(lp + 1, cm - lp - 1)));
+                            dec_scale     = static_cast<uint8_t>(std::stoi(lt.substr(cm + 1, rp - cm - 1)));
+                        }
+                    }
+                    // Exact size first (count pass), then one write pass into the
+                    // reserved bytes; the two cannot disagree (same code path).
+                    size_t sz = rugo::serialized_size(decoded, dec_precision, dec_scale);
+                    void* dst = nullptr;
+                    int64_t ref_id = pool_sink_.reserve
+                        ? pool_sink_.reserve(pool_sink_.ctx, static_cast<int64_t>(sz), &dst)
+                        : -1;
+                    if (ref_id < 0 || dst == nullptr) {
+                        result.success = false;
+                        result.error = "MemoryPool exhausted serializing column: " + col_stats.name;
+                        break;
+                    }
+                    size_t written = rugo::serialize_decoded_column_into(
+                        decoded, static_cast<uint8_t*>(dst), dec_precision, dec_scale);
+                    pool_sink_.finalize(pool_sink_.ctx, ref_id, static_cast<int64_t>(written));
+                    ipc_bytes_serialized_.fetch_add(written, std::memory_order_relaxed);
+                    cout.direct_kind = DK_POOL;
+                    cout.ref_id = ref_id;
                 }
-                size_t written = rugo::serialize_decoded_column_into(
-                    decoded, static_cast<uint8_t*>(dst), dec_precision, dec_scale);
-                pool_sink_.finalize(pool_sink_.ctx, ref_id, static_cast<int64_t>(written));
-                ipc_bytes_serialized_.fetch_add(written, std::memory_order_relaxed);
-                result.column_ref_ids.push_back(ref_id);
-                result.column_byte_lens.push_back(static_cast<int64_t>(written));
+                result.columns.push_back(cout);
             }
         } catch (const std::exception& e) {
             result.success = false;
