@@ -157,6 +157,7 @@ def _build_registry() -> OperatorRegistry:
     )
     from opteryx.operators.heap_sort import HeapSortNode
     from opteryx.operators.limit import LimitNode
+    from opteryx.operators.window import WindowNode
     from opteryx.operators.nested_loop_join import NestedLoopJoinNode
     from opteryx.operators.non_equi_join import NonEquiJoinNode
     from opteryx.operators.null_reader import NullReaderNode
@@ -259,6 +260,14 @@ def _build_registry() -> OperatorRegistry:
         LimitNode,
         name="Limit",
         category=OperatorCategory.LIMIT,
+    )
+
+    # -- Window operators -----------------------------------------------------
+    # ROW_NUMBER() OVER (PARTITION BY ...) — streaming per-partition counter.
+    r.register(
+        WindowNode,
+        name="Window",
+        category=OperatorCategory.PROJECT,
     )
 
     # -- Set operations -------------------------------------------------------

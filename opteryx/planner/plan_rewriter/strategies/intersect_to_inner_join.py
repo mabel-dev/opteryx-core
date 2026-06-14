@@ -22,8 +22,10 @@ SEMI JOIN is semantically correct because:
 
 NOT rewritten:
   - INTERSECT ALL — multiset semantics require counting occurrences. A semi-join only checks
-    existence, whereas INTERSECT ALL preserves the minimum count across sides.
-    The binder handles INTERSECT ALL directly.
+    existence, whereas INTERSECT ALL preserves the minimum count across sides. It is not yet
+    implemented: the Intersect node survives to physical planning, which fails fast with
+    `InvalidInternalStateError` (there is no Intersect physical operator). should_i_run() must
+    exclude it so the fixed-point plan rewriter does not spin forever on an un-rewritable node.
   - Wildcard projections (SELECT * INTERSECT SELECT *) — column names are not yet available
     pre-bind. The binder expands wildcards and handles those nodes directly.
 
@@ -112,8 +114,16 @@ def _build_on_condition(
 
 class IntersectToSemiJoinStrategy(PlanRewriteStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
+        # Only claim work for nodes complete() will actually rewrite. The plan
+        # rewriter loops to a fixed point: a strategy whose should_i_run() stays
+        # True without removing the triggering node spins forever. INTERSECT ALL
+        # and wildcard/unresolvable projections are skipped in complete(), so they
+        # must not register here (the binder handles those directly).
         return any(
-            node.node_type == LogicalPlanStepType.Intersect for _, node in plan.nodes(True)
+            node.node_type == LogicalPlanStepType.Intersect
+            and node.modifier != "All"
+            and _column_names(node.columns) is not None
+            for _, node in plan.nodes(True)
         )
 
     def visit(self, node: LogicalPlanNode, context: PlanRewriteContext) -> PlanRewriteContext:

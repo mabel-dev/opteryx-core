@@ -18,7 +18,10 @@ preserved unchanged.
 NOT rewritten:
   - EXCEPT ALL — multiset difference cannot be expressed as a plain anti-join. An anti-join
     excludes every left row that has any match on the right, whereas EXCEPT ALL removes
-    exactly one left occurrence per right occurrence. The binder handles EXCEPT ALL directly.
+    exactly one left occurrence per right occurrence. It is not yet implemented: the Except
+    node survives to physical planning, which fails fast with `InvalidInternalStateError`
+    (there is no Except physical operator). should_i_run() must exclude it so the fixed-point
+    plan rewriter does not spin forever on an un-rewritable node.
   - Wildcard projections (SELECT * EXCEPT SELECT *) — column names are not yet available
     pre-bind. The binder expands wildcards and handles those nodes directly.
 
@@ -107,8 +110,16 @@ def _build_on_condition(
 
 class ExceptToAntiJoinStrategy(PlanRewriteStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
+        # Only claim work for nodes complete() will actually rewrite. The plan
+        # rewriter loops to a fixed point: a strategy whose should_i_run() stays
+        # True without removing the triggering node spins forever. EXCEPT ALL and
+        # wildcard/unresolvable projections are skipped in complete(), so they
+        # must not register here (the binder handles those directly).
         return any(
-            node.node_type == LogicalPlanStepType.Except for _, node in plan.nodes(True)
+            node.node_type == LogicalPlanStepType.Except
+            and node.modifier != "All"
+            and _column_names(node.columns) is not None
+            for _, node in plan.nodes(True)
         )
 
     def visit(self, node: LogicalPlanNode, context: PlanRewriteContext) -> PlanRewriteContext:

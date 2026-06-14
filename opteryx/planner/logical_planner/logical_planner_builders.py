@@ -901,7 +901,16 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
     if func == "MATCH_AGAINST" or func.startswith("_"):
         raise UnsupportedSyntaxError(f"`{func}` is internal. Use documented SQL syntax instead.")
 
-    if _is_function(func):
+    if func in ("ROW_NUMBER", "RANK", "DENSE_RANK"):
+        # Ranking window functions. Parsed as AGGREGATOR so the window-function
+        # detection in the logical planner picks them up; they are only valid with
+        # an OVER (...) clause (enforced there).
+        node_type = NodeType.AGGREGATOR
+        if filter_condition is not None:
+            raise UnsupportedSyntaxError(
+                f"Filters are not supported with window function '{func}'."
+            )
+    elif _is_function(func):
         node_type = NodeType.FUNCTION
         if filter_condition is not None:
             raise UnsupportedSyntaxError("Filters are not supported with function calls.")

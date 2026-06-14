@@ -18,16 +18,20 @@ from opteryx.planner.plan_rewriter.strategies.exists_subquery_to_join import (
 from opteryx.planner.plan_rewriter.strategies.in_subquery_to_join import (
     InSubqueryToJoinStrategy,
 )
+from opteryx.planner.plan_rewriter.strategies.intersect_except_all_to_window_join import (
+    IntersectExceptAllToWindowJoinStrategy,
+)
 from opteryx.planner.plan_rewriter.strategies.intersect_to_inner_join import (
     IntersectToSemiJoinStrategy,
 )
 from opteryx.planner.plan_rewriter.strategies.window_to_join import WindowToJoinStrategy
 
 STRATEGIES: list = [
-    WindowToJoinStrategy,          # runs first — Window nodes must be eliminated before join planning
+    WindowToJoinStrategy,          # runs first — aggregate Window nodes must be eliminated before join planning
     ExceptToAntiJoinStrategy,
     ExistsSubqueryToJoinStrategy,
     IntersectToSemiJoinStrategy,
+    IntersectExceptAllToWindowJoinStrategy,  # INTERSECT/EXCEPT ALL -> ROW_NUMBER + semi/anti join
     InSubqueryToJoinStrategy,
     DecorrelateSubqueryStrategy,  # runs after EXISTS/IN — handles scalar correlated subqueries
 ]

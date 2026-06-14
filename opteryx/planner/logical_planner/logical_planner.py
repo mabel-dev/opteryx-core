@@ -474,9 +474,46 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # Replace each window function in _projection with a plain column reference to its output alias,
     # so the regular aggregate path does not see them. Window logical nodes are inserted here so
     # they sit between the scan/filter chain and the project, ready for the plan rewriter.
-    _window_specs: list = []  # (index, agg_node, partition_by_nodes)
+    _RANKING_FUNCTIONS = ("ROW_NUMBER", "RANK", "DENSE_RANK")
+    _window_specs: list = []  # aggregate windows: (index, agg_node, partition_by_nodes)
+    # ranking windows: (kind, partition_by_nodes, order_by_pairs, win_alias)
+    _ranking_specs: list = []
     for _i, proj_col in enumerate(_projection):
         _over = getattr(proj_col, "over", None)
+        _is_ranking = (
+            proj_col.node_type == NodeType.AGGREGATOR and proj_col.value in _RANKING_FUNCTIONS
+        )
+        if _is_ranking:
+            if _over is None:
+                raise UnsupportedSyntaxError(
+                    f"{proj_col.value}() is a window function and requires an OVER (...) clause."
+                )
+            if not _over.get("order_by"):
+                raise UnsupportedSyntaxError(
+                    f"{proj_col.value}() requires an ORDER BY in its OVER (...) clause."
+                )
+            if _over.get("window_frame") is not None:
+                raise UnsupportedSyntaxError(
+                    "Window functions with frame specifications (ROWS/RANGE BETWEEN) are not supported."
+                )
+            _partition_by = [
+                logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
+            ]
+            _order_by = [
+                (
+                    logical_planner_builders.build(item["expr"]),
+                    True if item["options"]["asc"] is None else item["options"]["asc"],
+                )
+                for item in _over.get("order_by", [])
+            ]
+            _win_alias = proj_col.alias or f"$win_{random_string(6)}"
+            _ranking_specs.append((proj_col.value, _partition_by, _order_by, _win_alias))
+            _ref = LogicalColumn(
+                node_type=NodeType.IDENTIFIER, source_column=_win_alias, alias=_win_alias
+            )
+            _ref.query_column = _win_alias
+            _projection[_i] = _ref
+            continue
         if _over is not None and proj_col.node_type == NodeType.AGGREGATOR:
             if _over.get("order_by"):
                 raise UnsupportedSyntaxError(
@@ -536,6 +573,44 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _window_step.source_scan = _source_scan.copy()
             previous_step_id, step_id = step_id, random_string()
             inner_plan.add_node(step_id, _window_step)
+            inner_plan.add_edge(previous_step_id, step_id)
+
+    if _ranking_specs:
+        if _groups is not None and _groups != []:
+            raise UnsupportedSyntaxError("Window functions cannot be combined with GROUP BY.")
+        from opteryx.types.schema import SchemaColumn, mint_column_identity
+
+        # Group ranking functions that share the same PARTITION BY + ORDER BY into a
+        # single Window node (one sort serves all of them).
+        _by_spec: dict = {}
+        for _kind, _partition_by, _order_by, _win_alias in _ranking_specs:
+            _pkey = tuple(format_expression(pb) for pb in _partition_by)
+            _okey = tuple((format_expression(c), bool(a)) for c, a in _order_by)
+            _spec_key = (_pkey, _okey)
+            if _spec_key not in _by_spec:
+                _by_spec[_spec_key] = (_partition_by, _order_by, [])
+            _by_spec[_spec_key][2].append((_kind, _win_alias))
+        for _spec_key, (_partition_by, _order_by, _outs) in _by_spec.items():
+            _win_rel = f"$window-{random_string(6)}"
+            _outputs = [
+                (
+                    _kind,
+                    SchemaColumn(
+                        name=_win_alias,
+                        column_type=_plt.INT64,
+                        identity=mint_column_identity(_win_rel, _win_alias),
+                    ),
+                )
+                for _kind, _win_alias in _outs
+            ]
+            _win_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+            _win_step.partition_by = _partition_by
+            _win_step.order_by = _order_by
+            _win_step.outputs = _outputs
+            _win_step.output_relation = _win_rel
+            _win_step.columns = []
+            previous_step_id, step_id = step_id, random_string()
+            inner_plan.add_node(step_id, _win_step)
             inner_plan.add_edge(previous_step_id, step_id)
 
     if _groups is not None and _groups != []:

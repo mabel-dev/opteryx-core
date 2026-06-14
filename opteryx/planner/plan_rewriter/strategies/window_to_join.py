@@ -180,17 +180,30 @@ def _rewrite_one_window(plan: LogicalPlan, win_nid: str) -> LogicalPlan:
     return plan
 
 
+def _is_aggregate_window(node: LogicalPlanNode) -> bool:
+    """Aggregate windows (SUM/COUNT/... OVER) lower to a GROUP BY + broadcast join.
+
+    Ranking windows (ROW_NUMBER/RANK/DENSE_RANK) carry `outputs` and are executed by
+    the dedicated WindowNode operator instead — they must NOT be picked up here, or
+    the fixed-point rewriter would loop on an un-rewritable node. `outputs` is set by
+    the producer at plan-rewrite time (unlike `window_functions`, which the binder
+    fills in later), so it is the reliable discriminator here.
+    """
+    return (
+        node.node_type == LogicalPlanStepType.Window
+        and getattr(node, "outputs", None) is None
+    )
+
+
 class WindowToJoinStrategy(PlanRewriteStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        return any(
-            node.node_type == LogicalPlanStepType.Window for _, node in plan.nodes(True)
-        )
+        return any(_is_aggregate_window(node) for _, node in plan.nodes(True))
 
     def visit(self, node: LogicalPlanNode, context: PlanRewriteContext) -> PlanRewriteContext:
         if not context.rewritten_plan:
             context.rewritten_plan = context.pre_rewrite_tree.copy()
 
-        if node.node_type == LogicalPlanStepType.Window:
+        if _is_aggregate_window(node):
             context.bag.setdefault("candidates", []).append(context.node_id)
 
         return context

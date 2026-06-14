@@ -296,6 +296,19 @@ STATEMENTS = [
         # Two columns.
         ("SELECT id, name FROM $planets WHERE id < 5 INTERSECT SELECT id, name FROM $planets WHERE id < 4 INTERSECT SELECT id, name FROM $planets WHERE id < 3", 2, 2, None),
 
+        # INTERSECT ALL / EXCEPT ALL — multiset semantics via ROW_NUMBER + semi/anti
+        # join. min(count_left, count_right) for INTERSECT ALL, max(left - right, 0)
+        # for EXCEPT ALL. Over $planets (distinct rows) the ALL forms coincide with the
+        # distinct forms; multiset counting is exercised by the result-checking suite.
+        ("SELECT name FROM $planets WHERE id < 5 INTERSECT ALL SELECT name FROM $planets WHERE id < 3", 2, 1, None),
+        ("SELECT name FROM $planets WHERE id < 5 EXCEPT ALL SELECT name FROM $planets WHERE id = 1", 3, 1, None),
+        ("SELECT name FROM $planets WHERE id < 5 INTERSECT ALL SELECT name FROM $planets WHERE id < 4 INTERSECT ALL SELECT name FROM $planets WHERE id < 3", 2, 1, None),
+        # Multiset counting (testdata.satellites.planetId has duplicates): planetId 5
+        # appears only on the left, 6..9 on both. INTERSECT ALL keeps the min per value
+        # (drops 5 entirely); EXCEPT ALL keeps the left surplus (only the 67 planetId=5).
+        ("SELECT planetId FROM testdata.satellites WHERE planetId >= 5 INTERSECT ALL SELECT planetId FROM testdata.satellites WHERE planetId >= 6", 107, 1, None),
+        ("SELECT planetId FROM testdata.satellites WHERE planetId >= 5 EXCEPT ALL SELECT planetId FROM testdata.satellites WHERE planetId >= 6", 67, 1, None),
+
         # IN subquery
         ("SELECT name FROM testdata.satellites WHERE id IN (SELECT id FROM $planets)", 9, 1, None),
         ("SELECT name FROM testdata.satellites WHERE id NOT IN (SELECT id FROM $planets)", 168, 1, None),
@@ -324,6 +337,21 @@ STATEMENTS = [
         ("SELECT id, SUM(gravity) OVER (PARTITION BY id ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
         # Unsupported: window function combined with GROUP BY
         ("SELECT id, SUM(gravity) OVER (PARTITION BY id) FROM $planets GROUP BY id", None, None, UnsupportedSyntaxError),
+
+        # RANKING WINDOW FUNCTIONS (ROW_NUMBER / RANK / DENSE_RANK) — blocking sort path.
+        # User-facing ranking functions REQUIRE an OVER (...) with ORDER BY.
+        ("SELECT name, ROW_NUMBER() OVER (PARTITION BY id ORDER BY name) AS rn FROM $planets", 9, 2, None),
+        ("SELECT name, RANK() OVER (ORDER BY id) AS rk FROM $planets", 9, 2, None),
+        ("SELECT name, DENSE_RANK() OVER (ORDER BY id) AS dr FROM $planets", 9, 2, None),
+        # Several ranking functions sharing one PARTITION BY + ORDER BY (one sort).
+        ("SELECT id, ROW_NUMBER() OVER (ORDER BY id) rn, RANK() OVER (ORDER BY id) rk, DENSE_RANK() OVER (ORDER BY id) dr FROM $planets", 9, 4, None),
+        # PARTITION BY a real grouping column (numbering resets per partition).
+        ("SELECT planetId, ROW_NUMBER() OVER (PARTITION BY planetId ORDER BY id) rn FROM testdata.satellites", 177, 2, None),
+        ("SELECT planetId, RANK() OVER (PARTITION BY planetId ORDER BY id DESC) rk FROM testdata.satellites", 177, 2, None),
+        # Ranking function without ORDER BY — must raise (numbering would be undefined).
+        ("SELECT ROW_NUMBER() OVER (PARTITION BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        # Ranking function without OVER — must raise (it is window-only).
+        ("SELECT RANK() FROM $planets", None, None, UnsupportedSyntaxError),
 
         # casting array vectors segfaulted
         ("SELECT CAST(missions AS VARCHAR) FROM testdata.astronauts", 357, 1, None),

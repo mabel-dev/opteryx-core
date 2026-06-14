@@ -81,6 +81,15 @@ def _create_distinct_node(logical_node, query_properties, registry):
     )
 
 
+def _create_window_node(logical_node, query_properties, registry):
+    node_config = logical_node.properties
+    return registry.create(
+        "Window",
+        query_properties,
+        **{k: v for k, v in node_config.items() if k in ("partition_by", "order_by", "window_functions")},
+    )
+
+
 def _create_exit_node(logical_node, query_properties, registry):
     return registry.create("Exit", query_properties, **logical_node.properties)
 
@@ -276,6 +285,7 @@ _DISPATCH = {
     LogicalPlanStepType.DropView:         _create_drop_view_node,
     LogicalPlanStepType.ShowColumns:      _create_show_columns_node,
     LogicalPlanStepType.Union:            _create_union_node,
+    LogicalPlanStepType.Window:           _create_window_node,
     LogicalPlanStepType.Unnest:           _create_unnest_node,
     LogicalPlanStepType.Analyze:          _create_analyze_node,
     LogicalPlanStepType.Comment:          _create_comment_node,
