@@ -192,7 +192,7 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
     from opteryx.expression import NodeType
     from opteryx.models import Node
     from opteryx.planner.logical_planner import LogicalPlanStepType
-    from opteryx.managers.views import get_view_plan
+    from opteryx.managers.views import resolve_relation
 
     if ctes is None:
         ctes = {}
@@ -209,8 +209,20 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
             relation = node.relation
             if relation in ctes:
                 sub_plan = _copy_cte_plan(ctes[relation])
+            elif getattr(node, "resolved_dataset", None) is not None:
+                # Already resolved to a table on a previous pass; leave as Scan.
+                sub_plan = None
             else:
-                sub_plan = get_view_plan(relation, telemetry)
+                # Catalog resolution step: one round trip resolves view-or-table.
+                kind, resolved = resolve_relation(relation, telemetry)
+                if kind == "view":
+                    sub_plan = resolved
+                else:
+                    if kind == "dataset":
+                        # Stash on the node so the dataset-bind pass reuses it
+                        # instead of re-reading the catalog.
+                        node.resolved_dataset = resolved
+                    sub_plan = None
             if sub_plan:
                 sub_plan = rename_relations(sub_plan)
                 sub_plan_head = sub_plan.get_exit_points()[0]

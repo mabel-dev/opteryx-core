@@ -10,18 +10,47 @@ from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.utils import lru_cache_with_expiry
 
 
-def get_view_plan(view_name: str, telemetry) -> dict:
-    """Return the logical plan for a view, if it exists."""
-    # DEBUG: print(f"Fetching view plan for {view_name}")
-    definition = _get_view_definition(view_name, telemetry)
+def _view_plan_from_definition(definition):
+    """Build a view's logical plan from its definition (or None)."""
     if definition is None:
         return None
-    view_sql = definition.statement
-    view_plan = _view_as_plan(view_sql)
+    view_plan = _view_as_plan(definition.statement)
     # Copy the cached plan so mutations during binding don't affect the cache
     view_plan = view_plan.copy()
-    statistics_bound = _bind_row_count_estimate(view_plan, definition.last_row_count)
-    return statistics_bound
+    return _bind_row_count_estimate(view_plan, definition.last_row_count)
+
+
+def get_view_plan(view_name: str, telemetry) -> dict:
+    """Return the logical plan for a view, if it exists."""
+    return _view_plan_from_definition(_get_view_definition(view_name, telemetry))
+
+
+def resolve_relation(relation: str, telemetry):
+    """Catalog resolution step: resolve a relation in a single catalog round
+    trip, returning one of:
+
+      ('view', view_logical_plan)   — expand it in place
+      ('dataset', dataset_object)   — hand to table_engine via prefetched_table=
+      (None, None)                  — unknown here; bind it normally
+
+    Connectors exposing ``get_relation`` resolve the dataset and view in one
+    ``get_all``; others fall back to a view-only probe so behaviour is
+    unchanged. Non-eidetic connectors (e.g. local filesystem) never look up
+    views, so they return (None, None) and bind on the normal path.
+    """
+    connector = connector_factory(relation, telemetry)
+    if not connector.eidetic:
+        return None, None
+    resolver = getattr(connector, "get_relation", None)
+    if resolver is None:
+        definition = _get_view_definition(relation, telemetry)
+        return ("view", _view_plan_from_definition(definition)) if definition else (None, None)
+    kind, obj = resolver(relation)
+    if kind == "view":
+        return "view", _view_plan_from_definition(obj)
+    if kind == "dataset":
+        return "dataset", obj
+    return None, None
 
 
 def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:

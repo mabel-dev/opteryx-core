@@ -82,6 +82,10 @@ class OpteryxTable(Diachronic, PredicatePushable):
             workspace: The workspace name
             **kwargs: Additional parameters (telemetry, etc.)
         """
+        # Resolved up front by the catalog resolution step, if available, so we
+        # can skip the per-table catalog round trip below.
+        prefetched_table = kwargs.pop("prefetched_table", None)
+
         Diachronic.__init__(self, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
 
@@ -105,7 +109,10 @@ class OpteryxTable(Diachronic, PredicatePushable):
         _diag = _os.environ.get("OPTERYX_PLAN_DIAG")
         _t0 = _time.monotonic_ns()
         try:
-            self.table = self.catalog.load_dataset(self.dataset)
+            if prefetched_table is not None:
+                self.table = prefetched_table
+            else:
+                self.table = self.catalog.load_dataset(self.dataset)
             self.snapshot = self.table.snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
         except DatasetNotFound as exc:
@@ -524,6 +531,31 @@ class OpteryxConnector(Eidetic, PredicatePushable):
             ViewDefinition object
         """
         return self.get_view(name)
+
+    def get_relation(self, name: str):
+        """Catalog resolution step: resolve a relation to its kind + payload in
+        a single catalog round trip (one get_all over the dataset and view docs).
+
+        Returns ('dataset', SimpleDataset), ('view', ViewDefinition) or
+        (None, None). The dataset object can be handed back to table_engine via
+        `prefetched_table=` so binding does not re-read the catalog.
+        """
+        from opteryx.connectors.capabilities.eidetic import ViewDefinition
+
+        workspace, relative_id = self._parse_identifier(name)
+        catalog = self._get_catalog(workspace)
+
+        kind, obj = catalog.get_relation(relative_id)
+        if kind == "view":
+            return "view", ViewDefinition(
+                name=obj.name,
+                statement=obj.definition,
+                owner=obj.metadata.author,
+                last_row_count=obj.metadata.last_execution_records,
+            )
+        if kind == "dataset":
+            return "dataset", obj
+        return None, None
 
     # View operations (Eidetic capability)
     def get_view(self, view_name: str):

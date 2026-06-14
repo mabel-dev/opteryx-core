@@ -154,6 +154,12 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if gateway.supports_diachronic:
         engine_kwargs["at_date"] = node.at_date
 
+    # Reuse the dataset resolved by the catalog resolution step, if present, so
+    # table_engine doesn't re-read the catalog. Absent → normal binding path.
+    resolved_dataset = getattr(node, "resolved_dataset", None)
+    if resolved_dataset is not None:
+        engine_kwargs["prefetched_table"] = resolved_dataset
+
     node.connector = gateway.table_engine(
         dataset_name, telemetry=context.telemetry, **engine_kwargs
     )
