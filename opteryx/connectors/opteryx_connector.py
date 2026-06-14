@@ -104,10 +104,6 @@ class OpteryxTable(Diachronic, PredicatePushable):
         # Load table from catalog
         from opteryx_catalog.exceptions import DatasetNotFound
 
-        import os as _os
-        import time as _time
-        _diag = _os.environ.get("OPTERYX_PLAN_DIAG")
-        _t0 = _time.monotonic_ns()
         try:
             if prefetched_table is not None:
                 self.table = prefetched_table
@@ -117,12 +113,6 @@ class OpteryxTable(Diachronic, PredicatePushable):
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
         except DatasetNotFound as exc:
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from exc
-        if _diag:
-            import sys as _sys
-            _sys.stderr.write(
-                "[plan_diag] %s load_dataset+snapshot (firestore) = %.1fms\n"
-                % (self.dataset, (_time.monotonic_ns() - _t0) / 1e6)
-            )
 
     @staticmethod
     def _normalize_type(
@@ -264,21 +254,13 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
         # Build Manifest from catalog table.scan()
         # scan() returns an iterable of DataFile objects
-        import os as _os
-        import time as _time
-        _diag = _os.environ.get("OPTERYX_PLAN_DIAG")
-        _t_scan = _time.monotonic_ns()
         scan = self.table.scan(snapshot_id=self.snapshot_id)
-        # Force materialization (scan may be lazy): this is where the GCS manifest
-        # read + parquet parse + DataFile object creation actually happen.
-        data_files = list(scan)
-        _t_materialized = _time.monotonic_ns()
 
         # Build FileEntry for each file
         file_entries = []
         protocols = set()
 
-        for data_file in data_files:
+        for data_file in scan:
             file_entry = FileEntry.from_datafile(data_file)
             file_entries.append(file_entry)
 
@@ -286,19 +268,6 @@ class OpteryxTable(Diachronic, PredicatePushable):
             if "://" in file_entry.file_path:
                 protocol = file_entry.file_path.split("://")[0]
                 protocols.add(protocol)
-
-        if _diag:
-            import sys as _sys
-            _sys.stderr.write(
-                "[plan_diag] %s scan() materialize (gcs+parse) = %.1fms  "
-                "FileEntry.from_datafile x%d (cpu) = %.1fms\n"
-                % (
-                    self.dataset,
-                    (_t_materialized - _t_scan) / 1e6,
-                    len(file_entries),
-                    (_time.monotonic_ns() - _t_materialized) / 1e6,
-                )
-            )
 
         # Validate all files use same protocol
         if len(protocols) > 1:
