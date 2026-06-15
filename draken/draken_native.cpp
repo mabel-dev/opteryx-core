@@ -5370,6 +5370,10 @@ NB_MODULE(draken_native, m) {
             uint64_t* out = static_cast<uint64_t*>(draken_malloc(alloc));
             if (!out) throw std::bad_alloc();
             OwnedBuffer<uint64_t> out_owned(out);
+            // The hash computation is pure C++ over the column; release the GIL
+            // for it and re-acquire only to box the result list below.
+            {
+            nb::gil_scoped_release _gil;
             // D.11: null — every row hashes as the NULL_HASH sentinel (same path as
             // null rows in other types: scratch=NULL_HASH → simd_hash_i64 → out[i]).
             if (v.vec.type == DRAKEN_NULL) {
@@ -5431,6 +5435,7 @@ NB_MODULE(draken_native, m) {
             } else {
                 draken_hash(v.vec, out, n);
             }
+            }  // re-acquire GIL
             nb::list result;
             for (uint32_t i = 0u; i < n; ++i)
                 result.append(nb::cast(out[i]));
@@ -5444,6 +5449,9 @@ NB_MODULE(draken_native, m) {
         // NULL_HASH, source validity carried as a passenger mask. NULL/FP16
         // key types fall back to a dense INT64 hash vector.
         .def("hash_shaped", [](const VectorOwner& v) -> VectorOwner {
+            // Pure C++ (malloc + simd hash + VecResult). VectorOwner return is
+            // converted after the lambda. Release the GIL for the whole body.
+            nb::gil_scoped_release _gil;
             if (v.vec.type == DRAKEN_ARRAY)
                 throw std::invalid_argument("hash_shaped: not supported for DRAKEN_ARRAY");
             const uint32_t n = v.vec.length;
@@ -5526,16 +5534,17 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type == DRAKEN_NULL) return nb::cast(static_cast<int64_t>(0));
             if (is_float_type(v.vec.type)) {
                 double val = 0.0;
-                draken_float_sum(v.vec, &val);
+                { nb::gil_scoped_release _gil; draken_float_sum(v.vec, &val); }
                 return nb::cast(val);
             }
             if (v.vec.type == DRAKEN_DECIMAL128) {
                 require_decimal_descriptor(v, "sum");
-                __int128 acc = 0; dec128_sum_reduce(v.vec, acc);
+                __int128 acc = 0;
+                { nb::gil_scoped_release _gil; dec128_sum_reduce(v.vec, acc); }
                 return unscaled128_to_py_decimal(acc, v.logical_type->scale);
             }
             int64_t val = 0;
-            draken_sum(v.vec, &val);
+            { nb::gil_scoped_release _gil; draken_sum(v.vec, &val); }
             if (v.vec.type == DRAKEN_DECIMAL) {
                 require_decimal_descriptor(v, "sum");
                 return unscaled_to_py_decimal(val, v.logical_type->scale);
@@ -5579,27 +5588,31 @@ NB_MODULE(draken_native, m) {
                 throw std::invalid_argument("Cannot compute min of empty column");
             // D.12: INTERVAL — custom scan returns original (months, ms) of min slot.
             if (v.vec.type == DRAKEN_INTERVAL) {
-                auto r = draken::ops::interval_find_min(v.vec);
+                draken::ops::IntervalMinMaxResult r;
+                { nb::gil_scoped_release _gil; r = draken::ops::interval_find_min(v.vec); }
                 if (!r.found)
                     throw std::invalid_argument("Cannot compute min of all-null column");
                 return interval_slot_to_py(DrakenIntervalSlot{r.months, r.ms});
             }
             if (is_float_type(v.vec.type)) {
                 double val = 0.0;
-                uint32_t count = draken_float_min(v.vec, &val);
+                uint32_t count;
+                { nb::gil_scoped_release _gil; count = draken_float_min(v.vec, &val); }
                 if (count == 0)
                     throw std::invalid_argument("Cannot compute min of all-null column");
                 return nb::cast(val);
             }
             if (v.vec.type == DRAKEN_DECIMAL128) {
                 require_decimal_descriptor(v, "min");
-                __int128 best = 0; uint32_t cnt = dec128_min_reduce(v.vec, best);
+                __int128 best = 0; uint32_t cnt;
+                { nb::gil_scoped_release _gil; cnt = dec128_min_reduce(v.vec, best); }
                 if (cnt == 0)
                     throw std::invalid_argument("Cannot compute min of all-null column");
                 return unscaled128_to_py_decimal(best, v.logical_type->scale);
             }
             int64_t val = 0;
-            uint32_t count = draken_min(v.vec, &val);
+            uint32_t count;
+            { nb::gil_scoped_release _gil; count = draken_min(v.vec, &val); }
             if (count == 0)
                 throw std::invalid_argument("Cannot compute min of all-null column");
             if (v.vec.type == DRAKEN_TIMESTAMP64)
@@ -5633,27 +5646,31 @@ NB_MODULE(draken_native, m) {
                 throw std::invalid_argument("Cannot compute max of empty column");
             // D.12: INTERVAL — custom scan returns original (months, ms) of max slot.
             if (v.vec.type == DRAKEN_INTERVAL) {
-                auto r = draken::ops::interval_find_max(v.vec);
+                draken::ops::IntervalMinMaxResult r;
+                { nb::gil_scoped_release _gil; r = draken::ops::interval_find_max(v.vec); }
                 if (!r.found)
                     throw std::invalid_argument("Cannot compute max of all-null column");
                 return interval_slot_to_py(DrakenIntervalSlot{r.months, r.ms});
             }
             if (is_float_type(v.vec.type)) {
                 double val = 0.0;
-                uint32_t count = draken_float_max(v.vec, &val);
+                uint32_t count;
+                { nb::gil_scoped_release _gil; count = draken_float_max(v.vec, &val); }
                 if (count == 0)
                     throw std::invalid_argument("Cannot compute max of all-null column");
                 return nb::cast(val);
             }
             if (v.vec.type == DRAKEN_DECIMAL128) {
                 require_decimal_descriptor(v, "max");
-                __int128 best = 0; uint32_t cnt = dec128_max_reduce(v.vec, best);
+                __int128 best = 0; uint32_t cnt;
+                { nb::gil_scoped_release _gil; cnt = dec128_max_reduce(v.vec, best); }
                 if (cnt == 0)
                     throw std::invalid_argument("Cannot compute max of all-null column");
                 return unscaled128_to_py_decimal(best, v.logical_type->scale);
             }
             int64_t val = 0;
-            uint32_t count = draken_max(v.vec, &val);
+            uint32_t count;
+            { nb::gil_scoped_release _gil; count = draken_max(v.vec, &val); }
             if (count == 0)
                 throw std::invalid_argument("Cannot compute max of all-null column");
             if (v.vec.type == DRAKEN_TIMESTAMP64)
@@ -5689,18 +5706,20 @@ NB_MODULE(draken_native, m) {
                 /* E.32: DECIMAL arithmetic intercepted before OpsTable. */    \
                 if (a.type == DRAKEN_DECIMAL || b.type == DRAKEN_DECIMAL ||   \
                     a.type == DRAKEN_DECIMAL128 || b.type == DRAKEN_DECIMAL128)\
-                    return decimal_fn(self, bo);                               \
+                    { nb::gil_scoped_release _gil; return decimal_fn(self, bo); } \
                 if (is_integer_type(a.type) && is_integer_type(b.type)        \
                         && a.type != b.type) {                                 \
                     DrakenType wt = wider_int_type(a.type, b.type);            \
                     auto pa = maybe_promote(a, wt);                            \
                     auto pb = maybe_promote(b, wt);                            \
+                    nb::gil_scoped_release _gil;                               \
                     return vecresult_to_owner(draken_fn(                       \
                         pa ? pa->vec : a, pb ? pb->vec : b));                  \
                 }                                                              \
                 if (a.type != b.type)                                          \
                     throw std::invalid_argument(                               \
                         "cross-type vector arithmetic not supported");         \
+                nb::gil_scoped_release _gil;                                   \
                 return vecresult_to_owner(draken_fn(a, b));                    \
             }                                                                  \
             /* E.32: decimal × scalar not supported; promote scalar first. */  \
@@ -5708,9 +5727,14 @@ NB_MODULE(draken_native, m) {
                 throw std::invalid_argument(                                   \
                     std::string(#fn) + ": DECIMAL × scalar not supported; "   \
                     "promote scalar to DECIMAL first");                         \
-            if (is_float_type(self.vec.type))                                  \
-                return vecresult_to_owner(draken_float_fn_s(self.vec, nb::cast<double>(other))); \
-            return vecresult_to_owner(draken_fn_s(self.vec, nb::cast<int64_t>(other))); \
+            if (is_float_type(self.vec.type)) {                               \
+                const double _s = nb::cast<double>(other);                     \
+                nb::gil_scoped_release _gil;                                   \
+                return vecresult_to_owner(draken_float_fn_s(self.vec, _s));    \
+            }                                                                  \
+            const int64_t _si = nb::cast<int64_t>(other);                     \
+            nb::gil_scoped_release _gil;                                       \
+            return vecresult_to_owner(draken_fn_s(self.vec, _si));            \
         })
         DRAKEN_BINOP_CROSS(add, draken_add, draken_add_scalar, draken_float_add_scalar, decimal_add_dispatch)
         DRAKEN_BINOP_CROSS(sub, draken_sub, draken_sub_scalar, draken_float_sub_scalar, decimal_sub_dispatch)
@@ -5724,6 +5748,8 @@ NB_MODULE(draken_native, m) {
         // neg: unary negation; neg(INT64_MIN) wraps for integers.
         // E.32: DECIMAL neg raises on INT64_MIN (financial data; no silent wrap).
         .def("neg", [](const VectorOwner& v) -> VectorOwner {
+            // Pure C++ on DrakenVector — release the GIL for the body.
+            nb::gil_scoped_release _gil;
             if (v.vec.type == DRAKEN_ARRAY)
                 throw std::invalid_argument("neg: not supported for DRAKEN_ARRAY");
             if (v.vec.type == DRAKEN_DECIMAL) {
@@ -5774,6 +5800,8 @@ NB_MODULE(draken_native, m) {
         //
         // All ops require DRAKEN_BOOL inputs; mismatched types throw invalid_argument.
         .def("bool_and", [](const VectorOwner& self, const VectorOwner& other) -> VectorOwner {
+            // Pure C++ Kleene op on DrakenVector — release the GIL for the body.
+            nb::gil_scoped_release _gil;
             if (self.vec.type != DRAKEN_BOOL || other.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("bool_and: both operands must be DRAKEN_BOOL");
             if (self.vec.length != other.vec.length)
@@ -5782,6 +5810,8 @@ NB_MODULE(draken_native, m) {
         }, nb::arg("other"),
             "Kleene AND: BOOL × BOOL → BOOL. FALSE dominates (F∧N=F). T∧N=N.")
         .def("bool_or", [](const VectorOwner& self, const VectorOwner& other) -> VectorOwner {
+            // Pure C++ Kleene op on DrakenVector — release the GIL for the body.
+            nb::gil_scoped_release _gil;
             if (self.vec.type != DRAKEN_BOOL || other.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("bool_or: both operands must be DRAKEN_BOOL");
             if (self.vec.length != other.vec.length)
@@ -5790,6 +5820,8 @@ NB_MODULE(draken_native, m) {
         }, nb::arg("other"),
             "Kleene OR: BOOL × BOOL → BOOL. TRUE dominates (T∨N=T). F∨N=N.")
         .def("bool_not", [](const VectorOwner& v) -> VectorOwner {
+            // Pure C++ Kleene op on DrakenVector — release the GIL for the body.
+            nb::gil_scoped_release _gil;
             if (v.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("bool_not: operand must be DRAKEN_BOOL");
             return vecresult_to_owner(draken::ops::bool_not(v.vec));
@@ -5798,7 +5830,8 @@ NB_MODULE(draken_native, m) {
         .def("bool_any", [](const VectorOwner& v) -> nb::object {
             if (v.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("bool_any: operand must be DRAKEN_BOOL");
-            const int8_t r = draken::ops::bool_any(v.vec);
+            int8_t r;
+            { nb::gil_scoped_release _gil; r = draken::ops::bool_any(v.vec); }
             if (r < 0) return nb::none();
             return nb::cast(r == 1);
         },
@@ -5806,7 +5839,8 @@ NB_MODULE(draken_native, m) {
         .def("bool_all", [](const VectorOwner& v) -> nb::object {
             if (v.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("bool_all: operand must be DRAKEN_BOOL");
-            const int8_t r = draken::ops::bool_all(v.vec);
+            int8_t r;
+            { nb::gil_scoped_release _gil; r = draken::ops::bool_all(v.vec); }
             if (r < 0) return nb::none();
             return nb::cast(r == 1);
         },
@@ -5820,12 +5854,19 @@ NB_MODULE(draken_native, m) {
             std::vector<int32_t> idx_vec(n);
             for (uint32_t i = 0; i < n; ++i)
                 idx_vec[i] = nb::cast<int32_t>(indices[i]);
+            // The index list is materialised under the GIL above; the gather
+            // itself is pure C++ on DrakenVector, so run it off-GIL.
+            nb::gil_scoped_release _gil;
             return vector_take_impl(v, idx_vec.data(), n);
         })
         // slice(start, length) — contiguous subrange. No Python index list; direct
         // memcpy for dense vectors. Equivalent to take(range(start, start+length))
         // but without materialising an index array at any level.
         .def("slice", [](const VectorOwner& v, uint32_t start, uint32_t length) -> VectorOwner {
+            // Pure C++ on DrakenVector structs (args pre-unwrapped, VectorOwner
+            // return converted after the lambda). Release the GIL for the whole
+            // body (CLAUDE.md §2); std:: throws re-acquire during unwind.
+            nb::gil_scoped_release _gil;
             // O(1) bounds guard: fail loud rather than read past the vector
             // (a denormalised start+length silently returned garbage before).
             if (static_cast<uint64_t>(start) + length > v.vec.length)
@@ -5855,6 +5896,13 @@ NB_MODULE(draken_native, m) {
         .def("mask", [](const VectorOwner& v, const VectorOwner& m) -> VectorOwner {
             if (m.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("mask: expected a DRAKEN_BOOL mask vector");
+            // The whole body operates on DrakenVector C structs (no Python
+            // objects) — args are already-unwrapped VectorOwner refs and the
+            // VectorOwner return is converted by nanobind after we return.
+            // Release the GIL so the per-row index build + typed take run
+            // off-GIL (CLAUDE.md §2). This is the dominant cost of Filter's
+            // filter_mask gather.
+            nb::gil_scoped_release _gil;
             const uint32_t mn = m.vec.length;
             std::vector<int32_t> idx_vec;
             idx_vec.reserve(mn);
@@ -5875,6 +5923,8 @@ NB_MODULE(draken_native, m) {
         // count_true() — number of rows that are valid AND true. Used to size a
         // zero-column filtered morsel (filter on a projected-away column).
         .def("count_true", [](const VectorOwner& m) -> int64_t {
+            // Pure C++ scan; int64_t return boxed after the lambda. Release GIL.
+            nb::gil_scoped_release _gil;
             if (m.vec.type != DRAKEN_BOOL)
                 throw std::invalid_argument("count_true: expected a DRAKEN_BOOL vector");
             const uint32_t n = m.vec.length;
@@ -5884,6 +5934,8 @@ NB_MODULE(draken_native, m) {
             return c;
         })
         .def("materialize", [](const VectorOwner& v) -> VectorOwner {
+            // Pure C++ on DrakenVector structs — release the GIL for the body.
+            nb::gil_scoped_release _gil;
             // D.11: null — materialize is a no-op (no encoding to expand).
             if (v.vec.type == DRAKEN_NULL) return make_null_vector(v.vec.length);
             // D.13: array — copy offsets + materialize child recursively.
@@ -5896,6 +5948,8 @@ NB_MODULE(draken_native, m) {
             return result;
         })
         .def("compress", [](const VectorOwner& v) -> VectorOwner {
+            // Pure C++ on DrakenVector structs — release the GIL for the body.
+            nb::gil_scoped_release _gil;
             // D.11: null — all rows are null → 0 valid rows after compress.
             if (v.vec.type == DRAKEN_NULL) return make_null_vector(0u);
             // D.13: array — keep only valid rows, compacting child.
@@ -5942,15 +5996,19 @@ NB_MODULE(draken_native, m) {
                 // does not require the literal to be exact at the column scale.
                 __int128 b_unscaled; uint8_t sb;
                 py_scalar_to_unscaled_scale(scalar.ptr(), b_unscaled, sb);
+                const uint8_t sc = v.logical_type->scale;
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken::ops::dec_compare_scalar(
-                    v.vec, v.logical_type->scale, b_unscaled, sb, op));
+                    v.vec, sc, b_unscaled, sb, op));
             }
             if (v.vec.type == DRAKEN_DECIMAL128) {
                 require_decimal_descriptor(v, "compare_scalar");
                 __int128 b_unscaled; uint8_t sb;
                 py_scalar_to_unscaled_scale(scalar.ptr(), b_unscaled, sb);
+                const uint8_t sc = v.logical_type->scale;
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken::ops::dec128_compare_scalar(
-                    v.vec, v.logical_type->scale, b_unscaled, sb, op));
+                    v.vec, sc, b_unscaled, sb, op));
             }
             if (v.vec.type == DRAKEN_TIMESTAMP64) {
                 if (!v.logical_type)
@@ -5963,6 +6021,7 @@ NB_MODULE(draken_native, m) {
                     ts = nb::cast<int64_t>(scalar);
                 else
                     ts = py_datetime_to_instant(scalar, v.logical_type->unit);
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, ts, op));
             }
             if (v.vec.type == DRAKEN_DATE32) {
@@ -5974,6 +6033,7 @@ NB_MODULE(draken_native, m) {
                     days = nb::cast<int64_t>(scalar);
                 else
                     days = static_cast<int64_t>(py_date_to_days(scalar.ptr()));
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, days, op));
             }
             if (v.vec.type == DRAKEN_TIME32 || v.vec.type == DRAKEN_TIME64) {
@@ -5981,6 +6041,7 @@ NB_MODULE(draken_native, m) {
                     throw std::invalid_argument(
                         "compare_scalar: TIME vector requires a logical-type descriptor");
                 const int64_t raw = py_time_to_raw(scalar.ptr(), v.logical_type->unit);
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, raw, op));
             }
             // D.12: INTERVAL — scalar is (months, ms) tuple; normalize then dispatch.
@@ -5988,6 +6049,7 @@ NB_MODULE(draken_native, m) {
                 const DrakenIntervalSlot slot = py_to_interval_slot(scalar);
                 const int64_t norm = draken::ops::interval_normalize_checked(
                     slot.months, slot.ms);
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, norm, op));
             }
             if (v.vec.type == DRAKEN_VARCHAR) {
@@ -6010,20 +6072,32 @@ NB_MODULE(draken_native, m) {
                     str_init_extern(&scalar_slot, ubytes, ulen,
                                     (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
                 }
+                // ubytes points at the Python str's cached UTF-8; the str arg
+                // stays alive (and is immutable) across the released-GIL window.
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(
                     draken_str_compare_scalar(v.vec, scalar_slot, ubytes, op));
             }
             // FLOAT32/64: scalar is Python float (or int coerced to double).
-            if (is_float_type(v.vec.type))
+            if (is_float_type(v.vec.type)) {
+                const double s = nb::cast<double>(scalar);
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(
-                    draken_float_compare_scalar(v.vec, nb::cast<double>(scalar), op));
+                    draken_float_compare_scalar(v.vec, s, op));
+            }
             // INT64 (and other types): expect int scalar.
-            return vecresult_to_owner(draken_compare_scalar(v.vec, nb::cast<int64_t>(scalar), op));
+            const int64_t si = nb::cast<int64_t>(scalar);
+            nb::gil_scoped_release _gil;
+            return vecresult_to_owner(draken_compare_scalar(v.vec, si, op));
         }, nb::arg("scalar"), nb::arg("op"),
             "Compare each row against scalar. op: 0=eq 1=ne 2=gt 3=ge 4=lt 5=le.\n"
             "INT64: scalar is int. STRING: scalar is str.\n"
             "Returns a DRAKEN_BOOL vector (bit-packed, 1 bit/row, LSB-first).")
         .def("compare_vector", [](const VectorOwner& self, const VectorOwner& other, int op) -> VectorOwner {
+            // Both operands are pre-unwrapped VectorOwner refs; the body touches
+            // only DrakenVector/logical_type (C++) and returns a VectorOwner
+            // converted after the lambda. Release the GIL for the whole body.
+            nb::gil_scoped_release _gil;
             const DrakenVector& a = self.vec;
             const DrakenVector& b = other.vec;
             // D.13: array — whole-array comparison unsupported.
@@ -6179,6 +6253,7 @@ NB_MODULE(draken_native, m) {
                         lo.ptr(), v.logical_type->precision, v.logical_type->scale);
                     const int64_t hi_u = decimal_to_unscaled(
                         hi.ptr(), v.logical_type->precision, v.logical_type->scale);
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_u, hi_u, lo_inclusive, hi_inclusive));
                 }
@@ -6188,6 +6263,7 @@ NB_MODULE(draken_native, m) {
                             "between: TIMESTAMP64 requires a logical-type descriptor");
                     const int64_t lo_i = py_datetime_to_instant(lo, v.logical_type->unit);
                     const int64_t hi_i = py_datetime_to_instant(hi, v.logical_type->unit);
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_i, hi_i, lo_inclusive, hi_inclusive));
                 }
@@ -6200,6 +6276,7 @@ NB_MODULE(draken_native, m) {
                     const int64_t hi_i = PyLong_Check(hi.ptr())
                         ? nb::cast<int64_t>(hi)
                         : static_cast<int64_t>(py_date_to_days(hi.ptr()));
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_i, hi_i, lo_inclusive, hi_inclusive));
                 }
@@ -6209,6 +6286,7 @@ NB_MODULE(draken_native, m) {
                             "between: TIME vector requires a logical-type descriptor");
                     const int64_t lo_i = py_time_to_raw(lo.ptr(), v.logical_type->unit);
                     const int64_t hi_i = py_time_to_raw(hi.ptr(), v.logical_type->unit);
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_i, hi_i, lo_inclusive, hi_inclusive));
                 }
@@ -6220,13 +6298,16 @@ NB_MODULE(draken_native, m) {
                         lo_s.months, lo_s.ms);
                     const int64_t hi_ms = draken::ops::interval_normalize_checked(
                         hi_s.months, hi_s.ms);
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_ms, hi_ms, lo_inclusive, hi_inclusive));
                 }
                 if (is_float_type(v.vec.type)) {
+                    const double lo_d = nb::cast<double>(lo);
+                    const double hi_d = nb::cast<double>(hi);
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(draken_float_between(
-                        v.vec, nb::cast<double>(lo), nb::cast<double>(hi),
-                        lo_inclusive, hi_inclusive));
+                        v.vec, lo_d, hi_d, lo_inclusive, hi_inclusive));
                 }
                 if (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR) {
                     // Build lo and hi bound slots at the Python edge — same
@@ -6257,15 +6338,20 @@ NB_MODULE(draken_native, m) {
                     };
                     auto lo_sb = make_str_slot(lo, "lo");
                     auto hi_sb = make_str_slot(hi, "hi");
+                    // bytes point at the lo/hi str args' cached UTF-8 (alive,
+                    // immutable) across the released-GIL window.
+                    nb::gil_scoped_release _gil;
                     return vecresult_to_owner(draken_str_between(
                         v.vec,
                         lo_sb.slot, lo_sb.bytes,
                         hi_sb.slot, hi_sb.bytes,
                         lo_inclusive, hi_inclusive));
                 }
+                const int64_t lo_l = nb::cast<int64_t>(lo);
+                const int64_t hi_l = nb::cast<int64_t>(hi);
+                nb::gil_scoped_release _gil;
                 return vecresult_to_owner(
-                    draken_between(v.vec, nb::cast<int64_t>(lo), nb::cast<int64_t>(hi),
-                                   lo_inclusive, hi_inclusive));
+                    draken_between(v.vec, lo_l, hi_l, lo_inclusive, hi_inclusive));
             },
             nb::arg("lo"), nb::arg("hi"),
             nb::arg("lo_inclusive") = true, nb::arg("hi_inclusive") = true,
@@ -6313,7 +6399,7 @@ NB_MODULE(draken_native, m) {
                         simd_hash_i64(&raw, &h, 1u);
                         set.insert_or_ignore(h);
                     }
-                    return vecresult_to_owner(draken_in_list(v.vec, set));
+                    { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
                 if (v.vec.type == DRAKEN_TIMESTAMP64) {
                     if (!v.logical_type)
@@ -6327,7 +6413,7 @@ NB_MODULE(draken_native, m) {
                         simd_hash_i64(&raw, &h, 1u);
                         set.insert_or_ignore(h);
                     }
-                    return vecresult_to_owner(draken_in_list(v.vec, set));
+                    { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
                 if (v.vec.type == DRAKEN_DATE32) {
                     for (size_t k = 0; k < n; ++k) {
@@ -6338,7 +6424,7 @@ NB_MODULE(draken_native, m) {
                         simd_hash_i64(&raw, &h, 1u);
                         set.insert_or_ignore(h);
                     }
-                    return vecresult_to_owner(draken_in_list(v.vec, set));
+                    { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
                 if (v.vec.type == DRAKEN_TIME32 || v.vec.type == DRAKEN_TIME64) {
                     if (!v.logical_type)
@@ -6352,7 +6438,7 @@ NB_MODULE(draken_native, m) {
                         simd_hash_i64(&raw, &h, 1u);
                         set.insert_or_ignore(h);
                     }
-                    return vecresult_to_owner(draken_in_list(v.vec, set));
+                    { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
                 // D.12: INTERVAL — normalize each value to total_ms, hash.
                 if (v.vec.type == DRAKEN_INTERVAL) {
@@ -6367,7 +6453,7 @@ NB_MODULE(draken_native, m) {
                         simd_hash_i64(&raw, &h, 1u);
                         set.insert_or_ignore(h);
                     }
-                    return vecresult_to_owner(draken_in_list(v.vec, set));
+                    { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
                 if (v.vec.type == DRAKEN_VARCHAR) {
                     // Hash-only membership via CarcharSet; same str_hash_seed →
@@ -6426,7 +6512,7 @@ NB_MODULE(draken_native, m) {
                         set.insert_or_ignore(h);
                     }
                 }
-                return vecresult_to_owner(draken_in_list(v.vec, set));
+                { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
             },
             nb::arg("values"),
             "Set membership: returns True for rows whose hash is found in values.\n"
@@ -7339,9 +7425,11 @@ NB_MODULE(draken_native, m) {
     // -------------------------------------------------------------------------
 
     // vector_reinterpret_as_timestamp64 — reinterpret an INT64 vector's data as TIMESTAMP64.
-    // The underlying int64 values are treated as microseconds-since-epoch unchanged.
+    // The underlying int64 values are treated as raw counts in `unit` unchanged
+    // (default "us" preserves the pre-existing microseconds behaviour for callers
+    // that omit it; the grouped-agg MIN/MAX finalize passes the source unit).
     m.def("vector_reinterpret_as_timestamp64",
-        [](nb::object obj) -> VectorOwner {
+        [](nb::object obj, const std::string& unit) -> VectorOwner {
             const DrakenVector* src = draken_vector_unwrap(obj.ptr());
             if (!src)
                 throw nb::python_error();
@@ -7366,16 +7454,121 @@ NB_MODULE(draken_native, m) {
             }
             DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_TIMESTAMP64, validity);
             VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
-            // Attach microseconds/UTC logical type so compare_scalar etc. work.
             LogicalType lt;
             lt.kind = LogicalKind::TIMESTAMP;
-            lt.unit = TimestampUnit::MICROSECONDS;
+            lt.unit = str_to_unit(unit);
             lt.offset_minutes = 0;
             owner.logical_type = logical_type_intern(lt);
             return owner;
         },
+        nb::arg("vec"), nb::arg("unit") = std::string("us"),
+        "Reinterpret INT64 vector data as TIMESTAMP64 with the given unit "
+        "(\"s\"/\"ms\"/\"us\"/\"ns\"; default \"us\"). Returns new Vector.");
+
+    // vector_reinterpret_as_time32 — INT64 vector → TIME32 (int32, unit-tagged).
+    // Values are cast to int32 (counts-since-midnight in `unit`).
+    m.def("vector_reinterpret_as_time32",
+        [](nb::object obj, const std::string& unit) -> VectorOwner {
+            const DrakenVector* src = draken_vector_unwrap(obj.ptr());
+            if (!src)
+                throw nb::python_error();
+            if (src->type != DRAKEN_INT64)
+                throw std::invalid_argument("vector_reinterpret_as_time32: requires INT64 vector");
+            const uint32_t n = src->length;
+            int32_t* dst = static_cast<int32_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int32_t)));
+            if (!dst) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dst);
+            OwnedBuffer<uint8_t> val_buf(nullptr);
+            for (uint32_t i = 0; i < n; ++i)
+                dst[i] = static_cast<int32_t>(static_cast<const int64_t*>(src->data)[src->selection[i]]);
+            uint8_t* validity = nullptr;
+            if (src->validity) {
+                const uint32_t nbytes = (n + 7u) / 8u;
+                const uint32_t padded = ((nbytes + 7u) & ~7u);
+                validity = static_cast<uint8_t*>(draken_malloc(padded > 0 ? padded : 8u));
+                if (!validity) throw std::bad_alloc();
+                val_buf.reset(validity);
+                std::memcpy(validity, src->validity, nbytes);
+            }
+            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_TIME32, validity);
+            VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+            LogicalType lt;
+            lt.kind = LogicalKind::TIME;
+            lt.unit = str_to_unit(unit);
+            lt.offset_minutes = 0;
+            owner.logical_type = logical_type_intern(lt);
+            return owner;
+        },
+        nb::arg("vec"), nb::arg("unit") = std::string("ms"),
+        "Reinterpret INT64 vector data as TIME32 (cast to int32) with the given unit. Returns new Vector.");
+
+    // vector_reinterpret_as_time64 — INT64 vector → TIME64 (int64, unit-tagged).
+    m.def("vector_reinterpret_as_time64",
+        [](nb::object obj, const std::string& unit) -> VectorOwner {
+            const DrakenVector* src = draken_vector_unwrap(obj.ptr());
+            if (!src)
+                throw nb::python_error();
+            if (src->type != DRAKEN_INT64)
+                throw std::invalid_argument("vector_reinterpret_as_time64: requires INT64 vector");
+            const uint32_t n = src->length;
+            int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int64_t)));
+            if (!dst) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dst);
+            OwnedBuffer<uint8_t> val_buf(nullptr);
+            for (uint32_t i = 0; i < n; ++i)
+                dst[i] = static_cast<const int64_t*>(src->data)[src->selection[i]];
+            uint8_t* validity = nullptr;
+            if (src->validity) {
+                const uint32_t nbytes = (n + 7u) / 8u;
+                const uint32_t padded = ((nbytes + 7u) & ~7u);
+                validity = static_cast<uint8_t*>(draken_malloc(padded > 0 ? padded : 8u));
+                if (!validity) throw std::bad_alloc();
+                val_buf.reset(validity);
+                std::memcpy(validity, src->validity, nbytes);
+            }
+            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_TIME64, validity);
+            VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+            LogicalType lt;
+            lt.kind = LogicalKind::TIME;
+            lt.unit = str_to_unit(unit);
+            lt.offset_minutes = 0;
+            owner.logical_type = logical_type_intern(lt);
+            return owner;
+        },
+        nb::arg("vec"), nb::arg("unit") = std::string("us"),
+        "Reinterpret INT64 vector data as TIME64 with the given unit. Returns new Vector.");
+
+    // vector_reinterpret_as_float32 — narrow a FLOAT64 vector's data to FLOAT32.
+    // Used by grouped MIN/MAX(FLOAT32) finalize: min/max is computed in double,
+    // then narrowed back so the result emerges as FLOAT32, not FLOAT64.
+    m.def("vector_reinterpret_as_float32",
+        [](nb::object obj) -> VectorOwner {
+            const DrakenVector* src = draken_vector_unwrap(obj.ptr());
+            if (!src)
+                throw nb::python_error();
+            if (src->type != DRAKEN_FLOAT64)
+                throw std::invalid_argument("vector_reinterpret_as_float32: requires FLOAT64 vector");
+            const uint32_t n = src->length;
+            float* dst = static_cast<float*>(draken_malloc((n > 0 ? n : 1u) * sizeof(float)));
+            if (!dst) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dst);
+            OwnedBuffer<uint8_t> val_buf(nullptr);
+            for (uint32_t i = 0; i < n; ++i)
+                dst[i] = static_cast<float>(static_cast<const double*>(src->data)[src->selection[i]]);
+            uint8_t* validity = nullptr;
+            if (src->validity) {
+                const uint32_t nbytes = (n + 7u) / 8u;
+                const uint32_t padded = ((nbytes + 7u) & ~7u);
+                validity = static_cast<uint8_t*>(draken_malloc(padded > 0 ? padded : 8u));
+                if (!validity) throw std::bad_alloc();
+                val_buf.reset(validity);
+                std::memcpy(validity, src->validity, nbytes);
+            }
+            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_FLOAT32, validity);
+            return VectorOwner(v, std::move(data_buf), std::move(val_buf));
+        },
         nb::arg("vec"),
-        "Reinterpret INT64 vector data as TIMESTAMP64 (microseconds-since-epoch). Returns new Vector.");
+        "Narrow a FLOAT64 vector to FLOAT32 (cast each value to float). Returns new Vector.");
 
     // vector_reinterpret_as_date32 — reinterpret an INT64 vector's data as DATE32.
     // INT64 values are cast to int32 (days-since-epoch); values outside int32 range raise.

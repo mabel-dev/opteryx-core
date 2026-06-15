@@ -81,7 +81,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "disable_optimizer": (BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
     "concurrent_reads": (INT64, config.CONCURRENT_READS, VariableOwner.SERVER, Visibility.RESTRICTED),
     "user_memberships": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
-    "morsel_size": (INT64, config.MORSEL_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
     "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.SERVER, Visibility.RESTRICTED),
 }
 # fmt: on

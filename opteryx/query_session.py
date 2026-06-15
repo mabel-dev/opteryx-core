@@ -471,7 +471,10 @@ class Session(DataFrame):
         """Execute a SQL operation and stream Draken Morsels.
 
         This method merges adjacent morsels and splits large morsels such that each
-        yielded morsel contains at most ``max_size`` rows.
+        yielded morsel contains at most ``max_size`` rows. The 65,536 default is the
+        empirical sweet spot on ARM: join build cost plateaus there and hash /
+        group-by are flat across chunk sizes. (This is the *output*-boundary row
+        target; execution-internal morsels are still row-group sized.)
 
         This is a *Draken-native* API: it avoids converting morsels to Arrow (or
         any other intermediate format) except when absolutely required.

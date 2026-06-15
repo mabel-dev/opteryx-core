@@ -172,11 +172,14 @@ cdef class ReaderNode(BasePlanNode):
         return "Reader"
 
     def sensors(self):
-        """Additional details for this step"""
-        return {
-            "dataset": self.dataset,
-            "alias": self.alias,
-        }
+        """Reader-specific details, merged onto the base counters (calls,
+        execution_time, self_time, records/bytes) so scans report timing too —
+        the scan's execution_time is populated by drive_scan timing
+        next_morsel()."""
+        base = BasePlanNode.sensors(self)
+        base["dataset"] = self.dataset
+        base["alias"] = self.alias
+        return base
 
     @property
     def config(self):

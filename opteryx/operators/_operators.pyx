@@ -174,7 +174,14 @@ cdef class BasePlanNode:
     cdef int _seen_input_closes
 
     # Hot-path telemetry counters (typed; no Python attr writes per morsel).
-    cdef public uint64_t execution_time      # ns; cumulative
+    cdef public uint64_t execution_time      # ns; cumulative, INCLUSIVE of downstream
+    # Time (ns) spent inside downstream `push()` calls, accumulated in
+    # `_emit_cdef`. Subtracting it from `execution_time` yields this operator's
+    # SELF time (its own work, excluding the downstream chain it drives).
+    # Only accumulated when tracing is enabled (EXPLAIN ANALYZE flips it on),
+    # so normal queries pay zero extra clock_gettime cost; when tracing is off
+    # `self_time` reported by sensors() equals `execution_time` (inclusive).
+    cdef public uint64_t downstream_time
     cdef public uint64_t calls
     cdef public uint64_t records_in
     cdef public uint64_t records_out
@@ -231,6 +238,7 @@ cdef class BasePlanNode:
         self.telemetry = QueryTelemetry(properties.query_id)
         self.parameters = parameters
         self.execution_time = 0
+        self.downstream_time = 0
         self.identity = random_string()
         self.calls = 0
         self.records_in = 0
@@ -293,9 +301,20 @@ cdef class BasePlanNode:
         yield from execute(morsel)
 
     def sensors(self):
+        # self_time = own work, excluding the downstream chain this operator
+        # drives (execution_time is INCLUSIVE of downstream). downstream_time is
+        # only accumulated under tracing (EXPLAIN ANALYZE); when tracing is off
+        # it is 0 and self_time == execution_time. Clamp at 0 to absorb clock
+        # jitter and the join/scan case where push() is never called on the node
+        # itself (its downstream emits still accrue downstream_time).
+        cdef uint64_t self_time = 0
+        if self.execution_time > self.downstream_time:
+            self_time = self.execution_time - self.downstream_time
         base = {
             "calls": int(self.calls),
             "execution_time": int(self.execution_time),
+            "self_time": int(self_time),
+            "downstream_time": int(self.downstream_time),
             "records_in": int(self.records_in),
             "records_out": int(self.records_out),
             "bytes_in": int(self.bytes_in),
@@ -319,12 +338,24 @@ cdef class BasePlanNode:
         if self._ctx is not None and self._ctx.is_terminated():
             return
 
+        cdef uint64_t records_out_before
+        cdef uint64_t bytes_out_before
+        cdef uint64_t rows_emitted
+        cdef uint64_t bytes_emitted
+
         if morsel is not None:
             rows = morsel.num_rows
             nbytes = morsel.nbytes
             self.records_in += rows
             self.bytes_in += nbytes
         self.calls += 1
+
+        # Snapshot output counters so the trace event can record the rows/bytes
+        # THIS push produced (records_out/bytes_out are incremented downstream in
+        # _emit_cdef during _dispatch_push). Only read under tracing — otherwise
+        # the snapshot is unused and the compiler drops it.
+        records_out_before = self.records_out
+        bytes_out_before = self.bytes_out
 
         clock_gettime(CLOCK_MONOTONIC, &ts_start)
         self._dispatch_push(morsel)
@@ -333,7 +364,10 @@ cdef class BasePlanNode:
         duration_ns += <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec)
         self.execution_time += duration_ns
         if self._tracing_enabled:
-            self._append_trace(rows, 0, nbytes, 0, duration_ns, 0)
+            rows_emitted = self.records_out - records_out_before
+            bytes_emitted = self.bytes_out - bytes_out_before
+            self._append_trace(rows, rows_emitted, nbytes, bytes_emitted,
+                               duration_ns, 1 if rows_emitted > 0 else 0)
 
         self._morsel_index += 1
 
@@ -355,13 +389,26 @@ cdef class BasePlanNode:
         operators call `emit` (cpdef) instead."""
         cdef uint64_t rows = 0
         cdef uint64_t nbytes = 0
+        cdef timespec ds_start, ds_end
         if morsel is not None:
             rows = morsel.num_rows
             nbytes = morsel.nbytes
             self.records_out += rows
             self.bytes_out += nbytes
         if self._downstream is not None:
-            self._downstream.push(morsel)
+            if self._tracing_enabled:
+                # Time the downstream chain so push() can report SELF time
+                # (execution_time - downstream_time). Gated on tracing so normal
+                # queries pay no extra clock_gettime; EXPLAIN ANALYZE enables it.
+                clock_gettime(CLOCK_MONOTONIC, &ds_start)
+                self._downstream.push(morsel)
+                clock_gettime(CLOCK_MONOTONIC, &ds_end)
+                self.downstream_time += (
+                    (<uint64_t>(ds_end.tv_sec - ds_start.tv_sec)) * <uint64_t>1000000000
+                    + <uint64_t>(ds_end.tv_nsec - ds_start.tv_nsec)
+                )
+            else:
+                self._downstream.push(morsel)
 
     cpdef void emit(self, Morsel morsel) except *:
         """Python-callable wrapper around `_emit_cdef`. Used by Python-class
@@ -516,6 +563,18 @@ cdef class JoinNode(BasePlanNode):
         to terminate the downstream chain."""
         pass
 
+    cdef inline void _account_input(self, Morsel morsel, uint64_t dur_ns) except *:
+        """Roll one adapter-driven input push into the join's own counters.
+        Joins are driven via JoinLeft/RightAdapter calling push_left/push_right
+        directly (not the join's push()), so without this the join reports 0ms.
+        Both adapters call this, so records_in/bytes_in/calls/execution_time
+        accumulate the join's TOTAL input work (left build + right probe)."""
+        if morsel is not None:
+            self.records_in += morsel.num_rows
+            self.bytes_in += morsel.nbytes
+        self.calls += 1
+        self.execution_time += dur_ns
+
     @staticmethod
     def _join_numeric_target_type(left_type, right_type):
         from opteryx.types.logical_type import LogicalCategory, find_compatible_type
@@ -640,10 +699,23 @@ def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineCo
     not leaked. The original exception/GeneratorExit is not suppressed."""
     cdef Morsel morsel
     cdef bint has_exit = exit_node is not None
+    cdef timespec ns_start, ns_end
 
     try:
         while True:
+            # Time the source pull so the scan operator gets a real
+            # execution_time. Scans are driven via next_morsel(), not push(),
+            # so without this they report 0ms in EXPLAIN ANALYZE. The scan does
+            # not emit (drive_scan pushes for it), so it has no downstream_time
+            # and its self_time == execution_time (pure read/decode).
+            clock_gettime(CLOCK_MONOTONIC, &ns_start)
             morsel = scan.next_morsel()
+            clock_gettime(CLOCK_MONOTONIC, &ns_end)
+            scan.execution_time += (
+                (<uint64_t>(ns_end.tv_sec - ns_start.tv_sec)) * <uint64_t>1000000000
+                + <uint64_t>(ns_end.tv_nsec - ns_start.tv_nsec)
+            )
+            scan.calls += 1
             if morsel is None:
                 break
             if ctx.is_terminated():
@@ -697,6 +769,24 @@ cdef class JoinLeftAdapter(BasePlanNode):
     def name(self) -> str:
         return "JoinLeftAdapter"
 
+    cpdef void push(self, Morsel morsel) except *:
+        # Attribute the build-side push time to the JOIN, not this hidden
+        # adapter, so the join shows real time in EXPLAIN ANALYZE. Single clock
+        # pair; mirrors the base push() ctx-terminated guard. No trace/snapshot
+        # (the adapter is is_not_explained; the join emits its own output
+        # counters via _emit_cdef in push_right).
+        cdef timespec ts_start, ts_end
+        if self._ctx is not None and self._ctx.is_terminated():
+            return
+        clock_gettime(CLOCK_MONOTONIC, &ts_start)
+        self._dispatch_push(morsel)
+        clock_gettime(CLOCK_MONOTONIC, &ts_end)
+        self._join._account_input(
+            morsel,
+            (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
+            + <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec),
+        )
+
     cdef void _dispatch_push(self, Morsel morsel) except *:
         self._join.push_left(morsel)
 
@@ -726,6 +816,23 @@ cdef class JoinRightAdapter(BasePlanNode):
     @property
     def name(self) -> str:
         return "JoinRightAdapter"
+
+    cpdef void push(self, Morsel morsel) except *:
+        # Attribute the probe-side push time to the JOIN, not this hidden
+        # adapter (see JoinLeftAdapter.push). The probe side emits downstream,
+        # so under tracing the join's downstream_time is captured in _emit_cdef
+        # and self_time = probe own work.
+        cdef timespec ts_start, ts_end
+        if self._ctx is not None and self._ctx.is_terminated():
+            return
+        clock_gettime(CLOCK_MONOTONIC, &ts_start)
+        self._dispatch_push(morsel)
+        clock_gettime(CLOCK_MONOTONIC, &ts_end)
+        self._join._account_input(
+            morsel,
+            (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
+            + <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec),
+        )
 
     cdef void _dispatch_push(self, Morsel morsel) except *:
         self._join.push_right(morsel)

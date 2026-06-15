@@ -17,10 +17,11 @@ from libc.stdlib cimport malloc, realloc, free
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
-from draken.core.buffers cimport DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_FLOAT64, DRAKEN_FLOAT32
 from draken.core.buffers cimport DRAKEN_DECIMAL
 from draken.core.buffers cimport DRAKEN_DECIMAL128
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DRAKEN_TIMESTAMP64, DRAKEN_DATE32, DRAKEN_TIME32, DRAKEN_TIME64
 from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.buffers cimport (
     DrakenStringArena, DrakenStringSlot,
@@ -38,6 +39,20 @@ from draken.vectors.vector import Vector as _V
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
+
+from draken.core.buffers cimport DRAKEN_INTERVAL
+
+cdef extern from "core/interval_slot.h":
+    cdef struct DrakenIntervalSlot:
+        int64_t months
+        int64_t ms
+
+# Same approximate single-scalar order INTERVAL uses everywhere (sort, compare,
+# ungrouped min/max): total_ms = months*INTERVAL_MONTH_MS + ms, 1 month = 30 days
+# = 86_400_000 ms/day. Imperfect (months/days vary) but consistent engine-wide.
+# Value mirrors INTERVAL_MONTH_MS in ops/interval_ops.h (that header can't be
+# cimported standalone — it has unmet deps). Folded inline below, not cimported.
+cdef int64_t INTERVAL_MONTH_MS = 2592000000
 
 # int128 type for the DECIMAL128 grouped collectors. Cython has no native 128-bit
 # integer; this ctypedef emits C `__int128` (clang and gcc both support it). Cython's
@@ -679,11 +694,19 @@ cdef class MinMaxInt64Collector(BaseCollector):
     cdef uint8_t* _seen
     cdef int64_t _capacity
     cdef int8_t _direction    # +1 = MIN (use INT64_MAX as init), -1 = MAX (INT64_MIN)
+    # Type-preserving finalize: the min/max is computed on the raw int representation
+    # (correct ordering for INT and all int-backed temporal types within one unit),
+    # then the int64 result buffer is reinterpreted back to the source type. Default
+    # INT64 → no reinterpret. _out_unit carries the TIMESTAMP/TIME unit ("s"/"ms"/...).
+    cdef DrakenType _out_type
+    cdef object _out_unit
 
     def __cinit__(self):
         self._values = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
         self._seen = NULL
         self._capacity = 0
+        self._out_type = DRAKEN_INT64
+        self._out_unit = None
 
     def __dealloc__(self):
         if self._values != NULL:
@@ -730,13 +753,14 @@ cdef class MinMaxInt64Collector(BaseCollector):
         nulls = uv.validity
         t = uv.type
         cdef int8_t direction = self._direction
-        # Width-aware read: narrow ints are sign-extended before compare.
+        # Width-aware read: narrow ints (and the 4-byte temporal types DATE32/TIME32)
+        # are sign-extended before compare; 8-byte TIMESTAMP64/TIME64 read as int64.
         with nogil:
             if t == DRAKEN_INT8:
                 _minmax_accumulate_int(<const int8_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
             elif t == DRAKEN_INT16:
                 _minmax_accumulate_int(<const int16_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
-            elif t == DRAKEN_INT32:
+            elif t == DRAKEN_INT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
                 _minmax_accumulate_int(<const int32_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
             else:
                 _minmax_accumulate_int(<const int64_t*>uv.data, sel, nulls, state_indices, values, seen, n_rows, direction)
@@ -761,7 +785,28 @@ cdef class MinMaxInt64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return _consume_int64_buffer(out)
+        return self._apply_out_type(_consume_int64_buffer(out))
+
+    cdef Vector _apply_out_type(self, Vector int_vec):
+        # int_vec is a dense INT64 Vector of the raw min/max values. For int-backed
+        # temporal sources, reinterpret it back to the source type (carrying the
+        # TIMESTAMP/TIME unit) so the result emerges typed, not as a raw epoch int.
+        # The comparison itself was correct on the raw int representation.
+        cdef object unit
+        if self._out_type == DRAKEN_INT64:
+            return int_vec
+        if self._out_type == DRAKEN_DATE32:
+            return _V(_draken_native.vector_reinterpret_as_date32(int_vec._nb))
+        unit = self._out_unit if self._out_unit is not None else "us"
+        if isinstance(unit, bytes):
+            unit = unit.decode("ascii")
+        if self._out_type == DRAKEN_TIMESTAMP64:
+            return _V(_draken_native.vector_reinterpret_as_timestamp64(int_vec._nb, unit))
+        if self._out_type == DRAKEN_TIME32:
+            return _V(_draken_native.vector_reinterpret_as_time32(int_vec._nb, unit))
+        if self._out_type == DRAKEN_TIME64:
+            return _V(_draken_native.vector_reinterpret_as_time64(int_vec._nb, unit))
+        return int_vec
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._values
@@ -779,13 +824,15 @@ cdef class MinMaxInt64Collector(BaseCollector):
                 free(seen)
                 self._seen = NULL
 
-        return _slice_int64_buffer(out, start, stop)
+        return self._apply_out_type(_slice_int64_buffer(out, start, stop))
 
     cpdef BaseCollector _clone_empty(self):
         cdef MinMaxInt64Collector c = MinMaxInt64Collector()
         c.column_name = self.column_name
         c.result_name = self.result_name
         c._direction = self._direction
+        c._out_type = self._out_type
+        c._out_unit = self._out_unit
         return c
 
     cpdef BaseCollector _clone_as_merge(self):
@@ -793,6 +840,8 @@ cdef class MinMaxInt64Collector(BaseCollector):
         c.column_name = self.result_name
         c.result_name = self.result_name
         c._direction = self._direction
+        c._out_type = self._out_type
+        c._out_unit = self._out_unit
         return c
 
 
@@ -805,11 +854,15 @@ cdef class MinMaxFloat64Collector(BaseCollector):
     cdef uint8_t* _seen
     cdef int64_t _capacity
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
+    # FLOAT32 sources accumulate in double then narrow back at finalize so the
+    # result emerges FLOAT32, not FLOAT64. Default FLOAT64 → no narrow.
+    cdef DrakenType _out_type
 
     def __cinit__(self):
         self._values = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
         self._seen = NULL
         self._capacity = 0
+        self._out_type = DRAKEN_FLOAT64
 
     def __dealloc__(self):
         if self._values != NULL:
@@ -855,10 +908,33 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        data = <double*>uv.data
         sel = uv.selection
         nulls = uv.validity
         cdef int8_t direction = self._direction
+        cdef const float* fdata
+        # FLOAT32 source: read 4-byte floats, widen to double for compare/store.
+        # The float64 hot path below is left untouched.
+        if uv.type == DRAKEN_FLOAT32:
+            fdata = <const float*>uv.data
+            with nogil:
+                if direction == 1:
+                    for i in range(n_rows):
+                        if _num_bitmap_valid(nulls, i):
+                            si = state_indices[i]
+                            v = <double>fdata[sel[i]]
+                            if not _num_bitmap_valid(seen, si) or v < values[si]:
+                                values[si] = v
+                            _bitmap_set(seen, si)
+                else:
+                    for i in range(n_rows):
+                        if _num_bitmap_valid(nulls, i):
+                            si = state_indices[i]
+                            v = <double>fdata[sel[i]]
+                            if not _num_bitmap_valid(seen, si) or v > values[si]:
+                                values[si] = v
+                            _bitmap_set(seen, si)
+            return
+        data = <double*>uv.data
         with nogil:
             if direction == 1:   # MIN
                 for i in range(n_rows):
@@ -897,7 +973,13 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return _consume_float64_buffer(out)
+        return self._apply_out_type(_consume_float64_buffer(out))
+
+    cdef Vector _apply_out_type(self, Vector f64_vec):
+        # Narrow back to FLOAT32 for a FLOAT32 source so the result type matches.
+        if self._out_type == DRAKEN_FLOAT32:
+            return _V(_draken_native.vector_reinterpret_as_float32(f64_vec._nb))
+        return f64_vec
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._values
@@ -915,13 +997,14 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                 free(seen)
                 self._seen = NULL
 
-        return _slice_float64_buffer(out, start, stop)
+        return self._apply_out_type(_slice_float64_buffer(out, start, stop))
 
     cpdef BaseCollector _clone_empty(self):
         cdef MinMaxFloat64Collector c = MinMaxFloat64Collector()
         c.column_name = self.column_name
         c.result_name = self.result_name
         c._direction = self._direction
+        c._out_type = self._out_type
         return c
 
     cpdef BaseCollector _clone_as_merge(self):
@@ -929,27 +1012,55 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         c.column_name = self.result_name
         c.result_name = self.result_name
         c._direction = self._direction
+        c._out_type = self._out_type
         return c
 
 
 # ---------------------------------------------------------------------------
-# MIN/MAX on generic (non-numeric) columns — Python comparison via to_pylist
+# MIN/MAX(bool) — false < true: MIN = AND-reduce, MAX = OR-reduce over non-nulls.
+# One 0/1 byte per group (+ a seen byte). Per-row accumulate is nogil (reads the
+# bit-packed source); finalize boxes over #groups (bool MIN/MAX is rare, and the
+# result must round-trip through the bool-vector builder).
 # ---------------------------------------------------------------------------
 
-cdef class MinMaxObjectCollector(BaseCollector):
-    """MIN/MAX for non-numeric types via Python comparison."""
-    cdef vector[vector[uint8_t]] _values  # C-level string storage per group
-    cdef vector[uint8_t] _seen
+cdef class MinMaxBoolCollector(BaseCollector):
+    cdef uint8_t* _values
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
-    cdef DrakenType _col_type # source column type, captured on first accumulate
 
     def __cinit__(self):
-        self._col_type = DRAKEN_VARBINARY
+        self._values = NULL
+        self._seen = NULL
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._values != NULL:
+            free(self._values)
+            self._values = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
-        while <int64_t>self._values.size() < new_count:
-            self._values.push_back(vector[uint8_t]())
-            self._seen.push_back(0)
+        cdef int64_t target
+        cdef void* p
+        if new_count <= self._capacity:
+            return
+        target = _grow_target(self._capacity, new_count)
+        p = malloc(<size_t>target)
+        if self._values != NULL:
+            memcpy(p, self._values, <size_t>self._capacity)
+            free(self._values)
+        self._values = <uint8_t*>p
+        memset(self._values + self._capacity, 0, <size_t>(target - self._capacity))
+        p = malloc(<size_t>target)
+        if self._seen != NULL:
+            memcpy(p, self._seen, <size_t>self._capacity)
+            free(self._seen)
+        self._seen = <uint8_t*>p
+        memset(self._seen + self._capacity, 0, <size_t>(target - self._capacity))
+        self._capacity = target
 
     cdef void accumulate(
         self,
@@ -960,74 +1071,189 @@ cdef class MinMaxObjectCollector(BaseCollector):
         if self._col_idx < 0:
             self._col_idx = morsel._column_index_from_name(self.column_name)
         cdef Vector vec = morsel._get_column(self._col_idx)
-        cdef uint8_t* seen = self._seen.data()
+        cdef DrakenVector* uv = vec.unified()
+        cdef const uint8_t* bits = <const uint8_t*>uv.data
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef uint8_t* values = self._values
+        cdef uint8_t* seen = self._seen
+        cdef int8_t direction = self._direction
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef bytes cur, v
-        cdef object v_obj
-        cdef list col
-        cdef vector[uint8_t]* cur_vec
-
-        # Preserve the source column type so finalize emits the same type.
-        self._col_type = vec.unified().type
-
-        col = vec.to_pylist()
-
-        if self._direction == 1:   # MIN
+        cdef uint32_t phys
+        cdef uint8_t b
+        with nogil:
             for i in range(n_rows):
-                v_obj = col[i]
-                if v_obj is None:
-                    continue
-                v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
-                si = state_indices[i]
-                cur_vec = &self._values[si]
-                if cur_vec.empty():
-                    self._values[si] = v
-                else:
-                    cur = bytes(cur_vec.data()[:cur_vec.size()])
-                    if v < cur:
-                        self._values[si] = v
-                seen[si] = 1
-        else:                      # MAX
-            for i in range(n_rows):
-                v_obj = col[i]
-                if v_obj is None:
-                    continue
-                v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
-                si = state_indices[i]
-                cur_vec = &self._values[si]
-                if cur_vec.empty():
-                    self._values[si] = v
-                else:
-                    cur = bytes(cur_vec.data()[:cur_vec.size()])
-                    if v > cur:
-                        self._values[si] = v
-                seen[si] = 1
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    phys = sel[i]
+                    b = (bits[phys >> 3] >> (phys & 7)) & 1
+                    if seen[si] == 0:
+                        values[si] = b
+                        seen[si] = 1
+                    elif direction == 1:        # MIN: false dominates
+                        if b < values[si]:
+                            values[si] = b
+                    else:                       # MAX: true dominates
+                        if b > values[si]:
+                            values[si] = b
 
-    cpdef Vector finalize(self, int64_t num_groups):
+    cdef Vector _build(self, int64_t start, int64_t stop):
         cdef list result = []
-        cdef int64_t i
-        cdef int64_t limit = min(<int64_t>self._values.size(), num_groups)
-        cdef vector[uint8_t]* vec
-        for i in range(limit):
-            vec = &self._values[i]
-            if vec.empty():
+        cdef int64_t g
+        for g in range(start, stop):
+            if g >= self._capacity or self._seen[g] == 0:
                 result.append(None)
             else:
-                result.append(bytes(vec.data()[:vec.size()]))
-        # Emit with the source column's type (raw bytes, no decode).
-        nb = _draken_native.vector_string_family_from_bytes(result, <int>self._col_type)
-        return _V(nb)
+                result.append(self._values[g] != 0)
+        return _V(_draken_native.vector_from_bool_sequence(result))
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        return self._build(0, num_groups)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        return self._build(start, stop)
 
     cpdef BaseCollector _clone_empty(self):
-        cdef MinMaxObjectCollector c = MinMaxObjectCollector()
+        cdef MinMaxBoolCollector c = MinMaxBoolCollector()
         c.column_name = self.column_name
         c.result_name = self.result_name
         c._direction = self._direction
         return c
 
     cpdef BaseCollector _clone_as_merge(self):
-        cdef MinMaxObjectCollector c = MinMaxObjectCollector()
+        cdef MinMaxBoolCollector c = MinMaxBoolCollector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
+
+
+# ---------------------------------------------------------------------------
+# MIN/MAX(interval) — ordered by the approximate scalar fold (months*30d + ms),
+# the same order the engine uses everywhere else for intervals. The winning
+# row's ORIGINAL (months, ms) slot is kept, so the result is exact for the slot
+# even though the ORDERING is approximate. Per-row accumulate is nogil; finalize
+# boxes (months, ms) tuples over #groups (interval MIN/MAX is rare).
+# ---------------------------------------------------------------------------
+
+cdef class MinMaxIntervalCollector(BaseCollector):
+    cdef int64_t* _months
+    cdef int64_t* _ms
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
+    cdef int8_t _direction    # +1 = MIN, -1 = MAX
+
+    def __cinit__(self):
+        self._months = NULL
+        self._ms = NULL
+        self._seen = NULL
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._months != NULL:
+            free(self._months)
+            self._months = NULL
+        if self._ms != NULL:
+            free(self._ms)
+            self._ms = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
+    cdef void grow(self, int64_t new_count):
+        cdef int64_t target
+        cdef void* p
+        if new_count <= self._capacity:
+            return
+        target = _grow_target(self._capacity, new_count)
+        p = malloc(<size_t>target * sizeof(int64_t))
+        if self._months != NULL:
+            memcpy(p, self._months, <size_t>self._capacity * sizeof(int64_t))
+            free(self._months)
+        self._months = <int64_t*>p
+        p = malloc(<size_t>target * sizeof(int64_t))
+        if self._ms != NULL:
+            memcpy(p, self._ms, <size_t>self._capacity * sizeof(int64_t))
+            free(self._ms)
+        self._ms = <int64_t*>p
+        p = malloc(<size_t>target)
+        if self._seen != NULL:
+            memcpy(p, self._seen, <size_t>self._capacity)
+            free(self._seen)
+        self._seen = <uint8_t*>p
+        memset(self._seen + self._capacity, 0, <size_t>(target - self._capacity))
+        self._capacity = target
+
+    cdef void accumulate(
+        self,
+        Morsel morsel,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ):
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
+        cdef DrakenVector* uv = vec.unified()
+        cdef const DrakenIntervalSlot* slots = <const DrakenIntervalSlot*>uv.data
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef int64_t* months = self._months
+        cdef int64_t* ms = self._ms
+        cdef uint8_t* seen = self._seen
+        cdef int8_t direction = self._direction
+        cdef Py_ssize_t i
+        cdef int64_t si
+        cdef uint32_t phys
+        cdef int64_t sm, sms, src_norm, grp_norm
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    phys = sel[i]
+                    sm = slots[phys].months
+                    sms = slots[phys].ms
+                    src_norm = sm * INTERVAL_MONTH_MS + sms
+                    if seen[si] == 0:
+                        months[si] = sm
+                        ms[si] = sms
+                        seen[si] = 1
+                    else:
+                        grp_norm = months[si] * INTERVAL_MONTH_MS + ms[si]
+                        if direction == 1:
+                            if src_norm < grp_norm:
+                                months[si] = sm
+                                ms[si] = sms
+                        else:
+                            if src_norm > grp_norm:
+                                months[si] = sm
+                                ms[si] = sms
+
+    cdef Vector _build(self, int64_t start, int64_t stop):
+        cdef list result = []
+        cdef int64_t g
+        for g in range(start, stop):
+            if g >= self._capacity or self._seen[g] == 0:
+                result.append(None)
+            else:
+                result.append((self._months[g], self._ms[g]))
+        return _V(_draken_native.vector_interval_from_sequence(result))
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        return self._build(0, num_groups)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        return self._build(start, stop)
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef MinMaxIntervalCollector c = MinMaxIntervalCollector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef MinMaxIntervalCollector c = MinMaxIntervalCollector()
         c.column_name = self.result_name
         c.result_name = self.result_name
         c._direction = self._direction

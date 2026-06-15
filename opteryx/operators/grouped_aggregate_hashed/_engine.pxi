@@ -38,14 +38,17 @@ cdef extern from "core/buffers.h" nogil:
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
     cdef cppclass CarcharIndex:
         CarcharIndex(size_t initial_capacity, double load_factor) except +
-        void reserve(size_t expected_entries)
+        void reserve(size_t expected_entries) except +
         size_t size() const
         bint lookup_fast(uint64_t key, int64_t& payload_ref_out) const
         size_t insert_new(uint64_t key, int64_t payload_ref) except +
         # Single-probe combined find/insert.  Returns True if new_id was newly
         # inserted; False if an existing payload was returned in payload_out.
-        bint find_or_insert_id(uint64_t key, int64_t new_id, int64_t& payload_out) except +
-        void prefetch(uint64_t key) noexcept
+        # Declared noexcept nogil so the hot keying loop runs off-GIL. The ONLY
+        # throw path is the internal resize on a miss; callers MUST reserve()
+        # worst-case capacity before probing so that resize is unreachable here.
+        bint find_or_insert_id(uint64_t key, int64_t new_id, int64_t& payload_out) noexcept nogil
+        void prefetch(uint64_t key) noexcept nogil
 
 
 cdef extern from "parvi.hpp" namespace "opteryx::parvi":
@@ -277,6 +280,9 @@ cdef class GroupHashEngine:
         cdef bint _hot_is_new
 
         self._new_row_scratch.clear()
+        # Reserve worst-case scratch (every row introduces a new group) so the
+        # push_back inside the nogil keying loop never reallocates.
+        self._new_row_scratch.reserve(<size_t>n_rows)
         if self._telemetry_enabled:
             phase_start = _now_ns()
         # Shape-preserving keying hash. Compressed (single dict/constant key) →
@@ -295,6 +301,14 @@ cdef class GroupHashEngine:
         # probing from n to k. Only when carchar is the active map — parvi keeps
         # its per-row loop (its 8-slot cache already absorbs repeats at tiny k).
         compressed = (not self._use_parvi) and (draken_is_compressed(huv) != 0)
+        # Reserve worst-case index capacity (every row a new group) BEFORE probing
+        # so find_or_insert_id's internal resize — its only throw path — cannot
+        # fire inside the nogil keying loop below. Idempotent: no-ops once capacity
+        # is sufficient, so steady state is a single hoisted resize, not per-row.
+        # Parvi (low-cardinality) has fixed capacity and promotes under the GIL, so
+        # it needs no reserve here.
+        if not self._use_parvi:
+            self._index.reserve(<size_t>(num_groups + n_rows))
         if self._telemetry_enabled:
             phase_start = _now_ns()
 
@@ -303,19 +317,22 @@ cdef class GroupHashEngine:
             if <Py_ssize_t>self._code_state.size() < k:
                 self._code_state.resize(k)
             code_state = self._code_state.data()
-            for c in range(k):
-                code_state[c] = -1          # unprobed sentinel (group ids are >= 0)
-            for i in range(n_rows):
-                c = <Py_ssize_t>codes[i]
-                state_idx = code_state[c]
-                if state_idx == -1:
-                    # First occurrence of this code in the morsel → probe once.
-                    _is_new = self._index.find_or_insert_id(khashes[c], num_groups, state_idx)
-                    if _is_new:
-                        self._new_row_scratch.push_back(i)   # first occurrence row
-                        num_groups += 1
-                    code_state[c] = state_idx
-                si_buf[i] = <uint32_t>state_idx
+            # Capacity reserved above; probe loop is pure C++ on raw pointers and
+            # the noexcept-nogil index — run it off-GIL (CLAUDE.md §2).
+            with nogil:
+                for c in range(k):
+                    code_state[c] = -1          # unprobed sentinel (group ids are >= 0)
+                for i in range(n_rows):
+                    c = <Py_ssize_t>codes[i]
+                    state_idx = code_state[c]
+                    if state_idx == -1:
+                        # First occurrence of this code in the morsel → probe once.
+                        _is_new = self._index.find_or_insert_id(khashes[c], num_groups, state_idx)
+                        if _is_new:
+                            self._new_row_scratch.push_back(i)   # first occurrence row
+                            num_groups += 1
+                        code_state[c] = state_idx
+                    si_buf[i] = <uint32_t>state_idx
         else:
             # i is shared across parvi → carchar handoff so an overflow mid-morsel
             # resumes at the row after the one that triggered promotion.
@@ -366,15 +383,18 @@ cdef class GroupHashEngine:
                 # (memory-level parallelism on the latency-bound probe). All hashes
                 # are precomputed in khashes. ~10% on high-cardinality (all-miss)
                 # GROUP BY; negligible when the table is cache-resident.
-                while i < n_rows:
-                    if i + _AGG_PROBE_PREFETCH < n_rows:
-                        self._index.prefetch(khashes[codes[i + _AGG_PROBE_PREFETCH]])
-                    _hot_is_new = self._index.find_or_insert_id(khashes[codes[i]], num_groups, state_idx)
-                    if _hot_is_new:
-                        self._new_row_scratch.push_back(i)
-                        num_groups += 1
-                    si_buf[i] = <uint32_t>state_idx
-                    i += 1
+                # Capacity reserved above; pure C++ on raw pointers + the
+                # noexcept-nogil index — run the probe off-GIL (CLAUDE.md §2).
+                with nogil:
+                    while i < n_rows:
+                        if i + _AGG_PROBE_PREFETCH < n_rows:
+                            self._index.prefetch(khashes[codes[i + _AGG_PROBE_PREFETCH]])
+                        _hot_is_new = self._index.find_or_insert_id(khashes[codes[i]], num_groups, state_idx)
+                        if _hot_is_new:
+                            self._new_row_scratch.push_back(i)
+                            num_groups += 1
+                        si_buf[i] = <uint32_t>state_idx
+                        i += 1
         if self._telemetry_enabled:
             self._time_lookup_ns += _now_ns() - phase_start
 

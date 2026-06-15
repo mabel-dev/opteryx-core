@@ -1745,12 +1745,17 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     if 0 < slot.op_code < 19:
                         dv_op = _DRAKEN_CMP_OP[slot.op_code]
                     if (dv_op >= 0 and dv_left_ptr != NULL and dv_right_ptr != NULL):
-                        dv_result_ptr = draken_compare_dv(
-                            dv_op,
-                            dv_left_ptr, dv_right_ptr,
-                            slot.left_type_code, slot.right_type_code,
-                            <uint32_t>num_rows, arena,
-                        )
+                        # draken_compare_dv is fully nogil-safe (operates on
+                        # DrakenVector* and the frame arena — no Python objects).
+                        # Release the GIL for the per-row compare so string/ordinal
+                        # comparisons over a whole morsel don't serialize on it.
+                        with nogil:
+                            dv_result_ptr = draken_compare_dv(
+                                dv_op,
+                                dv_left_ptr, dv_right_ptr,
+                                slot.left_type_code, slot.right_type_code,
+                                <uint32_t>num_rows, arena,
+                            )
                         if dv_result_ptr != NULL:
                             # Store DV* directly — no from_decoded until _slot_to_pyobj.
                             dv_stack[sp] = dv_result_ptr

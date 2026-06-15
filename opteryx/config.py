@@ -158,14 +158,6 @@ PARQUET_LOCAL_IO_WORKERS: int = int(get("PARQUET_LOCAL_IO_WORKERS", 8))
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 """Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
 
-# size of morsels to push between steps
-# MORSEL_SIZE remains a plain constant
-MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
-
-# target row count per emitted morsel from Parquet reads
-# 65536 is the empirical sweet spot on ARM: join build cost plateaus here,
-# all other operations (hash, group-by) are flat across chunk sizes.
-PARQUET_MORSEL_ROWS: int = MORSEL_SIZE
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

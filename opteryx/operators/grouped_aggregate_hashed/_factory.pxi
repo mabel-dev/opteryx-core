@@ -19,12 +19,18 @@ from draken.core.buffers cimport (
     DRAKEN_INT32,
     DRAKEN_INT64,
     DRAKEN_FLOAT64,
+    DRAKEN_FLOAT32,
+    DRAKEN_BOOL,
     DRAKEN_VARCHAR,
     DRAKEN_NVARCHAR,
     DRAKEN_VARBINARY,
     DRAKEN_DECIMAL,
     DRAKEN_DECIMAL128,
     DRAKEN_TIMESTAMP64,
+    DRAKEN_DATE32,
+    DRAKEN_TIME32,
+    DRAKEN_TIME64,
+    DRAKEN_INTERVAL,
 )
 
 
@@ -189,9 +195,10 @@ cpdef void resolve_deferred_collectors(
             if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = 1
-            elif t == DRAKEN_FLOAT64:
+            elif t == DRAKEN_FLOAT64 or t == DRAKEN_FLOAT32:
                 typed_c = MinMaxFloat64Collector()
                 (<MinMaxFloat64Collector>typed_c)._direction = 1
+                (<MinMaxFloat64Collector>typed_c)._out_type = t
             elif t == DRAKEN_DECIMAL:
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = 1
@@ -205,9 +212,24 @@ cpdef void resolve_deferred_collectors(
             elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
                 typed_c = MinMaxVarcharCollector()
                 (<MinMaxVarcharCollector>typed_c)._direction = 1
+            elif t == DRAKEN_TIMESTAMP64 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32 or t == DRAKEN_TIME64:
+                # Int-backed temporal: min/max on the raw int, type-preserving finalize.
+                typed_c = MinMaxInt64Collector()
+                (<MinMaxInt64Collector>typed_c)._direction = 1
+                (<MinMaxInt64Collector>typed_c)._out_type = t
+                if t != DRAKEN_DATE32:
+                    (<MinMaxInt64Collector>typed_c)._out_unit = vec._nb.logical_type_unit
+            elif t == DRAKEN_BOOL:
+                typed_c = MinMaxBoolCollector()
+                (<MinMaxBoolCollector>typed_c)._direction = 1
+            elif t == DRAKEN_INTERVAL:
+                typed_c = MinMaxIntervalCollector()
+                (<MinMaxIntervalCollector>typed_c)._direction = 1
             else:
-                typed_c = MinMaxObjectCollector()
-                (<MinMaxObjectCollector>typed_c)._direction = 1
+                raise NotImplementedError(
+                    f"MIN over column type {t} is not supported "
+                    "(supported: integer, float, decimal, string/binary, "
+                    "date/timestamp/time, boolean, interval)")
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
@@ -218,9 +240,10 @@ cpdef void resolve_deferred_collectors(
             if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = -1
-            elif t == DRAKEN_FLOAT64:
+            elif t == DRAKEN_FLOAT64 or t == DRAKEN_FLOAT32:
                 typed_c = MinMaxFloat64Collector()
                 (<MinMaxFloat64Collector>typed_c)._direction = -1
+                (<MinMaxFloat64Collector>typed_c)._out_type = t
             elif t == DRAKEN_DECIMAL:
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = -1
@@ -234,9 +257,24 @@ cpdef void resolve_deferred_collectors(
             elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
                 typed_c = MinMaxVarcharCollector()
                 (<MinMaxVarcharCollector>typed_c)._direction = -1
+            elif t == DRAKEN_TIMESTAMP64 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32 or t == DRAKEN_TIME64:
+                # Int-backed temporal: min/max on the raw int, type-preserving finalize.
+                typed_c = MinMaxInt64Collector()
+                (<MinMaxInt64Collector>typed_c)._direction = -1
+                (<MinMaxInt64Collector>typed_c)._out_type = t
+                if t != DRAKEN_DATE32:
+                    (<MinMaxInt64Collector>typed_c)._out_unit = vec._nb.logical_type_unit
+            elif t == DRAKEN_BOOL:
+                typed_c = MinMaxBoolCollector()
+                (<MinMaxBoolCollector>typed_c)._direction = -1
+            elif t == DRAKEN_INTERVAL:
+                typed_c = MinMaxIntervalCollector()
+                (<MinMaxIntervalCollector>typed_c)._direction = -1
             else:
-                typed_c = MinMaxObjectCollector()
-                (<MinMaxObjectCollector>typed_c)._direction = -1
+                raise NotImplementedError(
+                    f"MAX over column type {t} is not supported "
+                    "(supported: integer, float, decimal, string/binary, "
+                    "date/timestamp/time, boolean, interval)")
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c

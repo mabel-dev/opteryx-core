@@ -156,6 +156,8 @@ def explain(
                 }
                 if analyze:
                     record["time_ms"] = operator.execution_time / 1e6
+                    sensors = operator.sensors()
+                    record["self_time_ms"] = sensors.get("self_time", operator.execution_time) / 1e6
                     record["records_in"] = operator.records_in
                     record["records_out"] = operator.records_out
                     record["bytes_in"] = operator.bytes_in
@@ -226,10 +228,24 @@ def explain(
             count = int(getattr(getattr(operator, "telemetry", None), "rows_read", 0) or 0)
         return count
 
+    def _self_ms(operator):
+        # SELF time = own work, excluding the downstream chain (execution_time is
+        # inclusive). Only meaningful under ANALYZE (tracing populates
+        # downstream_time). Fall back to execution_time when an operator's
+        # sensors() doesn't surface self_time (downstream_time is 0 for such
+        # nodes, so the two are equal).
+        get_sensors = getattr(operator, "sensors", None)
+        if get_sensors is not None:
+            sensed = get_sensors()
+            if "self_time" in sensed:
+                return round((sensed["self_time"] or 0) / 1e6, 3)
+        return round((getattr(operator, "execution_time", 0) or 0) / 1e6, 3)
+
     tree_col = [row[0] for row in op_rows]
     details_col = [row[1] for row in op_rows]
     rows_col = [_row_count(row[2]) for row in op_rows]
     time_col = [round((getattr(row[2], "execution_time", 0) or 0) / 1e6, 3) for row in op_rows]
+    self_col = [_self_ms(row[2]) for row in op_rows]
 
     # ── OPTIMIZATIONS: which optimizer rules fired, from telemetry counters ───
     readings = getattr(telemetry, "_reading", None) or {}
@@ -248,12 +264,14 @@ def explain(
         details_col.append("")
         rows_col.append(0)
         time_col.append(0.0)
+        self_col.append(0.0)
         for index, (label, count) in enumerate(opt_items):
             connector = "└─ " if index == len(opt_items) - 1 else "├─ "
             tree_col.append(connector + label)
             details_col.append(f"applied {count}×" if count > 1 else "applied")
             rows_col.append(0)
             time_col.append(0.0)
+            self_col.append(0.0)
 
     columns = ["tree", "details"]
     vectors = [
@@ -261,10 +279,13 @@ def explain(
         vector_from_sequence(details_col, dtype=DrakenType.VARCHAR),
     ]
     if analyze:
-        columns += ["rows", "time_ms"]
+        # time_ms is INCLUSIVE (own + downstream); self_ms is this operator's own
+        # work only — the column to read when deciding what to parallelise.
+        columns += ["rows", "time_ms", "self_ms"]
         vectors += [
             vector_from_sequence(rows_col, dtype=DrakenType.INT64),
             vector_from_sequence(time_col, dtype=DrakenType.FLOAT64),
+            vector_from_sequence(self_col, dtype=DrakenType.FLOAT64),
         ]
 
     yield Morsel.from_vectors(columns, vectors)
