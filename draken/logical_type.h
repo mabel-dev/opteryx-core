@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <mutex>
 
 // ---------------------------------------------------------------------------
 // Timestamp unit codes (ascending precision, matches Arrow/pandas convention).
@@ -95,11 +96,17 @@ struct LogicalType {
 // Storage: std::deque<LogicalType> — push_back never invalidates existing
 // element addresses (unlike std::vector), so borrowed pointers stay stable.
 //
-// Thread-safety: called only from Python paths that hold the GIL; no mutex
-// needed.  Do not call from multi-threaded C++ without a lock.
+// Thread-safety: guarded by a process-global mutex. Reachable off-GIL via
+// vecresult_to_owner (e.g. take/mask/slice on a TIMESTAMP64 column inside a
+// gil_scoped_release window), so the GIL can no longer be relied on to
+// serialise the iterate+push_back. The deque keeps borrowed pointers stable;
+// the mutex only protects the lookup/insert, and the returned pointer remains
+// valid (and lock-free to dereference) for the process lifetime.
 // ---------------------------------------------------------------------------
 static inline const LogicalType* logical_type_intern(const LogicalType& lt) {
     static std::deque<LogicalType> registry;
+    static std::mutex registry_mutex;
+    std::lock_guard<std::mutex> lk(registry_mutex);
     for (const LogicalType& entry : registry) {
         if (entry == lt) return &entry;
     }

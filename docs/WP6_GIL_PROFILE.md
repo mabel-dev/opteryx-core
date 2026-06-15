@@ -1,6 +1,17 @@
 # WP-6 — GIL-Held Profile of the Operator Chain
 
-**Status:** evidence delivered (M2). **Date:** 2026-06-15. **Tool:** [`dev/gil_profile.py`](../dev/gil_profile.py).
+**Status:** evidence delivered (M2), then acted on. **Date:** 2026-06-15. **Tool:** [`dev/gil_profile.py`](../dev/gil_profile.py).
+
+> **Update (2026-06-15, post-profile).** This profile did not just measure — it
+> drove fixes. The string-filter anomaly (original finding 4) was diagnosed and
+> fixed, and a broad sweep released the GIL across ~56 hot draken nanobind ops
+> (take/mask/slice/compare/sum/min/max/arithmetic/in_list/between …). The
+> releases were then audited for thread-safety (one real race fixed —
+> `logical_type_intern`) and covered by a concurrency stress test
+> (`tests/draken/test_gil_release_concurrency.py`). **The go/no-go below has
+> flipped: filter and sort are no longer GIL-bound.** The results table carries
+> both the original baseline and the post-fix numbers. Building the parallel
+> executor itself (M4) is out of scope for this thread.
 
 ## Question
 
@@ -31,14 +42,23 @@ fraction reflects compute/decode, not disk. 3 reps averaged; numbers stable to
 
 ## Results — full ClickBench (`scratch.hits`, ~100M rows) + TPC-H sf001
 
-| class       | wall_ms | GIL-held | **GIL-released** | dominant operators (self_ms) |
-|-------------|--------:|---------:|-----------------:|------------------------------|
-| distinct    |     ~550 |    ~25% | **~75%** | Ungrouped Aggregate (COUNT DISTINCT) ~485 |
-| group-agg   |     ~230 |    ~41% | **~59%** | Grouped Aggregate (Hashed) ~190 |
-| scan/decode |      ~75 |    ~50% | **~48%** | Parquet Read ~27, Ungrouped Aggregate ~25 |
-| filter      |     ~415 |    ~77% | **~22%** | **Filter ~260**, Parquet Read ~123 |
-| sort/topN   |    ~1050 |    ~88% | **~12%** | Grouped Aggregate ~615, Filter ~253 |
-| join        |     ~5.8 |    ~38% | (unreliable) | Parquet Read (TPC-H sf001 too small) |
+GIL-**released** fraction, before and after the post-profile nogil work. Higher
+is more parallelisable. (Warm cache, 3 reps, ±2–3 points.)
+
+| class       | wall_ms | GIL-released (baseline) | **GIL-released (post-fix)** | dominant operators (self_ms) |
+|-------------|--------:|------------------------:|----------------------------:|------------------------------|
+| distinct    |     ~515 | ~75% | **~75%** | Ungrouped Aggregate (COUNT DISTINCT) ~467 |
+| group-agg   |     ~235 | ~59% | **~74%** | Grouped Aggregate (Hashed) ~193 |
+| scan/decode |      ~80 | ~48% | **~65%** | Parquet Read ~34, Ungrouped Aggregate ~26 |
+| filter      |     ~400 | ~22% | **~50%** | **Filter ~253**, Parquet Read ~118 |
+| sort/topN   |    ~1040 | ~12% | **~53%** | Grouped Aggregate ~611, Filter ~250 |
+| join        |     ~5.6 | (unreliable) | (unreliable) | Inner Join Draken / Parquet Read (sf001 too small) |
+
+Every measured operator class is now **≥50% GIL-released** (join excepted as
+unreliable). The two formerly GIL-bound classes moved the most: **filter 22%→50%**
+and **sort/topN 12%→53%**. group-agg and scan also rose (59%→74%, 48%→65%) as the
+sweep released the aggregate/reduction kernels; distinct was already kernel-bound
+and is unchanged.
 
 Queries: `SUM(ResolutionWidth)` (scan); `COUNT(*) WHERE SearchPhrase<>''`
 (filter); `GROUP BY RegionID` (group-agg); `COUNT(DISTINCT UserID)` (distinct);
@@ -47,30 +67,46 @@ Queries: `SUM(ResolutionWidth)` (scan); `COUNT(*) WHERE SearchPhrase<>''`
 
 ## Findings
 
-1. **GIL behaviour is strongly operator-dependent — there is no single answer.**
-   The released fraction spans **12% (sort) to 75% (distinct)**. Any blanket
-   "parallelise the engine" decision would be wrong; the unit of decision is the
-   operator.
+1. **GIL behaviour was strongly operator-dependent — and that pointed straight
+   at the fixes.** The original baseline spanned 12% (sort) to 75% (distinct);
+   the gap between operators *was the finding*. The low outliers turned out not
+   to be intrinsic — they were nogil-safe kernels that simply hadn't released the
+   GIL. Once released, the spread collapsed: every class is now ≥50%.
 
-2. **Clear parallelism wins: COUNT(DISTINCT) (~75%) and grouped aggregation
-   (~59%).** Both spend most of their time in nogil hash kernels. These are
-   exactly the M5 targets (partition-parallel grouped agg / distinct) — the
-   measurement endorses that plan.
+2. **The original "GIL-bound" verdict for filter and sort was wrong — they were
+   un-released, not un-parallelisable.** filter (22%→50%) and sort/topN
+   (12%→53%) were dominated by kernels (string compare, the `filter_mask` gather)
+   that were already nogil-safe C++ but called with the GIL held. Releasing the
+   GIL — not waiting on the Phase-9 nogil Morsel surface — recovered them.
 
-3. **Clear GIL-bound operators: sort/topN with string grouping (~12%) and
-   filter on a string predicate (~22%).** Thread-parallelism would barely move
-   these today; they are gated on the Phase-9 nogil Morsel surface.
+3. **The aggregate/distinct wins held and grew.** distinct stayed ~75% (already
+   kernel-bound); grouped aggregation rose 59%→74% as the sum/min/max reduction
+   kernels were released. These remain the strongest partition-parallel targets.
 
-4. **The filter result is a specific, actionable anomaly.** `SearchPhrase <> ''`
-   spends ~260ms of self-time at only ~22% released — a string predicate that is
-   ~78% GIL-held. A simple string-inequality kernel *should* be nogil. This is
-   worth investigating directly: if the string comparison path holds the GIL in
-   a hot loop, fixing it is **both a serial speed-up and a parallelism unlock**.
-   (Flagged as a follow-up, not yet diagnosed.)
+4. **The filter anomaly (original finding 4) is diagnosed and fixed.**
+   `SearchPhrase <> ''` was ~78% GIL-held not because the string compare was
+   slow, but because (a) the compare kernel was called without `with nogil:` and,
+   dominantly, (b) the per-column `filter_mask` gather (`Vector.mask`) ran its
+   whole pure-C++ index-build + take under the GIL. Releasing both took the
+   *gather* from 72%→22% held in isolation and the whole operator from 22%→50%
+   released. The double-win predicted here landed.
 
-5. **Scan/decode (~48% released) is not the operator-chain win it looks like.**
-   The released half is largely parquet decode, which already runs on C++ worker
-   threads. Parallelising the *operator chain* above the scan is a separate axis.
+5. **Scan/decode (now ~65% released) is still not the operator-chain win it
+   looks like.** Much of the released fraction is parquet decode, already on C++
+   worker threads; the rise to 65% reflects the released `SUM` reduction kernel.
+   Parallelising the *operator chain* above the scan is a separate axis.
+
+6. **Releasing the GIL is necessary but not sufficient — it must be safe.** The
+   sweep exposed shared state the GIL had been silently serialising. A
+   thread-safety audit of everything reachable from the released kernels found
+   the selection/validity buffer pools, ops table, allocator, and kernel registry
+   already safe, and one real data race: `logical_type_intern` (a process-global
+   `std::deque` with no lock), reached off-GIL via `vecresult_to_owner` for
+   timestamp results. Fixed with a mutex; covered by
+   `tests/draken/test_gil_release_concurrency.py` (16 threads, results verified
+   against a single-threaded reference). **Lesson for M4: a clean GIL-released
+   fraction is a ceiling, not a guarantee — each released path needs its shared
+   state audited.**
 
 ## Methodology limits (read before over-trusting a number)
 
@@ -88,17 +124,53 @@ Queries: `SUM(ResolutionWidth)` (scan); `COUNT(*) WHERE SearchPhrase<>''`
 - Decode counts as released (correct — already parallel); the dominant-operator
   column is how you attribute a high released fraction to decode vs operator work.
 
-## Go / no-go for M4/M5
+## Measured kernel scaling (not just the ceiling)
 
-- **Do not** pursue naive thread-per-pipeline across all operators: filter and
-  sort are GIL-bound and would contend on the GIL for orchestration.
-- **Do** prioritise **partition-parallel grouped aggregation and
-  count-distinct** (M5) — the measured winners, ~59% and ~75% released.
-- **Investigate the string-filter GIL hold (finding 4)** — potentially a cheap
-  serial + parallel double-win independent of the larger parallelism work.
-- **Close the join measurement gap** before committing to parallel joins.
-- The GIL-bound operators (filter/sort) wait on the **Phase-9 nogil Morsel
-  surface**; revisit them after it lands.
+The released fractions above are a *ceiling*. [`dev/parallel_scaling.py`](../dev/parallel_scaling.py)
+measures *actual* speedup: one shared input vector, N OS threads each running
+released kernels, speedup = T(1)/T(N). This is **kernel-layer** scaling (no engine
+orchestration) — the precondition for M4, not end-to-end query scaling.
+
+5M-row INT64, 16 work units, 18-core Apple Silicon:
+
+| workload (kernel)            | 2 thr | 4 thr | 8 thr | 16 thr |
+|------------------------------|------:|------:|------:|-------:|
+| keying (`hash_shaped`)       | 1.9× | 3.3× | 4.6× | 4.7× |
+| agg (`sum`)                  | 1.9× | 3.6× | 5.1× | 5.6× |
+| filter (`compare_scalar`+`mask`) | 1.9× | 3.2× | 5.5× | **7.9×** |
+
+The releases deliver real parallelism — **near-linear to 4 threads** (83–95%
+efficiency) — then flatten as these memory-bandwidth-heavy kernels saturate DRAM,
+not the GIL. So the plateau is a *lower bound* on the GIL win. `filter` scales
+best (7.9×): fitting, since it was the worst GIL offender pre-fix and now does the
+most nogil work per unit (compare + gather).
+
+## Go / no-go for M4/M5 (revised post-fix)
+
+The original verdict ("do not thread-per-pipeline; filter and sort are
+GIL-bound") **no longer holds** — those operators were un-released, not
+un-parallelisable, and the releases have landed (and are thread-safe).
+
+- **Thread-per-pipeline is no longer ruled out by the kernels.** Every measured
+  class is ≥50% released, so the per-operator GIL ceiling is no longer the
+  blocker it was. The string-filter / nogil-Morsel-surface dependency that gated
+  filter and sort is **removed**.
+- **The remaining ceiling is per-morsel orchestration, not the kernels.** With
+  the kernels released, the residual GIL-held fraction (e.g. filter's ~50%) is
+  now dominated by the push dispatch / `drive_scan` / `Morsel`-lifecycle floor
+  (see Methodology limits) — Python that every worker re-runs. Lifting *that* is
+  the engine-layer job (out of scope for this thread), and it is what now bounds
+  thread-per-pipeline scaling.
+- **Still prioritise partition-parallel grouped aggregation and count-distinct**
+  — the highest released fractions (~74% / ~75%) and the cleanest first targets.
+- **A clean GIL-released fraction is a ceiling, not a guarantee.** Before relying
+  on any released path under M4 threads, audit its shared state (as was done for
+  the kernels here) — the engine/orchestration layer has *not* been audited.
+- **Close the join measurement gap** (sf001 too small) before parallel joins.
+- **The kernels are proven to scale** (4.7×–7.9× on 8–16 threads, see Measured
+  kernel scaling). The remaining work to realise this end-to-end is the engine
+  layer: a parallel executor + the per-morsel orchestration floor — out of scope
+  for this thread, but no longer blocked by the kernels.
 
 ## Reproduce
 

@@ -6795,8 +6795,8 @@ NB_MODULE(draken_native, m) {
         },
         nb::arg("value").none(true), nb::arg("length"),
         "Build a constant-shape VARCHAR Vector (data_length==1, selection=zero-vector).\n"
-        "value may be None (→ all-null constant).\n"
-        "Raises TypeError if value is not str or None.");
+        "value must be bytes (stored verbatim) or None (→ all-null constant).\n"
+        "Raises if value is not bytes or None — str must be encoded to bytes at the binder.");
     m.def("vector_varbinary_from_constant",
         [](nb::object value, uint32_t length) {
             return make_varbinary_constant(value, length);
