@@ -163,8 +163,9 @@ def test_soundex_against_reference(input_name):
 
 def _build_sv(*values):
     """Build a Draken string vector from Python strings/bytes/None."""
+    # vector_from_string_sequence is bytes-only — encode str inputs to bytes.
     return dn.vector_from_string_sequence(
-        [v.decode() if isinstance(v, bytes) else v for v in values]
+        [v.encode("utf-8") if isinstance(v, str) else v for v in values]
     )
 
 

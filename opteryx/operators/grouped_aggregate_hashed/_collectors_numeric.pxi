@@ -40,7 +40,31 @@ cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
 
-from draken.core.buffers cimport DRAKEN_INTERVAL
+from cpython.object cimport PyObject
+
+# C-level Py_DECREF to balance the NEW reference the own_* builders return.
+cdef extern from *:
+    """static inline void _cn_decref(PyObject* op) { Py_XDECREF(op); }"""
+    void _cn_decref(PyObject* op)
+
+# Python-free typed-vector builders (own ownership of the buffers passed in).
+# Used by the type-preserving finalize paths so the compiled collectors never
+# touch a Python builder. own_timestamp/time carry the TIME/TIMESTAMP unit.
+cdef extern from "core/draken_bridge.h":
+    PyObject* draken_vector_own_timestamp(
+        void* data, uint8_t* validity, uint32_t length, const char* unit_str)
+    PyObject* draken_vector_own_time32(
+        void* data, uint8_t* validity, uint32_t length, const char* unit_str)
+    PyObject* draken_vector_own_time64(
+        void* data, uint8_t* validity, uint32_t length, const char* unit_str)
+    # Hand accumulated German-string slots + arena straight to a string-family
+    # Vector (no per-row boxing, no rehash — slot hash32 is trusted). Ownership of
+    # slots + arena + validity transfers on call.
+    PyObject* draken_vector_own_string(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint8_t* validity, uint32_t length, DrakenType vec_type)
+
+from draken.core.buffers cimport DRAKEN_INTERVAL, DRAKEN_BOOL
 
 cdef extern from "core/interval_slot.h":
     cdef struct DrakenIntervalSlot:
@@ -112,7 +136,14 @@ cdef inline void _minmax_accumulate_int(
 ) noexcept nogil:
     cdef Py_ssize_t i
     cdef int64_t si, v
-    if direction == 1:   # MIN
+    if direction == 0:   # ANY_VALUE — keep the first non-null per group
+        for i in range(n_rows):
+            if _num_bitmap_valid(nulls, i):
+                si = state_indices[i]
+                if not _num_bitmap_valid(seen, si):
+                    values[si] = <int64_t>data[sel[i]]
+                    _bitmap_set(seen, si)
+    elif direction == 1:   # MIN
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
@@ -312,6 +343,96 @@ cdef inline Vector _consume_float64_buffer(DrakenFixedBuffer* buf) except *:
     )
     free_fixed_buffer(buf, True)
     return out
+
+
+cdef inline uint8_t* _validity_from_slice(uint8_t* src_nbm, int64_t start,
+                                          int64_t length) except? NULL:
+    """Build a fresh draken_malloc'd validity bitmap (1=valid) for rows
+    [start, start+length) of src_nbm, or NULL if src_nbm is NULL (all valid).
+    """
+    cdef size_t bm_bytes
+    cdef uint8_t* validity
+    cdef int64_t i
+    if src_nbm == NULL:
+        return NULL
+    bm_bytes = <size_t>((length + 7) >> 3)
+    validity = <uint8_t*>draken_malloc(bm_bytes if bm_bytes > 0 else 1)
+    if validity == NULL:
+        raise MemoryError()
+    memset(validity, 0xFF, bm_bytes)
+    for i in range(length):
+        if not _num_bitmap_valid(src_nbm, start + i):
+            validity[i >> 3] &= ~(<uint8_t>(1 << (i & 7)))
+    return validity
+
+
+cdef Vector _build_temporal_from_int64(int64_t* src, uint8_t* src_nbm,
+                                       int64_t start, int64_t length,
+                                       DrakenType out_type, bytes unit) except *:
+    """Build a typed temporal Vector from int64 results [start, start+length).
+
+    Copies into fresh draken_malloc'd buffers at the source's NATIVE width
+    (4-byte for DATE32/TIME32, 8-byte for TIMESTAMP64/TIME64) and hands them to
+    the Python-free extern-C builders (which carry the unit). Does NOT touch the
+    source buffer's ownership. No Python objects on this path.
+    """
+    cdef size_t alloc_n = <size_t>(length if length > 0 else 1)
+    cdef uint8_t* validity = _validity_from_slice(src_nbm, start, length)
+    cdef int32_t* d32
+    cdef int64_t* d64
+    cdef int64_t i
+    cdef PyObject* raw
+    cdef Vector result
+    if out_type == DRAKEN_DATE32:
+        d32 = <int32_t*>draken_malloc(alloc_n * sizeof(int32_t))
+        if d32 == NULL:
+            if validity != NULL: draken_free(validity)
+            raise MemoryError()
+        for i in range(length):
+            d32[i] = <int32_t>src[start + i]
+        # DATE32 has no unit — from_decoded is the Python-free builder.
+        return _vector_from_decoded(d32, validity, <uint32_t>length, DRAKEN_DATE32)
+    if out_type == DRAKEN_TIME32:
+        d32 = <int32_t*>draken_malloc(alloc_n * sizeof(int32_t))
+        if d32 == NULL:
+            if validity != NULL: draken_free(validity)
+            raise MemoryError()
+        for i in range(length):
+            d32[i] = <int32_t>src[start + i]
+        raw = draken_vector_own_time32(d32, validity, <uint32_t>length, <const char*>unit)
+    else:
+        d64 = <int64_t*>draken_malloc(alloc_n * sizeof(int64_t))
+        if d64 == NULL:
+            if validity != NULL: draken_free(validity)
+            raise MemoryError()
+        for i in range(length):
+            d64[i] = src[start + i]
+        if out_type == DRAKEN_TIMESTAMP64:
+            raw = draken_vector_own_timestamp(d64, validity, <uint32_t>length, <const char*>unit)
+        else:  # DRAKEN_TIME64
+            raw = draken_vector_own_time64(d64, validity, <uint32_t>length, <const char*>unit)
+    if raw == NULL:
+        raise MemoryError("temporal vector build failed")
+    result = <Vector>(<object>raw)   # Cython incref → 2
+    _cn_decref(raw)                  # balance the NEW ref → 1
+    return result
+
+
+cdef Vector _build_float32_from_float64(double* src, uint8_t* src_nbm,
+                                        int64_t start, int64_t length) except *:
+    """Narrow double results [start, start+length) to a fresh FLOAT32 buffer and
+    wrap via from_decoded (Python-free). Does NOT touch the source's ownership.
+    """
+    cdef size_t alloc_n = <size_t>(length if length > 0 else 1)
+    cdef uint8_t* validity = _validity_from_slice(src_nbm, start, length)
+    cdef float* f32 = <float*>draken_malloc(alloc_n * sizeof(float))
+    cdef int64_t i
+    if f32 == NULL:
+        if validity != NULL: draken_free(validity)
+        raise MemoryError()
+    for i in range(length):
+        f32[i] = <float>src[start + i]
+    return _vector_from_decoded(f32, validity, <uint32_t>length, DRAKEN_FLOAT32)
 
 
 cdef inline Vector _slice_int64_buffer(
@@ -699,14 +820,14 @@ cdef class MinMaxInt64Collector(BaseCollector):
     # then the int64 result buffer is reinterpreted back to the source type. Default
     # INT64 → no reinterpret. _out_unit carries the TIMESTAMP/TIME unit ("s"/"ms"/...).
     cdef DrakenType _out_type
-    cdef object _out_unit
+    cdef bytes _out_unit       # TIMESTAMP/TIME unit (b"s"/b"ms"/b"us"/b"ns")
 
     def __cinit__(self):
         self._values = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
         self._seen = NULL
         self._capacity = 0
         self._out_type = DRAKEN_INT64
-        self._out_unit = None
+        self._out_unit = b"us"
 
     def __dealloc__(self):
         if self._values != NULL:
@@ -785,28 +906,16 @@ cdef class MinMaxInt64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return self._apply_out_type(_consume_int64_buffer(out))
-
-    cdef Vector _apply_out_type(self, Vector int_vec):
-        # int_vec is a dense INT64 Vector of the raw min/max values. For int-backed
-        # temporal sources, reinterpret it back to the source type (carrying the
-        # TIMESTAMP/TIME unit) so the result emerges typed, not as a raw epoch int.
-        # The comparison itself was correct on the raw int representation.
-        cdef object unit
+        # INT64: hand the buffer off directly (Python-free). Int-backed temporal:
+        # build the typed vector from the same buffer, carrying the unit — also
+        # Python-free (extern-C builders), then free the int64 source.
         if self._out_type == DRAKEN_INT64:
-            return int_vec
-        if self._out_type == DRAKEN_DATE32:
-            return _V(_draken_native.vector_reinterpret_as_date32(int_vec._nb))
-        unit = self._out_unit if self._out_unit is not None else "us"
-        if isinstance(unit, bytes):
-            unit = unit.decode("ascii")
-        if self._out_type == DRAKEN_TIMESTAMP64:
-            return _V(_draken_native.vector_reinterpret_as_timestamp64(int_vec._nb, unit))
-        if self._out_type == DRAKEN_TIME32:
-            return _V(_draken_native.vector_reinterpret_as_time32(int_vec._nb, unit))
-        if self._out_type == DRAKEN_TIME64:
-            return _V(_draken_native.vector_reinterpret_as_time64(int_vec._nb, unit))
-        return int_vec
+            return _consume_int64_buffer(out)
+        cdef Vector r = _build_temporal_from_int64(
+            <int64_t*>out.data, out.null_bitmap, 0, num_groups,
+            self._out_type, self._out_unit)
+        free_fixed_buffer(out, True)
+        return r
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._values
@@ -824,7 +933,13 @@ cdef class MinMaxInt64Collector(BaseCollector):
                 free(seen)
                 self._seen = NULL
 
-        return self._apply_out_type(_slice_int64_buffer(out, start, stop))
+        if self._out_type == DRAKEN_INT64:
+            return _slice_int64_buffer(out, start, stop)
+        # Temporal slice: build [start, stop) from the int64 buffer; the buffer is
+        # retained (self._values), so the typed builder only copies, never frees it.
+        return _build_temporal_from_int64(
+            <int64_t*>out.data, out.null_bitmap, start, stop - start,
+            self._out_type, self._out_unit)
 
     cpdef BaseCollector _clone_empty(self):
         cdef MinMaxInt64Collector c = MinMaxInt64Collector()
@@ -917,7 +1032,14 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         if uv.type == DRAKEN_FLOAT32:
             fdata = <const float*>uv.data
             with nogil:
-                if direction == 1:
+                if direction == 0:      # ANY_VALUE — first non-null per group
+                    for i in range(n_rows):
+                        if _num_bitmap_valid(nulls, i):
+                            si = state_indices[i]
+                            if not _num_bitmap_valid(seen, si):
+                                values[si] = <double>fdata[sel[i]]
+                                _bitmap_set(seen, si)
+                elif direction == 1:
                     for i in range(n_rows):
                         if _num_bitmap_valid(nulls, i):
                             si = state_indices[i]
@@ -936,7 +1058,14 @@ cdef class MinMaxFloat64Collector(BaseCollector):
             return
         data = <double*>uv.data
         with nogil:
-            if direction == 1:   # MIN
+            if direction == 0:       # ANY_VALUE — first non-null per group
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        if not _num_bitmap_valid(seen, si):
+                            values[si] = data[sel[i]]
+                            _bitmap_set(seen, si)
+            elif direction == 1:   # MIN
                 for i in range(n_rows):
                     if _num_bitmap_valid(nulls, i):
                         si = state_indices[i]
@@ -957,6 +1086,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         cdef DrakenFixedBuffer* out = self._values
         cdef uint8_t* seen = self._seen
         cdef Py_ssize_t i
+        cdef Vector f32r
 
         out.length = <size_t>num_groups
         if seen != NULL:
@@ -973,13 +1103,11 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return self._apply_out_type(_consume_float64_buffer(out))
-
-    cdef Vector _apply_out_type(self, Vector f64_vec):
-        # Narrow back to FLOAT32 for a FLOAT32 source so the result type matches.
         if self._out_type == DRAKEN_FLOAT32:
-            return _V(_draken_native.vector_reinterpret_as_float32(f64_vec._nb))
-        return f64_vec
+            f32r = _build_float32_from_float64(<double*>out.data, out.null_bitmap, 0, num_groups)
+            free_fixed_buffer(out, True)
+            return f32r
+        return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._values
@@ -997,7 +1125,9 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                 free(seen)
                 self._seen = NULL
 
-        return self._apply_out_type(_slice_float64_buffer(out, start, stop))
+        if self._out_type == DRAKEN_FLOAT32:
+            return _build_float32_from_float64(<double*>out.data, out.null_bitmap, start, stop - start)
+        return _slice_float64_buffer(out, start, stop)
 
     cpdef BaseCollector _clone_empty(self):
         cdef MinMaxFloat64Collector c = MinMaxFloat64Collector()
@@ -1094,19 +1224,36 @@ cdef class MinMaxBoolCollector(BaseCollector):
                     elif direction == 1:        # MIN: false dominates
                         if b < values[si]:
                             values[si] = b
-                    else:                       # MAX: true dominates
+                    elif direction == -1:       # MAX: true dominates
                         if b > values[si]:
                             values[si] = b
+                    # direction 0 (ANY_VALUE): keep the first value, no update
 
     cdef Vector _build(self, int64_t start, int64_t stop):
-        cdef list result = []
-        cdef int64_t g
-        for g in range(start, stop):
-            if g >= self._capacity or self._seen[g] == 0:
-                result.append(None)
-            else:
-                result.append(self._values[g] != 0)
-        return _V(_draken_native.vector_from_bool_sequence(result))
+        # Build a bit-packed DRAKEN_BOOL buffer + validity directly (Python-free).
+        cdef int64_t length = stop - start
+        cdef size_t nbytes = <size_t>((length + 7) >> 3)
+        cdef uint8_t* data = <uint8_t*>draken_malloc(nbytes if nbytes > 0 else 1)
+        cdef uint8_t* validity = <uint8_t*>draken_malloc(nbytes if nbytes > 0 else 1)
+        cdef int64_t g, idx
+        cdef bint has_null = False
+        if data == NULL or validity == NULL:
+            if data != NULL: draken_free(data)
+            if validity != NULL: draken_free(validity)
+            raise MemoryError()
+        memset(data, 0, nbytes)
+        memset(validity, 0xFF, nbytes)
+        for g in range(length):
+            idx = start + g
+            if idx >= self._capacity or self._seen[idx] == 0:
+                validity[g >> 3] &= ~(<uint8_t>(1 << (g & 7)))
+                has_null = True
+            elif self._values[idx] != 0:
+                data[g >> 3] |= <uint8_t>(1 << (g & 7))
+        if not has_null:
+            draken_free(validity)
+            validity = NULL
+        return _vector_from_decoded(data, validity, <uint32_t>length, DRAKEN_BOOL)
 
     cpdef Vector finalize(self, int64_t num_groups):
         return self._build(0, num_groups)
@@ -1218,26 +1365,49 @@ cdef class MinMaxIntervalCollector(BaseCollector):
                         months[si] = sm
                         ms[si] = sms
                         seen[si] = 1
-                    else:
+                    elif direction == 1:
                         grp_norm = months[si] * INTERVAL_MONTH_MS + ms[si]
-                        if direction == 1:
-                            if src_norm < grp_norm:
-                                months[si] = sm
-                                ms[si] = sms
-                        else:
-                            if src_norm > grp_norm:
-                                months[si] = sm
-                                ms[si] = sms
+                        if src_norm < grp_norm:
+                            months[si] = sm
+                            ms[si] = sms
+                    elif direction == -1:
+                        grp_norm = months[si] * INTERVAL_MONTH_MS + ms[si]
+                        if src_norm > grp_norm:
+                            months[si] = sm
+                            ms[si] = sms
+                    # direction 0 (ANY_VALUE): keep the first value, no update
 
     cdef Vector _build(self, int64_t start, int64_t stop):
-        cdef list result = []
-        cdef int64_t g
-        for g in range(start, stop):
-            if g >= self._capacity or self._seen[g] == 0:
-                result.append(None)
+        # Build a DrakenIntervalSlot buffer + validity directly (Python-free).
+        cdef int64_t length = stop - start
+        cdef size_t nbytes = <size_t>(length if length > 0 else 1) * sizeof(DrakenIntervalSlot)
+        cdef DrakenIntervalSlot* slots = <DrakenIntervalSlot*>draken_malloc(nbytes)
+        cdef uint8_t* validity = NULL
+        cdef size_t bm_bytes = <size_t>((length + 7) >> 3)
+        cdef int64_t g, idx
+        cdef bint has_null = False
+        if slots == NULL:
+            raise MemoryError()
+        for g in range(length):
+            idx = start + g
+            if idx >= self._capacity or self._seen[idx] == 0:
+                slots[g].months = 0
+                slots[g].ms = 0
+                has_null = True
             else:
-                result.append((self._months[g], self._ms[g]))
-        return _V(_draken_native.vector_interval_from_sequence(result))
+                slots[g].months = self._months[idx]
+                slots[g].ms = self._ms[idx]
+        if has_null:
+            validity = <uint8_t*>draken_malloc(bm_bytes if bm_bytes > 0 else 1)
+            if validity == NULL:
+                draken_free(slots)
+                raise MemoryError()
+            memset(validity, 0xFF, bm_bytes)
+            for g in range(length):
+                idx = start + g
+                if idx >= self._capacity or self._seen[idx] == 0:
+                    validity[g >> 3] &= ~(<uint8_t>(1 << (g & 7)))
+        return _vector_from_decoded(slots, validity, <uint32_t>length, DRAKEN_INTERVAL)
 
     cpdef Vector finalize(self, int64_t num_groups):
         return self._build(0, num_groups)
@@ -1389,7 +1559,15 @@ cdef class MinMaxVarcharCollector(BaseCollector):
         cdef int8_t direction = self._direction
 
         with nogil:
-            if direction == 1:  # MIN
+            if direction == 0:  # ANY_VALUE — first non-null per group
+                for i in range(n_rows):
+                    if nulls != NULL and not _num_bitmap_valid(nulls, i):
+                        continue
+                    si = <size_t>state_indices[i]
+                    if not seen[si]:
+                        self._copy_slot(si, &src_slots[sel[i]], src_arena)
+                        seen[si] = 1
+            elif direction == 1:  # MIN
                 for i in range(n_rows):
                     if nulls != NULL and not _num_bitmap_valid(nulls, i):
                         continue
@@ -1429,22 +1607,46 @@ cdef class MinMaxVarcharCollector(BaseCollector):
                             self._copy_slot(si, src_slot, src_arena)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        cdef list result = []
-        cdef size_t i
+        # Hand the accumulated German-string slots + arena straight to the
+        # string-family builder (Python-free — no per-group bytes boxing). The
+        # builder takes ownership of slots/arena/validity, so we null our pointers
+        # afterwards to avoid a double free in __dealloc__.
         cdef uint8_t* seen = self._seen
-        cdef DrakenStringSlot* slot
-        cdef const uint8_t* payload
-        cdef uint32_t slen
-        for i in range(<size_t>num_groups):
-            if not seen[i]:
-                result.append(None)
-            else:
-                slot = &self._slots[i]
-                slen = str_length(slot)
-                payload = str_data(slot, self._arena)
-                result.append(bytes(payload[:slen]))
-        nb = _draken_native.vector_string_family_from_bytes(result, <int>self._col_type)
-        return _V(nb)
+        cdef size_t bm_bytes = <size_t>((num_groups + 7) >> 3)
+        cdef uint8_t* validity = NULL
+        cdef size_t g
+        cdef bint has_null = False
+        cdef PyObject* raw
+        cdef Vector result
+        if num_groups > 0 and seen != NULL:
+            for g in range(<size_t>num_groups):
+                if seen[g] == 0:
+                    has_null = True
+                    break
+            if has_null:
+                validity = <uint8_t*>draken_malloc(bm_bytes if bm_bytes > 0 else 1)
+                if validity == NULL:
+                    raise MemoryError()
+                memset(validity, 0xFF, bm_bytes)
+                for g in range(<size_t>num_groups):
+                    if seen[g] == 0:
+                        validity[g >> 3] &= ~(<uint8_t>(1 << (g & 7)))
+        raw = draken_vector_own_string(
+            self._slots, self._arena, self._arena_used, validity,
+            <uint32_t>num_groups, self._col_type)
+        self._slots = NULL
+        self._arena = NULL
+        self._capacity = 0
+        self._arena_used = 0
+        self._arena_cap = 0
+        if seen != NULL:
+            free(seen)
+            self._seen = NULL
+        if raw == NULL:
+            raise MemoryError("draken_vector_own_string failed")
+        result = <Vector>(<object>raw)
+        _cn_decref(raw)
+        return result
 
     cpdef BaseCollector _clone_empty(self):
         cdef MinMaxVarcharCollector c = MinMaxVarcharCollector()
@@ -1867,7 +2069,14 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         nulls = uv.validity
         cdef int8_t direction = self._direction
         with nogil:
-            if direction == 1:   # MIN
+            if direction == 0:   # ANY_VALUE — first non-null per group
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        if not _num_bitmap_valid(seen, si):
+                            values[si] = data[sel[i]]
+                            _bitmap_set(seen, si)
+            elif direction == 1:   # MIN
                 for i in range(n_rows):
                     if _num_bitmap_valid(nulls, i):
                         si = state_indices[i]
@@ -2068,7 +2277,14 @@ cdef class MinMaxDecimal128Collector(BaseCollector):
         cdef int128_t v
         cdef int8_t direction = self._direction
         with nogil:
-            if direction == 1:   # MIN
+            if direction == 0:   # ANY_VALUE — first non-null per group
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        if not _num_bitmap_valid(seen, si):
+                            values[si] = data[sel[i]]
+                            _bitmap_set(seen, si)
+            elif direction == 1:   # MIN
                 for i in range(n_rows):
                     if _num_bitmap_valid(nulls, i):
                         si = state_indices[i]

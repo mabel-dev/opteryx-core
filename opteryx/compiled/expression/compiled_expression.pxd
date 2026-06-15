@@ -16,6 +16,7 @@ from libcpp.vector cimport vector
 cdef extern from "expression/compiled_expression.h" namespace "opteryx_expr":
     cdef cppclass CompiledExpression:
         int node_type
+        int physical_type
         PyObject* value
         PyObject* schema_column
         PyObject* source_node
@@ -125,6 +126,10 @@ cdef enum BCOpcode:
     BC_EXTRACTION        = 16
     BC_CAST              = 17
     BC_CASE              = 18
+    # Pre-materialised scalar literal: literal_obj holds a constant-shape Vector
+    # (data_length==1) built ONCE at bind time. The executor re-stamps only the
+    # logical length per morsel — no Python object, no isinstance, no re-encode.
+    BC_LOAD_LIT_CONST    = 19
 
 
 # Compare-time flag bits (instr.flags).

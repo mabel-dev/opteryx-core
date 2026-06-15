@@ -21,11 +21,11 @@ import draken.draken_native as dn
 
 
 def dense(lst):
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence([v.encode("utf-8") if isinstance(v, str) else v for v in lst])
 
 
 def dictv(lst):
-    return dn.vector_from_string_dict_sequence(lst)
+    return dn.vector_from_string_dict_sequence([v.encode("utf-8") if isinstance(v, str) else v for v in lst])
 
 
 def py(v):
@@ -384,31 +384,31 @@ class TestD2OnDictShape:
     def test_compare_eq_short(self):
         d = dictv(["a", "b", "a", "c"])
         m = d.materialize()
-        r_dict  = [b for b in d.compare_scalar("a", 0).to_pylist()]
-        r_dense = [b for b in m.compare_scalar("a", 0).to_pylist()]
+        r_dict  = [b for b in d.compare_scalar(b"a", 0).to_pylist()]
+        r_dense = [b for b in m.compare_scalar(b"a", 0).to_pylist()]
         assert r_dict == r_dense
 
     def test_compare_eq_long(self):
         s = "hello_world_" * 5
         d = dictv([s, "other_value__", s])
         m = d.materialize()
-        r_dict  = d.compare_scalar(s, 0).to_pylist()
-        r_dense = m.compare_scalar(s, 0).to_pylist()
+        r_dict  = d.compare_scalar(s.encode("utf-8"), 0).to_pylist()
+        r_dense = m.compare_scalar(s.encode("utf-8"), 0).to_pylist()
         assert r_dict == r_dense
 
     def test_compare_ne(self):
         d = dictv(["x", "y", "x"])
         m = d.materialize()
-        r_dict  = d.compare_scalar("x", 1).to_pylist()
-        r_dense = m.compare_scalar("x", 1).to_pylist()
+        r_dict  = d.compare_scalar(b"x", 1).to_pylist()
+        r_dense = m.compare_scalar(b"x", 1).to_pylist()
         assert r_dict == r_dense
 
     def test_compare_order(self):
         d = dictv(["apple", "banana", "apple", "cherry"])
         m = d.materialize()
         # gt: which values > "banana"?
-        r_dict  = d.compare_scalar("banana", 2).to_pylist()
-        r_dense = m.compare_scalar("banana", 2).to_pylist()
+        r_dict  = d.compare_scalar(b"banana", 2).to_pylist()
+        r_dense = m.compare_scalar(b"banana", 2).to_pylist()
         assert r_dict == r_dense
 
     def test_compare_vector_dict_x_dense(self):

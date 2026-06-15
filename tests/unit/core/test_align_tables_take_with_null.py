@@ -25,7 +25,7 @@ def test_unmatched_rows_are_null_string_float():
     left = _left(3)
     right = Morsel.from_vectors(
         [b"rs", b"rf"],
-        [dn.vector_from_string_sequence(["a", "b", "c"]),
+        [dn.vector_from_string_sequence([b"a", b"b", b"c"]),
          dn.vector_float64_from_sequence([1.0, 2.0, 3.0])],
     )
     out = align_tables(left, right, array("i", [0, 1, 2]), array("i", [2, -1, 0]))

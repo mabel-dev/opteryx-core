@@ -33,17 +33,20 @@ LONG_PRESENT  = "this is a very long string that exceeds twelve bytes - present"
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _enc(lst):
+    return [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+
 def make(lst):
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence(_enc(lst))
 
 def make_dict(lst):
-    return dn.vector_from_string_dict_sequence(lst)
+    return dn.vector_from_string_dict_sequence(_enc(lst))
 
 def pylist(v):
     return v.to_pylist()
 
 def in_list(v, values):
-    return pylist(v.in_list(values))
+    return pylist(v.in_list(_enc(values)))
 
 def _py_in_list(x, s):
     if x is None:
@@ -58,12 +61,12 @@ def _py_in_list(x, s):
 class TestResultMeta:
     def test_result_type_is_bool(self):
         v = make(["a", "b", "c"])
-        r = v.in_list(["a"])
+        r = v.in_list([b"a"])
         assert r.type == dn.DrakenType.BOOL
 
     def test_result_length_matches_input(self):
         v = make(["a", "b", "c", "d"])
-        r = v.in_list(["a", "c"])
+        r = v.in_list([b"a", b"c"])
         assert len(r) == 4
 
 
@@ -252,7 +255,7 @@ class TestEmptyVector:
 
     def test_empty_result_type(self):
         v = make([])
-        r = v.in_list(["x"])
+        r = v.in_list([b"x"])
         assert r.type == dn.DrakenType.BOOL
         assert len(r) == 0
 

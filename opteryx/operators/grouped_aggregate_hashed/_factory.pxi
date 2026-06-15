@@ -138,6 +138,54 @@ cpdef tuple create_collectors(list aggregation_specs, list group_columns):
     return collectors, key_kinds
 
 
+cdef BaseCollector _make_minmax_collector(DrakenType t, int8_t direction, Vector vec):
+    """Type-preserving MIN(+1) / MAX(-1) / ANY_VALUE(0) collector for column type
+    t. The same nogil collectors serve all three — direction 0 keeps the first
+    value per group — so ANY_VALUE inherits type preservation for free. The caller
+    sets column_name / result_name. Unsupported types fail loud.
+    """
+    cdef BaseCollector c
+    if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
+        c = MinMaxInt64Collector()
+        (<MinMaxInt64Collector>c)._direction = direction
+    elif t == DRAKEN_FLOAT64 or t == DRAKEN_FLOAT32:
+        c = MinMaxFloat64Collector()
+        (<MinMaxFloat64Collector>c)._direction = direction
+        (<MinMaxFloat64Collector>c)._out_type = t
+    elif t == DRAKEN_DECIMAL:
+        c = MinMaxDecimalCollector()
+        (<MinMaxDecimalCollector>c)._direction = direction
+        (<MinMaxDecimalCollector>c)._scale = vec._nb.logical_type_scale
+        (<MinMaxDecimalCollector>c)._precision = vec._nb.logical_type_precision
+    elif t == DRAKEN_DECIMAL128:
+        c = MinMaxDecimal128Collector()
+        (<MinMaxDecimal128Collector>c)._direction = direction
+        (<MinMaxDecimal128Collector>c)._scale = vec._nb.logical_type_scale
+        (<MinMaxDecimal128Collector>c)._precision = vec._nb.logical_type_precision
+    elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
+        c = MinMaxVarcharCollector()
+        (<MinMaxVarcharCollector>c)._direction = direction
+    elif t == DRAKEN_TIMESTAMP64 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32 or t == DRAKEN_TIME64:
+        # Int-backed temporal: operate on the raw int, type-preserving finalize.
+        c = MinMaxInt64Collector()
+        (<MinMaxInt64Collector>c)._direction = direction
+        (<MinMaxInt64Collector>c)._out_type = t
+        if t != DRAKEN_DATE32:
+            (<MinMaxInt64Collector>c)._out_unit = vec._nb.logical_type_unit.encode("ascii")
+    elif t == DRAKEN_BOOL:
+        c = MinMaxBoolCollector()
+        (<MinMaxBoolCollector>c)._direction = direction
+    elif t == DRAKEN_INTERVAL:
+        c = MinMaxIntervalCollector()
+        (<MinMaxIntervalCollector>c)._direction = direction
+    else:
+        raise NotImplementedError(
+            f"MIN/MAX/ANY_VALUE over column type {t} is not supported "
+            "(supported: integer, float, decimal, string/binary, "
+            "date/timestamp/time, boolean, interval)")
+    return c
+
+
 cpdef void resolve_deferred_collectors(
     list collectors,
     object morsel,
@@ -191,103 +239,23 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredMinCollector):
             vec = morsel.column(c.column_name)
-            t = vec.unified().type
-            if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
-                typed_c = MinMaxInt64Collector()
-                (<MinMaxInt64Collector>typed_c)._direction = 1
-            elif t == DRAKEN_FLOAT64 or t == DRAKEN_FLOAT32:
-                typed_c = MinMaxFloat64Collector()
-                (<MinMaxFloat64Collector>typed_c)._direction = 1
-                (<MinMaxFloat64Collector>typed_c)._out_type = t
-            elif t == DRAKEN_DECIMAL:
-                typed_c = MinMaxDecimalCollector()
-                (<MinMaxDecimalCollector>typed_c)._direction = 1
-                (<MinMaxDecimalCollector>typed_c)._scale = vec._nb.logical_type_scale
-                (<MinMaxDecimalCollector>typed_c)._precision = vec._nb.logical_type_precision
-            elif t == DRAKEN_DECIMAL128:
-                typed_c = MinMaxDecimal128Collector()
-                (<MinMaxDecimal128Collector>typed_c)._direction = 1
-                (<MinMaxDecimal128Collector>typed_c)._scale = vec._nb.logical_type_scale
-                (<MinMaxDecimal128Collector>typed_c)._precision = vec._nb.logical_type_precision
-            elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
-                typed_c = MinMaxVarcharCollector()
-                (<MinMaxVarcharCollector>typed_c)._direction = 1
-            elif t == DRAKEN_TIMESTAMP64 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32 or t == DRAKEN_TIME64:
-                # Int-backed temporal: min/max on the raw int, type-preserving finalize.
-                typed_c = MinMaxInt64Collector()
-                (<MinMaxInt64Collector>typed_c)._direction = 1
-                (<MinMaxInt64Collector>typed_c)._out_type = t
-                if t != DRAKEN_DATE32:
-                    (<MinMaxInt64Collector>typed_c)._out_unit = vec._nb.logical_type_unit
-            elif t == DRAKEN_BOOL:
-                typed_c = MinMaxBoolCollector()
-                (<MinMaxBoolCollector>typed_c)._direction = 1
-            elif t == DRAKEN_INTERVAL:
-                typed_c = MinMaxIntervalCollector()
-                (<MinMaxIntervalCollector>typed_c)._direction = 1
-            else:
-                raise NotImplementedError(
-                    f"MIN over column type {t} is not supported "
-                    "(supported: integer, float, decimal, string/binary, "
-                    "date/timestamp/time, boolean, interval)")
+            typed_c = _make_minmax_collector(vec.unified().type, 1, vec)
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
 
         elif isinstance(c, _DeferredMaxCollector):
             vec = morsel.column(c.column_name)
-            t = vec.unified().type
-            if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
-                typed_c = MinMaxInt64Collector()
-                (<MinMaxInt64Collector>typed_c)._direction = -1
-            elif t == DRAKEN_FLOAT64 or t == DRAKEN_FLOAT32:
-                typed_c = MinMaxFloat64Collector()
-                (<MinMaxFloat64Collector>typed_c)._direction = -1
-                (<MinMaxFloat64Collector>typed_c)._out_type = t
-            elif t == DRAKEN_DECIMAL:
-                typed_c = MinMaxDecimalCollector()
-                (<MinMaxDecimalCollector>typed_c)._direction = -1
-                (<MinMaxDecimalCollector>typed_c)._scale = vec._nb.logical_type_scale
-                (<MinMaxDecimalCollector>typed_c)._precision = vec._nb.logical_type_precision
-            elif t == DRAKEN_DECIMAL128:
-                typed_c = MinMaxDecimal128Collector()
-                (<MinMaxDecimal128Collector>typed_c)._direction = -1
-                (<MinMaxDecimal128Collector>typed_c)._scale = vec._nb.logical_type_scale
-                (<MinMaxDecimal128Collector>typed_c)._precision = vec._nb.logical_type_precision
-            elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
-                typed_c = MinMaxVarcharCollector()
-                (<MinMaxVarcharCollector>typed_c)._direction = -1
-            elif t == DRAKEN_TIMESTAMP64 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32 or t == DRAKEN_TIME64:
-                # Int-backed temporal: min/max on the raw int, type-preserving finalize.
-                typed_c = MinMaxInt64Collector()
-                (<MinMaxInt64Collector>typed_c)._direction = -1
-                (<MinMaxInt64Collector>typed_c)._out_type = t
-                if t != DRAKEN_DATE32:
-                    (<MinMaxInt64Collector>typed_c)._out_unit = vec._nb.logical_type_unit
-            elif t == DRAKEN_BOOL:
-                typed_c = MinMaxBoolCollector()
-                (<MinMaxBoolCollector>typed_c)._direction = -1
-            elif t == DRAKEN_INTERVAL:
-                typed_c = MinMaxIntervalCollector()
-                (<MinMaxIntervalCollector>typed_c)._direction = -1
-            else:
-                raise NotImplementedError(
-                    f"MAX over column type {t} is not supported "
-                    "(supported: integer, float, decimal, string/binary, "
-                    "date/timestamp/time, boolean, interval)")
+            typed_c = _make_minmax_collector(vec.unified().type, -1, vec)
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
 
         elif isinstance(c, _DeferredAnyValueCollector):
+            # ANY_VALUE = "keep the first value per group" → direction 0 on the
+            # same type-preserving nogil collectors (no to_pylist, no boxing).
             vec = morsel.column(c.column_name)
-            t = vec.unified().type
-            if t == DRAKEN_INT64:
-                typed_c = AnyValueInt64Collector()
-            elif t == DRAKEN_FLOAT64:
-                typed_c = AnyValueFloat64Collector()
-            else:
-                typed_c = AnyValueObjectCollector()
+            typed_c = _make_minmax_collector(vec.unified().type, 0, vec)
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c

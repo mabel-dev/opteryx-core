@@ -17,11 +17,15 @@ from opteryx.compiled.nanobind.vector_string_case import vector_lowercase
 
 
 def make_varchar(lst):
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    )
 
 
 def make_nvarchar(lst):
-    return dn.vector_from_nvarchar_sequence(lst)
+    return dn.vector_from_nvarchar_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    )
 
 
 def make_bytes_vec(lst):

@@ -27,6 +27,72 @@ from libc.string cimport memset
 import draken.draken_native as _draken_native
 from opteryx.exceptions import IncorrectTypeError
 
+import datetime as _datetime
+import decimal as _decimal
+
+from draken.vectors.vector cimport Vector
+from draken.core.buffers cimport DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+
+# Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
+cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
+
+
+cdef Vector _materialise_constant_literal(object value, int physical_type):
+    """Materialise a scalar literal into a constant-shape Draken Vector ONCE at
+    bind time (data_length==1, length==1). The executor re-stamps only the
+    logical length per morsel — no per-morsel Python object, isinstance, or
+    re-encode (CLAUDE.md §2/§3).
+
+    Strings are bound to bytes here: a Python str is encoded to UTF-8 exactly
+    once so it never reaches the Draken edge. The string subtype is selected from
+    physical_type — VARCHAR/VARBINARY store the bytes verbatim; NVARCHAR validates
+    UTF-8 inside the native constructor. Non-string scalars dispatch on the Python
+    value type, preserving the existing INT64/FLOAT64/DECIMAL/DATE32/TIMESTAMP
+    mappings exactly.
+    """
+    cdef long long ordinal
+    cdef bytes raw
+    cdef object int_vec
+    if value is None:
+        return Vector(_draken_native.vector_null_from_length(1))
+    if isinstance(value, bool):
+        # Bools are handled upstream by BC_LOAD_LIT_BOOL; reaching here is a bug.
+        raise IncorrectTypeError(
+            "_materialise_constant_literal: bool literal must use BC_LOAD_LIT_BOOL"
+        )
+    if isinstance(value, int):
+        return Vector(_draken_native.vector_from_constant(value, 1))
+    if isinstance(value, float):
+        return Vector(_draken_native.vector_float64_from_constant(value, 1))
+    if isinstance(value, (str, bytes)):
+        if isinstance(value, str):
+            raw = (<str>value).encode("utf-8")
+        else:
+            raw = <bytes>value
+        if physical_type == <int>DRAKEN_NVARCHAR:
+            return Vector(_draken_native.vector_nvarchar_from_constant(raw, 1))
+        if physical_type == <int>DRAKEN_VARBINARY:
+            return Vector(_draken_native.vector_varbinary_from_constant(raw, 1))
+        # Default (VARCHAR and any unspecified physical tag): raw bytes verbatim.
+        return Vector(_draken_native.vector_varchar_from_constant(raw, 1))
+    if isinstance(value, _decimal.Decimal):
+        sign, digits, exponent = value.as_tuple()
+        scale = max(0, -int(exponent))
+        precision = max(len(digits), scale + 1)
+        if precision > 18:
+            return Vector(_draken_native.vector_decimal128_from_constant(value, 1, precision, scale))
+        return Vector(_draken_native.vector_decimal_from_constant(value, 1, precision, scale))
+    if isinstance(value, _datetime.date) and not isinstance(value, _datetime.datetime):
+        ordinal = (value - _EPOCH_DATE).days
+        int_vec = _draken_native.vector_from_constant(ordinal, 1)
+        return Vector(_draken_native.vector_reinterpret_as_date32(int_vec))
+    if isinstance(value, _datetime.datetime):
+        return Vector(_draken_native.vector_timestamp_from_constant(value, 1))
+    raise IncorrectTypeError(
+        f"_materialise_constant_literal: cannot materialise constant for literal "
+        f"{value!r} (type {type(value).__name__})"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Phase 9b: Kernel resolution and context wrapper
@@ -301,6 +367,7 @@ cdef Py_ssize_t _linearize(
     cdef object inlist_set_obj
     cdef object cast_target_type, cast_unit, cast_params, cast_kernel, cast_py_node
     cdef object src
+    cdef object const_lit
 
     # ------------------------------------------------------------------
     # NT_NESTED — transparent, no instruction emitted
@@ -322,11 +389,24 @@ cdef Py_ssize_t _linearize(
         else:
             _ensure_set_types()
             if isinstance(value_obj, _CarcharSetWrapper_t) or isinstance(value_obj, _PerfectHashSet_t):
+                # Set / hash-set literal — consumed as a Python object by a
+                # downstream BC_COMPARE; never a DrakenVector on the stack.
                 slot.opcode = BC_LOAD_LIT_SET
-            else:
+                bc._hold(value_obj)
+                slot.literal_obj = <PyObject*>value_obj
+            elif isinstance(value_obj, (list, tuple, set, frozenset)):
+                # In-list collection literal — stays a Python object on the stack
+                # for a downstream BC_COMPARE membership test.
                 slot.opcode = BC_LOAD_LIT_SCALAR
-            bc._hold(value_obj)
-            slot.literal_obj = <PyObject*>value_obj
+                bc._hold(value_obj)
+                slot.literal_obj = <PyObject*>value_obj
+            else:
+                # Genuine scalar literal — materialise the native constant ONCE.
+                # The executor re-stamps only the logical length per morsel.
+                const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                slot.opcode = BC_LOAD_LIT_CONST
+                bc._hold(const_lit)
+                slot.literal_obj = <PyObject*>const_lit
         depth += 1
         if depth > bc.max_stack_depth:
             bc.max_stack_depth = depth
@@ -446,9 +526,17 @@ cdef Py_ssize_t _linearize(
             if (
                 isinstance(inlist_set_obj, _CarcharSetWrapper_t)
                 or isinstance(inlist_set_obj, _PerfectHashSet_t)
-                or isinstance(inlist_set_obj, (list, tuple, set, frozenset))
             ):
                 right_is_inlist_literal = True
+            elif isinstance(inlist_set_obj, (list, tuple, set, frozenset)):
+                right_is_inlist_literal = True
+                # The string in-list edge (vector_in_list) is bytes-only — encode
+                # str members to bytes ONCE at bind (str must not reach the Draken
+                # edge). Non-str members (ints, etc.) pass through unchanged.
+                inlist_set_obj = [
+                    e.encode("utf-8") if isinstance(e, str) else e
+                    for e in inlist_set_obj
+                ]
             else:
                 inlist_set_obj = None  # scalar literal — don't fold
 

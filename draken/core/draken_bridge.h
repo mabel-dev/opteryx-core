@@ -243,6 +243,16 @@ PyObject* draken_vector_own_array(
 PyObject* draken_vector_own_timestamp(
     void* data, uint8_t* validity, uint32_t length, const char* unit_str);
 
+// draken_vector_own_time32 / _own_time64 — wrap a hand-allocated time buffer as a
+// DRAKEN_TIME32 (int32 data) / DRAKEN_TIME64 (int64 data) Vector with a TIME
+// LogicalType at `unit_str` ("s"/"ms"/"us"/"ns"). data must be draken_malloc'd at
+// the matching width; validity may be NULL (all-valid). Ownership of both buffers
+// transfers unconditionally. NEW reference on success; NULL + exception on failure.
+PyObject* draken_vector_own_time32(
+    void* data, uint8_t* validity, uint32_t length, const char* unit_str);
+PyObject* draken_vector_own_time64(
+    void* data, uint8_t* validity, uint32_t length, const char* unit_str);
+
 // draken_arrow_varlen_to_string_block — Arrow varlen (data + offsets + nulls) →
 // German-string storage. PURE buffer work, no Python: builds and returns a
 // draken_malloc'd consolidated arena block [DrakenStringArena | slots | arena]

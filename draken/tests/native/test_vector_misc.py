@@ -50,9 +50,9 @@ def make_float(lst):
 
 
 def make_str(lst):
-    # For VARCHAR vectors: use str for construction, bytes expected in literals lists.
-    str_lst = [None if v is None else (v.decode() if isinstance(v, bytes) else v) for v in lst]
-    return dn.vector_from_string_sequence(str_lst)
+    # For VARCHAR vectors: edge function requires bytes; encode str inputs.
+    byte_lst = [None if v is None else (v.encode("utf-8") if isinstance(v, str) else v) for v in lst]
+    return dn.vector_from_string_sequence(byte_lst)
 
 
 def bool_to_list(bv):

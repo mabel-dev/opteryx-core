@@ -39,7 +39,7 @@ NULL_HASH_MIXED = 0x73d59cff8f94d86c
 # ---------------------------------------------------------------------------
 
 def make(lst):
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence([v.encode("utf-8") if isinstance(v, str) else v for v in lst])
 
 
 def hashes(lst):
@@ -48,6 +48,8 @@ def hashes(lst):
 
 def cmp_s(lst, scalar, op):
     """compare_scalar over a string vector."""
+    if isinstance(scalar, str):
+        scalar = scalar.encode("utf-8")
     return make(lst).compare_scalar(scalar, op).to_pylist()
 
 
@@ -216,8 +218,8 @@ class TestCmpScalarLongEq:
         s = "prefix_" + "z" * 20
         v1 = make([s])
         v2 = make(["filler_long_string____" + "y" * 10, s])
-        assert v1.compare_scalar(s, EQ).to_pylist() == [True]
-        assert v2.compare_scalar(s, EQ).to_pylist() == [False, True]
+        assert v1.compare_scalar(s.encode("utf-8"), EQ).to_pylist() == [True]
+        assert v2.compare_scalar(s.encode("utf-8"), EQ).to_pylist() == [False, True]
 
 
 class TestCmpScalarLongOrdering:

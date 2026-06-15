@@ -36,6 +36,7 @@
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
 #include "core/interval_slot.h"
+#include "utf8.h"                    // E.26: UTF-8 validation (utf8nvalid) for NVARCHAR
 #include "logical_type.h"
 #include "fp16/fp16.h"   // fp16_ieee_from_fp32_value / fp16_ieee_to_fp32_value (D.11)
 #include "ops/bool_logical.h"
@@ -289,14 +290,18 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
         if (obj.is_none()) {
             has_nulls = true;
         } else {
-            PyObject* pystr = obj.ptr();
-            if (!PyUnicode_Check(pystr))
+            // VARCHAR carries raw bytes verbatim. A Python str must never reach
+            // this edge — callers encode to bytes (CLAUDE.md §1). Reject str.
+            PyObject* pybytes = obj.ptr();
+            if (!PyBytes_Check(pybytes))
                 throw std::invalid_argument(
-                    "vector_from_string_sequence: element is not str or None");
+                    "vector_from_string_sequence: element is not bytes or None "
+                    "(str must be encoded to bytes by the caller)");
+            char* bptr = nullptr;
             Py_ssize_t slen = 0;
-            const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
-            if (!utf8) throw nb::python_error();
-            ptrs[i] = utf8;
+            if (PyBytes_AsStringAndSize(pybytes, &bptr, &slen) < 0)
+                throw nb::python_error();
+            ptrs[i] = bptr;
             lens[i] = slen;
             if (slen > STR_INLINE_MAX)
                 total_extern += static_cast<size_t>(slen);
@@ -399,30 +404,37 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
 // data_buf owns the block; validity is embedded in the block.
 // ---------------------------------------------------------------------------
 
-static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) {
+// Unified constant-shape string builder for the VARCHAR / NVARCHAR / VARBINARY
+// family. value_obj is bytes (stored verbatim) or None (→ all-null constant).
+// A Python str must NEVER reach this edge — string literals are encoded to bytes
+// at the binder/planner (CLAUDE.md §1).
+//
+// validate_utf8 (NVARCHAR only): the bytes are checked with utf8nvalid before
+// storage; invalid UTF-8 fails loud. VARCHAR/VARBINARY store bytes unvalidated.
+static VectorOwner make_string_constant(nb::object value_obj, uint32_t length,
+                                        DrakenType type, bool validate_utf8) {
     const bool is_null = value_obj.is_none();
 
-    // Gather UTF-8 bytes for the one unique value (if not null).
-    const char*  utf8_ptr  = nullptr;
-    Py_ssize_t   utf8_len  = 0;
+    const char*  bytes_ptr = nullptr;
+    Py_ssize_t   bytes_len = 0;
     size_t       arena_ext = 0u;  // bytes needed in arena (> 0 only if long form)
 
     if (!is_null) {
         PyObject* pyobj = value_obj.ptr();
-        // VARCHAR carries raw bytes. Accept str (encode to its UTF-8 bytes) or
-        // bytes (stored verbatim, NO decode — preserves non-UTF-8 key/literal data).
-        if (PyUnicode_Check(pyobj)) {
-            utf8_ptr = PyUnicode_AsUTF8AndSize(pyobj, &utf8_len);
-            if (!utf8_ptr) throw nb::python_error();
-        } else if (PyBytes_Check(pyobj)) {
-            if (PyBytes_AsStringAndSize(pyobj, const_cast<char**>(&utf8_ptr), &utf8_len) < 0)
-                throw nb::python_error();
-        } else {
+        if (!PyBytes_Check(pyobj)) {
             throw std::invalid_argument(
-                "vector_varchar_from_constant: value must be str, bytes, or None");
+                "string constant: value must be bytes or None "
+                "(str must be encoded to bytes at the binder)");
         }
-        if (utf8_len > STR_INLINE_MAX)
-            arena_ext = static_cast<size_t>(utf8_len);
+        if (PyBytes_AsStringAndSize(pyobj, const_cast<char**>(&bytes_ptr), &bytes_len) < 0)
+            throw nb::python_error();
+        if (validate_utf8 && bytes_len > 0 &&
+            utf8nvalid(reinterpret_cast<const utf8_int8_t*>(bytes_ptr),
+                       static_cast<size_t>(bytes_len)) != nullptr) {
+            throw std::invalid_argument("nvarchar constant: value is not valid UTF-8");
+        }
+        if (bytes_len > STR_INLINE_MAX)
+            arena_ext = static_cast<size_t>(bytes_len);
     }
 
     // Single-block layout: [DrakenStringArena | DrakenStringSlot[1] | arena_bytes | validity]
@@ -460,11 +472,11 @@ static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) 
     sa->arena_cap    = arena_ext;
     sa->null_bitmap  = nullptr;        // validity is on the DrakenVector, not the arena
     sa->owns_buffers = 0;
-    sa->type         = DRAKEN_VARCHAR;
+    sa->type         = type;
 
     if (!is_null) {
-        const uint8_t* src  = reinterpret_cast<const uint8_t*>(utf8_ptr);
-        const uint32_t slen = static_cast<uint32_t>(utf8_len);
+        const uint8_t* src  = reinterpret_cast<const uint8_t*>(bytes_ptr);
+        const uint32_t slen = static_cast<uint32_t>(bytes_len);
         if (slen <= STR_INLINE_MAX) {
             str_init_inline(slot, src, slen);
         } else {
@@ -477,8 +489,16 @@ static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) 
     // is_null: slot is already zeroed (null sentinel: length == 0, all bytes zero).
 
     // Constant shape: one data slot broadcast over `length` rows.
-    DrakenVector v = draken_vector_from_constant(sa, length, DRAKEN_VARCHAR, bitmap);
+    DrakenVector v = draken_vector_from_constant(sa, length, type, bitmap);
     return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+}
+
+static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) {
+    return make_string_constant(value_obj, length, DRAKEN_VARCHAR, /*validate_utf8=*/false);
+}
+
+static VectorOwner make_nvarchar_constant(nb::object value_obj, uint32_t length) {
+    return make_string_constant(value_obj, length, DRAKEN_NVARCHAR, /*validate_utf8=*/true);
 }
 
 // ---------------------------------------------------------------------------
@@ -486,67 +506,33 @@ static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) 
 // Mirrors make_varchar_constant but accepts Python bytes and tags the result VARBINARY.
 // ---------------------------------------------------------------------------
 static VectorOwner make_varbinary_constant(nb::object value_obj, uint32_t length) {
-    const bool is_null = value_obj.is_none();
+    return make_string_constant(value_obj, length, DRAKEN_VARBINARY, /*validate_utf8=*/false);
+}
 
-    const char* ptr = nullptr;
-    Py_ssize_t  blen = 0;
-    size_t      arena_ext = 0u;
-
-    if (!is_null) {
-        PyObject* pybytes = value_obj.ptr();
-        if (!PyBytes_Check(pybytes))
-            throw std::invalid_argument(
-                "vector_varbinary_from_constant: value must be bytes or None");
-        ptr  = PyBytes_AS_STRING(pybytes);
-        blen = PyBytes_GET_SIZE(pybytes);
-        if (blen > STR_INLINE_MAX)
-            arena_ext = static_cast<size_t>(blen);
-    }
-
-    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
-    const size_t struct_end  = (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
-    const size_t slots_bytes = sizeof(DrakenStringSlot);
-    const size_t arena_start = struct_end + slots_bytes;
-    const size_t validity_start = arena_start + arena_ext;
-
-    size_t validity_bytes = 0u;
-    if (is_null) {
-        const uint32_t bm = (length + 7u) / 8u;
-        const uint32_t padded = ((bm + 7u) & ~7u);
-        validity_bytes = (padded > 0u) ? padded : 8u;
-    }
-
-    const size_t total_alloc = validity_start + validity_bytes;
-    uint8_t* block = static_cast<uint8_t*>(
-        draken_malloc(total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena)));
-    if (!block) throw std::bad_alloc();
-    std::memset(block, 0, total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena));
-    OwnedBuffer<void> data_buf(block);
-
-    DrakenStringArena* sa   = reinterpret_cast<DrakenStringArena*>(block);
-    DrakenStringSlot*  slot = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
-    uint8_t* arena  = (arena_ext > 0u) ? (block + arena_start) : nullptr;
-    uint8_t* bitmap = is_null ? (block + validity_start) : nullptr;
-
-    sa->slots = slot; sa->arena = arena;
-    sa->length = 1u; sa->arena_used = arena_ext; sa->arena_cap = arena_ext;
-    sa->null_bitmap = nullptr; sa->owns_buffers = 0;
-    sa->type = DRAKEN_VARBINARY;
-
-    if (!is_null) {
-        const uint8_t* src  = reinterpret_cast<const uint8_t*>(ptr);
-        const uint32_t slen = static_cast<uint32_t>(blen);
-        if (slen <= STR_INLINE_MAX) {
-            str_init_inline(slot, src, slen);
-        } else {
-            std::memcpy(arena, src, slen);
-            str_init_extern(slot, src, slen,
-                            static_cast<uint32_t>(XXH3_64bits(src, slen)), 0u);
-        }
-    }
-
-    DrakenVector v = draken_vector_from_constant(sa, length, DRAKEN_VARBINARY, bitmap);
-    return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+// ---------------------------------------------------------------------------
+// Constant length-adjust view — borrow an existing constant-shape Vector's single
+// data slot and present it with a new logical length. Zero-copy: the returned
+// Vector owns nothing (data/validity/codes buffers are null); the source's data
+// is kept alive via nb::keep_alive on the binding. selection/validity are the
+// shared global zero buffers sized for `length`.
+//
+// Used by the bytecode executor's cold path (_slot_to_pyobj): the hot path
+// re-stamps the cached bind-time constant straight into its DV stack (no Python
+// object), and only when a Python-fallback kernel needs a real Vector do we
+// materialise this borrowed view at the correct logical length.
+// ---------------------------------------------------------------------------
+static VectorOwner make_constant_view(const VectorOwner& src, uint32_t length) {
+    if (src.vec.data_length != 1u)
+        throw std::invalid_argument(
+            "vector_constant_view: source must be a constant-shape vector (data_length==1)");
+    DrakenVector v = src.vec;                 // borrow the single-slot data pointer
+    v.length    = length;
+    v.selection = draken_zero_sel(length);
+    if (v.validity != nullptr)
+        v.validity = const_cast<uint8_t*>(draken_zero_validity(length));
+    VectorOwner o(v, OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(nullptr));
+    o.logical_type = src.logical_type;        // preserve TIMESTAMP/DECIMAL descriptors
+    return o;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,14 +569,17 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
         if (obj.is_none()) {
             has_nulls = true;
         } else {
-            PyObject* pystr = obj.ptr();
-            if (!PyUnicode_Check(pystr))
+            // VARCHAR carries raw bytes verbatim; reject str (encode at caller).
+            PyObject* pybytes = obj.ptr();
+            if (!PyBytes_Check(pybytes))
                 throw std::invalid_argument(
-                    "vector_from_string_dict_sequence: element is not str or None");
+                    "vector_from_string_dict_sequence: element is not bytes or None "
+                    "(str must be encoded to bytes by the caller)");
+            char* bptr = nullptr;
             Py_ssize_t slen = 0;
-            const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
-            if (!utf8) throw nb::python_error();
-            ptrs[i] = utf8;
+            if (PyBytes_AsStringAndSize(pybytes, &bptr, &slen) < 0)
+                throw nb::python_error();
+            ptrs[i] = bptr;
             lens[i] = slen;
         }
     }
@@ -2824,6 +2813,55 @@ extern "C" PyObject* draken_vector_own_timestamp(
     }
 }
 
+// draken_vector_own_time32 / _own_time64 — wrap a hand-allocated time buffer as a
+// DRAKEN_TIME32 (int32 data) / DRAKEN_TIME64 (int64 data) Vector tagged with `unit`.
+// Mirrors draken_vector_own_timestamp; lets the grouped-agg collectors build typed
+// TIME results off the Python edge (no nanobind dispatch, no boxing). Ownership of
+// data + validity transfers; both are freed on failure.
+extern "C" PyObject* draken_vector_own_time32(
+    void* data, uint8_t* validity, uint32_t length, const char* unit_str)
+{
+    OwnedBuffer<void>    data_guard(data);
+    OwnedBuffer<uint8_t> val_guard(validity);
+    try {
+        const std::string u(unit_str);
+        TimestampUnit unit = str_to_unit(u);
+        void* final_data = data_guard.release();
+        DrakenVector v = draken_vector_from_dense(final_data, length, DRAKEN_TIME32, validity);
+        OwnedBuffer<void>    data_buf(final_data);
+        OwnedBuffer<uint8_t> vbuf(val_guard.release());
+        VectorOwner owner(v, std::move(data_buf), std::move(vbuf));
+        LogicalType lt; lt.kind = LogicalKind::TIME; lt.unit = unit; lt.offset_minutes = 0;
+        owner.logical_type = logical_type_intern(lt);
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr(); Py_INCREF(result); return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+      catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+      catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
+extern "C" PyObject* draken_vector_own_time64(
+    void* data, uint8_t* validity, uint32_t length, const char* unit_str)
+{
+    OwnedBuffer<void>    data_guard(data);
+    OwnedBuffer<uint8_t> val_guard(validity);
+    try {
+        const std::string u(unit_str);
+        TimestampUnit unit = str_to_unit(u);
+        void* final_data = data_guard.release();
+        DrakenVector v = draken_vector_from_dense(final_data, length, DRAKEN_TIME64, validity);
+        OwnedBuffer<void>    data_buf(final_data);
+        OwnedBuffer<uint8_t> vbuf(val_guard.release());
+        VectorOwner owner(v, std::move(data_buf), std::move(vbuf));
+        LogicalType lt; lt.kind = LogicalKind::TIME; lt.unit = unit; lt.offset_minutes = 0;
+        owner.logical_type = logical_type_intern(lt);
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr(); Py_INCREF(result); return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+      catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+      catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
 // draken_vector_own — wrap a VecResult op result in a new Python Vector handle.
 //
 // C++ only (declared in bridge header under #ifdef __cplusplus).
@@ -4100,9 +4138,28 @@ static VectorOwner make_array_from_sequence(nb::list seq) {
     // Build child VectorOwner.
     std::unique_ptr<VectorOwner> child;
     switch (child_type) {
-        case CT_STRING:
-            child = std::make_unique<VectorOwner>(make_string_from_sequence(flat_children));
+        case CT_STRING: {
+            // make_string_from_sequence is bytes-only; encode any str children to
+            // bytes here so this dev/test array-ingestion helper stays usable
+            // while no str reaches the string edge.
+            nb::list encoded;
+            for (auto item : flat_children) {
+                PyObject* p = item.ptr();
+                if (item.is_none() || PyBytes_Check(p)) {
+                    encoded.append(item);
+                } else if (PyUnicode_Check(p)) {
+                    Py_ssize_t sl = 0;
+                    const char* u = PyUnicode_AsUTF8AndSize(p, &sl);
+                    if (!u) throw nb::python_error();
+                    encoded.append(nb::steal(PyBytes_FromStringAndSize(u, sl)));
+                } else {
+                    throw std::invalid_argument(
+                        "vector_array_from_sequence: string child element must be str/bytes/None");
+                }
+            }
+            child = std::make_unique<VectorOwner>(make_string_from_sequence(encoded));
             break;
+        }
         case CT_ARRAY:
             child = std::make_unique<VectorOwner>(make_array_from_sequence(flat_children));
             break;
@@ -6052,18 +6109,24 @@ NB_MODULE(draken_native, m) {
                 nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, norm, op));
             }
-            if (v.vec.type == DRAKEN_VARCHAR) {
-                // Build literal slot at the Python edge using the same ingestion
-                // path as D.1 so equality against stored long strings is correct.
-                PyObject* pystr = scalar.ptr();
-                if (!PyUnicode_Check(pystr))
+            if (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR
+                    || v.vec.type == DRAKEN_VARBINARY) {
+                // Bytewise comparison for all string subtypes. The scalar must be
+                // bytes (str is encoded at the binder; CLAUDE.md §1). Copy the
+                // bytes into an owned buffer so NO Python-owned memory is read in
+                // the released-GIL window (structural off-GIL fix, not a pre-copy
+                // band-aid on a borrowed Python buffer).
+                PyObject* pybytes = scalar.ptr();
+                if (!PyBytes_Check(pybytes))
                     throw std::invalid_argument(
-                        "compare_scalar: STRING vector requires str scalar");
-                Py_ssize_t slen = 0;
-                const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
-                if (!utf8) throw nb::python_error();
-                const uint8_t* ubytes = reinterpret_cast<const uint8_t*>(utf8);
-                const uint32_t ulen   = static_cast<uint32_t>(slen);
+                        "compare_scalar: string vector requires a bytes scalar");
+                char* bsrc = nullptr;
+                Py_ssize_t blen = 0;
+                if (PyBytes_AsStringAndSize(pybytes, &bsrc, &blen) < 0)
+                    throw nb::python_error();
+                std::string owned(bsrc, static_cast<size_t>(blen));
+                const uint8_t* ubytes = reinterpret_cast<const uint8_t*>(owned.data());
+                const uint32_t ulen   = static_cast<uint32_t>(blen);
                 DrakenStringSlot scalar_slot;
                 if (ulen <= STR_INLINE_MAX) {
                     str_init_inline(&scalar_slot, ubytes, ulen);
@@ -6072,8 +6135,8 @@ NB_MODULE(draken_native, m) {
                     str_init_extern(&scalar_slot, ubytes, ulen,
                                     (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
                 }
-                // ubytes points at the Python str's cached UTF-8; the str arg
-                // stays alive (and is immutable) across the released-GIL window.
+                // `owned` (C++ storage, not Python memory) backs ubytes across
+                // the released-GIL window and lives to the end of this scope.
                 nb::gil_scoped_release _gil;
                 return vecresult_to_owner(
                     draken_str_compare_scalar(v.vec, scalar_slot, ubytes, op));
@@ -6309,42 +6372,43 @@ NB_MODULE(draken_native, m) {
                     return vecresult_to_owner(draken_float_between(
                         v.vec, lo_d, hi_d, lo_inclusive, hi_inclusive));
                 }
-                if (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR) {
-                    // Build lo and hi bound slots at the Python edge — same
-                    // construction path as compare_scalar string case.
-                    auto make_str_slot = [](nb::object pyobj, const char* which) {
-                        struct SlotAndBytes {
-                            DrakenStringSlot slot;
-                            const uint8_t*   bytes;
-                        };
-                        PyObject* pystr = pyobj.ptr();
-                        if (!PyUnicode_Check(pystr))
+                if (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR
+                        || v.vec.type == DRAKEN_VARBINARY) {
+                    // Bounds must be bytes (str encoded at binder; CLAUDE.md §1).
+                    // Copy into owned C++ storage so NO Python memory is read in
+                    // the released-GIL window (structural off-GIL fix).
+                    auto to_owned = [](nb::object pyobj, const char* which) -> std::string {
+                        PyObject* pybytes = pyobj.ptr();
+                        if (!PyBytes_Check(pybytes))
                             throw std::invalid_argument(
-                                std::string("between: string vector requires str bound for ") + which);
-                        Py_ssize_t slen = 0;
-                        const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
-                        if (!utf8) throw nb::python_error();
-                        const uint8_t* ubytes = reinterpret_cast<const uint8_t*>(utf8);
-                        const uint32_t ulen   = static_cast<uint32_t>(slen);
-                        SlotAndBytes sb;
-                        if (ulen <= STR_INLINE_MAX) {
-                            str_init_inline(&sb.slot, ubytes, ulen);
-                        } else {
-                            str_init_extern(&sb.slot, ubytes, ulen,
-                                            (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
-                        }
-                        sb.bytes = ubytes;
-                        return sb;
+                                std::string("between: string vector requires a bytes bound for ") + which);
+                        char* p = nullptr; Py_ssize_t n = 0;
+                        if (PyBytes_AsStringAndSize(pybytes, &p, &n) < 0) throw nb::python_error();
+                        return std::string(p, static_cast<size_t>(n));
                     };
-                    auto lo_sb = make_str_slot(lo, "lo");
-                    auto hi_sb = make_str_slot(hi, "hi");
-                    // bytes point at the lo/hi str args' cached UTF-8 (alive,
-                    // immutable) across the released-GIL window.
+                    auto make_slot = [](const std::string& s) -> DrakenStringSlot {
+                        const uint8_t* u  = reinterpret_cast<const uint8_t*>(s.data());
+                        const uint32_t ul = static_cast<uint32_t>(s.size());
+                        DrakenStringSlot slot;
+                        if (ul <= STR_INLINE_MAX)
+                            str_init_inline(&slot, u, ul);
+                        else
+                            str_init_extern(&slot, u, ul, (uint32_t)XXH3_64bits(u, ul), 0u);
+                        return slot;
+                    };
+                    std::string lo_owned = to_owned(lo, "lo");
+                    std::string hi_owned = to_owned(hi, "hi");
+                    DrakenStringSlot lo_slot = make_slot(lo_owned);
+                    DrakenStringSlot hi_slot = make_slot(hi_owned);
+                    const uint8_t* lo_bytes = reinterpret_cast<const uint8_t*>(lo_owned.data());
+                    const uint8_t* hi_bytes = reinterpret_cast<const uint8_t*>(hi_owned.data());
+                    // lo_owned/hi_owned (C++ storage) back the byte pointers across
+                    // the released-GIL window; they live to the end of this scope.
                     nb::gil_scoped_release _gil;
                     return vecresult_to_owner(draken_str_between(
                         v.vec,
-                        lo_sb.slot, lo_sb.bytes,
-                        hi_sb.slot, hi_sb.bytes,
+                        lo_slot, lo_bytes,
+                        hi_slot, hi_bytes,
                         lo_inclusive, hi_inclusive));
                 }
                 const int64_t lo_l = nb::cast<int64_t>(lo);
@@ -6455,19 +6519,23 @@ NB_MODULE(draken_native, m) {
                     }
                     { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
-                if (v.vec.type == DRAKEN_VARCHAR) {
+                if (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR
+                        || v.vec.type == DRAKEN_VARBINARY) {
                     // Hash-only membership via CarcharSet; same str_hash_seed →
                     // simd_hash_i64 path as str_in_list and hash_string.  Any
-                    // deviation here causes present values to miss.
+                    // deviation here causes present values to miss. Values must be
+                    // bytes (str encoded at binder; CLAUDE.md §1). Hashing runs
+                    // GIL-held, so no off-GIL borrowed-buffer concern here.
                     for (size_t k = 0; k < n; ++k) {
-                        PyObject* pystr = values[static_cast<Py_ssize_t>(k)].ptr();
-                        if (!PyUnicode_Check(pystr))
+                        PyObject* pybytes = values[static_cast<Py_ssize_t>(k)].ptr();
+                        if (!PyBytes_Check(pybytes))
                             throw std::invalid_argument(
-                                "in_list: STRING vector requires str values");
+                                "in_list: string vector requires bytes values");
+                        char* bptr = nullptr;
                         Py_ssize_t slen = 0;
-                        const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
-                        if (!utf8) throw nb::python_error();
-                        const uint8_t* ubytes = reinterpret_cast<const uint8_t*>(utf8);
+                        if (PyBytes_AsStringAndSize(pybytes, &bptr, &slen) < 0)
+                            throw nb::python_error();
+                        const uint8_t* ubytes = reinterpret_cast<const uint8_t*>(bptr);
                         const uint32_t ulen   = static_cast<uint32_t>(slen);
                         DrakenStringSlot slot;
                         if (ulen <= STR_INLINE_MAX) {
@@ -6736,7 +6804,26 @@ NB_MODULE(draken_native, m) {
         nb::arg("value").none(true), nb::arg("length"),
         "Build a constant-shape VARBINARY Vector (data_length==1, selection=zero-vector).\n"
         "value may be None (→ all-null constant).\n"
-        "Raises TypeError if value is not bytes or None.");
+        "Raises if value is not bytes or None.");
+    m.def("vector_nvarchar_from_constant",
+        [](nb::object value, uint32_t length) {
+            return make_nvarchar_constant(value, length);
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape NVARCHAR Vector (data_length==1, selection=zero-vector).\n"
+        "value must be bytes (validated as UTF-8) or None (→ all-null constant).\n"
+        "Raises if value is not bytes/None or the bytes are not valid UTF-8.");
+
+    // Zero-copy length-adjust view of a constant-shape Vector (executor cold path).
+    m.def("vector_constant_view",
+        [](const VectorOwner& src, uint32_t length) {
+            return make_constant_view(src, length);
+        },
+        nb::arg("source"), nb::arg("length"),
+        nb::keep_alive<0, 1>(),
+        "Borrow a constant-shape Vector's single value as a length-N constant view.\n"
+        "Zero-copy; the source Vector is kept alive for the view's lifetime.\n"
+        "Raises if source is not constant-shape (data_length==1).");
 
     // E.7 — NVARCHAR ingestion (opt-in UTF-8; codepoint-length ops).
     m.def("vector_from_nvarchar_sequence",

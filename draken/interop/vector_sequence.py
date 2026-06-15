@@ -83,6 +83,27 @@ _DTYPE_DISPATCH = {
 }
 
 
+def _encode_varchar_elements(values):
+    """Encode str elements to UTF-8 bytes for the bytes-only VARCHAR edge.
+
+    The VARCHAR sequence builder (`vector_from_string_sequence`) is bytes-only;
+    a Python str must not reach the Draken edge. This is the single ingestion
+    encode point so list-of-str callers keep working. None passes through.
+    """
+    out = []
+    for v in values:
+        if v is None or isinstance(v, bytes):
+            out.append(v)
+        elif isinstance(v, str):
+            out.append(v.encode("utf-8"))
+        else:
+            raise TypeError(
+                f"VARCHAR sequence element must be str, bytes, or None; "
+                f"got {type(v).__name__}"
+            )
+    return out
+
+
 def _resolve_dtype_name(dtype):
     """Coerce `dtype` to an uppercase string type name, or None for default."""
     if dtype is None:
@@ -145,6 +166,11 @@ def vector_from_sequence(values, dtype=None):
     # DECIMAL needs precision/scale; dispatch with sensible defaults.
     if type_name == "DECIMAL":
         return _draken_native.vector_decimal_from_sequence(values, 18, 6)
+
+    # The VARCHAR/NVARCHAR sequence edge is bytes-only — encode str elements once
+    # here (the NVARCHAR builder shares the bytes-only string-from-sequence path).
+    if type_name in ("VARCHAR", "STRING", "NVARCHAR"):
+        values = _encode_varchar_elements(values)
 
     ctor = _DTYPE_DISPATCH.get(type_name)
     if ctor is None:

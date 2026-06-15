@@ -134,8 +134,10 @@ def _typed_constant_vector(value, length: int, schema_column):
         )
 
     if target_type == LogicalCategory.VARCHAR:
-        # VARCHAR carries raw bytes; the constant ctor stores str/bytes verbatim
-        # (no decode), so non-UTF-8 literal data is preserved.
+        # VARCHAR edge is bytes-only — encode str to bytes (str must not reach the
+        # Draken edge). Bytes are stored verbatim, preserving non-UTF-8 literals.
+        if not is_null and isinstance(value, str):
+            value = value.encode("utf-8")
         return _draken_native_expr.vector_varchar_from_constant(
             None if is_null else value, length
         )

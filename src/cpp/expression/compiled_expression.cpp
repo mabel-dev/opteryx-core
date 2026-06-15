@@ -65,6 +65,7 @@ CompiledExpression* CompiledExpressionArena::lower_one(PyObject* py_node) {
     nodes_.emplace_back();
     CompiledExpression* slot = &nodes_.back();
     slot->node_type = NT_UNKNOWN;
+    slot->physical_type = -1;
     slot->value = nullptr;
     slot->schema_column = nullptr;
     slot->source_node = nullptr;
@@ -89,6 +90,35 @@ CompiledExpression* CompiledExpressionArena::lower_one(PyObject* py_node) {
         return nullptr;
     }
     slot->node_type = static_cast<int>(nt);
+
+    // For LITERAL nodes, capture the value's physical DrakenType once at lower
+    // time (py_node.type.physical). Lets the bind-time lineariser materialise the
+    // native constant with the correct constructor / string subtype without any
+    // per-morsel Python type dispatch. -1 stays for nodes lacking a physical tag.
+    if (slot->node_type == NT_LITERAL) {
+        PyObject* type_obj = PyObject_GetAttrString(py_node, "type");
+        if (type_obj == nullptr) {
+            PyErr_Clear();
+        } else if (type_obj != Py_None) {
+            PyObject* phys = PyObject_GetAttrString(type_obj, "physical");
+            if (phys == nullptr) {
+                PyErr_Clear();
+            } else if (phys != Py_None) {
+                long pv = PyLong_AsLong(phys);
+                if (pv == -1 && PyErr_Occurred()) {
+                    PyErr_Clear();
+                } else {
+                    slot->physical_type = static_cast<int>(pv);
+                }
+                Py_DECREF(phys);
+            } else {
+                Py_DECREF(phys);
+            }
+            Py_DECREF(type_obj);
+        } else {
+            Py_DECREF(type_obj);
+        }
+    }
 
     // value, schema_column — hold a ref for the arena's lifetime.
     PyObject* value = get_attr_or_none(py_node, "value");

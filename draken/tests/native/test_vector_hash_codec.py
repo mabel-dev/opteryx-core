@@ -74,7 +74,9 @@ hc = _load_vector_hash_codec()
 # ---------------------------------------------------------------------------
 
 def sv(values):
-    return dn.vector_from_string_sequence(values)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in values]
+    )
 
 
 def vals(vec):

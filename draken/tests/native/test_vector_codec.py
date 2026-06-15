@@ -59,7 +59,9 @@ vc = _load_vector_codec()
 
 def make_string_vec(values):
     """Build a DRAKEN_VARCHAR Vector from a list[str | None]."""
-    return dn.vector_from_string_sequence(values)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in values]
+    )
 
 
 def extract_string_vec(vec):

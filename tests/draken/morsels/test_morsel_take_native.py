@@ -22,7 +22,7 @@ def test_take_int_string_float():
     m = Morsel.from_vectors(
         [b"i", b"s", b"f"],
         [dn.vector_from_sequence(list(range(10))),
-         dn.vector_from_string_sequence([f"v{i}" for i in range(10)]),
+         dn.vector_from_string_sequence([f"v{i}".encode("utf-8") for i in range(10)]),
          dn.vector_float64_from_sequence([float(i) for i in range(10)])],
     )
     t = m.take([9, 0, 5, 5, 2])

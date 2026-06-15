@@ -69,8 +69,8 @@ DRAKEN_VARIANT = dn.DrakenType.VARIANT
 
 def make(lst):
     """Build a VARCHAR DrakenVector from a list of str/bytes/None values."""
-    decoded = [v.decode() if isinstance(v, bytes) else v for v in lst]
-    return dn.vector_from_string_sequence(decoded)
+    encoded = [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    return dn.vector_from_string_sequence(encoded)
 
 
 def read(vec, i):

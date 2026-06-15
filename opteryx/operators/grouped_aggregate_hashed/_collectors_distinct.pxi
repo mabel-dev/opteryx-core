@@ -2,11 +2,10 @@
 # cython: boundscheck=False
 # cython: wraparound=False
 
-# COUNT(DISTINCT col) and ANY_VALUE collectors.
+# COUNT(DISTINCT col) collector.
 # CountDistinctCollector: one CarcharSet* per group — pure C++.
-# AnyValueInt64/Float64Collector: vector[int64/double] + seen — pure C++.
-# AnyValueObjectCollector: fallback for non-numeric types (string, date, etc.)
-#   — Python list for values, but grow()/accumulate() stay in Cython.
+# (ANY_VALUE now routes through the type-preserving MIN/MAX collectors in
+#  _collectors_numeric.pxi with direction 0 = "keep first value per group".)
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
@@ -14,11 +13,7 @@ from libc.string cimport memcpy, memset
 from libcpp.vector cimport vector
 
 from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
-from draken.interop.vector_sequence import vector_from_sequence
-
-# Hoist the shim Vector import to module level to avoid hot-path inline imports (E.30a)
-from draken.vectors.vector import Vector as _V
+from draken.core.buffers cimport DrakenVector
 
 
 cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
@@ -172,195 +167,3 @@ cdef class CountDistinctCollector(BaseCollector):
             out[i] = <int64_t>self._sets[i].size()
         buf.length = <size_t>num_groups
         return _consume_int64_buffer(buf)
-
-
-# ---------------------------------------------------------------------------
-# ANY_VALUE(int64) — first non-NULL value per group
-# ---------------------------------------------------------------------------
-
-cdef class AnyValueInt64Collector(BaseCollector):
-    cdef vector[int64_t] _values
-    cdef vector[uint8_t] _seen
-    cdef long long _time_finalize_ns
-
-    cdef void grow(self, int64_t new_count):
-        while self._values.size() < <size_t>new_count:
-            self._values.push_back(0)
-            self._seen.push_back(0)
-
-    cdef void accumulate(
-        self,
-        Morsel morsel,
-        const uint32_t* state_indices,
-        Py_ssize_t n_rows,
-    ):
-        if self._col_idx < 0:
-            self._col_idx = morsel._column_index_from_name(self.column_name)
-        cdef Vector vec = morsel._get_column(self._col_idx)
-        cdef int64_t* data
-        cdef const uint32_t* sel
-        cdef uint8_t* nulls
-        cdef int64_t* values = self._values.data()
-        cdef uint8_t* seen = self._seen.data()
-        cdef Py_ssize_t i
-        cdef int64_t si
-        cdef DrakenVector* uv
-
-        uv = vec.unified()
-        data = <int64_t*>uv.data
-        sel = uv.selection
-        nulls = uv.validity
-        with nogil:
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    if not seen[si]:
-                        values[si] = data[sel[i]]
-                        seen[si] = 1
-
-    cpdef Vector finalize(self, int64_t num_groups):
-        cdef long long start_ns = _now_ns()
-        cdef list vals = []
-        cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._values[i] if self._seen[i] else None)
-        self._time_finalize_ns += _now_ns() - start_ns
-        return vector_from_sequence(vals)
-
-    cpdef BaseCollector _clone_empty(self):
-        cdef AnyValueInt64Collector c = AnyValueInt64Collector()
-        c.column_name = self.column_name
-        c.result_name = self.result_name
-        return c
-
-    cpdef BaseCollector _clone_as_merge(self):
-        cdef AnyValueInt64Collector c = AnyValueInt64Collector()
-        c.column_name = self.result_name
-        c.result_name = self.result_name
-        return c
-
-
-# ---------------------------------------------------------------------------
-# ANY_VALUE(float64)
-# ---------------------------------------------------------------------------
-
-cdef class AnyValueFloat64Collector(BaseCollector):
-    cdef vector[double] _values
-    cdef vector[uint8_t] _seen
-    cdef long long _time_finalize_ns
-
-    cdef void grow(self, int64_t new_count):
-        while self._values.size() < <size_t>new_count:
-            self._values.push_back(0.0)
-            self._seen.push_back(0)
-
-    cdef void accumulate(
-        self,
-        Morsel morsel,
-        const uint32_t* state_indices,
-        Py_ssize_t n_rows,
-    ):
-        if self._col_idx < 0:
-            self._col_idx = morsel._column_index_from_name(self.column_name)
-        cdef Vector vec = morsel._get_column(self._col_idx)
-        cdef double* data
-        cdef const uint32_t* sel
-        cdef uint8_t* nulls
-        cdef double* values = self._values.data()
-        cdef uint8_t* seen = self._seen.data()
-        cdef Py_ssize_t i
-        cdef int64_t si
-        cdef DrakenVector* uv
-
-        uv = vec.unified()
-        data = <double*>uv.data
-        sel = uv.selection
-        nulls = uv.validity
-        with nogil:
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    if not seen[si]:
-                        values[si] = data[sel[i]]
-                        seen[si] = 1
-
-    cpdef Vector finalize(self, int64_t num_groups):
-        cdef long long start_ns = _now_ns()
-        cdef list vals = []
-        cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._values[i] if self._seen[i] else None)
-        self._time_finalize_ns += _now_ns() - start_ns
-        return vector_from_sequence(vals)
-
-    cpdef BaseCollector _clone_empty(self):
-        cdef AnyValueFloat64Collector c = AnyValueFloat64Collector()
-        c.column_name = self.column_name
-        c.result_name = self.result_name
-        return c
-
-    cpdef BaseCollector _clone_as_merge(self):
-        cdef AnyValueFloat64Collector c = AnyValueFloat64Collector()
-        c.column_name = self.result_name
-        c.result_name = self.result_name
-        return c
-
-
-# ---------------------------------------------------------------------------
-# ANY_VALUE(object) — string, date, time, etc.
-# Uses a Python list for per-group storage — the column type requires it.
-# grow()/accumulate() are Cython loops. No Python inside the inner loop
-# beyond the list index assignment.
-# ---------------------------------------------------------------------------
-
-cdef class AnyValueObjectCollector(BaseCollector):
-    cdef list _values     # one Python object per group (None until first non-NULL)
-    cdef vector[uint8_t] _seen
-    cdef long long _time_finalize_ns
-
-    def __cinit__(self):
-        self._values = []
-
-    cdef void grow(self, int64_t new_count):
-        while len(self._values) < new_count:
-            self._values.append(None)
-            self._seen.push_back(0)
-
-    cdef void accumulate(
-        self,
-        Morsel morsel,
-        const uint32_t* state_indices,
-        Py_ssize_t n_rows,
-    ):
-        if self._col_idx < 0:
-            self._col_idx = morsel._column_index_from_name(self.column_name)
-        cdef list col = morsel._get_column(self._col_idx).to_pylist()
-        cdef uint8_t* seen = self._seen.data()
-        cdef Py_ssize_t i
-        cdef int64_t si
-        cdef object v
-        for i in range(n_rows):
-            v = col[i]
-            if v is not None:
-                si = state_indices[i]
-                if not seen[si]:
-                    self._values[si] = v
-                    seen[si] = 1
-
-    cpdef Vector finalize(self, int64_t num_groups):
-        cdef long long start_ns = _now_ns()
-        result = vector_from_sequence(self._values[:num_groups])
-        self._time_finalize_ns += _now_ns() - start_ns
-        return result
-
-    cpdef BaseCollector _clone_empty(self):
-        cdef AnyValueObjectCollector c = AnyValueObjectCollector()
-        c.column_name = self.column_name
-        c.result_name = self.result_name
-        return c
-
-    cpdef BaseCollector _clone_as_merge(self):
-        cdef AnyValueObjectCollector c = AnyValueObjectCollector()
-        c.column_name = self.result_name
-        c.result_name = self.result_name
-        return c

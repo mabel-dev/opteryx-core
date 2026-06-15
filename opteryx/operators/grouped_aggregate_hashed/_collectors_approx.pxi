@@ -9,8 +9,17 @@
 # whose type is unknown at compile time.
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int64_t, uint32_t, uint64_t, uint8_t
-from libcpp.vector cimport vector
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint32_t, uint64_t, uint8_t
+
+from libc.string cimport memset
+
+from draken.vectors.vector cimport from_decoded as _vector_from_decoded
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 # Hoist the shim Vector import to module level to avoid hot-path inline imports (E.30a)
 from draken.vectors.vector import Vector as _V
@@ -71,18 +80,23 @@ cdef class ApproxCountDistinctCollector(BaseCollector):
             self._col_idx = morsel._column_index_from_name(self.column_name)
         cdef uint64_t[::1] hashes = morsel.hash([self.column_name])
         cdef HllppSketch** sketches = self._sketches.data()
+        cdef const uint64_t* hp = &hashes[0]
         cdef Py_ssize_t i
-        for i in range(n_rows):
-            sketches[state_indices[i]].add_hash(hashes[i])
+        with nogil:
+            for i in range(n_rows):
+                sketches[state_indices[i]].add_hash(hp[i])
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.vector_sequence import vector_from_sequence
-        cdef list vals = []
+        # Estimates are counts ≥ 0 (never null) → write straight into an INT64
+        # buffer and hand it to from_decoded. No Python list, no boxing.
+        cdef int64_t* out = <int64_t*>draken_malloc(
+            <size_t>(num_groups if num_groups > 0 else 1) * sizeof(int64_t))
+        if out == NULL:
+            raise MemoryError()
         cdef Py_ssize_t i
         for i in range(num_groups):
-            vals.append(<int64_t>self._sketches[i].estimate())
-        nb = vector_from_sequence(vals)
-        return _V(nb)
+            out[i] = <int64_t>self._sketches[i].estimate()
+        return _vector_from_decoded(<void*>out, NULL, <uint32_t>num_groups, DRAKEN_INT64)
 
 
 # ---------------------------------------------------------------------------
@@ -124,36 +138,68 @@ cdef class ApproxPercentileCollector(BaseCollector):
         cdef const uint32_t* sel = uv.selection
         cdef td_histogram_t** hists = self._hists.data()
         cdef Py_ssize_t i
-        cdef int64_t si
-        cdef int64_t* i64
-        cdef double* f64
-
-        if t == DRAKEN_INT64:
-            i64 = <int64_t*>uv.data
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    td_add(hists[si], <double>i64[sel[i]], 1)
-        else:
-            f64 = <double*>uv.data
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    td_add(hists[si], f64[sel[i]], 1)
+        # Width-aware read: feed the raw value into the sketch off-GIL. (The old
+        # code read every non-INT64 type at double stride — wrong for narrow ints
+        # and FLOAT32.) Numeric only; non-numeric fails loud before the nogil loop.
+        if t != DRAKEN_INT64 and t != DRAKEN_INT32 and t != DRAKEN_INT16 and \
+           t != DRAKEN_INT8 and t != DRAKEN_FLOAT64 and t != DRAKEN_FLOAT32:
+            raise NotImplementedError(
+                f"APPROX_PERCENTILE over column type {t} is not supported (numeric only)")
+        with nogil:
+            if t == DRAKEN_INT64:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        td_add(hists[state_indices[i]], <double>(<int64_t*>uv.data)[sel[i]], 1)
+            elif t == DRAKEN_INT32:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        td_add(hists[state_indices[i]], <double>(<int32_t*>uv.data)[sel[i]], 1)
+            elif t == DRAKEN_INT16:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        td_add(hists[state_indices[i]], <double>(<int16_t*>uv.data)[sel[i]], 1)
+            elif t == DRAKEN_INT8:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        td_add(hists[state_indices[i]], <double>(<int8_t*>uv.data)[sel[i]], 1)
+            elif t == DRAKEN_FLOAT64:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        td_add(hists[state_indices[i]], (<double*>uv.data)[sel[i]], 1)
+            else:  # DRAKEN_FLOAT32
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        td_add(hists[state_indices[i]], <double>(<float*>uv.data)[sel[i]], 1)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.vector_sequence import vector_from_sequence
-        cdef list vals = []
+        # One quantile per group straight into a FLOAT64 buffer (+ validity for
+        # empty groups). No Python list. td_quantile/td_size aren't nogil, so the
+        # loop runs GIL-held — but touches no Python objects.
+        cdef double* out = <double*>draken_malloc(
+            <size_t>(num_groups if num_groups > 0 else 1) * sizeof(double))
+        if out == NULL:
+            raise MemoryError()
+        cdef Py_ssize_t bitmap_bytes = (num_groups + 7) >> 3
+        cdef uint8_t* validity = <uint8_t*>draken_malloc(<size_t>(bitmap_bytes if bitmap_bytes > 0 else 1))
+        if validity == NULL:
+            draken_free(out)
+            raise MemoryError()
+        memset(validity, 0xFF, bitmap_bytes)
         cdef Py_ssize_t i
         cdef td_histogram_t* h
+        cdef bint any_null = False
         for i in range(num_groups):
             h = self._hists[i]
             if td_size(h) == 0:
-                vals.append(None)
+                out[i] = 0.0
+                validity[i >> 3] &= ~(<uint8_t>(1 << (i & 7)))
+                any_null = True
             else:
-                vals.append(td_quantile(h, self._percentile))
-        nb = vector_from_sequence(vals)
-        return _V(nb)
+                out[i] = td_quantile(h, self._percentile)
+        if not any_null:
+            draken_free(validity)
+            validity = NULL
+        return _vector_from_decoded(<void*>out, validity, <uint32_t>num_groups, DRAKEN_FLOAT64)
 
 
 # ---------------------------------------------------------------------------

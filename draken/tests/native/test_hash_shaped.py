@@ -28,19 +28,19 @@ def _parity(v):
 
 class TestShapedHashParity:
     def test_dict_string(self):
-        v = dn.vector_from_string_dict_sequence(["a", "b", "a", "c", "b"] * 3)
+        v = dn.vector_from_string_dict_sequence([b"a", b"b", b"a", b"c", b"b"] * 3)
         dense, mat, hv = _parity(v)
         assert hv.is_dict and hv.data_length == 3
         assert mat == dense
 
     def test_dense_string(self):
-        v = dn.vector_from_string_sequence(["x" + str(i) for i in range(20)])
+        v = dn.vector_from_string_sequence([("x" + str(i)).encode("utf-8") for i in range(20)])
         dense, mat, hv = _parity(v)
         assert hv.is_dense and hv.data_length == 20
         assert mat == dense
 
     def test_constant_string(self):
-        v = dn.vector_from_string_dict_sequence(["hi"] * 16)
+        v = dn.vector_from_string_dict_sequence([b"hi"] * 16)
         dense, mat, hv = _parity(v)
         assert hv.is_constant
         assert mat == dense
@@ -52,7 +52,7 @@ class TestShapedHashParity:
         assert mat == dense
 
     def test_nullable_dict_string(self):
-        v = dn.vector_from_string_dict_sequence(["a", "b", None, "a", None, "c"] * 3)
+        v = dn.vector_from_string_dict_sequence([b"a", b"b", None, b"a", None, b"c"] * 3)
         dense, mat, hv = _parity(v)
         assert mat == dense
 
@@ -69,7 +69,7 @@ class TestShapedHashParity:
         assert len(set(mat)) == 1
 
     def test_constant_with_nulls(self):
-        v = dn.vector_from_string_dict_sequence(["z", None, "z", None] * 2)
+        v = dn.vector_from_string_dict_sequence([b"z", None, b"z", None] * 2)
         dense, mat, hv = _parity(v)
         assert mat == dense
 
@@ -81,7 +81,7 @@ class TestShapedHashParity:
     def test_hash_vector_is_never_null(self):
         # A hash vector's slots always hold a real value; nulls collide on a
         # baked slot, so the vector is fully valid regardless of key nullity.
-        v = dn.vector_from_string_dict_sequence(["a", None, "b", None])
+        v = dn.vector_from_string_dict_sequence([b"a", None, b"b", None])
         hv = v.hash_shaped()
         # to_pylist returns no None entries — every hash is present.
         assert all(x is not None for x in hv.materialize().to_pylist())

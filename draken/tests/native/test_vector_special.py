@@ -39,7 +39,9 @@ vs = _load("vector_special")
 
 def make_string_vec(*strings):
     """Build a VARCHAR DrakenVector from Python str/None values."""
-    return dn.vector_from_string_sequence(list(strings))
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in strings]
+    )
 
 
 def make_int64_vec(value):

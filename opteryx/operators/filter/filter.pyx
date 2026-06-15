@@ -124,7 +124,12 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
         if not isinstance(value, (str, bytes)):
             return None
-        # VARCHAR carries raw bytes; the ctor stores str/bytes verbatim (no decode).
+        # The string edge is bytes-only — encode str to bytes (str must not reach
+        # the Draken edge). Bytes are stored verbatim (no decode).
+        if isinstance(value, str):
+            value = value.encode("utf-8")
+        if t == DRAKEN_NVARCHAR:
+            return Vector(_draken_native.vector_nvarchar_from_constant(value, length))
         return Vector(_draken_native.vector_varchar_from_constant(value, length))
     if t == DRAKEN_VARBINARY:
         if not isinstance(value, (str, bytes)):

@@ -47,7 +47,9 @@ vector_soundex = _misc3.vector_soundex
 
 
 def make(lst):
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    )
 
 
 class TestVectsqlundex:

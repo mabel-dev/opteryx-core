@@ -11,7 +11,7 @@
 # (default 1000). Exceeding the cap raises during accumulate(); we keep the
 # state intact so the engine can still surface a clean diagnostic.
 
-from libc.stdint cimport int64_t, uint8_t, uint32_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint32_t
 from libc.stddef cimport size_t
 from libc.string cimport memcpy, memset
 from libcpp.vector cimport vector
@@ -19,6 +19,7 @@ from libcpp.vector cimport vector
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32
 
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
@@ -96,34 +97,37 @@ cdef class MedianFloat64Collector(BaseCollector):
         cdef DrakenType t = uv.type
         cdef Py_ssize_t i
         cdef uint8_t* nulls = uv.validity
-        cdef int64_t* idata
-        cdef double* fdata
         cdef const uint32_t* sel = uv.selection
-        cdef list pylist
 
+        # Width-aware read straight into the C++ MedianState — no to_pylist.
+        # MEDIAN is numeric; non-numeric types fail loud.
         if t == DRAKEN_INT64:
-            idata = <int64_t*>uv.data
             for i in range(n_rows):
-                if nulls != NULL and not _num_bitmap_valid(nulls, i):
-                    continue
-                self._append(state_indices[i], <double>idata[sel[i]])
-            return
-
-        if t == DRAKEN_FLOAT64:
-            fdata = <double*>uv.data
+                if nulls == NULL or _num_bitmap_valid(nulls, i):
+                    self._append(state_indices[i], <double>(<int64_t*>uv.data)[sel[i]])
+        elif t == DRAKEN_INT32:
             for i in range(n_rows):
-                if nulls != NULL and not _num_bitmap_valid(nulls, i):
-                    continue
-                self._append(state_indices[i], fdata[sel[i]])
-            return
-
-        # Fallback: integer-narrow vectors and anything else go via to_pylist.
-        pylist = vec.to_pylist()
-        for i in range(n_rows):
-            val = pylist[i]
-            if val is None:
-                continue
-            self._append(state_indices[i], <double>val)
+                if nulls == NULL or _num_bitmap_valid(nulls, i):
+                    self._append(state_indices[i], <double>(<int32_t*>uv.data)[sel[i]])
+        elif t == DRAKEN_INT16:
+            for i in range(n_rows):
+                if nulls == NULL or _num_bitmap_valid(nulls, i):
+                    self._append(state_indices[i], <double>(<int16_t*>uv.data)[sel[i]])
+        elif t == DRAKEN_INT8:
+            for i in range(n_rows):
+                if nulls == NULL or _num_bitmap_valid(nulls, i):
+                    self._append(state_indices[i], <double>(<int8_t*>uv.data)[sel[i]])
+        elif t == DRAKEN_FLOAT64:
+            for i in range(n_rows):
+                if nulls == NULL or _num_bitmap_valid(nulls, i):
+                    self._append(state_indices[i], (<double*>uv.data)[sel[i]])
+        elif t == DRAKEN_FLOAT32:
+            for i in range(n_rows):
+                if nulls == NULL or _num_bitmap_valid(nulls, i):
+                    self._append(state_indices[i], <double>(<float*>uv.data)[sel[i]])
+        else:
+            raise NotImplementedError(
+                f"MEDIAN over column type {t} is not supported (numeric only)")
 
     cpdef Vector finalize(self, int64_t num_groups):
         return self.finalize_slice(0, num_groups)

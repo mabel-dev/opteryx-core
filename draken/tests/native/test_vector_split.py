@@ -69,7 +69,9 @@ _split = _load_module(
 
 def vector_split(rows, delimiter):
     """Helper: build a VARCHAR Vector, call vector_split, decode to list of lists."""
-    vec = dn.vector_from_string_sequence(rows)
+    vec = dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in rows]
+    )
     result = _split.vector_split(vec, delimiter)
     return _decode_array(result)
 
@@ -117,7 +119,7 @@ class TestVectorSplitBasic:
         assert result == [[""]]
 
     def test_delimiter_null_byte(self):
-        vec = dn.vector_from_string_sequence(["a\x00b", "c"])
+        vec = dn.vector_from_string_sequence([b"a\x00b", b"c"])
         result_vec = _split.vector_split(vec, 0)
         decoded = _decode_array(result_vec)
         assert decoded == [["a", "b"], ["c"]]
@@ -207,18 +209,18 @@ class TestVectorSplitLongStrings:
 
 class TestVectorSplitOutputType:
     def test_result_type_is_array(self):
-        vec = dn.vector_from_string_sequence(["a,b"])
+        vec = dn.vector_from_string_sequence([b"a,b"])
         result = _split.vector_split(vec, ord(","))
         assert result.type == dn.DrakenType.ARRAY
 
     def test_child_type_is_varchar(self):
-        vec = dn.vector_from_string_sequence(["a,b"])
+        vec = dn.vector_from_string_sequence([b"a,b"])
         result = _split.vector_split(vec, ord(","))
         assert result.array_child_type == dn.DrakenType.VARCHAR
 
     def test_result_length_matches_input(self):
         rows = ["a,b", "c,d,e", "f"]
-        vec = dn.vector_from_string_sequence(rows)
+        vec = dn.vector_from_string_sequence([r.encode("utf-8") for r in rows])
         result = _split.vector_split(vec, ord(","))
         assert len(result) == len(rows)
 
@@ -235,17 +237,17 @@ class TestVectorSplitOutputType:
 
 class TestVectorSplitErrors:
     def test_delimiter_negative(self):
-        vec = dn.vector_from_string_sequence(["a,b"])
+        vec = dn.vector_from_string_sequence([b"a,b"])
         with pytest.raises(Exception):
             _split.vector_split(vec, -1)
 
     def test_delimiter_too_large(self):
-        vec = dn.vector_from_string_sequence(["a,b"])
+        vec = dn.vector_from_string_sequence([b"a,b"])
         with pytest.raises(Exception):
             _split.vector_split(vec, 256)
 
     def test_delimiter_non_integer(self):
-        vec = dn.vector_from_string_sequence(["a,b"])
+        vec = dn.vector_from_string_sequence([b"a,b"])
         with pytest.raises(Exception):
             _split.vector_split(vec, ",")
 

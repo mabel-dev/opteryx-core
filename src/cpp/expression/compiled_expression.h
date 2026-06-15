@@ -39,6 +39,13 @@ enum NodeTypeCode : int {
 struct CompiledExpression {
     int node_type;
 
+    // Physical DrakenType of a LITERAL node's value, captured at lower time from
+    // py_node.type.physical. -1 when absent (non-literal nodes, or a literal whose
+    // type carries no physical tag). The bind-time lineariser uses this to pick the
+    // native constant constructor and the string subtype (VARCHAR/NVARCHAR/VARBINARY)
+    // for BC_LOAD_LIT_CONST — no per-morsel Python type dispatch.
+    int physical_type;
+
     // Borrowed views into Python objects that live for the arena's lifetime.
     // Never NULL: missing fields are Py_None (no special-case in consumers).
     PyObject* value;

@@ -11,8 +11,6 @@ the values declared on the NodeType IntEnum in opteryx/expression/__init__.py;
 a runtime check in opteryx/expression/evaluator/__init__.py verifies this.
 """
 
-import datetime
-import decimal as _decimal_eval
 import sys as _sys
 
 from opteryx.compiled.expression.compiled_expression import (
@@ -95,9 +93,6 @@ DEF _BV_IS_FALSE = 1
 DEF _BV_IS_NOT_TRUE = 2
 DEF _BV_IS_NOT_FALSE = 3
 
-_EPOCH_DATE = datetime.date(1970, 1, 1)
-_EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
-
 # ColumnType instances for temporal coercion — passed to _coerce_temporal_scalar_for_arrow
 # to disambiguate DATE vs TIMESTAMP from the BC_TYPE_* int codes on the AnyOp paths.
 _CT_TIMESTAMP = _TIMESTAMP_factory()
@@ -118,45 +113,6 @@ def get_c_native_kernel_call_count():
 def _is_scalar_value(obj):
     """Deprecated: use is_scalar() from opteryx.utils.vector_types instead."""
     return is_scalar(obj)
-
-
-cdef Vector _scalar_to_draken_constant(object value, Py_ssize_t n):
-    """Convert a Python scalar literal to a Draken constant Vector of length n.
-
-    Dispatches to the appropriate draken_native typed constructor. Raises
-    TypeError for unrecognised types. Booleans must be handled by the caller
-    before reaching this function (use BoolVector.from_constant instead).
-    """
-    cdef long long ordinal, us
-    if value is None:
-        return Vector(_draken_native.vector_null_from_length(n))
-    if isinstance(value, int):
-        return Vector(_draken_native.vector_from_constant(value, n))
-    if isinstance(value, float):
-        return Vector(_draken_native.vector_float64_from_constant(value, n))
-    if isinstance(value, str):
-        return Vector(_draken_native.vector_varchar_from_constant(value, n))
-    if isinstance(value, bytes):
-        # VARCHAR carries raw bytes; no decode (the constant ctor stores verbatim).
-        return Vector(_draken_native.vector_varchar_from_constant(value, n))
-    if isinstance(value, _decimal_eval.Decimal):
-        sign, digits, exponent = value.as_tuple()
-        scale = max(0, -int(exponent))
-        precision = max(len(digits), scale + 1)
-        # p ≤ 18 → int64-backed DECIMAL; 19 ≤ p ≤ 38 → int128-backed DECIMAL128.
-        if precision > 18:
-            return Vector(_draken_native.vector_decimal128_from_constant(value, n, precision, scale))
-        return Vector(_draken_native.vector_decimal_from_constant(value, n, precision, scale))
-    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
-        ordinal = (value - _EPOCH_DATE).days
-        int_vec = _draken_native.vector_from_constant(ordinal, n)
-        return Vector(_draken_native.vector_reinterpret_as_date32(int_vec))
-    if isinstance(value, datetime.datetime):
-        return Vector(_draken_native.vector_timestamp_from_constant(value, n))
-    raise TypeError(
-        f"_scalar_to_draken_constant: cannot construct Draken vector for literal "
-        f"{value!r} (type {type(value).__name__})"
-    )
 
 
 cdef _unary_op_kernel(int op_code, vec):
@@ -616,6 +572,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_INSTR_C_NATIVE,
     BC_LOAD_COL,
     BC_LOAD_LIT_BOOL,
+    BC_LOAD_LIT_CONST,
     BC_LOAD_LIT_SCALAR,
     BC_LOAD_LIT_SET,
     BC_NOT,
@@ -644,6 +601,7 @@ from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport draken_zero_sel, draken_zero_validity
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
@@ -1281,7 +1239,20 @@ cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena
     Called only from Python-fallback paths (LIKE/RLIKE, string concat, etc.);
     never on the ordinal-compare hot path.
     """
+    cdef Vector av
     if anc is not None:
+        # A bind-time scalar literal is anchored as a constant-shape Vector cached
+        # at length 1; the hot path re-stamps only the DV. When a Python-fallback
+        # kernel needs the Vector object at the morsel length, hand back a
+        # zero-copy length-adjusted view (the cached value is reused, not
+        # re-encoded). Non-constant anchors (length already matches) pass through.
+        if isinstance(anc, Vector):
+            av = <Vector>anc
+            if av._dv != NULL and av._dv.length != dv.length:
+                if av._dv.type == DRAKEN_NULL:
+                    return Vector(_draken_native.vector_null_from_length(dv.length))
+                if av._dv.data_length == 1:
+                    return Vector(_draken_native.vector_constant_view(av._nb, dv.length))
         return anc
     cdef void*    dp = dv.data
     cdef uint8_t* vp = dv.validity
@@ -1447,42 +1418,47 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                 continue
 
             # ----------------------------------------------------------
-            # BC_LOAD_LIT_SCALAR — typed constant Vector
+            # BC_LOAD_LIT_SCALAR — IN-list collection / set literal.
+            #
+            # Genuine scalar literals are pre-materialised at bind time and use
+            # BC_LOAD_LIT_CONST. Only set/list/tuple membership literals remain
+            # here: they are never DrakenVector* and are pushed as a Python anchor
+            # for a downstream BC_COMPARE. Anything else is an internal invariant
+            # violation — fail fast (CLAUDE.md §1).
             # ----------------------------------------------------------
             if opcode == BC_LOAD_LIT_SCALAR:
                 scalar_obj = <object>slot.literal_obj
-                if isinstance(scalar_obj, bool):
-                    # Bool scalar: dense bitmap in arena (constant-shape safe)
-                    result_data_ptr = draken_frame_arena_alloc(arena, <size_t>nbytes)
-                    if result_data_ptr == NULL:
-                        raise MemoryError("execute_bytecode: BC_LOAD_LIT_SCALAR bool alloc failed")
-                    if scalar_obj:
-                        memset(<uint8_t*>result_data_ptr, 0xFF, <size_t>nbytes)
-                        if num_rows & 7:
-                            (<uint8_t*>result_data_ptr)[nbytes - 1] = <uint8_t>((1 << (num_rows & 7)) - 1)
-                    else:
-                        memset(<uint8_t*>result_data_ptr, 0x00, <size_t>nbytes)
-                    dv_store[sp] = draken_vector_from_dense(
-                        result_data_ptr, <uint32_t>num_rows, DRAKEN_BOOL, NULL
-                    )
-                    dv_stack[sp] = &dv_store[sp]
-                    anchor[sp] = None
-                    sp += 1
-                    continue
-                if isinstance(scalar_obj, (_CarcharSetWrapper, _PerfectHashSet)):
+                if isinstance(scalar_obj, (_CarcharSetWrapper, _PerfectHashSet,
+                                           list, tuple, set, frozenset)):
                     anchor[sp] = scalar_obj
                     dv_stack[sp] = NULL
                     sp += 1
                     continue
-                # Lists/sets/tuples are IN-list literals consumed immediately by BC_COMPARE.
-                if isinstance(scalar_obj, (list, tuple, set, frozenset)):
-                    anchor[sp] = scalar_obj
-                    dv_stack[sp] = NULL
-                    sp += 1
-                    continue
-                v_result = _scalar_to_draken_constant(scalar_obj, num_rows)
-                anchor[sp] = v_result
-                dv_stack[sp] = (<Vector>v_result).unified()
+                raise TypeError(
+                    "execute_bytecode: BC_LOAD_LIT_SCALAR expected an in-list "
+                    f"collection/set literal, got {type(scalar_obj).__name__}"
+                )
+
+            # ----------------------------------------------------------
+            # BC_LOAD_LIT_CONST — pre-materialised scalar constant.
+            #
+            # The cached Vector is constant-shape (data_length==1), built ONCE at
+            # bind time. Re-stamp ONLY the logical length onto a stack-local DV
+            # copy — zero alloc, no Python object, no isinstance, no re-encode.
+            # selection/validity are refreshed to the shared globals sized for N
+            # rows (the bind-time pointers were sized for length 1). The cached
+            # Vector anchors the borrowed data; _slot_to_pyobj lazily builds a
+            # length-N view if a Python-fallback kernel needs the object.
+            # ----------------------------------------------------------
+            if opcode == BC_LOAD_LIT_CONST:
+                scalar_obj = <object>slot.literal_obj
+                dv_store[sp] = (<Vector>scalar_obj).unified()[0]
+                dv_store[sp].length = <uint32_t>num_rows
+                dv_store[sp].selection = draken_zero_sel(<uint32_t>num_rows)
+                if dv_store[sp].validity != NULL:
+                    dv_store[sp].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
+                dv_stack[sp] = &dv_store[sp]
+                anchor[sp] = scalar_obj
                 sp += 1
                 continue
 

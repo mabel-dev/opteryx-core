@@ -196,8 +196,8 @@ cdef class GroupHashEngine:
         )
         self._key_store = KeyStore(self._group_columns, self._key_kinds)
         # Set the actual DrakenType for each string key column so the key store
-        # reconstructs VARCHAR as str (via vector_from_string_sequence) and
-        # VARBINARY as bytes (via vector_from_bytes_sequence).
+        # reconstructs the group key with the right type (VARCHAR vs VARBINARY)
+        # directly from the stored native string slots via from_decoded.
         cdef Py_ssize_t _ki
         cdef DrakenType _col_type
         cdef int _col_type_int

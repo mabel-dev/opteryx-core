@@ -79,7 +79,9 @@ vector_cosine_distance     = _misc2.vector_cosine_distance
 
 def make(lst):
     """Build a VARCHAR Vector from a Python list of strings/None."""
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    )
 
 
 def make_fp16(rows, dim=None):

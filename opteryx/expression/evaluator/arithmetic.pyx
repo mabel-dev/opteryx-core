@@ -42,15 +42,16 @@ cdef _to_string_vec(v, n):
         v = v_nb
     if getattr(v, "type", None) in _str_types:
         return v  # already a string Vector (now guaranteed nanobind)
-    # Normalize scalar to str or None.
+    # Normalize scalar to bytes or None — the VARCHAR edge is bytes-only, so a
+    # Python str must not reach it (encode here once).
     if isinstance(v, bytes):
-        v = v.decode("utf-8")
-    elif isinstance(v, str):
         pass
+    elif isinstance(v, str):
+        v = v.encode("utf-8")
     elif v is None:
         pass
     else:
-        v = str(v)
+        v = str(v).encode("utf-8")
     return _draken_native.vector_varchar_from_constant(v, n)
 
 

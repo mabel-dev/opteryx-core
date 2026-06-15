@@ -71,17 +71,23 @@ vss = _load_mod()
 
 def sv(values):
     """Dense VARCHAR Vector from list of str|None."""
-    return dn.vector_from_string_sequence(values)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in values]
+    )
 
 
 def sv_dict(values):
     """Dict-encoded VARCHAR Vector from list of str|None."""
-    return dn.vector_from_string_dict_sequence(values)
+    return dn.vector_from_string_dict_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in values]
+    )
 
 
 def needle(s):
     """Single-value VARCHAR needle Vector."""
-    return dn.vector_from_string_sequence([s])
+    return dn.vector_from_string_sequence(
+        [s.encode("utf-8") if isinstance(s, str) else s]
+    )
 
 
 def needle_null():

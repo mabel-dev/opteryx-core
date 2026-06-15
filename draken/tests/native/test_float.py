@@ -34,7 +34,7 @@ def f32(vals):
     return dn.vector_float32_from_sequence(vals)
 
 def sv(vals):
-    return dn.vector_from_string_sequence(vals)
+    return dn.vector_from_string_sequence([v.encode("utf-8") if isinstance(v, str) else v for v in vals])
 
 NAN = float("nan")
 INF = float("inf")

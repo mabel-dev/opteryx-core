@@ -139,7 +139,11 @@ def _build_array_to_json(arr):
     one cast path excused from zero-Python (CLAUDE.md carve-out)."""
     cdef object row
     rows = arr.to_pylist()
-    result = [_array_row_to_json(row) if row is not None else None for row in rows]
+    # vector_from_string_sequence is bytes-only — encode each JSON string to bytes.
+    result = [
+        _array_row_to_json(row).encode("utf-8") if row is not None else None
+        for row in rows
+    ]
     return _draken_native_casts.vector_from_string_sequence(result)
 
 
@@ -176,8 +180,10 @@ def _cast_result_to_draken(result, resolved_type, args=()):
     """
     from draken.vectors.bool_vector import BoolVector as _BoolVector_casts
     if resolved_type in ("VARCHAR", "BLOB", "VARBINARY"):
+        # vector_from_string_sequence is bytes-only — normalize each element to
+        # bytes (str must not reach the Draken edge).
         return _draken_native_casts.vector_from_string_sequence(
-            [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in result]
+            [v if isinstance(v, bytes) else (str(v).encode("utf-8") if v is not None else None) for v in result]
         )
     if resolved_type in ("INTEGER", "BIGINT"):
         return _draken_native_casts.vector_from_sequence(result)

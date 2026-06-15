@@ -501,6 +501,10 @@ def assemble_flat_string(
             result_list[r] = else_part[pos]
         # else: None (already in result_list)
 
+    # vector_from_string_sequence is bytes-only — encode str results to bytes.
+    result_list = [
+        s.encode("utf-8") if isinstance(s, str) else s for s in result_list
+    ]
     return Vector(_draken_native_ch.vector_from_string_sequence(result_list))
 
 

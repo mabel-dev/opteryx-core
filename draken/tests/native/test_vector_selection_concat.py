@@ -86,12 +86,16 @@ def iv(lst):
 
 def sv(lst):
     """VARCHAR vector from list (None → null)."""
-    return dn.vector_from_string_sequence(lst)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    )
 
 
 def nv(lst):
     """NVARCHAR vector from list (None → null)."""
-    return dn.vector_from_nvarchar_sequence(lst)
+    return dn.vector_from_nvarchar_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in lst]
+    )
 
 
 def bv(lst):

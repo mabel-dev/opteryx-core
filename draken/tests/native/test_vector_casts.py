@@ -73,7 +73,9 @@ def iv(values):
     return dn.vector_from_sequence(values)
 
 def sv(values):
-    return dn.vector_from_string_sequence(values)
+    return dn.vector_from_string_sequence(
+        [v.encode("utf-8") if isinstance(v, str) else v for v in values]
+    )
 
 def vals(vec):
     return vec.to_pylist()

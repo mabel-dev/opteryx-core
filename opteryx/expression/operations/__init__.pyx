@@ -251,7 +251,8 @@ def _inner_filter_operations(arr, operator, value):
         return rlike_match(raw_arr, value, operator)
     elif operator.startswith("ArrayContains"):
         from draken.draken_native import vector_from_string_sequence as _vfss
-        return vector_contains(raw_arr, _vfss([str(value)]))
+        # vector_from_string_sequence is bytes-only — encode the needle.
+        return vector_contains(raw_arr, _vfss([str(value).encode("utf-8")]))
     else:
         # AnyOp* / AllOp* / AtArrow are dispatched via
         # evaluator.comparisons.draken_compare before they can reach here.

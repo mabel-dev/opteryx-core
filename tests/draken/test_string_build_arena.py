@@ -16,6 +16,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import draken.draken_native as dn
 
 
+def _sv(vals):
+    """Build a VARCHAR vector; the edge is bytes-only so encode str inputs."""
+    return dn.vector_from_string_sequence(
+        [s.encode("utf-8") if isinstance(s, str) else s for s in vals]
+    )
+
+
 CASES = {
     "all-short": ["abc", "defgh", "ij"],
     "boundary-12-inline": ["123456789012"],          # exactly 12 → inline
@@ -31,14 +38,14 @@ CASES = {
 
 def test_roundtrip_all_cases():
     for name, vals in CASES.items():
-        v = dn.vector_from_string_sequence(vals)
+        v = _sv(vals)
         assert v.to_pylist() == vals, (name, v.to_pylist())
 
 
 def test_gather_after_build():
     # take/slice copy the arena; ensure dead-byte trimming didn't drop payload.
     for name, vals in CASES.items():
-        v = dn.vector_from_string_sequence(vals)
+        v = _sv(vals)
         order = list(range(len(vals)))[::-1]
         t = v.take(order)
         assert t.to_pylist() == [vals[i] for i in order], (name, t.to_pylist())
@@ -49,7 +56,7 @@ def test_long_string_distinct_from_prefix_collision():
     # build (the arena holds the full bytes; equality verifies them).
     a = "abcdefghijkl" + "MMMMMM"
     b = "abcdefghijkl" + "NNNNNN"
-    v = dn.vector_from_string_sequence([a, b, a])
+    v = _sv([a, b, a])
     assert v.to_pylist() == [a, b, a]
 
 
