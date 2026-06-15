@@ -83,6 +83,15 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
     cpdef object get_result(self):
         return self._result if self._seen else None
 
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        cdef MinInt64Aggregate o = <MinInt64Aggregate>other
+        if o._seen and (not self._seen or o._result < self._result):
+            self._result = o._result
+            self._seen = True
+
 
 # ---------------------------------------------------------------------------
 # MaxInt64Aggregate
@@ -153,6 +162,15 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
     cpdef object get_result(self):
         return self._result if self._seen else None
 
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        cdef MaxInt64Aggregate o = <MaxInt64Aggregate>other
+        if o._seen and (not self._seen or o._result > self._result):
+            self._result = o._result
+            self._seen = True
+
 
 # ---------------------------------------------------------------------------
 # MinFloat64Aggregate
@@ -217,6 +235,15 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
     cpdef object get_result(self):
         return self._result if self._seen else None
 
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        cdef MinFloat64Aggregate o = <MinFloat64Aggregate>other
+        if o._seen and (not self._seen or o._result < self._result):
+            self._result = o._result
+            self._seen = True
+
 
 # ---------------------------------------------------------------------------
 # MaxFloat64Aggregate
@@ -280,6 +307,15 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
 
     cpdef object get_result(self):
         return self._result if self._seen else None
+
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        cdef MaxFloat64Aggregate o = <MaxFloat64Aggregate>other
+        if o._seen and (not self._seen or o._result > self._result):
+            self._result = o._result
+            self._seen = True
 
 
 # ---------------------------------------------------------------------------

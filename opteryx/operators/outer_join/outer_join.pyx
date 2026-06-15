@@ -45,9 +45,6 @@ from opteryx.models import QueryProperties
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
-# Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
-BLOOM_FASTPATH_COUNTER = 0
-
 CHUNK_SIZE: int = 50_000
 
 
@@ -546,8 +543,11 @@ cdef class OuterJoinNode(JoinNode):
                         right_morsel = right_morsel.filter_mask(mask)
                         eliminated_rows = orig_rows - right_morsel.num_rows
                         self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
-                        global BLOOM_FASTPATH_COUNTER
-                        BLOOM_FASTPATH_COUNTER += 1
+                        # Per-instance telemetry (was a module-level global — a
+                        # lost-update race once kernels release the GIL; instance
+                        # state is correct under clone-per-worker, mirrors the
+                        # adjacent rows_eliminated_by_bloom_filter counter).
+                        self.readings["feature_bloom_fastpath"] += 1
                         pass_filter_index = None
             else:
                 right_morsel = Morsel.from_vectors({})

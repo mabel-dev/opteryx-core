@@ -77,12 +77,27 @@ cdef class BaseCollector:
         """Return an output Vector for groups in [start, stop)."""
         return None
 
-    cpdef BaseCollector _clone_empty(self):
-        """Return a fresh zero-state instance of this collector with the same config.
-        Returns None for collectors that cannot participate in partial aggregation."""
-        return None
+    # ---- WP-7 partition-parallel merge -----------------------------------
+    # A parallel engine runs one GroupHashEngine per worker over a disjoint
+    # partition, then combines per-group collector state with merge_group_state
+    # before a single finalize. A collector is mergeable only if combining two
+    # partial per-group accumulators is exact (COUNT→add, SUM→add, MIN/MAX→
+    # seen-aware, AVG→add sums+counts). Collectors whose partials cannot be
+    # combined without the original rows (MEDIAN) or via an API not yet exposed
+    # (COUNT DISTINCT), and the collectors not yet wired for merge (decimal /
+    # string / bool / interval MIN/MAX, decimal AVG/SUM), report is_mergeable()
+    # ==False so the engine keeps the whole aggregation serial rather than
+    # producing a wrong answer.
+    cdef bint is_mergeable(self) noexcept:
+        return False
 
-    cpdef BaseCollector _clone_as_merge(self):
-        """Return a collector that accumulates partial aggregates from a finalised morsel.
-        Reads from result_name instead of column_name.  Returns None if non-mergeable."""
-        return None
+    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
+        """Combine other's group `other_idx` accumulator into self's group
+        `self_idx`. The caller (GroupHashEngine.merge) guarantees
+        type(self) is type(other) BEFORE calling, because the <Type>other cast in
+        the overrides is UNCHECKED — a type mismatch would read the wrong struct
+        layout (memory corruption)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support partition-parallel merge"
+        )
+

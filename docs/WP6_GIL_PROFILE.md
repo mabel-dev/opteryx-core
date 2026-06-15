@@ -40,7 +40,7 @@ Measured **warm** (OS page cache hot, 2 warmups) so IO wait ≈ 0 and the releas
 fraction reflects compute/decode, not disk. 3 reps averaged; numbers stable to
 ±2–3 points across runs.
 
-## Results — full ClickBench (`scratch.hits`, ~100M rows) + TPC-H sf001
+## Results — full ClickBench (`scratch.hits`, ~100M rows) + TPC-H sf1
 
 GIL-**released** fraction, before and after the post-profile nogil work. Higher
 is more parallelisable. (Warm cache, 3 reps, ±2–3 points.)
@@ -52,18 +52,25 @@ is more parallelisable. (Warm cache, 3 reps, ±2–3 points.)
 | scan/decode |      ~80 | ~48% | **~65%** | Parquet Read ~34, Ungrouped Aggregate ~26 |
 | filter      |     ~400 | ~22% | **~50%** | **Filter ~253**, Parquet Read ~118 |
 | sort/topN   |    ~1040 | ~12% | **~53%** | Grouped Aggregate ~611, Filter ~250 |
-| join        |     ~5.6 | (unreliable) | (unreliable) | Inner Join Draken / Parquet Read (sf001 too small) |
+| join (sf1)  |     ~280 |  (sf001 too small) | **~54%** | **Inner Join Draken ~236**, Filter ~14 |
 
-Every measured operator class is now **≥50% GIL-released** (join excepted as
-unreliable). The two formerly GIL-bound classes moved the most: **filter 22%→50%**
-and **sort/topN 12%→53%**. group-agg and scan also rose (59%→74%, 48%→65%) as the
-sweep released the aggregate/reduction kernels; distinct was already kernel-bound
-and is unchanged.
+Every measured operator class is now **≥50% GIL-released**. The two formerly
+GIL-bound classes moved the most: **filter 22%→50%** and **sort/topN 12%→53%**.
+group-agg and scan also rose (59%→74%, 48%→65%) as the sweep released the
+aggregate/reduction kernels; distinct was already kernel-bound and is unchanged.
+
+**Join measurement gap (originally open) is now CLOSED.** Re-measured at TPC-H
+sf1 (the original join row used sf001, too small to trust). Two joins:
+`orders(1.5M) ⋈ customer(150k)` → ~51% released at ~77ms; `lineitem(6M) ⋈
+orders(1.5M)` → **~54% released at ~281ms** (the reliable one — >200ms, and the
+Inner Join is the dominant operator at ~236ms self). The hashed join's
+build+probe releases the GIL substantially; joins are in the same parallelisable
+band as filter/sort, **not GIL-bound.**
 
 Queries: `SUM(ResolutionWidth)` (scan); `COUNT(*) WHERE SearchPhrase<>''`
 (filter); `GROUP BY RegionID` (group-agg); `COUNT(DISTINCT UserID)` (distinct);
-`GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10` (sort); `orders ⋈ customer`
-(join).
+`GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10` (sort); `lineitem ⋈ orders`
+(join, sf1).
 
 ## Findings
 
@@ -119,8 +126,9 @@ Queries: `SUM(ResolutionWidth)` (scan); `COUNT(*) WHERE SearchPhrase<>''`
 - **Short queries are planning/orchestration-dominated.** scan (~75ms) and
   especially join (~5.8ms) include non-trivial Python planning; trust only the
   >200ms queries (filter, group-agg, distinct, sort).
-- **The join number is unusable** — TPC-H sf001 is too small. Measuring join GIL
-  behaviour needs a larger build/probe (sf1+ or a clickbench self-join). **Gap.**
+- **The join gap is now CLOSED** — re-measured at TPC-H sf1 (`lineitem ⋈ orders`,
+  ~281ms, ~54% released, Inner Join the dominant operator). The original sf001
+  number was too small to trust; sf1 gives a reliable >200ms build/probe.
 - Decode counts as released (correct — already parallel); the dominant-operator
   column is how you attribute a high released fraction to decode vs operator work.
 

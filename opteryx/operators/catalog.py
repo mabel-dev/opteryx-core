@@ -49,6 +49,31 @@ class ParallelStrategy(Enum):
     ASYNC = "async"
 
 
+class OperatorParallelism(Enum):
+    """How an operator may be parallelised — the thread-safety contract a future
+    parallel engine must honour (see docs/EXECUTION_THREAD_SAFETY_CONTRACT.md).
+
+    Orthogonal to ``ParallelStrategy`` (thread vs async dispatch); this captures
+    the cloning/merging semantics:
+
+    - STATELESS:           no cross-morsel state; clone or share freely.
+    - STATEFUL_MERGEABLE:  clone one instance per worker, combine partials via
+                           the operator's ``merge()`` (aggregates, distinct).
+    - STATEFUL_SERIAL:     must see all input on a single instance — the safe
+                           default and exactly today's behaviour.
+    - SINGLETON:           one instance joins N input chains; cannot be cloned
+                           (Union, the terminal Exit).
+
+    This is metadata only: the serial engine ignores it. It exists so a parallel
+    scheduler can decide per-operator without re-deriving the contract.
+    """
+
+    STATELESS = "stateless"
+    STATEFUL_MERGEABLE = "stateful_mergeable"
+    STATEFUL_SERIAL = "stateful_serial"
+    SINGLETON = "singleton"
+
+
 @dataclass(frozen=True)
 class OperatorMetadata:
     """Static metadata about an operator class."""
@@ -57,6 +82,7 @@ class OperatorMetadata:
     operator_class: Type
     category: OperatorCategory
     parallel_strategy: ParallelStrategy = ParallelStrategy.SINGLE_THREAD
+    parallelism: OperatorParallelism = OperatorParallelism.STATEFUL_SERIAL
     is_pipeline_breaking: bool = False
     is_join: bool = False
     is_scan: bool = False
@@ -81,6 +107,7 @@ class OperatorRegistry:
         name: str,
         category: OperatorCategory,
         parallel_strategy: ParallelStrategy = ParallelStrategy.SINGLE_THREAD,
+        parallelism: OperatorParallelism = OperatorParallelism.STATEFUL_SERIAL,
         is_pipeline_breaking: bool = False,
         is_join: bool = False,
         is_scan: bool = False,
@@ -96,6 +123,7 @@ class OperatorRegistry:
                 operator_class=operator_class,
                 category=category,
                 parallel_strategy=parallel_strategy,
+                parallelism=parallelism,
                 is_pipeline_breaking=is_pipeline_breaking,
                 is_join=is_join,
                 is_scan=is_scan,
@@ -184,6 +212,7 @@ def _build_registry() -> OperatorRegistry:
         ReaderNode,
         name="Reader",
         category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_scan=True,
     )
@@ -191,6 +220,7 @@ def _build_registry() -> OperatorRegistry:
         ParquetReadNode,
         name="Parquet Reader",
         category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_scan=True,
     )
@@ -198,12 +228,14 @@ def _build_registry() -> OperatorRegistry:
         NullReaderNode,
         name="Null Reader",
         category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
         is_scan=True,
     )
     r.register(
         FunctionDatasetNode,
         name="Function Dataset",
         category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
         is_scan=True,
     )
 
@@ -212,6 +244,7 @@ def _build_registry() -> OperatorRegistry:
         FilterNode,
         name="Filter",
         category=OperatorCategory.FILTER,
+        parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_stateless=True,
     )
@@ -219,6 +252,7 @@ def _build_registry() -> OperatorRegistry:
         ProjectionNode,
         name="Projection",
         category=OperatorCategory.PROJECT,
+        parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_stateless=True,
     )
@@ -226,6 +260,7 @@ def _build_registry() -> OperatorRegistry:
         DistinctNode,
         name="Distinct",
         category=OperatorCategory.SET_OP,
+        parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
         is_pipeline_breaking=True,
     )
 
@@ -234,12 +269,14 @@ def _build_registry() -> OperatorRegistry:
         UngroupedAggregateNode,
         name="Aggregate",
         category=OperatorCategory.AGGREGATE,
+        parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
         is_pipeline_breaking=True,
     )
     r.register(
         DrakenAggregateAndGroupNode,
         name="Aggregate and Group",
         category=OperatorCategory.AGGREGATE,
+        parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
         is_pipeline_breaking=True,
     )
 
@@ -275,6 +312,7 @@ def _build_registry() -> OperatorRegistry:
         UnionNode,
         name="Union",
         category=OperatorCategory.SET_OP,
+        parallelism=OperatorParallelism.SINGLETON,
         is_pipeline_breaking=True,
     )
 
@@ -340,6 +378,7 @@ def _build_registry() -> OperatorRegistry:
         ExitNode,
         name="Exit",
         category=OperatorCategory.IO,
+        parallelism=OperatorParallelism.SINGLETON,
     )
     r.register(
         ExplainNode,

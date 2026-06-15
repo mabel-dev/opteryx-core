@@ -144,6 +144,50 @@ cdef class UngroupedAggregateEngine:
             agg = <UngroupedAggregate>self._agg_ptrs[i]
             agg.apply(morsel)
 
+    cpdef bint is_mergeable(self):
+        """True iff every aggregate supports partition-parallel merge
+        (COUNT/SUM/MIN/MAX). COUNT DISTINCT and MEDIAN are not yet mergeable, so
+        an engine containing them must stay serial. AVG is mergeable because its
+        SUM and COUNT components are in _agg_ptrs and the finalizer recomputes
+        from the merged columns."""
+        cdef Py_ssize_t i
+        for i in range(self._n_aggregates):
+            if not (<UngroupedAggregate>self._agg_ptrs[i]).is_mergeable():
+                return False
+        return True
+
+    cpdef void merge(self, UngroupedAggregateEngine other) except *:
+        """Combine another engine's partial accumulators into this one. Both
+        engines must come from the same plan over disjoint input partitions, so
+        their aggregate lists line up positionally and by type. AVG finalizers
+        need no merge — they recompute from the merged sum/count columns at
+        finalize(). After merge, finalize() yields the exact total."""
+        if self._n_aggregates != other._n_aggregates:
+            raise ValueError(
+                f"cannot merge engines with {self._n_aggregates} vs "
+                f"{other._n_aggregates} aggregates"
+            )
+        if self._n_avgs != other._n_avgs:
+            raise ValueError("cannot merge engines with different AVG finalizers")
+        if not self.is_mergeable():
+            raise NotImplementedError(
+                "engine contains a non-mergeable aggregate (COUNT DISTINCT / MEDIAN)"
+            )
+        cdef Py_ssize_t i
+        for i in range(self._n_aggregates):
+            # The cast in merge_from is unchecked; verify the types match first
+            # (cheap — once per aggregate, not per row) so a misconfiguration
+            # fails loud instead of reading the wrong struct layout.
+            if type(self._aggregates_pyrefs[i]) is not type(other._aggregates_pyrefs[i]):
+                raise ValueError(
+                    f"aggregate type mismatch at position {i}: "
+                    f"{type(self._aggregates_pyrefs[i]).__name__} vs "
+                    f"{type(other._aggregates_pyrefs[i]).__name__}"
+                )
+            (<UngroupedAggregate>self._agg_ptrs[i]).merge_from(
+                <UngroupedAggregate>other._agg_ptrs[i]
+            )
+
     cpdef Morsel finalize(self):
         """
         Collect results from all aggregates and return a single-row Morsel.

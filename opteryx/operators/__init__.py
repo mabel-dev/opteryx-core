@@ -6,7 +6,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 
-from .catalog import OperatorCategory, ParallelStrategy, get_registry
+from .catalog import OperatorCategory, OperatorParallelism, ParallelStrategy, get_registry
 from ._operators import (
     BasePlanNode,
     JoinNode,
@@ -23,6 +23,7 @@ __all__ = [
     "JoinRightAdapter",
     "PipelineContext",
     "OperatorCategory",
+    "OperatorParallelism",
     "ParallelStrategy",
     "get_registry",
     "ReaderNode",

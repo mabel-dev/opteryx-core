@@ -165,6 +165,30 @@ cdef class UngroupedAggregate:
     cpdef object get_result(self):
         return None
 
+    # ---- WP-7 partition-parallel merge ------------------------------------
+    # Two engines run over disjoint partitions of the same input; their
+    # per-aggregate partial accumulators are combined via merge_from before a
+    # single finalize. An aggregate is mergeable only if combining two partials
+    # is exact (or, for float SUM, order-tolerant) — COUNT(add), SUM(add),
+    # MIN(min), MAX(max). Aggregates whose partials cannot be combined without
+    # the original rows (e.g. MEDIAN) or a set extract API not yet exposed
+    # (COUNT DISTINCT) report is_mergeable()==False, so the engine keeps them
+    # serial rather than producing a wrong answer.
+    cdef bint is_mergeable(self) noexcept:
+        return False
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support partition-parallel merge"
+        )
+
+    def _test_merge_from(self, other):
+        """Test-only driver: invoke ``merge_from`` from Python."""
+        self.merge_from(<UngroupedAggregate>other)
+
+    def _test_is_mergeable(self):
+        return bool(self.is_mergeable())
+
     def _test_apply(self, morsel):
         """Test-only driver: invoke ``apply`` from Python."""
         self.apply(<Morsel>morsel)

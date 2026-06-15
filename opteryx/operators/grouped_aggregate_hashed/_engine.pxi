@@ -434,6 +434,190 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
 
+    cpdef bint is_mergeable(self):
+        """True iff every collector supports partition-parallel merge
+        (COUNT / SUM / MIN / MAX / AVG over int & float). DECIMAL/string/bool/
+        interval MIN-MAX, decimal SUM/AVG, COUNT DISTINCT and MEDIAN report
+        is_mergeable()==False, so an engine containing any of them must stay
+        serial. Collectors are concrete (resolved) by the time merge() runs."""
+        cdef Py_ssize_t i
+        for i in range(len(self._collectors)):
+            if not (<BaseCollector>self._collectors[i]).is_mergeable():
+                return False
+        return True
+
+    cpdef void merge(self, GroupHashEngine other) except *:
+        """WP-7: combine another engine's per-group partial accumulators into this
+        one. Both engines must come from the same plan over disjoint input
+        partitions (same group columns, positionally-matching collectors). After
+        merge, this engine's finalize() yields the exact total — identical to a
+        single engine over all rows.
+
+        Algorithm (per-group state transplant):
+          1. Reconstruct `other`'s group keys into a one-row-per-group morsel and
+             hash them with the SAME hash_keys used at ingest — deterministic per
+             key value, so an identical key collides with this engine's matching
+             group. (Reconstruct consumes other's KeyStore; other is spent.)
+          2. find_or_insert each hash into this engine's index, building an
+             other_group -> self_group slot map and the list of keys new to self.
+          3. store_new_rows() copies the new group keys into this KeyStore; grow
+             collectors to the new group count.
+          4. merge_group_state() transplants each collector's per-group state via
+             the slot map.
+        """
+        from draken.morsels.morsel import Morsel as _Morsel
+
+        cdef Py_ssize_t n_collectors = len(self._collectors)
+        if n_collectors != <Py_ssize_t>len(other._collectors):
+            raise ValueError(
+                f"cannot merge engines with {n_collectors} vs "
+                f"{len(other._collectors)} collectors"
+            )
+
+        # Empty other — nothing to combine (even if it held a non-mergeable
+        # collector, there is no partial state to merge).
+        if not other._resolved or other._num_groups == 0:
+            return
+
+        # other is resolved → its collectors are concrete. Refuse loud if any is
+        # non-mergeable rather than silently producing a wrong answer.
+        if not other.is_mergeable():
+            raise NotImplementedError(
+                "grouped engine contains a non-mergeable collector "
+                "(COUNT DISTINCT / MEDIAN / decimal / string / bool / interval)"
+            )
+
+        cdef Py_ssize_t i
+        cdef Py_ssize_t j
+        cdef int64_t n_other = other._num_groups
+
+        # This engine never ingested (e.g. an empty partition) — adopt other's
+        # resolved state wholesale via a clean ownership move, then return.
+        if not self._resolved:
+            self._index = other._index
+            other._index = NULL
+            self._parvi = other._parvi
+            other._parvi = NULL
+            self._use_parvi = other._use_parvi
+            self._promoted_from_parvi = other._promoted_from_parvi
+            self._parvi_final_size = other._parvi_final_size
+            self._key_store = other._key_store
+            other._key_store = None
+            self._collectors = other._collectors
+            other._collectors = []
+            self._key_kinds = other._key_kinds
+            self._num_groups = n_other
+            self._resolved = True
+            other._num_groups = 0
+            other._resolved = False
+            return
+
+        if not self.is_mergeable():
+            raise NotImplementedError(
+                "grouped engine contains a non-mergeable collector "
+                "(COUNT DISTINCT / MEDIAN / decimal / string / bool / interval)"
+            )
+
+        # The <Type>other cast inside merge_group_state is UNCHECKED — verify the
+        # collector types line up first (once per collector, not per group) so a
+        # misconfigured plan fails loud instead of reading the wrong struct layout.
+        for i in range(n_collectors):
+            if type(self._collectors[i]) is not type(other._collectors[i]):
+                raise ValueError(
+                    f"collector type mismatch at position {i}: "
+                    f"{type(self._collectors[i]).__name__} vs "
+                    f"{type(other._collectors[i]).__name__}"
+                )
+
+        cdef int64_t num_groups = self._num_groups
+        cdef BaseCollector sc
+        cdef BaseCollector oc
+        cdef int64_t g
+
+        # Zero group columns (GROUP BY all-constant literal) — a single implicit
+        # group; there is no key material to hash or store. Transplant slot 0.
+        if <Py_ssize_t>len(self._group_columns) == 0:
+            if num_groups == 0:
+                num_groups = 1
+                for j in range(n_collectors):
+                    (<BaseCollector>self._collectors[j]).grow(num_groups)
+                self._num_groups = num_groups
+            for j in range(n_collectors):
+                sc = <BaseCollector>self._collectors[j]
+                oc = <BaseCollector>other._collectors[j]
+                for g in range(n_other):
+                    sc.merge_group_state(oc, g, 0)
+            return
+
+        # ---- 1. Reconstruct other's keys (consumes other's KeyStore) ----
+        cdef list key_names = []
+        cdef list key_vecs = []
+        other._key_store.reconstruct_vectors(n_other, key_names, key_vecs)
+        # Address the keys morsel by this engine's group columns exactly as the
+        # ingest path does, so hash_keys() and store_new_rows() agree on columns.
+        keys_morsel = _Morsel.from_vectors(self._group_columns, key_vecs)
+
+        cdef object hv = keys_morsel.hash_keys(self._group_columns)
+        cdef DrakenVector* huv = (<Vector>hv).unified()
+        cdef const uint64_t* khashes = <const uint64_t*>huv.data
+        cdef const uint32_t* codes = huv.selection
+
+        # ---- 2. Map each other-group to a self-group slot ----
+        cdef vector[int64_t] self_slot
+        self_slot.resize(<size_t>n_other)
+        cdef vector[int64_t] new_rows
+        new_rows.reserve(<size_t>n_other)
+
+        cdef uint64_t h
+        cdef int64_t slot
+        cdef bint is_new
+        cdef ParviResult pr
+
+        if not self._use_parvi:
+            # Reserve worst-case (every other-group a new self-group) so
+            # find_or_insert_id's internal resize cannot fire below.
+            self._index.reserve(<size_t>(num_groups + n_other))
+
+        for g in range(n_other):
+            h = khashes[codes[g]]
+            if self._use_parvi:
+                pr = self._parvi.insert_new(h, num_groups)
+                if pr.found:
+                    slot = num_groups
+                    new_rows.push_back(g)
+                    num_groups += 1
+                elif pr.slot == _PARVI_CAPACITY:
+                    slot = num_groups
+                    self._promote_parvi_to_carchar()
+                    self._index.insert_new(h, slot)
+                    new_rows.push_back(g)
+                    num_groups += 1
+                    # Promoted mid-loop: reserve the worst-case carchar tail.
+                    self._index.reserve(<size_t>(num_groups + (n_other - g)))
+                else:
+                    slot = <int64_t>pr.slot
+            else:
+                is_new = self._index.find_or_insert_id(h, num_groups, slot)
+                if is_new:
+                    new_rows.push_back(g)
+                    num_groups += 1
+            self_slot[g] = slot
+
+        # ---- 3. Store new group keys; grow collectors ----
+        cdef Py_ssize_t n_new = <Py_ssize_t>new_rows.size()
+        if n_new > 0:
+            self._key_store.store_new_rows(keys_morsel, new_rows.data(), n_new)
+        for j in range(n_collectors):
+            (<BaseCollector>self._collectors[j]).grow(num_groups)
+        self._num_groups = num_groups
+
+        # ---- 4. Transplant per-group collector state ----
+        for j in range(n_collectors):
+            sc = <BaseCollector>self._collectors[j]
+            oc = <BaseCollector>other._collectors[j]
+            for g in range(n_other):
+                sc.merge_group_state(oc, g, self_slot[g])
+
     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):
         """
         Generator. Yields result Morsels in chunks.

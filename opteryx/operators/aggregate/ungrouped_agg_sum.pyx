@@ -143,6 +143,14 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
     cpdef object get_result(self):
         return int(self._total_py) if self._seen else None
 
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        cdef SumInt64Aggregate o = <SumInt64Aggregate>other
+        self._total_py = self._total_py + o._total_py
+        self._seen = self._seen or o._seen
+
 
 cdef class SumFloat64Aggregate(UngroupedAggregate):
     cdef double _total
@@ -211,6 +219,17 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
 
     cpdef object get_result(self):
         return self._total if self._seen else None
+
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        # Float SUM: partials add. Order across partitions may differ from the
+        # serial sum in the last ULP — the property test allows a relative
+        # tolerance for float sums (exact for int).
+        cdef SumFloat64Aggregate o = <SumFloat64Aggregate>other
+        self._total += o._total
+        self._seen = self._seen or o._seen
 
 
 cdef class SumDecimalAggregate(UngroupedAggregate):

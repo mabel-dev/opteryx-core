@@ -39,6 +39,12 @@ cdef class CountStarAggregate(UngroupedAggregate):
     cpdef object get_result(self):
         return self._count
 
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        self._count += (<CountStarAggregate>other)._count
+
 
 cdef class CountAggregate(UngroupedAggregate):
     """COUNT(col) — counts non-null values in the named column."""
@@ -133,3 +139,9 @@ cdef class CountAggregate(UngroupedAggregate):
 
     cpdef object get_result(self):
         return self._count
+
+    cdef bint is_mergeable(self) noexcept:
+        return True
+
+    cdef void merge_from(self, UngroupedAggregate other) except *:
+        self._count += (<CountAggregate>other)._count
