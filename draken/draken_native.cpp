@@ -59,7 +59,8 @@ namespace nb = nanobind;
 // in core/vector_owner.h so the native scan + C++-first CxxMorsel can share them.
 // ---------------------------------------------------------------------------
 #include "core/vector_owner.h"
-#include "morsels/cxx_morsel.h"   // S0: C++-first CxxMorsel / CxxColumn
+#include "morsels/cxx_morsel.h"       // S0: C++-first CxxMorsel / CxxColumn
+#include "morsels/cxx_morsel_ops.h"   // S0: nogil morsel-op surface (cxx_hash, ...)
 
 // Morsel: dumb container grouping related Vector handles.
 // Holds Python object references (refcount-based keep-alive); owns nothing in C++.
@@ -5093,6 +5094,62 @@ static nb::list cxx_morsel_roundtrip(nb::list vectors) {
     return out;
 }
 
+// S0: build a CxxMorsel from Vector handles, run the nogil cxx_hash over the given
+// column indices, return the INT64 hash Vector. Proves the op matches Morsel.hash.
+static nb::object cxx_hash_seam(nb::list vectors, nb::list col_indices) {
+    CxxMorsel m;
+    const size_t n = nb::len(vectors);
+    m.columns.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        CxxColumn col;
+        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
+        col.view = col.own->vec;
+        m.columns.push_back(std::move(col));
+    }
+    std::vector<uint32_t> cols;
+    cols.reserve(nb::len(col_indices));
+    for (size_t i = 0; i < nb::len(col_indices); ++i)
+        cols.push_back(nb::cast<uint32_t>(col_indices[i]));
+    std::shared_ptr<VectorOwner> owner = cxx_hash(m, cols.data(), static_cast<uint32_t>(cols.size()));
+    return nb::cast(owner);
+}
+
+// S0: gather all columns of a CxxMorsel at the given row indices (nogil; reuses
+// vector_take_impl — VectorOwner in/out, no PyObject). Returns a new CxxMorsel.
+static CxxMorsel cxx_take(const CxxMorsel& m, const int32_t* idx, uint32_t n) {
+    CxxMorsel out;
+    out.names = m.names;
+    if (m.columns.empty()) { out.zero_col_rows = n; return out; }
+    out.columns.reserve(m.columns.size());
+    for (const CxxColumn& col : m.columns) {
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx, n));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    return out;
+}
+
+// S0 seam hook: build a CxxMorsel from Vectors, gather at `indices`, return Vectors.
+static nb::list cxx_take_seam(nb::list vectors, nb::list indices) {
+    CxxMorsel m;
+    const size_t nc = nb::len(vectors);
+    m.columns.reserve(nc);
+    for (size_t i = 0; i < nc; ++i) {
+        CxxColumn col;
+        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
+        col.view = col.own->vec;
+        m.columns.push_back(std::move(col));
+    }
+    const uint32_t n = static_cast<uint32_t>(nb::len(indices));
+    std::vector<int32_t> idx(n > 0u ? n : 1u);
+    for (uint32_t i = 0; i < n; ++i) idx[i] = nb::cast<int32_t>(indices[i]);
+    CxxMorsel taken = cxx_take(m, n > 0u ? idx.data() : nullptr, n);
+    nb::list out;
+    for (const CxxColumn& col : taken.columns) out.append(nb::cast(col.own));
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------
@@ -6836,6 +6893,10 @@ NB_MODULE(draken_native, m) {
     // S0: prove the CxxMorsel seam round-trips Vector handles byte-identically.
     m.def("_cxx_morsel_roundtrip", &cxx_morsel_roundtrip,
           "S0 seam proof: py Vectors → CxxMorsel (shared_ptr<VectorOwner>) → py Vectors.");
+    m.def("_cxx_hash", &cxx_hash_seam,
+          "S0: nogil cxx_hash over a CxxMorsel built from the given Vectors + column indices.");
+    m.def("_cxx_take", &cxx_take_seam,
+          "S0: nogil cxx_take (gather rows) over a CxxMorsel built from the given Vectors.");
 
     m.def("vector_concat",
         [](nb::list vectors) -> VectorOwner {

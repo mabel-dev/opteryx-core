@@ -61,6 +61,76 @@ def test_roundtrip_empty():
     assert list(out) == []
 
 
+# --- cxx_hash: the first nogil kernel-backed CxxMorsel op ---
+from draken.morsels.morsel import Morsel
+
+_U64 = (1 << 64) - 1
+
+
+def _check_hash(vectors):
+    """cxx_hash (nogil, no PyObject) must equal Morsel.hash (the c_hash dense-mix path)."""
+    names = [str(i).encode() for i in range(len(vectors))]
+    ref = list(Morsel.from_vectors(names, vectors).hash())  # uint64
+    cxx_vec = dn._cxx_hash(vectors, list(range(len(vectors))))
+    assert cxx_vec.type == DT.INT64
+    got = [(x & _U64) for x in cxx_vec.to_pylist()]  # INT64 bits → uint64
+    assert ref == got, (ref, got)
+
+
+def test_cxx_hash_single_int64():
+    _check_hash([vector_from_sequence([1, 2, 3, 4, None], dtype=DT.INT64)])
+
+
+def test_cxx_hash_single_varchar():
+    _check_hash([vector_from_sequence([b"a", b"bb", b"long arena string here", None], dtype=DT.VARCHAR)])
+
+
+def test_cxx_hash_multi_int():
+    _check_hash([
+        vector_from_sequence([1, 2, 3], dtype=DT.INT64),
+        vector_from_sequence([10, 20, 30], dtype=DT.INT64),
+    ])
+
+
+def test_cxx_hash_multi_mixed():
+    _check_hash([
+        vector_from_sequence([1, 2], dtype=DT.INT64),
+        vector_from_sequence([True, False], dtype=DT.BOOL),
+        vector_from_sequence([b"x", b"y"], dtype=DT.VARCHAR),
+    ])
+
+
+# --- cxx_take: nogil row-gather, must match Morsel.take ---
+def _check_take(vectors, idx):
+    names = [str(i).encode() for i in range(len(vectors))]
+    ref = Morsel.from_vectors(names, vectors).take(idx)
+    ref_cols = [ref[i].to_pylist() for i in range(len(vectors))]
+    out = dn._cxx_take(vectors, list(idx))
+    got_cols = [out[i].to_pylist() for i in range(len(vectors))]
+    assert ref_cols == got_cols, (ref_cols, got_cols)
+    for i in range(len(vectors)):
+        assert out[i].type == vectors[i].type
+
+
+def test_cxx_take_int64_reorder():
+    _check_take([vector_from_sequence([10, 20, 30, 40, None], dtype=DT.INT64)], [4, 0, 2, 2, 1])
+
+
+def test_cxx_take_varchar_dup():
+    _check_take([vector_from_sequence([b"a", b"bb", b"long arena string xyz", None], dtype=DT.VARCHAR)], [3, 2, 0, 2])
+
+
+def test_cxx_take_multi_col():
+    _check_take([
+        vector_from_sequence([1, 2, 3], dtype=DT.INT64),
+        vector_from_sequence([b"p", b"q", b"r"], dtype=DT.VARCHAR),
+    ], [2, 0, 1, 1])
+
+
+def test_cxx_take_empty():
+    _check_take([vector_from_sequence([1, 2, 3], dtype=DT.INT64)], [])
+
+
 if __name__ == "__main__":
     test_roundtrip_int64()
     test_roundtrip_float64()
@@ -68,4 +138,12 @@ if __name__ == "__main__":
     test_roundtrip_varchar_with_nulls_and_arena()
     test_roundtrip_multi_column()
     test_roundtrip_empty()
-    print("✅ S0 CxxMorsel seam round-trip — all byte-identical")
+    test_cxx_hash_single_int64()
+    test_cxx_hash_single_varchar()
+    test_cxx_hash_multi_int()
+    test_cxx_hash_multi_mixed()
+    test_cxx_take_int64_reorder()
+    test_cxx_take_varchar_dup()
+    test_cxx_take_multi_col()
+    test_cxx_take_empty()
+    print("✅ S0 CxxMorsel seam + cxx_hash + cxx_take — all byte-identical")
