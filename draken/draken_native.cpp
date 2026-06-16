@@ -16,6 +16,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/shared_ptr.h>   // S0: shared_ptr<VectorOwner> seam (CxxMorsel)
 
 #include <climits>
 #include <cmath>
@@ -54,57 +55,11 @@
 namespace nb = nanobind;
 
 // ---------------------------------------------------------------------------
-// Ownership primitives (doc 01)
+// Ownership primitives (doc 01) — DrakenFree / OwnedBuffer / VectorOwner now live
+// in core/vector_owner.h so the native scan + C++-first CxxMorsel can share them.
 // ---------------------------------------------------------------------------
-
-// Stateless deleter. Empty type → unique_ptr<T, DrakenFree> stays one word (EBO).
-struct DrakenFree {
-    void operator()(void* p) const noexcept { draken_free(p); }
-};
-
-template <typename T>
-using OwnedBuffer = std::unique_ptr<T, DrakenFree>;
-
-// VectorOwner: the frozen 40-byte DrakenVector ABI struct plus owned buffers.
-//
-// Ownership map:
-//   data_buf     — owns vec.data  (typed payload; draken_free on destruct)
-//                  For DRAKEN_ARRAY: owns int32_t offsets[length+1].
-//   validity_buf — owns vec.validity (null bitmap or empty → nullptr if all-valid)
-//   codes_buf    — owns vec.selection for dict-encoded vectors (nullptr for
-//                  identity/zero selections which point at shared globals)
-//   logical_type — BORROWED pointer into the global LogicalType registry.
-//                  Non-null for parameterized physical types (TIMESTAMP64, etc.).
-//                  nullptr for simple scalar types (INT64, FLOAT64, BOOL, …).
-//                  MANDATORY for DRAKEN_TIMESTAMP64: using a timestamp vector
-//                  with logical_type==nullptr is a hard error (fail loud).
-//   child_owner  — Non-null only for DRAKEN_ARRAY. Owns the child DrakenVector
-//                  (and transitively its subtree). Destructor chains recursively,
-//                  so freeing the parent frees the whole subtree. No back-pointers.
-//
-// RAII: all unique_ptrs call draken_free via DrakenFree on destruction.
-// No owns_* flags anywhere — the unique_ptr itself IS the ownership record.
-struct VectorOwner {
-    DrakenVector         vec;
-    OwnedBuffer<void>    data_buf;
-    OwnedBuffer<uint8_t> validity_buf;
-    OwnedBuffer<void>    codes_buf;   // non-null only for dict shapes
-    const LogicalType*   logical_type = nullptr;  // borrowed; registry-interned
-    std::unique_ptr<VectorOwner> child_owner;     // non-null only for DRAKEN_ARRAY
-
-    VectorOwner(DrakenVector v,
-                OwnedBuffer<void>    d,
-                OwnedBuffer<uint8_t> val,
-                OwnedBuffer<void>    codes = OwnedBuffer<void>(nullptr)) noexcept
-        : vec(v), data_buf(std::move(d)), validity_buf(std::move(val)),
-          codes_buf(std::move(codes)), logical_type(nullptr), child_owner(nullptr) {}
-
-    VectorOwner(const VectorOwner&)            = delete;
-    VectorOwner& operator=(const VectorOwner&) = delete;
-    VectorOwner(VectorOwner&&)                 = default;
-    VectorOwner& operator=(VectorOwner&&)      = default;
-    ~VectorOwner()                             = default;
-};
+#include "core/vector_owner.h"
+#include "morsels/cxx_morsel.h"   // S0: C++-first CxxMorsel / CxxColumn
 
 // Morsel: dumb container grouping related Vector handles.
 // Holds Python object references (refcount-based keep-alive); owns nothing in C++.
@@ -5113,6 +5068,32 @@ extern "C" PyObject* draken_vector_take_with_null_buffer(
 }
 
 // ---------------------------------------------------------------------------
+// S0 seam (CxxMorsel) — bridge nanobind Vector handles ↔ CxxMorsel via the
+// shared_ptr<VectorOwner> caster. cast<shared_ptr>(handle) yields an aliasing
+// shared_ptr (Py keep-alive deleter); cast(shared_ptr) yields a Vector wrapper
+// referencing the same instance. Both directions are zero-copy. This proves the
+// seam round-trips byte-identically; the real cdef-Morsel↔CxxMorsel plumbing
+// lands with the first converted operator (S1+).
+// ---------------------------------------------------------------------------
+static nb::list cxx_morsel_roundtrip(nb::list vectors) {
+    // py Vector handles → CxxMorsel (each column owns a shared_ptr<VectorOwner>).
+    CxxMorsel m;
+    const size_t n = nb::len(vectors);
+    m.columns.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        CxxColumn col;
+        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
+        col.view = col.own->vec;
+        m.columns.push_back(std::move(col));
+    }
+    // CxxMorsel → py Vector handles (shared_ptr → Vector wrapper, same instance).
+    nb::list out;
+    for (const CxxColumn& col : m.columns)
+        out.append(nb::cast(col.own));
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------
 
@@ -6851,6 +6832,10 @@ NB_MODULE(draken_native, m) {
         "Build a string-family Vector from list[bytes | None] with an explicit type\n"
         "tag (DRAKEN_VARCHAR / NVARCHAR / VARBINARY). Raw bytes, no decode — used to\n"
         "carry bytes data under a known source type (e.g. MIN/MAX of VARCHAR).");
+
+    // S0: prove the CxxMorsel seam round-trips Vector handles byte-identically.
+    m.def("_cxx_morsel_roundtrip", &cxx_morsel_roundtrip,
+          "S0 seam proof: py Vectors → CxxMorsel (shared_ptr<VectorOwner>) → py Vectors.");
 
     m.def("vector_concat",
         [](nb::list vectors) -> VectorOwner {

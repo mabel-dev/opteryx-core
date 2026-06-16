@@ -255,6 +255,29 @@ acting. Header/`.hpp`/draken changes use `make compile` (not `make c`).
   `combine`/`hash_keys`/`partition_by_hash`/`align_tables`), and
   `cxx_from_pymorsel` / `pymorsel_from_cxx`. Prove byte-identical round-trip; no
   operator converted.
+
+  **S0.0 LANDED (2026-06-16):** `VectorOwner`/`OwnedBuffer`/`DrakenFree` extracted
+  from `draken_native.cpp` into `draken/core/vector_owner.h` (behaviour-neutral;
+  make compile + q 182 green) so the native scan + CxxMorsel can reference the type.
+
+  **S0 OWNERSHIP CRUX (decision needed):** `CxxColumn` must SHARE a `VectorOwner` for
+  the seam to be zero-copy both ways AND for joins/exchange to fan one column into
+  many outputs (the reason `shared_ptr` was chosen). But the nanobind `Vector` stores
+  `VectorOwner` BY VALUE INLINE (lifetime = Py refcount), and nanobind's
+  `stl/shared_ptr.h` is NOT in the vendored slice.
+  - **Option A (locked-`shared_ptr`, clean):** change the `Vector` binding to a
+    `shared_ptr<VectorOwner>` holder. Requires VENDORING `nanobind/stl/shared_ptr.h`
+    (§4 dependency — needs architect agreement) + refactoring 8 `nb::cast(std::move
+    (owner))` + 5 `inst_ptr<VectorOwner>` sites + the `nb::class_` decl +
+    `draken_vector_unwrap`. Zero-copy bidirectional seam; enables fan-out. Highest-risk
+    change in the initiative (every Vector flows through it) — gate q/tpch/clickbench.
+  - **Option B (no new dep, interim):** keep the inline-`VectorOwner` Vector binding.
+    `CxxMorsel` holds `shared_ptr<VectorOwner>`; `cxx_from_pymorsel` builds it via an
+    aliasing shared_ptr with a Py-keep-alive deleter (zero-copy in); the boundary
+    handoff out uses the existing `draken_vector_own_*` ownership-transfer (works for
+    unique owners at a segment END boundary — fine for contiguous scan→filter→agg).
+    No fan-out zero-copy (joins/exchange would copy until Option A lands). Lower risk,
+    unblocks S1/S2, defers the holder change.
 - **S1 — Scan emits `CxxMorsel`** (GIL released across assembly), adapter at the
   chain head.
 - **S2 — Grouped-aggregate-hashed → C++ nogil** (M4 breaker / bottleneck).
