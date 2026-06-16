@@ -6,14 +6,17 @@
 #include "ops/kernels/cast_kernels.h"
 #include "ops/kernels/binary_op_kernels.h"
 #include "ops/kernels/extraction_kernels.h"
+#include "ops/kernels/binop_kernels.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"
+#include "ops/kernels/kernel_registry.h"
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include <cassert>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -93,8 +96,98 @@ DrakenVector* create_int64_constant_vector(int64_t value, uint32_t length) {
     return vec;
 }
 
+// Narrow-int dense constructors (P9.1a binop tests).
+DrakenVector* create_int8_vector(const int8_t* data, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* d = static_cast<int8_t*>(malloc((length ? length : 1) * sizeof(int8_t)));
+    auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));
+    memcpy(d, data, length * sizeof(int8_t));
+    for (uint32_t i = 0; i < length; ++i) sel[i] = i;
+    vec->data = d; vec->selection = sel; vec->data_length = length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_INT8; vec->flags = 0;
+    return vec;
+}
+DrakenVector* create_int16_vector(const int16_t* data, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* d = static_cast<int16_t*>(malloc((length ? length : 1) * sizeof(int16_t)));
+    auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));
+    memcpy(d, data, length * sizeof(int16_t));
+    for (uint32_t i = 0; i < length; ++i) sel[i] = i;
+    vec->data = d; vec->selection = sel; vec->data_length = length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_INT16; vec->flags = 0;
+    return vec;
+}
+DrakenVector* create_int32_vector(const int32_t* data, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* d = static_cast<int32_t*>(malloc((length ? length : 1) * sizeof(int32_t)));
+    auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));
+    memcpy(d, data, length * sizeof(int32_t));
+    for (uint32_t i = 0; i < length; ++i) sel[i] = i;
+    vec->data = d; vec->selection = sel; vec->data_length = length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_INT32; vec->flags = 0;
+    return vec;
+}
+DrakenVector* create_float32_vector(const float* data, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* d = static_cast<float*>(malloc((length ? length : 1) * sizeof(float)));
+    auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));
+    memcpy(d, data, length * sizeof(float));
+    for (uint32_t i = 0; i < length; ++i) sel[i] = i;
+    vec->data = d; vec->selection = sel; vec->data_length = length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_FLOAT32; vec->flags = 0;
+    return vec;
+}
+
+// DRAKEN_DECIMAL vector: int64 unscaled values (scale is out-of-band, passed via ctx).
+DrakenVector* create_decimal_vector(const int64_t* data, uint32_t length) {
+    DrakenVector* v = create_int64_vector(data, length);
+    v->type = DRAKEN_DECIMAL;
+    return v;
+}
+
+// DRAKEN_DECIMAL128 vector: __int128 unscaled values (built from int64 test inputs).
+DrakenVector* create_decimal128_vector(const int64_t* data, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* d = static_cast<__int128*>(malloc((length ? length : 1) * sizeof(__int128)));
+    auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));
+    for (uint32_t i = 0; i < length; ++i) { d[i] = static_cast<__int128>(data[i]); sel[i] = i; }
+    vec->data = d; vec->selection = sel; vec->data_length = length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_DECIMAL128; vec->flags = 0;
+    return vec;
+}
+
+// Attach a validity bitmap (valid[i]!=0 → row i valid). Freed by free_vector.
+void set_validity(DrakenVector* v, const uint8_t* valid, uint32_t n) {
+    const uint32_t nb = (n + 7u) >> 3;
+    auto* bm = static_cast<uint8_t*>(malloc(nb ? nb : 1));
+    memset(bm, 0, nb ? nb : 1);
+    for (uint32_t i = 0; i < n; ++i) if (valid[i]) bm[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+    v->validity = bm;
+}
+
 bool is_error(const VecResult& result) {
     return result.data == nullptr && result.type == DRAKEN_NULL;
+}
+
+// Width-aware read of a (possibly narrow) integer result at logical row i.
+int64_t binop_read(const VecResult& r, uint32_t i) {
+    const uint32_t s = r.selection[i];
+    switch (r.type) {
+        case DRAKEN_INT8:  return static_cast<const int8_t*>(r.data)[s];
+        case DRAKEN_INT16: return static_cast<const int16_t*>(r.data)[s];
+        case DRAKEN_INT32: return static_cast<const int32_t*>(r.data)[s];
+        case DRAKEN_INT64: return static_cast<const int64_t*>(r.data)[s];
+        default: return INT64_MIN;
+    }
+}
+bool binop_equal(const VecResult& r, const int64_t* exp, uint32_t n, DrakenType tag) {
+    if (is_error(r) || r.length != n || r.type != tag) return false;
+    for (uint32_t i = 0; i < n; ++i) if (binop_read(r, i) != exp[i]) return false;
+    return true;
+}
+bool binop_row_null(const VecResult& r, uint32_t i) {
+    if (r.validity == nullptr) return false;
+    return ((r.validity[i >> 3] >> (i & 7u)) & 1u) == 0u;
 }
 
 bool vectors_equal_int64(const VecResult& result, const int64_t* expected, uint32_t length) {
@@ -152,13 +245,19 @@ void test_draken_cast_bool_to_float64() { uint8_t d[] = {0, 1, 1}; double e[] = 
 void test_draken_cast_to_float64() { int64_t d[] = {1, 2, 3}; double e[] = {1.0, 2.0, 3.0}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_to_float64(nullptr, v); assert(!is_error(r) && vectors_equal_float64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
 void test_draken_cast_to_int64() { double d[] = {1.5, 2.7, 3.2}; int64_t e[] = {1, 2, 3}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_to_int64(nullptr, v); assert(!is_error(r) && vectors_equal_int64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
 void test_draken_cast_to_bool() { int64_t d[] = {0, 1, 5}; uint8_t e[] = {0, 1, 1}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_to_bool(nullptr, v); assert(!is_error(r) && vectors_equal_bool(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
-void test_draken_cast_identity() { double d[] = {1.5, 2.5, 3.5}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_identity(nullptr, v); assert(!is_error(r)); free_vector(v); draken_free(r.data); }
+// draken_cast_identity returns a BORROWED view of the input (result.data == v->data,
+// owns_selection=false) — the caller wraps it; it does NOT own the buffers. So only
+// free_vector(v) frees them; a separate draken_free(r.data) would double-free (aliases
+// v->data). The double free was masked while mimalloc was linked; the system allocator
+// aborts on it.
+void test_draken_cast_identity() { double d[] = {1.5, 2.5, 3.5}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_identity(nullptr, v); assert(!is_error(r) && r.data == v->data); free_vector(v); }
 
 // Phase 9c: string-output casts are now REAL — assert VARCHAR result, free block.
 void test_draken_cast_int64_to_string() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); VecResult r = draken_cast_int64_to_string(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1); free_vector(v); draken_free(r.data); }
 void test_draken_cast_int64_to_timestamp() { int64_t d[] = {1000000}; DrakenVector* v = create_int64_vector(d, 1); VecResult r = draken_cast_int64_to_timestamp(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_TIMESTAMP64 && r.ts_unit == 2); free_vector(v); draken_free(r.data); draken_free(r.validity); }
 void test_draken_cast_bool_to_string() { uint8_t d[] = {0}; DrakenVector* v = create_bool_vector(d, 1); VecResult r = draken_cast_bool_to_string(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1); free_vector(v); draken_free(r.data); }
-void test_draken_cast_float64_to_string() { double d[] = {1.5}; DrakenVector* v = create_float64_vector(d, 1); VecResult r = draken_cast_float64_to_string(nullptr, v); assert(is_error(r)); free_vector(v); }
+// Phase 9c: float64→string is now REAL (Ryu) — assert VARCHAR result, free block.
+void test_draken_cast_float64_to_string() { double d[] = {1.5}; DrakenVector* v = create_float64_vector(d, 1); VecResult r = draken_cast_float64_to_string(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1); free_vector(v); draken_free(r.data); }
 void test_draken_cast_string_to_int64() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_int64(nullptr, v); free(v); }
 
 void test_draken_cast_string_to_bool() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_bool(nullptr, v); free(v); }
@@ -271,11 +370,414 @@ void test_arith_result_is_identity_shaped() {
     free_vector(L); free_vector(R); draken_free(res.data);
 }
 
+// P9.0 registry honesty: the kernel registry must contain ONLY real, nogil,
+// byte-identical kernels. A registered stub is a trap — the binder marks it
+// BC_INSTR_C_NATIVE and the executor dispatches an error sentinel. This guards
+// against re-adding the stubs removed in P9.0, and confirms the real kernels stay.
+void test_registry_honesty() {
+    kernel_fn_t fn = nullptr; void* ctx = nullptr;
+    // Removed in P9.0 — must NOT be registered until implemented real:
+    const char* removed_stubs[] = {
+        "draken_bitwise_or", "draken_bitwise_and", "draken_bitwise_xor",
+        "draken_bitwise_shift_left", "draken_bitwise_shift_right",
+        "draken_string_concat", "draken_ip_in_cidr",
+        "draken_temporal_interval_op", "draken_date_minus_date",
+        "draken_interval_interval_op",
+        "draken_cast_date32_to_timestamp", "draken_cast_timestamp_to_date32",
+    };
+    for (const char* name : removed_stubs) {
+        fn = nullptr; ctx = nullptr;
+        assert(!kernel_registry_lookup(name, &fn, &ctx)
+               && "P9.0: stub kernel must not be registered");
+    }
+    // Real kernels must remain reachable by name:
+    const char* real_kernels[] = {
+        "draken_add", "draken_subtract", "draken_multiply", "draken_divide",
+        "draken_modulo", "draken_binary_arith",
+        "draken_cast_int64_to_float64", "draken_cast_int64_to_string",
+        "draken_cast_float64_to_string", "draken_cast_string_to_float64",
+    };
+    for (const char* name : real_kernels) {
+        fn = nullptr; ctx = nullptr;
+        assert(kernel_registry_lookup(name, &fn, &ctx) && fn != nullptr
+               && "P9.0: real kernel must stay registered");
+    }
+    // NOTE: extraction kernels (draken_map_access_string / _array_map_access /
+    // _json_extract / _pointer_extract) are KNOWN stubs intentionally still
+    // registered (binder requires them; executor ignores kernel_fn for BC_EXTRACTION).
+    // They are not asserted here — pending the P9 extraction-flip decision.
+}
+
+// P9.1a — unified binop dispatch (draken_binop), integer arithmetic core.
+// Verifies D.6 widen-to-next-power result types, proven div/mod-by-zero→0,
+// per-row null propagation, all three vector shapes, and that not-yet-covered
+// combinations fail loud (no silent fallback). NOT wired into the executor.
+void test_draken_binop_int_arith() {
+    binary_op_ctx c_plus{1}, c_minus{2}, c_mul{3}, c_div{4}, c_mod{5}, c_idiv{6};
+
+    // int8 + int8 → int16 (D.6)
+    { int8_t l[]={10,20,30}, r[]={1,2,3}; int64_t e[]={11,22,33};
+      auto* lv=create_int8_vector(l,3); auto* rv=create_int8_vector(r,3);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(binop_equal(res,e,3,DRAKEN_INT16));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int16 * int16 → int32 (D.6)
+    { int16_t l[]={100,200}, r[]={3,4}; int64_t e[]={300,800};
+      auto* lv=create_int16_vector(l,2); auto* rv=create_int16_vector(r,2);
+      VecResult res=draken_binop(&c_mul,lv,rv);
+      assert(binop_equal(res,e,2,DRAKEN_INT32));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int32 - int32 → int64 (D.6)
+    { int32_t l[]={5,9}, r[]={2,3}; int64_t e[]={3,6};
+      auto* lv=create_int32_vector(l,2); auto* rv=create_int32_vector(r,2);
+      VecResult res=draken_binop(&c_minus,lv,rv);
+      assert(binop_equal(res,e,2,DRAKEN_INT64));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int64 + int64 → int64
+    { int64_t l[]={1,2}, r[]={10,20}, e[]={11,22};
+      auto* lv=create_int64_vector(l,2); auto* rv=create_int64_vector(r,2);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(binop_equal(res,e,2,DRAKEN_INT64));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // cross-width int8 + int32 → int64 (wider rank wins → next-power)
+    { int8_t l[]={7}; int32_t r[]={100}; int64_t e[]={107};
+      auto* lv=create_int8_vector(l,1); auto* rv=create_int32_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(binop_equal(res,e,1,DRAKEN_INT64));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // INT_DIVIDE by zero → 0; MODULO by zero → 0 (int16/int16 → int32)
+    { int16_t l[]={10,10}, r[]={0,3}; int64_t ediv[]={0,3}, emod[]={0,1};
+      auto* lv=create_int16_vector(l,2); auto* rv=create_int16_vector(r,2);
+      VecResult rd=draken_binop(&c_idiv,lv,rv); assert(binop_equal(rd,ediv,2,DRAKEN_INT32));
+      VecResult rm=draken_binop(&c_mod ,lv,rv); assert(binop_equal(rm,emod,2,DRAKEN_INT32));
+      free_vector(lv); free_vector(rv);
+      draken_free(rd.data); draken_free(rd.validity); draken_free(rm.data); draken_free(rm.validity); }
+
+    // null propagation: int8 + int8, left row 1 NULL → result row 1 NULL
+    { int8_t l[]={10,20,30}, r[]={1,2,3}; uint8_t lvalid[]={1,0,1};
+      auto* lv=create_int8_vector(l,3); set_validity(lv,lvalid,3);
+      auto* rv=create_int8_vector(r,3);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(res.type==DRAKEN_INT16 && res.length==3);
+      assert(!binop_row_null(res,0) && binop_row_null(res,1) && !binop_row_null(res,2));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // constant shape: int64 constant(5) + int64 → broadcast
+    { int64_t r[]={1,2,3}, e[]={6,7,8};
+      auto* lv=create_int64_constant_vector(5,3); auto* rv=create_int64_vector(r,3);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(binop_equal(res,e,3,DRAKEN_INT64));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // dict shape: int64 dict {values=[100,200], codes=[0,1,0]} + constant(1)
+    { int64_t vals[]={100,200}; uint32_t codes[]={0,1,0}; int64_t e[]={101,201,101};
+      auto* lv=create_int64_dict_vector(vals,2,codes,3); auto* rv=create_int64_constant_vector(1,3);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(binop_equal(res,e,3,DRAKEN_INT64));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // still-deferred → loud error (no silent fallback): string-concat op (7) on ints.
+    { binary_op_ctx c_concat{7}; int64_t l[]={6}, r[]={2};
+      auto* lv=create_int64_vector(l,1); auto* rv=create_int64_vector(r,1);
+      VecResult res=draken_binop(&c_concat,lv,rv); assert(is_error(res));
+      free_vector(lv); free_vector(rv); }
+    // (true DIVIDE, float, and bitwise are now COVERED — see the float/bitwise tests.)
+}
+
+// P9.1a-rest — draken_binop float paths: TRUE DIVIDE (any numeric → FLOAT64,
+// IEEE x/0 → ±inf, matching DuckDB) and non-divide arithmetic with a FLOAT64
+// operand → FLOAT64. FLOAT32-without-FLOAT64 stays deferred (loud error).
+static double f64_at(const VecResult& r, uint32_t i) {
+    return static_cast<const double*>(r.data)[r.selection[i]];
+}
+static float f32_at(const VecResult& r, uint32_t i) {
+    return static_cast<const float*>(r.data)[r.selection[i]];
+}
+void test_draken_binop_float() {
+    binary_op_ctx c_plus{1}, c_minus{2}, c_mul{3}, c_div{4}, c_mod{5};
+
+    // int64 / int64 → FLOAT64 (true division: 7/2 = 3.5)
+    { int64_t l[]={7,9}, r[]={2,4}; double e[]={3.5,2.25};
+      auto* lv=create_int64_vector(l,2); auto* rv=create_int64_vector(r,2);
+      VecResult res=draken_binop(&c_div,lv,rv);
+      assert(vectors_equal_float64(res,e,2));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int8 / int8 → FLOAT64 (3/2 = 1.5) — fixes the live narrow-int divide bug
+    { int8_t l[]={3}, r[]={2}; double e[]={1.5};
+      auto* lv=create_int8_vector(l,1); auto* rv=create_int8_vector(r,1);
+      VecResult res=draken_binop(&c_div,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // divide by zero → +inf (IEEE, matches DuckDB)
+    { int64_t l[]={7}, r[]={0};
+      auto* lv=create_int64_vector(l,1); auto* rv=create_int64_vector(r,1);
+      VecResult res=draken_binop(&c_div,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_FLOAT64 && std::isinf(f64_at(res,0)) && f64_at(res,0) > 0);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // float64 + float64 → FLOAT64
+    { double l[]={1.5,2.5}, r[]={0.25,0.5}, e[]={1.75,3.0};
+      auto* lv=create_float64_vector(l,2); auto* rv=create_float64_vector(r,2);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(vectors_equal_float64(res,e,2));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int64 + float64 → FLOAT64 (mixed promotion)
+    { int64_t l[]={3}; double r[]={1.5}, e[]={4.5};
+      auto* lv=create_int64_vector(l,1); auto* rv=create_float64_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // float64 * int8 → FLOAT64
+    { double l[]={2.5}; int8_t r[]={3}; double e[]={7.5};
+      auto* lv=create_float64_vector(l,1); auto* rv=create_int8_vector(r,1);
+      VecResult res=draken_binop(&c_mul,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // float64 % float64 → FLOAT64 (fmod: 7.5 % 2.0 = 1.5)
+    { double l[]={7.5}, r[]={2.0}, e[]={1.5};
+      auto* lv=create_float64_vector(l,1); auto* rv=create_float64_vector(r,1);
+      VecResult res=draken_binop(&c_mod,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // null propagation in the float path: float64 / float64, right row 1 NULL
+    { double l[]={6.0,8.0}, r[]={2.0,4.0}; uint8_t rvalid[]={1,0};
+      auto* lv=create_float64_vector(l,2); auto* rv=create_float64_vector(r,2); set_validity(rv,rvalid,2);
+      VecResult res=draken_binop(&c_div,lv,rv);
+      assert(res.type==DRAKEN_FLOAT64 && !binop_row_null(res,0) && binop_row_null(res,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // constant shape: float64 constant(2.0) * int64 → FLOAT64 broadcast
+    { int64_t r[]={1,2,3}; double e[]={2.0,4.0,6.0};
+      auto* lv=create_int64_constant_vector(0,3); /* placeholder, replaced below */
+      free_vector(lv);
+      // build a FLOAT64 constant by hand
+      auto* fv=static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+      auto* fd=static_cast<double*>(malloc(sizeof(double))); fd[0]=2.0;
+      auto* fsel=static_cast<uint32_t*>(malloc(3*sizeof(uint32_t))); for(int i=0;i<3;++i) fsel[i]=0;
+      fv->data=fd; fv->selection=fsel; fv->data_length=1; fv->length=3; fv->validity=nullptr; fv->type=DRAKEN_FLOAT64; fv->flags=0;
+      auto* rv=create_int64_vector(r,3);
+      VecResult res=draken_binop(&c_mul,fv,rv);
+      assert(vectors_equal_float64(res,e,3));
+      free_vector(fv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // P9.1a-rest-2 — FLOAT32-preserving non-divide (DuckDB: FLOAT+FLOAT→FLOAT,
+    // int+FLOAT→FLOAT, single precision; only a DOUBLE operand promotes).
+
+    // float32 + float32 → FLOAT32
+    { float l[]={1.5f}, r[]={2.5f};
+      auto* lv=create_float32_vector(l,1); auto* rv=create_float32_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_FLOAT32 && f32_at(res,0)==4.0f);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int8 + float32 → FLOAT32
+    { int8_t l[]={3}; float r[]={1.5f};
+      auto* lv=create_int8_vector(l,1); auto* rv=create_float32_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_FLOAT32 && f32_at(res,0)==4.5f);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int64 + float32 at SINGLE precision: 16777217 rounds to its float32 rep (16777216)
+    { int64_t l[]={16777217}; float r[]={0.0f};
+      auto* lv=create_int64_vector(l,1); auto* rv=create_float32_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_FLOAT32 && f32_at(res,0)==16777216.0f);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // float32 % float32 → FLOAT32 (7.5 % 2.0 = 1.5)
+    { float l[]={7.5f}, r[]={2.0f};
+      auto* lv=create_float32_vector(l,1); auto* rv=create_float32_vector(r,1);
+      VecResult res=draken_binop(&c_mod,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_FLOAT32 && f32_at(res,0)==1.5f);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // float32 + float64 → FLOAT64 (any DOUBLE operand promotes)
+    { float l[]={1.5f}; double r[]={2.5}, e[]={4.0};
+      auto* lv=create_float32_vector(l,1); auto* rv=create_float64_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // null propagation in the float32 path
+    { float l[]={1.0f,2.0f}, r[]={10.0f,20.0f}; uint8_t lvalid[]={0,1};
+      auto* lv=create_float32_vector(l,2); set_validity(lv,lvalid,2); auto* rv=create_float32_vector(r,2);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(res.type==DRAKEN_FLOAT32 && binop_row_null(res,0) && !binop_row_null(res,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // still-deferred → loud error: DECIMAL operand (P9.1b)
+    { int64_t r[]={2}; auto* rv=create_int64_vector(r,1);
+      auto* lv=static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+      auto* ld=static_cast<int64_t*>(malloc(sizeof(int64_t))); ld[0]=5;
+      auto* lsel=static_cast<uint32_t*>(malloc(sizeof(uint32_t))); lsel[0]=0;
+      lv->data=ld; lv->selection=lsel; lv->data_length=1; lv->length=1; lv->validity=nullptr;
+      lv->type=DRAKEN_DECIMAL; lv->flags=0;
+      VecResult res=draken_binop(&c_plus,lv,rv); assert(is_error(res));
+      free_vector(lv); free_vector(rv); }
+}
+
+// P9.1b-1 — draken_binop DECIMAL×DECIMAL (int64-backed), scale-aware via dec_*.
+// Scales come through ctx (left_scale, right_scale, result_scale). PostgreSQL
+// scale rules (E.32): add/sub → max(sa,sb); mul → sa+sb; div → result_scale;
+// mod → sa. Values hand-computed; result type must be DRAKEN_DECIMAL.
+static int64_t dec_at(const VecResult& r, uint32_t i) {
+    return static_cast<const int64_t*>(r.data)[r.selection[i]];
+}
+static __int128 dec128_at(const VecResult& r, uint32_t i) {
+    return static_cast<const __int128*>(r.data)[r.selection[i]];
+}
+void test_draken_binop_decimal() {
+    // a = [1.50, 3.00] scale 2 (150,300);  b = [2.5, 1.0] scale 1 (25,10)
+    int64_t a[]={150,300}, b[]={25,10};
+
+    // ADD (result scale 2): 1.50+2.50=4.00 → 400 ; 3.00+1.00=4.00 → 400
+    { binary_op_ctx c{1,2,1,2};
+      auto* lv=create_decimal_vector(a,2); auto* rv=create_decimal_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL && res.length==2
+             && dec_at(res,0)==400 && dec_at(res,1)==400);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // SUB (result scale 2): 1.50-2.50=-1.00 → -100 ; 3.00-1.00=2.00 → 200
+    { binary_op_ctx c{2,2,1,2};
+      auto* lv=create_decimal_vector(a,2); auto* rv=create_decimal_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL && dec_at(res,0)==-100 && dec_at(res,1)==200);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // MUL (result scale sa+sb=3): 1.50*2.5=3.750 → 3750 ; 3.00*1.0=3.000 → 3000
+    { binary_op_ctx c{3,2,1,3};
+      auto* lv=create_decimal_vector(a,2); auto* rv=create_decimal_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL && dec_at(res,0)==3750 && dec_at(res,1)==3000);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // DIV (result scale max(sa+6,6)=8): 1.50/2.5=0.6 → 60000000 ; 3.00/1.0=3.0 → 300000000
+    { binary_op_ctx c{4,2,1,8};
+      auto* lv=create_decimal_vector(a,2); auto* rv=create_decimal_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL
+             && dec_at(res,0)==60000000 && dec_at(res,1)==300000000);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // MOD (result scale sa=2): 1.50 % 2.50 = 1.50 → 150 ; 3.00 % 1.00 = 0.00 → 0
+    { binary_op_ctx c{5,2,1,2};
+      auto* lv=create_decimal_vector(a,2); auto* rv=create_decimal_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL && dec_at(res,0)==150 && dec_at(res,1)==0);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // --- DECIMAL128 × DECIMAL128 (int128-backed), via dec128_* ---
+    // ADD scale2: [400,400]; MUL scale3: [3750,3000]; DIV scale8: [60000000,300000000]
+    { binary_op_ctx c{1,2,1,2};
+      auto* lv=create_decimal128_vector(a,2); auto* rv=create_decimal128_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL128 && dec128_at(res,0)==400 && dec128_at(res,1)==400);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+    { binary_op_ctx c{3,2,1,3};
+      auto* lv=create_decimal128_vector(a,2); auto* rv=create_decimal128_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL128 && dec128_at(res,0)==3750 && dec128_at(res,1)==3000);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+    { binary_op_ctx c{4,2,1,8};
+      auto* lv=create_decimal128_vector(a,2); auto* rv=create_decimal128_vector(b,2);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL128
+             && dec128_at(res,0)==(__int128)60000000 && dec128_at(res,1)==(__int128)300000000);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // --- DECIMAL × FLOAT → FLOAT64 (decimal promoted via to_float64 = unscaled/10^scale) ---
+    // DECIMAL 1.50 (150, scale2) + FLOAT64 0.5 → 2.0 ; DIV 1.50/0.5 → 3.0
+    { binary_op_ctx c{1,2,0,0}; int64_t da[]={150}; double fb[]={0.5}; double e[]={2.0};
+      auto* lv=create_decimal_vector(da,1); auto* rv=create_float64_vector(fb,1);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+    { binary_op_ctx c{4,2,0,0}; int64_t da[]={150}; double fb[]={0.5}; double e[]={3.0};
+      auto* lv=create_decimal_vector(da,1); auto* rv=create_float64_vector(fb,1);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+    // FLOAT64 × DECIMAL128 (reversed order, scale on right): 0.5 * 1.50 → 0.75
+    { binary_op_ctx c{3,0,2,0}; double fa[]={0.5}; int64_t db[]={150}; double e[]={0.75};
+      auto* lv=create_float64_vector(fa,1); auto* rv=create_decimal128_vector(db,1);
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(vectors_equal_float64(res,e,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // still-deferred → loud error: DECIMAL × INTEGER (P9.1b-rest later)
+    { binary_op_ctx c{1,2,0,2}; int64_t r[]={5};
+      auto* lv=create_decimal_vector(a,1); auto* rv=create_int64_vector(r,1);
+      VecResult res=draken_binop(&c,lv,rv); assert(is_error(res));
+      free_vector(lv); free_vector(rv); }
+}
+
+// P9.1c — draken_binop bitwise OR/AND/XOR/SHL/SHR (int_bitwise; result = input type,
+// both operands same type; mismatch / out-of-range shift → loud error).
+void test_draken_binop_bitwise() {
+    binary_op_ctx c_or{8}, c_and{9}, c_xor{10}, c_shl{11}, c_shr{12};
+
+    // int32 5 | 3 = 7 ; 5 & 3 = 1 ; 5 ^ 3 = 6  → INT32
+    { int32_t l[]={5}, r[]={3}; int64_t eo[]={7}, ea[]={1}, ex[]={6};
+      auto* lv=create_int32_vector(l,1); auto* rv=create_int32_vector(r,1);
+      VecResult ro=draken_binop(&c_or,lv,rv);  assert(binop_equal(ro,eo,1,DRAKEN_INT32));
+      VecResult ra=draken_binop(&c_and,lv,rv); assert(binop_equal(ra,ea,1,DRAKEN_INT32));
+      VecResult rx=draken_binop(&c_xor,lv,rv); assert(binop_equal(rx,ex,1,DRAKEN_INT32));
+      free_vector(lv); free_vector(rv);
+      draken_free(ro.data); draken_free(ro.validity); draken_free(ra.data); draken_free(ra.validity);
+      draken_free(rx.data); draken_free(rx.validity); }
+
+    // int8 preserves width: 7 & 3 = 3 → INT8
+    { int8_t l[]={7}, r[]={3}; int64_t e[]={3};
+      auto* lv=create_int8_vector(l,1); auto* rv=create_int8_vector(r,1);
+      VecResult res=draken_binop(&c_and,lv,rv);
+      assert(binop_equal(res,e,1,DRAKEN_INT8));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // int16 shifts: 1 << 4 = 16 ; 64 >> 2 = 16 → INT16
+    { int16_t l[]={1,64}, r[]={4,2}; int64_t esl[]={16,256}, esr[]={0,16};
+      auto* lv=create_int16_vector(l,2); auto* rv=create_int16_vector(r,2);
+      VecResult rl=draken_binop(&c_shl,lv,rv); assert(binop_equal(rl,esl,2,DRAKEN_INT16));
+      VecResult rr=draken_binop(&c_shr,lv,rv); assert(binop_equal(rr,esr,2,DRAKEN_INT16));
+      free_vector(lv); free_vector(rv);
+      draken_free(rl.data); draken_free(rl.validity); draken_free(rr.data); draken_free(rr.validity); }
+
+    // null propagation: int32 OR, left row 0 NULL
+    { int32_t l[]={5,6}, r[]={3,1}; uint8_t lvalid[]={0,1};
+      auto* lv=create_int32_vector(l,2); set_validity(lv,lvalid,2); auto* rv=create_int32_vector(r,2);
+      VecResult res=draken_binop(&c_or,lv,rv);
+      assert(res.type==DRAKEN_INT32 && binop_row_null(res,0) && !binop_row_null(res,1));
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
+
+    // type mismatch → loud error (int8 & int32)
+    { int8_t l[]={5}; int32_t r[]={3};
+      auto* lv=create_int8_vector(l,1); auto* rv=create_int32_vector(r,1);
+      VecResult res=draken_binop(&c_and,lv,rv); assert(is_error(res));
+      free_vector(lv); free_vector(rv); }
+
+    // out-of-range shift → loud error (int8 1 << 100)
+    { int8_t l[]={1}, r[]={100};
+      auto* lv=create_int8_vector(l,1); auto* rv=create_int8_vector(r,1);
+      VecResult res=draken_binop(&c_shl,lv,rv); assert(is_error(res));
+      free_vector(lv); free_vector(rv); }
+}
+
 void test_error_handling() { draken_error_message_clear(); assert(!draken_has_error()); VecResult s = draken_error_sentinel("Test"); assert(is_error(s) && draken_has_error()); draken_error_message_clear(); }
 void test_context_passing() { binary_op_ctx ctx{1}; int64_t l[] = {1}, r[] = {10}, e[] = {11}; DrakenVector* lv = create_int64_vector(l, 1); DrakenVector* rv = create_int64_vector(r, 1); VecResult res = draken_binary_arith(&ctx, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 1)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 
 int main() {
-    std::cout << "=" << std::string(70, '=') << "\nC ABI Parity Tests for Phase 9a — All 48 Registered Kernels\n" << std::string(70, '=') << "\n\n";
+    std::cout << "=" << std::string(70, '=') << "\nC ABI Parity Tests — kernels + P9.1a binop dispatch\n" << std::string(70, '=') << "\n\n";
 
     const struct { const char* name; void (*fn)(); } tests[] = {
         {"draken_add", test_draken_add}, {"draken_subtract", test_draken_subtract}, {"draken_multiply", test_draken_multiply},
@@ -301,7 +803,12 @@ int main() {
         {"draken_ip_in_cidr", test_draken_ip_in_cidr},
         {"draken_map_access_string", test_draken_map_access_string}, {"draken_array_map_access", test_draken_array_map_access},
         {"draken_json_extract", test_draken_json_extract}, {"draken_pointer_extract", test_draken_pointer_extract},
-        {"error_handling", test_error_handling}, {"context_passing", test_context_passing}
+        {"error_handling", test_error_handling}, {"context_passing", test_context_passing},
+        {"registry_honesty", test_registry_honesty},
+        {"draken_binop_int_arith", test_draken_binop_int_arith},
+        {"draken_binop_float", test_draken_binop_float},
+        {"draken_binop_decimal", test_draken_binop_decimal},
+        {"draken_binop_bitwise", test_draken_binop_bitwise}
     };
 
     // Shape-parity tests (WP-03) — exercise existing kernels with dict/constant
@@ -319,8 +826,14 @@ int main() {
 
     const int TOTAL = sizeof(tests) / sizeof(tests[0]);
     const int SHAPE_TOTAL = sizeof(shape_tests) / sizeof(shape_tests[0]);
-    const int KERNELS = TOTAL - 2;
-    const int EXPECTED_KERNELS = 48;
+    // Coverage tripwire: catch a kernel test added/removed without updating the
+    // count. Exclude the non-kernel meta tests (error_handling, context_passing,
+    // registry_honesty, draken_binop_int_arith, draken_binop_float) so it tracks
+    // registered-kernel tests.
+    const int META_TESTS = 7;  // error_handling, context_passing, registry_honesty,
+                               // draken_binop_int_arith / _float / _decimal / _bitwise
+    const int KERNELS = TOTAL - META_TESTS;
+    const int EXPECTED_KERNELS = 47;
     int passed = 0, failed = 0;
 
     for (int i = 0; i < TOTAL; ++i) {

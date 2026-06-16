@@ -35,6 +35,7 @@
 #include "decode.hpp"
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
+#include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
 
 namespace rugo {
 
@@ -65,17 +66,30 @@ struct PoolSink {
 //                 any compact→positional scatter (WP-6b-2).
 enum DirectKind {
     DK_POOL = 0, DK_INT64 = 1, DK_FLOAT32 = 2, DK_FLOAT64 = 3,
-    DK_BOOL = 4, DK_DECIMAL128 = 5
+    DK_BOOL = 4, DK_DECIMAL128 = 5,
+    // Stage 4b — variable-width direct path. `data` is a draken_alloc'd
+    // DrakenStringSlot array; `arena` holds the long-string bytes. DK_VARCHAR is
+    // one slot per row (plain). DK_VARCHAR_DICT (reserved, not yet emitted) would
+    // carry `data_length` unique-value slots + a `codes` selection of `length`.
+    DK_VARCHAR = 6, DK_VARCHAR_DICT = 7
 };
 
 struct ColumnOut {
     int      direct_kind = DK_POOL;  // DirectKind
-    void*    data = nullptr;         // direct: draken_alloc'd positional values
+    void*    data = nullptr;         // direct: draken_alloc'd positional values / string slots
     uint8_t* validity = nullptr;     // direct: draken_alloc'd null bitmap, or NULL
-    uint32_t length = 0;             // direct: row count
+    uint32_t length = 0;             // direct: logical row count
     int64_t  ref_id = -1;            // pool path: MemoryPool ref
     uint8_t  dec_precision = 0;      // DK_DECIMAL128: descriptor
     uint8_t  dec_scale = 0;
+    // DK_VARCHAR* string buffers (draken_alloc'd). OWNERSHIP: the consumer hands
+    // these to draken_vector_own_string, which COPIES + frees them; so the
+    // consumer must `morsel_take_string` (null them) to stop this destructor from
+    // double-freeing. Any not taken (decode error / abandonment) are freed here.
+    void*    arena = nullptr;        // long-string byte arena
+    size_t   arena_len = 0;          // valid bytes in arena
+    void*    codes = nullptr;        // DK_VARCHAR_DICT: uint32 code per row
+    uint32_t data_length = 0;        // DK_VARCHAR_DICT: number of unique-value slots
 };
 
 // Owns the direct-path Draken buffers (data + validity) it carries: any not
@@ -105,6 +119,8 @@ struct MorselRef {
             for (auto& c : columns) {
                 if (c.data) free_fn(c.data);
                 if (c.validity) free_fn(c.validity);
+                if (c.arena) free_fn(c.arena);
+                if (c.codes) free_fn(c.codes);
             }
         }
     }
@@ -119,6 +135,18 @@ static inline void* morsel_take_direct(MorselRef& m, size_t i, uint8_t** out_val
     m.columns[i].data = nullptr;
     m.columns[i].validity = nullptr;
     return p;
+}
+
+// Take ownership of column i's variable-width string buffers (arena + dict codes),
+// nulling the slots so the destructor won't free them — REQUIRED for DK_VARCHAR*
+// columns because draken_vector_own_string frees the arena it is handed. Pairs
+// with morsel_take_direct (which takes the slots `data` + validity).
+static inline void morsel_take_string(MorselRef& m, size_t i,
+                                      void** out_arena, void** out_codes) {
+    *out_arena = m.columns[i].arena;
+    *out_codes = m.columns[i].codes;
+    m.columns[i].arena = nullptr;
+    m.columns[i].codes = nullptr;
 }
 
 // WP-6b: a fixed-width value array qualifies for the direct path if it is either
@@ -138,10 +166,17 @@ static inline bool _fixed_eligible(size_t vsize, uint32_t n, bool nullable) {
 // int-backed decimal stay on the IPC path) is applied separately by the caller.
 static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     if (!d.rep_levels.empty()) return DK_POOL;           // list
+    const std::string& t = d.type;
+    // Stage 4b: dict-encoded byte_array → direct DICT VARCHAR (before the generic
+    // dict→pool exclusion below, which still sends NUMERIC dicts to the pool).
+    // Requires the flat dict arena + a per-row code source, and not RLE.
+    if ((t == "string" || t == "byte_array") && !d.string_dict_lens.empty() &&
+        d.rle_str_lens.empty() &&
+        (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
+        return DK_VARCHAR_DICT;
     if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
     if (!d.rle_int64_values.empty() || !d.rle_float64_values.empty() ||
         !d.rle_str_lens.empty()) return DK_POOL;         // RLE skip-dense
-    const std::string& t = d.type;
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     if (!d.int128_values.empty() && _fixed_eligible(d.int128_values.size(), n, nullable))
@@ -151,7 +186,143 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     if (t == "float32" && _fixed_eligible(d.float32_values.size(), n, nullable)) return DK_FLOAT32;
     if (t == "float64" && _fixed_eligible(d.float64_values.size(), n, nullable)) return DK_FLOAT64;
     if (t == "boolean" && _fixed_eligible(d.boolean_values.size(), n, nullable)) return DK_BOOL;
+    // Stage 4b: plain (non-dict, non-RLE, non-list) byte_array → direct dense
+    // VARCHAR. string_values is one entry per row (incl null rows); only take the
+    // positional case so the per-row slot build below is exact.
+    if ((t == "string" || t == "byte_array") && d.string_values.size() == n)
+        return DK_VARCHAR;
     return DK_POOL;
+}
+
+// Build a positional DrakenStringSlot array (+ long-string arena + validity) for a
+// plain byte_array column, mirroring the Cython _build_string_plain EXACTLY: one
+// slot per row; strings > STR_INLINE_MAX live in the arena (hash from the bytes),
+// inline strings live in the slot; null rows get an init-null slot. string_values
+// has one entry per row. Allocates via `alloc`; frees what it took on failure.
+static inline bool build_direct_string_plain(const DecodedColumn& d,
+                                             void* (*alloc)(size_t), void (*freefn)(void*),
+                                             ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const bool nullable = !d.valid_bits.empty();
+    const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
+    const auto& vals = d.string_values;
+
+    // Pass 1: arena bytes (long, non-null strings only).
+    size_t total_arena = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) continue;
+        const size_t slen = (i < vals.size()) ? vals[i].size() : 0u;
+        if (slen > STR_INLINE_MAX) total_arena += slen;
+    }
+
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
+        alloc((n ? n : 1u) * sizeof(DrakenStringSlot)));
+    if (!slots) return false;
+    uint8_t* arena = static_cast<uint8_t*>(alloc(total_arena ? total_arena : 1u));
+    if (!arena) { freefn(slots); return false; }
+    uint8_t* validity = nullptr;
+    if (nullable) {
+        validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!validity) { freefn(arena); freefn(slots); return false; }
+        std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+    }
+
+    // Pass 2: fill arena + build slots.
+    uint32_t arena_pos = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        DrakenStringSlot* slot = &slots[i];
+        if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) {
+            str_init_null(slot);
+            continue;
+        }
+        const std::string& s = vals[i];
+        const uint8_t* sp = reinterpret_cast<const uint8_t*>(s.data());
+        const uint32_t slen = static_cast<uint32_t>(s.size());
+        if (slen > STR_INLINE_MAX) {
+            std::memcpy(arena + arena_pos, sp, slen);
+            draken_build_string_slot(slot, sp, slen, arena_pos);
+            arena_pos += slen;
+        } else {
+            draken_build_string_slot(slot, sp, slen, arena_pos);  // inline; offset ignored
+        }
+    }
+
+    out.data = slots;
+    out.validity = validity;
+    out.length = n;
+    out.arena = arena;
+    out.arena_len = arena_pos;
+    return true;
+}
+
+// Build the DICT-VARCHAR direct buffers for a dict-encoded byte_array column,
+// mirroring _build_string_dict (consumer) + serialize_string_dict (source): a
+// compact value array of `dict_size` unique slots over a verbatim copy of
+// string_dict_arena (slot k references offset string_dict_offsets[k], length =
+// the offset delta — matching the deserializer), plus a per-row uint32 `codes`
+// selection from dict_codes_array (packed code_width) or dict_indices (sparse,
+// null rows → code 0). The result is data_length < length (dict shape) but
+// accessed through the same uniform value[codes[i]] path.
+static inline bool build_direct_string_dict(const DecodedColumn& d,
+                                            void* (*alloc)(size_t), void (*freefn)(void*),
+                                            ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const uint32_t dict_size = static_cast<uint32_t>(d.string_dict_lens.size());
+    const bool nullable = !d.valid_bits.empty();
+    const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
+    const size_t arena_len = d.string_dict_arena.size();
+
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
+        alloc((dict_size ? dict_size : 1u) * sizeof(DrakenStringSlot)));
+    if (!slots) return false;
+    uint8_t* arena = static_cast<uint8_t*>(alloc(arena_len ? arena_len : 1u));
+    if (!arena) { freefn(slots); return false; }
+    if (arena_len) std::memcpy(arena, d.string_dict_arena.data(), arena_len);
+    for (uint32_t k = 0; k < dict_size; ++k) {
+        const uint32_t s_off = d.string_dict_offsets[k];
+        const uint32_t slen = (k + 1u < dict_size)
+            ? (d.string_dict_offsets[k + 1u] - s_off)
+            : (static_cast<uint32_t>(arena_len) - s_off);
+        draken_build_string_slot(&slots[k], arena + s_off, slen, s_off);
+    }
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) { freefn(arena); freefn(slots); return false; }
+    const uint8_t cw = d.code_width;
+    if (!d.dict_codes_array.empty()) {
+        const uint8_t* ca = d.dict_codes_array.data();
+        for (uint32_t row = 0; row < n; ++row) {
+            uint32_t c;
+            if (cw == 1) { c = ca[row]; }
+            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
+            else { std::memcpy(&c, ca + row * 4, 4); }
+            codes[row] = c;
+        }
+    } else {
+        int32_t di = 0;
+        for (uint32_t row = 0; row < n; ++row) {
+            if (nullable && !((nb[row >> 3] >> (row & 7)) & 1))
+                codes[row] = 0u;
+            else
+                codes[row] = static_cast<uint32_t>(d.dict_indices[di++]);
+        }
+    }
+
+    uint8_t* validity = nullptr;
+    if (nullable) {
+        validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!validity) { freefn(codes); freefn(arena); freefn(slots); return false; }
+        std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+    }
+
+    out.data = slots;
+    out.arena = arena;
+    out.arena_len = arena_len;
+    out.codes = codes;
+    out.data_length = dict_size;
+    out.validity = validity;
+    out.length = n;
+    return true;
 }
 
 // Build a positional Draken buffer (+ validity) for a byte-granular fixed-width
@@ -586,29 +757,50 @@ class ParquetIOPipeline {
                 }
 
                 ColumnOut cout;
-                // Direct-path logical gate: plain numerics + boolean + int128
-                // DECIMAL128 may go direct. DATE / TIMESTAMP and INT-BACKED
-                // DECIMAL carry distinct logical_types ("date32[day]",
-                // "timestamp[ms,UTC]", "decimal(p,s)" over int32/int64) and are
-                // reinterpreted downstream (_coerce_logical_types) from the pool
-                // representation — so they stay on the IPC path. int128-backed
-                // DECIMAL128 is already typed via its (precision,scale)
-                // descriptor and can go direct.
+                // Direct-path logical gate (Stage 4a). Plain numerics + boolean +
+                // int128 DECIMAL128 go direct as their physical kind. DATE and
+                // TIMESTAMP decode to a physical int32/int64 stream and are
+                // direct-eligible as DK_INT64; the consumer's schema-driven
+                // coercion (_coerce_vectors / _coerce_logical_types) reinterprets
+                // that INT64 vector to date32/timestamp identically to the pool
+                // representation (verified: make q / tpch / clickbench).
+                //
+                // INT-BACKED DECIMAL (precision<=18) deliberately stays on the
+                // pool path: the pool serializer emits a representation the
+                // deserializer turns into a directly-usable DECIMAL, which a raw
+                // direct INT64 + downstream reinterpret does NOT reproduce
+                // (tpch Q01 dec_mul type error — the historic decimal trap).
+                //
+                // Stage 4b: PLAIN byte_array → direct dense VARCHAR. Dict/RLE/list
+                // strings stay pool (direct_kind_for returns DK_POOL for them); a
+                // dense VARCHAR is concat/CASE-compatible with a pool dict VARCHAR
+                // (§11 uniform access — proven by test_string_dense_dict_concat_compat).
                 const std::string& lt = col_stats.logical_type;
                 const bool safe_logical =
                     lt.empty() || lt == "int64" || lt == "int32" ||
                     lt == "float64" || lt == "float32" || lt == "boolean" ||
+                    lt.rfind("date", 0) == 0 || lt.rfind("timestamp", 0) == 0 ||
                     (lt.rfind("decimal", 0) == 0 && !decoded.int128_values.empty());
-                DirectKind dk = (pool_sink_.draken_alloc && safe_logical)
-                    ? direct_kind_for(decoded) : DK_POOL;
+                DirectKind dk = pool_sink_.draken_alloc ? direct_kind_for(decoded) : DK_POOL;
+                // The logical-type gate applies only to FIXED-WIDTH direct (date/
+                // timestamp OK; int-backed decimal stays pool). DK_VARCHAR needs no
+                // reinterpret, so it bypasses the gate.
+                if (dk != DK_POOL && dk != DK_VARCHAR && dk != DK_VARCHAR_DICT && !safe_logical)
+                    dk = DK_POOL;
 
                 if (dk != DK_POOL) {
                     // Direct path: the worker builds the positional Draken
                     // buffer (+ validity), doing any compact→positional scatter
                     // itself; the consumer wraps it with zero copy.
-                    bool ok = (dk == DK_BOOL)
-                        ? build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout)
-                        : build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    bool ok;
+                    if (dk == DK_BOOL)
+                        ok = build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_VARCHAR)
+                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_VARCHAR_DICT)
+                        ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else
+                        ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     if (!ok) {
                         result.success = false;
                         result.error = "draken_alloc failed for column: " + col_stats.name;

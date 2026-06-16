@@ -143,7 +143,7 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	$(call print_blue,"Building and running C ABI parity test...")
 	@mkdir -p /tmp/opteryx-tests
 	@cd /tmp/opteryx-tests && \
-	  clang++ -std=c++17 -O3 \
+	  clang++ -std=c++20 -O3 \
 	    -I$(CURDIR) \
 	    -I$(CURDIR)/src/cpp \
 	    -I$(CURDIR)/draken \
@@ -152,7 +152,9 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    -I$(CURDIR)/third_party/cyan4973 \
 	    -I$(CURDIR)/third_party/mabel/carchar \
 	    -I$(CURDIR)/third_party/mabel/parvi \
-	    -I$(CURDIR)/third_party/mimalloc/include \
+	    -I$(CURDIR)/third_party/fastfloat \
+	    -I$(CURDIR)/third_party/fastfloat/fast_float \
+	    -I$(CURDIR)/third_party/ulfjack/ryu \
 	    $(CURDIR)/draken/ops/kernels/c_abi_test.cpp \
 	    $(CURDIR)/draken/core/vector_alloc.cpp \
 	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
@@ -166,7 +168,9 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    $(CURDIR)/draken/ops/kernels/binary_op_arithmetic.cpp \
 	    $(CURDIR)/draken/ops/kernels/binary_op_other.cpp \
 	    $(CURDIR)/draken/ops/kernels/binary_op_temporal.cpp \
-	    $(CURDIR)/build/temp.mimalloc.o \
+	    $(CURDIR)/draken/ops/kernels/binop_dispatch.cpp \
+	    $(CURDIR)/third_party/ulfjack/ryu/d2fixed.c \
+	    $(CURDIR)/third_party/ulfjack/ryu/d2s.c \
 	    -o c_abi_test
 	@/tmp/opteryx-tests/c_abi_test
 	$(call print_green,"✓ C ABI parity test passed")

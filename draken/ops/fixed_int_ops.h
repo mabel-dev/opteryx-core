@@ -142,6 +142,84 @@ static inline VecResult fi_make_dense(T* data, uint8_t* validity, uint32_t n) {
 }
 
 // ===========================================================================
+// ARITHMETIC (D.6 widen-to-next-power) — int8/16/32/64 element-wise.
+//
+// P9.1 (unify binops onto the registry kernel_fn ABI). Reads every operand as
+// int64 (sign-extended through its declared width, via selection so all three
+// vector shapes work uniformly), applies the op with the proven i64 semantics
+// (div/mod by zero → 0, C truncation toward zero — matches int64_arithmetic.h),
+// and writes the D.6 result width: int8→int16, int16→int32, int32→int64; for
+// cross-width the wider operand's rank wins. Add/sub/mul cannot overflow the
+// widened result, so the downcast to the result width is lossless. Output is
+// dense; validity is the per-logical-row AND of the inputs.
+//
+// TRUE division (BOP_DIVIDE → float64) is NOT handled here — the dispatch routes
+// it to the float path. Covers PLUS/MINUS/MULTIPLY/MODULO/INT_DIVIDE only.
+// ===========================================================================
+
+// Sign-extend the i-th logical value of any signed-int vector to int64.
+static inline int64_t fi_read_i64(const DrakenVector& v, uint32_t i) {
+    const uint32_t p = v.selection[i];
+    switch (v.type) {
+        case DRAKEN_INT8:  return static_cast<const int8_t*>(v.data)[p];
+        case DRAKEN_INT16: return static_cast<const int16_t*>(v.data)[p];
+        case DRAKEN_INT32: return static_cast<const int32_t*>(v.data)[p];
+        case DRAKEN_INT64: return static_cast<const int64_t*>(v.data)[p];
+        default: throw std::invalid_argument("fi_read_i64: non-integer type");
+    }
+}
+
+// op codes match BCBinaryOpCode: 1=PLUS 2=MINUS 3=MULTIPLY 5=MODULO 6=INT_DIVIDE.
+static inline int64_t fi_apply_i64(int op, int64_t x, int64_t y) {
+    switch (op) {
+        case 1: return x + y;
+        case 2: return x - y;
+        case 3: return x * y;
+        case 5: return (y == 0) ? 0 : x % y;   // mod-by-zero → 0 (matches i64_mod)
+        case 6: return (y == 0) ? 0 : x / y;   // div-by-zero → 0 (matches i64_div)
+        default: throw std::invalid_argument("fi_apply_i64: unsupported op");
+    }
+}
+
+template<typename W, DrakenType WTAG>
+static inline VecResult fi_int_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
+    const uint32_t n = a.length;
+    W* dst = fi_alloc<W>(n);
+    for (uint32_t i = 0; i < n; ++i)
+        dst[i] = static_cast<W>(fi_apply_i64(op, fi_read_i64(a, i), fi_read_i64(b, i)));
+    return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+}
+
+// D.6 result tag = next-power of the wider operand width.
+static inline DrakenType fi_arith_result_tag(DrakenType ta, DrakenType tb) {
+    auto rank = [](DrakenType t) -> int {
+        switch (t) { case DRAKEN_INT8: return 0; case DRAKEN_INT16: return 1;
+                     case DRAKEN_INT32: return 2; case DRAKEN_INT64: return 3;
+                     default: return -1; }
+    };
+    const int r = rank(ta) > rank(tb) ? rank(ta) : rank(tb);
+    switch (r) {
+        case 0: return DRAKEN_INT16;  // int8  → int16
+        case 1: return DRAKEN_INT32;  // int16 → int32
+        case 2: return DRAKEN_INT64;  // int32 → int64
+        case 3: return DRAKEN_INT64;  // int64 → int64
+        default: throw std::invalid_argument("fi_arith_result_tag: non-integer operand");
+    }
+}
+
+// Integer arithmetic entry (PLUS/MINUS/MULTIPLY/MODULO/INT_DIVIDE), D.6 result width.
+static inline VecResult fi_int_arith(int op, const DrakenVector& a, const DrakenVector& b) {
+    if (a.length != b.length)
+        throw std::invalid_argument("fi_int_arith: length mismatch");
+    switch (fi_arith_result_tag(a.type, b.type)) {
+        case DRAKEN_INT16: return fi_int_arith_store<int16_t, DRAKEN_INT16>(op, a, b);
+        case DRAKEN_INT32: return fi_int_arith_store<int32_t, DRAKEN_INT32>(op, a, b);
+        case DRAKEN_INT64: return fi_int_arith_store<int64_t, DRAKEN_INT64>(op, a, b);
+        default: throw std::invalid_argument("fi_int_arith: bad result tag");
+    }
+}
+
+// ===========================================================================
 // HASH — sign-extend T → int64_t → uint64_t, then simd_hash_i64
 // ===========================================================================
 

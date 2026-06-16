@@ -40,8 +40,8 @@ from typing import Generator
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.connectors.parquet_io import fetch_columns
-from opteryx.connectors.parquet_io import iter_row_groups
-from opteryx.connectors.parquet_io.pool_reader import iter_pass2_row_groups_ipc
+from opteryx.connectors.parquet_io.pool_reader import open_ipc_source
+from opteryx.connectors.parquet_io.pool_reader import open_pass2_source
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -66,6 +66,16 @@ from opteryx.compiled.expression.compiled_expression import build_bytecode as _b
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
 from draken.vectors.vector cimport Vector as _DrakenShimVector
+
+# Native mutex for thread-safe concurrent pull (M4 / no-GIL target). Guards the
+# per-scan accounting committed in _single_pass_next. Held only over the
+# GIL-release-free commit (counters + _commit_morsel); morsel assembly and the
+# decode pull happen outside it, so N workers assemble in parallel.
+cdef extern from "<mutex>" namespace "std" nogil:
+    cppclass cpp_mutex "std::mutex":
+        cpp_mutex()
+        void lock()
+        void unlock()
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 from opteryx import config
@@ -488,6 +498,19 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     return result
 
 
+cdef enum:
+    # Scan mode chosen once by _ensure_scan_started.
+    #   _SCAN_SINGLE   — native single-pass state machine (next_morsel pulls
+    #                    one morsel per call from _rg_iter; zero outer generator).
+    #   _SCAN_LATMAT   — native two-pass late-materialization state machine.
+    #   _SCAN_FALLBACK — empty manifest; driven by the preserved read_morsels
+    #                    generator (single empty Morsel).
+    _SCAN_UNSET = 0
+    _SCAN_SINGLE = 1
+    _SCAN_FALLBACK = 2
+    _SCAN_LATMAT = 3
+
+
 cdef class ParquetReadNode(ReaderNode):
     """Read node backed by column-chunk range reads via ``parquet_io``.
 
@@ -497,7 +520,59 @@ cdef class ParquetReadNode(ReaderNode):
     """
 
     cdef public set _parquet_files_seen
+    # ── Stage 1: native single-pass scan state machine ────────────────────────
+    # Setup runs once in _ensure_scan_started; next_morsel then pulls one morsel
+    # per call. These fields hold the hoisted once-per-scan plan + cursor state.
+    cdef bint _scan_started
+    cdef int _scan_mode
+    cdef cpp_mutex* _scan_mtx             # guards per-scan accounting under concurrent pull
+    cdef object _ipc_source               # IpcRowGroupSource native driver (single-pass)
+    cdef list _sp_coerce_ops              # per-column (kind, arg) logical-type coercions
+    cdef bint _sp_needs_coerce
+    # ── Stage 6: native two-pass latmat state machine ─────────────────────────
+    cdef object _lm_pass1_src             # IpcRowGroupSource over filter columns
+    cdef object _lm_pass2_src             # masked IpcRowGroupSource over projection columns
+    cdef bint _lm_pass1_done              # pass-1 drained + pass-2 source opened
+    cdef list _lm_pass2_work              # [(path, rg_idx, mask_bytes)] survivors
+    cdef dict _lm_p1_cache                # (path, rg_idx) -> (p1_filtered Morsel, identity names)
+    cdef object _lm_topn_winners          # {(path,rg_idx): [survivor_idx]} or None
+    cdef list _lm_pass1_names_bytes
+    cdef list _lm_pass2_names_bytes
+    cdef int64_t _decode_start_ns
+    cdef int64_t _total_rows_before_filter
+    cdef int64_t _total_rows_after_filter
+    cdef bint _scan_finished              # decode-telemetry flushed once
+    cdef bint _emitted_any                # any morsel returned (empty-result guard)
+    cdef bint _empty_guard_done           # the single empty morsel already returned
+    # Hoisted single-pass plan (read by _single_pass_next; latmat reads the
+    # _sp_* it shares via read_morsels).
+    cdef object _sp_filesystem
+    cdef object _sp_connector_type
+    cdef object _sp_blob_paths
+    cdef dict _sp_file_sizes
+    cdef object _sp_query_id
+    cdef list _sp_column_names
+    cdef list _sp_identity_names           # invariant identity order, precomputed once
+    cdef dict _sp_name_to_identity
+    cdef dict _sp_planner_identity
+    cdef list _sp_output_identity_order
+    cdef dict _sp_decimal_col_map
+    cdef set _sp_date_col_set
+    cdef set _sp_timestamp_col_set
+    cdef object _sp_predicate_stats
+    cdef list _sp_pass1_column_names
+    cdef list _sp_pass2_column_names
+    cdef dict _sp_pass1_name_to_identity
+    cdef dict _sp_pass2_name_to_identity
+    cdef bint _sp_topn_active
+    cdef bint _sp_two_pass_eligible
     cdef CompiledBytecode _compiled_predicate
+    # LIMIT counter for the source. Lives on the node (not a generator local) so
+    # the single _commit_morsel mutation seam owns it — the granularity a future
+    # per-scan lock guards (Stage 5). _records_unlimited mirrors the old float
+    # "inf" sentinel: when true the LIMIT never trips and no slice is taken.
+    cdef int64_t _records_to_read
+    cdef bint _records_unlimited
     cdef public object _planner_name_to_identity_cached
     cdef public object _filter_column_names_cached
     cdef public ScanReadings scan_readings
@@ -510,6 +585,27 @@ cdef class ParquetReadNode(ReaderNode):
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.predicates = parameters.get("predicates")
         self._parquet_files_seen = set()
+        self._records_to_read = 0
+        self._records_unlimited = True
+        self._scan_started = False
+        self._scan_mode = _SCAN_UNSET
+        self._ipc_source = None
+        self._sp_coerce_ops = None
+        self._sp_needs_coerce = False
+        self._lm_pass1_src = None
+        self._lm_pass2_src = None
+        self._lm_pass1_done = False
+        self._lm_pass2_work = None
+        self._lm_p1_cache = None
+        self._lm_topn_winners = None
+        self._lm_pass1_names_bytes = None
+        self._lm_pass2_names_bytes = None
+        self._decode_start_ns = 0
+        self._total_rows_before_filter = 0
+        self._total_rows_after_filter = 0
+        self._scan_finished = False
+        self._emitted_any = False
+        self._empty_guard_done = False
         self._compiled_predicate = None  # CompiledBytecode, bound once at execute() time
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
@@ -519,6 +615,12 @@ cdef class ParquetReadNode(ReaderNode):
         self._topn_sort_name = parameters.get("topn_sort_name")
         self._topn_descending = bool(parameters.get("topn_descending", False))
         self._topn_limit = parameters.get("topn_limit")
+        self._scan_mtx = new cpp_mutex()
+
+    def __dealloc__(self):
+        if self._scan_mtx != NULL:
+            del self._scan_mtx
+            self._scan_mtx = NULL
 
     @property
     def name(self) -> str:  # pragma: no cover
@@ -673,6 +775,30 @@ cdef class ParquetReadNode(ReaderNode):
         self.telemetry.rows_read += num_rows
         self.telemetry.bytes_processed += num_bytes
 
+    cdef Morsel _commit_morsel(self, Morsel result_morsel, object path):
+        """Single seam for ALL per-emitted-morsel shared-state mutation:
+        row-group accounting, file-seen tracking, the LIMIT decrement + slice,
+        and the telemetry mirror. Returns the (possibly LIMIT-sliced) morsel to
+        emit. This is the one site a future per-scan lock guards (Stage 5);
+        every yield path must funnel through here.
+        """
+        cdef int64_t num_rows = result_morsel.num_rows
+        self.scan_readings.record_row_group_complete(num_rows)
+        self._mark_file_seen(path)
+        if not self._records_unlimited:
+            if self._records_to_read < num_rows:
+                result_morsel = result_morsel.slice(0, self._records_to_read)
+                self._records_to_read = 0
+            else:
+                self._records_to_read -= num_rows
+        self._record_morsel_emitted(result_morsel)
+        return result_morsel
+
+    cdef inline bint _limit_exhausted(self):
+        """True once a finite LIMIT has been fully satisfied — the caller's
+        signal to stop pulling. Always False for unlimited scans."""
+        return (not self._records_unlimited) and self._records_to_read <= 0
+
     cdef void _record_pass1_survivor(self, _Pass1Result r, list pass2_work, dict p1_cache):
         """Funnel a surviving pass-1 row group into shared work-state.
 
@@ -751,34 +877,99 @@ cdef class ParquetReadNode(ReaderNode):
             new_pass2_work.append((key[0], key[1], bytes(reduced)))
         return new_pass2_work, winners_by_rg
 
-    cdef tuple _extract_row_group_metadata(self, object scan_rg, dict row_group):
-        """Extract (path, rg_idx) from ScanRowGroup and funnel telemetry into ScanReadings.
+    cdef Morsel next_morsel(self) except *:
+        """Native source iterator (overrides BasePlanNode). On first call it
+        plans the scan; thereafter it returns one morsel per call — no outer
+        Python generator for the single-pass path. Returns None on exhaustion.
+        Two-pass latmat and empty manifests still run through the preserved
+        read_morsels generator (Stage 6 ports latmat).
 
-        Called after iter_row_groups yields (ScanRowGroup, {col: Vector}), which
-        the caller unpacks and passes both to this function.
-        bytes_fetched lives on BasePlanNode.bytes_in (not ScanReadings) so we
-        receive it back from the merge call and apply it here.
-        Returns (path, rg_idx); row_group dict is passed downstream unchanged.
-        """
-        cdef object path = scan_rg.path
-        cdef object rg_idx = scan_rg.rg_idx
-        self.bytes_in += self.scan_readings.merge_row_group_metadata(scan_rg)
-        return path, rg_idx
+        Single-pass pull is reentrant: concurrent callers share the native
+        IpcRowGroupSource + `_scan_mtx`. The FALLBACK (latmat) generator is NOT
+        reentrant — two-pass scans are pulled serially (the M4 concurrent path is
+        single-pass only)."""
+        # Init guard under the lock so concurrent first-callers plan the scan
+        # exactly once and observe a fully-built _ipc_source before pulling. The
+        # uncontended lock/unlock is negligible beside decode; no atomics needed.
+        self._scan_mtx.lock()
+        if not self._scan_started:
+            self._ensure_scan_started()
+        self._scan_mtx.unlock()
+        if self._scan_mode == _SCAN_SINGLE:
+            return self._single_pass_next()
+        if self._scan_mode == _SCAN_LATMAT:
+            return self._latmat_next()
+        # FALLBACK: drive the empty-manifest generator one step at a time.
+        if self._morsel_iter is None:
+            self._morsel_iter = iter(self.read_morsels())
+        return <Morsel>next(self._morsel_iter, None)
 
-    def read_morsels(self):
-        """Source-side morsel iterator driven by the push pipeline engine."""
+    cpdef void close_source(self) except *:
+        """Flush decode telemetry and release the source(s) on every exit path.
+        The native single-pass and latmat paths own their flush + source close;
+        the empty-manifest fallback flushes nothing (it never opened a source)."""
+        cdef object src, src1, src2
+        if self._scan_mode == _SCAN_SINGLE:
+            # Lock so a concurrent late puller can't race the flush/close-once.
+            self._scan_mtx.lock()
+            if not self._scan_finished:
+                self._scan_finished = True
+                self._flush_decode_telemetry()
+            src = self._ipc_source
+            self._ipc_source = None
+            self._scan_mtx.unlock()
+            if src is not None:
+                src.close()
+            return
+        if self._scan_mode == _SCAN_LATMAT:
+            self._scan_mtx.lock()
+            if not self._scan_finished:
+                self._scan_finished = True
+                self._flush_decode_telemetry()
+            src1 = self._lm_pass1_src
+            src2 = self._lm_pass2_src
+            self._lm_pass1_src = None
+            self._lm_pass2_src = None
+            self._scan_mtx.unlock()
+            if src1 is not None:
+                src1.close()
+            if src2 is not None:
+                src2.close()
+            return
+        BasePlanNode.close_source(self)
+
+    cdef void _flush_decode_telemetry(self) except *:
+        """Per-scan decode-time + filter-total telemetry. Mirrors the read_morsels
+        finally block; called once from close_source for the single-pass path."""
+        cdef int64_t decode_ns = <int64_t>time.monotonic_ns() - self._decode_start_ns
+        self.scan_readings.record_decode_time(decode_ns)
+        self.telemetry.time_decoding_blobs += decode_ns
+        self.scan_readings.record_filter_totals(
+            self._total_rows_before_filter,
+            self._total_rows_after_filter,
+        )
+        self.scan_readings.flush_into(self.readings)
+
+    cdef void _ensure_scan_started(self) except *:
+        """Run the once-per-scan setup (schema resolution, identity maps, predicate
+        compile, two-pass eligibility, filesystem resolution) and choose the scan
+        mode. For the single-pass mode it opens the inner row-group iterator. The
+        hoisted plan is stored on the node so neither next_morsel nor the latmat
+        generator recompute it. Idempotent."""
+        if self._scan_started:
+            return
+        self._scan_started = True
+
         base_schema = self.parameters["schema"]
 
-        # Build name → planner identity map once and cache. Avoids repeated dict
-        # comprehensions that would recompute this for every execute() call.
         if self._planner_name_to_identity_cached is None:
             self._planner_name_to_identity_cached = {
                 col.schema_column.name: col.schema_column.identity
                 for col in (self.columns or [])
             }
         _planner_name_to_identity = self._planner_name_to_identity_cached
+        self._sp_planner_identity = _planner_name_to_identity
 
-        # Cache filter column names extraction (called once, reused at line 559).
         if self._filter_column_names_cached is None:
             self._filter_column_names_cached = self._extract_filter_column_names(self.predicates)
         filter_column_names = self._filter_column_names_cached
@@ -792,21 +983,14 @@ cdef class ParquetReadNode(ReaderNode):
             read_schema.columns = [base_schema.columns[0]]
 
         # output_identity_order: planner identities in self.columns order.
-        output_identity_order = [
+        self._sp_output_identity_order = [
             _planner_name_to_identity[col.schema_column.name]
             for col in (self.columns or [])
             if col.schema_column.name in _planner_name_to_identity
         ]
 
-        # Build DECIMAL column map: col_name → (precision, scale) for DECIMAL columns
-        # with precision <= 18 (int64-backed). These arrive as TAG_INT64 and need a
-        # coerce (reinterpret + descriptor). DECIMAL128 columns (precision > 18) arrive
-        # as TAG_INT128 and are already correctly typed with their descriptor attached
-        # by _wrap_decoded_fixed — skip them here or the reinterpret would corrupt them.
-        # Keys are bytes — column names in the data dict are bytes (C++ parquet native).
-        # D-4 Phase 2: read (precision, scale) from the unified column_type rather
-        # than the legacy side-cars. column_type carries a Draken LogicalType whose
-        # precision/scale fields are authoritative for parameterized types.
+        # DECIMAL (precision<=18, int64-backed) / DATE / TIMESTAMP coerce sets.
+        # Keys are bytes — column names in the data dict are bytes (C++ native).
         from opteryx.types.logical_type import LogicalCategory as _LC
         _decimal_col_map = {}
         for col in base_schema.columns:
@@ -817,42 +1001,24 @@ cdef class ParquetReadNode(ReaderNode):
                 _decimal_col_map[col.name.encode('utf-8')] = (
                     ct.logical.precision, ct.logical.scale
                 )
-        # D-4 Phase 2: dispatch on LogicalCategory rather than the legacy LogicalCategory
-        # value. column_type may be None for cases the bridge can't yet map; those
-        # columns harmlessly drop out of the coerce set.
-        _date_col_set = {
+        self._sp_decimal_col_map = _decimal_col_map
+        self._sp_date_col_set = {
             col.name.encode('utf-8') for col in base_schema.columns
             if col.column_type is not None and col.column_type.category == _LC.DATE
         }
-        _timestamp_col_set = {
+        self._sp_timestamp_col_set = {
             col.name.encode('utf-8') for col in base_schema.columns
             if col.column_type is not None and col.column_type.category == _LC.TIMESTAMP
         }
         predicate_root = self._compose_predicates(self.predicates or [])
 
-        # Compile the predicate to bytecode once per execute() call. Every row
-        # group then iterates a typed C struct array — no Python AST walking,
-        # no per-row-group dispatch decisions.
+        # Compile the predicate to bytecode once per execute() call.
         if self._compiled_predicate is None and predicate_root is not None:
             self._compiled_predicate = _build_bytecode(_lower_expr(predicate_root))
 
-        # ── Two# Two-pass late materialization column split ────────────────────────
-        # Use physical column names throughout — base_schema and the parquet file
-        # share the same names; identities are assigned afterpass.
-        # pass1_colun_names: filter columns only — fetched for every row group.
-        # pass2_column_names: projection-only columns — fetched only for row groups
-        # that have at least one row surviving the Pass 1 predicate evaluation.
-        # Two-pass is skipped when predicates are absent, there are no projection-
-        # only columns (e.g. SELECT url WHERE url LIKE …), or the feature is off.
-        # Use physical column names throughout to avoid identity-space mismatch
-        # between self.columns (planner) and base_schema.columns (schema loader).
-        _filter_names = filter_column_names  # Use cached value instead of extracting again
+        # ── Two-pass late-materialization eligibility ─────────────────────────
+        _filter_names = filter_column_names
         _projected_names = {col.schema_column.name for col in (self.columns or [])}
-
-        # WP-2: top-N is active only when the optimizer stamped a single physical
-        # sort column that this scan actually projects. The sort column is read in
-        # pass 1 (alongside the filters) so the top-N can be evaluated before the
-        # expensive projection-only columns are materialized in pass 2.
         topn_active = (
             self._topn_sort_name is not None
             and self._topn_limit is not None
@@ -868,40 +1034,43 @@ cdef class ParquetReadNode(ReaderNode):
             and bool(_filter_names)
             and bool(_pass2_names)
         )
-        # Top-N only engages on the two-pass path (it needs a filter to define the
-        # candidate set). If the scan isn't two-pass eligible, fall back silently —
-        # the downstream HeapSort still produces the correct result.
         topn_active = topn_active and two_pass_eligible
-        pass1_column_names: list = []
-        pass2_column_names: list = []
-        pass1_name_to_identity: dict = {}
-        pass2_name_to_identity: dict = {}
+        self._sp_topn_active = topn_active
+        self._sp_two_pass_eligible = two_pass_eligible
+        self._sp_pass1_column_names = []
+        self._sp_pass2_column_names = []
+        self._sp_pass1_name_to_identity = {}
+        self._sp_pass2_name_to_identity = {}
         if two_pass_eligible:
             _p1_cols = [c for c in base_schema.columns if c.name in _pass1_only_names]
             _p2_cols = [c for c in base_schema.columns if c.name in _pass2_names]
-            pass1_column_names = [c.name for c in _p1_cols]
-            pass2_column_names = [c.name for c in _p2_cols]
-            pass1_name_to_identity = {c.name: _planner_name_to_identity.get(c.name, c.identity) for c in _p1_cols}
-            pass2_name_to_identity = {c.name: _planner_name_to_identity.get(c.name, c.identity) for c in _p2_cols}
+            self._sp_pass1_column_names = [c.name for c in _p1_cols]
+            self._sp_pass2_column_names = [c.name for c in _p2_cols]
+            self._sp_pass1_name_to_identity = {c.name: _planner_name_to_identity.get(c.name, c.identity) for c in _p1_cols}
+            self._sp_pass2_name_to_identity = {c.name: _planner_name_to_identity.get(c.name, c.identity) for c in _p2_cols}
 
-        # ── Empty manifest ────────────────────────────────────────────────────
+        # ── Empty manifest → fallback generator yields a single empty Morsel ──
+        # (Returns before the per-scan accounting below, exactly as before.)
         if not self.manifest or self.manifest.get_file_count() == 0:
-            # Yield empty Morsel with the correct column names
-            empty_morsel = Morsel()
-            yield empty_morsel
+            self._scan_mode = _SCAN_FALLBACK
             return
 
         self.readings["columns_read"] += len(read_schema.columns)
         self.readings["parquet_filter_columns_read"] += len(filter_column_names)
         self.readings["parquet_projection_columns_read"] += len(_planner_name_to_identity)
 
-        # Phase 1 predicate pushdown: extract (col, op, value) triples from pushed-down
-        # predicates so the reader can prune row groups using footer min/max stats.
-        predicate_stats = extract_predicate_stats(self.predicates or [])
+        # Row-group pruning stats from pushed-down predicates.
+        self._sp_predicate_stats = extract_predicate_stats(self.predicates or [])
 
-        records_to_read = self.limit if self.limit is not None else float("inf")
+        if self.limit is not None:
+            self._records_to_read = <int64_t>self.limit
+            self._records_unlimited = False
+        else:
+            self._records_to_read = 0
+            self._records_unlimited = True
 
         blob_paths = self.manifest.get_file_paths()
+        self._sp_blob_paths = blob_paths
         file_sizes = {}
         files = getattr(self.manifest, "files", None)
         if files:
@@ -909,11 +1078,8 @@ cdef class ParquetReadNode(ReaderNode):
                 size = getattr(file_entry, "file_size_in_bytes", None)
                 if isinstance(size, int) and size > 0:
                     file_sizes.setdefault(file_entry.file_path, size)
+        self._sp_file_sizes = file_sizes
 
-        # Resolve the filesystem: connectors that own a pre-configured filesystem
-        # (FileSystemConnector subclasses) expose it directly.  For connectors that
-        # don't (e.g. OpteryxConnector), derive it from the
-        # storage protocol embedded in the file paths.
         filesystem = getattr(self.connector, "filesystem", None)
         if filesystem is not None:
             connector_type = (
@@ -926,229 +1092,340 @@ cdef class ParquetReadNode(ReaderNode):
             protocol = first_path.split("://")[0] if "://" in first_path else ""
             filesystem = create_filesystem(protocol)
             connector_type = protocol.upper() if protocol else "FILESYSTEM"
-        # Column names as they appear in the Parquet file (Parquet uses the
-        # original names, not identity aliases).
+        self._sp_filesystem = filesystem
+        self._sp_connector_type = connector_type
+
         column_names = [col.name for col in read_schema.columns]
-        # Map data-file column name → query-engine identity for Morsel construction.
-        # Filter-only columns (not in self.columns) fall back to col.identity from the
-        # schema, which auto-generates as name.encode('utf-8') when no explicit identity
-        # is assigned. Projection columns use the planner's identity.
-        name_to_identity = {
+        self._sp_column_names = column_names
+        self._sp_name_to_identity = {
             col.name: _planner_name_to_identity.get(col.name, col.identity)
             for col in read_schema.columns
         }
-
-        result_morsel = None
-
-        # Hoist properties.query_id out of the per-row-group loop; was previously
-        # called via getattr() three times per iteration in iter_row_groups kwargs.
-        query_id = getattr(self.properties, "query_id", None)
-
-        decode_start = time.monotonic_ns()
-        total_rows_before_filter = 0
-        total_rows_after_filter = 0
-        try:
-            if two_pass_eligible:
-                # ── Phase 1: stream pass-1 row groups, evaluate predicate, collect survivors ──
-                pass2_work = []   # list of (path, rg_idx, mask_bytes)
-                p1_cache = {}     # (path, rg_idx) -> p1_filtered Morsel
-
-                for _rg_tuple in iter_row_groups(
-                    filesystem,
-                    blob_paths,
-                    pass1_column_names,
-                    decode_workers=config.PARQUET_GCS_IO_WORKERS if connector_type in ("GCS", "GS") else config.PARQUET_LOCAL_IO_WORKERS,
-                    predicates=predicate_stats,
-                    file_sizes=file_sizes or None,
-                    connector=connector_type,
-                    query_id=query_id,
-                    footer_bytes_cache=_FOOTER_CACHE,
-                ):
-                    scan_rg, row_group = _rg_tuple
-                    path, rg_idx = self._extract_row_group_metadata(scan_rg, row_group)
-
-                    result = _evaluate_pass1_row_group(
-                        path,
-                        rg_idx,
-                        row_group,
-                        self._compiled_predicate,
-                        pass1_name_to_identity,
-                        _decimal_col_map,
-                        _date_col_set,
-                        _timestamp_col_set,
-                        pass1_column_names,
-                    )
-                    if result.empty:
-                        continue
-
-                    total_rows_before_filter += result.rows_before_filter
-
-                    if result.survived:
-                        self._record_pass1_survivor(result, pass2_work, p1_cache)
-                    else:
-                        self._record_pass1_skip(result)
-
-                # ── WP-2: top-N reduction ──────────────────────────────────────────────
-                # Trim pass-2 work to only the rows that can survive ORDER BY .. LIMIT n,
-                # so the projection-only columns are decoded for ~n rows instead of every
-                # filter survivor. Drops whole row groups that hold no top-n candidate.
-                _topn_winners = None
-                if topn_active:
-                    _topn_sort_identity = _planner_name_to_identity[self._topn_sort_name]
-                    pass2_work, _topn_winners = self._apply_topn(
-                        pass2_work,
-                        p1_cache,
-                        _topn_sort_identity,
-                        int(self._topn_limit),
-                        self._topn_descending,
-                    )
-
-                # ── Phase 2: parallel pass-2 decode via C++ pipeline ──────────────────────
-                for _rg_tuple in iter_pass2_row_groups_ipc(
-                    filesystem,
-                    pass2_work,
-                    pass2_column_names,
-                    file_sizes=file_sizes or None,
-                    connector=connector_type,
-                    query_id=query_id,
-                    footer_bytes_cache=_FOOTER_CACHE,
-                ):
-                    scan_rg, row_group = _rg_tuple
-                    path = scan_rg.path
-                    rg_idx = scan_rg.rg_idx
-
-                    p2_bytes = scan_rg.bytes_fetched
-                    self.scan_readings.record_pass2_decoded(p2_bytes)
-                    self.bytes_in += p2_bytes
-                    # No cleanup needed — row_group now contains only {col: Vector}
-
-                    # Coerce DATE/TIMESTAMP/DECIMAL in pass-2 projection columns.
-                    _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
-
-                    p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
-
-                    # WP-2: reduce pass-1 survivors to the same top-n winners pass 2
-                    # decoded (ascending row order on both sides keeps them aligned).
-                    if _topn_winners is not None:
-                        p1_filtered = p1_filtered.take(_topn_winners[(path, rg_idx)])
-
-                    p1_vectors_by_identity = {n: p1_filtered.column(n) for n in p1_identity_names}
-                    # Positional pairing: pass2_column_names order matches row_group.values() order.
-                    p2_vectors_by_identity = {
-                        pass2_name_to_identity[col]: vec
-                        for col, vec in zip(pass2_column_names, row_group.values())
-                    }
-
-                    if output_identity_order:
-                        combined_identity_names = []
-                        combined_vectors = []
-                        for identity in output_identity_order:
-                            if identity in p1_vectors_by_identity:
-                                combined_identity_names.append(identity)
-                                combined_vectors.append(p1_vectors_by_identity[identity])
-                            elif identity in p2_vectors_by_identity:
-                                combined_identity_names.append(identity)
-                                combined_vectors.append(p2_vectors_by_identity[identity])
-                    else:
-                        combined_identity_names = list(p1_identity_names)
-                        combined_identity_names.extend(p2_vectors_by_identity.keys())
-                        combined_vectors = list(p1_vectors_by_identity.values())
-                        combined_vectors.extend(p2_vectors_by_identity.values())
-
-                    result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
-                    rows_after_filter = result_morsel.num_rows
-                    total_rows_after_filter += rows_after_filter
-
-                    self.scan_readings.record_row_group_complete(rows_after_filter)
-                    self._mark_file_seen(path)
-
-                    # Already assembled in output_identity_order — no select() needed.
-                    num_rows = result_morsel.num_rows
-                    if records_to_read < num_rows:
-                        result_morsel = result_morsel.slice(0, int(records_to_read))
-                        records_to_read = 0
-                    else:
-                        records_to_read -= num_rows
-
-                    self._record_morsel_emitted(result_morsel)
-                    yield result_morsel
-
-                    if records_to_read <= 0:
-                        break
-
+        # Identity order is invariant across row groups (positional pairing with
+        # row_group.values()); compute once instead of per morsel.
+        self._sp_identity_names = [
+            self._sp_name_to_identity[col] for col in column_names
+        ]
+        # Positional logical-type coercion plan (kind, arg) per column, computed
+        # once. kind 0=none, 1=decimal(prec,scale), 2=date32, 3=timestamp. Empty
+        # of real work for pure numeric scans → coercion is skipped entirely.
+        self._sp_coerce_ops = []
+        for col in column_names:
+            col_b = col.encode('utf-8')
+            if col_b in self._sp_decimal_col_map:
+                self._sp_coerce_ops.append((1, self._sp_decimal_col_map[col_b]))
+            elif col_b in self._sp_date_col_set:
+                self._sp_coerce_ops.append((2, None))
+            elif col_b in self._sp_timestamp_col_set:
+                self._sp_coerce_ops.append((3, None))
             else:
-                # ── Single-pass path: existing behaviour ─────────────────────────────────
-                for _rg_tuple in iter_row_groups(
-                    filesystem,
-                    blob_paths,
-                    column_names,
-                    decode_workers=config.PARQUET_GCS_IO_WORKERS if connector_type in ("GCS", "GS") else config.PARQUET_LOCAL_IO_WORKERS,
-                    predicates=predicate_stats,
-                    file_sizes=file_sizes or None,
-                    connector=connector_type,
-                    query_id=query_id,
-                    footer_bytes_cache=_FOOTER_CACHE,
-                ):
-                    scan_rg, row_group = _rg_tuple
-                    path, rg_idx = self._extract_row_group_metadata(scan_rg, row_group)
+                self._sp_coerce_ops.append((0, None))
+        self._sp_needs_coerce = any(op[0] != 0 for op in self._sp_coerce_ops)
+        self._sp_query_id = getattr(self.properties, "query_id", None)
 
-                    _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
+        self._decode_start_ns = <int64_t>time.monotonic_ns()
+        self._total_rows_before_filter = 0
+        self._total_rows_after_filter = 0
 
-                    # Positional pairing: column_names order matches row_group.values() order.
-                    identity_names = [name_to_identity[col] for col in column_names]
-                    vectors = list(row_group.values())
-                    if not identity_names:
-                        continue
-                    result_morsel = Morsel.from_vectors(identity_names, vectors)
-                    rows_before_filter = result_morsel.num_rows
-                    rows_after_filter = rows_before_filter
-                    if self._compiled_predicate is not None:
-                        result_morsel, rows_before_filter, rows_after_filter = (
-                            self._apply_predicates_to_morsel(result_morsel)
-                        )
-                    total_rows_before_filter += rows_before_filter
-                    total_rows_after_filter += rows_after_filter
+        if two_pass_eligible:
+            # Native two-pass latmat: open the pass-1 (filter columns) source with
+            # predicate pushdown; pass-2 is opened after pass-1 drains (the barrier).
+            self._scan_mode = _SCAN_LATMAT
+            self._lm_pass1_names_bytes = [c.encode('utf-8') for c in self._sp_pass1_column_names]
+            self._lm_pass2_names_bytes = [c.encode('utf-8') for c in self._sp_pass2_column_names]
+            self._lm_pass1_src = open_ipc_source(
+                filesystem,
+                blob_paths,
+                self._sp_pass1_column_names,
+                decode_workers=config.PARQUET_GCS_IO_WORKERS if connector_type in ("GCS", "GS") else config.PARQUET_LOCAL_IO_WORKERS,
+                predicates=self._sp_predicate_stats,
+                file_sizes=file_sizes or None,
+                connector=connector_type,
+                query_id=self._sp_query_id,
+                footer_bytes_cache=_FOOTER_CACHE,
+            )
+            return
 
-                    if output_identity_order:
-                        result_morsel = result_morsel.select(output_identity_order)
-                    else:
-                        # No output columns (e.g. COUNT(*) with a filter-only read).
-                        surviving_rows = result_morsel.num_rows
-                        if surviving_rows == 0:
-                            continue
-                        result_morsel = Morsel.from_vectors(
+        self._scan_mode = _SCAN_SINGLE
+        self._ipc_source = open_ipc_source(
+            filesystem,
+            blob_paths,
+            column_names,
+            decode_workers=config.PARQUET_GCS_IO_WORKERS if connector_type in ("GCS", "GS") else config.PARQUET_LOCAL_IO_WORKERS,
+            predicates=self._sp_predicate_stats,
+            file_sizes=file_sizes or None,
+            connector=connector_type,
+            query_id=self._sp_query_id,
+            footer_bytes_cache=_FOOTER_CACHE,
+        )
+
+    cdef void _coerce_vectors(self, list vectors):
+        """Reinterpret DATE/TIMESTAMP/DECIMAL columns in place, by position.
+
+        Mirrors _coerce_logical_types but indexes the precomputed _sp_coerce_ops
+        plan instead of a name-keyed dict, so the all-direct numeric path never
+        builds a dict. The C++ pipeline serialises these as TAG_INT64 (physical);
+        the schema-driven logical type is applied here."""
+        cdef Py_ssize_t i, n = len(vectors)
+        cdef tuple op
+        cdef int kind
+        cdef object v, v_nb, dec
+        for i in range(n):
+            op = self._sp_coerce_ops[i]
+            kind = op[0]
+            if kind == 0:
+                continue
+            v = vectors[i]
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            if v_nb.type != _draken_native_parquet.INT64:
+                continue
+            if kind == 1:
+                dec = op[1]
+                vectors[i] = _int64_to_decimal(v_nb, dec[0], dec[1])
+            elif kind == 2:
+                vectors[i] = _int64_to_date32(v_nb)
+            else:  # kind == 3
+                vectors[i] = _int64_to_timestamp(v_nb)
+
+    cdef Morsel _single_pass_next(self):
+        """Pull and assemble the next single-pass morsel directly from the native
+        IpcRowGroupSource — no generator, no intermediate row_group dict, no
+        ScanRowGroup. Direct (numeric/decimal) columns reach the morsel with zero
+        per-morsel Python beyond the necessary Vector objects.
+
+        Thread-safe: the pull (IpcRowGroupSource) and the morsel assembly
+        (coerce / from_vectors / predicate / select) run on thread-local data with
+        no lock; only the per-scan accounting + _commit_morsel run under
+        `_scan_mtx`, which holds no GIL-releasing call. Returns None on exhaustion
+        (after one empty morsel if nothing was produced)."""
+        cdef tuple pulled
+        cdef list vectors
+        cdef object path
+        cdef Morsel result_morsel, emit_morsel
+        cdef bint has_identity
+        cdef int64_t rows_before_filter, rows_after_filter, surviving_rows
+        cdef int64_t bytes_fetched, read_ns, decode_ns
+        while True:
+            if self._limit_exhausted():
+                return self._finish_locked()
+            pulled = self._ipc_source.next_vectors()
+            if pulled is None:
+                return self._finish_locked()
+            vectors = pulled[0]
+            bytes_fetched = pulled[1]
+            read_ns = pulled[2]
+            decode_ns = pulled[3]
+            path = pulled[4]
+
+            # ── Thread-local assembly (no lock) ──────────────────────────────
+            if self._sp_needs_coerce:
+                self._coerce_vectors(vectors)
+            has_identity = bool(self._sp_identity_names)
+            emit_morsel = None
+            rows_before_filter = 0
+            rows_after_filter = 0
+            if has_identity:
+                # Positional pairing: vectors order == column_names == identity order.
+                result_morsel = Morsel.from_vectors(self._sp_identity_names, vectors)
+                rows_before_filter = result_morsel.num_rows
+                rows_after_filter = rows_before_filter
+                if self._compiled_predicate is not None:
+                    result_morsel, rows_before_filter, rows_after_filter = (
+                        self._apply_predicates_to_morsel(result_morsel)
+                    )
+                if self._sp_output_identity_order:
+                    emit_morsel = result_morsel.select(self._sp_output_identity_order)
+                else:
+                    # No output columns (e.g. COUNT(*) with a filter-only read).
+                    surviving_rows = result_morsel.num_rows
+                    if surviving_rows > 0:
+                        emit_morsel = Morsel.from_vectors(
                             [b'*'],
                             [_draken_native_parquet.vector_from_bool_constant(True, <uint32_t>surviving_rows)],
                         )
 
-                    num_rows = result_morsel.num_rows
-                    self.scan_readings.record_row_group_complete(num_rows)
-                    self._mark_file_seen(path)
+            # ── Shared commit (under _scan_mtx; no GIL-releasing call inside) ──
+            self._scan_mtx.lock()
+            # Telemetry: the cpp-pipeline ScanRowGroup populated only these three
+            # fields; the rest of merge_row_group_metadata added 0. Apply directly.
+            self.bytes_in += bytes_fetched
+            self.scan_readings.time_parquet_read_ranges_ns += read_ns
+            self.scan_readings.time_parquet_decode_columns_ns += decode_ns
+            if has_identity:
+                self._total_rows_before_filter += rows_before_filter
+                self._total_rows_after_filter += rows_after_filter
+            if emit_morsel is not None:
+                emit_morsel = self._commit_morsel(emit_morsel, path)
+                self._emitted_any = True
+                self._scan_mtx.unlock()
+                return emit_morsel
+            self._scan_mtx.unlock()
+            # No emit (no projected identities, or COUNT(*) with 0 survivors) — loop.
 
-                    if records_to_read < num_rows:
-                        result_morsel = result_morsel.slice(0, int(records_to_read))
-                        records_to_read = 0
-                    else:
-                        records_to_read -= num_rows
+    cdef Morsel _finish_locked(self):
+        """Locked wrapper around the exhaustion guard so the empty-result bookkeeping
+        is consistent under concurrent pull."""
+        cdef Morsel out
+        self._scan_mtx.lock()
+        out = self._single_pass_finish()
+        self._scan_mtx.unlock()
+        return out
 
-                    self._record_morsel_emitted(result_morsel)
-                    yield result_morsel
-
-                    if records_to_read <= 0:
-                        break
-
-        finally:
-            decode_ns = time.monotonic_ns() - decode_start
-            self.scan_readings.record_decode_time(decode_ns)
-            self.telemetry.time_decoding_blobs += decode_ns
-            self.scan_readings.record_filter_totals(
-                total_rows_before_filter,
-                total_rows_after_filter,
-            )
-            self.scan_readings.flush_into(self.readings)
-
-        # ── Empty result guard ────────────────────────────────────────────────
-        if result_morsel is None:
+    cdef Morsel _single_pass_finish(self):
+        """On exhaustion, emit exactly one empty Morsel if the scan produced
+        nothing (parity with the generator's `result_morsel is None` guard),
+        otherwise signal end-of-stream with None. Caller holds `_scan_mtx`."""
+        if not self._emitted_any and not self._empty_guard_done:
+            self._empty_guard_done = True
+            self._emitted_any = True
             self.readings["empty_datasets"] += 1
-            # Yield empty Morsel without Arrow intermediate
-            yield Morsel()
+            return Morsel()
+        return None
+
+    cdef void _run_pass1(self) except *:
+        """Drain the pass-1 (filter-column) source, evaluate the predicate per row
+        group, and collect survivors into the pass-2 work list + p1 cache; then run
+        the WP-2 top-N reduction and open the pass-2 (masked, projection-column)
+        source. The pass-1→pass-2 barrier: this runs to completion on the first
+        _latmat_next() call. Mirrors the former read_morsels pass-1 loop exactly."""
+        cdef object pass1_src = self._lm_pass1_src
+        cdef tuple pulled
+        cdef list vectors
+        cdef object path, rg_idx, topn_sort_identity
+        cdef dict row_group
+        cdef _Pass1Result result
+        cdef Py_ssize_t i, n
+        cdef list pass2_work = []
+        cdef dict p1_cache = {}
+        while True:
+            pulled = pass1_src.next_vectors()
+            if pulled is None:
+                break
+            vectors = pulled[0]
+            self.bytes_in += pulled[1]
+            self.scan_readings.time_parquet_read_ranges_ns += pulled[2]
+            self.scan_readings.time_parquet_decode_columns_ns += pulled[3]
+            path = pulled[4]
+            rg_idx = pulled[5]
+            n = len(vectors)
+            row_group = {self._lm_pass1_names_bytes[i]: vectors[i] for i in range(n)}
+            result = _evaluate_pass1_row_group(
+                path, rg_idx, row_group, self._compiled_predicate,
+                self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
+                self._sp_date_col_set, self._sp_timestamp_col_set,
+                self._sp_pass1_column_names,
+            )
+            if result.empty:
+                continue
+            self._total_rows_before_filter += result.rows_before_filter
+            if result.survived:
+                self._record_pass1_survivor(result, pass2_work, p1_cache)
+            else:
+                self._record_pass1_skip(result)
+
+        # ── WP-2: top-N reduction (drops row groups with no top-n candidate). ──
+        if self._sp_topn_active:
+            topn_sort_identity = self._sp_planner_identity[self._topn_sort_name]
+            pass2_work, self._lm_topn_winners = self._apply_topn(
+                pass2_work, p1_cache, topn_sort_identity,
+                int(self._topn_limit), self._topn_descending,
+            )
+
+        self._lm_pass2_work = pass2_work
+        self._lm_p1_cache = p1_cache
+        pass1_src.close()
+        self._lm_pass1_src = None
+        self._lm_pass2_src = open_pass2_source(
+            self._sp_filesystem,
+            pass2_work,
+            self._sp_pass2_column_names,
+            file_sizes=self._sp_file_sizes or None,
+            connector=self._sp_connector_type,
+            query_id=self._sp_query_id,
+            footer_bytes_cache=_FOOTER_CACHE,
+        )
+        self._lm_pass1_done = True
+
+    cdef Morsel _latmat_next(self):
+        """Native two-pass latmat: run pass-1 to completion on first call, then
+        stream pass-2 row groups, combining each with its pass-1 survivors and
+        returning one morsel per call. Replaces the read_morsels generator's
+        latmat body — no generator frame. Returns None on exhaustion."""
+        cdef tuple pulled
+        cdef list vectors, combined_identity_names, combined_vectors
+        cdef object path, rg_idx, identity, p1_filtered, p1_identity_names
+        cdef dict row_group, p1_vectors_by_identity, p2_vectors_by_identity
+        cdef Morsel result_morsel
+        cdef int64_t rows_after_filter
+        cdef Py_ssize_t i, n
+        if not self._lm_pass1_done:
+            self._run_pass1()
+        while True:
+            if self._limit_exhausted():
+                return self._finish_locked()
+            pulled = None if self._lm_pass2_src is None else self._lm_pass2_src.next_vectors()
+            if pulled is None:
+                return self._finish_locked()
+            vectors = pulled[0]
+            path = pulled[4]
+            rg_idx = pulled[5]
+            # Pass-2 telemetry mirrors the original: bytes only.
+            self.scan_readings.record_pass2_decoded(pulled[1])
+            self.bytes_in += pulled[1]
+
+            n = len(vectors)
+            row_group = {self._lm_pass2_names_bytes[i]: vectors[i] for i in range(n)}
+            _coerce_logical_types(
+                row_group, self._sp_decimal_col_map,
+                self._sp_date_col_set, self._sp_timestamp_col_set,
+            )
+
+            p1_filtered, p1_identity_names = self._lm_p1_cache.pop((path, rg_idx))
+            # WP-2: reduce pass-1 survivors to the same top-n winners pass 2 decoded.
+            if self._lm_topn_winners is not None:
+                p1_filtered = p1_filtered.take(self._lm_topn_winners[(path, rg_idx)])
+
+            p1_vectors_by_identity = {nm: p1_filtered.column(nm) for nm in p1_identity_names}
+            # Positional pairing: pass2_column_names order == row_group.values() order.
+            p2_vectors_by_identity = {
+                self._sp_pass2_name_to_identity[col]: vec
+                for col, vec in zip(self._sp_pass2_column_names, row_group.values())
+            }
+
+            if self._sp_output_identity_order:
+                combined_identity_names = []
+                combined_vectors = []
+                for identity in self._sp_output_identity_order:
+                    if identity in p1_vectors_by_identity:
+                        combined_identity_names.append(identity)
+                        combined_vectors.append(p1_vectors_by_identity[identity])
+                    elif identity in p2_vectors_by_identity:
+                        combined_identity_names.append(identity)
+                        combined_vectors.append(p2_vectors_by_identity[identity])
+            else:
+                combined_identity_names = list(p1_identity_names)
+                combined_identity_names.extend(p2_vectors_by_identity.keys())
+                combined_vectors = list(p1_vectors_by_identity.values())
+                combined_vectors.extend(p2_vectors_by_identity.values())
+
+            result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
+            rows_after_filter = result_morsel.num_rows
+
+            self._scan_mtx.lock()
+            self._total_rows_after_filter += rows_after_filter
+            # Already assembled in output_identity_order — no select() needed.
+            result_morsel = self._commit_morsel(result_morsel, path)
+            self._emitted_any = True
+            self._scan_mtx.unlock()
+            return result_morsel
+
+    def read_morsels(self):
+        """Empty-manifest FALLBACK source generator. Single-pass and two-pass
+        latmat scans are served natively by next_morsel; _ensure_scan_started
+        routes here only for an empty / zero-file manifest, emitting one empty
+        Morsel (mirrors the original guard)."""
+        self._ensure_scan_started()
+        yield Morsel()
+
+        # Non-empty manifests are served natively (SINGLE or LATMAT); FALLBACK is
+        # selected only for an empty manifest, so there is nothing more to yield.

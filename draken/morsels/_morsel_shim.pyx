@@ -544,6 +544,107 @@ cdef class Morsel:
             free(idx)
         return result
 
+    def partition_by_hash(self, col_names, int n_bins):
+        """Partition rows into `n_bins` sub-morsels by hash(col_names) bucket.
+
+        The routing hash is the existing keying hash (the nogil `c_hash` path):
+        for a single string key it folds the german-string slot hash32 (no arena
+        re-hash); for multi-column / fixed-width keys it mixes the per-column
+        hashes. Identical keys always route to the same bin (deterministic per
+        key value); NULL keys collide to one bin. `n_bins` MUST be a power of two
+        (bucket = hash & (n_bins - 1)).
+
+        Returns `n_bins` Morsels (some may be empty). The bins are a ROW-DISJOINT
+        partition of self — every input row lands in exactly one bin and every
+        instance of a group key lands in the same bin — so per-bin grouped
+        aggregation needs NO cross-bin merge.
+        """
+        if n_bins < 1 or (n_bins & (n_bins - 1)) != 0:
+            raise ValueError("partition_by_hash: n_bins must be a power of two")
+
+        cdef Py_ssize_t n = self.num_rows
+        cdef Py_ssize_t ncols = self._num_columns()
+        cdef uint64_t mask = <uint64_t>(n_bins - 1)
+        cdef Py_ssize_t b, i
+        cdef list result = []
+        cdef Morsel sub
+
+        if n == 0:
+            for b in range(n_bins):
+                sub = _make_morsel()
+                sub._col_names = list(self._col_names)
+                sub._zero_col_num_rows = 0
+                result.append(sub)
+            return result
+
+        # 1) per-row routing hashes — reuse the nogil c_hash path (slot hash for
+        #    strings, mixed hash for multi-column).
+        cdef int32_t n_cols = 0
+        cdef int32_t* col_indices = self._resolve_columns_to_indices(col_names, &n_cols)
+        cdef const DrakenVector** dvs
+        try:
+            dvs = self._columns_to_pointers(col_indices, n_cols)
+        finally:
+            free(col_indices)
+        cdef uint64_t* hashes = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
+        if hashes == NULL:
+            draken_free(dvs)
+            raise MemoryError()
+        cdef bint needs_gil
+        try:
+            needs_gil = self.c_hash(hashes, dvs, n_cols, n)
+        finally:
+            draken_free(dvs)
+        if needs_gil:
+            free(hashes)
+            raise NotImplementedError(
+                "partition_by_hash: column type cannot be hashed via this path"
+            )
+
+        # 2) counting-partition row indices into contiguous per-bin ranges (nogil).
+        cdef int32_t* counts = <int32_t*>calloc(<size_t>n_bins, sizeof(int32_t))
+        cdef int32_t* offsets = <int32_t*>malloc(<size_t>n_bins * sizeof(int32_t))
+        cdef int32_t* cursor = <int32_t*>malloc(<size_t>n_bins * sizeof(int32_t))
+        cdef int32_t* idx = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
+        if counts == NULL or offsets == NULL or cursor == NULL or idx == NULL:
+            free(hashes); free(counts); free(offsets); free(cursor); free(idx)
+            raise MemoryError()
+        cdef uint64_t bucket
+        with nogil:
+            for i in range(n):
+                counts[hashes[i] & mask] += 1
+            offsets[0] = 0
+            for b in range(1, n_bins):
+                offsets[b] = offsets[b - 1] + counts[b - 1]
+            for b in range(n_bins):
+                cursor[b] = offsets[b]
+            for i in range(n):
+                bucket = hashes[i] & mask
+                idx[cursor[bucket]] = <int32_t>i
+                cursor[bucket] += 1
+        free(hashes)
+        free(cursor)
+
+        # 3) gather each bin's contiguous index slice into a sub-morsel.
+        cdef int32_t start, blen
+        try:
+            for b in range(n_bins):
+                start = offsets[b]
+                blen = counts[b]
+                sub = _make_morsel()
+                sub._col_names = list(self._col_names)
+                if ncols == 0:
+                    sub._zero_col_num_rows = blen
+                else:
+                    for i in range(ncols):
+                        sub._append_column(
+                            _take_native(self._get_column(i), idx + start, <uint32_t>blen)
+                        )
+                result.append(sub)
+        finally:
+            free(counts); free(offsets); free(idx)
+        return result
+
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):
         cdef Py_ssize_t real_start = start if start >= 0 else offset
         cdef Morsel result = _make_morsel()

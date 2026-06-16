@@ -158,6 +158,26 @@ PARQUET_LOCAL_IO_WORKERS: int = int(get("PARQUET_LOCAL_IO_WORKERS", 8))
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 """Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
 
+MAX_EXECUTION_WORKERS: int = int(get("MAX_EXECUTION_WORKERS", 1))
+"""Central parallel execution scheduler width (M4). 1 = the serial engine, byte-
+identical to the historic path (the default). >1 routes to the parallel engine,
+which parallelises pipeline segments over data partitions on a query-scoped
+CppThreadPool. Capped at 8 (the measured regression boundary) inside the engine.
+See docs/M4_CENTRAL_SCHEDULER_DESIGN.md."""
+
+PARALLEL_MIN_ROWS: int = int(get("PARALLEL_MIN_ROWS", 262_144))
+"""Row-floor for the parallel scheduler (M4). A pipeline whose scan yields fewer
+buffered rows than this runs serially — below it the per-worker clone + thread
+setup (and the merge) dominate. Bench-tuned; set to 0 to force-engage parallel
+on any input (testing/benchmarking)."""
+
+PARALLEL_AGG_STRATEGY: str = get("PARALLEL_AGG_STRATEGY", "roundrobin")
+"""Parallel grouped-aggregate strategy (M4). 'roundrobin' = whole morsels to
+workers + WP-7 merge() (wins low/medium cardinality). 'shuffle' = hash-partition
+rows by key into disjoint bins, NO merge (wins high cardinality). 'auto' (Stage 2)
+will select by NDV. Default 'roundrobin' until the NDV selector lands. See
+docs/M4_CENTRAL_SCHEDULER_DESIGN.md §11."""
+
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

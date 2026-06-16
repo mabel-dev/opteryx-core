@@ -556,8 +556,8 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
         if s not in sources:
             sources.append(s)
 
-    # New draken links the vendored mimalloc (single-TU object pre-built in
-    # build_extensions, before any extension is linked).
+    # draken uses the system allocator (draken/core/alloc.h); mimalloc is not
+    # linked — see the note in build_extensions for why it was removed.
     return Extension(
         name=f"draken.{module_path}",
         sources=sources,
@@ -661,7 +661,8 @@ extensions = [
         depends=["draken/core/buffers.h", "draken/core/string_slot.h"],
     ),
     # Draken nanobind binding (Milestone B.1): Vector handle + Morsel + int64 ingestion.
-    # Single module; links mimalloc (all owned buffers) + nanobind + vector_alloc globals.
+    # Single module; nanobind + vector_alloc globals (owned buffers use the system
+    # allocator via draken/core/alloc.h — mimalloc removed, see build_extensions).
     Extension(
         "draken.draken_native",
         sources=[

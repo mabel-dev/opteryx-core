@@ -82,7 +82,6 @@ class GroupedAggregateHashedNode(BasePlanNode):
         collectors, _key_kinds_placeholder = create_collectors(
             self._aggregation_specs, self.group_by_columns
         )
-
         variant = parameters.get("group_map_variant", "carchar")
         use_parvi = variant == "parvi"
         self._engine = GroupHashEngine(self.group_by_columns, collectors, True, use_parvi)
@@ -282,20 +281,23 @@ class GroupedAggregateHashedNode(BasePlanNode):
         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
 
     def _finalize(self):
+        yield from self._finalize_engine(self._engine)
+
+    def _finalize_engine(self, engine):
         finalize_start = time.monotonic_ns()
 
         # Pass HAVING filter to engine for early filtering before chunking
         # This avoids reconstructing groups that don't pass the filter.
         filter_fn = self._apply_having_filter if self._having_condition is not None else None
 
-        for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):
+        for chunk in engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):
             if self._implicit_count_added:
                 # Drop the first column (the implicit COUNT(*))
                 chunk = chunk.select(chunk.column_names[1:])
             yield chunk
 
         self.readings["time_aggregate_finalize"] += time.monotonic_ns() - finalize_start
-        engine_telemetry = self._engine.telemetry()
+        engine_telemetry = engine.telemetry()
         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]

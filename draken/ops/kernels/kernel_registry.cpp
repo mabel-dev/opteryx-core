@@ -79,8 +79,11 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},
     {"draken_cast_timestamp_to_string", (kernel_fn_t)&draken_cast_timestamp_to_string},
-    {"draken_cast_date32_to_timestamp", (kernel_fn_t)&draken_cast_date32_to_timestamp},
-    {"draken_cast_timestamp_to_date32", (kernel_fn_t)&draken_cast_timestamp_to_date32},
+    // P9.0: draken_cast_date32_to_timestamp / draken_cast_timestamp_to_date32 removed —
+    // they are STUBS (cast_temporal.cpp returns "not yet implemented"). The registry
+    // holds ONLY real, nogil, byte-identical kernels; a registered stub is a trap (the
+    // binder would mark it BC_INSTR_C_NATIVE and dispatch an error sentinel). Re-add when
+    // implemented. Neutral today: neither is in casts.py `_c_native_cast`.
 
     // Dispatch helpers (any → target type)
     {"draken_cast_to_float64", (kernel_fn_t)&draken_cast_to_float64},
@@ -99,10 +102,10 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_identity", (kernel_fn_t)&draken_cast_identity},
 
     // ========================================================================
-    // Binary operation kernels (16 total)
+    // Binary operation kernels — REAL only
     // ========================================================================
 
-    // Arithmetic dispatch and individual operations
+    // Arithmetic dispatch and individual operations (binary_op_arithmetic.cpp — real).
     {"draken_binary_arith", (kernel_fn_t)&draken_binary_arith},
     {"draken_add", (kernel_fn_t)&draken_add},
     {"draken_subtract", (kernel_fn_t)&draken_subtract},
@@ -110,26 +113,21 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_divide", (kernel_fn_t)&draken_divide},
     {"draken_modulo", (kernel_fn_t)&draken_modulo},
 
-    // Bitwise operations
-    {"draken_bitwise_or", (kernel_fn_t)&draken_bitwise_or},
-    {"draken_bitwise_and", (kernel_fn_t)&draken_bitwise_and},
-    {"draken_bitwise_xor", (kernel_fn_t)&draken_bitwise_xor},
-    {"draken_bitwise_shift_left", (kernel_fn_t)&draken_bitwise_shift_left},
-    {"draken_bitwise_shift_right", (kernel_fn_t)&draken_bitwise_shift_right},
-
-    // String operations
-    {"draken_string_concat", (kernel_fn_t)&draken_string_concat},
-
-    // Temporal operations
-    {"draken_temporal_interval_op", (kernel_fn_t)&draken_temporal_interval_op},
-    {"draken_date_minus_date", (kernel_fn_t)&draken_date_minus_date},
-    {"draken_interval_interval_op", (kernel_fn_t)&draken_interval_interval_op},
-
-    // IP address operations
-    {"draken_ip_in_cidr", (kernel_fn_t)&draken_ip_in_cidr},
+    // P9.0: bitwise (×5), string_concat, IP (binary_op_other.cpp) and temporal
+    // (binary_op_temporal.cpp) binary kernels removed — ALL STUBS ("not yet
+    // implemented"). The registry holds only real kernels. These were also DEAD:
+    // the BC_BINARY_OP path dispatches arithmetic via draken_arithmetic_dv (a separate
+    // C entry point) and everything else via the resolve_binary_op closure — nothing
+    // looked these names up. Per architect decision (2026-06-16) the binary-op path
+    // will later UNIFY onto this registry's kernel_fn ABI, but only as a complete,
+    // null-correct replacement (no beside-fallback); these get re-added real then.
 
     // ========================================================================
-    // Extraction kernels (4 total)
+    // Extraction kernels (4) — KNOWN STUBS, intentionally still registered.
+    // extraction.cpp returns "not yet implemented", but the binder REQUIRES these
+    // entries (raises if absent) and the executor IGNORES kernel_fn for BC_EXTRACTION
+    // (hardcoded nanobind dispatch), so they never execute as C-native. Left in place
+    // pending the P9 extraction-flip decision; remove + make real together then.
     // ========================================================================
 
     {"draken_map_access_string", (kernel_fn_t)&draken_map_access_string},

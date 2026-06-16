@@ -53,6 +53,12 @@ struct cast_varchar_ctx {
  */
 struct binary_op_ctx {
     int op_code;  // BOP_PLUS, BOP_MINUS, BOP_MULTIPLY, BOP_DIVIDE, BOP_MODULO
+    // DECIMAL/DECIMAL128 only (P9.1b): operand + result scales, supplied by the
+    // binder (DrakenVector carries no scale — it lives on the LogicalType
+    // descriptor at bind time). Zero for non-decimal ops (aggregate init `{op}`).
+    unsigned char left_scale;
+    unsigned char right_scale;
+    unsigned char result_scale;  // dec_div result scale = max(sa+6,6) capped 18
 };
 
 /**

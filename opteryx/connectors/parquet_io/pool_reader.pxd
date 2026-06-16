@@ -20,13 +20,17 @@ from rugo.parquet_reader cimport ColumnStats, RowGroupStats
 
 cdef extern from "io_pipeline.hpp" namespace "rugo":
     cdef cppclass ColumnOut:
-        int direct_kind      # 0=pool; 1=int64 2=float32 3=float64 4=bool 5=decimal128
-        void* data           # direct: draken_alloc'd positional values
+        int direct_kind      # 0=pool 1=int64 2=float32 3=float64 4=bool 5=decimal128 6=varchar
+        void* data           # direct: draken_alloc'd positional values / string slots
         uint8_t* validity    # direct: draken_alloc'd null bitmap, or NULL
-        uint32_t length      # direct: row count
+        uint32_t length      # direct: logical row count
         int64_t ref_id       # pool path: MemoryPool ref
         uint8_t dec_precision # DK_DECIMAL128 descriptor
         uint8_t dec_scale
+        void* arena          # DK_VARCHAR*: long-string byte arena
+        size_t arena_len     # DK_VARCHAR*: valid arena bytes
+        void* codes          # DK_VARCHAR_DICT: uint32 code per row
+        uint32_t data_length # DK_VARCHAR_DICT: unique-value slot count
 
     cdef cppclass MorselRef:
         string path
@@ -42,6 +46,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
     # Take ownership of column i's direct buffers (data returned, validity via
     # out param); nulls both slots so MorselRef's destructor won't free them.
     void* morsel_take_direct(MorselRef& m, size_t i, uint8_t** out_validity) nogil
+    # Take ownership of column i's DK_VARCHAR* arena + dict codes (nulls both so
+    # the destructor won't double-free what draken_vector_own_string frees).
+    void morsel_take_string(MorselRef& m, size_t i, void** out_arena, void** out_codes) nogil
 
     cdef cppclass ParquetIOPipeline:
         ParquetIOPipeline(int decode_workers, size_t queue_capacity) except +

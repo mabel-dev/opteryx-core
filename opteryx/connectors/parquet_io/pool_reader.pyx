@@ -25,6 +25,16 @@ from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 import time
 
+# Native mutex for thread-safe concurrent pull (M4 / no-GIL target). The lock is
+# the real cross-thread synchronisation once the GIL is gone; today it is held
+# only over GIL-release-free bookkeeping (cursor advance + accounting), never
+# across the nogil decode wait or work submission, so no GIL/mutex inversion.
+cdef extern from "<mutex>" namespace "std" nogil:
+    cppclass cpp_mutex "std::mutex":
+        cpp_mutex()
+        void lock()
+        void unlock()
+
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
@@ -32,9 +42,34 @@ from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
 # WP-6b direct path: wrap worker-built Draken buffers into Vectors (consumer-side,
 # GIL held). DirectKind 1=int64 2=float32 3=float64 4=bool 5=decimal128.
 from draken.core.buffers cimport (
-    DrakenType, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_DECIMAL128
+    DrakenType, DrakenVector,
+    DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_DECIMAL128, DRAKEN_VARCHAR
 )
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
+from cpython.ref cimport PyObject
+
+# Stage 4b: wrap worker-built direct string slots into a VARCHAR Vector. Mirrors
+# column_deserializer._wrap_raw_pyobj — draken_vector_own_string copies the
+# slots+arena into a self-owned block and frees the inputs, so the worker buffers
+# must have been taken (nulled) on the MorselRef first to avoid a double free.
+cdef extern from "core/string_slot.h" nogil:
+    ctypedef struct DrakenStringSlot:
+        pass
+
+cdef extern from *:
+    """static inline void _pr_decref(PyObject* op) { Py_DECREF(op); }"""
+    void _pr_decref(PyObject* op)
+
+cdef extern from "core/draken_bridge.h":
+    const DrakenVector* draken_vector_unwrap(PyObject* obj)
+    PyObject* draken_vector_own_string(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint8_t* validity, uint32_t length, DrakenType vec_type)
+    PyObject* draken_vector_own_string_dict(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint32_t* codes, uint32_t data_length,
+        uint8_t* validity, uint32_t length, DrakenType vec_type)
+
 from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
@@ -45,49 +80,117 @@ _PARQUET_FOOTER_SUFFIX = 8
 _FOOTER_PREFETCH = 65536
 
 
+cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i):
+    """Stage 4b: wrap direct DK_VARCHAR column i into a dense VARCHAR Vector.
+
+    Takes the worker's slots (data) + validity via morsel_take_direct and the arena
+    via morsel_take_string — nulling ALL of them on the MorselRef — then hands them
+    to draken_vector_own_string, which copies into a self-owned block and frees the
+    slots+arena (and owns the validity). Because every buffer was taken, the
+    MorselRef destructor frees nothing for this column: no double free.
+    """
+    cdef uint32_t dlen = result.columns[i].length
+    cdef size_t arena_len = result.columns[i].arena_len
+    cdef void* slots_ptr
+    cdef uint8_t* dval
+    cdef void* arena_ptr
+    cdef void* codes_ptr
+    cdef PyObject* raw
+    cdef Vector vec
+    slots_ptr = morsel_take_direct(result[0], i, &dval)
+    morsel_take_string(result[0], i, &arena_ptr, &codes_ptr)
+    raw = draken_vector_own_string(
+        <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
+        dval, dlen, DRAKEN_VARCHAR)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_string failed")
+    vec = Vector.__new__(Vector)
+    vec._nb = <object>raw          # Cython incref → refcount 2
+    _pr_decref(raw)                # balance the NEW ref → refcount 1
+    vec._dv = draken_vector_unwrap(raw)
+    return vec
+
+
+cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i):
+    """Stage 4b: wrap direct DK_VARCHAR_DICT column i into a dict-shape VARCHAR
+    Vector. Like the plain wrap but also hands the codes selection to
+    draken_vector_own_string_dict, which owns all four buffers; morsel_take_direct
+    + morsel_take_string null slots/validity/arena/codes so the destructor frees
+    none of them (no double free)."""
+    cdef uint32_t dlen = result.columns[i].length
+    cdef size_t arena_len = result.columns[i].arena_len
+    cdef uint32_t data_length = result.columns[i].data_length
+    cdef void* slots_ptr
+    cdef uint8_t* dval
+    cdef void* arena_ptr
+    cdef void* codes_ptr
+    cdef PyObject* raw
+    cdef Vector vec
+    slots_ptr = morsel_take_direct(result[0], i, &dval)
+    morsel_take_string(result[0], i, &arena_ptr, &codes_ptr)
+    raw = draken_vector_own_string_dict(
+        <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
+        <uint32_t*>codes_ptr, data_length,
+        dval, dlen, DRAKEN_VARCHAR)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_string_dict failed")
+    vec = Vector.__new__(Vector)
+    vec._nb = <object>raw
+    _pr_decref(raw)
+    vec._dv = draken_vector_unwrap(raw)
+    return vec
+
+
+cdef inline Vector _wrap_direct(MorselRef* result, size_t i):
+    """Wrap direct column i into a Draken Vector via ownership transfer.
+    morsel_take_direct hands the draken_alloc'd buffer + validity to the Vector and
+    nulls the MorselRef slots so the destructor won't double-free. Fixed-width kinds
+    1..5; DK_VARCHAR (6) routes to the string wrap.
+    """
+    cdef int dk = result.columns[i].direct_kind
+    cdef uint32_t dlen = result.columns[i].length
+    cdef DrakenType dtype
+    cdef void* dptr
+    cdef uint8_t* dval
+    cdef Vector vec
+    if dk == 6:
+        return _wrap_string_direct(result, i)
+    if dk == 7:
+        return _wrap_string_dict_direct(result, i)
+    if dk == 1:
+        dtype = DRAKEN_INT64
+    elif dk == 2:
+        dtype = DRAKEN_FLOAT32
+    elif dk == 3:
+        dtype = DRAKEN_FLOAT64
+    elif dk == 4:
+        dtype = DRAKEN_BOOL
+    else:  # dk == 5
+        dtype = DRAKEN_DECIMAL128
+    dptr = morsel_take_direct(result[0], i, &dval)
+    vec = _vector_from_decoded(dptr, dval, dlen, dtype)
+    if dk == 5 and dlen > 0:
+        vec._nb.set_decimal_descriptor(
+            result.columns[i].dec_precision, result.columns[i].dec_scale)
+    return vec
+
+
 cdef inline tuple _split_columns(MorselRef* result):
     """Split a result's columns into (pool ref_ids, direct Vectors).
 
     Pool-path columns (direct_kind == 0) return their MemoryPool ref_id for the
-    deserializer. Direct-path columns (WP-6b: non-nullable fixed-width) are
-    wrapped here into a Draken Vector via ownership transfer — morsel_take_direct
-    hands the draken_alloc'd buffer to the Vector and nulls the MorselRef slot so
-    its destructor won't double-free.
+    deserializer. Direct-path columns are wrapped here via _wrap_direct.
     """
     cdef dict ref_ids = {}
     cdef dict direct = {}
     cdef bytes col_name
-    cdef int dk
-    cdef DrakenType dtype
-    cdef uint32_t dlen
-    cdef void* dptr
-    cdef uint8_t* dval
-    cdef Vector vec
     cdef size_t i
     for i in range(result.columns.size()):
         col_name = result.column_names[i]   # bytes — names are bytes throughout
-        dk = result.columns[i].direct_kind
-        if dk == 0:
+        if result.columns[i].direct_kind == 0:
             ref_ids[col_name] = result.columns[i].ref_id
             continue
-        if dk == 1:
-            dtype = DRAKEN_INT64
-        elif dk == 2:
-            dtype = DRAKEN_FLOAT32
-        elif dk == 3:
-            dtype = DRAKEN_FLOAT64
-        elif dk == 4:
-            dtype = DRAKEN_BOOL
-        else:  # dk == 5
-            dtype = DRAKEN_DECIMAL128
-        dlen = result.columns[i].length
-        # Take both data + validity (nulls the slots so the dtor won't free them).
-        dptr = morsel_take_direct(result[0], i, &dval)
-        vec = _vector_from_decoded(dptr, dval, dlen, dtype)
-        if dk == 5 and dlen > 0:
-            vec._nb.set_decimal_descriptor(
-                result.columns[i].dec_precision, result.columns[i].dec_scale)
-        direct[col_name] = vec
+        direct[col_name] = _wrap_direct(result, i)
     return ref_ids, direct
 
 
@@ -543,6 +646,413 @@ cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates):
     return True
 
 
+cdef class IpcRowGroupSource:
+    """Native single-pass row-group driver: owns the C++ pipeline lifecycle and
+    feeds decoded row groups one at a time WITHOUT a Python generator frame.
+
+    ``open_ipc_source`` does the once-per-scan planning (footer fetch, work-item
+    pruning, pool sizing); ``next_vectors`` submits the bounded in-flight window
+    and blocks (GIL released) for the next decoded row group, returning a tuple
+    ``(vectors, bytes_fetched, read_ns, decode_ns, path, rg_idx)`` in submission
+    order. All ``MorselRef`` / C++ handling stays inside this module.
+
+    Thread-safe concurrent pull (M4 / no-GIL target): a native ``std::mutex``
+    guards the cursor (``next_to_submit`` / ``results_received``). The claim
+    (advance the submit window + take one result slot) runs under the lock; the
+    actual work submission and the blocking decode wait run OUTSIDE the lock — so
+    the lock is never held across a GIL-releasing region (no GIL/mutex inversion
+    while a GIL still exists) and N threads decode/assemble in parallel. Per-row
+    telemetry is RETURNED, never stored on the instance, so concurrent callers
+    can't clobber each other's values. The bounded window keeps peak pool
+    occupancy ~ ``in_flight_limit`` row groups plus the few in-flight per thread.
+    """
+
+    cdef CppIOPipeline pipeline
+    cdef list work_items                 # [(path, rg_idx)]
+    cdef list column_names               # str, submission order
+    cdef list column_names_bytes         # bytes, for name-keyed callers
+    cdef unordered_map[string, FileStats]* footer_map
+    cdef object prefetched_footers
+    cdef dict orig_to_cpp
+    cdef dict cpp_to_orig
+    cdef int in_flight_limit
+    cdef int n_items
+    cdef int next_to_submit
+    cdef int results_received
+    cdef bint _closed
+    cdef list masks                      # pass-2: bit-packed survival mask per work item (else None)
+    cdef cpp_mutex* _mtx                  # guards the cursor under concurrent pull
+
+    def __cinit__(self):
+        self.footer_map = NULL
+        self._closed = False
+        self.pipeline = None
+        self.next_to_submit = 0
+        self.results_received = 0
+        self.n_items = 0
+        self.in_flight_limit = 0
+        self.masks = None
+        self._mtx = new cpp_mutex()
+
+    def __dealloc__(self):
+        if self.footer_map != NULL:
+            del self.footer_map
+            self.footer_map = NULL
+        if self._mtx != NULL:
+            del self._mtx
+            self._mtx = NULL
+
+    cdef void _submit_one(self, int idx):
+        """Submit one work item to the C++ pipeline. Called OUTSIDE the cursor
+        lock — the pipeline's work queue is itself thread-safe and the footer map
+        is read-only after open(), so disjoint claimed ranges submit safely in
+        parallel."""
+        cdef object path = self.work_items[idx][0]
+        cdef int rg_idx = self.work_items[idx][1]
+        cdef str cpp_path = self.orig_to_cpp.get(path, path)
+        cdef string path_bytes_cpp
+        cdef RowGroupStats* rg_ptr
+        cdef list column_stats_dicts
+        cdef object meta, rg_meta, col_meta, col_name
+        if self.masks is not None:
+            # Pass-2 late materialization: decode only surviving rows (the
+            # bit-packed mask from pass-1) — always the native-footer path.
+            path_bytes_cpp = path.encode('utf-8')
+            rg_ptr = &self.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+            self.pipeline.submit_work_native_masked(
+                cpp_path, rg_idx, self.column_names, rg_ptr, self.masks[idx])
+            return
+        if self.prefetched_footers and path in self.prefetched_footers:
+            meta = self.prefetched_footers[path]
+            rg_meta = meta["row_groups"][rg_idx]
+            column_stats_dicts = []
+            for col_name in self.column_names:
+                for col_meta in rg_meta["columns"]:
+                    if col_meta["name"] == col_name:
+                        column_stats_dicts.append(col_meta)
+                        break
+            self.pipeline.submit_work(cpp_path, rg_idx, self.column_names, column_stats_dicts)
+        else:
+            path_bytes_cpp = path.encode('utf-8')
+            rg_ptr = &self.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+            self.pipeline.submit_work_native(cpp_path, rg_idx, self.column_names, rg_ptr)
+
+    cpdef tuple next_vectors(self):
+        """Block for the next decoded row group; return
+        ``(vectors, bytes_fetched, read_ns, decode_ns, path, rg_idx)`` (vectors in
+        submission order) or None on exhaustion. Direct (WP-6b) columns are wrapped
+        zero-copy; pool-path columns are deserialized and slotted positionally."""
+        cdef MorselRef result
+        cdef bint got
+        cdef list vectors
+        cdef dict ref_ids
+        cdef dict pool_dict
+        cdef Py_ssize_t i, ncols, max_len, this_len
+        cdef int submit_start, submit_end, idx
+        cdef str cpp_path, path_str
+
+        # ── Claim phase (under the cursor lock): advance the submit window to keep
+        # it full, then take one result slot. No GIL-releasing call runs here. ──
+        self._mtx.lock()
+        submit_start = self.next_to_submit
+        submit_end = submit_start
+        while submit_end < self.n_items and \
+                (submit_end - self.results_received) < self.in_flight_limit:
+            submit_end += 1
+        self.next_to_submit = submit_end
+        if self.results_received >= self.n_items:
+            self._mtx.unlock()
+            return None
+        self.results_received += 1
+        self._mtx.unlock()
+
+        # ── Submit the claimed range OUTSIDE the lock (queue is thread-safe). ──
+        for idx in range(submit_start, submit_end):
+            self._submit_one(idx)
+
+        # ── Blocking wait OUTSIDE the lock; the C++ queue hands each concurrent
+        # caller a distinct completed result. ──
+        with nogil:
+            got = self.pipeline.pipeline.wait_and_get_result(result)
+        if not got:
+            raise RuntimeError("Parquet pipeline drained with result(s) missing")
+        if not result.success:
+            raise RuntimeError(f"Parquet pipeline error: {result.error.decode('utf-8')}")
+
+        cpp_path = result.path.decode('utf-8')
+        path_str = self.cpp_to_orig.get(cpp_path, cpp_path)
+
+        ncols = result.columns.size()
+        vectors = [None] * ncols
+        ref_ids = None
+        for i in range(ncols):
+            if result.columns[i].direct_kind == 0:
+                if ref_ids is None:
+                    ref_ids = {}
+                ref_ids[result.column_names[i]] = result.columns[i].ref_id
+                continue
+            vectors[i] = _wrap_direct(&result, i)
+
+        # Pool-path columns (strings/dict/list) are deserialized here and slotted
+        # positionally; fixed-width + date/timestamp arrive direct via _wrap_direct.
+        if ref_ids is not None:
+            pool_dict = deserialize_row_group(ref_ids, self.pipeline.pool)
+            for i in range(ncols):
+                if vectors[i] is None:
+                    vectors[i] = pool_dict[result.column_names[i]]
+
+        # Defensive: a zero-length column in an otherwise non-empty row group is
+        # a C++ decoder bug (silent data loss).
+        max_len = 0
+        for i in range(ncols):
+            this_len = len(vectors[i])
+            if this_len > max_len:
+                max_len = this_len
+        if max_len > 0:
+            for i in range(ncols):
+                if len(vectors[i]) == 0:
+                    raise RuntimeError(
+                        f"C++ decoder produced zero-length column in non-empty row "
+                        f"group for path={path_str!r} rg={result.rg_idx}"
+                    )
+        return (vectors, result.bytes_fetched, result.read_ns,
+                result.decode_ns, path_str, result.rg_idx)
+
+    cpdef void close(self):
+        """Cancel outstanding work, drain the pool, free the footer map. Safe to
+        call more than once and on a source that produced no work."""
+        if self._closed:
+            return
+        self._closed = True
+        if self.pipeline is not None:
+            self.pipeline.cancel()
+            self.pipeline.close()
+        if self.footer_map != NULL:
+            del self.footer_map
+            self.footer_map = NULL
+
+
+cpdef IpcRowGroupSource open_ipc_source(
+    filesystem,
+    paths,
+    column_names,
+    int decode_workers=4,
+    predicates=None,
+    file_sizes=None,
+    connector=None,
+    query_id=None,
+    prefetched_footers=None,
+    footer_bytes_cache=None,
+):
+    """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
+    and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
+    drives it with next_vectors() and releases it with close(). A source with
+    n_items == 0 is returned for empty/fully-pruned scans (close() still safe)."""
+    from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
+
+    cdef IpcRowGroupSource src = IpcRowGroupSource()
+    src.column_names = list(column_names)
+    src.column_names_bytes = [c.encode('utf-8') for c in src.column_names]
+    src.prefetched_footers = prefetched_footers
+    src.footer_map = new unordered_map[string, FileStats]()
+
+    # Signed-URL rewrite (GCS): C++ libcurl fetches need no auth header. A reverse
+    # map translates C++ result paths back to originals for telemetry.
+    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
+    cdef dict orig_to_cpp = {}
+    cdef dict cpp_to_orig = {}
+    if sign_url:
+        for path in paths:
+            if path not in orig_to_cpp:
+                cpp_path = sign_url(path)
+                orig_to_cpp[path] = cpp_path
+                cpp_to_orig[cpp_path] = path
+    src.orig_to_cpp = orig_to_cpp
+    src.cpp_to_orig = cpp_to_orig
+
+    cdef string path_bytes_cpp
+    cdef const uint8_t* footer_buf_ptr
+    cdef size_t footer_buf_size
+    cdef RowGroupStats* rgp
+    cdef size_t rg_i, ci
+    cdef int64_t max_rg_bytes = 0
+    cdef int64_t rg_bytes
+    cdef int64_t est_rg, dyn_pool_size
+    cdef int in_flight_limit
+
+    work_items = []
+
+    # ── Batch footer prefetch: one concurrent get_many for remote/uncached files.
+    batch_orig = []
+    batch_urls = []
+    batch_sizes = []
+    for path in paths:
+        if prefetched_footers and path in prefetched_footers:
+            continue
+        fetch_url = orig_to_cpp.get(path, path)
+        if not (fetch_url.startswith("gs://")
+                or fetch_url.startswith("http://")
+                or fetch_url.startswith("https://")):
+            continue
+        if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
+            continue
+        batch_orig.append(path)
+        batch_urls.append(fetch_url)
+        batch_sizes.append(file_sizes.get(path, -1) if file_sizes else -1)
+    if batch_urls:
+        envelopes = _fetch_footers_many(batch_urls, batch_sizes)
+        for bi in range(len(batch_orig)):
+            envelope = envelopes[bi]
+            if footer_bytes_cache is not None:
+                footer_bytes_cache.put(batch_urls[bi], envelope)
+            footer_buf_ptr = <const uint8_t*>envelope
+            footer_buf_size = len(envelope)
+            src.footer_map[0][batch_orig[bi].encode('utf-8')] = ReadParquetMetadataFromBuffer(
+                footer_buf_ptr, footer_buf_size
+            )
+
+    for path in paths:
+        if prefetched_footers and path in prefetched_footers:
+            meta = prefetched_footers[path]
+            for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
+                if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                    continue
+                work_items.append((path, rg_idx))
+        else:
+            path_bytes_cpp = path.encode('utf-8')
+            if src.footer_map[0].count(path_bytes_cpp) == 0:
+                envelope, _ = _read_footer_payload(
+                    orig_to_cpp.get(path, path),
+                    file_sizes.get(path, -1) if file_sizes else -1,
+                    footer_bytes_cache,
+                )
+                footer_buf_ptr = <const uint8_t*>envelope
+                footer_buf_size = len(envelope)
+                src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                    footer_buf_ptr, footer_buf_size
+                )
+            for rg_i in range(src.footer_map[0][path_bytes_cpp].row_groups.size()):
+                if predicates and not _rg_passes_predicates_native(
+                    src.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates
+                ):
+                    continue
+                work_items.append((path, rg_i))
+
+    src.work_items = work_items
+    src.n_items = len(work_items)
+    if src.n_items == 0:
+        return src
+
+    # ── Footer-derived pool sizing from the largest projected row group. ──
+    proj_set = set(column_names)
+    proj_set_bytes = {name.encode('utf-8') for name in column_names}
+    max_rg_bytes = 0
+    for path, rg_idx in work_items:
+        rg_bytes = 0
+        if prefetched_footers and path in prefetched_footers:
+            rg_meta = prefetched_footers[path]["row_groups"][rg_idx]
+            for col_meta in rg_meta["columns"]:
+                if col_meta["name"] in proj_set:
+                    cm_sz = col_meta.get("total_uncompressed_size", 0)
+                    if cm_sz and cm_sz > 0:
+                        rg_bytes += cm_sz
+        else:
+            path_bytes_cpp = path.encode('utf-8')
+            rgp = &src.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+            for ci in range(rgp.columns.size()):
+                if rgp.columns[ci].total_uncompressed_size > 0 and \
+                        bytes(rgp.columns[ci].name) in proj_set_bytes:
+                    rg_bytes += rgp.columns[ci].total_uncompressed_size
+        if rg_bytes > max_rg_bytes:
+            max_rg_bytes = rg_bytes
+
+    in_flight_limit = decode_workers + 2
+    est_rg = max_rg_bytes * 2
+    dyn_pool_size = est_rg * (in_flight_limit + 1)
+    if dyn_pool_size < 256*1024*1024:
+        dyn_pool_size = 256*1024*1024
+    src.in_flight_limit = in_flight_limit
+    src.pipeline = CppIOPipeline(
+        decode_workers=decode_workers,
+        queue_capacity=1024,
+        pool_size=dyn_pool_size,
+    )
+    return src
+
+
+cpdef IpcRowGroupSource open_pass2_source(
+    filesystem,
+    work_items,
+    column_names,
+    int decode_workers=0,
+    file_sizes=None,
+    connector=None,
+    query_id=None,
+    footer_bytes_cache=None,
+):
+    """Pass-2 late-materialization driver: decode only the surviving rows of the
+    pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
+
+    Returns an IpcRowGroupSource configured with explicit work items + per-row-group
+    masks — no footer pruning (pass-1 already chose the row groups). The masked
+    submit + the thread-safe next_vectors() consume are shared with the single-pass
+    driver. Pass-1 already fetched the footers, so these are cache hits."""
+    if decode_workers <= 0:
+        import os
+        decode_workers = max(2, (os.cpu_count() or 4) - 2)
+
+    cdef IpcRowGroupSource src = IpcRowGroupSource()
+    src.column_names = list(column_names)
+    src.column_names_bytes = [c.encode('utf-8') for c in src.column_names]
+    src.prefetched_footers = None
+    src.footer_map = new unordered_map[string, FileStats]()
+
+    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
+    cdef dict orig_to_cpp = {}
+    cdef dict cpp_to_orig = {}
+    if sign_url:
+        for path, _rg, _mask in work_items:
+            if path not in orig_to_cpp:
+                cpp_path = sign_url(path)
+                orig_to_cpp[path] = cpp_path
+                cpp_to_orig[cpp_path] = path
+    src.orig_to_cpp = orig_to_cpp
+    src.cpp_to_orig = cpp_to_orig
+
+    cdef string path_bytes_cpp
+    cdef const uint8_t* footer_buf_ptr
+    cdef size_t footer_buf_size
+    cdef list wi = []
+    cdef list masks = []
+    for path, rg_idx, mask_bytes in work_items:
+        wi.append((path, rg_idx))
+        masks.append(bytes(mask_bytes))
+        path_bytes_cpp = path.encode('utf-8')
+        if src.footer_map[0].count(path_bytes_cpp) == 0:
+            envelope, _ = _read_footer_payload(
+                orig_to_cpp.get(path, path),
+                file_sizes.get(path, -1) if file_sizes else -1,
+                footer_bytes_cache,
+            )
+            footer_buf_ptr = <const uint8_t*>envelope
+            footer_buf_size = len(envelope)
+            src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                footer_buf_ptr, footer_buf_size
+            )
+    src.work_items = wi
+    src.masks = masks
+    src.n_items = len(wi)
+    if src.n_items == 0:
+        return src
+    src.in_flight_limit = decode_workers + 2
+    src.pipeline = CppIOPipeline(
+        decode_workers=decode_workers,
+        queue_capacity=1024,
+        pool_size=256*1024*1024,
+    )
+    return src
+
+
 def iter_row_groups_ipc(
     filesystem,
     paths,
@@ -560,336 +1070,56 @@ def iter_row_groups_ipc(
     C++ Parquet IO pipeline: read + decode + serialize all in C++, no Python in hot path.
     Supports local files (POSIX), HTTP/HTTPS (libcurl), and GCS gs:// (rewritten to
     signed HTTPS URLs at submission time so C++ libcurl needs no auth headers).
+
+    Thin generator wrapper over IpcRowGroupSource for callers that want the
+    (ScanRowGroup, {col: Vector}) contract (latmat pass-1, tests). The single-pass
+    scan operator drives IpcRowGroupSource directly with no generator frame.
     """
-    from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
-
-    # Planning-time URL signer: converts gs:// paths to signed HTTPS URLs so the
-    # C++ pipeline can fetch them via libcurl without any Authorization header.
-    # Only present on GCS filesystems; local/HTTP paths pass through unchanged.
-    # Each unique path is signed once; a reverse map translates C++ result paths
-    # back to original paths for Python-side consumers (fetch_columns, telemetry).
-    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
-    cdef dict orig_to_cpp = {}
-    cdef dict cpp_to_orig = {}
-    if sign_url:
-        for path in paths:
-            if path not in orig_to_cpp:
-                cpp_path = sign_url(path)
-                orig_to_cpp[path] = cpp_path
-                cpp_to_orig[cpp_path] = path
-
-    # Created after footer collection so the IPC pool can be sized from the
-    # data (see "Footer-derived pool sizing" below) rather than a fixed constant.
-    cdef CppIOPipeline pipeline = None
-
-    cdef uint64_t t_phase1_ns = 0
-    cdef uint64_t t_phase2_ns = 0
-    cdef uint64_t t_footer_ns = 0
-    cdef uint64_t t_submit_ns = 0
-    cdef uint64_t t_consume_ns = 0
-    cdef uint64_t t_get_result_ns = 0
-    cdef uint64_t t_deserialize_ns = 0
-    cdef uint64_t _t0, _t1, _ts
-    cdef unordered_map[string, FileStats] local_footers_native
-    cdef string path_bytes_cpp
-    cdef const uint8_t* footer_buf_ptr
-    cdef size_t footer_buf_size
-    cdef RowGroupStats* rg_ptr
-    cdef RowGroupStats* rgp
-    cdef size_t rg_i
-    cdef size_t ci
-    cdef int64_t max_rg_bytes = 0
-    cdef int64_t rg_bytes
-    cdef int64_t est_rg
-    cdef int64_t dyn_pool_size
-    cdef int in_flight_limit
-    cdef int next_to_submit
-    cdef int n_items
-
+    cdef IpcRowGroupSource src = open_ipc_source(
+        filesystem, paths, column_names,
+        decode_workers=decode_workers, predicates=predicates,
+        file_sizes=file_sizes, connector=connector, query_id=query_id,
+        prefetched_footers=prefetched_footers, footer_bytes_cache=footer_bytes_cache,
+    )
+    cdef list names = src.column_names_bytes
+    cdef list vectors
+    cdef tuple pulled
+    cdef Py_ssize_t i, n
+    if src.n_items == 0:
+        src.close()
+        return
     try:
-        _t0 = time.monotonic_ns()
-        work_items = []
-
-        # ── Batch footer prefetch (B) ────────────────────────────────────────
-        # Fetch every (remote, uncached) footer in one concurrent get_many round
-        # via an HTTP suffix range (bytes=-64k) instead of a serial HEAD+GET per
-        # file. No per-file HEAD and no dependency on the manifest carrying file
-        # sizes. Local and prefetched-dict files fall through to the serial loop
-        # below unchanged. Populating local_footers_native here makes that loop
-        # skip the per-file fetch. file_sizes, when present, is still passed so
-        # the C++ side can stat-skip any local files (A); -1 means unknown.
-        batch_orig = []
-        batch_urls = []
-        batch_sizes = []
-        for path in paths:
-            if prefetched_footers and path in prefetched_footers:
-                continue
-            fetch_url = orig_to_cpp.get(path, path)
-            if not (fetch_url.startswith("gs://")
-                    or fetch_url.startswith("http://")
-                    or fetch_url.startswith("https://")):
-                continue
-            if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
-                continue
-            batch_orig.append(path)
-            batch_urls.append(fetch_url)
-            batch_sizes.append(file_sizes.get(path, -1) if file_sizes else -1)
-        if batch_urls:
-            _ts = time.monotonic_ns()
-            envelopes = _fetch_footers_many(batch_urls, batch_sizes)
-            t_footer_ns += time.monotonic_ns() - _ts
-            for bi in range(len(batch_orig)):
-                envelope = envelopes[bi]
-                if footer_bytes_cache is not None:
-                    footer_bytes_cache.put(batch_urls[bi], envelope)
-                footer_buf_ptr = <const uint8_t*>envelope
-                footer_buf_size = len(envelope)
-                local_footers_native[batch_orig[bi].encode('utf-8')] = ReadParquetMetadataFromBuffer(
-                    footer_buf_ptr, footer_buf_size
-                )
-
-        for path in paths:
-            if prefetched_footers and path in prefetched_footers:
-                # Prefetched dict path — predicate check uses Python dict API
-                meta = prefetched_footers[path]
-                for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
-                    if predicates and not row_group_may_satisfy(rg_meta, predicates):
-                        continue
-                    work_items.append((path, rg_idx))
-            else:
-                path_bytes_cpp = path.encode('utf-8')
-                if local_footers_native.count(path_bytes_cpp) == 0:
-                    _ts = time.monotonic_ns()
-                    envelope, _ = _read_footer_payload(
-                        orig_to_cpp.get(path, path),
-                        file_sizes.get(path, -1) if file_sizes else -1,
-                        footer_bytes_cache,
-                    )
-                    t_footer_ns += time.monotonic_ns() - _ts
-                    footer_buf_ptr = <const uint8_t*>envelope
-                    footer_buf_size = len(envelope)
-                    local_footers_native[path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                        footer_buf_ptr, footer_buf_size
-                    )
-                for rg_i in range(local_footers_native[path_bytes_cpp].row_groups.size()):
-                    if predicates and not _rg_passes_predicates_native(
-                        local_footers_native[path_bytes_cpp].row_groups[rg_i], predicates
-                    ):
-                        continue
-                    work_items.append((path, rg_i))
-        t_phase1_ns = time.monotonic_ns() - _t0
-
-        if not work_items:
-            return
-
-        # ── Footer-derived pool sizing (#2) ──────────────────────────────────
-        # Size the IPC pool from the largest projected row group rather than a
-        # fixed constant. total_uncompressed_size is the decoded-but-encoded
-        # column-chunk size; a 2x factor pads for dict-code widening (RLE → u32
-        # codes) and IPC framing. The historical 256MB stays as a floor so small
-        # reads behave exactly as before. Combined with the in-flight bound
-        # below, peak pool occupancy is in_flight_limit + 1 row groups (the
-        # in-flight window plus the one dequeued-but-not-yet-deserialized
-        # result whose pool bytes are still held while the window is refilled),
-        # so memory scales with per-row-group size × concurrency — never with
-        # total file or dataset size.
-        # proj_set for prefetched-footer path (str); proj_set_bytes for C++ native path (bytes).
-        # Column names from the operator are str (schema); C++ footer returns bytes.
-        proj_set = set(column_names)
-        proj_set_bytes = {name.encode('utf-8') for name in column_names}
-        max_rg_bytes = 0
-        for path, rg_idx in work_items:
-            rg_bytes = 0
-            if prefetched_footers and path in prefetched_footers:
-                rg_meta = prefetched_footers[path]["row_groups"][rg_idx]
-                for col_meta in rg_meta["columns"]:
-                    if col_meta["name"] in proj_set:
-                        cm_sz = col_meta.get("total_uncompressed_size", 0)
-                        if cm_sz and cm_sz > 0:
-                            rg_bytes += cm_sz
-            else:
-                path_bytes_cpp = path.encode('utf-8')
-                rgp = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
-                for ci in range(rgp.columns.size()):
-                    if rgp.columns[ci].total_uncompressed_size > 0 and \
-                            bytes(rgp.columns[ci].name) in proj_set_bytes:
-                        rg_bytes += rgp.columns[ci].total_uncompressed_size
-            if rg_bytes > max_rg_bytes:
-                max_rg_bytes = rg_bytes
-
-        in_flight_limit = decode_workers + 2
-        est_rg = max_rg_bytes * 2
-        dyn_pool_size = est_rg * (in_flight_limit + 1)
-        if dyn_pool_size < 256*1024*1024:
-            dyn_pool_size = 256*1024*1024
-
-        pipeline = CppIOPipeline(
-            decode_workers=decode_workers,
-            queue_capacity=1024,
-            pool_size=dyn_pool_size,
-        )
-
-        # ── Bounded submission + consume (#1) ────────────────────────────────
-        # At most in_flight_limit row groups are submitted-but-not-yet-received
-        # at any instant. Each loop iteration does exactly one of two things:
-        # receive a result from the C++ queue, or deserialize the previously
-        # received (pending) result. The window top-up runs at the head of
-        # every iteration, so after a result is received — and before this
-        # thread spends time deserializing it and the downstream operators
-        # consume the yielded morsel — replacement work is already submitted
-        # and the C++ workers stay fed. Peak pool occupancy is bounded by
-        # in_flight_limit + 1 row groups (window + the pending result), which
-        # the pool sizing above accounts for.
-        _t0 = time.monotonic_ns()
-        n_items = len(work_items)
-        next_to_submit = 0
-        results_received = 0
-        pending_result = None
-        while results_received < n_items or pending_result is not None:
-            # Top up the in-flight window.
-            while next_to_submit < n_items and (next_to_submit - results_received) < in_flight_limit:
-                _ts = time.monotonic_ns()
-                path, rg_idx = work_items[next_to_submit]
-                if prefetched_footers and path in prefetched_footers:
-                    # Prefetched dict path — column stats come from Python dict
-                    meta = prefetched_footers[path]
-                    rg_meta = meta["row_groups"][rg_idx]
-                    column_stats_dicts = []
-                    for col_name in column_names:
-                        for col_meta in rg_meta["columns"]:
-                            if col_meta["name"] == col_name:
-                                column_stats_dicts.append(col_meta)
-                                break
-                    pipeline.submit_work(
-                        orig_to_cpp.get(path, path), rg_idx, column_names, column_stats_dicts
-                    )
-                else:
-                    # Native path — column stats come directly from C++ FileStats
-                    path_bytes_cpp = path.encode('utf-8')
-                    rg_ptr = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
-                    pipeline.submit_work_native(
-                        orig_to_cpp.get(path, path), rg_idx, column_names, rg_ptr
-                    )
-                t_submit_ns += time.monotonic_ns() - _ts
-                next_to_submit += 1
-
-            if pending_result is None:
-                # Receive phase: block for the next result, count it against
-                # the window, then loop back so the top-up above refills the
-                # window before any Python-side consumption happens.
-                _ts = time.monotonic_ns()
-                result = pipeline.wait_result()
-                t_get_result_ns += time.monotonic_ns() - _ts
-                if result is None:
-                    # Pipeline drained before all work completed — should not happen.
-                    raise RuntimeError(
-                        f"Parquet pipeline drained with {n_items - results_received} "
-                        f"result(s) missing"
-                    )
-
-                if not result['success']:
-                    raise RuntimeError(f"Parquet pipeline error: {result.get('error', 'unknown')}")
-
-                results_received += 1
-                pending_result = result
-                continue
-
-            # Consume phase: deserialize the pending result and yield it.
-            result = pending_result
-            pending_result = None
-
-            _ts = time.monotonic_ns()
-            row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
-            # WP-6b: direct columns are already Vectors (wrapped in wait_result);
-            # merge them in. Keyed by column-name bytes, same as the pool columns.
-            row_group.update(result['direct'])
-            t_deserialize_ns += time.monotonic_ns() - _ts
-
-            # Defensive: detect columns decoded to 0 rows in a non-empty row group.
-            # List columns (max_repetition_level > 0) have more values than rows and
-            # are intentionally excluded — only a zero-length column in a non-empty
-            # row group indicates a C++ decoder bug (silent data loss).
-            col_lengths = {
-                k: len(v)
-                for k, v in row_group.items()
-                if not (isinstance(k, str) and k.startswith('__'))
-                   and getattr(v, '__len__', None) is not None
-            }
-            if col_lengths:
-                lengths = list(col_lengths.values())
-                max_len = max(lengths)
-                if max_len > 0 and any(l == 0 for l in lengths):
-                    raise RuntimeError(
-                        f"C++ decoder produced zero-length column(s) in non-empty row group for "
-                        f"path={result['path']!r} rg={result['rg_idx']}: {col_lengths}"
-                    )
-
-            # Build typed metadata object; remove all __*__ keys from dict.
-            # Yield (ScanRowGroup, {col: Vector}) to separate metadata from data.
-            path_str = cpp_to_orig.get(result['path'], result['path'])
+        while True:
+            pulled = src.next_vectors()
+            if pulled is None:
+                break
+            vectors = pulled[0]
+            n = len(vectors)
+            row_group = {names[i]: vectors[i] for i in range(n)}
             telemetry_dict = {
-                '__bytes_fetched__': result.get('bytes_fetched', 0),
-                '__time_read_ranges_ns__': result.get('read_ns', 0),
-                '__time_decode_columns_ns__': result.get('decode_ns', 0),
+                '__bytes_fetched__': pulled[1],
+                '__time_read_ranges_ns__': pulled[2],
+                '__time_decode_columns_ns__': pulled[3],
             }
-            scan_rg = _make_scan_row_group(path_str, result['rg_idx'], 'cpp-pipeline', telemetry_dict)
-            # row_group is now pure {col: Vector}; clean for the operator.
+            scan_rg = _make_scan_row_group(pulled[4], pulled[5], 'cpp-pipeline', telemetry_dict)
             yield (scan_rg, row_group)
-        t_consume_ns = time.monotonic_ns() - _t0
-
     finally:
-        import os, sys
-        # pipeline is None if we returned before footer-sized creation
-        # (no work items) or failed during sizing.
-        if pipeline is not None:
-            # WP-8: cancel first so any row groups submitted-but-not-yet-decoded
-            # bail in the workers instead of being decoded during the close()
-            # wait. On normal exhaustion there is no outstanding work, so this is
-            # a harmless flag flip; on early exit (LIMIT short-circuit, caller
-            # abandonment) it stops the engine paying for unconsumed row groups.
-            pipeline.cancel()
-            if os.environ.get("OPTERYX_IO_DIAG"):
-                diag = pipeline.diagnostics()
-                sys.stderr.write(
-                    "\n[io_diag] paths=%d rgs=%d  phase1=%.1fms phase2=%.1fms consume=%.1fms\n"
-                    "         footer_total=%.1fms  submit_total=%.3fms\n"
-                    "         wait_result_total=%.1fms deserialize_total=%.1fms\n"
-                    "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
-                    "         http: requests=%d fetch_ops=%d retries=%d  worker_blocked=%.1fms\n"
-                    "         handoff: serialized=%d committed=%d bytes\n"
-                    % (
-                        len(set(p for p, _ in work_items)) if work_items else 0,
-                        len(work_items),
-                        t_phase1_ns / 1e6, t_phase2_ns / 1e6, t_consume_ns / 1e6,
-                        t_footer_ns / 1e6, t_submit_ns / 1e6,
-                        t_get_result_ns / 1e6, t_deserialize_ns / 1e6,
-                        diag["enqueue_count"], diag["queue_high_watermark"],
-                        diag["spin_iterations"],
-                        diag["http_request_count"], diag["http_fetch_ops"],
-                        diag["http_retries"],
-                        diag["worker_blocked_ns"] / 1e6,
-                        diag["ipc_bytes_serialized"], diag["ipc_bytes_committed"],
-                    )
-                )
-            diag_json_path = os.environ.get("OPTERYX_IO_DIAG_JSON")
-            if diag_json_path:
-                # Machine-readable diag for the dev benchmark harness: one JSON
-                # object per scan, appended as a line (JSONL). Dev tooling only.
-                import json
-                record = pipeline.diagnostics()
-                record.update({
-                    "paths": len(set(p for p, _ in work_items)) if work_items else 0,
-                    "row_groups": len(work_items),
-                    "phase1_ns": t_phase1_ns,
-                    "footer_ns": t_footer_ns,
-                    "submit_ns": t_submit_ns,
-                    "consume_ns": t_consume_ns,
-                    "wait_result_ns": t_get_result_ns,
-                    "deserialize_ns": t_deserialize_ns,
-                })
-                with open(diag_json_path, "a") as diag_file:
-                    diag_file.write(json.dumps(record) + "\n")
-            pipeline.close()
+        import os
+        diag_json_path = os.environ.get("OPTERYX_IO_DIAG_JSON")
+        if diag_json_path and src.pipeline is not None:
+            # Machine-readable diag for the dev benchmark harness (one JSON line
+            # per scan). The split native driver no longer measures the Python
+            # per-phase timers, so those fields are reported as 0; the C++ counters
+            # (the load-bearing ones) are preserved.
+            import json
+            record = src.pipeline.diagnostics()
+            record.update({
+                "paths": len(set(p for p, _ in src.work_items)) if src.work_items else 0,
+                "row_groups": src.n_items,
+            })
+            with open(diag_json_path, "a") as diag_file:
+                diag_file.write(json.dumps(record) + "\n")
+        src.close()
 
 
 def iter_pass2_row_groups_ipc(

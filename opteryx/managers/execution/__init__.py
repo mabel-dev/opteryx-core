@@ -44,7 +44,15 @@ def execute(plan, telemetry):
     # Label the join legs to ensure left/right ordering
     plan.label_join_legs()
 
-    results, result_type = serial_execute(plan, telemetry=telemetry)
+    # Engine selection (M4). MAX_EXECUTION_WORKERS == 1 is the serial engine —
+    # byte-identical to the historic path and the default. > 1 routes to the
+    # parallel scheduler. See docs/M4_CENTRAL_SCHEDULER_DESIGN.md.
+    if config.MAX_EXECUTION_WORKERS > 1:
+        from .parallel_engine import execute as parallel_execute
+
+        results, result_type = parallel_execute(plan, telemetry=telemetry)
+    else:
+        results, result_type = serial_execute(plan, telemetry=telemetry)
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type
