@@ -131,6 +131,41 @@ def test_cxx_take_empty():
     _check_take([vector_from_sequence([1, 2, 3], dtype=DT.INT64)], [])
 
 
+# --- cxx_mask / cxx_slice / cxx_combine, vs the Morsel equivalents ---
+def _cols(m, ncols):
+    return [m[i].to_pylist() for i in range(ncols)]
+
+
+def test_cxx_mask():
+    vs = [
+        vector_from_sequence([10, 20, 30, 40, None], dtype=DT.INT64),
+        vector_from_sequence([b"a", b"b", b"long arena str xyz", b"d", b"e"], dtype=DT.VARCHAR),
+    ]
+    maskv = vector_from_sequence([True, False, True, None, True], dtype=DT.BOOL)
+    ref = Morsel.from_vectors([b"0", b"1"], vs).filter_mask(maskv)
+    got = dn._cxx_mask(vs, maskv)
+    assert _cols(ref, 2) == [got[i].to_pylist() for i in range(2)]
+
+
+def test_cxx_slice():
+    vs = [
+        vector_from_sequence([10, 20, 30, 40, 50], dtype=DT.INT64),
+        vector_from_sequence([b"a", b"b", b"c", b"d", b"e"], dtype=DT.VARCHAR),
+    ]
+    ref = Morsel.from_vectors([b"0", b"1"], vs).slice(1, 3)
+    got = dn._cxx_slice(vs, 1, 3)
+    assert _cols(ref, 2) == [got[i].to_pylist() for i in range(2)]
+
+
+def test_cxx_combine():
+    m1 = [vector_from_sequence([1, 2], dtype=DT.INT64), vector_from_sequence([b"a", b"bb"], dtype=DT.VARCHAR)]
+    m2 = [vector_from_sequence([3], dtype=DT.INT64), vector_from_sequence([b"long arena string here"], dtype=DT.VARCHAR)]
+    m3 = [vector_from_sequence([4, 5, None], dtype=DT.INT64), vector_from_sequence([b"x", None, b"z"], dtype=DT.VARCHAR)]
+    ref = Morsel.combine([Morsel.from_vectors([b"0", b"1"], x) for x in (m1, m2, m3)])
+    got = dn._cxx_combine([m1, m2, m3])
+    assert _cols(ref, 2) == [got[i].to_pylist() for i in range(2)]
+
+
 if __name__ == "__main__":
     test_roundtrip_int64()
     test_roundtrip_float64()
@@ -146,4 +181,7 @@ if __name__ == "__main__":
     test_cxx_take_varchar_dup()
     test_cxx_take_multi_col()
     test_cxx_take_empty()
-    print("✅ S0 CxxMorsel seam + cxx_hash + cxx_take — all byte-identical")
+    test_cxx_mask()
+    test_cxx_slice()
+    test_cxx_combine()
+    print("✅ S0 CxxMorsel seam + hash/take/mask/slice/combine — all byte-identical")

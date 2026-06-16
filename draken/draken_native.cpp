@@ -4994,6 +4994,48 @@ static VectorOwner vector_take_with_null_impl(const VectorOwner& v, const int32_
     return result;
 }
 
+// S0: slice/mask compute extracted from the nanobind Vector.slice/.mask lambdas so
+// cxx_slice/cxx_mask share ONE body (no duplication). Pure C++ over DrakenVector
+// structs — the callers (the lambdas, and the nogil cxx_* ops) manage the GIL.
+static VectorOwner vector_slice_impl(const VectorOwner& v, uint32_t start, uint32_t length) {
+    if (static_cast<uint64_t>(start) + length > v.vec.length)
+        throw std::out_of_range("Vector.slice: start + length exceeds vector length");
+    if (v.vec.type == DRAKEN_NULL) return make_null_vector(length);
+    if (v.vec.type == DRAKEN_ARRAY || v.vec.type == DRAKEN_VECTOR_FP16 ||
+        v.vec.type == DRAKEN_BOOL) {
+        std::vector<int32_t> idx_vec(length);
+        for (uint32_t i = 0; i < length; ++i)
+            idx_vec[i] = static_cast<int32_t>(start + i);
+        if (v.vec.type == DRAKEN_ARRAY)       return make_array_take(v, idx_vec.data(), length);
+        if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), length);
+        return make_bool_take(v, idx_vec.data(), length);
+    }
+    auto result = vecresult_to_owner(draken_slice(v.vec, start, length));
+    result.vec.type     = v.vec.type;
+    result.logical_type = v.logical_type;
+    return result;
+}
+
+static VectorOwner vector_mask_impl(const VectorOwner& v, const VectorOwner& m) {
+    if (m.vec.type != DRAKEN_BOOL)
+        throw std::invalid_argument("mask: expected a DRAKEN_BOOL mask vector");
+    const uint32_t mn = m.vec.length;
+    std::vector<int32_t> idx_vec;
+    idx_vec.reserve(mn);
+    for (uint32_t i = 0; i < mn; ++i)
+        if (row_is_valid(m.vec, i) && row_bool(m.vec, i))
+            idx_vec.push_back(static_cast<int32_t>(i));
+    const uint32_t n = static_cast<uint32_t>(idx_vec.size());
+    if (v.vec.type == DRAKEN_NULL) return make_null_vector(n);
+    if (v.vec.type == DRAKEN_ARRAY) return make_array_take(v, idx_vec.data(), n);
+    if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), n);
+    if (v.vec.type == DRAKEN_BOOL) return make_bool_take(v, idx_vec.data(), n);
+    auto result = vecresult_to_owner(draken_take(v.vec, idx_vec.data(), n));
+    result.vec.type     = v.vec.type;
+    result.logical_type = v.logical_type;
+    return result;
+}
+
 // draken_vector_take_buffer — C-bridge take over a raw int32 index buffer.
 //
 // vec_obj must be a draken.draken_native.Vector. `indices` is a caller-owned
@@ -5148,6 +5190,100 @@ static nb::list cxx_take_seam(nb::list vectors, nb::list indices) {
     nb::list out;
     for (const CxxColumn& col : taken.columns) out.append(nb::cast(col.own));
     return out;
+}
+
+// S0: filter all columns by a BOOL mask (nogil; reuses vector_mask_impl).
+static CxxMorsel cxx_mask(const CxxMorsel& m, const VectorOwner& mask) {
+    CxxMorsel out;
+    out.names = m.names;
+    if (m.columns.empty()) {
+        uint32_t c = 0;  // count surviving rows for a zero-column morsel
+        for (uint32_t i = 0; i < mask.vec.length; ++i)
+            if (row_is_valid(mask.vec, i) && row_bool(mask.vec, i)) ++c;
+        out.zero_col_rows = c;
+        return out;
+    }
+    out.columns.reserve(m.columns.size());
+    for (const CxxColumn& col : m.columns) {
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(vector_mask_impl(*col.own, mask));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    return out;
+}
+
+// S0: slice a row window from all columns (nogil; reuses vector_slice_impl).
+static CxxMorsel cxx_slice(const CxxMorsel& m, uint32_t start, uint32_t length) {
+    CxxMorsel out;
+    out.names = m.names;
+    if (m.columns.empty()) { out.zero_col_rows = length; return out; }
+    out.columns.reserve(m.columns.size());
+    for (const CxxColumn& col : m.columns) {
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(vector_slice_impl(*col.own, start, length));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    return out;
+}
+
+// S0: vertical concatenation of N same-schema morsels (nogil; reuses concat_owners).
+static CxxMorsel cxx_combine(const std::vector<const CxxMorsel*>& parts) {
+    CxxMorsel out;
+    if (parts.empty()) return out;
+    const CxxMorsel& first = *parts[0];
+    out.names = first.names;
+    const size_t ncols = first.columns.size();
+    out.columns.reserve(ncols);
+    for (size_t c = 0; c < ncols; ++c) {
+        std::vector<const VectorOwner*> col_parts;
+        col_parts.reserve(parts.size());
+        for (const CxxMorsel* p : parts)
+            col_parts.push_back(p->columns[c].own.get());
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(concat_owners(col_parts));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    return out;
+}
+
+static CxxMorsel cxx_from_vectors_list(nb::list vectors) {
+    CxxMorsel m;
+    const size_t n = nb::len(vectors);
+    m.columns.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        CxxColumn col;
+        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
+        col.view = col.own->vec;
+        m.columns.push_back(std::move(col));
+    }
+    return m;
+}
+static nb::list cxx_columns_to_list(const CxxMorsel& m) {
+    nb::list out;
+    for (const CxxColumn& col : m.columns) out.append(nb::cast(col.own));
+    return out;
+}
+
+static nb::list cxx_mask_seam(nb::list vectors, nb::object mask) {
+    CxxMorsel m = cxx_from_vectors_list(vectors);
+    std::shared_ptr<VectorOwner> mk = nb::cast<std::shared_ptr<VectorOwner>>(mask);
+    return cxx_columns_to_list(cxx_mask(m, *mk));
+}
+static nb::list cxx_slice_seam(nb::list vectors, uint32_t start, uint32_t length) {
+    CxxMorsel m = cxx_from_vectors_list(vectors);
+    return cxx_columns_to_list(cxx_slice(m, start, length));
+}
+static nb::list cxx_combine_seam(nb::list morsels) {
+    std::vector<CxxMorsel> built;
+    built.reserve(nb::len(morsels));
+    for (size_t i = 0; i < nb::len(morsels); ++i)
+        built.push_back(cxx_from_vectors_list(nb::cast<nb::list>(morsels[i])));
+    std::vector<const CxxMorsel*> parts;
+    for (const CxxMorsel& cm : built) parts.push_back(&cm);
+    return cxx_columns_to_list(cxx_combine(parts));
 }
 
 // ---------------------------------------------------------------------------
@@ -5958,30 +6094,8 @@ NB_MODULE(draken_native, m) {
         // memcpy for dense vectors. Equivalent to take(range(start, start+length))
         // but without materialising an index array at any level.
         .def("slice", [](const VectorOwner& v, uint32_t start, uint32_t length) -> VectorOwner {
-            // Pure C++ on DrakenVector structs (args pre-unwrapped, VectorOwner
-            // return converted after the lambda). Release the GIL for the whole
-            // body (CLAUDE.md §2); std:: throws re-acquire during unwind.
-            nb::gil_scoped_release _gil;
-            // O(1) bounds guard: fail loud rather than read past the vector
-            // (a denormalised start+length silently returned garbage before).
-            if (static_cast<uint64_t>(start) + length > v.vec.length)
-                throw std::out_of_range("Vector.slice: start + length exceeds vector length");
-            if (v.vec.type == DRAKEN_NULL) return make_null_vector(length);
-            // Special types fall back to index-based take to avoid adding slice
-            // overloads for array/fp16/bool (uncommon in the slice call sites).
-            if (v.vec.type == DRAKEN_ARRAY || v.vec.type == DRAKEN_VECTOR_FP16 ||
-                v.vec.type == DRAKEN_BOOL) {
-                std::vector<int32_t> idx_vec(length);
-                for (uint32_t i = 0; i < length; ++i)
-                    idx_vec[i] = static_cast<int32_t>(start + i);
-                if (v.vec.type == DRAKEN_ARRAY)   return make_array_take(v, idx_vec.data(), length);
-                if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), length);
-                return make_bool_take(v, idx_vec.data(), length);
-            }
-            auto result = vecresult_to_owner(draken_slice(v.vec, start, length));
-            result.vec.type     = v.vec.type;
-            result.logical_type = v.logical_type;
-            return result;
+            nb::gil_scoped_release _gil;  // pure C++ body; GIL not needed (CLAUDE.md §2)
+            return vector_slice_impl(v, start, length);
         })
         // mask(bool_vector) — keep rows where the mask is valid AND true, gather
         // natively. The surviving-row indices are derived from the mask's bitmap
@@ -5989,31 +6103,9 @@ NB_MODULE(draken_native, m) {
         // dict, and constant shapes); the gather then reuses the same typed take
         // dispatch as .take(). No Python, no boxed index list.
         .def("mask", [](const VectorOwner& v, const VectorOwner& m) -> VectorOwner {
-            if (m.vec.type != DRAKEN_BOOL)
-                throw std::invalid_argument("mask: expected a DRAKEN_BOOL mask vector");
-            // The whole body operates on DrakenVector C structs (no Python
-            // objects) — args are already-unwrapped VectorOwner refs and the
-            // VectorOwner return is converted by nanobind after we return.
-            // Release the GIL so the per-row index build + typed take run
-            // off-GIL (CLAUDE.md §2). This is the dominant cost of Filter's
-            // filter_mask gather.
+            // Dominant cost of Filter's filter_mask gather; pure C++, GIL released.
             nb::gil_scoped_release _gil;
-            const uint32_t mn = m.vec.length;
-            std::vector<int32_t> idx_vec;
-            idx_vec.reserve(mn);
-            for (uint32_t i = 0; i < mn; ++i) {
-                if (row_is_valid(m.vec, i) && row_bool(m.vec, i))
-                    idx_vec.push_back(static_cast<int32_t>(i));
-            }
-            const uint32_t n = static_cast<uint32_t>(idx_vec.size());
-            if (v.vec.type == DRAKEN_NULL) return make_null_vector(n);
-            if (v.vec.type == DRAKEN_ARRAY) return make_array_take(v, idx_vec.data(), n);
-            if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), n);
-            if (v.vec.type == DRAKEN_BOOL) return make_bool_take(v, idx_vec.data(), n);
-            auto result = vecresult_to_owner(draken_take(v.vec, idx_vec.data(), n));
-            result.vec.type     = v.vec.type;
-            result.logical_type = v.logical_type;
-            return result;
+            return vector_mask_impl(v, m);
         })
         // count_true() — number of rows that are valid AND true. Used to size a
         // zero-column filtered morsel (filter on a projected-away column).
@@ -6897,6 +6989,9 @@ NB_MODULE(draken_native, m) {
           "S0: nogil cxx_hash over a CxxMorsel built from the given Vectors + column indices.");
     m.def("_cxx_take", &cxx_take_seam,
           "S0: nogil cxx_take (gather rows) over a CxxMorsel built from the given Vectors.");
+    m.def("_cxx_mask", &cxx_mask_seam, "S0: nogil cxx_mask (filter by BOOL mask).");
+    m.def("_cxx_slice", &cxx_slice_seam, "S0: nogil cxx_slice (row window).");
+    m.def("_cxx_combine", &cxx_combine_seam, "S0: nogil cxx_combine (vertical concat of morsels).");
 
     m.def("vector_concat",
         [](nb::list vectors) -> VectorOwner {
