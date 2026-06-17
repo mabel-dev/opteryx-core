@@ -877,17 +877,23 @@ cdef class ParquetReadNode(ReaderNode):
             new_pass2_work.append((key[0], key[1], bytes(reduced)))
         return new_pass2_work, winners_by_rg
 
-    cdef Morsel next_morsel(self) except *:
+    cdef shared_ptr[CxxMorsel] next_morsel(self) except *:
         """Native source iterator (overrides BasePlanNode). On first call it
-        plans the scan; thereafter it returns one morsel per call — no outer
-        Python generator for the single-pass path. Returns None on exhaustion.
-        Two-pass latmat and empty manifests still run through the preserved
-        read_morsels generator (Stage 6 ports latmat).
+        plans the scan; thereafter it returns one morsel per call as the C++
+        carrier (`shared_ptr[CxxMorsel]`) — no outer Python generator for the
+        single-pass path. Returns a NULL shared_ptr on exhaustion. Two-pass latmat
+        and empty manifests still run through the preserved read_morsels generator.
+
+        Stays GIL-requiring during S-B.1 (the morsel is still assembled as a
+        Python Morsel by the helpers, then encoded to the carrier here); S-B.2
+        converts the scan body to build the CxxMorsel natively with no encode.
 
         Single-pass pull is reentrant: concurrent callers share the native
         IpcRowGroupSource + `_scan_mtx`. The FALLBACK (latmat) generator is NOT
         reentrant — two-pass scans are pulled serially (the M4 concurrent path is
         single-pass only)."""
+        cdef Morsel py
+        cdef shared_ptr[CxxMorsel] out
         # Init guard under the lock so concurrent first-callers plan the scan
         # exactly once and observe a fully-built _ipc_source before pulling. The
         # uncontended lock/unlock is negligible beside decode; no atomics needed.
@@ -896,13 +902,17 @@ cdef class ParquetReadNode(ReaderNode):
             self._ensure_scan_started()
         self._scan_mtx.unlock()
         if self._scan_mode == _SCAN_SINGLE:
-            return self._single_pass_next()
-        if self._scan_mode == _SCAN_LATMAT:
-            return self._latmat_next()
-        # FALLBACK: drive the empty-manifest generator one step at a time.
-        if self._morsel_iter is None:
-            self._morsel_iter = iter(self.read_morsels())
-        return <Morsel>next(self._morsel_iter, None)
+            py = self._single_pass_next()
+        elif self._scan_mode == _SCAN_LATMAT:
+            py = self._latmat_next()
+        else:
+            # FALLBACK: drive the empty-manifest generator one step at a time.
+            if self._morsel_iter is None:
+                self._morsel_iter = iter(self.read_morsels())
+            py = <Morsel>next(self._morsel_iter, None)
+        if py is not None:
+            out = morsel_to_cxx(py)
+        return out
 
     cpdef void close_source(self) except *:
         """Flush decode telemetry and release the source(s) on every exit path.

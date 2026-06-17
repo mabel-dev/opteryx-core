@@ -94,7 +94,11 @@ cdef class ExitNode(BasePlanNode):
     cpdef object pop_pending(self):
         return self._pending.popleft()
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Cursor materialization point: this is where the C++ carrier becomes the
+        # Python Morsel the caller consumes (via pop_pending). The base nogil
+        # `_dispatch_push` decodes the carrier (recovering the EOS sentinel) and
+        # calls this; select/rename build the final result Morsel into _pending.
         if morsel is _EOS_SENTINEL:
             if not self.at_least_one:
                 vectors = [_draken_native.vector_from_sequence([]) for _ in self.columns]

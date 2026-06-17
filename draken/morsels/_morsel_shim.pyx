@@ -118,13 +118,6 @@ cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp):
     return Morsel.from_cxx(handle)
 
 
-cpdef Morsel _sb1a_roundtrip(Morsel m):
-    """THROWAWAY S-B.1a validation hook: Morsel -> shared_ptr<CxxMorsel> -> Morsel.
-    Proves the boundary bridges round-trip byte-identical. Delete when S-B.1b wires
-    the bridges into the operator chain."""
-    return cxx_to_morsel(morsel_to_cxx(m))
-
-
 cdef class Morsel:
     def __cinit__(self):
         self._col_names = []

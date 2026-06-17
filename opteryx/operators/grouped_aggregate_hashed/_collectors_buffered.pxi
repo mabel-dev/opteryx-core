@@ -57,6 +57,7 @@ cdef class MedianFloat64Collector(BaseCollector):
     cdef int64_t _first_overflow_group
 
     def __cinit__(self):
+        self._nogil_capable = False  # buffers values per group → GIL accumulate_gil
         self._states = new vector[MedianState]()
         self._capacity = 0
         self._any_overflow = False
@@ -80,16 +81,16 @@ cdef class MedianFloat64Collector(BaseCollector):
                 self._any_overflow = True
                 self._first_overflow_group = gid
 
-    cdef void accumulate(
+    cdef void accumulate_gil(
         self,
         Morsel morsel,
         const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        # Per-row template (D-B): one type-dispatch per morsel, typed
-        # pointers cached, pure-C inner loop. Uniform Vector access via
-        # vec.unified() — works for Dense/Constant/Dict shapes through
-        # data[selection[i]] (CLAUDE.md §11).
+        # GIL path (buffers values per group). Per-row template (D-B): one
+        # type-dispatch per morsel, typed pointers cached, pure-C inner loop.
+        # Uniform Vector access via vec.unified() — works for Dense/Constant/Dict
+        # shapes through data[selection[i]] (CLAUDE.md §11).
         if self._col_idx < 0:
             self._col_idx = morsel._column_index_from_name(self.column_name)
         cdef Vector vec = morsel._get_column(self._col_idx)

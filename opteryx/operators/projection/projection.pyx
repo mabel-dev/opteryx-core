@@ -103,9 +103,11 @@ cdef class ProjectionNode(BasePlanNode):
                 self.readings.get("draken_constant_columns_emitted", 0) + emitted
         return morsel.select(self.projection)
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier and calls this, surfacing any exception via the ErrCtx path.
         if morsel is _EOS_SENTINEL:
-            self._emit_cdef(morsel)
+            self.emit(morsel)
             return
 
         # Single-morsel case is the only path the push pipeline uses; the
@@ -113,4 +115,4 @@ cdef class ProjectionNode(BasePlanNode):
         # scan APIs and is no longer reachable here.
         if morsel.num_rows == 0:
             return
-        self._emit_cdef(self._execute_morsel_projection(morsel))
+        self.emit(self._execute_morsel_projection(morsel))

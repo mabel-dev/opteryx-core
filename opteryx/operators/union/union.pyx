@@ -43,13 +43,16 @@ cdef class UnionNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return ""
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
         """Union receives one EOS per input leg. The pipeline compiler stamps
         the expected leg count via set_expected_input_closes; emit the single
-        downstream EOS only after every leg has closed."""
+        downstream EOS only after every leg has closed.
+
+        Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        carrier (recovering the EOS sentinel) and calls this."""
         if morsel is _EOS_SENTINEL:
             if self._record_input_close():
-                self._emit_cdef(_EOS_SENTINEL)
+                self.emit(_EOS_SENTINEL)
             return
 
         if self.schema is None:
@@ -60,4 +63,4 @@ cdef class UnionNode(BasePlanNode):
         if morsel.num_columns != len(self.column_ids):
             morsel = morsel.select(self.schema[: len(self.column_ids)])
         morsel = morsel.rename(self.column_ids)
-        self._emit_cdef(morsel.select(self.column_ids))
+        self.emit(morsel.select(self.column_ids))

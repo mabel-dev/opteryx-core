@@ -32,9 +32,17 @@ cdef class BaseCollector:
     cdef public bytes result_name    # output column alias
     cdef public bint telemetry_enabled
     cdef public long long time_finalize_ns
-    cdef Py_ssize_t _col_idx         # cached column index; -1 = unresolved
+    cdef Py_ssize_t _col_idx         # cached column index; -1 = unresolved (bound at resolve)
+    # S-B.3: nogil-capable collectors read their value column from a pre-resolved
+    # DrakenVector* in `accumulate` (noexcept nogil) — the engine's nogil ingest_cxx
+    # path can drive them with the GIL released. Complex collectors that touch Python
+    # (median/count-distinct/approx/array_agg) set this False and override
+    # `accumulate_gil(Morsel, …)` instead; an engine containing any such collector
+    # stays on the GIL ingest path.
+    cdef bint _nogil_capable
 
     def __cinit__(self, *args, **kwargs):
+        self._nogil_capable = True
         # -1 = unresolved. Cython zero-initialises Py_ssize_t to 0, which would
         # silently resolve every collector to column 0 (the first group key) and
         # skip the name lookup in accumulate (guarded by `if self._col_idx < 0`),
@@ -58,15 +66,27 @@ cdef class BaseCollector:
 
     cdef void accumulate(
         self,
+        const DrakenVector* value_view,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        """Update aggregate state (nogil-capable collectors). `value_view` is the
+        collector's pre-resolved source column (a DrakenVector* into the morsel's
+        substrate; NULL for COUNT(*) which reads no column). The engine resolves it
+        from the cached `_col_idx` — under the GIL on the fallback ingest path, from
+        the CxxMorsel* on the nogil ingest_cxx path. state_indices[i] = group slot
+        for row i; n_rows rows. Read value_view.data/validity/selection/type."""
+        pass
+
+    cdef void accumulate_gil(
+        self,
         Morsel morsel,
         const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        """
-        Update aggregate state.
-        state_indices[i] is the group slot for row i.
-        Called once per morsel — n_rows rows to process.
-        """
+        """GIL-only accumulate for collectors that touch Python (median /
+        count-distinct / approx / array_agg). Overridden by those collectors;
+        the engine calls this (under the GIL) when `_nogil_capable` is False."""
         pass
 
     cpdef Vector finalize(self, int64_t num_groups):

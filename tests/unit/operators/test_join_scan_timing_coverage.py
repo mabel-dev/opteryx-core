@@ -21,7 +21,7 @@ from draken.draken_native import vector_from_sequence
 from opteryx import EOS
 from opteryx.models import QueryProperties
 from opteryx.operators import BasePlanNode, JoinLeftAdapter, PipelineContext
-from opteryx.operators._operators import drive_scan
+from opteryx.operators._operators import drive_scan, push_one
 from opteryx.operators.cross_join import CrossJoinNode
 
 
@@ -43,8 +43,8 @@ def test_join_adapter_attributes_to_join_not_adapter():
     # (the timing assertion below would be flaky on a trivial single morsel).
     n_morsels, rows = 50, 1000
     for _ in range(n_morsels):
-        adapter.push(_morsel(rows))
-    adapter.push(EOS)                 # build EOS -> combine + _build_complete
+        push_one(adapter, _morsel(rows))
+    push_one(adapter, EOS)            # build EOS -> combine + _build_complete
 
     s_join = join.sensors()
     # Input counters are attributed to the join (deterministic).

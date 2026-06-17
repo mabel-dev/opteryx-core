@@ -29,6 +29,7 @@ from draken.draken_native import vector_from_sequence
 
 from opteryx import EOS
 from opteryx.operators import BasePlanNode
+from opteryx.operators._operators import push_one
 
 
 def _morsel(i):
@@ -76,8 +77,8 @@ def _chain(trace):
 
 def _drive(head, n=8):
     for i in range(n):
-        head.push(_morsel(i))
-    head.push(EOS)
+        push_one(head, _morsel(i))
+    push_one(head, EOS)
 
 
 def test_inclusive_nesting_and_self_time_decomposition():

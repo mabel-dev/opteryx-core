@@ -512,7 +512,20 @@ cdef class FilterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    cpdef void push_right(self, Morsel morsel) except *:
+    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_right_gil(_EOS_SENTINEL)
+                else:
+                    self._push_right_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_right_gil(self, Morsel morsel) except *:
         cdef long long start
         if morsel is _EOS_SENTINEL:
             # FilterJoin builds from the RIGHT side; right EOS finalises the
@@ -543,7 +556,7 @@ cdef class FilterJoinNode(JoinNode):
                 if len(self.right_columns) == 1:
                     col = morsel._cxx_column(self.right_columns[0])
                     _col_type_a = getattr(col, "type", None)
-                if _col_type_a == _draken_native.INT8 or _col_type_a == _draken_native.INT16:
+                    if _col_type_a == _draken_native.INT8 or _col_type_a == _draken_native.INT16:
                         if (<Vector>col).null_bitmap_ptr() != NULL:
                             self._right_has_null = True
                 self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
@@ -576,7 +589,23 @@ cdef class FilterJoinNode(JoinNode):
         )
         self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
 
-    cpdef void push_left(self, Morsel morsel) except *:
+    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_left_gil(_EOS_SENTINEL)
+                else:
+                    self._push_left_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_left_gil(self, Morsel morsel) except *:
+        cdef Morsel result
+        cdef PerfectHashSet phash
+        cdef CarcharSetWrapper cs
         self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
@@ -585,9 +614,6 @@ cdef class FilterJoinNode(JoinNode):
         if morsel.num_rows == 0:
             self.emit(morsel)
             return
-
-        cdef Morsel result
-        cdef PerfectHashSet phash
 
         if self._use_phash:
             phash = <PerfectHashSet>self.right_hash_set
@@ -611,7 +637,7 @@ cdef class FilterJoinNode(JoinNode):
             self._use_phash = False
             self.right_hash_set = _rebuild_carchar_from_phash(phash)
 
-        cdef CarcharSetWrapper cs = <CarcharSetWrapper>self.right_hash_set
+        cs = <CarcharSetWrapper>self.right_hash_set
         if self.join_type == "left semi":
             self.emit(_semi_join_filter(morsel, self.left_columns, cs, self._right_has_null))
         elif self.join_type == "left anti":

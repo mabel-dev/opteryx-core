@@ -5228,6 +5228,126 @@ extern "C" void cxx_morsel_delete(CxxMorsel* m) {
     delete m;
 }
 
+// ── Shape-preserving keying hash — ONE implementation shared by the
+//    Vector.hash_shaped binding and the nogil C-ABI cxx_hash_c. Pure C++,
+//    GIL-free (no PyObject/nanobind). Mirrors the old hash_shaped lambda body.
+static VectorOwner hash_shaped_impl(const VectorOwner& v) {
+    if (v.vec.type == DRAKEN_ARRAY)
+        throw std::invalid_argument("hash_shaped: not supported for DRAKEN_ARRAY");
+    const uint32_t n = v.vec.length;
+    if (v.vec.type != DRAKEN_NULL && v.vec.type != DRAKEN_VECTOR_FP16
+            && v.vec.type != DRAKEN_DECIMAL128) {
+        return vecresult_to_owner(draken_hash_shaped(v.vec));
+    }
+    // Dense fallback for NULL / FP16 / DECIMAL128: materialise n row hashes.
+    // DECIMAL128 has no OpsTable hash slot (its hash is boundary-only); the
+    // per-row hash here is the SAME cross-tier-consistent logic as .hash(), so a
+    // DECIMAL128 key collides with the int64-decimal of the same value.
+    uint64_t* out = static_cast<uint64_t*>(
+        draken_malloc((n > 0u ? n : 1u) * sizeof(uint64_t)));
+    if (!out) throw std::bad_alloc();
+    OwnedBuffer<uint64_t> out_owned(out);
+    uint64_t scratch[1024];
+    uint32_t i = 0u;
+    if (v.vec.type == DRAKEN_NULL) {
+        while (i < n) {
+            const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+            for (uint32_t j = 0u; j < block; ++j) scratch[j] = NULL_HASH;
+            simd_hash_i64(scratch, out + i, block);
+            i += block;
+        }
+    } else if (v.vec.type == DRAKEN_DECIMAL128) {
+        while (i < n) {
+            const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+            for (uint32_t j = 0u; j < block; ++j) {
+                if (!row_is_valid(v.vec, i + j)) {
+                    scratch[j] = NULL_HASH;
+                } else {
+                    const __int128 x = row_int128(v.vec, i + j);
+                    const uint64_t lo = static_cast<uint64_t>(x);
+                    const uint64_t hi = static_cast<uint64_t>(x >> 64);
+                    scratch[j] = (hi == static_cast<uint64_t>(static_cast<int64_t>(lo) >> 63))
+                        ? lo
+                        : (lo ^ (hi * 0x9E3779B97F4A7C15ULL));
+                }
+            }
+            simd_hash_i64(scratch, out + i, block);
+            i += block;
+        }
+    } else {  // FP16
+        require_fp16_descriptor(v, "hash_shaped");
+        const uint32_t dim = v.logical_type->dimension;
+        const uint16_t* data = static_cast<const uint16_t*>(v.vec.data);
+        while (i < n) {
+            const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+            for (uint32_t j = 0u; j < block; ++j) {
+                scratch[j] = row_is_valid(v.vec, i + j)
+                    ? fp16_row_fnv_seed(data + v.vec.selection[i + j]
+                                             * static_cast<size_t>(dim), dim)
+                    : NULL_HASH;
+            }
+            simd_hash_i64(scratch, out + i, block);
+            i += block;
+        }
+    }
+    VecResult r;
+    r.data = out_owned.release();
+    r.validity = nullptr;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length = n;
+    r.length = n;
+    r.type = DRAKEN_INT64;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return vecresult_to_owner(r);
+}
+
+// Keying hash over the group-key columns of a CxxMorsel → a 1-column CxxMorsel
+// holding the INT64 hash vector. Mirrors Morsel.hash_keys EXACTLY: single key →
+// shape-preserving (dict→dict) via hash_shaped_impl; multi key → dense mix
+// (draken_hash per column + simd_mix_hash into a zeroed buffer). The 1-column
+// wrapper lets the engine read columns[0].view and free via cxx_morsel_delete.
+// GIL-free. Group keys are never DRAKEN_ARRAY (the binder rejects them).
+static CxxMorsel cxx_hash(const CxxMorsel& m, const int32_t* col_idxs, uint32_t n_cols) {
+    std::shared_ptr<VectorOwner> sp;
+    if (n_cols == 1) {
+        sp = std::make_shared<VectorOwner>(hash_shaped_impl(*m.columns[col_idxs[0]].own));
+    } else {
+        const uint32_t n = m.num_rows();
+        uint64_t* buf = static_cast<uint64_t*>(
+            draken_malloc((n > 0u ? n : 1u) * sizeof(uint64_t)));
+        if (!buf) throw std::bad_alloc();
+        OwnedBuffer<uint64_t> buf_owned(buf);
+        std::memset(buf, 0, static_cast<size_t>(n) * sizeof(uint64_t));  // zeroed: required by simd_mix_hash
+        if (n > 0u) {
+            uint64_t* tmp = static_cast<uint64_t*>(draken_malloc(n * sizeof(uint64_t)));
+            if (!tmp) throw std::bad_alloc();
+            OwnedBuffer<uint64_t> tmp_owned(tmp);
+            for (uint32_t c = 0u; c < n_cols; ++c) {
+                draken_hash(m.columns[col_idxs[c]].view, tmp, n);
+                simd_mix_hash(buf, tmp, static_cast<size_t>(n));
+            }
+        }
+        VecResult r;
+        r.data = buf_owned.release();
+        r.validity = nullptr;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length = n;
+        r.length = n;
+        r.type = DRAKEN_INT64;
+        r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        sp = std::make_shared<VectorOwner>(vecresult_to_owner(r));
+    }
+    CxxMorsel out;
+    out.columns.push_back(CxxColumn{sp->vec, sp});
+    out.names.push_back(std::string("$keyhash"));
+    return out;
+}
+extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, uint32_t n_cols) {
+    return new CxxMorsel(cxx_hash(*m, col_idxs, n_cols));
+}
+
 // ---------------------------------------------------------------------------
 // S-B.1a — boundary bridges (Morsel ⇄ shared_ptr<CxxMorsel>).
 //
@@ -5657,77 +5777,10 @@ NB_MODULE(draken_native, m) {
         // NULL_HASH, source validity carried as a passenger mask. NULL/FP16
         // key types fall back to a dense INT64 hash vector.
         .def("hash_shaped", [](const VectorOwner& v) -> VectorOwner {
-            // Pure C++ (malloc + simd hash + VecResult). VectorOwner return is
-            // converted after the lambda. Release the GIL for the whole body.
+            // Shape-preserving keying hash. Pure C++ in hash_shaped_impl (shared
+            // with the nogil C-ABI cxx_hash_c) — release the GIL for the body.
             nb::gil_scoped_release _gil;
-            if (v.vec.type == DRAKEN_ARRAY)
-                throw std::invalid_argument("hash_shaped: not supported for DRAKEN_ARRAY");
-            const uint32_t n = v.vec.length;
-            if (v.vec.type != DRAKEN_NULL && v.vec.type != DRAKEN_VECTOR_FP16
-                    && v.vec.type != DRAKEN_DECIMAL128) {
-                return vecresult_to_owner(draken_hash_shaped(v.vec));
-            }
-            // Dense fallback for NULL / FP16 / DECIMAL128: materialise n row hashes.
-            // DECIMAL128 has no OpsTable hash slot (its hash is boundary-only); the
-            // per-row hash here is the SAME cross-tier-consistent logic as .hash(), so a
-            // DECIMAL128 key collides with the int64-decimal of the same value.
-            uint64_t* out = static_cast<uint64_t*>(
-                draken_malloc((n > 0u ? n : 1u) * sizeof(uint64_t)));
-            if (!out) throw std::bad_alloc();
-            OwnedBuffer<uint64_t> out_owned(out);
-            uint64_t scratch[1024];
-            uint32_t i = 0u;
-            if (v.vec.type == DRAKEN_NULL) {
-                while (i < n) {
-                    const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
-                    for (uint32_t j = 0u; j < block; ++j) scratch[j] = NULL_HASH;
-                    simd_hash_i64(scratch, out + i, block);
-                    i += block;
-                }
-            } else if (v.vec.type == DRAKEN_DECIMAL128) {
-                while (i < n) {
-                    const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
-                    for (uint32_t j = 0u; j < block; ++j) {
-                        if (!row_is_valid(v.vec, i + j)) {
-                            scratch[j] = NULL_HASH;
-                        } else {
-                            const __int128 x = row_int128(v.vec, i + j);
-                            const uint64_t lo = static_cast<uint64_t>(x);
-                            const uint64_t hi = static_cast<uint64_t>(x >> 64);
-                            scratch[j] = (hi == static_cast<uint64_t>(static_cast<int64_t>(lo) >> 63))
-                                ? lo
-                                : (lo ^ (hi * 0x9E3779B97F4A7C15ULL));
-                        }
-                    }
-                    simd_hash_i64(scratch, out + i, block);
-                    i += block;
-                }
-            } else {  // FP16
-                require_fp16_descriptor(v, "hash_shaped");
-                const uint32_t dim = v.logical_type->dimension;
-                const uint16_t* data = static_cast<const uint16_t*>(v.vec.data);
-                while (i < n) {
-                    const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
-                    for (uint32_t j = 0u; j < block; ++j) {
-                        scratch[j] = row_is_valid(v.vec, i + j)
-                            ? fp16_row_fnv_seed(data + v.vec.selection[i + j]
-                                                     * static_cast<size_t>(dim), dim)
-                            : NULL_HASH;
-                    }
-                    simd_hash_i64(scratch, out + i, block);
-                    i += block;
-                }
-            }
-            VecResult r;
-            r.data = out_owned.release();
-            r.validity = nullptr;
-            r.selection = draken_identity_sel(n);
-            r.owns_selection = false;
-            r.data_length = n;
-            r.length = n;
-            r.type = DRAKEN_INT64;
-            r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-            return vecresult_to_owner(r);
+            return hash_shaped_impl(v);
         })
         // ----------------------------------------------------------------
         // C.2 — reductions

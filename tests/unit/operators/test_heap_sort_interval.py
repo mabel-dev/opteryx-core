@@ -20,7 +20,7 @@ import draken.draken_native as dn
 from draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.models.query_properties import QueryProperties
-from opteryx.operators._operators import BasePlanNode, HeapSortNode, _EOS_SENTINEL
+from opteryx.operators._operators import BasePlanNode, HeapSortNode, _EOS_SENTINEL, push_one
 
 _MONTH_US = 2592000000000
 
@@ -32,6 +32,9 @@ class _Collector(BasePlanNode):
 
     def _push_impl(self, morsel):
         if morsel is not None and morsel is not _EOS_SENTINEL:
+            # Operators now emit Cxx-backed morsels; materialize (as the cursor
+            # does) so the test can read columns via the PyObject path.
+            morsel.materialize()
             self.collected.append(morsel)
 
 
@@ -55,8 +58,8 @@ def _run(order_by, limit):
     node.set_downstream(sink)
     vid = dn.vector_from_sequence(list(range(len(_IVALS))))
     viv = dn.vector_interval_from_sequence(_IVALS)
-    node.push(Morsel.from_vectors([b"id", b"iv"], [vid, viv]))
-    node.push(_EOS_SENTINEL)
+    push_one(node, Morsel.from_vectors([b"id", b"iv"], [vid, viv]))
+    push_one(node, _EOS_SENTINEL)
     out = []
     for m in sink.collected:
         out.extend(m.column(b"id").to_pylist())
@@ -85,11 +88,11 @@ def test_interval_with_equal_totals_tiebreak_by_id():
     node = HeapSortNode(props, order_by=[(_oc(b"iv"), True), (_oc(b"id"), True)], limit=3)
     sink = _Collector(props)
     node.set_downstream(sink)
-    node.push(Morsel.from_vectors(
+    push_one(node, Morsel.from_vectors(
         [b"id", b"iv"],
         [dn.vector_from_sequence([0, 1, 2]), dn.vector_interval_from_sequence(ivals)],
     ))
-    node.push(_EOS_SENTINEL)
+    push_one(node, _EOS_SENTINEL)
     out = []
     for m in sink.collected:
         out.extend(m.column(b"id").to_pylist())

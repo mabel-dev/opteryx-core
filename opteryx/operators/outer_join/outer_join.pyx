@@ -500,7 +500,20 @@ cdef class OuterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    cpdef void push_left(self, Morsel morsel) except *:
+    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_left_gil(_EOS_SENTINEL)
+                else:
+                    self._push_left_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_left_gil(self, Morsel morsel) except *:
         cdef long long start
         if morsel is _EOS_SENTINEL:
             self._build_complete = True
@@ -522,13 +535,25 @@ cdef class OuterJoinNode(JoinNode):
         if morsel is not None:
             self.left_morsels.append(morsel)
 
-    cpdef void push_right(self, Morsel morsel) except *:
+    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_right_gil(_EOS_SENTINEL)
+                else:
+                    self._push_right_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_right_gil(self, Morsel morsel) except *:
         cdef Py_ssize_t orig_rows
         cdef uint8_t[::1] bit_results
         cdef object pass_filter_index
         cdef Morsel right_morsel
         cdef Py_ssize_t eliminated_rows
-
         self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             pass_filter_index = self.filter_index

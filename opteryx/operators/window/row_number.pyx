@@ -114,7 +114,9 @@ cdef class WindowNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return "ranking OVER (PARTITION BY ... ORDER BY ...)" if self._blocking else "ROW_NUMBER OVER (PARTITION BY ...)"
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier and calls this, surfacing any exception via the ErrCtx path.
         if self._blocking:
             self._push_blocking(morsel)
         else:
@@ -123,7 +125,7 @@ cdef class WindowNode(BasePlanNode):
     # ------------------------------------------------------------------ streaming
     cdef void _push_streaming(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
-            self._emit_cdef(morsel)
+            self.emit(morsel)
             return
         if morsel.num_rows == 0:
             return
@@ -144,7 +146,7 @@ cdef class WindowNode(BasePlanNode):
 
         cdef Vector rn_vec = from_decoded(<void*>rn_buf, NULL, <uint32_t>n, DRAKEN_INT64)
         morsel.append_vector(self._functions[0][1], rn_vec)
-        self._emit_cdef(morsel)
+        self.emit(morsel)
 
     # ------------------------------------------------------------------- blocking
     cdef void _push_blocking(self, Morsel morsel) except *:
@@ -154,7 +156,7 @@ cdef class WindowNode(BasePlanNode):
             return
 
         if not self._morsels:
-            self._emit_cdef(_EOS_SENTINEL)
+            self.emit(_EOS_SENTINEL)
             return
 
         combined = Morsel.combine(self._morsels)
@@ -238,5 +240,5 @@ cdef class WindowNode(BasePlanNode):
         draken_free(rk)
         draken_free(dr)
 
-        self._emit_cdef(combined)
-        self._emit_cdef(_EOS_SENTINEL)
+        self.emit(combined)
+        self.emit(_EOS_SENTINEL)

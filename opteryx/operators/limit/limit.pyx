@@ -51,9 +51,12 @@ cdef class LimitNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return str(self.limit) + " OFFSET " + str(self.offset)
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier (recovering the EOS sentinel) and calls this; it catches any
+        # exception and surfaces it via the ErrCtx status path.
         if morsel is _EOS_SENTINEL:
-            self._emit_cdef(morsel)
+            self.emit(morsel)
             return
 
         if morsel.num_rows == 0:
@@ -76,13 +79,13 @@ cdef class LimitNode(BasePlanNode):
 
         if chunk.num_rows < self.remaining_rows:
             self.remaining_rows -= chunk.num_rows
-            self._emit_cdef(chunk)
+            self.emit(chunk)
         else:
             rows_to_slice = self.remaining_rows
             self.remaining_rows = 0
-            self._emit_cdef(chunk.slice(offset=0, length=rows_to_slice))
+            self.emit(chunk.slice(offset=0, length=rows_to_slice))
             # LIMIT reached — signal upstream to stop and emit terminal EOS
             # so downstream operators flush.
             if self._ctx is not None:
                 self._ctx.terminate()
-            self._emit_cdef(_EOS_SENTINEL)
+            self.emit(_EOS_SENTINEL)

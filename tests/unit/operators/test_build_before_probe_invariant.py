@@ -31,6 +31,7 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
 from opteryx.operators.cross_join import CrossJoinNode
 from opteryx.operators.filter_join import FilterJoinNode
+from opteryx.operators._operators import push_left_one, push_right_one
 
 
 def _props():
@@ -48,22 +49,22 @@ def _morsel():
 def test_cross_probe_before_build_raises():
     node = CrossJoinNode(properties=_props(), columns=[])
     with pytest.raises(InvalidInternalStateError):
-        node.push_right(_morsel())
+        push_right_one(node, _morsel())
 
 
 def test_cross_probe_after_build_ok():
     node = CrossJoinNode(properties=_props(), columns=[])
     # Build side closes (empty build is legal and must still set the flag).
-    node.push_left(EOS)
+    push_left_one(node, EOS)
     # Probe morsel now accepted without raising.
-    node.push_right(_morsel())
-    node.push_right(EOS)
+    push_right_one(node, _morsel())
+    push_right_one(node, EOS)
 
 
 def test_cross_empty_build_then_probe_ok():
     node = CrossJoinNode(properties=_props(), columns=[])
-    node.push_left(EOS)            # zero build rows
-    node.push_right(EOS)           # probe EOS — must not raise
+    push_left_one(node, EOS)            # zero build rows
+    push_right_one(node, EOS)           # probe EOS — must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +75,14 @@ def test_filter_probe_before_build_raises():
     node = FilterJoinNode(properties=_props(), type="left semi", columns=[],
                           left_columns=[], right_columns=[])
     with pytest.raises(InvalidInternalStateError):
-        node.push_left(_morsel())
+        push_left_one(node, _morsel())
 
 
 def test_filter_probe_after_build_ok():
     node = FilterJoinNode(properties=_props(), type="left semi", columns=[],
                           left_columns=[], right_columns=[])
-    node.push_right(EOS)           # build (right) closes
-    node.push_left(EOS)            # probe EOS — must not raise
+    push_right_one(node, EOS)           # build (right) closes
+    push_left_one(node, EOS)            # probe EOS — must not raise
 
 
 if __name__ == "__main__":

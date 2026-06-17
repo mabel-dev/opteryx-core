@@ -1,6 +1,28 @@
 # S-B — Carrier Flip: `cdef class Morsel` → `shared_ptr<CxxMorsel>` (implementation plan)
 
-Status: **plan + mechanics spike DONE; chain-wide code awaiting go.**
+Status: **S-B.1 LANDED (2026-06-17) — atomic carrier flip complete, all bodies
+gil-wrapped, GIL still held inside every body; S-B.2+ (true-nogil bodies) next.**
+
+> **⭐ S-B.1 LANDED (2026-06-17, architect chose the literal flip).** The chain
+> currency is now `shared_ptr[CxxMorsel]` (the Q2 fix). `push`/`_dispatch_push`/
+> `_emit_cdef`/`push_left`/`push_right` are `cdef int … (shared_ptr[CxxMorsel],
+> ErrCtx*) noexcept nogil`; `next_morsel` returns `shared_ptr[CxxMorsel]` (NULL =
+> exhausted, still gil-held); `push_cxx` retired (absorbed into `push`).
+> **Key Cython constraint discovered:** a `noexcept nogil` cdef function may NOT
+> hold named Python-object locals (they need the GIL for cleanup on exit) — so the
+> transitional gil-wrapped body lives in a SEPARATE gil-held helper, and the nogil
+> method only decodes the carrier + calls it with no named local:
+>   - single-input cdef operators put the body in `cpdef _push_impl(self, Morsel)`
+>     (the base `_dispatch_push` default decodes + dispatches);
+>   - joins keep a minimal nogil `push_left`/`push_right` wrapper + a
+>     `cdef void _push_<side>_gil(self, Morsel) except *` helper.
+> **Error model:** the shared `PipelineContext._exc` stashes the first body
+> exception (per-node `_cxx_push_exc` fallback when no ctx); the driver
+> (`drive_scan` / the new `push_one`/`push_left_one`/`push_right_one` Python
+> drivers used by `parallel_engine` + unit tests) re-raises once at the gil
+> boundary. **Cursor = ExitNode** (sole Python-Morsel build via `cxx_to_morsel`).
+> Gates: `make q` 190/190, TPC-H results 7/7, ClickBench 43/43, touched unit tests
+> green. Carrier round-trip provably preserves int+float NULLs (GROUP BY/DISTINCT).
 Parent: `docs/M4_CPP_MORSEL_DESIGN.md` (§B.1 dead-end, §D.1 S-B). This is the
 load-bearing step that unwinds the Q2-violating hybrid carrier and makes the
 operator chain structurally nogil-capable. It touches **every operator** and the

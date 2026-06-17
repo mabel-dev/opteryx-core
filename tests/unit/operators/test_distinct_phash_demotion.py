@@ -18,7 +18,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import draken.draken_native as dn
 from draken.morsels.morsel import Morsel
 from opteryx.models.query_properties import QueryProperties
-from opteryx.operators._operators import BasePlanNode, DistinctNode
+from opteryx.operators._operators import BasePlanNode, DistinctNode, push_one
 
 
 class _Collector(BasePlanNode):
@@ -42,6 +42,9 @@ def _make_node():
 def _emitted_values(sink):
     vals = []
     for m in sink.collected:
+        # Operators now emit Cxx-backed morsels; materialize (as the cursor does)
+        # before engine-external PyObject column access.
+        m.materialize()
         vals.extend(m.column(b"c").to_pylist())
     return vals
 
@@ -54,9 +57,9 @@ def test_phash_demotes_on_nullable_second_morsel():
         [dn.vector_int8_from_sequence([None if i % 7 == 0 else i % 10 for i in range(100)])],
     )
 
-    node.push(m1)
+    push_one(node, m1)
     assert node._use_phash is True
-    node.push(m2)
+    push_one(node, m2)
     assert node._use_phash is False  # demoted
 
     vals = _emitted_values(sink)
@@ -72,9 +75,9 @@ def test_phash_demotes_on_dict_encoded_second_morsel():
         [b"c"], [dn.vector_int8_from_dict(list(range(12)), [i % 12 for i in range(100)])]
     )
 
-    node.push(m1)
+    push_one(node, m1)
     assert node._use_phash is True
-    node.push(m2)
+    push_one(node, m2)
     assert node._use_phash is False  # demoted
 
     vals = _emitted_values(sink)
@@ -90,8 +93,8 @@ def test_phash_demotion_preserves_seen_values():
         [b"c"], [dn.vector_int8_from_sequence([1, 2, 3, 4, 5, None, 6])]
     )
 
-    node.push(m1)
-    node.push(m2)
+    push_one(node, m1)
+    push_one(node, m2)
 
     vals = _emitted_values(sink)
     assert sorted(v for v in vals if v is not None) == [1, 2, 3, 4, 5, 6]
@@ -108,9 +111,9 @@ def test_phash_int16_demotes_on_nulls():
         [dn.vector_int16_from_sequence([None if i % 5 == 0 else i % 300 - 150 for i in range(600)])],
     )
 
-    node.push(m1)
+    push_one(node, m1)
     assert node._use_phash is True
-    node.push(m2)
+    push_one(node, m2)
     assert node._use_phash is False
 
     vals = _emitted_values(sink)
@@ -124,7 +127,7 @@ def test_phash_eligible_stream_stays_on_fast_path():
         m = Morsel.from_vectors(
             [b"c"], [dn.vector_int8_from_sequence([i % 20 for i in range(1000)])]
         )
-        node.push(m)
+        push_one(node, m)
 
     assert node._use_phash is True
     vals = _emitted_values(sink)
@@ -138,7 +141,7 @@ def test_phash_demotes_on_permutation_first_morsel():
     node, sink = _make_node()
     perm = [3, 1, 4, 2, 5, 0, 6, 7]
     v = dn.vector_int8_from_dict(list(range(8)), perm)  # data_length==length, flags=0
-    node.push(Morsel.from_vectors([b"c"], [v]))
+    push_one(node, Morsel.from_vectors([b"c"], [v]))
 
     assert node._use_phash is False  # demoted on the permutation
     vals = _emitted_values(sink)
@@ -151,8 +154,8 @@ def test_fully_deduped_chunks_are_not_emitted():
     m1 = Morsel.from_vectors([b"c"], [dn.vector_int8_from_sequence([1, 2, 3])])
     m2 = Morsel.from_vectors([b"c"], [dn.vector_int8_from_sequence([1, 2, 3])])
 
-    node.push(m1)
-    node.push(m2)
+    push_one(node, m1)
+    push_one(node, m2)
 
     assert len(sink.collected) == 1  # second (empty) chunk suppressed
     assert sink.collected[0].num_rows == 3

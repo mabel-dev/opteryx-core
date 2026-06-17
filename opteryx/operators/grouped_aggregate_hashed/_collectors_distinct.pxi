@@ -48,6 +48,7 @@ cdef class CountDistinctCollector(BaseCollector):
     cdef long long _time_finalize_ns
 
     def __cinit__(self):
+        self._nogil_capable = False  # per-group distinct sets + Python scratch → GIL accumulate_gil
         self._scratch_per_group = []
         self._col_idx = -1
         self._scratch_buf = NULL
@@ -85,7 +86,7 @@ cdef class CountDistinctCollector(BaseCollector):
             self._in_touched = <uint8_t*>p
             self._in_touched_cap = nc
 
-    cdef void accumulate(
+    cdef void accumulate_gil(
         self,
         Morsel morsel,
         const uint32_t* state_indices,

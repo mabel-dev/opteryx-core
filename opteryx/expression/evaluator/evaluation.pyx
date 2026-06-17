@@ -614,8 +614,9 @@ cdef extern from "core/alloc.h":
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
 
-from draken.morsels.morsel cimport Morsel
-from draken.morsels.cxx_morsel cimport CxxMorsel
+from draken.morsels.morsel cimport Morsel, cxx_to_morsel
+from draken.morsels.cxx_morsel cimport CxxMorsel, cxx_mask_c
+from libcpp.memory cimport shared_ptr
 from draken.vectors.bool_vector cimport (
     BoolVector,
     from_decoded,
@@ -1705,20 +1706,33 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
     if bc.count > 256:
         bc.is_all_c_native = False
         return execute_bytecode(bc, morsel)
+    cdef const CxxMorsel* m = morsel._cxx_ptr
     cdef Py_ssize_t num_rows = morsel.ptr.num_rows
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef DrakenVector* dv_cache[256]
+    cdef int col_idx[256]
+    cdef DrakenVector* lit_dv[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef int err_op = 0
     cdef int rc
+    cdef bint use_substrate = (m != NULL)
+    cdef object err_msg
+    # GIL prepass: resolve loads. When the morsel is Cxx-backed, resolve columns
+    # straight from the substrate (columns[idx].view) — no per-column Vector build;
+    # otherwise the Morsel path (_cxx_column). Unresolved identity → Morsel path.
+    if use_substrate:
+        if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
+            use_substrate = False
+    if not use_substrate:
+        _dv_native_prepass(bc, morsel, num_rows, dv_cache)
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     if arena == NULL:
         raise MemoryError("evaluate_c_native: failed to create DrakenFrameArena")
-    cdef object err_msg
     try:
-        _dv_native_prepass(bc, morsel, num_rows, dv_cache)
         with nogil:
+            if use_substrate:
+                _dv_fill_cache_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, dv_cache)
             rc = c_execute_dv_inner(
                 bc.instrs, bc.count, dv_cache, dv_stack, dv_store,
                 arena, nbytes, <uint32_t>num_rows, &err_op)
@@ -1806,17 +1820,19 @@ cdef int _dv_cxx_resolve_caches(
     return 0
 
 
-cpdef object evaluate_c_native_cxx(CompiledBytecode bc, Morsel morsel):
-    """CxxMorsel-substrate twin of evaluate_c_native: same nogil inner, but
-    columns resolve from morsel._cxx_ptr (no per-column Vector build). Falls back
-    to evaluate_c_native if the morsel isn't Cxx-backed or a column is unresolved.
-    """
+cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
+    """S3.2: evaluate an all-c-native predicate AND apply its mask in ONE nogil
+    span over the CxxMorsel — the predicate result DV* feeds straight into
+    cxx_mask_c, no Python BoolVector materialized, no nanobind mask crossing, one
+    GIL release for the whole filter. Returns the filtered (Cxx-backed) Morsel,
+    or None when not applicable (caller falls back to execute_bytecode +
+    filter_mask). Raises on a genuine C kernel error (rc 4)."""
     cdef const CxxMorsel* m = morsel._cxx_ptr
     if m == NULL or bc.count > 256:
-        return execute_bytecode(bc, morsel)
+        return None
     cdef Py_ssize_t num_rows = morsel.ptr.num_rows
     if num_rows == 0:
-        return execute_bytecode(bc, morsel)
+        return None
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef int col_idx[256]
     cdef DrakenVector* lit_dv[256]
@@ -1825,20 +1841,25 @@ cpdef object evaluate_c_native_cxx(CompiledBytecode bc, Morsel morsel):
     cdef DrakenVector  dv_store[64]
     cdef int err_op = 0
     cdef int rc
+    cdef CxxMorsel* filtered = NULL
     cdef object err_msg
     if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
-        return execute_bytecode(bc, morsel)
+        return None
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     if arena == NULL:
-        raise MemoryError("evaluate_c_native_cxx: failed to create DrakenFrameArena")
+        raise MemoryError("filter_morsel_c_native: failed to create DrakenFrameArena")
     try:
         with nogil:
             _dv_fill_cache_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, dv_cache)
             rc = c_execute_dv_inner(
                 bc.instrs, bc.count, dv_cache, dv_stack, dv_store,
                 arena, nbytes, <uint32_t>num_rows, &err_op)
+            if rc == 0:
+                # mask DV* (dv_stack[0]) is a BOOL result; cxx_mask_c derives the
+                # surviving rows and gathers every column — new owners, not arena.
+                filtered = cxx_mask_c(m, dv_stack[0])
         if rc == 0:
-            return _slot_to_pyobj(dv_stack[0], None, arena)
+            return cxx_to_morsel(shared_ptr[CxxMorsel](filtered))
         if rc == 4:
             err_msg = (
                 draken_get_error_message().decode("utf-8", "replace")
@@ -1846,12 +1867,8 @@ cpdef object evaluate_c_native_cxx(CompiledBytecode bc, Morsel morsel):
             )
             draken_error_message_clear()
             raise ValueError(err_msg)
-        if rc == 1:
-            raise TypeError("evaluate_c_native_cxx: NULL operand")
-        if rc == 2:
-            raise MemoryError("evaluate_c_native_cxx: arena alloc failed")
-        bc.is_all_c_native = False
-        return execute_bytecode(bc, morsel)
+        # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
+        return None
     finally:
         draken_frame_arena_destroy(arena)
 

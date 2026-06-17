@@ -728,18 +728,20 @@ cdef class HeapSortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Heap Sort"
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier (recovering the EOS sentinel) and calls this, surfacing any
+        # exception via the ErrCtx path.
         cdef Py_ssize_t chunk_rows
-
         if morsel is _EOS_SENTINEL:
             if not self._chunk_buffer:
-                self._emit_cdef(_EOS_SENTINEL)
+                self.emit(_EOS_SENTINEL)
                 return
             table = Morsel.combine(self._chunk_buffer)
             if self.mapped_order:
                 table = self._top_n(table)
-            self._emit_cdef(table)
-            self._emit_cdef(_EOS_SENTINEL)
+            self.emit(table)
+            self.emit(_EOS_SENTINEL)
             return
 
         chunk_rows = morsel.num_rows

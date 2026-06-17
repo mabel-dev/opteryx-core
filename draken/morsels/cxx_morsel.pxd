@@ -50,6 +50,7 @@ cdef extern from * nogil:
     extern "C" CxxMorsel* cxx_take_c(const CxxMorsel*, const int32_t*, uint32_t);
     extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel*, uint32_t, uint32_t);
     extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel*, const DrakenVector*);
+    extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel*, const int32_t*, uint32_t);
     extern "C" void cxx_morsel_delete(CxxMorsel*);
     extern "C" CxxMorsel* cxx_morsel_shallow_copy(const CxxMorsel*);
     extern "C" CxxMorsel* cxx_morsel_new_eos();
@@ -63,6 +64,9 @@ cdef extern from * nogil:
     # S1: whole-morsel mask (keep rows valid AND true) — derives indices once,
     # type-takes each column nogil. mask is the predicate BoolVector's view.
     CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) nogil
+    # S-B.3a keying hash — single col → shape-preserving, multi → dense mix.
+    # Returns a 1-column CxxMorsel (read columns[0].view; free via cxx_morsel_delete).
+    CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, uint32_t n_cols) nogil
     void cxx_morsel_delete(CxxMorsel* m) nogil
     # S-B.1a boundary bridges. shallow_copy: owned heap CxxMorsel sharing owners.
     # to_handle: NEW-ref nanobind handle wrapping a shallow copy (boundary out).

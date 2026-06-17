@@ -57,6 +57,7 @@ from typing import Tuple
 from opteryx import EOS as _EOS_SENTINEL
 from opteryx import config
 from opteryx.constants import ResultType
+from opteryx.operators._operators import push_one
 from opteryx.operators.catalog import OperatorParallelism
 from opteryx.operators.catalog import get_registry
 
@@ -328,10 +329,10 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
             for morsel in buffer:
                 if ctx.is_terminated():
                     break
-                head.push(morsel)
+                push_one(head, morsel)
                 yield from _drain()
             if not ctx.is_terminated():
-                head.push(_EOS_SENTINEL)
+                push_one(head, _EOS_SENTINEL)
                 yield from _drain()
             return
 
@@ -348,7 +349,7 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
                     morsel = work_queue.get()
                     if morsel is _WORKER_DONE:
                         return
-                    chain_head.push(morsel)
+                    push_one(chain_head, morsel)
             except BaseException as exc:  # noqa: BLE001 — surface on the main thread
                 errors[index] = exc
                 # Keep draining so the main thread's put() can never block on a
@@ -410,7 +411,7 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
 
         # Finalise via the original breaker → emits to exit and drives the
         # serial tail of the plan (any sort/limit downstream of the aggregate).
-        breaker.push(_EOS_SENTINEL)
+        push_one(breaker, _EOS_SENTINEL)
         yield from _drain()
     finally:
         if pool is not None:
@@ -473,10 +474,10 @@ def _shuffle_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
             for morsel in buffer:
                 if ctx.is_terminated():
                     break
-                head.push(morsel)
+                push_one(head, morsel)
                 yield from _drain()
             if not ctx.is_terminated():
-                head.push(_EOS_SENTINEL)
+                push_one(head, _EOS_SENTINEL)
                 yield from _drain()
             return
 
@@ -494,7 +495,7 @@ def _shuffle_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
                     sub = work_queue.get()
                     if sub is _WORKER_DONE:
                         return
-                    chain_head.push(sub)
+                    push_one(chain_head, sub)
             except BaseException as exc:  # noqa: BLE001
                 errors[index] = exc
                 while work_queue.get() is not _WORKER_DONE:
@@ -545,9 +546,9 @@ def _shuffle_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
             if received[index] == 0:
                 continue
             for chunk in clones[index][1]._finalize():
-                post.push(chunk)
+                push_one(post, chunk)
                 yield from _drain()
-        post.push(_EOS_SENTINEL)
+        push_one(post, _EOS_SENTINEL)
         yield from _drain()
     finally:
         if pool is not None:

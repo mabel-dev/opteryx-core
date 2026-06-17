@@ -21,7 +21,7 @@ import draken.draken_native as dn
 from draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.models.query_properties import QueryProperties
-from opteryx.operators._operators import BasePlanNode, HeapSortNode, _EOS_SENTINEL
+from opteryx.operators._operators import BasePlanNode, HeapSortNode, _EOS_SENTINEL, push_one
 
 
 class _Collector(BasePlanNode):
@@ -31,6 +31,9 @@ class _Collector(BasePlanNode):
 
     def _push_impl(self, morsel):
         if morsel is not None and morsel is not _EOS_SENTINEL:
+            # Operators emit Cxx-backed morsels; materialize (as the cursor does)
+            # before engine-external column access.
+            morsel.materialize()
             self.collected.append(morsel)
 
 
@@ -52,8 +55,8 @@ def _run_topn(bools, order_by, limit, extra_cols=()):
         dn.vector_from_sequence(list(range(len(bools)))),
         dn.vector_from_bool_sequence(bools),
     ] + [v for _, v in extra_cols]
-    node.push(Morsel.from_vectors(names, vecs))
-    node.push(_EOS_SENTINEL)
+    push_one(node, Morsel.from_vectors(names, vecs))
+    push_one(node, _EOS_SENTINEL)
 
     rows = []
     for m in sink.collected:

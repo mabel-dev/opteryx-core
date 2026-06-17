@@ -57,14 +57,16 @@ cdef class SortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Sort"
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier and calls this, surfacing any exception via the ErrCtx path.
         if morsel is not _EOS_SENTINEL:
             if morsel.num_rows > 0:
                 self._morsels.append(morsel)
             return
 
         if not self._morsels:
-            self._emit_cdef(_EOS_SENTINEL)
+            self.emit(_EOS_SENTINEL)
             return
 
         combined = Morsel.combine(self._morsels)
@@ -90,5 +92,5 @@ cdef class SortNode(BasePlanNode):
         # The result must be reassigned or the sort permutation is silently lost.
         combined = combined.take(perm)
 
-        self._emit_cdef(combined)
-        self._emit_cdef(_EOS_SENTINEL)
+        self.emit(combined)
+        self.emit(_EOS_SENTINEL)

@@ -58,6 +58,9 @@ cdef extern from "tdigest.h":
 cdef class ApproxCountDistinctCollector(BaseCollector):
     cdef vector[HllppSketch*] _sketches
 
+    def __cinit__(self):
+        self._nogil_capable = False  # row-hash per value (morsel.hash) → GIL accumulate_gil
+
     def __dealloc__(self):
         cdef Py_ssize_t i
         for i in range(self._sketches.size()):
@@ -69,7 +72,7 @@ cdef class ApproxCountDistinctCollector(BaseCollector):
         while self._sketches.size() < <size_t>new_count:
             self._sketches.push_back(new HllppSketch(14, 0, 0))
 
-    cdef void accumulate(
+    cdef void accumulate_gil(
         self,
         Morsel morsel,
         const uint32_t* state_indices,
@@ -108,6 +111,7 @@ cdef class ApproxPercentileCollector(BaseCollector):
     cdef double _percentile
 
     def __cinit__(self, double percentile=0.5):
+        self._nogil_capable = False  # per-group t-digest histogram → GIL accumulate_gil
         self._percentile = percentile
 
     def __dealloc__(self):
@@ -121,7 +125,7 @@ cdef class ApproxPercentileCollector(BaseCollector):
         while self._hists.size() < <size_t>new_count:
             self._hists.push_back(td_new(100.0))
 
-    cdef void accumulate(
+    cdef void accumulate_gil(
         self,
         Morsel morsel,
         const uint32_t* state_indices,
@@ -214,6 +218,7 @@ cdef class ArrayAggCollector(BaseCollector):
     cdef object _options    # dict or None
 
     def __cinit__(self, object options=None):
+        self._nogil_capable = False  # builds Python lists per group → GIL accumulate_gil
         self._per_group = []
         self._options = options or {}
 
@@ -221,7 +226,7 @@ cdef class ArrayAggCollector(BaseCollector):
         while len(self._per_group) < new_count:
             self._per_group.append([])
 
-    cdef void accumulate(
+    cdef void accumulate_gil(
         self,
         Morsel morsel,
         const uint32_t* state_indices,

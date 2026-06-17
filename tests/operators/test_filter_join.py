@@ -337,6 +337,60 @@ def test_intersect_basic():
 
 
 # ---------------------------------------------------------------------------
+# 5b. Multi-column filter-join keys (regression: len(right_columns) != 1 path)
+#
+# The build side null-detection in _push_right_gil is only meaningful for a
+# single-column key. The multi-column path must not touch the single-column-only
+# locals (col / _col_type). This was a real indentation bug where the INT8/INT16
+# null check sat outside the `len(right_columns) == 1` guard, leaving `col`/
+# `_col_type` unbound or stale on the multi-column path.
+# ---------------------------------------------------------------------------
+
+def test_except_two_column_key():
+    """EXCEPT on a 2-column key exercises the multi-column build path."""
+    result = row_count(
+        "SELECT name, id FROM $planets AS A WHERE id <= 5 "
+        "EXCEPT "
+        "SELECT name, id FROM $planets AS B WHERE id <= 3"
+    )
+    direct = row_count("SELECT name, id FROM $planets WHERE id > 3 AND id <= 5")
+    # ids 4,5 remain → 2 rows, matching the direct filter
+    assert result == direct == 2
+
+
+def test_intersect_two_column_key():
+    """INTERSECT on a 2-column key exercises the multi-column build path."""
+    n = row_count(
+        "SELECT name, id FROM $planets AS A WHERE id <= 5 "
+        "INTERSECT "
+        "SELECT name, id FROM $planets AS B WHERE id >= 3"
+    )
+    # ids 3,4,5 are in both, and (name,id) pairs are identical → 3 rows
+    assert n == 3
+
+
+def test_intersect_three_column_key():
+    """INTERSECT on a 3-column key (>1 columns) must build and probe correctly."""
+    n = row_count(
+        "SELECT name, id, gravity FROM $planets AS A WHERE id <= 6 "
+        "INTERSECT "
+        "SELECT name, id, gravity FROM $planets AS B WHERE id >= 4"
+    )
+    # ids 4,5,6 overlap → 3 rows
+    assert n == 3
+
+
+def test_except_two_column_full_right_empty():
+    """EXCEPT with a 2-column key removing everything → zero rows."""
+    n = row_count(
+        "SELECT name, id FROM $planets AS A WHERE id <= 5 "
+        "EXCEPT "
+        "SELECT name, id FROM $planets AS B WHERE id <= 5"
+    )
+    assert n == 0
+
+
+# ---------------------------------------------------------------------------
 # 6. Low-level CarcharSet batch probe API
 # ---------------------------------------------------------------------------
 
@@ -538,6 +592,10 @@ if __name__ == "__main__":
         test_except_basic,
         test_except_empty_right_returns_left,
         test_intersect_basic,
+        test_except_two_column_key,
+        test_intersect_two_column_key,
+        test_intersect_three_column_key,
+        test_except_two_column_full_right_empty,
         test_exists_basic,
         test_not_exists_basic,
         test_exists_not_exists_partition,

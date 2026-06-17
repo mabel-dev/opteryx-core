@@ -425,9 +425,24 @@ cdef class GroupHashEngine:
 
         if self._telemetry_enabled:
             phase_start = _now_ns()
-        # Accumulate each collector over this morsel's rows
+        # Accumulate each collector over this morsel's rows. nogil-capable
+        # collectors take a pre-resolved value view (resolved here under the GIL on
+        # this fallback path; ingest_cxx resolves it from the CxxMorsel* nogil).
+        # `_vtmp` holds the transient Vector alive so its unified() DrakenVector*
+        # stays valid for the accumulate call. Complex collectors stay on the GIL
+        # accumulate_gil(morsel) path.
+        cdef BaseCollector bc
+        cdef Vector _vtmp
         for collector in self._collectors:
-            (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
+            bc = <BaseCollector>collector
+            if bc._nogil_capable:
+                if bc._col_idx >= 0:
+                    _vtmp = morsel._get_column(bc._col_idx)
+                    bc.accumulate(_vtmp.unified(), si_buf, n_rows)
+                else:
+                    bc.accumulate(NULL, si_buf, n_rows)
+            else:
+                bc.accumulate_gil(morsel, si_buf, n_rows)
         if self._telemetry_enabled:
             self._time_accumulate_ns += _now_ns() - phase_start
 

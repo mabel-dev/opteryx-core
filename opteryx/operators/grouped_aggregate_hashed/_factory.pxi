@@ -292,6 +292,16 @@ cpdef void resolve_deferred_collectors(
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
 
+    # S-B.3: bind each (now-concrete) collector's value-column index ONCE here
+    # (was lazy on first accumulate). The nogil accumulate path reads a pre-resolved
+    # DrakenVector* view by this index; COUNT(*) (column_name b"*") reads no column
+    # and keeps _col_idx == -1.
+    cdef BaseCollector bc
+    for i in range(len(collectors)):
+        bc = <BaseCollector>collectors[i]
+        if bc.column_name is not None and bc.column_name != b"*":
+            bc._col_idx = morsel._column_index_from_name(bc.column_name)
+
     # Resolve key kinds from actual column types
     cdef Py_ssize_t ki
     for ki in range(len(group_columns)):

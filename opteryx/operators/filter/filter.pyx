@@ -28,7 +28,7 @@ from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
-from opteryx.expression.evaluator.evaluation import evaluate_c_native_cxx as _evaluate_c_native_cxx
+from opteryx.expression.evaluator.evaluation import filter_morsel_c_native as _filter_morsel_c_native
 from opteryx.models import QueryProperties
 
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
@@ -141,18 +141,45 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     return None
 
 
-cdef void _apply_constant_replacements(Morsel morsel, list replacements) except *:
+cdef Morsel _apply_constant_replacements(Morsel morsel, list replacements):
     cdef Py_ssize_t length = morsel.ptr.num_rows
-    cdef Py_ssize_t idx
+    cdef Py_ssize_t idx, i, ncols
     cdef Vector cur
     cdef Vector new_vec
     cdef dict mapping
     cdef object py_idx
+    cdef list col_vecs
+    cdef bint changed = False
 
     if length == 0 or not replacements:
-        return
+        return morsel
 
     mapping = morsel._ensure_name_map()
+
+    # A Cxx-backed morsel has no PyObject column store to mutate (_set_column
+    # would deref an empty vector). Rebuild it from the substrate columns with
+    # the replaced column swapped in. PyObject-backed morsels mutate in place.
+    if morsel._cxx is not None:
+        ncols = morsel._num_columns()
+        col_vecs = []
+        for i in range(ncols):
+            col_vecs.append(morsel._get_column(i))
+        for identity, value in replacements:
+            py_idx = mapping.get(identity)
+            if py_idx is None:
+                continue
+            idx = <Py_ssize_t>py_idx
+            cur = <Vector>col_vecs[idx]
+            if cur is None:
+                continue
+            new_vec = _build_constant_vector(cur, value, length)
+            if new_vec is None:
+                continue
+            col_vecs[idx] = new_vec
+            changed = True
+        if not changed:
+            return morsel
+        return Morsel.from_cxx_vectors(list(morsel._col_names), col_vecs)
 
     for identity, value in replacements:
         py_idx = mapping.get(identity)
@@ -166,6 +193,7 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         if new_vec is None:
             continue
         morsel._set_column(idx, new_vec)
+    return morsel
 
 
 cdef class FilterNode(BasePlanNode):
@@ -203,25 +231,29 @@ cdef class FilterNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Filter"
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier and calls this, surfacing any exception via the ErrCtx path.
         cdef BoolVector mask
         cdef Morsel filtered
         cdef list keep
         if morsel is _EOS_SENTINEL:
-            self._emit_cdef(morsel)
+            self.emit(morsel)
             return
 
-        # S3: for all-C-native predicates, evaluate over the CxxMorsel substrate
-        # (columns straight from columns[idx].view, nogil inner) — no per-column
-        # Vector build. Other predicates stay on the Morsel VM path.
+        # S3.2: for all-C-native predicates, evaluate AND mask in ONE nogil span
+        # over the CxxMorsel (columns straight from columns[idx].view; the
+        # predicate result feeds cxx_mask_c without a Python BoolVector). Returns
+        # None when not applicable → fall back to the Morsel VM + filter_mask.
+        filtered = None
         if self._compiled_filter.is_all_c_native:
-            mask = _evaluate_c_native_cxx(self._compiled_filter, morsel)
-        else:
+            filtered = _filter_morsel_c_native(self._compiled_filter, morsel)
+        if filtered is None:
             mask = _execute_bytecode(self._compiled_filter, morsel)
-        filtered = morsel.filter_mask(mask)
+            filtered = morsel.filter_mask(mask)
 
         if self._const_replacements:
-            _apply_constant_replacements(filtered, self._const_replacements)
+            filtered = _apply_constant_replacements(filtered, self._const_replacements)
 
         if self.post_filter_columns:
             keep = [c for c in filtered.column_names if c in self.post_filter_columns]
@@ -229,7 +261,7 @@ cdef class FilterNode(BasePlanNode):
                 filtered = filtered.select(keep)
 
         if filtered.num_rows > 0:
-            self._emit_cdef(filtered)
+            self.emit(filtered)
         # Empty-output filters: do nothing (drop the morsel). Previous code
         # emitted morsel.slice(0,0); under push semantics EMPTY-like outputs
         # are suppressed and the downstream sees fewer morsels.

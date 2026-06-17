@@ -93,14 +93,14 @@ cdef Morsel _perform_asof_join(
 
     bisect_fn, bisect_offset = _bisect_params(asof_op)
 
-    right_asof_raw = right_morsel.column(asof_right_col)
+    right_asof_raw = right_morsel._cxx_column(asof_right_col)
     right_asof_vals = [right_asof_raw[i] for i in range(right_rows)]
 
     # Build sorted right-side structure (per-partition or global).
     if has_partition:
         right_partitions = {}
         right_part_keys = [
-            tuple(right_morsel.column(c)[i] for c in partition_right_cols)
+            tuple(right_morsel._cxx_column(c)[i] for c in partition_right_cols)
             for i in range(right_rows)
         ]
         for i in range(right_rows):
@@ -133,7 +133,7 @@ cdef Morsel _perform_asof_join(
         right_partitions = {}
 
     # Probe: match each left row to the nearest right row.
-    left_asof_raw = left_morsel.column(asof_left_col)
+    left_asof_raw = left_morsel._cxx_column(asof_left_col)
     left_asof_vals = [left_asof_raw[i] for i in range(left_rows)]
 
     matched_left_idx  = []
@@ -148,7 +148,7 @@ cdef Morsel _perform_asof_join(
 
         if has_partition:
             left_pkey = tuple(
-                left_morsel.column(c)[i] for c in partition_left_cols
+                left_morsel._cxx_column(c)[i] for c in partition_left_cols
             )
             part = right_partitions.get(left_pkey)
             if part is None:
@@ -238,7 +238,20 @@ cdef class AsofJoinNode(JoinNode):
             base += f" USING ({', '.join(self.partition_left_columns)})"
         return base
 
-    cpdef void push_left(self, Morsel morsel) except *:
+    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_left_gil(_EOS_SENTINEL)
+                else:
+                    self._push_left_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_left_gil(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
             self._build_complete = True
             if self.left_morsels:
@@ -248,9 +261,21 @@ cdef class AsofJoinNode(JoinNode):
         if morsel is not None:
             self.left_morsels.append(morsel)
 
-    cpdef void push_right(self, Morsel morsel) except *:
-        cdef Morsel right_morsel, result
+    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_right_gil(_EOS_SENTINEL)
+                else:
+                    self._push_right_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
 
+    cdef void _push_right_gil(self, Morsel morsel) except *:
+        cdef Morsel right_morsel, result
         self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             if self.left_morsel is None or self.left_morsel.num_rows == 0:

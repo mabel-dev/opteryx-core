@@ -36,7 +36,7 @@ from time import perf_counter_ns
 
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter, create_bloom_filter_from_hashes
 from draken.morsels.morsel cimport align_tables
-from draken.vectors.vector cimport NULL_HASH, Vector
+from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DrakenVector
 
 cdef extern from "core/buffers.h" nogil:
@@ -284,7 +284,20 @@ cdef class DrakenInnerJoinNode(JoinNode):
         self.join_readings.feature_eliminate_join_columns_draken += 1
         return morsel.select(selected)
 
-    cpdef void push_left(self, Morsel morsel) except *:
+    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_left_gil(_EOS_SENTINEL)
+                else:
+                    self._push_left_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_left_gil(self, Morsel morsel) except *:
         with self.lock:
             if morsel is _EOS_SENTINEL:
                 # Build-side EOS — finalise hash table. Do NOT emit downstream.
@@ -303,10 +316,10 @@ cdef class DrakenInnerJoinNode(JoinNode):
                         self.left_morsel = execute_and_append(
                             self._compiled_left_evals, self.left_morsel
                         )
-                    except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                    except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err2:
                         raise UnsupportedSyntaxError(
-                            f"Draken inner join expression evaluation does not support this query shape: {err}"
-                        ) from err
+                            f"Draken inner join expression evaluation does not support this query shape: {err2}"
+                        ) from err2
                     new_cols = set(self.left_morsel.column_names) - old_cols
                     if new_cols:
                         for col in new_cols:
@@ -351,7 +364,20 @@ cdef class DrakenInnerJoinNode(JoinNode):
             self.left_morsels.append(morsel)
             self.join_readings.time_inner_join_left_accumulate += time.monotonic_ns() - start
 
-    cpdef void push_right(self, Morsel morsel) except *:
+    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_right_gil(_EOS_SENTINEL)
+                else:
+                    self._push_right_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_right_gil(self, Morsel morsel) except *:
         with self.lock:
             self._require_build_complete()
             if morsel is _EOS_SENTINEL:
@@ -372,10 +398,10 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 old_cols = set(right_chunk.column_names)
                 try:
                     right_chunk = execute_and_append(self._compiled_right_evals, right_chunk)
-                except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err2:
                     raise UnsupportedSyntaxError(
-                        f"Draken inner join expression evaluation does not support this query shape: {err}"
-                    ) from err
+                        f"Draken inner join expression evaluation does not support this query shape: {err2}"
+                    ) from err2
                 new_cols = set(right_chunk.column_names) - old_cols
                 if new_cols:
                     for col in new_cols:
@@ -480,14 +506,48 @@ cdef class DrakenCarcharJoinMap:
         return self.bloom_filter is not None
 
 
-cdef inline void _append_valid_rows_and_hashes(
+cdef inline void _multicol_null_eligibility(
+    Morsel relation,
+    list join_columns,
+    Py_ssize_t num_rows,
+    vector[uint8_t]& eligible,
+):
+    """Mark each logical row eligible (1) iff EVERY join key column is non-null
+    at that row.
+
+    Composite NULL exclusion: SQL requires a row whose key has a NULL in ANY
+    column to never match (NULL != NULL). The mixed composite hash does NOT
+    preserve the NULL_HASH sentinel — simd_mix_hash blends a null column's
+    NULL_HASH with the other columns' live hashes, so a row with a NULL in only
+    some columns yields a non-sentinel composite hash. Null exclusion must
+    therefore read the source key-column validity, exactly as the single-column
+    path does (the §11 "consult key validity" contract).
+    """
+    cdef Py_ssize_t ncols = len(join_columns)
+    cdef Py_ssize_t ci, i
+    cdef Vector keycol
+    cdef uint8_t* validity
+
+    eligible.assign(num_rows, <uint8_t>1)
+    for ci in range(ncols):
+        keycol = <Vector>relation._cxx_column(join_columns[ci])
+        validity = keycol.null_bitmap_ptr()
+        if validity == NULL:
+            continue  # all rows valid for this column
+        with nogil:
+            for i in range(num_rows):
+                if not (validity[i >> 3] & (<uint8_t>1 << (i & 7))):
+                    eligible[i] = 0
+
+
+cdef inline void _append_eligible_rows_and_hashes(
     uint64_t[::1] row_hashes,
+    const vector[uint8_t]& eligible,
     vector[uint64_t]& valid_hashes,
     vector[int64_t]& valid_rows,
 ):
     cdef Py_ssize_t num_rows = row_hashes.shape[0]
     cdef Py_ssize_t i
-    cdef uint64_t h
     cdef const uint64_t* hashes_ptr
 
     if num_rows == 0:
@@ -499,14 +559,14 @@ cdef inline void _append_valid_rows_and_hashes(
 
     with nogil:
         for i in range(num_rows):
-            h = hashes_ptr[i]
-            if h != NULL_HASH:
+            if eligible[i]:
                 valid_rows.push_back(i)
-                valid_hashes.push_back(h)
+                valid_hashes.push_back(hashes_ptr[i])
 
 
-cdef inline void _append_bloom_filtered_rows_and_hashes(
+cdef inline void _append_eligible_bloom_rows_and_hashes(
     uint64_t[::1] row_hashes,
+    const vector[uint8_t]& eligible,
     BloomFilter bloom_filter,
     vector[uint64_t]& candidate_hashes,
     vector[int64_t]& candidate_rows,
@@ -525,8 +585,10 @@ cdef inline void _append_bloom_filtered_rows_and_hashes(
 
     with nogil:
         for i in range(num_rows):
+            if not eligible[i]:
+                continue
             h = hashes_ptr[i]
-            if h != NULL_HASH and bloom_filter._possibly_contains_fast(h):
+            if bloom_filter._possibly_contains_fast(h):
                 candidate_rows.push_back(i)
                 candidate_hashes.push_back(h)
 
@@ -605,6 +667,7 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
     cdef uint64_t[::1] row_hashes
     cdef vector[uint64_t] valid_hashes
     cdef vector[int64_t] valid_rows
+    cdef vector[uint8_t] eligible
     cdef long long bloom_start
     cdef uint64_t* hashes_ptr
     cdef Py_ssize_t hashes_len
@@ -625,10 +688,12 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
         # NULL=NULL P0 on the build side; null rows never enter the table).
         _shaped_build_rows_and_hashes(relation, join_columns, valid_hashes, valid_rows)
     else:
-        # Multi-column composite key — OUT OF SCOPE for WP-13. Legacy per-row
-        # hash() path; its null handling is unchanged (tracked separately).
+        # Multi-column composite key. The mixed composite hash does NOT preserve
+        # the NULL_HASH sentinel, so exclude rows whose key has a NULL in ANY
+        # column by reading source key-column validity (SQL NULL != NULL).
         row_hashes = relation.hash(join_columns)
-        _append_valid_rows_and_hashes(row_hashes, valid_hashes, valid_rows)
+        _multicol_null_eligibility(relation, join_columns, num_rows, eligible)
+        _append_eligible_rows_and_hashes(row_hashes, eligible, valid_hashes, valid_rows)
 
     if valid_rows.size() != 0:
         ht.engine.insert_batch(
@@ -889,11 +954,15 @@ cdef object _probe_multicol_legacy(
     Py_ssize_t num_rows,
     InnerJoinKernelMetrics metrics,
 ):
-    """Multi-column composite key — OUT OF SCOPE for WP-13. Legacy per-row hash()
-    probe; null handling unchanged (tracked separately)."""
+    """Multi-column composite key — OUT OF SCOPE for WP-13's k-probe optimization,
+    but null keys ARE excluded here: a row whose composite key has a NULL in ANY
+    column must never match (SQL NULL != NULL). The mixed composite hash does not
+    preserve the NULL_HASH sentinel, so eligibility is read from source
+    key-column validity (mirrors the single-column path)."""
     cdef uint64_t[::1] row_hashes
     cdef vector[uint64_t] probe_hashes
     cdef vector[int64_t] probe_rows
+    cdef vector[uint8_t] eligible
     cdef pair[vector[int64_t], vector[int64_t]] matches
     cdef long long t_start
     cdef long long t_after_hash
@@ -905,16 +974,18 @@ cdef object _probe_multicol_legacy(
     row_hashes = right_relation.hash(join_columns)
     t_after_hash = perf_counter_ns()
 
+    _multicol_null_eligibility(right_relation, join_columns, num_rows, eligible)
+
     if left_hash_table.bloom_filter is not None:
         bloom_filter = <BloomFilter>left_hash_table.bloom_filter
-        _append_bloom_filtered_rows_and_hashes(
-            row_hashes, bloom_filter, probe_hashes, probe_rows)
+        _append_eligible_bloom_rows_and_hashes(
+            row_hashes, eligible, bloom_filter, probe_hashes, probe_rows)
         bloom_end = perf_counter_ns()
         metrics.bloom_filter_time_ns = bloom_end - t_after_hash
         metrics.rows_eliminated_by_bloom_filter = (
             num_rows - <Py_ssize_t>probe_rows.size())
     else:
-        _append_valid_rows_and_hashes(row_hashes, probe_hashes, probe_rows)
+        _append_eligible_rows_and_hashes(row_hashes, eligible, probe_hashes, probe_rows)
         bloom_end = perf_counter_ns()
         metrics.bloom_filter_time_ns = 0
         metrics.rows_eliminated_by_bloom_filter = 0

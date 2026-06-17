@@ -223,7 +223,20 @@ cdef class NonEquiJoinNode(JoinNode):
         op_symbol = op_symbols.get(self.comparison_op, self.comparison_op)
         return f"{self.left_column} {op_symbol} {self.right_column}"
 
-    cpdef void push_left(self, Morsel morsel) except *:
+    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_left_gil(_EOS_SENTINEL)
+                else:
+                    self._push_left_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_left_gil(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
             self._build_complete = True
             if self.left_morsels:
@@ -233,7 +246,21 @@ cdef class NonEquiJoinNode(JoinNode):
         if morsel is not None:
             self.left_morsels.append(morsel)
 
-    cpdef void push_right(self, Morsel morsel) except *:
+    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_right_gil(_EOS_SENTINEL)
+                else:
+                    self._push_right_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_right_gil(self, Morsel morsel) except *:
+        cdef Morsel aligned
         self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
@@ -250,7 +277,7 @@ cdef class NonEquiJoinNode(JoinNode):
             left_column, right_column = right_column, left_column
             swapped = True
 
-        cdef Morsel aligned = _non_equi_nested_loop_join_kernel(
+        aligned = _non_equi_nested_loop_join_kernel(
             self.left_morsel,
             morsel,
             left_column,

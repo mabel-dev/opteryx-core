@@ -146,12 +146,24 @@ cdef class NestedLoopJoinNode(JoinNode):
     def config(self):
         return "draken"
 
-    cpdef void push_left(self, Morsel morsel) except *:
+    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_left_gil(_EOS_SENTINEL)
+                else:
+                    self._push_left_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_left_gil(self, Morsel morsel) except *:
         cdef long long start
         cdef uint64_t[::1] left_hashes
         cdef _HashIndexHolder holder
         cdef HashIndex* idx
-
         if morsel is _EOS_SENTINEL:
             self._build_complete = True
             if self.left_morsels:
@@ -181,13 +193,25 @@ cdef class NestedLoopJoinNode(JoinNode):
         if morsel is not None:
             self.left_morsels.append(morsel)
 
-    cpdef void push_right(self, Morsel morsel) except *:
+    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        with gil:
+            try:
+                if is_eos:
+                    self._push_right_gil(_EOS_SENTINEL)
+                else:
+                    self._push_right_gil(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
+
+    cdef void _push_right_gil(self, Morsel morsel) except *:
         cdef long long start
         cdef Py_ssize_t eliminated_rows
         cdef Morsel morsel_filtered
         cdef Morsel result
         cdef _HashIndexHolder holder
-
         self._require_build_complete()
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)

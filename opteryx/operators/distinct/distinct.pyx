@@ -137,7 +137,10 @@ cdef class DistinctNode(BasePlanNode):
         PyMem_Free(idx_buf)
         return True
 
-    cdef void _dispatch_push(self, Morsel morsel) except *:
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier (recovering the EOS sentinel) and calls this, surfacing any
+        # exception via the ErrCtx path.
         cdef bint is_active_parvi
         if self._hash_set is None:
             # First morsel: try PerfectHashSet for eligible narrow-int columns
@@ -151,7 +154,7 @@ cdef class DistinctNode(BasePlanNode):
                 self._hash_set = _CarcharSetWrapper()
 
         if morsel is _EOS_SENTINEL:
-            self._emit_cdef(_EOS_SENTINEL)
+            self.emit(_EOS_SENTINEL)
             return
 
         chunk = morsel
@@ -195,6 +198,6 @@ cdef class DistinctNode(BasePlanNode):
         # num_rows, not len(): Morsel.__len__ returns the COLUMN count, so the
         # old `len(chunk) > 0` guard was always true and emitted 0-row chunks.
         if chunk.num_rows > 0 or not self.at_least_one_yielded:
-            self._emit_cdef(chunk)
+            self.emit(chunk)
 
         self.at_least_one_yielded = True
