@@ -121,8 +121,8 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
     # Note: identity for $COUNT(*) is a known constant
     encoded_count_identity = b"$COUNT(*)"
     if left_morsel.column_names == [encoded_count_identity] and right_morsel.column_names == [encoded_count_identity]:
-        left_count = left_morsel.column(encoded_count_identity)[0]
-        right_count = right_morsel.column(encoded_count_identity)[0]
+        left_count = left_morsel._cxx_column(encoded_count_identity)[0]
+        right_count = right_morsel._cxx_column(encoded_count_identity)[0]
 
         res = Morsel.from_vectors(
             [encoded_count_identity],
@@ -132,13 +132,13 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
         return
 
     if left_morsel.column_names == [encoded_count_identity]:
-        left_count = left_morsel.column(encoded_count_identity)[0]
+        left_count = left_morsel._cxx_column(encoded_count_identity)[0]
         for _ in range(left_count):
             yield right_morsel.copy()
         return
 
     if right_morsel.column_names == [encoded_count_identity]:
-        right_count = right_morsel.column(encoded_count_identity)[0]
+        right_count = right_morsel._cxx_column(encoded_count_identity)[0]
         for _ in range(right_count):
             yield left_morsel.copy()
         return
@@ -152,7 +152,7 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
         res._empty_inplace()
         for col_name in right_morsel.column_names:
             if col_name not in res.column_names:
-                res.append_vector(col_name, right_morsel.column(col_name).slice(0, 0))
+                res.append_vector(col_name, right_morsel._cxx_column(col_name).slice(0, 0))
         yield res
         return
 
@@ -169,7 +169,7 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
     left_names = set(left_morsel.column_names)
     for col_name in right_morsel.column_names:
         if col_name not in left_names:
-            res_morsel.append_vector(col_name, right_taken.column(col_name))
+            res_morsel.append_vector(col_name, right_taken._cxx_column(col_name))
 
     yield res_morsel
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
 from opteryx.types.logical_type import LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES
-from opteryx.types.vector_types import is_numeric_vector_type, resolve_node_type
+from opteryx.types.vectors.vector_types import is_numeric_vector_type, resolve_node_type
 
 Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
 

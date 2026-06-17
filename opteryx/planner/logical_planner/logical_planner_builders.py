@@ -12,6 +12,7 @@ a function and a reference to it in the dictionary.
 import datetime
 from typing import List, Optional
 
+from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.exceptions import ArrayWithMixedTypesError, SqlError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, format_expression
 from opteryx.expression.evaluator.arithmetic import resolve_binary_op
@@ -24,16 +25,50 @@ from opteryx.expression.intervals import (
     MICROSECONDS_PER_SECOND,
 )
 from opteryx.expression.operator_catalog import get_operator_node_type
-from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
 from opteryx.types.logical_type import (
-    LogicalCategory, ColumnType,
-    BOOLEAN as _CT_BOOLEAN, INT64 as _CT_INT64, FLOAT64 as _CT_FLOAT64,
-    DATE as _CT_DATE, INTERVAL as _CT_INTERVAL, VARCHAR as _CT_VARCHAR,
-    VARBINARY as _CT_VARBINARY, NULL as _CT_NULL, ARRAY as _CT_ARRAY,
-    TIMESTAMP as _CT_TIMESTAMP, TIME as _CT_TIME, VARIANT as _CT_VARIANT,
+    ARRAY as _CT_ARRAY,
+)
+from opteryx.types.logical_type import (
+    BOOLEAN as _CT_BOOLEAN,
+)
+from opteryx.types.logical_type import (
+    DATE as _CT_DATE,
+)
+from opteryx.types.logical_type import (
+    FLOAT64 as _CT_FLOAT64,
+)
+from opteryx.types.logical_type import (
+    INT64 as _CT_INT64,
+)
+from opteryx.types.logical_type import (
+    INTERVAL as _CT_INTERVAL,
+)
+from opteryx.types.logical_type import (
+    NULL as _CT_NULL,
+)
+from opteryx.types.logical_type import (
+    TIME as _CT_TIME,
+)
+from opteryx.types.logical_type import (
+    TIMESTAMP as _CT_TIMESTAMP,
+)
+from opteryx.types.logical_type import (
+    VARBINARY as _CT_VARBINARY,
+)
+from opteryx.types.logical_type import (
+    VARCHAR as _CT_VARCHAR,
+)
+from opteryx.types.logical_type import (
+    VARIANT as _CT_VARIANT,
+)
+from opteryx.types.logical_type import (
     VECTOR as _CT_VECTOR,
+)
+from opteryx.types.logical_type import (
+    ColumnType,
+    LogicalCategory,
 )
 from opteryx.utils import dates, suggest_alternative
 from opteryx.utils.vector_types import VectorType, get_vector_type
@@ -179,7 +214,11 @@ def _apply_interval_scalar(base_value, base_type, interval_value, operator: str)
 def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
     if node.node_type == NodeType.LITERAL:
         _node_ct = node.type  # ColumnType or None
-        if _node_ct is not None and _node_ct.category == LogicalCategory.INTERVAL and apply_interval_literal_to_now:
+        if (
+            _node_ct is not None
+            and _node_ct.category == LogicalCategory.INTERVAL
+            and apply_interval_literal_to_now
+        ):
             return _interval_to_past_timestamp(node.value), _SENTINEL_TIMESTAMP
         return node.value, _node_ct
 
@@ -388,6 +427,7 @@ def all_op(branch, alias: Optional[List[str]] = None, key=None):
 
 def array(branch, alias: Optional[List[str]] = None, key=None):
     from opteryx.types import logical_type as _lt
+
     value_nodes = [build(elem) for elem in branch["elem"]]
     value_list = [v.value for v in value_nodes]
     element_ct_set = {v.type for v in value_nodes}
@@ -539,9 +579,10 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     # CAST(<lit> AS DECIMAL(p,s)) would silently drop (p,s) and skip quantization.
     # The runtime CAST node carries `parameters=[precision, scale]` and threads them
     # through _build_decimal_closure (bare DECIMAL → DECIMAL(18,6), Decision F).
-    if source_expr.node_type == NodeType.LITERAL and normalized_type.replace(
-        "TRY_", ""
-    ) not in ("NVARCHAR", "DECIMAL"):
+    if source_expr.node_type == NodeType.LITERAL and normalized_type.replace("TRY_", "") not in (
+        "NVARCHAR",
+        "DECIMAL",
+    ):
         return _cast_literal_value(source_expr, normalized_type, kind, alias)
 
     # For non-literals, return a CAST node that will be evaluated at runtime
@@ -660,12 +701,29 @@ def _normalize_cast_type(data_type: str) -> str:
 def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     """Cast a literal value at compile time."""
     from opteryx.expression.casts import parse_timestamp_value
-    from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
+    from opteryx.types.timestamps._datetime_conversion import (
+        date_to_int64_days,
+        timestamp_to_int64_us,
+    )
 
     _node_cat = literal_node.type.category if literal_node.type is not None else None
 
-    # NULL values remain NULL regardless of target type
+    # NULL values stay NULL, but must carry the target type. An untyped NULL
+    # literal loses the physical tag string kernels dispatch on: CAST(NULL AS
+    # VARCHAR) folded to an untyped NULL is later materialised as a DRAKEN_NULL
+    # vector (data==NULL, validity==NULL ⇒ all-valid) and read as a garbage
+    # string arena by concat/LIKE, emitting non-null junk. Stamp the resolved
+    # string-family ColumnType so the constant materialises as a typed null
+    # string. NVARCHAR/DECIMAL never reach here (routed to the runtime CAST
+    # node); numeric/temporal NULLs keep the untyped NULL — their kernels
+    # short-circuit on the DRAKEN_NULL tag, so the type carries no benefit.
     if _node_cat == LogicalCategory.NULL:
+        if target_type.replace("TRY_", "") == "VARCHAR":
+            return Node(NodeType.LITERAL, value=None, type=_CT_VARCHAR, alias=alias)
+        # Other targets keep the untyped NULL: a VARBINARY null reaching the
+        # string-concat closure would be stringified (VARBINARY is not in its
+        # string allow-list), and numeric/temporal kernels short-circuit on the
+        # DRAKEN_NULL tag — so the untyped NULL is both safe and correct there.
         return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
 
     # Strip TRY_ prefix for type lookup
@@ -720,6 +778,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         return Node(NodeType.LITERAL, type=_CT_TIMESTAMP(), value=value, alias=alias)
     else:
         from opteryx.types.logical_type import parse_column_type
+
         sql_type = parse_column_type(base_type)  # ColumnType
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
@@ -765,7 +824,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 
     # Attempt to parse and cast the literal value
     try:
-        from opteryx.types.value_parsing import parse_value
+        from opteryx.types.scalars.value_parsing import parse_value
+
         _sql_type_lc = sql_type.category if isinstance(sql_type, ColumnType) else sql_type
         parsed_value = parse_value(_sql_type_lc, literal_node.value)
         if isinstance(parsed_value, datetime.datetime):
@@ -1229,7 +1289,9 @@ def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
         _right_cat = right.type.category if isinstance(right.type, ColumnType) else right.type
         if _right_cat != LogicalCategory.ARRAY:
             right.value = (right.value,)
-            right.type = _CT_ARRAY(right.type if isinstance(right.type, ColumnType) else _CT_VARCHAR)
+            right.type = _CT_ARRAY(
+                right.type if isinstance(right.type, ColumnType) else _CT_VARCHAR
+            )
     return Node(
         NodeType.COMPARISON_OPERATOR,
         value=key,

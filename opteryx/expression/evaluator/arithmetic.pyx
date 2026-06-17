@@ -40,8 +40,15 @@ cdef _to_string_vec(v, n):
     cdef object v_nb = getattr(v, "_nb", None)
     if v_nb is not None:
         v = v_nb
-    if getattr(v, "type", None) in _str_types:
+    cdef object _vt = getattr(v, "type", None)
+    if _vt in _str_types:
         return v  # already a string Vector (now guaranteed nanobind)
+    # A DRAKEN_NULL vector (untyped NULL literal, e.g. `x || NULL`) is all-null by
+    # definition. It is NOT a string vector, so it must become a typed null VARCHAR
+    # constant — never str()'d (the `else` below would otherwise stringify the
+    # Vector's Python repr into the concat output).
+    if _vt == _draken_native.NULL:
+        return _draken_native.vector_varchar_from_constant(None, n)
     # Normalize scalar to bytes or None — the VARCHAR edge is bytes-only, so a
     # Python str must not reach it (encode here once).
     if isinstance(v, bytes):
@@ -219,6 +226,45 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
     from opteryx.types.logical_type import LogicalCategory
     from opteryx.utils.vector_types import VectorType
 
+    # left_sql/right_sql are ColumnType objects; dispatch keys off the operator
+    # category (LogicalCategory). ColumnType != LogicalCategory directly, so the
+    # dispatch category MUST be taken via `.category` — comparing a ColumnType to
+    # a LogicalCategory member is always False.
+    left_cat = left_sql.category if left_sql is not None else None
+    right_cat = right_sql.category if right_sql is not None else None
+
+    # Temporal arithmetic (date/timestamp ± interval, date − date, interval ±
+    # interval) MUST be tested before the generic numeric arithmetic branch —
+    # BOP_PLUS/BOP_MINUS are in that tuple, so a date/interval operation would
+    # otherwise be mis-routed to numeric arithmetic (std::bad_cast at runtime).
+    if op_code in (BOP_PLUS, BOP_MINUS):
+        from opteryx.expression.evaluator.temporal_ops import (
+            _date_interval_op_draken,
+            _date_minus_date_draken,
+            _interval_interval_op_draken,
+        )
+        left_is_date = left_cat in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+        right_is_interval = right_cat == LogicalCategory.INTERVAL
+        left_is_interval = left_cat == LogicalCategory.INTERVAL
+        right_is_date = right_cat in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+
+        # date/timestamp ± interval (operands may arrive in either order) → TIMESTAMP
+        if (left_is_date and right_is_interval) or (left_is_interval and right_is_date):
+            def _date_interval_kernel(left, right, op_code=op_code):
+                return _date_interval_op_draken(left, right, "Plus" if op_code == BOP_PLUS else "Minus")
+            return _date_interval_kernel
+
+        # date/timestamp − date/timestamp (Minus only) → INTERVAL
+        if op_code == BOP_MINUS and left_is_date and right_is_date:
+            return _date_minus_date_draken
+
+        # interval ± interval → INTERVAL
+        if left_is_interval and right_is_interval:
+            op_str = "Plus" if op_code == BOP_PLUS else "Minus"
+            def _interval_interval_kernel(left, right, op_str=op_str):
+                return _interval_interval_op_draken(left, right, op_str)
+            return _interval_interval_kernel
+
     # Arithmetic ops (Plus, Minus, Multiply, Divide, Modulo, IntegerDivide)
     if op_code in (BOP_PLUS, BOP_MINUS, BOP_MULTIPLY, BOP_DIVIDE, BOP_MODULO, BOP_INT_DIVIDE):
         # All numeric type combinations supported — deferred type checking to kernel
@@ -232,42 +278,13 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
     if op_code in (BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR, BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT):
         # Special case: BitwiseOr on VARCHAR → IP-in-CIDR
         if op_code == BOP_BITWISE_OR:
-            if (left_sql == LogicalCategory.VARCHAR or right_sql == LogicalCategory.VARCHAR):
+            if (left_cat == LogicalCategory.VARCHAR or right_cat == LogicalCategory.VARCHAR):
                 from opteryx.compiled.nanobind.vector_misc import vector_ip_in_cidr
                 def _ip_in_cidr_kernel(left, right, _k=vector_ip_in_cidr):
                     return _k(_unwrap_nb(left), _unwrap_nb(right))
                 return _ip_in_cidr_kernel
         # Standard bitwise on INTEGER
         return _build_bitwise_closure(op_code)
-
-    # Date/Timestamp ± Interval
-    if op_code in (BOP_PLUS, BOP_MINUS):
-        left_is_date = left_sql in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
-        right_is_interval = right_sql == LogicalCategory.INTERVAL
-        left_is_interval = left_sql == LogicalCategory.INTERVAL
-        right_is_date = right_sql in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
-
-        if (left_is_date and right_is_interval) or (left_is_interval and right_is_date):
-            def _date_interval_kernel(left, right, op_code=op_code):
-                return _date_interval_op_draken(left, right, "Plus" if op_code == BOP_PLUS else "Minus")
-            return _date_interval_kernel
-
-        # Date - Date (Minus only)
-        if op_code == BOP_MINUS and left_is_date and right_is_date:
-            return _date_minus_date_draken
-
-        # Interval ± Interval
-        if left_sql == LogicalCategory.INTERVAL and right_sql == LogicalCategory.INTERVAL:
-            from opteryx.expression.intervals import INTERVAL_KERNELS
-            key = (left_sql, right_sql, "Plus" if op_code == BOP_PLUS else "Minus")
-            kernel = INTERVAL_KERNELS.get(key)
-            if kernel is not None:
-                # Interval kernels have signature (left, left_type, right, right_type, op_str)
-                # Wrap to match (left, right) signature
-                op_str = "Plus" if op_code == BOP_PLUS else "Minus"
-                def _interval_wrapper(left, right, kernel=kernel, op_str=op_str):
-                    return kernel(left, left_sql, right, right_sql, op_str)
-                return _interval_wrapper
 
     raise NotImplementedError(
         f"resolve_binary_op: no kernel for op_code={op_code}, left_sql={left_sql}, right_sql={right_sql}"

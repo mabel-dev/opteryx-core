@@ -113,7 +113,7 @@ cdef object _filter_probe_compressed(
     cdef Py_ssize_t k_out = <Py_ssize_t>huv.data_length
     cdef Py_ssize_t n = relation.num_rows
 
-    cdef Vector keycol = <Vector>relation.column(join_columns[0])
+    cdef Vector keycol = <Vector>relation._cxx_column(join_columns[0])
     cdef uint8_t* validity = keycol.null_bitmap_ptr()
     cdef bint has_validity = (validity != NULL)
 
@@ -214,7 +214,7 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     """
     if len(columns) != 1:
         return None
-    col = morsel.column(columns[0])
+    col = morsel._cxx_column(columns[0])
     cdef bint is_int8 = getattr(col, "type", None) == _draken_native.INT8
     cdef bint is_int16 = getattr(col, "type", None) == _draken_native.INT16
     if not (is_int8 or is_int16):
@@ -413,7 +413,7 @@ cdef Morsel _phash_probe(
     """
     if len(join_columns) != 1:
         return None
-    col = relation.column(join_columns[0])
+    col = relation._cxx_column(join_columns[0])
     _col_type_probe = getattr(col, "type", None)
     cdef bint is_int8 = (_col_type_probe == _draken_native.INT8)
     cdef bint is_int16 = (_col_type_probe == _draken_native.INT16)
@@ -541,7 +541,7 @@ cdef class FilterJoinNode(JoinNode):
                 self._use_phash = True
                 # Check for nulls in this morsel
                 if len(self.right_columns) == 1:
-                    col = morsel.column(self.right_columns[0])
+                    col = morsel._cxx_column(self.right_columns[0])
                     _col_type_a = getattr(col, "type", None)
                 if _col_type_a == _draken_native.INT8 or _col_type_a == _draken_native.INT16:
                         if (<Vector>col).null_bitmap_ptr() != NULL:
@@ -560,7 +560,7 @@ cdef class FilterJoinNode(JoinNode):
             self.right_hash_set = phash
             # Track nulls
             if len(self.right_columns) == 1:
-                col = morsel.column(self.right_columns[0])
+                col = morsel._cxx_column(self.right_columns[0])
                 _col_type_b = getattr(col, "type", None)
                 if _col_type_b == _draken_native.INT8 or _col_type_b == _draken_native.INT16:
                     if (<Vector>col).null_bitmap_ptr() != NULL:

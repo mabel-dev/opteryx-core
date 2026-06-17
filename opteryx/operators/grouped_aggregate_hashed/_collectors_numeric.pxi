@@ -69,14 +69,15 @@ from draken.core.buffers cimport DRAKEN_INTERVAL, DRAKEN_BOOL
 cdef extern from "core/interval_slot.h":
     cdef struct DrakenIntervalSlot:
         int64_t months
-        int64_t ms
+        int64_t us
 
 # Same approximate single-scalar order INTERVAL uses everywhere (sort, compare,
-# ungrouped min/max): total_ms = months*INTERVAL_MONTH_MS + ms, 1 month = 30 days
-# = 86_400_000 ms/day. Imperfect (months/days vary) but consistent engine-wide.
-# Value mirrors INTERVAL_MONTH_MS in ops/interval_ops.h (that header can't be
-# cimported standalone — it has unmet deps). Folded inline below, not cimported.
-cdef int64_t INTERVAL_MONTH_MS = 2592000000
+# ungrouped min/max): total_us = months*INTERVAL_MONTH_US + us, 1 month = 30 days
+# = 86_400_000_000 µs/day. The `us` field is MICROSECONDS (canonical engine unit).
+# Imperfect (months/days vary) but consistent engine-wide. Value mirrors
+# INTERVAL_MONTH_US in ops/interval_ops.h (that header can't be cimported
+# standalone — it has unmet deps). Folded inline below, not cimported.
+cdef int64_t INTERVAL_MONTH_US = 2592000000000
 
 # int128 type for the DECIMAL128 grouped collectors. Cython has no native 128-bit
 # integer; this ctypedef emits C `__int128` (clang and gcc both support it). Cython's
@@ -1342,19 +1343,19 @@ cdef class MinMaxIntervalCollector(BaseCollector):
                     si = state_indices[i]
                     phys = sel[i]
                     sm = slots[phys].months
-                    sms = slots[phys].ms
-                    src_norm = sm * INTERVAL_MONTH_MS + sms
+                    sms = slots[phys].us
+                    src_norm = sm * INTERVAL_MONTH_US + sms
                     if seen[si] == 0:
                         months[si] = sm
                         ms[si] = sms
                         seen[si] = 1
                     elif direction == 1:
-                        grp_norm = months[si] * INTERVAL_MONTH_MS + ms[si]
+                        grp_norm = months[si] * INTERVAL_MONTH_US + ms[si]
                         if src_norm < grp_norm:
                             months[si] = sm
                             ms[si] = sms
                     elif direction == -1:
-                        grp_norm = months[si] * INTERVAL_MONTH_MS + ms[si]
+                        grp_norm = months[si] * INTERVAL_MONTH_US + ms[si]
                         if src_norm > grp_norm:
                             months[si] = sm
                             ms[si] = sms
@@ -1375,11 +1376,11 @@ cdef class MinMaxIntervalCollector(BaseCollector):
             idx = start + g
             if idx >= self._capacity or self._seen[idx] == 0:
                 slots[g].months = 0
-                slots[g].ms = 0
+                slots[g].us = 0
                 has_null = True
             else:
                 slots[g].months = self._months[idx]
-                slots[g].ms = self._ms[idx]
+                slots[g].us = self._ms[idx]
         if has_null:
             validity = <uint8_t*>draken_malloc(bm_bytes if bm_bytes > 0 else 1)
             if validity == NULL:

@@ -10,7 +10,13 @@ This module provides:
 - Bidirectional Python ↔ type mapping
 """
 
-from opteryx.types._null_handling import (
+from opteryx.types.logical_type import (
+    PYTHON_TO_SQL_MAP,
+    SQL_TO_PYTHON_MAP,
+    LogicalCategory,
+    find_compatible_type,
+)
+from opteryx.types.scalars._null_handling import (
     count_nulls,
     has_nulls,
     is_inf,
@@ -22,7 +28,7 @@ from opteryx.types._null_handling import (
     nulls_to_default,
     remove_nulls,
 )
-from opteryx.types._scalar_types import (
+from opteryx.types.scalars._scalar_types import (
     ScalarType,
     classify_scalar,
     extract_python_scalar,
@@ -32,13 +38,7 @@ from opteryx.types._scalar_types import (
     is_temporal_scalar,
     unwrap_scalar,
 )
-from opteryx.types.logical_type import (
-    PYTHON_TO_SQL_MAP,
-    SQL_TO_PYTHON_MAP,
-    LogicalCategory,
-    find_compatible_type,
-)
-from opteryx.types.vector_types import (
+from opteryx.types.vectors.vector_types import (
     get_vector_source_identifier,
     is_numeric_vector_type,
     node_is_constant_embed_call,
@@ -63,7 +63,7 @@ __all__ = [
     "PYTHON_TO_SQL_MAP",
     "SQL_TO_PYTHON_MAP",
     "find_compatible_type",
-    # Null handling primitives (Step 3)
+    # Null handling primitives
     "is_null",
     "is_nan",
     "is_inf",

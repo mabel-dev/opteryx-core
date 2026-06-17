@@ -10,10 +10,9 @@ from pathlib import Path
 
 from draken.vectors.vector import Vector as VectorVector
 
-from opteryx.exceptions import InvalidConfigurationError
-from opteryx.exceptions import MissingDependencyError
+from opteryx.exceptions import InvalidConfigurationError, MissingDependencyError
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
-from opteryx.vectors import vector_math
+from opteryx.types.vectors import vector_math
 
 _embedding_provider = None
 _default_embedding_provider = None
@@ -24,10 +23,46 @@ _STATIC_FEATURE_CACHE_MAX_ENTRIES = 65536
 _STATIC_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+(?:['_-][A-Za-z0-9]+)*|[^\w\s]", re.UNICODE)
 _STATIC_STOPWORDS = frozenset(
     {
-        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-        "has", "have", "i", "if", "in", "is", "it", "its", "me", "my", "of",
-        "on", "or", "our", "so", "that", "the", "their", "them", "there",
-        "they", "this", "to", "was", "we", "were", "with", "would", "you",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "i",
+        "if",
+        "in",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "so",
+        "that",
+        "the",
+        "their",
+        "them",
+        "there",
+        "they",
+        "this",
+        "to",
+        "was",
+        "we",
+        "were",
+        "with",
+        "would",
+        "you",
         "your",
     }
 )
@@ -56,7 +91,7 @@ class _StaticHashEmbeddingProvider:
         self._char_ngram_min = char_ngram_min
         self._char_ngram_max = max(char_ngram_min, char_ngram_max)
         self._feature_cache = OrderedDict()
-        self._projection_scale = float(2 ** -0.5)
+        self._projection_scale = float(2**-0.5)
 
     @property
     def dimensions(self) -> int:
@@ -123,7 +158,9 @@ class _StaticHashEmbeddingProvider:
             max_ngram = min(self._char_ngram_max, len(wrapped))
             for ngram_size in range(self._char_ngram_min, max_ngram + 1):
                 for start in range(len(wrapped) - ngram_size + 1):
-                    feature = b"g:" + wrapped[start : start + ngram_size].encode("utf8", errors="ignore")
+                    feature = b"g:" + wrapped[start : start + ngram_size].encode(
+                        "utf8", errors="ignore"
+                    )
                     for idx, sign in self._feature_projections(feature):
                         indices.append(idx)
                         contributions.append(sign * 0.25)
@@ -344,7 +381,10 @@ class _MiniLMNativeEmbeddingProvider:
         from opteryx.compiled.nanobind import minilm_native
 
         model_dir = (
-            Path(__file__).resolve().parent.parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+            Path(__file__).resolve().parent.parent.parent
+            / "third_party"
+            / "models"
+            / "all-MiniLM-L6-v2"
         )
         model_path = model_dir / "model.onnx"
         vocab_path = model_dir / "vocab.txt"
@@ -409,7 +449,10 @@ def _load_default_embedding_provider():
         return _default_embedding_provider
 
     model_dir = (
-        Path(__file__).resolve().parent.parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+        Path(__file__).resolve().parent.parent.parent
+        / "third_party"
+        / "models"
+        / "all-MiniLM-L6-v2"
     )
     if not (model_dir / "model.onnx").exists() or not (model_dir / "vocab.txt").exists():
         return None
@@ -603,9 +646,7 @@ def _embed_via_provider(provider, texts: list[str]) -> VectorVector:
         # Per-text fallback.
         first = _provider_single_row(provider, texts[0])
         if isinstance(first, VectorVector):
-            single_rows = [first] + [
-                _provider_single_row(provider, t) for t in texts[1:]
-            ]
+            single_rows = [first] + [_provider_single_row(provider, t) for t in texts[1:]]
             for r in single_rows:
                 if not isinstance(r, VectorVector) or len(r) != 1:
                     _raise_invalid_provider(provider, "a consistent provider return type.")
@@ -747,7 +788,9 @@ def embed_text_matrix(texts: list[str]) -> VectorVector:
                 missing_unique.append(text)
                 seen_missing.add(text)
 
-    if missing_positions and (new_rows is None or new_rows._nb.logical_type_dimension != dimensions):
+    if missing_positions and (
+        new_rows is None or new_rows._nb.logical_type_dimension != dimensions
+    ):
         # Re-embed any rows we just invalidated.
         new_rows = _embed_via_provider(provider, missing_unique)
         dimensions = new_rows._nb.logical_type_dimension

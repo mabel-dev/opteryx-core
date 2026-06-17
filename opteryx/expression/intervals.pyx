@@ -51,24 +51,23 @@ cpdef _as_interval_vector(values):
 
 
 cpdef _date_plus_interval(left, left_type, right, right_type, str operator):
-    """date/timestamp ⊕ interval (operands may be in either order)."""
-    cdef int signum = 1 if operator == "Plus" else -1
-    if left_type == LogicalCategory.INTERVAL:
-        left, right = right, left
+    """date/timestamp ⊕ interval (operands may be in either order).
 
-    interval_vector = _as_interval_vector(right)
-    return interval_vector.apply_to_temporal(left, signum)
+    Delegates to the native temporal arithmetic path (temporal_ops), which calls
+    the apply_to_temporal draken kernel directly.
+    """
+    from opteryx.expression.evaluator.temporal_ops import _date_interval_op_draken
+    return _date_interval_op_draken(left, right, operator)
 
 
 cpdef _interval_interval_op(left, left_type, right, right_type, str operator):
     """interval ⊕ interval — addition, subtraction, and the six comparisons."""
+    if operator in ("Plus", "Minus"):
+        from opteryx.expression.evaluator.temporal_ops import _interval_interval_op_draken
+        return _interval_interval_op_draken(left, right, operator)
+
     left_vector = _as_interval_vector(left)
     right_vector = _as_interval_vector(right)
-
-    if operator == "Plus":
-        return left_vector.add_vector(right_vector)
-    if operator == "Minus":
-        return left_vector.subtract_vector(right_vector)
 
     cdef int op_code
     if operator == "Eq":

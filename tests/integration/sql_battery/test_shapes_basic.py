@@ -79,6 +79,18 @@ STATEMENTS = [
         ("SELECT * FROM $planets TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY", 9, 20, None),
         ("SELECT * FROM $planets TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')", 9, 20, None),
 
+        # Temporal binary arithmetic (regression: restored after the draken C++-first
+        # rebuild removed the Arrow-backed interval materialization). DuckDB-verified
+        # semantics live in dev/ harnesses; these guard the shape + that they execute.
+        ("SELECT birth_date + INTERVAL '1' MONTH FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_date - INTERVAL '1' MONTH FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_date + INTERVAL '1' DAY FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_date + INTERVAL '13' MONTH FROM testdata.astronauts", 357, 1, None),
+        ("SELECT INTERVAL '1' MONTH + INTERVAL '2' MONTH FROM testdata.astronauts", 357, 1, None),
+        ("SELECT INTERVAL '5' MONTH - INTERVAL '2' MONTH FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_date - birth_date FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_date + (INTERVAL '1' MONTH + INTERVAL '10' DAY) FROM testdata.astronauts", 357, 1, None),
+
         # Does the error tester work
         ("THIS IS NOT VALID SQL", None, None, SqlError),
 

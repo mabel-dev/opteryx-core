@@ -2,9 +2,12 @@
 ORDER BY <interval> LIMIT k — native interval top-N (WP-08).
 
 Interval sort keys previously fell through to the per-comparison compare_at
-Python path. WP-08 added a native total_ms key (months*INTERVAL_MONTH_MS + ms,
+Python path. WP-08 added a native total_us key (months*INTERVAL_MONTH_US + us,
 matching draken_vector_compare_at) to the multi-key comparator and routed both
 single- and multi-key interval sorts through it. These tests pin the ordering.
+
+The interval slot's sub-month field carries MICROSECONDS (canonical engine unit),
+so a month normalizes to 30 days × 86_400_000_000 µs/day.
 """
 
 import os
@@ -19,7 +22,7 @@ from opteryx.expression import NodeType
 from opteryx.models.query_properties import QueryProperties
 from opteryx.operators._operators import BasePlanNode, HeapSortNode, _EOS_SENTINEL
 
-_MONTH_MS = 2592000000
+_MONTH_US = 2592000000000
 
 
 class _Collector(BasePlanNode):
@@ -37,12 +40,12 @@ def _oc(name):
                            schema_column=SimpleNamespace(identity=name))
 
 
-# (months, ms) tuples; total order is months*_MONTH_MS + ms
+# (months, us) tuples; total order is months*_MONTH_US + us
 _IVALS = [(0, 5000), (2, 0), (0, 1000), (1, 0), (0, 3000)]
 
 
 def _total(t):
-    return t[0] * _MONTH_MS + t[1]
+    return t[0] * _MONTH_US + t[1]
 
 
 def _run(order_by, limit):
@@ -76,8 +79,8 @@ def test_interval_multi_key_with_tiebreak():
 
 
 def test_interval_with_equal_totals_tiebreak_by_id():
-    # months=1 (==_MONTH_MS) vs (0, _MONTH_MS) have equal totals; id breaks the tie.
-    ivals = [(1, 0), (0, _MONTH_MS), (0, 0)]
+    # months=1 (==_MONTH_US) vs (0, _MONTH_US) have equal totals; id breaks the tie.
+    ivals = [(1, 0), (0, _MONTH_US), (0, 0)]
     props = QueryProperties(query_id="q", variables={})
     node = HeapSortNode(props, order_by=[(_oc(b"iv"), True), (_oc(b"id"), True)], limit=3)
     sink = _Collector(props)

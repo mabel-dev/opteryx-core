@@ -28,6 +28,7 @@
 
 #include "ops/kernels/cast_kernels.h"
 #include "ops/kernels/binary_op_kernels.h"
+#include "ops/kernels/binop_kernels.h"   // P9.1: unified draken_binop (canonical)
 #include "ops/kernels/extraction_kernels.h"
 
 // ---------------------------------------------------------------------------
@@ -61,9 +62,10 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_float64_to_string", (kernel_fn_t)&draken_cast_float64_to_string},
     {"draken_cast_float64_to_bool", (kernel_fn_t)&draken_cast_float64_to_bool},
 
-    // Narrow-integer widening (INT32/INT16/INT8 → FLOAT64 / INT64)
+    // Narrow-integer widening (INT32/INT16/INT8 → FLOAT64 / INT64) + direct → string
     {"draken_cast_integer_to_float64", (kernel_fn_t)&draken_cast_integer_to_float64},
     {"draken_cast_integer_to_int64", (kernel_fn_t)&draken_cast_integer_to_int64},
+    {"draken_cast_integer_to_string", (kernel_fn_t)&draken_cast_integer_to_string},
 
     // String type-specific casts (cast_string.cpp)
     {"draken_cast_string_to_int64", (kernel_fn_t)&draken_cast_string_to_int64},
@@ -104,6 +106,12 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // ========================================================================
     // Binary operation kernels — REAL only
     // ========================================================================
+
+    // P9.1: unified single-dispatch binop kernel (canonical, architect 2026-06-17).
+    // The binder resolves every C-native binop family to this one symbol with
+    // op_code (+ decimal scales) in binary_op_ctx. The per-op 9a kernels below are
+    // superseded and will be retired once the flip is proven.
+    {"draken_binop", (kernel_fn_t)&draken_binop},
 
     // Arithmetic dispatch and individual operations (binary_op_arithmetic.cpp — real).
     {"draken_binary_arith", (kernel_fn_t)&draken_binary_arith},

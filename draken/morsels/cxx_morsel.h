@@ -24,12 +24,31 @@ struct CxxColumn {
     std::shared_ptr<VectorOwner> own;
 };
 
+// Stream state a morsel carries through the operator chain (S-B). EOS is a valid
+// morsel with a flag (no separate PyObject sentinel) so the chain can detect
+// end-of-stream nogil. Extensible — add states here without changing the carrier.
+enum class MorselState : uint8_t {
+    DATA          = 0,   // normal data morsel
+    END_OF_STREAM = 1,   // terminal marker; carries no rows
+};
+
+// Per-pipeline error context (S-B). nogil operator methods return a status code
+// (0 == OK) and, on failure, set code + msg here; the gil boundary (drive loop /
+// cursor) raises a Python exception once. This is the C-application error model
+// validated by the spike — Cython cdef-class methods cannot propagate C++
+// exceptions (`except +` is extern-only), so the chain uses status codes.
+struct ErrCtx {
+    int         code = 0;        // 0 == OK; non-zero == error
+    const char* msg  = nullptr;  // static/owned-elsewhere message; valid at raise time
+};
+
 // A morsel: owned columns + names. Move-only (exclusive ownership of the column
 // list; the bytes themselves are shared via each column's shared_ptr).
 struct CxxMorsel {
     std::vector<CxxColumn>   columns;
     std::vector<std::string> names;       // column identities (bytes), one per column
     uint32_t                 zero_col_rows = 0;  // row count when columns.empty()
+    MorselState              state = MorselState::DATA;  // S-B: EOS-as-flag; default DATA
 
     CxxMorsel() = default;
     CxxMorsel(CxxMorsel&&) noexcept = default;

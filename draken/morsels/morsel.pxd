@@ -8,10 +8,12 @@
 from libc.stdint cimport int32_t, uint64_t
 
 from libcpp.vector cimport vector
+from libcpp.memory cimport shared_ptr
 from cpython.object cimport PyObject
 
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
+from draken.morsels.cxx_morsel cimport CxxMorsel
 
 cdef class Morsel:
     cdef public list _col_names
@@ -21,6 +23,42 @@ cdef class Morsel:
     # vector holds a strong reference to each Vector (released in __dealloc__).
     cdef vector[PyObject*] _columns
     cdef public int _zero_col_num_rows
+    # S1 dual-representation: when set (a draken_native.CxxMorsel handle), this
+    # morsel is Cxx-backed — `_columns`/`_col_names` are empty until a PyObject
+    # accessor calls `_ensure_pyobject`, which materializes them and clears `_cxx`.
+    # At most one representation is authoritative at a time. None = PyObject-backed.
+    cdef public object _cxx
+    # C-level read handle into the SAME C++ CxxMorsel the `_cxx` nanobind handle
+    # wraps (extracted once via cxx_morsel_raw_ptr when the morsel becomes
+    # Cxx-backed). NULL when PyObject-backed. The relational hot path reads
+    # columns through this — `&_cxx_ptr.columns[i].view` — with no PyObject and
+    # no nanobind per access (GIL-releasable). The `_cxx` handle owns the C++
+    # object, so the pointer is valid for as long as `_cxx` is set.
+    cdef const CxxMorsel* _cxx_ptr
+
+    # Every write to `_cxx` MUST go through this setter so `_cxx_ptr` and the
+    # cached `_col_names` stay in lock-step with the handle. Pass None to clear.
+    cdef void _set_cxx(self, object handle)
+    # nogil C-level column read: borrowed DrakenVector* for the i-th substrate
+    # column (valid while the morsel stays Cxx-backed). i assumed in range.
+    cdef const DrakenVector* _col_view(self, Py_ssize_t i) noexcept nogil
+
+    # Guard at the top of every engine-internal PyObject column accessor: a
+    # Cxx-backed morsel reaching here means an operator/path touched columns
+    # without being converted to the CxxMorsel substrate — FAIL LOUD. The ONLY
+    # sanctioned conversion to PyObject is `materialize`, called by the cursor.
+    cdef void _ensure_pyobject(self) except *
+    # Cursor-boundary shim: build PyObject columns from `_cxx` and clear it.
+    # Idempotent; the cursor is the sole place this may be called.
+    cpdef void materialize(self) except *
+    # Return the CxxMorsel handle for converted (C++) operators: `_cxx` if set,
+    # else a transient one built from the current PyObject columns.
+    cpdef object _get_cxx(self)
+    # Read one column (by identity/name) for a CONVERTED operator: from the
+    # CxxMorsel substrate when Cxx-backed (no whole-morsel materialization),
+    # else the normal PyObject column. Converted operators call this instead of
+    # `column`, which fails loud on a Cxx-backed morsel.
+    cpdef object _cxx_column(self, identity, name=*)
 
     # ---- Column store accessors (replace direct _columns[...] indexing) ----
     # Number of columns currently held.
@@ -74,3 +112,10 @@ cdef class Morsel:
 
 cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
                            int32_t[::1] left_view, int32_t[::1] right_view)
+
+
+# S-B boundary bridges (defined in _morsel_shim.pyx) — cimportable by the operator
+# chain so it can convert at the scan/cursor edges and during the gil-wrapped
+# transition. Cheap shallow copies (share column owners, not bytes).
+cdef shared_ptr[CxxMorsel] morsel_to_cxx(Morsel m)
+cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp)

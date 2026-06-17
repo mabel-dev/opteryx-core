@@ -14,7 +14,9 @@
 #
 # Common cimports declared here are visible to all included files.
 
-from draken.morsels.morsel cimport Morsel
+from libcpp.memory cimport shared_ptr
+from draken.morsels.morsel cimport Morsel, morsel_to_cxx, cxx_to_morsel
+from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector, mix_hash
 from draken.core.buffers cimport (
@@ -350,10 +352,6 @@ cdef class BasePlanNode:
             self.bytes_in += nbytes
         self.calls += 1
 
-        # Snapshot output counters so the trace event can record the rows/bytes
-        # THIS push produced (records_out/bytes_out are incremented downstream in
-        # _emit_cdef during _dispatch_push). Only read under tracing — otherwise
-        # the snapshot is unused and the compiler drops it.
         records_out_before = self.records_out
         bytes_out_before = self.bytes_out
 
@@ -771,10 +769,7 @@ cdef class JoinLeftAdapter(BasePlanNode):
 
     cpdef void push(self, Morsel morsel) except *:
         # Attribute the build-side push time to the JOIN, not this hidden
-        # adapter, so the join shows real time in EXPLAIN ANALYZE. Single clock
-        # pair; mirrors the base push() ctx-terminated guard. No trace/snapshot
-        # (the adapter is is_not_explained; the join emits its own output
-        # counters via _emit_cdef in push_right).
+        # adapter, so the join shows real time in EXPLAIN ANALYZE.
         cdef timespec ts_start, ts_end
         if self._ctx is not None and self._ctx.is_terminated():
             return
@@ -819,9 +814,7 @@ cdef class JoinRightAdapter(BasePlanNode):
 
     cpdef void push(self, Morsel morsel) except *:
         # Attribute the probe-side push time to the JOIN, not this hidden
-        # adapter (see JoinLeftAdapter.push). The probe side emits downstream,
-        # so under tracing the join's downstream_time is captured in _emit_cdef
-        # and self_time = probe own work.
+        # adapter (see JoinLeftAdapter.push).
         cdef timespec ts_start, ts_end
         if self._ctx is not None and self._ctx.is_terminated():
             return

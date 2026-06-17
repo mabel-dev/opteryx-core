@@ -29,6 +29,7 @@ extern VecResult draken_cast_float64_to_bool(void* ctx, const DrakenVector* vect
 extern VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* vector);
 
 extern VecResult draken_cast_int64_to_string(void* ctx, const DrakenVector* vector);
+extern VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* vector);
 extern VecResult draken_cast_bool_to_string(void* ctx, const DrakenVector* vector);
 extern VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* vector);
 extern VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* vector);
@@ -107,6 +108,10 @@ VecResult draken_cast_to_varchar(void* ctx, const DrakenVector* vector) {
                 return draken_cast_identity(ctx, vector);
             case DRAKEN_INT64:
                 return draken_cast_int64_to_string(ctx, vector);
+            case DRAKEN_INT8:
+            case DRAKEN_INT16:
+            case DRAKEN_INT32:
+                return draken_cast_integer_to_string(ctx, vector);
             case DRAKEN_BOOL:
                 return draken_cast_bool_to_string(ctx, vector);
             case DRAKEN_FLOAT64:

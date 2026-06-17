@@ -508,6 +508,13 @@ static nb::object float64_to_int64_apply(nb::object obj) {
     return wrap_cast_result(draken_cast_float64_to_int64(nullptr, dv));
 }
 
+// INTEGER (INT8/16/32) → VARCHAR: single pass at the source width (the draken
+// kernel reads the native stride — no widen-to-int64 detour).
+static nb::object integer_to_string_apply(nb::object obj) {
+    const DrakenVector* dv = unwrap_integer(obj);
+    return wrap_cast_result(draken_cast_integer_to_string(nullptr, dv));
+}
+
 // STRING → BOOL: "true"/"false", "1"/"0", "yes"/"no", "on"/"off" (case-insensitive).
 // Raises ValueError on unrecognized values.
 static nb::object string_to_bool_apply(nb::object obj) {
@@ -641,6 +648,12 @@ NB_MODULE(vector_casts, m) {
         [](nb::object v) -> nb::object { return integer_to_int64_apply(v); },
         nb::arg("v"),
         "CAST(v AS INT64): INT32/INT16/INT8 sign-extending widening to INT64. Null rows propagate.");
+
+    m.def("vector_cast_integer_to_string",
+        [](nb::object v) -> nb::object { return integer_to_string_apply(v); },
+        nb::arg("v"),
+        "CAST(v AS VARCHAR): INT32/INT16/INT8 → decimal ASCII DRAKEN_VARCHAR, read at the "
+        "source width in a single pass. Null rows propagate.");
 
     m.def("vector_cast_float64_to_int64",
         [](nb::object v) -> nb::object { return float64_to_int64_apply(v); },

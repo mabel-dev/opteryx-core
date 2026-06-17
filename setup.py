@@ -668,10 +668,10 @@ extensions = [
         sources=[
             "draken/draken_native.cpp",
             "draken/core/vector_alloc.cpp",
-            "draken/core/bitmap_ops.cpp",   # E.21: bitmap operations for bytecode VM
+            "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
             "draken/core/frame_arena.cpp",  # per-frame allocator for native eval engine
-            "draken/ops/compare_dv.cpp",    # arena-backed compare entry point
-            "draken/ops/arithmetic_dv.cpp", # arena-backed arithmetic entry point
+            "draken/ops/compare_dv.cpp",  # arena-backed compare entry point
+            "draken/ops/arithmetic_dv.cpp",  # arena-backed arithmetic entry point
             # Phase 9a: C kernel ABI implementations
             "draken/ops/kernels/error_handling.cpp",
             "draken/ops/kernels/result_helpers.cpp",  # Phase 9c: string VecResult builder
@@ -684,6 +684,7 @@ extensions = [
             "draken/ops/kernels/binary_op_arithmetic.cpp",
             "draken/ops/kernels/binary_op_other.cpp",
             "draken/ops/kernels/binary_op_temporal.cpp",
+            "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
             # Function kernels deferred to Phase 9f; they require nanobind wrappers not yet ported to extern "C"
             # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
             "src/cpp/simd_hash.cpp",
@@ -737,6 +738,7 @@ extensions = [
             "draken/ops/kernels/binary_op_arithmetic.cpp",
             "draken/ops/kernels/binary_op_other.cpp",
             "draken/ops/kernels/binary_op_temporal.cpp",
+            "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
             # Function kernels deferred to Phase 9f
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_env.cpp",
@@ -944,9 +946,10 @@ extensions = [
             "draken/core/alloc.h",
             "draken/core/buffers.h",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "rugo/src/_csv/core",
-            "rugo/src/_jsonl/core",   # fast_parsers.hpp
+            "rugo/src/_jsonl/core",  # fast_parsers.hpp
         ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -2056,8 +2059,8 @@ extensions.append(
 
 extensions.append(
     Extension(
-        "opteryx.vectors.vector_math",
-        sources=["opteryx/vectors/vector_math.pyx"],
+        "opteryx.types.vectors.vector_math",
+        sources=["opteryx/types/vectors/vector_math.pyx"],
         include_dirs=include_dirs + ["third_party/usearch/fp16/include"],
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,

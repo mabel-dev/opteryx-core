@@ -230,9 +230,9 @@ class GroupedAggregateHashedNode(BasePlanNode):
         col_vecs = []
         for _n in col_names:
             if isinstance(_n, bytes):
-                col_vecs.append(morsel.column(_n))
+                col_vecs.append(morsel._cxx_column(_n))
             else:
-                col_vecs.append(morsel.column(_n.encode()))
+                col_vecs.append(morsel._cxx_column(_n.encode()))
 
         existing = {
             _n.decode() if isinstance(_n, bytes) else _n for _n in col_names
@@ -254,6 +254,8 @@ class GroupedAggregateHashedNode(BasePlanNode):
             return morsel
 
         from draken.morsels.morsel import Morsel as DrakenMorsel
+        if morsel._cxx is not None:
+            return DrakenMorsel.from_cxx_vectors(col_names, col_vecs)
         return DrakenMorsel.from_vectors(col_names, col_vecs)
 
     def _apply_having_filter(self, morsel):

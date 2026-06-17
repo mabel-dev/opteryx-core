@@ -551,7 +551,7 @@ cdef inline void _shaped_build_rows_and_hashes(
     cdef const uint64_t* khashes = <const uint64_t*>huv.data
     cdef const uint32_t* codes = huv.selection
 
-    cdef Vector keycol = <Vector>relation.column(join_columns[0])
+    cdef Vector keycol = <Vector>relation._cxx_column(join_columns[0])
     cdef uint8_t* validity = keycol.null_bitmap_ptr()
 
     cdef Py_ssize_t i
@@ -984,7 +984,7 @@ cpdef object inner_join_carchar_morsel_aligned(
     hv = <Vector>right_relation.hash_keys(join_columns)
     hash_ns = perf_counter_ns() - t_start
     huv = hv.unified()
-    keycol = <Vector>right_relation.column(join_columns[0])
+    keycol = <Vector>right_relation._cxx_column(join_columns[0])
     validity = keycol.null_bitmap_ptr()
 
     # k-gate: compressed AND compresses by at least _WP13_KPROBE_MIN_RATIO.

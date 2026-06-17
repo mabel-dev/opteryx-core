@@ -483,7 +483,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
             asc = bool(ascending[col_idx])
             key_xor = _asc_xor if asc else _desc_xor
 
-            vec = morsel.column(col_name)
+            vec = morsel._cxx_column(col_name)
 
             if (<Vector>vec).unified().type == DRAKEN_VARCHAR or (<Vector>vec).unified().type == DRAKEN_NVARCHAR:
                 sv = <Vector>vec

@@ -45,9 +45,23 @@ from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
 from opteryx.types.logical_type import (
-    LogicalCategory, ColumnType,
-    BOOLEAN, INT64, FLOAT32, FLOAT64, DATE, INTERVAL, VARCHAR, NVARCHAR,
-    VARBINARY, VARIANT, NULL, ARRAY, TIMESTAMP, TIME, DECIMAL,
+    ARRAY,
+    BOOLEAN,
+    DATE,
+    DECIMAL,
+    FLOAT32,
+    FLOAT64,
+    INT64,
+    INTERVAL,
+    NULL,
+    NVARCHAR,
+    TIME,
+    TIMESTAMP,
+    VARBINARY,
+    VARCHAR,
+    VARIANT,
+    ColumnType,
+    LogicalCategory,
 )
 from opteryx.types.schema import ConstantColumn
 
@@ -69,14 +83,16 @@ def _infer_collection_literal(value: Any):
     if element_ct is None:
         return ARRAY(VARIANT), None
     # Numeric homogeneous array → treat as ARRAY<FLOAT64> at binder time
-    if element_ct.category in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL):
+    if element_ct.category in (
+        LogicalCategory.INTEGER,
+        LogicalCategory.FLOAT,
+        LogicalCategory.DECIMAL,
+    ):
         return ARRAY(FLOAT64), None
     return ARRAY(element_ct), None
 
 
-def build_literal_node(
-    value: Any, root: Optional[Node] = None, suggested_type=None
-):
+def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=None):
     """
     Build a literal node with the appropriate type based on the value.
     """
@@ -108,14 +124,18 @@ def build_literal_node(
         )
 
     if value is None:
-        # Matching None has complications
+        # A None value is a NULL literal. When a concrete type was requested
+        # (e.g. folding CAST(NULL AS VARCHAR)) preserve it — an untyped NULL
+        # loses the physical tag string-family kernels dispatch on, so a typed
+        # NULL string operand would otherwise be read as a garbage arena. With
+        # no suggestion the literal stays untyped NULL.
         root.value = None
         root.node_type = NodeType.LITERAL
-        root.type = NULL
+        root.type = suggested_type if suggested_type is not None else NULL
         root.left = None
         root.right = None
         if root.schema_column is not None:
-            root.schema_column.column_type = NULL
+            root.schema_column.column_type = root.type
         return root
 
     collection_ct = None
@@ -143,10 +163,12 @@ def build_literal_node(
         if suggested_type is not None and suggested_type == INTERVAL:
             value = normalize_interval_value(value)
         if isinstance(value, datetime.datetime):
-            from opteryx.types._datetime_conversion import timestamp_to_int64_us
+            from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us
+
             value = timestamp_to_int64_us(value)
         elif isinstance(value, datetime.date):
-            from opteryx.types._datetime_conversion import date_to_int64_days
+            from opteryx.types.timestamps._datetime_conversion import date_to_int64_days
+
             value = date_to_int64_days(value)
         root.value = value
         root.node_type = NodeType.LITERAL

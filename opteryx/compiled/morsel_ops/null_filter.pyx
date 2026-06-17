@@ -46,7 +46,7 @@ cdef vector[int64_t] non_null_row_indices(Morsel morsel, list column_names):
             result.push_back(<int64_t>i)
         return result
 
-    col_vec = morsel.column(column_names[0])
+    col_vec = morsel._cxx_column(column_names[0])
     if col_vec is None:
         return result
 
@@ -61,7 +61,7 @@ cdef vector[int64_t] non_null_row_indices(Morsel morsel, list column_names):
 
     try:
         for col_name in column_names:
-            col_vec = morsel.column(col_name)
+            col_vec = morsel._cxx_column(col_name)
             if col_vec is None:
                 continue
             dv = col_vec._dv

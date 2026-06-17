@@ -31,7 +31,7 @@ import datetime as _datetime
 import decimal as _decimal
 
 from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
@@ -54,6 +54,21 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
     cdef bytes raw
     cdef object int_vec
     if value is None:
+        # A typed NULL literal (e.g. CAST(NULL AS VARCHAR)) must materialise a
+        # null constant of its declared physical type, NOT an untyped DRAKEN_NULL
+        # vector. String-family kernels (concat, LIKE, ...) dispatch on the
+        # operand's bind type and read the string arena directly; handed a
+        # DRAKEN_NULL vector (data==NULL, validity==NULL ⇒ all-valid) they read
+        # garbage slots and emit non-null junk. The typed null constant carries a
+        # real all-null validity bitmap and the correct slot layout. Numeric and
+        # untyped (physical_type == -1) NULLs keep DRAKEN_NULL — their kernels
+        # short-circuit on the DRAKEN_NULL tag.
+        if physical_type == <int>DRAKEN_VARCHAR:
+            return Vector(_draken_native.vector_varchar_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_NVARCHAR:
+            return Vector(_draken_native.vector_nvarchar_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_VARBINARY:
+            return Vector(_draken_native.vector_varbinary_from_constant(None, 1))
         return Vector(_draken_native.vector_null_from_length(1))
     if isinstance(value, bool):
         # Bools are handled upstream by BC_LOAD_LIT_BOOL; reaching here is a bug.
@@ -61,7 +76,20 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
             "_materialise_constant_literal: bool literal must use BC_LOAD_LIT_BOOL"
         )
     if isinstance(value, int):
-        return Vector(_draken_native.vector_from_constant(value, 1))
+        # Temporal literals are carried as raw integers (DATE32 = days-since-epoch,
+        # TIMESTAMP64 = microseconds-since-epoch) but tagged with their temporal
+        # physical type — this is how the planner folds CAST(<str> AS DATE/TIMESTAMP)
+        # and stores typed temporal literals. Reinterpret the int constant as the
+        # tagged temporal type so the materialised vector carries DATE32/TIMESTAMP64
+        # (mirrors the datetime.date / datetime.datetime branches below). Without
+        # this the constant would surface as a bare INT64 and downstream temporal
+        # kernels (e.g. DATE + INTERVAL) would reject it.
+        int_vec = _draken_native.vector_from_constant(value, 1)
+        if physical_type == <int>DRAKEN_DATE32:
+            return Vector(_draken_native.vector_reinterpret_as_date32(int_vec))
+        if physical_type == <int>DRAKEN_TIMESTAMP64:
+            return Vector(_draken_native.vector_reinterpret_as_timestamp64(int_vec))
+        return Vector(int_vec)
     if isinstance(value, float):
         return Vector(_draken_native.vector_float64_from_constant(value, 1))
     if isinstance(value, (str, bytes)):
@@ -82,6 +110,12 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         if precision > 18:
             return Vector(_draken_native.vector_decimal128_from_constant(value, 1, precision, scale))
         return Vector(_draken_native.vector_decimal_from_constant(value, 1, precision, scale))
+    if physical_type == <int>DRAKEN_INTERVAL:
+        # INTERVAL literals are (months, microseconds) tuples (see
+        # logical_planner_builders.literal_interval). Materialise a constant-shape
+        # INTERVAL Vector so the temporal arithmetic kernels receive a real vector
+        # rather than a raw Python tuple.
+        return Vector(_draken_native.vector_interval_from_constant(value, 1))
     if isinstance(value, _datetime.date) and not isinstance(value, _datetime.datetime):
         ordinal = (value - _EPOCH_DATE).days
         int_vec = _draken_native.vector_from_constant(ordinal, 1)
@@ -202,6 +236,46 @@ _BOP_CODE = {
     "ShiftLeft":     BOP_SHIFT_LEFT,
     "ShiftRight":    BOP_SHIFT_RIGHT,
 }
+
+# P9.1: single source of truth for which (op, operand-types) dispatch C-native
+# via the unified draken_binop kernel. Increment 1 covers integer/float
+# ARITHMETIC and integer BITWISE — fixed-width results, ctx carries op_code only
+# (no decimal scales). DECIMAL, string concat, temporal and IP are NOT listed yet
+# and stay on the resolve_binary_op closure until their families are ported. This
+# is a deterministic, fail-loud routing decision (no silent fallback): a binop is
+# either explicitly C-native here or explicitly on the closure.
+_BINOP_NATIVE_INT = frozenset({"INT8", "INT16", "INT32", "INT64"})
+_BINOP_NATIVE_FLOAT = frozenset({"FLOAT32", "FLOAT64"})
+_BINOP_NATIVE_STRING = frozenset({"VARCHAR", "NVARCHAR", "VARBINARY"})
+
+def _c_native_binop(int op_code, left_phys, right_phys):
+    """True iff draken_binop handles (op_code, left_phys, right_phys) today."""
+    if left_phys is None or right_phys is None:
+        return False
+    cdef bint l_int = left_phys in _BINOP_NATIVE_INT
+    cdef bint r_int = right_phys in _BINOP_NATIVE_INT
+    cdef bint l_num = l_int or (left_phys in _BINOP_NATIVE_FLOAT)
+    cdef bint r_num = r_int or (right_phys in _BINOP_NATIVE_FLOAT)
+    # Arithmetic PLUS/MINUS/MULTIPLY/DIVIDE/MODULO/INT_DIVIDE over numeric
+    # (draken_binop handles cross-width widening + int/float promotion + true div).
+    if BOP_PLUS <= op_code <= BOP_INT_DIVIDE:
+        return l_num and r_num
+    # IP-in-CIDR: BitwiseOr over string operands (left = IP column, right = CIDR
+    # scalar) → BOOL. Distinct from integer bitwise-OR; the kernel reads both
+    # operands as strings. Mixed string/non-string stays on the closure.
+    if op_code == BOP_BITWISE_OR and left_phys in _BINOP_NATIVE_STRING \
+            and right_phys in _BINOP_NATIVE_STRING:
+        return True
+    # Bitwise OR/AND/XOR/SHIFT over SAME-type integers (int_bitwise requires it;
+    # mismatch would return a loud error sentinel, so require equality up front).
+    if BOP_BITWISE_OR <= op_code <= BOP_SHIFT_RIGHT:
+        return l_int and r_int and left_phys == right_phys
+    # String concat over SAME-type string columns (VARCHAR/NVARCHAR/VARBINARY).
+    # Mixed/non-string operands stay on the closure (which coerces) — the kernel
+    # only sees string||string of one type, result type = that type.
+    if op_code == BOP_STRING_CONCAT:
+        return left_phys in _BINOP_NATIVE_STRING and left_phys == right_phys
+    return False
 
 # Unary op string → BCUnaryOpCode. Built once at module load.
 _UOP_CODE = {
@@ -394,6 +468,15 @@ cdef Py_ssize_t _linearize(
                 slot.opcode = BC_LOAD_LIT_SET
                 bc._hold(value_obj)
                 slot.literal_obj = <PyObject*>value_obj
+            elif node.physical_type == <int>DRAKEN_INTERVAL:
+                # INTERVAL literal — its value is a (months, microseconds) tuple,
+                # but it is a genuine scalar, not an in-list collection. Materialise
+                # a constant INTERVAL Vector (must precede the tuple/in-list branch
+                # below, which would otherwise mis-handle it as a membership set).
+                const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                slot.opcode = BC_LOAD_LIT_CONST
+                bc._hold(const_lit)
+                slot.literal_obj = <PyObject*>const_lit
             elif isinstance(value_obj, (list, tuple, set, frozenset)):
                 # In-list collection literal — stays a Python object on the stack
                 # for a downstream BC_COMPARE membership test.
@@ -627,6 +710,28 @@ cdef Py_ssize_t _linearize(
         bc._hold(binop_kernel)
         slot.callable_ref = <PyObject*>binop_kernel
 
+        # P9.1 (executor flip): route C-native families to the unified draken_binop
+        # kernel. When _c_native_binop allow-lists this (op, types), the executor
+        # dispatches it directly via BC_INSTR_C_NATIVE (no closure, no Python
+        # objects). resolve_binary_op stays in callable_ref as the path for every
+        # binop not yet C-native. _c_native_binop is the single source of truth.
+        bin_left_phys = getattr(bin_left_type.physical, "name", None) if bin_left_type is not None else None
+        bin_right_phys = getattr(bin_right_type.physical, "name", None) if bin_right_type is not None else None
+        if _c_native_binop(slot.op_code, bin_left_phys, bin_right_phys):
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                "draken_binop", alloc_binary_op_ctx, slot.op_code)
+            if fn_ptr is not None and ctx_wrapper is not None:
+                slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
+                slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
+                bc._hold(ctx_wrapper)   # keep ctx alive for the bytecode's lifetime
+                slot.flags |= BC_INSTR_C_NATIVE
+                # S2: every C-native binop is fixed-width EXCEPT string concat
+                # (BOP_STRING_CONCAT → VARCHAR/NVARCHAR/VARBINARY owner). IP-in-CIDR
+                # (BOP_BITWISE_OR over strings) returns BOOL = fixed-width.
+                if slot.op_code != BOP_STRING_CONCAT:
+                    slot.flags |= BC_C_NATIVE_FIXED
+
         # Phase 1 result-wrap pattern: kernels return nanobind Vectors.
         slot.flags |= BC_RESULT_NEEDS_NB_WRAP
         # Binary ops never return BOOL, so BC_RESULT_WRAP_AS_BOOL stays false.
@@ -798,6 +903,10 @@ cdef Py_ssize_t _linearize(
             if fn_ptr is not None:
                 slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
                 slot.flags |= BC_INSTR_C_NATIVE
+                # S2: string-result cast kernels are named `..._to_string` (own the
+                # result as a Vector); everything else is fixed-width → nogil-safe.
+                if not _cn[0].endswith("_to_string"):
+                    slot.flags |= BC_C_NATIVE_FIXED
 
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel
@@ -1069,6 +1178,14 @@ _PURE_BITMAP_OPCODES = frozenset({
     BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
 })
 
+# S2: opcodes that run on the nogil DV* operand stack. Loads place operands;
+# compute ops produce an arena-owned result (so a bytecode ending in a compute
+# op has anchor-free result → the nogil path needs no Python anchor tracking).
+_C_NATIVE_LOAD_OPCODES = frozenset({BC_LOAD_COL, BC_LOAD_LIT_CONST, BC_LOAD_LIT_BOOL})
+_C_NATIVE_BOOL_OPCODES = frozenset({BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF})
+_C_NATIVE_COMPUTE_OPCODES = frozenset(
+    _C_NATIVE_BOOL_OPCODES | {BC_COMPARE, BC_BINARY_OP, BC_CAST})
+
 def build_bytecode(CompiledExpressionHandle handle):
     """Linearise the lowered tree into a typed CompiledBytecode container."""
     if handle._root == NULL:
@@ -1084,5 +1201,34 @@ def build_bytecode(CompiledExpressionHandle handle):
         if bc.instrs[k].opcode not in _PURE_BITMAP_OPCODES:
             bc.is_pure_bitmap = False
             break
+
+    # S2: is_all_c_native — every op runs nogil on the DV* stack with a fixed-width
+    # result, and the LAST op is a compute op (arena result → no anchor tracking).
+    # Enables evaluate_c_native (whole-bytecode single GIL release). Excludes:
+    # inline-IN-list / non-ordinal compares (LIKE/IN — Python kernels), string-
+    # result binop/cast (need a Vector owner), and FUNCTION/EXTRACTION/UNARY/
+    # BETWEEN/CASE/LIT_SET/LIT_SCALAR (GIL).
+    cdef int op, fl, opc
+    bc.is_all_c_native = bc.count > 0
+    for k in range(bc.count):
+        op = bc.instrs[k].opcode
+        fl = bc.instrs[k].flags
+        if op in _C_NATIVE_LOAD_OPCODES or op in _C_NATIVE_BOOL_OPCODES:
+            continue
+        if op == BC_COMPARE:
+            opc = bc.instrs[k].op_code
+            if (fl & BC_CMP_INLIST_INLINE) == 0 and 1 <= opc <= 6:
+                continue
+            bc.is_all_c_native = False
+            break
+        if op == BC_BINARY_OP or op == BC_CAST:
+            if (fl & BC_INSTR_C_NATIVE) != 0 and (fl & BC_C_NATIVE_FIXED) != 0:
+                continue
+            bc.is_all_c_native = False
+            break
+        bc.is_all_c_native = False
+        break
+    if bc.is_all_c_native and bc.instrs[bc.count - 1].opcode not in _C_NATIVE_COMPUTE_OPCODES:
+        bc.is_all_c_native = False
 
     return bc

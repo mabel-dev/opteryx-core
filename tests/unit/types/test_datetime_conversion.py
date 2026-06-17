@@ -17,7 +17,7 @@ import datetime
 
 import pytest
 
-from opteryx.types._datetime_conversion import (
+from opteryx.types.timestamps._datetime_conversion import (
     date_to_int64_days,
     int64_days_to_date,
     int64_us_to_datetime,

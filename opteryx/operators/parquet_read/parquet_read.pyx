@@ -1226,7 +1226,9 @@ cdef class ParquetReadNode(ReaderNode):
             rows_after_filter = 0
             if has_identity:
                 # Positional pairing: vectors order == column_names == identity order.
-                result_morsel = Morsel.from_vectors(self._sp_identity_names, vectors)
+                # The scan emits a Cxx-backed morsel (the C++-first substrate); columns
+                # materialize lazily for any operator not yet reading the CxxMorsel.
+                result_morsel = Morsel.from_cxx_vectors(self._sp_identity_names, vectors)
                 rows_before_filter = result_morsel.num_rows
                 rows_after_filter = rows_before_filter
                 if self._compiled_predicate is not None:

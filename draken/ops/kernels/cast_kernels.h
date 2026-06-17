@@ -46,6 +46,7 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* vector);
 
 VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* vector);
 
 VecResult draken_cast_date32_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector);

@@ -203,21 +203,21 @@ cdef class GroupHashEngine:
         cdef int _col_type_int
         for _ki in range(<Py_ssize_t>len(self._group_columns)):
             if self._key_kinds[_ki] == KEY_MULTI_ENCODED_STRING:
-                _col_type_int = morsel.column(self._group_columns[_ki])._nb.type.value
+                _col_type_int = morsel._cxx_column(self._group_columns[_ki])._nb.type.value
                 _col_type = <DrakenType>_col_type_int
                 self._key_store.set_string_col_type(_ki, _col_type)
             elif self._key_kinds[_ki] == KEY_MULTI_FIXED_TIMESTAMP64:
                 # Capture the timestamp unit ("s"/"ms"/"us"/"ns") so the key
                 # store can reconstruct the group key as TIMESTAMP, not int64.
                 self._key_store.set_timestamp_col_unit(
-                    _ki, morsel.column(self._group_columns[_ki])._nb.logical_type_unit)
+                    _ki, morsel._cxx_column(self._group_columns[_ki])._nb.logical_type_unit)
             elif self._key_kinds[_ki] == KEY_MULTI_FIXED_DECIMAL128:
                 # Capture (precision, scale) so the key store reconstructs the group
                 # key as DECIMAL128(p, s), not a raw int128.
                 self._key_store.set_decimal_col_descriptor(
                     _ki,
-                    morsel.column(self._group_columns[_ki])._nb.logical_type_precision,
-                    morsel.column(self._group_columns[_ki])._nb.logical_type_scale)
+                    morsel._cxx_column(self._group_columns[_ki])._nb.logical_type_precision,
+                    morsel._cxx_column(self._group_columns[_ki])._nb.logical_type_scale)
         if self._use_parvi:
             # Small-map fast path: no heap hash table, single SIMD group.
             # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).

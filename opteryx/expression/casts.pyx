@@ -19,8 +19,8 @@ import math
 import draken.draken_native as _draken_native_casts
 
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.value_parsing import parse_value, parser_for
-from opteryx.types._datetime_conversion import timestamp_to_int64_us
+from opteryx.types.scalars.value_parsing import parse_value, parser_for
+from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us
 
 
 cpdef bint _is_nullish(value):
@@ -200,7 +200,7 @@ def _cast_result_to_draken(result, resolved_type, args=()):
         int_vec = _draken_native_casts.vector_from_sequence(int_vals)
         return _draken_native_casts.vector_reinterpret_as_date32(int_vec)
     if resolved_type == "TIMESTAMP":
-        from opteryx.types._datetime_conversion import timestamp_to_int64_us as _ts_to_int
+        from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us as _ts_to_int
         int_vals = [_ts_to_int(v) if v is not None else None for v in result]
         int_vec = _draken_native_casts.vector_from_sequence(int_vals)
         return _draken_native_casts.vector_reinterpret_as_timestamp64(int_vec)
@@ -291,6 +291,8 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
     if t in ("VARCHAR", "BLOB"):
         if s == "INT64":
             return ("draken_cast_int64_to_string", 0)
+        if s in _CAST_NARROW_INT:
+            return ("draken_cast_integer_to_string", 0)
         if s in ("FLOAT64", "FLOAT32"):
             return ("draken_cast_float64_to_string", 0)
         if s == "BOOL":
@@ -353,6 +355,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_bool_to_float64,
         vector_cast_integer_to_float64,
         vector_cast_int64_to_string,
+        vector_cast_integer_to_string,
         vector_cast_bool_to_string,
         vector_cast_date_to_string,
         vector_cast_timestamp_to_string,
@@ -481,6 +484,10 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return (lambda arr: arr), False, False
         if s == "INT64":
             return vector_cast_int64_to_string, True, True
+        if s in _CAST_NARROW_INT:
+            # Single pass at the source width — the kernel reads INT8/16/32 at its
+            # native stride (no widen-to-int64 detour).
+            return vector_cast_integer_to_string, True, True
         if s in ("FLOAT64", "FLOAT32"):
             return _draken_native_casts.vector_cast_float64_to_string, True, True
         if s == "BOOL":

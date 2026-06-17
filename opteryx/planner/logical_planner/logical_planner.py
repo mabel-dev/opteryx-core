@@ -22,7 +22,7 @@ from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_a
 from opteryx.third_party.travers import Graph
 from opteryx.types import logical_type as _plt
 from opteryx.types.logical_type import ColumnType, LogicalCategory
-from opteryx.types.vector_types import (
+from opteryx.types.vectors.vector_types import (
     get_vector_source_identifier,
     node_is_vector_query_expression,
 )
@@ -1660,7 +1660,13 @@ def plan_create_table(statement, **kwargs):
 
         # Create SchemaColumn
         from opteryx.types.schema import mint_column_identity
-        flat_col = SchemaColumn(name=col_name, column_type=sql_type_ct, nullable=col_nullable, identity=mint_column_identity("$create", col_name))
+
+        flat_col = SchemaColumn(
+            name=col_name,
+            column_type=sql_type_ct,
+            nullable=col_nullable,
+            identity=mint_column_identity("$create", col_name),
+        )
         columns.append(flat_col)
 
     create_table_node.columns = columns

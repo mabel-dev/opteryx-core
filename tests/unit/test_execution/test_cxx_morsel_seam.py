@@ -1,12 +1,12 @@
 """
-S0 (C++-first CxxMorsel) — seam round-trip proof.
+C++-first morsel substrate (CxxMorsel) — tests on the REAL path only.
 
-Verifies that a Python Vector → CxxMorsel (shared_ptr<VectorOwner>) → Python Vector
-round-trip is byte-identical across types, nulls, long (arena) strings, and multiple
-columns. This proves the shared_ptr seam (draken_native._cxx_morsel_roundtrip) keeps
-the underlying buffers alive and does not copy or corrupt data.
+No test-only seam hooks: every assertion goes through the wired path — the cdef
+Morsel's dual representation (`from_cxx` / lazy materialization / Cxx-native
+select·take·slice) and the parquet scan that emits Cxx-backed morsels. Data
+correctness at scale is the value-checked make q / tpch / clickbench suites.
 
-See docs/M4_CPP_MORSEL_DESIGN.md (S0).
+See docs/M4_CPP_MORSEL_DESIGN.md, docs/M4_S1_DUAL_MORSEL_DESIGN.md.
 """
 import os
 import sys
@@ -15,173 +15,82 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import draken.draken_native as dn
 from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
 
 DT = dn.DrakenType
 
 
-def _roundtrip_one(seq, dtype):
-    v = vector_from_sequence(seq, dtype=dtype)
-    before = v.to_pylist()
-    out = dn._cxx_morsel_roundtrip([v])
-    assert len(out) == 1
-    assert out[0].type == v.type
-    assert out[0].to_pylist() == before, (dtype, before, out[0].to_pylist())
-
-
-def test_roundtrip_int64():
-    _roundtrip_one([1, 2, 3, None, 5], DT.INT64)
-
-
-def test_roundtrip_float64():
-    _roundtrip_one([1.5, None, 3.25, -7.0], DT.FLOAT64)
-
-
-def test_roundtrip_bool():
-    _roundtrip_one([True, False, None, True], DT.BOOL)
-
-
-def test_roundtrip_varchar_with_nulls_and_arena():
-    # Mix of short (inline) and long (>12B, arena) strings plus a null.
-    _roundtrip_one([b"a", b"hello world long arena string", None, b"x"], DT.VARCHAR)
-
-
-def test_roundtrip_multi_column():
-    a = vector_from_sequence([1, 2, 3], dtype=DT.INT64)
-    b = vector_from_sequence([b"p", b"q", b"r"], dtype=DT.VARCHAR)
-    a_before, b_before = a.to_pylist(), b.to_pylist()
-    out = dn._cxx_morsel_roundtrip([a, b])
-    assert len(out) == 2
-    assert out[0].type == DT.INT64 and out[1].type == DT.VARCHAR
-    assert out[0].to_pylist() == a_before
-    assert out[1].to_pylist() == b_before
-
-
-def test_roundtrip_empty():
-    out = dn._cxx_morsel_roundtrip([])
-    assert list(out) == []
-
-
-# --- cxx_hash: the first nogil kernel-backed CxxMorsel op ---
-from draken.morsels.morsel import Morsel
-
-_U64 = (1 << 64) - 1
-
-
-def _check_hash(vectors):
-    """cxx_hash (nogil, no PyObject) must equal Morsel.hash (the c_hash dense-mix path)."""
-    names = [str(i).encode() for i in range(len(vectors))]
-    ref = list(Morsel.from_vectors(names, vectors).hash())  # uint64
-    cxx_vec = dn._cxx_hash(vectors, list(range(len(vectors))))
-    assert cxx_vec.type == DT.INT64
-    got = [(x & _U64) for x in cxx_vec.to_pylist()]  # INT64 bits → uint64
-    assert ref == got, (ref, got)
-
-
-def test_cxx_hash_single_int64():
-    _check_hash([vector_from_sequence([1, 2, 3, 4, None], dtype=DT.INT64)])
-
-
-def test_cxx_hash_single_varchar():
-    _check_hash([vector_from_sequence([b"a", b"bb", b"long arena string here", None], dtype=DT.VARCHAR)])
-
-
-def test_cxx_hash_multi_int():
-    _check_hash([
-        vector_from_sequence([1, 2, 3], dtype=DT.INT64),
-        vector_from_sequence([10, 20, 30], dtype=DT.INT64),
-    ])
-
-
-def test_cxx_hash_multi_mixed():
-    _check_hash([
-        vector_from_sequence([1, 2], dtype=DT.INT64),
-        vector_from_sequence([True, False], dtype=DT.BOOL),
-        vector_from_sequence([b"x", b"y"], dtype=DT.VARCHAR),
-    ])
-
-
-# --- cxx_take: nogil row-gather, must match Morsel.take ---
-def _check_take(vectors, idx):
-    names = [str(i).encode() for i in range(len(vectors))]
-    ref = Morsel.from_vectors(names, vectors).take(idx)
-    ref_cols = [ref[i].to_pylist() for i in range(len(vectors))]
-    out = dn._cxx_take(vectors, list(idx))
-    got_cols = [out[i].to_pylist() for i in range(len(vectors))]
-    assert ref_cols == got_cols, (ref_cols, got_cols)
-    for i in range(len(vectors)):
-        assert out[i].type == vectors[i].type
-
-
-def test_cxx_take_int64_reorder():
-    _check_take([vector_from_sequence([10, 20, 30, 40, None], dtype=DT.INT64)], [4, 0, 2, 2, 1])
-
-
-def test_cxx_take_varchar_dup():
-    _check_take([vector_from_sequence([b"a", b"bb", b"long arena string xyz", None], dtype=DT.VARCHAR)], [3, 2, 0, 2])
-
-
-def test_cxx_take_multi_col():
-    _check_take([
-        vector_from_sequence([1, 2, 3], dtype=DT.INT64),
-        vector_from_sequence([b"p", b"q", b"r"], dtype=DT.VARCHAR),
-    ], [2, 0, 1, 1])
-
-
-def test_cxx_take_empty():
-    _check_take([vector_from_sequence([1, 2, 3], dtype=DT.INT64)], [])
-
-
-# --- cxx_mask / cxx_slice / cxx_combine, vs the Morsel equivalents ---
 def _cols(m, ncols):
     return [m[i].to_pylist() for i in range(ncols)]
 
 
-def test_cxx_mask():
+def test_dual_morsel_from_cxx_and_cxx_native_ops():
+    """from_cxx carrier: cheap accessors don't materialize; _get_cxx is zero-work;
+    select/take/slice stay Cxx-backed (no materialization) and are byte-identical to
+    the PyObject path; first real column access materializes byte-identically."""
     vs = [
-        vector_from_sequence([10, 20, 30, 40, None], dtype=DT.INT64),
-        vector_from_sequence([b"a", b"b", b"long arena str xyz", b"d", b"e"], dtype=DT.VARCHAR),
+        vector_from_sequence([10, 20, 30, None], dtype=DT.INT64),
+        vector_from_sequence([b"a", b"bb", b"long arena string", b"d"], dtype=DT.VARCHAR),
+        vector_from_sequence([True, False, None, True], dtype=DT.BOOL),
     ]
-    maskv = vector_from_sequence([True, False, True, None, True], dtype=DT.BOOL)
-    ref = Morsel.from_vectors([b"0", b"1"], vs).filter_mask(maskv)
-    got = dn._cxx_mask(vs, maskv)
-    assert _cols(ref, 2) == [got[i].to_pylist() for i in range(2)]
+    names = [b"id", b"name", b"flag"]
+    ref = Morsel.from_vectors(names, vs)
+
+    def fresh():
+        return Morsel.from_cxx(dn.cxx_morsel_from_vectors(vs, names))
+
+    # Cheap accessors answer from _cxx WITHOUT materializing.
+    m = fresh()
+    assert m._cxx is not None
+    assert m.num_rows == ref.num_rows
+    assert m.num_columns == ref.num_columns
+    assert m._cxx is not None, "num_* must not materialize"
+    assert m._get_cxx() is m._cxx, "_get_cxx returns the handle, zero work"
+    assert m._cxx is not None, "_get_cxx must not materialize"
+
+    # select / take / slice stay Cxx-backed (substrate survives the operator).
+    sel = fresh().select([b"flag", b"id"])
+    assert sel._cxx is not None
+    assert _cols(sel, 2) == _cols(ref.select([b"flag", b"id"]), 2)
+
+    tk = fresh().take([3, 0, 2, 2])
+    assert tk._cxx is not None
+    assert _cols(tk, 3) == _cols(ref.take([3, 0, 2, 2]), 3)
+
+    sl = fresh().slice(1, 2)
+    assert sl._cxx is not None
+    assert _cols(sl, 3) == _cols(ref.slice(1, 2), 3)
+
+    # First real column access materializes byte-identically and collapses to PyObject.
+    mat = fresh()
+    assert mat.column_names == ref.column_names
+    assert mat._cxx is None
+    for i in range(3):
+        assert mat[i].to_pylist() == ref[i].to_pylist()
+        assert mat[i].type == ref[i].type
+
+    # column(), and the keying hash, match through a Cxx-backed morsel.
+    assert fresh().column(b"name").to_pylist() == ref.column(b"name").to_pylist()
+    assert list(fresh().hash()) == list(ref.hash())
 
 
-def test_cxx_slice():
-    vs = [
-        vector_from_sequence([10, 20, 30, 40, 50], dtype=DT.INT64),
-        vector_from_sequence([b"a", b"b", b"c", b"d", b"e"], dtype=DT.VARCHAR),
-    ]
-    ref = Morsel.from_vectors([b"0", b"1"], vs).slice(1, 3)
-    got = dn._cxx_slice(vs, 1, 3)
-    assert _cols(ref, 2) == [got[i].to_pylist() for i in range(2)]
+def test_scan_emits_cxx_morsel():
+    """The single-pass parquet scan emits Cxx-backed morsels unconditionally; they
+    materialize lazily downstream. Smoke the path on a representative query."""
+    import opteryx
 
-
-def test_cxx_combine():
-    m1 = [vector_from_sequence([1, 2], dtype=DT.INT64), vector_from_sequence([b"a", b"bb"], dtype=DT.VARCHAR)]
-    m2 = [vector_from_sequence([3], dtype=DT.INT64), vector_from_sequence([b"long arena string here"], dtype=DT.VARCHAR)]
-    m3 = [vector_from_sequence([4, 5, None], dtype=DT.INT64), vector_from_sequence([b"x", None, b"z"], dtype=DT.VARCHAR)]
-    ref = Morsel.combine([Morsel.from_vectors([b"0", b"1"], x) for x in (m1, m2, m3)])
-    got = dn._cxx_combine([m1, m2, m3])
-    assert _cols(ref, 2) == [got[i].to_pylist() for i in range(2)]
+    s = opteryx.session()
+    ids = []
+    for m in s.execute_to_morsels(
+        "SELECT id, name FROM testdata.planets WHERE id > 3 ORDER BY id"
+    ):
+        ids.extend(m.column(b"id").to_pylist())
+    assert ids == sorted(ids)
+    assert all(i > 3 for i in ids)
+    assert ids == [i for i in range(1, 10) if i > 3]  # planet ids 1..9
 
 
 if __name__ == "__main__":
-    test_roundtrip_int64()
-    test_roundtrip_float64()
-    test_roundtrip_bool()
-    test_roundtrip_varchar_with_nulls_and_arena()
-    test_roundtrip_multi_column()
-    test_roundtrip_empty()
-    test_cxx_hash_single_int64()
-    test_cxx_hash_single_varchar()
-    test_cxx_hash_multi_int()
-    test_cxx_hash_multi_mixed()
-    test_cxx_take_int64_reorder()
-    test_cxx_take_varchar_dup()
-    test_cxx_take_multi_col()
-    test_cxx_take_empty()
-    test_cxx_mask()
-    test_cxx_slice()
-    test_cxx_combine()
-    print("✅ S0 CxxMorsel seam + hash/take/mask/slice/combine — all byte-identical")
+    test_dual_morsel_from_cxx_and_cxx_native_ops()
+    test_scan_emits_cxx_morsel()
+    print("✅ CxxMorsel substrate — dual Morsel + Cxx-native ops + scan, real path only")

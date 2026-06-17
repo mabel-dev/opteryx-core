@@ -148,6 +148,10 @@ cdef enum BCCompareFlag:
 # Phase 9b: Distinguish C native kernels from legacy Python callables.
 cdef enum BCInstrFlag:
     BC_INSTR_C_NATIVE = 0x1000  # kernel_fn is a C function pointer; dispatch to C ABI instead of PyObject_Call
+    # S2: this C-native binop/cast produces a FIXED-WIDTH result (no string Vector
+    # owner) → safe for the whole-bytecode nogil DV* path. Set at bind time where
+    # the result type is known. Cleared = string result (stays GIL).
+    BC_C_NATIVE_FIXED = 0x2000
 
 
 ctypedef struct BytecodeInstr:
@@ -183,6 +187,11 @@ cdef class CompiledBytecode:
     # and column loads — no comparisons, functions, or legacy nodes).
     # Enables the raw-bitmap nogil execution path in evaluate_bitmap().
     cdef bint is_pure_bitmap
+    # S2: True if every opcode runs on the C-native DV* operand stack with a
+    # fixed-width result (loads, bool algebra, ordinal compare, C-native fixed
+    # binop/cast) and the final op is a compute op (arena result). Enables the
+    # whole-bytecode nogil DV* path in evaluate_c_native().
+    cdef bint is_all_c_native
 
     cdef BytecodeInstr* _push_instr(self) except NULL
     cdef inline void _hold(self, object obj)

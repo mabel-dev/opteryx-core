@@ -14,28 +14,38 @@ from libc.stdint cimport int16_t
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types.logical_type import LogicalCategory
 
+from datetime import datetime as _datetime
+from datetime import time as _time
+from datetime import timezone as _timezone
+
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.vector import Vector as _TemporalVector
 import draken.draken_native as _draken_native
-from draken.draken_native import vector_from_sequence
+from draken.draken_native import vector_timestamp_from_sequence
 
 
+cdef _convert_date32_to_timestamp_vector(d_vec, str unit):
+    """Materialize a Date32Vector as a TIMESTAMP64 vector for cross-type ops.
 
-# Microseconds per day — used to convert Date32 (days since epoch) into
-# Timestamp (microseconds since epoch) for cross-type comparisons.
-DEF _US_PER_DAY = 86_400_000_000
-
-
-cdef _convert_date32_to_timestamp_vector(d_vec):
-    """Materialize a Date32Vector as a TimestampVector for cross-type ops."""
+    Each DATE is promoted to a UTC timestamp at midnight (DuckDB semantics),
+    in the same storage `unit` as the timestamp side so `compare_vector` (which
+    rejects cross-unit comparison) sees matching units. The dates arrive from
+    `to_pylist()` as `datetime.date`; combine each with midnight and let the
+    native factory do the calendar→instant conversion.
+    """
     d_values = d_vec.to_pylist()
-    cdef list ts_values = [None if d is None else (<long long>d) * _US_PER_DAY for d in d_values]
-    return vector_from_sequence(ts_values)
+    cdef list ts_values = [
+        None if d is None
+        else _datetime.combine(d, _time.min, tzinfo=_timezone.utc)
+        for d in d_values
+    ]
+    return vector_timestamp_from_sequence(ts_values, unit, 0)
 
 
 cdef _compare_timestamp_date32_vectors(int op_code, ts_vec, d_vec):
     """Compare a TimestampVector against a Date32Vector via native vector ops."""
-    d_as_ts = _convert_date32_to_timestamp_vector(d_vec)
+    cdef str unit = ts_vec._nb.logical_type_unit
+    d_as_ts = _convert_date32_to_timestamp_vector(d_vec, unit)
     return ts_vec._compare_vector(d_as_ts, _DRAKEN_CMP_OP[op_code])
 
 
@@ -131,30 +141,49 @@ cdef _interval_compare(int op_code, vec, right):
     raise NotImplementedError(f"IntervalVector: unsupported op (code {op_code})")
 
 
+# NOTE: `_unwrap_nb` is defined in arithmetic.pyx and shared across the single
+# _impl translation unit (both are `include`d by _impl.pyx). Do not redefine it
+# here — that produces a duplicate-symbol compile error.
+
+
 cpdef _date_minus_date_draken(left_vec, right_vec):
-    # Date/timestamp subtraction needs a native IntervalVector constructor,
-    # which is not yet wired through. Fail explicitly rather than masking it.
-    raise NotImplementedError(
-        "Date/timestamp subtraction requires a native IntervalVector constructor; "
-        "Arrow-backed interval materialization has been removed."
-    )
+    """date/timestamp − date/timestamp → INTERVAL (µs delta, months=0).
 
-
-# Intervals are detected by class name to avoid a hard dependency on the
-# IntervalVector type at module import time.
-cdef frozenset _INTERVAL_TYPES = frozenset(("IntervalVector",))
+    Matches the engine operator_map (DATE−DATE / TIMESTAMP−TIMESTAMP → INTERVAL).
+    Delegates to the native temporal_minus_temporal kernel; returns a nanobind
+    INTERVAL Vector (the executor re-wraps via BC_RESULT_NEEDS_NB_WRAP).
+    """
+    cdef object left_nb = _unwrap_nb(left_vec)
+    cdef object right_nb = _unwrap_nb(right_vec)
+    return left_nb.temporal_minus_temporal(right_nb)
 
 
 cpdef _date_interval_op_draken(left_vec, right_vec, str op):
-    from opteryx.expression.intervals import _as_interval_vector
+    """date/timestamp ± interval → TIMESTAMP (calendar month day-clamping).
+
+    Operands may arrive in either order; the interval side is identified by its
+    DRAKEN_INTERVAL physical type. Delegates to the native apply_to_temporal
+    kernel on the temporal vector. Returns a nanobind TIMESTAMP64 Vector.
+    """
+    import draken.draken_native as _dn
 
     cdef int signum = 1 if op == "Plus" else -1
+    cdef object left_nb = _unwrap_nb(left_vec)
+    cdef object right_nb = _unwrap_nb(right_vec)
 
-    if type(right_vec).__name__ in _INTERVAL_TYPES:
-        date_vec = left_vec
-        interval_vec = _as_interval_vector(right_vec)
-    else:
-        date_vec = right_vec
-        interval_vec = _as_interval_vector(left_vec)
+    if right_nb.type == _dn.INTERVAL:
+        return left_nb.apply_to_temporal(right_nb, signum)
+    return right_nb.apply_to_temporal(left_nb, signum)
 
-    return interval_vec.apply_to_temporal(date_vec, signum)
+
+cpdef _interval_interval_op_draken(left_vec, right_vec, str op):
+    """interval ± interval → INTERVAL (component-wise months/µs).
+
+    Delegates to the native interval_add / interval_sub kernels. Returns a
+    nanobind INTERVAL Vector.
+    """
+    cdef object left_nb = _unwrap_nb(left_vec)
+    cdef object right_nb = _unwrap_nb(right_vec)
+    if op == "Plus":
+        return left_nb.interval_add(right_nb)
+    return left_nb.interval_sub(right_nb)

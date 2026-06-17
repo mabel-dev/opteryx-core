@@ -19,16 +19,15 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
-from opteryx.compiled.expression.compiled_expression import lower, build_bytecode
+from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import execute_bytecode
 from opteryx.managers.virtual_datasets import no_table_data
 from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import BOOLEAN, LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
-from opteryx.types.logical_type import BOOLEAN
 from opteryx.utils.vector_types import is_draken_vector
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
@@ -56,7 +55,7 @@ def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
     result_type = resolved.inferred_return_type
     result_lc = result_type.category if result_type is not None else None
     if result_lc not in (None, LogicalCategory.NULL):
-        from opteryx.types.value_parsing import parse_value
+        from opteryx.types.scalars.value_parsing import parse_value
 
         for param in node.parameters:
             if (
@@ -312,7 +311,9 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         for i, param in enumerate(root.parameters):
             root.parameters[i] = fold_constants(param, telemetry)
 
-    _root_ct = getattr(root.schema_column, "column_type", None) if root.schema_column is not None else None
+    _root_ct = (
+        getattr(root.schema_column, "column_type", None) if root.schema_column is not None else None
+    )
     _root_cat = _root_ct.category if _root_ct is not None else None
     if (
         len(identifiers) == 0

@@ -52,6 +52,18 @@ static inline int u64_to_ascii(uint64_t value, char* buf) noexcept {
     return len;
 }
 
+// Width-aware signed load: read the j-th physical value at the source's native
+// stride and sign-extend to int64. The digit conversion is value-based and
+// width-agnostic; only the buffer read depends on width (INT8/16/32/64).
+static inline int64_t load_int_signed(const void* data, uint32_t j, DrakenType t) noexcept {
+    switch (t) {
+        case DRAKEN_INT8:  return static_cast<const int8_t*>(data)[j];
+        case DRAKEN_INT16: return static_cast<const int16_t*>(data)[j];
+        case DRAKEN_INT32: return static_cast<const int32_t*>(data)[j];
+        default:           return static_cast<const int64_t*>(data)[j];  // DRAKEN_INT64
+    }
+}
+
 // Shared int64/uint64 → VARCHAR core. Compression-aware: format the data_length
 // PHYSICAL values into a value block (1 for a constant, K for a dict, length for
 // dense) and carry the input's selection + validity through — the output keeps the
@@ -60,17 +72,24 @@ static inline int u64_to_ascii(uint64_t value, char* buf) noexcept {
 // null-introduction), so validity is preserved 1:1.
 static VecResult int_to_string_core(const DrakenVector* v, bool treat_as_unsigned) {
     if (!v) return draken_error_sentinel("Input vector is null");
-    if (v->type != DRAKEN_INT64)
-        return draken_error_sentinel_fmt("cast-to-string: expected INT64, got %d", v->type);
+    const DrakenType st = v->type;
+    const bool is_int = (st == DRAKEN_INT8 || st == DRAKEN_INT16 ||
+                         st == DRAKEN_INT32 || st == DRAKEN_INT64);
+    if (!is_int)
+        return draken_error_sentinel_fmt("cast-to-string: expected INT8/16/32/64, got %d", st);
+    // Unsigned formatting is only meaningful for the full 64-bit width (the bit
+    // pattern is reinterpreted). Narrow widths are always signed here.
+    if (treat_as_unsigned && st != DRAKEN_INT64)
+        return draken_error_sentinel_fmt("cast-to-string: unsigned requires INT64, got %d", st);
 
-    const int64_t* src = static_cast<const int64_t*>(v->data);
     const uint32_t k   = v->data_length;   // physical value count
 
     char tmp[21];
     size_t total_extern = 0u;
     for (uint32_t j = 0u; j < k; ++j) {
-        int len = treat_as_unsigned ? u64_to_ascii(static_cast<uint64_t>(src[j]), tmp)
-                                     : i64_to_ascii(src[j], tmp);
+        const int64_t val = load_int_signed(v->data, j, st);
+        int len = treat_as_unsigned ? u64_to_ascii(static_cast<uint64_t>(val), tmp)
+                                     : i64_to_ascii(val, tmp);
         if (static_cast<uint32_t>(len) > STR_INLINE_MAX) total_extern += static_cast<size_t>(len);
     }
 
@@ -85,8 +104,9 @@ static VecResult int_to_string_core(const DrakenVector* v, bool treat_as_unsigne
 
     size_t arena_used = 0u;
     for (uint32_t j = 0u; j < k; ++j) {
-        int len = treat_as_unsigned ? u64_to_ascii(static_cast<uint64_t>(src[j]), tmp)
-                                     : i64_to_ascii(src[j], tmp);
+        const int64_t val = load_int_signed(v->data, j, st);
+        int len = treat_as_unsigned ? u64_to_ascii(static_cast<uint64_t>(val), tmp)
+                                     : i64_to_ascii(val, tmp);
         if (static_cast<uint32_t>(len) > STR_INLINE_MAX) {
             const uint32_t off = static_cast<uint32_t>(arena_used);
             std::memcpy(arena + off, tmp, static_cast<size_t>(len));
@@ -148,6 +168,13 @@ VecResult draken_cast_int64_to_bool(void* ctx, const DrakenVector* v) {
 }
 
 VecResult draken_cast_int64_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return int_to_string_core(v, /*unsigned=*/false); });
+}
+
+// Narrow signed int (INT8/16/32) → VARCHAR. Single pass at the source's native
+// stride — no widen-to-int64 detour; int_to_string_core reads the value at the
+// correct width. (INT64 keeps its own entry point above.)
+VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({ return int_to_string_core(v, /*unsigned=*/false); });
 }
 

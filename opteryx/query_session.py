@@ -554,6 +554,9 @@ class Session(DataFrame):
                 continue
 
             if isinstance(item, Morsel):
+                # Cursor is the sole shim: a Cxx-backed morsel from the engine
+                # becomes PyObject here, once, at the user boundary.
+                item.materialize()
                 morsels = [item]
 
             for morsel in morsels:

@@ -11,7 +11,7 @@
 from array import array
 from collections.abc import Iterable
 
-from opteryx.vectors.vector_ranking import vector_exact_search_top_k
+from opteryx.types.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
@@ -19,9 +19,9 @@ from opteryx.models import QueryProperties
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 from opteryx.tracing.event_recorder import record_event as _trace_record
-from opteryx.types.vector_types import get_vector_source_identifier
-from opteryx.types.vector_types import node_is_numeric_vector
-from opteryx.types.vector_types import node_is_vector_query_expression
+from opteryx.types.vectors.vector_types import get_vector_source_identifier
+from opteryx.types.vectors.vector_types import node_is_numeric_vector
+from opteryx.types.vectors.vector_types import node_is_vector_query_expression
 
 # BasePlanNode in scope via textual include from _operators.pyx.
 
@@ -574,10 +574,11 @@ cdef struct ColMeta:
     void*              data        # numeric data ptr (kind 0/1)
 
 
-# INTERVAL total-order key: months * INTERVAL_MONTH_MS + ms (matches
+# INTERVAL total-order key: months * INTERVAL_MONTH_US + us (matches
 # draken_vector_compare_at's DRAKEN_INTERVAL branch). The slot is laid out as
-# [int64 months][int64 ms], so we read it as int64 pairs without the struct type.
-DEF _INTERVAL_MONTH_MS = 2592000000
+# [int64 months][int64 us], so we read it as int64 pairs without the struct type.
+# The sub-month field is MICROSECONDS (canonical engine unit).
+DEF _INTERVAL_MONTH_US = 2592000000000
 
 cdef inline void _build_interval_keys(DrakenVector* dv, int64_t* out) noexcept nogil:
     cdef int64_t* d = <int64_t*>dv.data
@@ -587,7 +588,7 @@ cdef inline void _build_interval_keys(DrakenVector* dv, int64_t* out) noexcept n
     cdef uint32_t s
     for i in range(n):
         s = sel[i]
-        out[i] = d[2 * s] * <int64_t>_INTERVAL_MONTH_MS + d[2 * s + 1]
+        out[i] = d[2 * s] * <int64_t>_INTERVAL_MONTH_US + d[2 * s + 1]
 
 
 cdef inline int _cmp_multi(ColMeta* cols, Py_ssize_t ncols, Py_ssize_t a, Py_ssize_t b) noexcept nogil:
@@ -785,7 +786,7 @@ cdef class HeapSortNode(BasePlanNode):
         if self._uniform_direction is not None:
             return self._top_n_multi_key_uniform(morsel, k, descending=<bint>self._uniform_direction)
 
-        key_vectors = [morsel.column(column) for column, _ in self.mapped_order]
+        key_vectors = [morsel._cxx_column(column) for column, _ in self.mapped_order]
         directions  = [_is_descending(direction) for _, direction in self.mapped_order]
 
         heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
@@ -835,7 +836,7 @@ cdef class HeapSortNode(BasePlanNode):
         for c in range(ncols):
             cols[c].pkeys = NULL
 
-        vectors = [morsel.column(col) for col, _ in self.mapped_order]
+        vectors = [morsel._cxx_column(col) for col, _ in self.mapped_order]
         try:
             for c in range(ncols):
                 vec = vectors[c]
@@ -916,7 +917,7 @@ cdef class HeapSortNode(BasePlanNode):
 
         column_name, direction = self.mapped_order[0]
         descending = _is_descending(direction)
-        vector = morsel.column(column_name)
+        vector = morsel._cxx_column(column_name)
 
         # German-string prefix-keyed fast path (string columns only; returns None otherwise).
         string_path = self._top_n_single_key_string(morsel, vector, descending, k)
@@ -1113,7 +1114,7 @@ cdef class HeapSortNode(BasePlanNode):
             PyMem_Free(heap_buf)
 
     cdef Morsel _top_n_multi_key_uniform(self, Morsel morsel, Py_ssize_t k, bint descending):
-        vectors = [morsel.column(col) for col, _ in self.mapped_order]
+        vectors = [morsel._cxx_column(col) for col, _ in self.mapped_order]
         directions = [_is_descending(direction) for _, direction in self.mapped_order]
 
         candidate_indices = self._candidate_indices_from_first_key(morsel, k, descending)
@@ -1163,7 +1164,7 @@ cdef class HeapSortNode(BasePlanNode):
         cdef int64_t[::1] compressed
 
         first_column = self.mapped_order[0][0]
-        first_vector = morsel.column(first_column)
+        first_vector = morsel._cxx_column(first_column)
         if not self._is_exact_compressible_vector(first_vector):
             return None
         try:
@@ -1238,7 +1239,7 @@ cdef class HeapSortNode(BasePlanNode):
             if not source_key:
                 continue
             try:
-                source_vector = morsel.column(source_key if isinstance(source_key, bytes) else source_key.encode())
+                source_vector = morsel._cxx_column(source_key if isinstance(source_key, bytes) else source_key.encode())
                 break
             except Exception:
                 continue
@@ -1421,7 +1422,7 @@ cdef class HeapSortNode(BasePlanNode):
             and len(query_node.parameters) == 1
             and query_node.parameters[0].node_type == NodeType.LITERAL
         ):
-            from opteryx.vectors.embeddings import embed_text_matrix
+            from opteryx.types.vectors.embeddings import embed_text_matrix
 
             embedded = embed_text_matrix([query_node.parameters[0].value])
             if not embedded or not embedded[0]:

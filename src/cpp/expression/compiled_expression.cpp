@@ -104,12 +104,22 @@ CompiledExpression* CompiledExpressionArena::lower_one(PyObject* py_node) {
             if (phys == nullptr) {
                 PyErr_Clear();
             } else if (phys != Py_None) {
-                long pv = PyLong_AsLong(phys);
+                // `physical` is a DrakenType, a plain (non-int) Enum — PyLong_AsLong
+                // fails on it, so read its integer `.value`. (A raw int, if ever
+                // passed, has no `.value`: fall back to the object itself.)
+                PyObject* num = PyObject_GetAttrString(phys, "value");
+                if (num == nullptr) {
+                    PyErr_Clear();
+                    num = phys;
+                    Py_INCREF(num);
+                }
+                long pv = PyLong_AsLong(num);
                 if (pv == -1 && PyErr_Occurred()) {
                     PyErr_Clear();
                 } else {
                     slot->physical_type = static_cast<int>(pv);
                 }
+                Py_DECREF(num);
                 Py_DECREF(phys);
             } else {
                 Py_DECREF(phys);

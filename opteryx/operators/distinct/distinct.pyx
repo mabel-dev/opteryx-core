@@ -67,7 +67,7 @@ cdef class DistinctNode(BasePlanNode):
         cols = self._distinct_on
         if cols is None or len(cols) != 1:
             return None
-        col = morsel.column(cols[0])
+        col = morsel._cxx_column(cols[0])
         if getattr(col, "type", None) == _draken_native.INT8:
             if (<Vector>col).null_bitmap_ptr() != NULL:
                 return None  # has nulls — fall back
@@ -88,7 +88,7 @@ cdef class DistinctNode(BasePlanNode):
         or duplicates are silently emitted.
         """
         cols = self._distinct_on
-        col = morsel.column(cols[0])
+        col = morsel._cxx_column(cols[0])
 
         cdef Py_ssize_t n = morsel.num_rows
         cdef int32_t* idx_buf = <int32_t*>PyMem_Malloc(n * sizeof(int32_t))

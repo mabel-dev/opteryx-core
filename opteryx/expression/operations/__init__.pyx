@@ -31,8 +31,8 @@ from opteryx.expression.evaluator.comparisons import draken_compare_int
 from opteryx.expression.evaluator._impl import _OP_CODE as _COMPARE_OP_CODE
 from opteryx.third_party import yyjson
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.value_parsing import parse_value
-from opteryx.types._datetime_conversion import (
+from opteryx.types.scalars.value_parsing import parse_value
+from opteryx.types.timestamps._datetime_conversion import (
     date_to_int64_days,
     int64_days_to_date,
     int64_us_to_datetime,

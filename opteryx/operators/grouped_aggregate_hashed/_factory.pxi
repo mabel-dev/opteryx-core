@@ -210,7 +210,7 @@ cpdef void resolve_deferred_collectors(
         # ANY_VALUE / MEDIAN over DECIMAL128 are not yet wired (they would read raw
         # int64/float → garbage), so fail loud for those two.
         if isinstance(c, (_DeferredAnyValueCollector, _DeferredMedianCollector)):
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             if vec.unified().type == DRAKEN_DECIMAL128:
                 raise NotImplementedError(
                     "ANY_VALUE / MEDIAN over a DECIMAL128 (precision > 18) input is "
@@ -218,7 +218,7 @@ cpdef void resolve_deferred_collectors(
                 )
 
         if isinstance(c, _DeferredSumCollector):
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             t = vec.unified().type
             if t == DRAKEN_INT64 or t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
                 # Narrow ints sum into an int64 accumulator (width-aware read),
@@ -238,14 +238,14 @@ cpdef void resolve_deferred_collectors(
             collectors[i] = typed_c
 
         elif isinstance(c, _DeferredMinCollector):
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             typed_c = _make_minmax_collector(vec.unified().type, 1, vec)
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
 
         elif isinstance(c, _DeferredMaxCollector):
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             typed_c = _make_minmax_collector(vec.unified().type, -1, vec)
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
@@ -254,14 +254,14 @@ cpdef void resolve_deferred_collectors(
         elif isinstance(c, _DeferredAnyValueCollector):
             # ANY_VALUE = "keep the first value per group" → direction 0 on the
             # same type-preserving nogil collectors (no to_pylist, no boxing).
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             typed_c = _make_minmax_collector(vec.unified().type, 0, vec)
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
 
         elif isinstance(c, _DeferredAvgCollector):
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             t = vec.unified().type
             if t == DRAKEN_DECIMAL:
                 # Exact int64 sum, double divide (AVG is DOUBLE). The generic
@@ -278,7 +278,7 @@ cpdef void resolve_deferred_collectors(
             collectors[i] = typed_c
 
         elif isinstance(c, _DeferredMedianCollector):
-            vec = morsel.column(c.column_name)
+            vec = morsel._cxx_column(c.column_name)
             t = vec.unified().type
             if t == DRAKEN_DECIMAL:
                 raise NotImplementedError(
@@ -296,7 +296,7 @@ cpdef void resolve_deferred_collectors(
     cdef Py_ssize_t ki
     for ki in range(len(group_columns)):
         col_name = group_columns[ki]
-        vec = morsel.column(col_name)
+        vec = morsel._cxx_column(col_name)
         t = vec.unified().type
         if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
             key_kinds[ki] = KEY_MULTI_ENCODED_STRING

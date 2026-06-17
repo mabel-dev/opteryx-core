@@ -897,7 +897,7 @@ cdef class KeyStore:
             # Single-column fast paths — statically dispatched
             # ----------------------------------------------------------------
             key_kind = self._key_kinds[0]
-            vec = morsel.column(self._group_columns[0])
+            vec = morsel._cxx_column(self._group_columns[0])
 
             uv = (<Vector>vec).unified()
 
@@ -986,7 +986,7 @@ cdef class KeyStore:
             # Multi-column path
             # ----------------------------------------------------------------
             # Pre-fetch all column vectors once (Python call, outside inner loop).
-            vecs = [morsel.column(self._group_columns[col_idx]) for col_idx in range(self._n_cols)]
+            vecs = [morsel._cxx_column(self._group_columns[col_idx]) for col_idx in range(self._n_cols)]
 
             # Pre-compute per-column dispatch codes + raw C pointers.
             # This runs once per morsel and eliminates isinstance() from the

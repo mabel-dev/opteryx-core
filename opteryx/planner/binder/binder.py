@@ -22,18 +22,40 @@ from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
-from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import (
-    BOOLEAN as _CT_BOOLEAN, INT64 as _CT_INT64, FLOAT64 as _CT_FLOAT64,
-    NULL as _CT_NULL, TIMESTAMP as _CT_TIMESTAMP, DATE as _CT_DATE,
-    VARCHAR as _CT_VARCHAR, INTERVAL as _CT_INTERVAL,
+    BOOLEAN as _CT_BOOLEAN,
+)
+from opteryx.types.logical_type import (
+    DATE as _CT_DATE,
+)
+from opteryx.types.logical_type import (
+    FLOAT64 as _CT_FLOAT64,
+)
+from opteryx.types.logical_type import (
+    INT64 as _CT_INT64,
+)
+from opteryx.types.logical_type import (
+    INTERVAL as _CT_INTERVAL,
+)
+from opteryx.types.logical_type import (
+    NULL as _CT_NULL,
+)
+from opteryx.types.logical_type import (
+    TIMESTAMP as _CT_TIMESTAMP,
+)
+from opteryx.types.logical_type import (
+    VARCHAR as _CT_VARCHAR,
+)
+from opteryx.types.logical_type import (
     ColumnType as _ColumnType,
+)
+from opteryx.types.logical_type import (
+    LogicalCategory,
     parse_column_type,
 )
-from opteryx.types.value_parsing import parse_value
-from opteryx.types.schema import ConstantColumn, SchemaColumn, FunctionColumn, RelationSchema
-
+from opteryx.types.scalars.value_parsing import parse_value
+from opteryx.types.schema import ConstantColumn, FunctionColumn, RelationSchema, SchemaColumn
 
 # Aggregate return-type inference for the binder. Aggregates are dispatched by
 # the physical aggregate operators (not the function catalog), but the binder
@@ -58,9 +80,10 @@ def _operand_column_type(operand):
     descriptor for DECIMAL, etc.). LITERAL operands without a bound schema_column
     fall through to the LogicalCategory path.
     """
+    from draken.draken_native import DrakenType
+
     from opteryx.types import logical_type as lt
     from opteryx.types.logical_type import ColumnType
-    from draken.draken_native import DrakenType
 
     # Prefer the bound schema_column's column_type (single source of truth).
     sc = getattr(operand, "schema_column", None)
@@ -123,7 +146,10 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
                 param_type = None
             if param_type is None or param_type.category in (None, LogicalCategory.NULL):
                 return None
-            if name == "AVG" and param_type.category in (LogicalCategory.INTEGER, LogicalCategory.DECIMAL):
+            if name == "AVG" and param_type.category in (
+                LogicalCategory.INTEGER,
+                LogicalCategory.DECIMAL,
+            ):
                 return _CT_FLOAT64
             return param_type  # ColumnType
     return None
@@ -262,9 +288,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         candidate_schemas = {
             name: schema
             for name, schema in context.schemas.items()
-            if name.startswith("$shared")
-            or name == node.source
-            or name.endswith(suffix)
+            if name.startswith("$shared") or name == node.source or name.endswith(suffix)
         }
     else:
         candidate_schemas = context.schemas
@@ -630,6 +654,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     element_type = _lt.VARIANT
 
             from opteryx.types import logical_type as _lt
+
             if target_type_name == "DECIMAL":
                 _ct = _lt.DECIMAL(precision, scale)
             elif target_type_name == "ARRAY":
@@ -641,7 +666,9 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 column_type=_ct,
                 aliases=aliases,
             )
-            schema_column.identity = column_name.encode("utf-8") if isinstance(column_name, str) else column_name
+            schema_column.identity = (
+                column_name.encode("utf-8") if isinstance(column_name, str) else column_name
+            )
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column
@@ -696,9 +723,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     _OT.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
                 }
                 coerce = _COERCE.get(left_type, lambda v: v)
-                node.right.value = [
-                    None if v is None else coerce(v) for v in node.right.value
-                ]
+                node.right.value = [None if v is None else coerce(v) for v in node.right.value]
 
             mismatches = get_mismatched_condition_column_types(node, relaxed=True)
             if mismatches:
@@ -711,14 +736,17 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             # numeric operands — other results (BOOLEAN comparisons, etc.) don't land here.
             _result_cat = result_type.category if result_type is not None else None
             result_ct_final = None
-            if (_result_cat == LogicalCategory.DECIMAL
-                    and node.value in ("Plus", "Minus", "Multiply", "Divide")
-                    and getattr(node, "left", None) is not None
-                    and getattr(node, "right", None) is not None):
+            if (
+                _result_cat == LogicalCategory.DECIMAL
+                and node.value in ("Plus", "Minus", "Multiply", "Divide")
+                and getattr(node, "left", None) is not None
+                and getattr(node, "right", None) is not None
+            ):
                 left_ct = _operand_column_type(node.left)
                 right_ct = _operand_column_type(node.right)
                 if left_ct is not None and right_ct is not None:
                     from opteryx.types.type_unification import compute_result_logical_type
+
                     result_ct_final = compute_result_logical_type(
                         left_ct, right_ct, node.value, LogicalCategory.DECIMAL
                     )

@@ -1719,9 +1719,9 @@ static int draken_vector_compare_at(const DrakenVector& v,
         case DRAKEN_INTERVAL: {
             const DrakenIntervalSlot* s =
                 static_cast<const DrakenIntervalSlot*>(v.data);
-            // Total ms ordering (months normalised at the documented 30-day rate).
-            const int64_t ta = s[a].months * INTERVAL_MONTH_MS + s[a].ms;
-            const int64_t tb = s[b].months * INTERVAL_MONTH_MS + s[b].ms;
+            // Total µs ordering (months normalised at the documented 30-day rate).
+            const int64_t ta = s[a].months * INTERVAL_MONTH_US + s[a].us;
+            const int64_t tb = s[b].months * INTERVAL_MONTH_US + s[b].us;
             return (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
         }
         default:
@@ -3797,42 +3797,43 @@ static VectorOwner make_decimal_dict(
 // ---------------------------------------------------------------------------
 // D.12 — interval ingestion helpers
 //
-// Physical: DrakenIntervalSlot { int64_t months; int64_t ms; }, 16 bytes/row.
-// Python API: (months: int, ms: int) tuple or None.
+// Physical: DrakenIntervalSlot { int64_t months; int64_t us; }, 16 bytes/row.
+// Python API: (months: int, us: int) tuple or None — the second element is
+// MICROSECONDS (the canonical engine unit; stored verbatim, no conversion).
 //
 // Normalization overflow is checked at ingestion so stored data never overflows
 // when the kernel normalizes unchecked at op entry.
 //
-// NOTE: (months, ms) tuples are used as the Python type for now. This is
+// NOTE: (months, us) tuples are used as the Python type for now. This is
 // flagged for the consumer-rewrite as the engine may want a richer type.
 // ---------------------------------------------------------------------------
 
 static DrakenIntervalSlot py_to_interval_slot(nb::object obj) {
     if (!PyTuple_Check(obj.ptr()) || PyTuple_GET_SIZE(obj.ptr()) != 2)
         throw std::invalid_argument(
-            "interval: element must be a (months, ms) tuple or None");
+            "interval: element must be a (months, us) tuple or None");
     // PyTuple_GET_ITEM returns a BORROWED reference — use PyLong_AsLongLong
     // directly to avoid ref-count manipulation on the borrowed pointer.
     int64_t months = PyLong_AsLongLong(PyTuple_GET_ITEM(obj.ptr(), 0));
-    int64_t ms     = PyLong_AsLongLong(PyTuple_GET_ITEM(obj.ptr(), 1));
-    if ((months == -1 || ms == -1) && PyErr_Occurred())
+    int64_t us     = PyLong_AsLongLong(PyTuple_GET_ITEM(obj.ptr(), 1));
+    if ((months == -1 || us == -1) && PyErr_Occurred())
         throw nb::python_error();
     // Validate that normalization doesn't overflow.
-    draken::ops::interval_normalize_checked(months, ms);
-    return DrakenIntervalSlot{months, ms};
+    draken::ops::interval_normalize_checked(months, us);
+    return DrakenIntervalSlot{months, us};
 }
 
 static nb::object interval_slot_to_py(const DrakenIntervalSlot& s) {
     PyObject* tup = PyTuple_New(2);
     if (!tup) throw nb::python_error();
     PyObject* mo = PyLong_FromLongLong(static_cast<long long>(s.months));
-    PyObject* ms = PyLong_FromLongLong(static_cast<long long>(s.ms));
-    if (!mo || !ms) {
-        Py_XDECREF(mo); Py_XDECREF(ms); Py_DECREF(tup);
+    PyObject* us = PyLong_FromLongLong(static_cast<long long>(s.us));
+    if (!mo || !us) {
+        Py_XDECREF(mo); Py_XDECREF(us); Py_DECREF(tup);
         throw nb::python_error();
     }
     PyTuple_SET_ITEM(tup, 0, mo);
-    PyTuple_SET_ITEM(tup, 1, ms);
+    PyTuple_SET_ITEM(tup, 1, us);
     return nb::steal<nb::object>(tup);
 }
 
@@ -5016,24 +5017,25 @@ static VectorOwner vector_slice_impl(const VectorOwner& v, uint32_t start, uint3
     return result;
 }
 
-static VectorOwner vector_mask_impl(const VectorOwner& v, const VectorOwner& m) {
-    if (m.vec.type != DRAKEN_BOOL)
+// Derive the surviving-row indices (valid AND true) from a DRAKEN_BOOL mask.
+// Shared by the single-column vector_mask_impl and the whole-morsel cxx_mask so
+// the index list is built ONCE per mask, not re-scanned per column.
+static std::vector<int32_t> mask_indices(const DrakenVector& m) {
+    if (m.type != DRAKEN_BOOL)
         throw std::invalid_argument("mask: expected a DRAKEN_BOOL mask vector");
-    const uint32_t mn = m.vec.length;
+    const uint32_t mn = m.length;
     std::vector<int32_t> idx_vec;
     idx_vec.reserve(mn);
     for (uint32_t i = 0; i < mn; ++i)
-        if (row_is_valid(m.vec, i) && row_bool(m.vec, i))
+        if (row_is_valid(m, i) && row_bool(m, i))
             idx_vec.push_back(static_cast<int32_t>(i));
-    const uint32_t n = static_cast<uint32_t>(idx_vec.size());
-    if (v.vec.type == DRAKEN_NULL) return make_null_vector(n);
-    if (v.vec.type == DRAKEN_ARRAY) return make_array_take(v, idx_vec.data(), n);
-    if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), n);
-    if (v.vec.type == DRAKEN_BOOL) return make_bool_take(v, idx_vec.data(), n);
-    auto result = vecresult_to_owner(draken_take(v.vec, idx_vec.data(), n));
-    result.vec.type     = v.vec.type;
-    result.logical_type = v.logical_type;
-    return result;
+    return idx_vec;
+}
+
+static VectorOwner vector_mask_impl(const VectorOwner& v, const VectorOwner& m) {
+    std::vector<int32_t> idx_vec = mask_indices(m.vec);
+    // vector_take_impl's type switch is identical to the old inline body.
+    return vector_take_impl(v, idx_vec.data(), static_cast<uint32_t>(idx_vec.size()));
 }
 
 // draken_vector_take_buffer — C-bridge take over a raw int32 index buffer.
@@ -5111,50 +5113,11 @@ extern "C" PyObject* draken_vector_take_with_null_buffer(
 }
 
 // ---------------------------------------------------------------------------
-// S0 seam (CxxMorsel) — bridge nanobind Vector handles ↔ CxxMorsel via the
-// shared_ptr<VectorOwner> caster. cast<shared_ptr>(handle) yields an aliasing
-// shared_ptr (Py keep-alive deleter); cast(shared_ptr) yields a Vector wrapper
-// referencing the same instance. Both directions are zero-copy. This proves the
-// seam round-trips byte-identically; the real cdef-Morsel↔CxxMorsel plumbing
-// lands with the first converted operator (S1+).
+// CxxMorsel helpers used by the wired path (the CxxMorsel nanobind methods +
+// the from_cxx_vectors factory). cast<shared_ptr<VectorOwner>>(handle) yields an
+// aliasing shared_ptr (Py keep-alive deleter); cast(shared_ptr) yields a Vector
+// wrapper referencing the same instance — both zero-copy.
 // ---------------------------------------------------------------------------
-static nb::list cxx_morsel_roundtrip(nb::list vectors) {
-    // py Vector handles → CxxMorsel (each column owns a shared_ptr<VectorOwner>).
-    CxxMorsel m;
-    const size_t n = nb::len(vectors);
-    m.columns.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        CxxColumn col;
-        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
-        col.view = col.own->vec;
-        m.columns.push_back(std::move(col));
-    }
-    // CxxMorsel → py Vector handles (shared_ptr → Vector wrapper, same instance).
-    nb::list out;
-    for (const CxxColumn& col : m.columns)
-        out.append(nb::cast(col.own));
-    return out;
-}
-
-// S0: build a CxxMorsel from Vector handles, run the nogil cxx_hash over the given
-// column indices, return the INT64 hash Vector. Proves the op matches Morsel.hash.
-static nb::object cxx_hash_seam(nb::list vectors, nb::list col_indices) {
-    CxxMorsel m;
-    const size_t n = nb::len(vectors);
-    m.columns.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        CxxColumn col;
-        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
-        col.view = col.own->vec;
-        m.columns.push_back(std::move(col));
-    }
-    std::vector<uint32_t> cols;
-    cols.reserve(nb::len(col_indices));
-    for (size_t i = 0; i < nb::len(col_indices); ++i)
-        cols.push_back(nb::cast<uint32_t>(col_indices[i]));
-    std::shared_ptr<VectorOwner> owner = cxx_hash(m, cols.data(), static_cast<uint32_t>(cols.size()));
-    return nb::cast(owner);
-}
 
 // S0: gather all columns of a CxxMorsel at the given row indices (nogil; reuses
 // vector_take_impl — VectorOwner in/out, no PyObject). Returns a new CxxMorsel.
@@ -5166,47 +5129,6 @@ static CxxMorsel cxx_take(const CxxMorsel& m, const int32_t* idx, uint32_t n) {
     for (const CxxColumn& col : m.columns) {
         CxxColumn nc;
         nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx, n));
-        nc.view = nc.own->vec;
-        out.columns.push_back(std::move(nc));
-    }
-    return out;
-}
-
-// S0 seam hook: build a CxxMorsel from Vectors, gather at `indices`, return Vectors.
-static nb::list cxx_take_seam(nb::list vectors, nb::list indices) {
-    CxxMorsel m;
-    const size_t nc = nb::len(vectors);
-    m.columns.reserve(nc);
-    for (size_t i = 0; i < nc; ++i) {
-        CxxColumn col;
-        col.own  = nb::cast<std::shared_ptr<VectorOwner>>(vectors[i]);
-        col.view = col.own->vec;
-        m.columns.push_back(std::move(col));
-    }
-    const uint32_t n = static_cast<uint32_t>(nb::len(indices));
-    std::vector<int32_t> idx(n > 0u ? n : 1u);
-    for (uint32_t i = 0; i < n; ++i) idx[i] = nb::cast<int32_t>(indices[i]);
-    CxxMorsel taken = cxx_take(m, n > 0u ? idx.data() : nullptr, n);
-    nb::list out;
-    for (const CxxColumn& col : taken.columns) out.append(nb::cast(col.own));
-    return out;
-}
-
-// S0: filter all columns by a BOOL mask (nogil; reuses vector_mask_impl).
-static CxxMorsel cxx_mask(const CxxMorsel& m, const VectorOwner& mask) {
-    CxxMorsel out;
-    out.names = m.names;
-    if (m.columns.empty()) {
-        uint32_t c = 0;  // count surviving rows for a zero-column morsel
-        for (uint32_t i = 0; i < mask.vec.length; ++i)
-            if (row_is_valid(mask.vec, i) && row_bool(mask.vec, i)) ++c;
-        out.zero_col_rows = c;
-        return out;
-    }
-    out.columns.reserve(m.columns.size());
-    for (const CxxColumn& col : m.columns) {
-        CxxColumn nc;
-        nc.own  = std::make_shared<VectorOwner>(vector_mask_impl(*col.own, mask));
         nc.view = nc.own->vec;
         out.columns.push_back(std::move(nc));
     }
@@ -5228,21 +5150,21 @@ static CxxMorsel cxx_slice(const CxxMorsel& m, uint32_t start, uint32_t length) 
     return out;
 }
 
-// S0: vertical concatenation of N same-schema morsels (nogil; reuses concat_owners).
-static CxxMorsel cxx_combine(const std::vector<const CxxMorsel*>& parts) {
+// S1: filter every column by a DRAKEN_BOOL mask (keep rows valid AND true).
+// Derives the surviving-row indices ONCE, then type-takes each column via the
+// same vector_take_impl cxx_take uses. nogil — no PyObject, shared-owner result.
+// Zero-column morsels carry the surviving row count (== mask count_true), which
+// matches the PyObject filter_mask path.
+static CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
     CxxMorsel out;
-    if (parts.empty()) return out;
-    const CxxMorsel& first = *parts[0];
-    out.names = first.names;
-    const size_t ncols = first.columns.size();
-    out.columns.reserve(ncols);
-    for (size_t c = 0; c < ncols; ++c) {
-        std::vector<const VectorOwner*> col_parts;
-        col_parts.reserve(parts.size());
-        for (const CxxMorsel* p : parts)
-            col_parts.push_back(p->columns[c].own.get());
+    out.names = m.names;
+    std::vector<int32_t> idx_vec = mask_indices(mask);
+    const uint32_t n = static_cast<uint32_t>(idx_vec.size());
+    if (m.columns.empty()) { out.zero_col_rows = n; return out; }
+    out.columns.reserve(m.columns.size());
+    for (const CxxColumn& col : m.columns) {
         CxxColumn nc;
-        nc.own  = std::make_shared<VectorOwner>(concat_owners(col_parts));
+        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx_vec.data(), n));
         nc.view = nc.own->vec;
         out.columns.push_back(std::move(nc));
     }
@@ -5267,23 +5189,78 @@ static nb::list cxx_columns_to_list(const CxxMorsel& m) {
     return out;
 }
 
-static nb::list cxx_mask_seam(nb::list vectors, nb::object mask) {
-    CxxMorsel m = cxx_from_vectors_list(vectors);
-    std::shared_ptr<VectorOwner> mk = nb::cast<std::shared_ptr<VectorOwner>>(mask);
-    return cxx_columns_to_list(cxx_mask(m, *mk));
+static std::string nb_bytes_to_std(nb::handle h) {
+    char* data; Py_ssize_t len;
+    if (PyBytes_AsStringAndSize(h.ptr(), &data, &len) != 0)
+        throw std::invalid_argument("cxx_select: column name must be bytes");
+    return std::string(data, static_cast<size_t>(len));
 }
-static nb::list cxx_slice_seam(nb::list vectors, uint32_t start, uint32_t length) {
-    CxxMorsel m = cxx_from_vectors_list(vectors);
-    return cxx_columns_to_list(cxx_slice(m, start, length));
+
+// Boundary bridge: hand the converted (Cython) operators the raw C++ CxxMorsel
+// pointer behind a nanobind handle, so the relational hot path reads columns
+// (columns[i].view → DrakenVector*) at C level — NO PyObject, NO nanobind, GIL
+// releasable — instead of dispatching a Python method per column access. Called
+// ONCE when a morsel becomes Cxx-backed (GIL held); the handle owns the C++
+// object, so the pointer stays valid for the handle's lifetime.
+extern "C" const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle) {
+    return nb::cast<CxxMorsel*>(nb::handle(handle));
 }
-static nb::list cxx_combine_seam(nb::list morsels) {
-    std::vector<CxxMorsel> built;
-    built.reserve(nb::len(morsels));
-    for (size_t i = 0; i < nb::len(morsels); ++i)
-        built.push_back(cxx_from_vectors_list(nb::cast<nb::list>(morsels[i])));
-    std::vector<const CxxMorsel*> parts;
-    for (const CxxMorsel& cm : built) parts.push_back(&cm);
-    return cxx_columns_to_list(cxx_combine(parts));
+
+// ---------------------------------------------------------------------------
+// S-B.0(a) — C-ABI transform surface.
+//
+// Thin `extern "C"` wrappers over the pure-C++ `cxx_*` ops so the Cython operator
+// chain can call them at C level (nogil, no PyObject, no nanobind), resolved across
+// the .so boundary via dynamic_lookup (same mechanism as cxx_morsel_raw_ptr). Each
+// returns a heap CxxMorsel the caller owns (free via cxx_morsel_delete); the result
+// is move-constructed, so the columns' shared_ptrs are shared, not copied. These
+// are GIL-free: no Python/nanobind in the body. NOT yet called (S-B.1 wires them).
+extern "C" CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n) {
+    return new CxxMorsel(cxx_take(*m, idx, n));
+}
+extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length) {
+    return new CxxMorsel(cxx_slice(*m, start, length));
+}
+extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) {
+    return new CxxMorsel(cxx_mask(*m, *mask));
+}
+extern "C" void cxx_morsel_delete(CxxMorsel* m) {
+    delete m;
+}
+
+// ---------------------------------------------------------------------------
+// S-B.1a — boundary bridges (Morsel ⇄ shared_ptr<CxxMorsel>).
+//
+// `CxxMorsel` is move-only; a shallow copy duplicates the `columns` vector, which
+// copies each `CxxColumn{view, shared_ptr<VectorOwner> own}` — sharing the column
+// OWNERS (refcount++), NOT the bytes. So two CxxMorsels can reference the same
+// buffers, kept alive independently of any Python handle. Used by `morsel_to_cxx`
+// (PyObject Morsel → owned heap CxxMorsel) and `cxx_to_morsel` (heap CxxMorsel →
+// new-ref nanobind handle → Morsel). GIL-free except the cast (boundary only).
+static inline void cxx_morsel_shallow_into(CxxMorsel& out, const CxxMorsel& m) {
+    out.columns       = m.columns;        // copies vector<CxxColumn> → shares owners
+    out.names         = m.names;
+    out.zero_col_rows = m.zero_col_rows;
+    out.state         = m.state;
+}
+extern "C" CxxMorsel* cxx_morsel_shallow_copy(const CxxMorsel* m) {
+    CxxMorsel* out = new CxxMorsel();
+    cxx_morsel_shallow_into(*out, *m);
+    return out;
+}
+// S-B: the end-of-stream marker — a valid (empty) morsel carrying the EOS flag.
+extern "C" CxxMorsel* cxx_morsel_new_eos() {
+    CxxMorsel* out = new CxxMorsel();
+    out->state = MorselState::END_OF_STREAM;
+    return out;
+}
+// Wrap a CxxMorsel (shallow copy) into a NEW-reference nanobind handle (boundary out).
+extern "C" PyObject* cxx_morsel_to_handle(const CxxMorsel* m) {
+    CxxMorsel copy;
+    cxx_morsel_shallow_into(copy, *m);
+    nb::object obj = nb::cast(std::move(copy));
+    obj.inc_ref();
+    return obj.ptr();
 }
 
 // ---------------------------------------------------------------------------
@@ -5817,13 +5794,13 @@ NB_MODULE(draken_native, m) {
                 throw std::invalid_argument("Cannot compute min of all-null column");
             if (v.vec.length == 0)
                 throw std::invalid_argument("Cannot compute min of empty column");
-            // D.12: INTERVAL — custom scan returns original (months, ms) of min slot.
+            // D.12: INTERVAL — custom scan returns original (months, us) of min slot.
             if (v.vec.type == DRAKEN_INTERVAL) {
                 draken::ops::IntervalMinMaxResult r;
                 { nb::gil_scoped_release _gil; r = draken::ops::interval_find_min(v.vec); }
                 if (!r.found)
                     throw std::invalid_argument("Cannot compute min of all-null column");
-                return interval_slot_to_py(DrakenIntervalSlot{r.months, r.ms});
+                return interval_slot_to_py(DrakenIntervalSlot{r.months, r.us});
             }
             if (is_float_type(v.vec.type)) {
                 double val = 0.0;
@@ -5875,13 +5852,13 @@ NB_MODULE(draken_native, m) {
                 throw std::invalid_argument("Cannot compute max of all-null column");
             if (v.vec.length == 0)
                 throw std::invalid_argument("Cannot compute max of empty column");
-            // D.12: INTERVAL — custom scan returns original (months, ms) of max slot.
+            // D.12: INTERVAL — custom scan returns original (months, us) of max slot.
             if (v.vec.type == DRAKEN_INTERVAL) {
                 draken::ops::IntervalMinMaxResult r;
                 { nb::gil_scoped_release _gil; r = draken::ops::interval_find_max(v.vec); }
                 if (!r.found)
                     throw std::invalid_argument("Cannot compute max of all-null column");
-                return interval_slot_to_py(DrakenIntervalSlot{r.months, r.ms});
+                return interval_slot_to_py(DrakenIntervalSlot{r.months, r.us});
             }
             if (is_float_type(v.vec.type)) {
                 double val = 0.0;
@@ -6000,6 +5977,75 @@ NB_MODULE(draken_native, m) {
         .def("to_float64", [](const VectorOwner& v) -> VectorOwner {
             return make_float64_from_numeric_vector(v);
         }, "Convert a numeric Vector to a dense FLOAT64 Vector (null-preserving).")
+        // ----------------------------------------------------------------
+        // DRAKEN_INTERVAL arithmetic — restored temporal binary ops.
+        //
+        // The generic add/sub/mul/div path (DRAKEN_BINOP_CROSS) routes through
+        // the OpsTable, whose arithmetic slots for INTERVAL are null (component-
+        // wise interval math doesn't fit the scalar arithmetic ABI). These named
+        // methods call the dedicated interval kernels directly.
+        // ----------------------------------------------------------------
+        // interval_add / interval_sub: INTERVAL × INTERVAL → INTERVAL (component-wise).
+        .def("interval_add", [](const VectorOwner& self, const VectorOwner& other) -> VectorOwner {
+            nb::gil_scoped_release _gil;
+            if (self.vec.type != DRAKEN_INTERVAL || other.vec.type != DRAKEN_INTERVAL)
+                throw std::invalid_argument("interval_add: both operands must be DRAKEN_INTERVAL");
+            if (self.vec.length != other.vec.length)
+                throw std::invalid_argument("interval_add: operands must have equal length");
+            return vecresult_to_owner(draken::ops::interval_add(self.vec, other.vec));
+        }, nb::arg("other"), "INTERVAL + INTERVAL → INTERVAL (component-wise months/µs).")
+        .def("interval_sub", [](const VectorOwner& self, const VectorOwner& other) -> VectorOwner {
+            nb::gil_scoped_release _gil;
+            if (self.vec.type != DRAKEN_INTERVAL || other.vec.type != DRAKEN_INTERVAL)
+                throw std::invalid_argument("interval_sub: both operands must be DRAKEN_INTERVAL");
+            if (self.vec.length != other.vec.length)
+                throw std::invalid_argument("interval_sub: operands must have equal length");
+            return vecresult_to_owner(draken::ops::interval_sub(self.vec, other.vec));
+        }, nb::arg("other"), "INTERVAL - INTERVAL → INTERVAL (component-wise months/µs).")
+        // apply_to_temporal: (DATE32 | TIMESTAMP64) ± INTERVAL → TIMESTAMP64 (µs).
+        // `self` is the temporal vector; `interval` the interval vector; signum
+        // +1 for Plus, -1 for Minus. SQL calendar semantics with day-clamping.
+        .def("apply_to_temporal",
+            [](const VectorOwner& self, const VectorOwner& interval, int signum) -> VectorOwner {
+                const bool is_date = (self.vec.type == DRAKEN_DATE32);
+                if (!is_date && self.vec.type != DRAKEN_TIMESTAMP64)
+                    throw std::invalid_argument(
+                        "apply_to_temporal: temporal operand must be DATE32 or TIMESTAMP64");
+                if (interval.vec.type != DRAKEN_INTERVAL)
+                    throw std::invalid_argument(
+                        "apply_to_temporal: second operand must be DRAKEN_INTERVAL");
+                if (self.vec.length != interval.vec.length)
+                    throw std::invalid_argument(
+                        "apply_to_temporal: operands must have equal length");
+                int src_unit = static_cast<int>(TimestampUnit::MICROSECONDS);
+                if (!is_date && self.logical_type)
+                    src_unit = static_cast<int>(self.logical_type->unit);
+                nb::gil_scoped_release _gil;
+                return vecresult_to_owner(draken::ops::interval_apply_to_temporal(
+                    self.vec, interval.vec, is_date, src_unit, signum));
+            }, nb::arg("interval"), nb::arg("signum"),
+            "(DATE32|TIMESTAMP64) ± INTERVAL → TIMESTAMP64 (µs); calendar month day-clamping.")
+        // temporal_minus_temporal: (DATE32|TIMESTAMP64) - (DATE32|TIMESTAMP64) → INTERVAL.
+        .def("temporal_minus_temporal",
+            [](const VectorOwner& self, const VectorOwner& other) -> VectorOwner {
+                const bool a_date = (self.vec.type == DRAKEN_DATE32);
+                const bool b_date = (other.vec.type == DRAKEN_DATE32);
+                if ((!a_date && self.vec.type != DRAKEN_TIMESTAMP64) ||
+                    (!b_date && other.vec.type != DRAKEN_TIMESTAMP64))
+                    throw std::invalid_argument(
+                        "temporal_minus_temporal: operands must be DATE32 or TIMESTAMP64");
+                if (self.vec.length != other.vec.length)
+                    throw std::invalid_argument(
+                        "temporal_minus_temporal: operands must have equal length");
+                int a_unit = static_cast<int>(TimestampUnit::MICROSECONDS);
+                int b_unit = static_cast<int>(TimestampUnit::MICROSECONDS);
+                if (!a_date && self.logical_type)  a_unit = static_cast<int>(self.logical_type->unit);
+                if (!b_date && other.logical_type) b_unit = static_cast<int>(other.logical_type->unit);
+                nb::gil_scoped_release _gil;
+                return vecresult_to_owner(draken::ops::temporal_minus_temporal(
+                    self.vec, other.vec, a_date, a_unit, b_date, b_unit));
+            }, nb::arg("other"),
+            "(DATE32|TIMESTAMP64) - (DATE32|TIMESTAMP64) → INTERVAL (µs delta, months=0).")
         // set_decimal_descriptor: attach a DECIMAL (precision, scale) logical-type
         // descriptor in place. Used when a DECIMAL-typed buffer is assembled from
         // raw int64 storage (e.g. CASE WHEN result scatter) and the scale/precision
@@ -6231,11 +6277,11 @@ NB_MODULE(draken_native, m) {
                 nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, raw, op));
             }
-            // D.12: INTERVAL — scalar is (months, ms) tuple; normalize then dispatch.
+            // D.12: INTERVAL — scalar is (months, us) tuple; normalize then dispatch.
             if (v.vec.type == DRAKEN_INTERVAL) {
                 const DrakenIntervalSlot slot = py_to_interval_slot(scalar);
                 const int64_t norm = draken::ops::interval_normalize_checked(
-                    slot.months, slot.ms);
+                    slot.months, slot.us);
                 nb::gil_scoped_release _gil;
                 return vecresult_to_owner(draken_compare_scalar(v.vec, norm, op));
             }
@@ -6483,17 +6529,17 @@ NB_MODULE(draken_native, m) {
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_i, hi_i, lo_inclusive, hi_inclusive));
                 }
-                // D.12: INTERVAL — bounds are (months, ms) tuples; normalize.
+                // D.12: INTERVAL — bounds are (months, us) tuples; normalize.
                 if (v.vec.type == DRAKEN_INTERVAL) {
                     const DrakenIntervalSlot lo_s = py_to_interval_slot(lo);
                     const DrakenIntervalSlot hi_s = py_to_interval_slot(hi);
-                    const int64_t lo_ms = draken::ops::interval_normalize_checked(
-                        lo_s.months, lo_s.ms);
-                    const int64_t hi_ms = draken::ops::interval_normalize_checked(
-                        hi_s.months, hi_s.ms);
+                    const int64_t lo_us = draken::ops::interval_normalize_checked(
+                        lo_s.months, lo_s.us);
+                    const int64_t hi_us = draken::ops::interval_normalize_checked(
+                        hi_s.months, hi_s.us);
                     nb::gil_scoped_release _gil;
                     return vecresult_to_owner(
-                        draken_between(v.vec, lo_ms, hi_ms, lo_inclusive, hi_inclusive));
+                        draken_between(v.vec, lo_us, hi_us, lo_inclusive, hi_inclusive));
                 }
                 if (is_float_type(v.vec.type)) {
                     const double lo_d = nb::cast<double>(lo);
@@ -6641,7 +6687,7 @@ NB_MODULE(draken_native, m) {
                         if (obj.is_none()) continue;  // null values never match non-null rows
                         const DrakenIntervalSlot slot = py_to_interval_slot(obj);
                         const int64_t norm = draken::ops::interval_normalize_checked(
-                            slot.months, slot.ms);
+                            slot.months, slot.us);
                         uint64_t raw = static_cast<uint64_t>(norm);
                         uint64_t h;
                         simd_hash_i64(&raw, &h, 1u);
@@ -6982,16 +7028,65 @@ NB_MODULE(draken_native, m) {
         "tag (DRAKEN_VARCHAR / NVARCHAR / VARBINARY). Raw bytes, no decode — used to\n"
         "carry bytes data under a known source type (e.g. MIN/MAX of VARCHAR).");
 
-    // S0: prove the CxxMorsel seam round-trips Vector handles byte-identically.
-    m.def("_cxx_morsel_roundtrip", &cxx_morsel_roundtrip,
-          "S0 seam proof: py Vectors → CxxMorsel (shared_ptr<VectorOwner>) → py Vectors.");
-    m.def("_cxx_hash", &cxx_hash_seam,
-          "S0: nogil cxx_hash over a CxxMorsel built from the given Vectors + column indices.");
-    m.def("_cxx_take", &cxx_take_seam,
-          "S0: nogil cxx_take (gather rows) over a CxxMorsel built from the given Vectors.");
-    m.def("_cxx_mask", &cxx_mask_seam, "S0: nogil cxx_mask (filter by BOOL mask).");
-    m.def("_cxx_slice", &cxx_slice_seam, "S0: nogil cxx_slice (row window).");
-    m.def("_cxx_combine", &cxx_combine_seam, "S0: nogil cxx_combine (vertical concat of morsels).");
+
+    // S1: CxxMorsel as a Python handle — the dual-representation Morsel's C++ backing
+    // (one PyObject carrier vs N Vector PyObjects). The cdef Morsel holds this handle
+    // in `_cxx`; materialization (`to_vectors`) builds the Vector handles lazily.
+    nb::class_<CxxMorsel>(m, "CxxMorsel")
+        .def_prop_ro("num_rows",    [](const CxxMorsel& cm) { return static_cast<int64_t>(cm.num_rows()); })
+        .def_prop_ro("num_columns", [](const CxxMorsel& cm) { return static_cast<int64_t>(cm.num_columns()); })
+        .def("names", [](const CxxMorsel& cm) {
+            nb::list out;
+            for (const std::string& s : cm.names)
+                out.append(nb::bytes(s.data(), s.size()));
+            return out;
+        })
+        .def("to_vectors", [](const CxxMorsel& cm) { return cxx_columns_to_list(cm); })
+        // Read one column (by identity/name) from the substrate as a Vector handle —
+        // for operators reading the CxxMorsel without materializing the whole morsel.
+        .def("column", [](const CxxMorsel& cm, nb::handle identity) -> nb::object {
+            const std::string want = nb_bytes_to_std(identity);
+            for (size_t i = 0; i < cm.names.size(); ++i)
+                if (cm.names[i] == want) return nb::cast(cm.columns[i].own);
+            throw nb::key_error("CxxMorsel.column: not found");
+        })
+        // Cxx-native ops — return a new CxxMorsel (stay off-PyObject; no materialization).
+        .def("select", [](const CxxMorsel& cm, nb::list want) -> CxxMorsel {
+            std::vector<std::string> w;
+            w.reserve(nb::len(want));
+            for (size_t i = 0; i < nb::len(want); ++i) w.push_back(nb_bytes_to_std(want[i]));
+            return cxx_select(cm, w);
+        })
+        .def("take", [](const CxxMorsel& cm, nb::list indices) -> CxxMorsel {
+            const uint32_t n = static_cast<uint32_t>(nb::len(indices));
+            std::vector<int32_t> idx(n > 0u ? n : 1u);
+            for (uint32_t i = 0; i < n; ++i) idx[i] = nb::cast<int32_t>(indices[i]);
+            return cxx_take(cm, n > 0u ? idx.data() : nullptr, n);
+        })
+        .def("slice", [](const CxxMorsel& cm, uint32_t start, uint32_t length) -> CxxMorsel {
+            return cxx_slice(cm, start, length);
+        })
+        .def("mask", [](const CxxMorsel& cm, const VectorOwner& mask) -> CxxMorsel {
+            return cxx_mask(cm, mask.vec);
+        })
+        .def("rename", [](const CxxMorsel& cm, nb::list new_names) -> CxxMorsel {
+            CxxMorsel out;
+            out.columns.reserve(cm.columns.size());
+            for (const CxxColumn& c : cm.columns) out.columns.push_back(c);  // shared_ptr copy
+            out.zero_col_rows = cm.zero_col_rows;
+            out.names.reserve(nb::len(new_names));
+            for (size_t i = 0; i < nb::len(new_names); ++i)
+                out.names.push_back(nb_bytes_to_std(new_names[i]));
+            return out;
+        });
+
+    m.def("cxx_morsel_from_vectors", [](nb::list vectors, nb::list names) -> CxxMorsel {
+        CxxMorsel cm = cxx_from_vectors_list(vectors);
+        cm.names.reserve(nb::len(names));
+        for (size_t i = 0; i < nb::len(names); ++i)
+            cm.names.push_back(nb_bytes_to_std(names[i]));
+        return cm;
+    }, "S1: build a CxxMorsel (handle) from Vector handles + bytes names.");
 
     m.def("vector_concat",
         [](nb::list vectors) -> VectorOwner {

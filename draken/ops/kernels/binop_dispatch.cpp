@@ -10,10 +10,14 @@
 #include "ops/fixed_int_ops.h"            // draken::ops::fi_int_arith, fi_combine_validity
 #include "ops/decimal_arith.h"            // draken::ops::dec_add/sub/mul/div/mod
 #include "ops/int_bitwise.h"              // draken::ops::bitwise_and/or/xor/shl/shr
+#include "ops/int64_compare.h"            // draken::ops::cmp_alloc_bool_buf (IP-in-CIDR result)
+#include "ops/kernels/result_helpers.h"   // vecresult_from_string_buffers
 #include "core/buffers.h"
+#include "core/string_slot.h"             // DrakenStringSlot, draken_build_string_slot, str_data/length
 #include "core/alloc.h"                   // draken_malloc
 #include "core/vector_alloc.h"            // draken_identity_sel
 #include <cmath>                          // std::fmod
+#include <cstring>                        // std::memcpy / std::memset
 #include <stdexcept>
 
 // BCBinaryOpCode values (mirror compiled_expression.pxd / arithmetic_dv.h):
@@ -169,6 +173,180 @@ VecResult binop_float64_scaled(int op, const DrakenVector& a, unsigned char sa,
     return r;
 }
 
+// ---- string concat (op 7, BOP_STRING_CONCAT) ------------------------------
+// Element-wise `a || b`. Ported from the live nanobind impl_concat
+// (vector_selection_concat.cpp): 2-pass byte assembly. The arena budget (Pass 1)
+// uses the per-row SUM (ll+rl) vs STR_INLINE_MAX — NOT the per-operand length:
+// two individually-inline operands can concatenate past the inline limit (7+7=14)
+// and still need arena bytes (the concat_arena_overflow trap). NULL || x = NULL
+// (DuckDB). Reads operands via the uniform data[selection[row]] path, so dense /
+// dict / constant string shapes all work. Operands must already share the string
+// type (the binder coerces); result type = left->type.
+static inline bool bsc_row_valid(const DrakenVector* dv, uint32_t row) {
+    if (!dv->validity) return true;
+    return ((dv->validity[row >> 3] >> (row & 7u)) & 1u) != 0u;
+}
+static inline void bsc_read_row(const DrakenVector* dv, uint32_t row,
+                                const uint8_t** data, uint32_t* len) {
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
+    const DrakenStringSlot* slot = &sa->slots[dv->selection[row]];
+    *data = str_data(slot, sa->arena);
+    *len  = str_length(slot);
+}
+
+static VecResult binop_string_concat(const DrakenVector* left, const DrakenVector* right) {
+    const uint32_t n = left->length;
+    const DrakenType out_type = left->type;
+    const uint8_t* ld; uint32_t ll; const uint8_t* rd; uint32_t rl;
+
+    // Pass 1: arena budget = sum of per-row concatenated lengths that exceed inline.
+    size_t total_bytes = 0u;
+    for (uint32_t row = 0u; row < n; ++row) {
+        if (!bsc_row_valid(left, row) || !bsc_row_valid(right, row)) continue;
+        bsc_read_row(left, row, &ld, &ll);
+        bsc_read_row(right, row, &rd, &rl);
+        const size_t row_len = static_cast<size_t>(ll) + static_cast<size_t>(rl);
+        if (row_len > STR_INLINE_MAX) total_bytes += row_len;
+    }
+
+    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+    if (!slots) return draken_error_sentinel("binop_string_concat: slot alloc failed");
+    std::memset(slots, 0, slots_sz);
+
+    uint8_t* arena = static_cast<uint8_t*>(draken_malloc(total_bytes > 0u ? total_bytes : 1u));
+    if (!arena) { draken_free(slots); return draken_error_sentinel("binop_string_concat: arena alloc failed"); }
+
+    const size_t vsz = (n > 0u) ? static_cast<size_t>((((n + 7u) >> 3u) + 7u) & ~7u) : 8u;
+    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vsz));
+    if (!validity) { draken_free(slots); draken_free(arena); return draken_error_sentinel("binop_string_concat: validity alloc failed"); }
+    std::memset(validity, 0, vsz);
+
+    size_t scratch_cap = 64u;
+    uint8_t* scratch = static_cast<uint8_t*>(draken_malloc(scratch_cap));
+    if (!scratch) { draken_free(slots); draken_free(arena); draken_free(validity); return draken_error_sentinel("binop_string_concat: scratch alloc failed"); }
+
+    bool any_null = false;
+    size_t arena_pos = 0u;
+
+    // Pass 2: assemble bytes, build slots (inline vs arena), set validity bits.
+    for (uint32_t row = 0u; row < n; ++row) {
+        if (!bsc_row_valid(left, row) || !bsc_row_valid(right, row)) {
+            str_init_null(&slots[row]); any_null = true; continue;
+        }
+        bsc_read_row(left, row, &ld, &ll);
+        bsc_read_row(right, row, &rd, &rl);
+        const uint32_t row_len = ll + rl;
+        if (row_len == 0u) {
+            draken_build_string_slot(&slots[row], nullptr, 0u, 0u);
+            validity[row >> 3u] |= static_cast<uint8_t>(1u << (row & 7u));
+            continue;
+        }
+        if (static_cast<size_t>(row_len) > scratch_cap) {
+            draken_free(scratch);
+            scratch_cap = static_cast<size_t>(row_len) + 64u;
+            scratch = static_cast<uint8_t*>(draken_malloc(scratch_cap));
+            if (!scratch) { draken_free(slots); draken_free(arena); draken_free(validity); return draken_error_sentinel("binop_string_concat: scratch grow failed"); }
+        }
+        if (ll) std::memcpy(scratch, ld, ll);
+        if (rl) std::memcpy(scratch + ll, rd, rl);
+        if (row_len > STR_INLINE_MAX) {
+            const uint32_t off = static_cast<uint32_t>(arena_pos);
+            std::memcpy(arena + off, scratch, row_len);
+            draken_build_string_slot(&slots[row], scratch, row_len, off);
+            arena_pos += row_len;
+        } else {
+            draken_build_string_slot(&slots[row], scratch, row_len, 0u);
+        }
+        validity[row >> 3u] |= static_cast<uint8_t>(1u << (row & 7u));
+    }
+    draken_free(scratch);
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+
+    return vecresult_from_string_buffers(slots, arena, arena_pos, validity, n, out_type);
+}
+
+// ---- IP-in-CIDR (op 8 BOP_BITWISE_OR over string operands) ----------------
+// `ip_column >> cidr` → BOOL. left = IP string column (N rows); right = CIDR
+// string — ONLY row 0 is read (the CIDR is a scalar, matching the live
+// vector_ip_in_cidr). Ported byte-identical from vector_misc.cpp: IPv4 only;
+// NULL ip → false (result validity null = all "valid"); invalid IP/CIDR → loud
+// error sentinel. Reads operands via the uniform data[selection[row]] path.
+static int bicidr_parse_ip(const uint8_t* ip, uint32_t length, uint32_t* out) {
+    uint32_t result = 0u, num; int shift = 24; uint32_t i = 0u; int oc = 0;
+    while (oc < 4) {
+        num = 0u; int dc = 0;
+        while (i < length) {
+            uint8_t c = ip[i];
+            if (c < '0' || c > '9') break;
+            num = num * 10u + static_cast<uint32_t>(c - '0'); ++dc; ++i;
+        }
+        if (dc == 0) return -1;
+        if (num > 255u) return -1;
+        result += (num << shift); shift -= 8; ++oc;
+        if (oc < 4) { if (i >= length || ip[i] != '.') return -1; ++i; }
+        else        { if (i < length) return -1; }
+    }
+    *out = result; return 0;
+}
+
+static VecResult binop_ip_in_cidr(const DrakenVector* ipv, const DrakenVector* cidrv) {
+    if (cidrv->length == 0u) return draken_error_sentinel("binop_ip_in_cidr: cidr vector empty");
+    if (!bsc_row_valid(cidrv, 0u)) return draken_error_sentinel("binop_ip_in_cidr: cidr row 0 is NULL");
+    const uint8_t* cidr_bytes; uint32_t cidr_len;
+    bsc_read_row(cidrv, 0u, &cidr_bytes, &cidr_len);
+
+    uint32_t slash = 0u;
+    while (slash < cidr_len && cidr_bytes[slash] != '/') ++slash;
+    if (slash == cidr_len) return draken_error_sentinel("binop_ip_in_cidr: CIDR notation missing '/'");
+
+    const uint8_t* mask_str = cidr_bytes + slash + 1u;
+    const uint32_t mask_len = cidr_len - slash - 1u;
+    uint32_t mask_size = 0u;
+    for (uint32_t k = 0u; k < mask_len; ++k) {
+        uint8_t c = mask_str[k];
+        if (c < '0' || c > '9') return draken_error_sentinel("binop_ip_in_cidr: CIDR mask not an integer");
+        mask_size = mask_size * 10u + static_cast<uint32_t>(c - '0');
+    }
+    if (mask_size > 32u) return draken_error_sentinel("binop_ip_in_cidr: CIDR mask out of range (>32)");
+    const uint32_t netmask = mask_size == 0u
+        ? 0u : ((0xFFFFFFFFu << (32u - mask_size)) & 0xFFFFFFFFu);
+
+    uint32_t base_ip = 0u;
+    if (bicidr_parse_ip(cidr_bytes, slash, &base_ip) != 0)
+        return draken_error_sentinel("binop_ip_in_cidr: invalid CIDR base address");
+    base_ip &= netmask;
+
+    const uint32_t n = ipv->length;
+    uint8_t* dst = draken::ops::cmp_alloc_bool_buf(n);  // zero-initialised
+    if (!dst) return draken_error_sentinel("binop_ip_in_cidr: bool buffer alloc failed");
+
+    const uint8_t* ip_bytes; uint32_t ip_len;
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!bsc_row_valid(ipv, i)) continue;
+        bsc_read_row(ipv, i, &ip_bytes, &ip_len);
+        if (ip_len == 0u) continue;
+        uint32_t ip_int = 0u;
+        if (bicidr_parse_ip(ip_bytes, ip_len, &ip_int) != 0) {
+            draken_free(dst);
+            return draken_error_sentinel("binop_ip_in_cidr: invalid IP address");
+        }
+        if ((ip_int & netmask) == base_ip)
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = nullptr;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
 }  // namespace
 
 extern "C" {
@@ -299,8 +477,25 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
             }
         }
 
+        // String concat (op 7): element-wise a || b over same-type string columns.
+        const bool lt_is_string = (lt == DRAKEN_VARCHAR || lt == DRAKEN_NVARCHAR
+                                   || lt == DRAKEN_VARBINARY);
+        if (op == BOP_STRING_CONCAT && lt_is_string && lt == rt) {
+            if (left->length != right->length)
+                return draken_error_sentinel("binop_string_concat: length mismatch");
+            return binop_string_concat(left, right);
+        }
+
+        // IP-in-CIDR (op 8 over string operands): left = IP column, right = CIDR
+        // scalar (row 0). Distinct from integer bitwise-OR (guarded by is_int below).
+        const bool rt_is_string = (rt == DRAKEN_VARCHAR || rt == DRAKEN_NVARCHAR
+                                   || rt == DRAKEN_VARBINARY);
+        if (op == BOP_BITWISE_OR && lt_is_string && rt_is_string) {
+            return binop_ip_in_cidr(left, right);
+        }
+
         // Not yet C-native (later P9.1 sub-stages): decimal×integer, cross-kind
-        // DECIMAL×DECIMAL128, string concat, temporal, IP-in-CIDR.
+        // DECIMAL×DECIMAL128, temporal, IP-in-CIDR.
         return draken_error_sentinel_fmt(
             "draken_binop: combination not yet C-native (covers int/float32/float64 arithmetic, "
             "true-divide, DECIMAL×DECIMAL, DECIMAL128×DECIMAL128, decimal×float): "

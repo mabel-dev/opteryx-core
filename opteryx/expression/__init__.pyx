@@ -30,7 +30,7 @@ from opteryx.exceptions import (
 from opteryx.expression.operations import filter_operations
 from opteryx.models import LogicalColumn, Node
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
+from opteryx.types.timestamps._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 from opteryx.utils import random_string
 
 # These are bit-masks

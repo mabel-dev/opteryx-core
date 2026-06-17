@@ -10,7 +10,13 @@ from cpython.object cimport PyObject
 from cpython.ref cimport Py_INCREF
 from libcpp.vector cimport vector
 
+from libcpp.memory cimport shared_ptr
+
 from draken.morsels.morsel cimport Morsel
+from draken.morsels.cxx_morsel cimport (
+    CxxMorsel, cxx_morsel_raw_ptr,
+    cxx_morsel_shallow_copy, cxx_morsel_to_handle, cxx_morsel_delete,
+)
 from draken.vectors.vector cimport Vector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_INT64
 
@@ -85,11 +91,114 @@ cdef Morsel _make_morsel():
     return m
 
 
+# ---- S-B.1a boundary bridges (Morsel <-> shared_ptr[CxxMorsel]) --------------
+# These are the conversions the carrier flip (S-B.1b) uses at the scan/cursor and
+# during the gil-wrapped transition. The chain itself will carry shared_ptr[CxxMorsel]
+# directly (no PyObject); these cross the boundary only. Round-trip is byte-identical
+# because every step shallow-copies — the per-column shared_ptr<VectorOwner> owners
+# (and thus the bytes) are shared, never duplicated.
+
+cdef shared_ptr[CxxMorsel] morsel_to_cxx(Morsel m):
+    """Boundary IN: any Morsel -> an owned heap shared_ptr<CxxMorsel> (shares
+    column owners). Cxx-backed: shallow-copy the cached substrate directly.
+    PyObject-backed: build a transient CxxMorsel from the columns first (the
+    shallow copy captures the owners, so the transient handle can be released)."""
+    if m._cxx_ptr is not NULL:
+        return shared_ptr[CxxMorsel](cxx_morsel_shallow_copy(m._cxx_ptr))
+    cdef object handle = m._get_cxx()   # nanobind CxxMorsel built from PyObject cols
+    cdef const CxxMorsel* p = cxx_morsel_raw_ptr(<PyObject*>handle)
+    return shared_ptr[CxxMorsel](cxx_morsel_shallow_copy(p))
+
+
+cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp):
+    """Boundary OUT: shared_ptr<CxxMorsel> -> a PyObject Morsel (the shim build)."""
+    cdef PyObject* raw = cxx_morsel_to_handle(sp.get())   # NEW ref
+    cdef object handle = <object>raw                       # Cython incref -> 2
+    _morsel_decref(raw)                                    # balance -> 1
+    return Morsel.from_cxx(handle)
+
+
+cpdef Morsel _sb1a_roundtrip(Morsel m):
+    """THROWAWAY S-B.1a validation hook: Morsel -> shared_ptr<CxxMorsel> -> Morsel.
+    Proves the boundary bridges round-trip byte-identical. Delete when S-B.1b wires
+    the bridges into the operator chain."""
+    return cxx_to_morsel(morsel_to_cxx(m))
+
+
 cdef class Morsel:
     def __cinit__(self):
         self._col_names = []
         # self._columns is a C++ vector[PyObject*] — default-constructed empty.
         self._zero_col_num_rows = 0
+        self._cxx = None  # S1: Cxx-backed when set (see _ensure_pyobject)
+        self._cxx_ptr = NULL
+
+    # ---- CxxMorsel substrate seams -------------------------------------------
+    cpdef void materialize(self) except *:
+        """Cursor-boundary shim: build PyObject columns from `_cxx` and clear it.
+        Byte-identical to from_vectors (wraps the exact VectorOwners). Idempotent.
+        The CURSOR is the only sanctioned caller — this is the single point where
+        the C++ substrate becomes Python for the user."""
+        if self._cxx is None:
+            return
+        cxx = self._cxx
+        # _col_names is already cached (set in _set_cxx); clearing keeps it.
+        self._set_cxx(None)
+        cdef Vector wrapped
+        for vec in cxx.to_vectors():
+            wrapped = _wrap(vec)
+            self._append_column(wrapped)
+
+    cdef void _ensure_pyobject(self) except *:
+        """Engine-internal guard: PyObject column access is only valid on a
+        PyObject-backed morsel. A Cxx-backed morsel reaching here means an
+        operator/path read columns without being converted to the CxxMorsel
+        substrate — FAIL LOUD (no silent materialization)."""
+        if self._cxx is not None:
+            raise RuntimeError(
+                "Morsel: engine-internal PyObject column access on a Cxx-backed "
+                "morsel. This operator/path is NOT converted to the CxxMorsel "
+                "substrate. Only the cursor may materialize (Morsel.materialize)."
+            )
+
+    cdef void _set_cxx(self, object handle):
+        """Single sanctioned write to the Cxx carrier: keep the nanobind handle,
+        the C-level read pointer, and the cached names in lock-step. Pass None to
+        clear. The one `names()` call here (when set) is the ONLY metadata cross
+        of the binding per morsel — all later name resolution uses `_col_names`."""
+        self._cxx = handle
+        if handle is not None:
+            self._cxx_ptr = cxx_morsel_raw_ptr(<PyObject*>handle)
+            self._col_names = list(handle.names())
+        else:
+            self._cxx_ptr = NULL
+
+    cdef const DrakenVector* _col_view(self, Py_ssize_t i) noexcept nogil:
+        # Pure C++ struct access — no PyObject, no nanobind, GIL-releasable.
+        return &self._cxx_ptr.columns[<size_t>i].view
+
+    cpdef object _get_cxx(self):
+        """Return the CxxMorsel handle for converted (C++) operators: `_cxx` if
+        set (zero work), else build a transient one from the PyObject columns."""
+        if self._cxx is not None:
+            return self._cxx
+        from draken.draken_native import cxx_morsel_from_vectors
+        cdef Py_ssize_t n = self._num_columns()
+        cdef Py_ssize_t i
+        handles = [self._get_column(i)._nb for i in range(n)]
+        return cxx_morsel_from_vectors(handles, list(self._col_names))
+
+    cpdef object _cxx_column(self, identity, name=None):
+        """Read one column for a CONVERTED operator: from the CxxMorsel substrate
+        when Cxx-backed (no whole-morsel materialization), else the normal column
+        (preserving the identity→name fallback). Returns a Cython Vector."""
+        if isinstance(identity, str):
+            identity = identity.encode("utf-8")
+        if self._cxx is not None:
+            return Vector(self._cxx.column(identity))
+        if name is not None:
+            return self.column(identity, name)
+        return self.column(identity)
 
     def __dealloc__(self):
         # Release the strong reference held on each column Vector.
@@ -100,9 +209,17 @@ cdef class Morsel:
 
     # ---- C++ column-store accessors -------------------------------------
     cdef Py_ssize_t _num_columns(self) noexcept:
+        # Cheap: answer from the Cxx backing without materializing.
+        if self._cxx is not None:
+            return <Py_ssize_t>self._cxx.num_columns
         return <Py_ssize_t>self._columns.size()
 
     cdef Vector _get_column(self, Py_ssize_t i):
+        if self._cxx is not None:
+            # Cxx-backed: hand back a Vector over the i-th substrate column. The
+            # underlying owner is kept alive by the CxxMorsel for the morsel's
+            # lifetime, so the borrowed DrakenVector* stays valid. No materialize.
+            return <Vector>self._cxx_column(self._col_names[i])
         return <Vector>(<object>self._columns[i])
 
     cdef void _set_column(self, Py_ssize_t i, Vector v):
@@ -128,6 +245,9 @@ cdef class Morsel:
 
     @property
     def num_rows(self):
+        # Cheap: answer from the Cxx backing without materializing.
+        if self._cxx is not None:
+            return self._cxx.num_rows
         if self._columns.size() == 0:
             return self._zero_col_num_rows
         return self._get_column(0).length
@@ -139,7 +259,7 @@ cdef class Morsel:
 
     @property
     def nbytes(self):
-        return self.num_rows * len(self._col_names) * 8
+        return self.num_rows * self._num_columns() * 8
 
     @property
     def num_columns(self):
@@ -147,6 +267,9 @@ cdef class Morsel:
 
     @property
     def column_names(self):
+        # Metadata: answer from the Cxx backing without materializing.
+        if self._cxx is not None:
+            return list(self._col_names)
         return self._col_names
 
     @property
@@ -216,6 +339,9 @@ cdef class Morsel:
         if n_cols == 1:
             col_idx = col_indices[0]
             free(col_indices)
+            if self._cxx is not None:
+                return Vector((<Vector>self._cxx_column(
+                    self._col_names[col_idx]))._nb.hash_shaped())
             return Vector(self._get_column(col_idx)._nb.hash_shaped())
 
         # Multi-column → dense mixed hash. Resolve pointers (GIL held) so the
@@ -252,6 +378,7 @@ cdef class Morsel:
 
     def __str__(self):
         """Format morsel as an ASCII table for display."""
+        self._ensure_pyobject()
         if self.num_rows == 0:
             if self.num_columns == 0:
                 return ""
@@ -294,13 +421,18 @@ cdef class Morsel:
     def _column_index_from_name(self, name):
         if isinstance(name, str):
             name = name.encode("utf-8")
-        for i, n in enumerate(self._col_names):
+        # Metadata lookup — answer from the substrate names when Cxx-backed,
+        # without materializing the PyObject column store.
+        cdef list names_src = self._col_names
+        for i, n in enumerate(names_src):
             if n == name:
                 return i
         raise KeyError(f"_column_index_from_name: column not found: {name!r}")
 
     def _ensure_name_map(self):
-        return {name: i for i, name in enumerate(self._col_names)}
+        # Metadata only — answer from the substrate names when Cxx-backed.
+        names_src = self._col_names
+        return {name: i for i, name in enumerate(names_src)}
 
     cdef int32_t* _resolve_columns_to_indices(self, object columns,
                                               int32_t* n_cols_out) except NULL:
@@ -309,7 +441,15 @@ cdef class Morsel:
         columns=None → indices [0, _num_columns()).
         Caller owns the returned buffer (free()). Raises KeyError on missing
         name; MemoryError on alloc failure.
+
+        Cxx-aware: when Cxx-backed, resolves names against the substrate
+        (`_cxx.names()`) without materializing the PyObject column store.
         """
+        cdef list names_src
+        if self._cxx is not None:
+            names_src = self._col_names
+        else:
+            names_src = self._col_names
         cdef Py_ssize_t avail = self._num_columns()
         cdef Py_ssize_t i, j
         cdef int32_t n_cols
@@ -343,7 +483,7 @@ cdef class Morsel:
                     )
                 found = False
                 for j in range(avail):
-                    if self._col_names[j] == name_bytes:
+                    if names_src[j] == name_bytes:
                         result[i] = <int32_t>j
                         found = True
                         break
@@ -370,6 +510,13 @@ cdef class Morsel:
         if result == NULL:
             raise MemoryError()
         cdef int32_t i
+        if self._cxx_ptr is not NULL:
+            # Cxx-backed: read the DrakenVector* straight out of the C++ substrate
+            # (columns[idx].view) — no PyObject, no nanobind, no name resolution.
+            # The pointer is valid while the morsel stays Cxx-backed.
+            for i in range(n_cols):
+                result[i] = self._col_view(col_indices[i])
+            return result
         for i in range(n_cols):
             result[i] = self._get_column(col_indices[i]).unified()
         return result
@@ -425,10 +572,15 @@ cdef class Morsel:
 
     def append(self, vec):
         cdef Vector wrapped = _wrap(vec)
+        self._ensure_pyobject()
         self._append_column(wrapped)
 
     cdef void _empty_inplace(self):
         """Zero all columns to 0 rows, in place."""
+        if self._cxx is not None:
+            # Cxx-native: 0-row slice replaces the substrate in place.
+            self._set_cxx(self._cxx.slice(0, 0))
+            return
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
         if n == 0:
@@ -441,6 +593,10 @@ cdef class Morsel:
     cdef void _take_inplace(self, int32_t[::1] indices):
         """Filter all columns to the given row indices, in place. Native gather
         straight off the typed memoryview — no boxed index list."""
+        if self._cxx is not None:
+            # Cxx-native: rebuild the substrate from the taken rows in place.
+            self._set_cxx(self._cxx.take(list(indices)))
+            return
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
         cdef uint32_t ni = <uint32_t>indices.shape[0]
@@ -455,10 +611,20 @@ cdef class Morsel:
         if isinstance(name, str):
             name = name.encode("utf-8")
         cdef Vector wrapped = _wrap(vec)
+        if self._cxx is not None:
+            # Cxx-native: rebuild the substrate with the extra column appended.
+            from draken.draken_native import cxx_morsel_from_vectors
+            names = list(self._col_names)
+            handles = [(<Vector>self._cxx_column(nm))._nb for nm in names]
+            names.append(name)
+            handles.append(wrapped._nb)
+            self._set_cxx(cxx_morsel_from_vectors(handles, names))
+            return
         self._col_names.append(name)
         self._append_column(wrapped)
 
     def column(self, name, fallback=None):
+        self._ensure_pyobject()
         if isinstance(name, str):
             name = name.encode("utf-8")
         for i, n in enumerate(self._col_names):
@@ -473,6 +639,11 @@ cdef class Morsel:
         raise KeyError(f"column not found: {name!r}")
 
     def select(self, col_names):
+        if self._cxx is not None:
+            # Cxx-native: stay Cxx-backed (no materialization). Result columns share
+            # the same owners; lazy materialization deferred to a real PyObject access.
+            names = [n if isinstance(n, bytes) else n.encode("utf-8") for n in col_names]
+            return Morsel.from_cxx(self._cxx.select(names))
         cdef Morsel result = _make_morsel()
         for name in col_names:
             if isinstance(name, str):
@@ -487,6 +658,9 @@ cdef class Morsel:
         return result
 
     def rename(self, new_names):
+        if self._cxx is not None:
+            names = [n if isinstance(n, bytes) else n.encode("utf-8") for n in new_names]
+            return Morsel.from_cxx(self._cxx.rename(names))
         cdef Morsel result = _make_morsel()
         for i, name in enumerate(new_names):
             if isinstance(name, str):
@@ -505,12 +679,18 @@ cdef class Morsel:
         row_is_valid/row_bool) and runs the typed take. No Python per-row loop,
         no to_pylist, no boxed index list.
         """
-        cdef Morsel result = _make_morsel()
-        result._col_names = list(self._col_names)
-        cdef Py_ssize_t n = self._num_columns()
         cdef object mask_nb = (<Vector>mask)._nb if isinstance(mask, Vector) else mask
         cdef Py_ssize_t i
         cdef object nb_masked
+        if self._cxx is not None:
+            # Cxx-native: mask the whole substrate in ONE nanobind crossing
+            # (cxx_mask derives surviving indices once, type-takes every column),
+            # staying Cxx-backed. No per-column crossing, no materialization.
+            # Zero-column morsels carry count_true, matching the PyObject path.
+            return Morsel.from_cxx(self._cxx.mask(mask_nb))
+        cdef Morsel result = _make_morsel()
+        result._col_names = list(self._col_names)
+        cdef Py_ssize_t n = self._num_columns()
         if n == 0:
             # No columns to gather — just carry the surviving row count.
             result._zero_col_num_rows = mask_nb.count_true()
@@ -521,6 +701,9 @@ cdef class Morsel:
         return result
 
     def take(self, indices):
+        if self._cxx is not None:
+            # Cxx-native: stay Cxx-backed (no materialization).
+            return Morsel.from_cxx(self._cxx.take(list(indices)))
         cdef Morsel result = _make_morsel()
         result._col_names = list(self._col_names)
         cdef Py_ssize_t n = self._num_columns()
@@ -561,6 +744,7 @@ cdef class Morsel:
         """
         if n_bins < 1 or (n_bins & (n_bins - 1)) != 0:
             raise ValueError("partition_by_hash: n_bins must be a power of two")
+        self._ensure_pyobject()
 
         cdef Py_ssize_t n = self.num_rows
         cdef Py_ssize_t ncols = self._num_columns()
@@ -647,6 +831,9 @@ cdef class Morsel:
 
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):
         cdef Py_ssize_t real_start = start if start >= 0 else offset
+        if self._cxx is not None:
+            # Cxx-native: stay Cxx-backed (no materialization).
+            return Morsel.from_cxx(self._cxx.slice(<uint32_t>real_start, <uint32_t>length))
         cdef Morsel result = _make_morsel()
         result._col_names = list(self._col_names)
         cdef Py_ssize_t n = self._num_columns()
@@ -660,6 +847,19 @@ cdef class Morsel:
         return result
 
     def copy(self, columns=None, mask=None):
+        if self._cxx is not None:
+            # Cxx-native: project (preserving morsel column order) and/or gather
+            # by index off the substrate — no materialization. CxxMorsel is
+            # immutable, so a no-arg copy shares the handle (mutators rebind).
+            cxx_names = list(self._col_names)
+            cxx = self._cxx
+            if columns is not None:
+                col_set = set(
+                    c.encode("utf-8") if isinstance(c, str) else c for c in columns)
+                cxx = cxx.select([nm for nm in cxx_names if nm in col_set])
+            if mask is not None:
+                cxx = cxx.take(list(mask))
+            return Morsel.from_cxx(cxx)
         cdef Morsel result = _make_morsel()
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
@@ -708,17 +908,24 @@ cdef class Morsel:
         if len(morsels) == 1:
             return first
         from draken.draken_native import vector_concat as _nb_concat
-        cdef Morsel result = _make_morsel()
-        result._col_names = list(first._col_names)
-        cdef Py_ssize_t ncols = first._num_columns()
+        # Column reads go through `_cxx_column`, which is representation-agnostic
+        # (substrate when Cxx-backed, PyObject otherwise) — no materialization.
+        cdef list names = list(first.column_names)
+        cdef Py_ssize_t ncols = len(names)
         cdef Py_ssize_t nmorsels = len(morsels)
+        cdef list out_vecs = []
         for col_idx in range(ncols):
             col_parts = [
-                (<Morsel>morsels[mi])._get_column(col_idx)._nb
+                (<Vector>(<Morsel>morsels[mi])._cxx_column(names[col_idx]))._nb
                 for mi in range(nmorsels)
             ]
-            nb_v = _nb_concat(col_parts)
-            result._append_column(Vector(nb_v))
+            out_vecs.append(_nb_concat(col_parts))
+        if first._cxx is not None:
+            return cls.from_cxx_vectors(names, out_vecs)
+        cdef Morsel result = _make_morsel()
+        result._col_names = list(names)
+        for col_idx in range(ncols):
+            result._append_column(Vector(out_vecs[col_idx]))
         return result
 
     @classmethod
@@ -735,6 +942,25 @@ cdef class Morsel:
             result._append_column(wrapped)
         return result
 
+    @classmethod
+    def from_cxx(cls, cxx):
+        """S1: build a Cxx-backed Morsel carrying a draken_native.CxxMorsel handle.
+        `_columns`/`_col_names` stay empty until a PyObject accessor calls
+        `_ensure_pyobject`, which materializes them byte-identically and clears `_cxx`."""
+        cdef Morsel result = cls.__new__(cls)
+        result._set_cxx(cxx)
+        return result
+
+    @classmethod
+    def from_cxx_vectors(cls, col_names, col_vecs):
+        """S1: same (names, vectors) signature as from_vectors, but produces a
+        Cxx-backed Morsel — the column handles are folded into a CxxMorsel and the
+        PyObject Vectors materialize lazily. Used by the scan under CXX_MORSEL_SCAN."""
+        from draken.draken_native import cxx_morsel_from_vectors
+        names = [n if isinstance(n, bytes) else n.encode("utf-8") for n in col_names]
+        handles = [_unwrap(v) for v in col_vecs]
+        return cls.from_cxx(cxx_morsel_from_vectors(handles, names))
+
 
 cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
                            int32_t[::1] left_view, int32_t[::1] right_view):
@@ -748,11 +974,17 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
     Returns a new Morsel with all left_morsel columns followed by all right_morsel
     columns. Number of rows equals len(left_view).
     """
+    # Column reads go through `_cxx_column` (representation-agnostic) so the join
+    # result is built directly off the substrate when inputs are Cxx-backed — no
+    # whole-morsel materialization. Output preserves the Cxx representation when
+    # either input carries it.
     cdef Py_ssize_t n = left_view.shape[0]
-    cdef Morsel result = _make_morsel()
+    cdef list left_names = list(left_morsel.column_names)
+    cdef list right_names = list(right_morsel.column_names)
+    cdef list out_names = []
+    cdef list out_vecs = []
     cdef Py_ssize_t i, j
     cdef int ncols_left, ncols_right
-    cdef object nb_taken, nb_new
     cdef bint left_has_neg, right_has_neg
 
     # Left columns: may contain -1 for unmatched right rows (RIGHT/FULL outer).
@@ -764,15 +996,14 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
 
     ncols_left = left_morsel._num_columns()
     cdef const int32_t* lidx = &left_view[0] if n > 0 else NULL
-    if not left_has_neg:
-        for j in range(ncols_left):
-            result._col_names.append(left_morsel._col_names[j])
-            result._append_column(_take_native(left_morsel._get_column(j), lidx, <uint32_t>n))
-    else:
-        for j in range(ncols_left):
-            result._col_names.append(left_morsel._col_names[j])
-            result._append_column(
-                _take_native_with_null(left_morsel._get_column(j), lidx, <uint32_t>n))
+    for j in range(ncols_left):
+        out_names.append(left_names[j])
+        if not left_has_neg:
+            out_vecs.append(_take_native(
+                <Vector>left_morsel._cxx_column(left_names[j]), lidx, <uint32_t>n))
+        else:
+            out_vecs.append(_take_native_with_null(
+                <Vector>left_morsel._cxx_column(left_names[j]), lidx, <uint32_t>n))
 
     # Right columns: may contain -1 for unmatched left rows (LEFT/FULL outer).
     right_has_neg = False
@@ -782,22 +1013,22 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
             break
 
     ncols_right = right_morsel._num_columns()
+    cdef const int32_t* ridx = &right_view[0] if n > 0 else NULL
+    for j in range(ncols_right):
+        out_names.append(right_names[j])
+        if not right_has_neg:
+            out_vecs.append(_take_native(
+                <Vector>right_morsel._cxx_column(right_names[j]), ridx, <uint32_t>n))
+        else:
+            # Unmatched-row path: native gather where right_view[i] < 0 → NULL row.
+            # ALL types supported (incl. ARRAY / INTERVAL / VARBINARY).
+            out_vecs.append(_take_native_with_null(
+                <Vector>right_morsel._cxx_column(right_names[j]), ridx, <uint32_t>n))
 
-    cdef const int32_t* ridx
-    if not right_has_neg:
-        # Fast path: no null rows — native gather off the memoryview.
-        ridx = &right_view[0] if n > 0 else NULL
-        for j in range(ncols_right):
-            result._col_names.append(right_morsel._col_names[j])
-            result._append_column(_take_native(right_morsel._get_column(j), ridx, <uint32_t>n))
-    else:
-        # Unmatched-row path: native gather where right_view[i] < 0 → NULL row.
-        # No to_pylist round-trip, no per-type reconstruction; ALL types
-        # supported (incl. ARRAY / INTERVAL / VARBINARY).
-        ridx = &right_view[0] if n > 0 else NULL
-        for j in range(ncols_right):
-            result._col_names.append(right_morsel._col_names[j])
-            result._append_column(
-                _take_native_with_null(right_morsel._get_column(j), ridx, <uint32_t>n))
-
+    if left_morsel._cxx is not None or right_morsel._cxx is not None:
+        return Morsel.from_cxx_vectors(out_names, out_vecs)
+    cdef Morsel result = _make_morsel()
+    result._col_names = out_names
+    for j in range(len(out_vecs)):
+        result._append_column(<Vector>out_vecs[j])
     return result

@@ -20,7 +20,7 @@ Includes:
 import math
 
 from opteryx.third_party import yyjson
-from opteryx.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
+from opteryx.types.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
 # ============================================================================
 # Math utility functions for vector operations
@@ -217,7 +217,7 @@ def _cosine_similarity_text(arr, val):
 
     from array import array
 
-    from opteryx.vectors import vector_math
+    from opteryx.types.vectors import vector_math
 
     embedded = embed_text_matrix([query_text, *active_texts])
     n_active = len(active_texts)
@@ -289,8 +289,8 @@ def cosine_distance(arr, val):
 
 def embed(arr):
     """Convert text values into a fp16 VectorVector using the configured embedding provider."""
-    from opteryx.vectors import vector_math
-    from opteryx.vectors.embeddings import (
+    from opteryx.types.vectors import vector_math
+    from opteryx.types.vectors.embeddings import (
         _provider_dimensions,
         _raise_embeddings_unavailable,
         get_embedding_provider,
@@ -417,7 +417,7 @@ def array_contains_all(arr, val):
 
 def array_cast(array, element_type):
     from opteryx.types.logical_type import LogicalCategory
-    from opteryx.types.value_parsing import parser_for
+    from opteryx.types.scalars.value_parsing import parser_for
 
     array = array.tolist()
     result = [None] * len(array)
@@ -437,7 +437,7 @@ def array_cast_safe(array, element_type):
     from contextlib import suppress
 
     from opteryx.types.logical_type import LogicalCategory
-    from opteryx.types.value_parsing import parser_for
+    from opteryx.types.scalars.value_parsing import parser_for
 
     result = [None] * len(array)
     parser = parser_for(LogicalCategory[element_type[0]])

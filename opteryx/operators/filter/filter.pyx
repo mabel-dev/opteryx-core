@@ -28,6 +28,7 @@ from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
+from opteryx.expression.evaluator.evaluation import evaluate_c_native_cxx as _evaluate_c_native_cxx
 from opteryx.models import QueryProperties
 
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
@@ -210,7 +211,13 @@ cdef class FilterNode(BasePlanNode):
             self._emit_cdef(morsel)
             return
 
-        mask = _execute_bytecode(self._compiled_filter, morsel)
+        # S3: for all-C-native predicates, evaluate over the CxxMorsel substrate
+        # (columns straight from columns[idx].view, nogil inner) — no per-column
+        # Vector build. Other predicates stay on the Morsel VM path.
+        if self._compiled_filter.is_all_c_native:
+            mask = _evaluate_c_native_cxx(self._compiled_filter, morsel)
+        else:
+            mask = _execute_bytecode(self._compiled_filter, morsel)
         filtered = morsel.filter_mask(mask)
 
         if self._const_replacements:
