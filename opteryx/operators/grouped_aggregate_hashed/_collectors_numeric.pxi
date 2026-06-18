@@ -209,17 +209,20 @@ cdef inline void _ensure_validity_bitmap(DrakenFixedBuffer* buf) except *:
         buf.null_bitmap = _alloc_all_valid_bitmap(<int64_t>buf.length)
 
 
-cdef inline void _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, int64_t new_count) except *:
+cdef inline bint _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, int64_t new_count) noexcept nogil:
     # realloc rather than malloc+memcpy: at large sizes the allocator extends
     # the mapping in place, skipping the copy of the live prefix. The tail
     # memset is semantic, not hygiene — counts/sums must start at zero.
+    # Returns False on allocation failure (the nogil-callable status-return that
+    # replaces `raise MemoryError`); the GIL caller raises, the nogil ingest sets
+    # an error and bails — never proceeds with an ungrown buffer.
     cdef void* new_data
     cdef Py_ssize_t old_bytes
     cdef Py_ssize_t new_bytes
 
     if new_count <= old_count:
         buf.length = <size_t>new_count
-        return
+        return True
 
     old_bytes = <Py_ssize_t>(old_count * <int64_t>buf.itemsize)
     new_bytes = <Py_ssize_t>(new_count * <int64_t>buf.itemsize)
@@ -229,17 +232,18 @@ cdef inline void _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, i
             free(buf.data)
         buf.data = NULL
         buf.length = <size_t>new_count
-        return
+        return True
 
     new_data = realloc(buf.data, new_bytes)
     if new_data == NULL:
-        raise MemoryError()
+        return False
 
     if new_bytes > old_bytes:
         memset(<uint8_t*>new_data + old_bytes, 0, new_bytes - old_bytes)
 
     buf.data = new_data
     buf.length = <size_t>new_count
+    return True
 
 
 cdef inline int64_t _grow_target(int64_t capacity, int64_t new_count) noexcept nogil:
@@ -249,7 +253,9 @@ cdef inline int64_t _grow_target(int64_t capacity, int64_t new_count) noexcept n
     return target
 
 
-cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t new_count, bint fill_valid) except *:
+cdef inline bint _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t new_count, bint fill_valid) noexcept nogil:
+    # Returns False on allocation failure (status-return replacing raise; same
+    # contract as _grow_fixed_buffer).
     cdef Py_ssize_t old_bytes = _bitmap_nbytes(old_count)
     cdef Py_ssize_t new_bytes = _bitmap_nbytes(new_count)
     cdef uint8_t fill_byte = 0xFF if fill_valid else 0x00
@@ -259,7 +265,7 @@ cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t n
         if bitmap_ref[0] != NULL:
             free(bitmap_ref[0])
             bitmap_ref[0] = NULL
-        return
+        return True
 
     # realloc preserves the live prefix; only the new tail needs the fill
     # byte. A fresh bitmap (NULL in) has no prefix, so fill everything.
@@ -268,12 +274,13 @@ cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t n
 
     new_bitmap = <uint8_t*>realloc(bitmap_ref[0], new_bytes)
     if new_bitmap == NULL:
-        raise MemoryError()
+        return False
 
     if new_bytes > old_bytes:
         memset(new_bitmap + old_bytes, fill_byte, new_bytes - old_bytes)
 
     bitmap_ref[0] = new_bitmap
+    return True
 
 
 cdef inline Vector _materialize_fixed_buffer(

@@ -53,8 +53,18 @@ cdef class BaseCollector:
         self._col_idx = -1
 
     cdef void grow(self, int64_t new_count):
-        """Resize internal state to hold new_count groups."""
-        pass
+        """Resize internal state to hold new_count groups (GIL ingest path).
+        Default delegates to grow_nogil and raises on allocation failure, so a
+        numeric collector overrides only grow_nogil; collectors with a Python grow
+        (ARRAY_AGG) override this directly."""
+        if not self.grow_nogil(new_count):
+            raise MemoryError()
+
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
+        """nogil resize returning False on allocation failure. Overridden by
+        nogil-capable (numeric) collectors so the engine's nogil ingest_cxx span
+        can grow state with the GIL released; default no-op success."""
+        return True
 
     cdef inline void _telemetry_begin_finalize(self) noexcept:
         if self.telemetry_enabled:
