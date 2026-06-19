@@ -506,19 +506,6 @@ cdef class CountStarCollector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
         return out
 
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        cdef CountStarCollector o = <CountStarCollector>other
-        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>o._counts.data)[other_idx]
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>(<CountStarCollector>other)._counts.data)[other_idx]
-
 # ---------------------------------------------------------------------------
 # COUNT(col) — skip NULLs
 # ---------------------------------------------------------------------------
@@ -566,19 +553,6 @@ cdef class CountValueCollector(BaseCollector):
         cdef Vector out = _slice_int64_buffer(self._counts, start, stop)
         self._time_finalize_ns += _now_ns() - start_ns
         return out
-
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        cdef CountValueCollector o = <CountValueCollector>other
-        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>o._counts.data)[other_idx]
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>(<CountValueCollector>other)._counts.data)[other_idx]
 
 # ---------------------------------------------------------------------------
 # SUM(int64)
@@ -686,31 +660,6 @@ cdef class SumInt64Collector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
         return result
 
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        # SUM partials add. _seen marks groups that saw a non-null value; OR it in
-        # so a group seen in either partition finalizes non-null (other's slot is 0
-        # when unseen, so the add is harmless).
-        cdef SumInt64Collector o = <SumInt64Collector>other
-        (<int64_t*>self._sums.data)[self_idx] += (<int64_t*>o._sums.data)[other_idx]
-        if o._seen != NULL and _num_bitmap_valid(o._seen, other_idx) and self._seen != NULL:
-            _bitmap_set(self._seen, self_idx)
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        # Borrowed inline casts only — a `cdef SumInt64Collector o = <...>other`
-        # assignment would incref (needs the GIL); read other's buffers through
-        # repeated casts of the (already type-checked) argument instead.
-        cdef int64_t* o_sums = <int64_t*>(<SumInt64Collector>other)._sums.data
-        cdef uint8_t* o_seen = (<SumInt64Collector>other)._seen
-        (<int64_t*>self._sums.data)[self_idx] += o_sums[other_idx]
-        if o_seen != NULL and _num_bitmap_valid(o_seen, other_idx) and self._seen != NULL:
-            _bitmap_set(self._seen, self_idx)
-
 # ---------------------------------------------------------------------------
 # SUM(float64)
 # ---------------------------------------------------------------------------
@@ -808,27 +757,6 @@ cdef class SumFloat64Collector(BaseCollector):
                 self._seen = NULL
 
         return _slice_float64_buffer(out, start, stop)
-
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        # Float SUM partials add; cross-partition order may differ from serial in
-        # the last ULP (the property test allows a relative tolerance for floats).
-        cdef SumFloat64Collector o = <SumFloat64Collector>other
-        (<double*>self._sums.data)[self_idx] += (<double*>o._sums.data)[other_idx]
-        if o._seen != NULL and _num_bitmap_valid(o._seen, other_idx) and self._seen != NULL:
-            _bitmap_set(self._seen, self_idx)
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        cdef double* o_sums = <double*>(<SumFloat64Collector>other)._sums.data
-        cdef uint8_t* o_seen = (<SumFloat64Collector>other)._seen
-        (<double*>self._sums.data)[self_idx] += o_sums[other_idx]
-        if o_seen != NULL and _num_bitmap_valid(o_seen, other_idx) and self._seen != NULL:
-            _bitmap_set(self._seen, self_idx)
 
 # ---------------------------------------------------------------------------
 # MIN/MAX(int64)   direction: +1 = MIN, -1 = MAX
@@ -963,54 +891,6 @@ cdef class MinMaxInt64Collector(BaseCollector):
         return _build_temporal_from_int64(
             <int64_t*>out.data, out.null_bitmap, start, stop - start,
             self._out_type, self._out_unit)
-
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        # MIN/MAX is seen-aware on the raw int representation (correct ordering for
-        # INT and int-backed temporals within one unit); finalize re-tags the type.
-        # direction 0 (ANY_VALUE): keep self's existing value, take other's only if
-        # self has none — matching the per-row "first value per group" semantics.
-        cdef MinMaxInt64Collector o = <MinMaxInt64Collector>other
-        if o._seen == NULL or not _num_bitmap_valid(o._seen, other_idx):
-            return
-        cdef int64_t v = (<int64_t*>o._values.data)[other_idx]
-        cdef int64_t* sv = <int64_t*>self._values.data
-        cdef int8_t direction = self._direction
-        if self._seen == NULL or not _num_bitmap_valid(self._seen, self_idx):
-            sv[self_idx] = v
-            if self._seen != NULL:
-                _bitmap_set(self._seen, self_idx)
-            return
-        if direction == 1:
-            if v < sv[self_idx]:
-                sv[self_idx] = v
-        elif direction == -1:
-            if v > sv[self_idx]:
-                sv[self_idx] = v
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        cdef uint8_t* o_seen = (<MinMaxInt64Collector>other)._seen
-        if o_seen == NULL or not _num_bitmap_valid(o_seen, other_idx):
-            return
-        cdef int64_t v = (<int64_t*>(<MinMaxInt64Collector>other)._values.data)[other_idx]
-        cdef int64_t* sv = <int64_t*>self._values.data
-        cdef int8_t direction = self._direction
-        if self._seen == NULL or not _num_bitmap_valid(self._seen, self_idx):
-            sv[self_idx] = v
-            if self._seen != NULL:
-                _bitmap_set(self._seen, self_idx)
-            return
-        if direction == 1:
-            if v < sv[self_idx]:
-                sv[self_idx] = v
-        elif direction == -1:
-            if v > sv[self_idx]:
-                sv[self_idx] = v
 
 # ---------------------------------------------------------------------------
 # MIN/MAX(float64)
@@ -1178,52 +1058,6 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         if self._out_type == DRAKEN_FLOAT32:
             return _build_float32_from_float64(<double*>out.data, out.null_bitmap, start, stop - start)
         return _slice_float64_buffer(out, start, stop)
-
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        # As MinMaxInt64Collector but in double; FLOAT32 sources stored as double
-        # and narrowed back at finalize, so the merge is identical.
-        cdef MinMaxFloat64Collector o = <MinMaxFloat64Collector>other
-        if o._seen == NULL or not _num_bitmap_valid(o._seen, other_idx):
-            return
-        cdef double v = (<double*>o._values.data)[other_idx]
-        cdef double* sv = <double*>self._values.data
-        cdef int8_t direction = self._direction
-        if self._seen == NULL or not _num_bitmap_valid(self._seen, self_idx):
-            sv[self_idx] = v
-            if self._seen != NULL:
-                _bitmap_set(self._seen, self_idx)
-            return
-        if direction == 1:
-            if v < sv[self_idx]:
-                sv[self_idx] = v
-        elif direction == -1:
-            if v > sv[self_idx]:
-                sv[self_idx] = v
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        cdef uint8_t* o_seen = (<MinMaxFloat64Collector>other)._seen
-        if o_seen == NULL or not _num_bitmap_valid(o_seen, other_idx):
-            return
-        cdef double v = (<double*>(<MinMaxFloat64Collector>other)._values.data)[other_idx]
-        cdef double* sv = <double*>self._values.data
-        cdef int8_t direction = self._direction
-        if self._seen == NULL or not _num_bitmap_valid(self._seen, self_idx):
-            sv[self_idx] = v
-            if self._seen != NULL:
-                _bitmap_set(self._seen, self_idx)
-            return
-        if direction == 1:
-            if v < sv[self_idx]:
-                sv[self_idx] = v
-        elif direction == -1:
-            if v > sv[self_idx]:
-                sv[self_idx] = v
 
 # ---------------------------------------------------------------------------
 # MIN/MAX(bool) — false < true: MIN = AND-reduce, MAX = OR-reduce over non-nulls.
@@ -1794,24 +1628,6 @@ cdef class AvgCollector(BaseCollector):
                 _bitmap_clear(out.null_bitmap, i)
 
         return _slice_float64_buffer(out, start, stop)
-
-    cdef bint is_mergeable(self) noexcept:
-        return True
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        # AVG holds (sum, count) per group; both add. finalize recomputes sum/count
-        # so the merged ratio equals the serial average exactly (modulo float order).
-        cdef AvgCollector o = <AvgCollector>other
-        (<double*>self._sums.data)[self_idx] += (<double*>o._sums.data)[other_idx]
-        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>o._counts.data)[other_idx]
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        return True
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        (<double*>self._sums.data)[self_idx] += (<double*>(<AvgCollector>other)._sums.data)[other_idx]
-        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>(<AvgCollector>other)._counts.data)[other_idx]
-
 
 cdef class AvgDecimalCollector(BaseCollector):
     """AVG for DECIMAL columns.

@@ -15,16 +15,10 @@ those with NO cross-worker recombination tax:
     STREAM their finished morsels out — no merge, no barrier. ``_stateless_stream``.
   * **Ungrouped aggregate** (``scan → stateless* → UngroupedAggregate``): no group
     key, so recombination is a trivial SCALAR merge. ``_ungrouped_agg_stream``.
-  * **Grouped aggregate** (``scan → stateless* → GroupedAggregate``): recombination
-    is a per-group merge (key probe + state transplant). Previously this REGRESSED
-    because the merge was GIL-bound (serial-merge Amdahl wall). Under free-threaded
-    CPython the merge runs GIL-free (``GroupHashEngine.merge`` over per-worker
-    clones, measured 6.4×–7.2× vs serial), so GROUP BY is parallelised again.
-    ``_grouped_agg_stream``. The grouped engine resolves collectors lazily, so
-    mergeability is decided at RUNTIME on the first morsel (not at plan time): a
-    non-mergeable aggregate (COUNT DISTINCT / MEDIAN / decimal / string / bool /
-    interval MIN-MAX) finishes serially through the breaker (capability routing,
-    not a perf gate).
+
+GROUP BY is NOT parallelised: it is folded to serial-only. The clone-per-worker +
+per-group merge recombination cost ≈ the aggregation itself at high cardinality,
+so parallel GROUP BY lost on ClickBench; grouped plans run on the serial engine.
 
 Shared infrastructure: ``resolve_worker_count`` (cap 8), ``identify_segments``
 (cut the DAG into pipeline segments), ``pull_one`` (the concurrent-safe scan
@@ -145,52 +139,6 @@ def identify_segments(plan) -> List[Segment]:
     return segments
 
 
-# NOTE: GROUP BY parallelism was previously removed because the cross-worker
-# recombination (a per-group merge) was GIL-bound — serial merge was an Amdahl
-# wall that exceeded the keying gain. Under free-threaded CPython that wall is
-# gone: the per-group merge runs GIL-free (GroupHashEngine.merge over per-worker
-# clones), measured 6.4×–7.2× vs serial. So GROUP BY is parallelised again — same
-# clone-per-worker / self-pull / recombine shape as the ungrouped path, just with
-# the per-group merge() instead of a scalar merge.
-
-
-def _find_parallel_grouped_agg(plan):
-    """Return ``(scan_id, middle_ids, breaker_id)`` for a single-scan
-    ``scan → stateless* → grouped-aggregate`` pipeline (a candidate by SHAPE),
-    else ``None``.
-
-    Unlike the ungrouped case the recombination is a per-group merge (key probe +
-    state transplant), not a scalar merge — but under free-threading that merge is
-    GIL-free, so it no longer dominates.
-
-    This finder gates on SHAPE only. It does NOT consult ``engine.is_mergeable()``:
-    the grouped engine resolves its collectors lazily (deferred until the first
-    morsel reveals the column type), so mergeability is unknowable at plan time and
-    is always False here. The mergeable-vs-serial decision is made at runtime in
-    ``_grouped_agg_stream`` once the first morsel resolves the collectors —
-    correctness routing by capability, NOT a perf gate.
-    """
-    registry = get_registry()
-    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
-    if len(scans) != 1:
-        return None
-    scan_id = scans[0]
-    segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
-    if segment is None or not segment.tail_is_breaker:
-        return None
-    breaker = plan[segment.tail]
-    if breaker.__class__.__name__ != "GroupedAggregateHashedNode":
-        return None
-    if getattr(breaker, "_engine", None) is None:
-        return None
-    middle_ids = list(segment.nodes[1:-1])
-    for nid in middle_ids:
-        meta = registry.get(type(plan[nid]))
-        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
-            return None
-    return scan_id, middle_ids, segment.tail
-
-
 def _find_parallel_ungrouped_agg(plan):
     """Return ``(scan_id, middle_ids, breaker_id)`` for a single-scan
     ``scan → stateless* → ungrouped-aggregate`` pipeline, else ``None``.
@@ -287,12 +235,13 @@ def execute(plan, head_node=None, telemetry=None):
     """
     from opteryx.managers.execution import serial_engine
 
+    # GROUP BY is folded to serial-only: the serial ingest no longer maintains the
+    # per-group merge state, and parallel GROUP BY lost on ClickBench (recombination
+    # ≈ aggregation at high cardinality). Grouped plans fall through to the serial
+    # engine below; only ungrouped-aggregate and stateless pipelines parallelise.
     ungrouped = _find_parallel_ungrouped_agg(plan)
-    grouped = None if ungrouped is not None else _find_parallel_grouped_agg(plan)
-    stateless = (
-        None if (ungrouped is not None or grouped is not None) else _find_parallel_stateless(plan)
-    )
-    if ungrouped is None and grouped is None and stateless is None:
+    stateless = None if ungrouped is not None else _find_parallel_stateless(plan)
+    if ungrouped is None and stateless is None:
         if telemetry is not None:
             telemetry._reading["parallel_engaged"] = 0
         return serial_engine.execute(plan, head_node=head_node, telemetry=telemetry)
@@ -310,12 +259,6 @@ def execute(plan, head_node=None, telemetry=None):
         scan_id, middle_ids, breaker_id = ungrouped
         return (
             _ungrouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
-            ResultType.TABULAR,
-        )
-    if grouped is not None:
-        scan_id, middle_ids, breaker_id = grouped
-        return (
-            _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
             ResultType.TABULAR,
         )
     scan_id, op_ids, exit_id = stateless
@@ -422,157 +365,6 @@ def _ungrouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, teleme
             for k in populated[1:]:
                 base_engine.merge(clones[k][1]._engine)
             breaker._engine = base_engine
-        push_one(breaker, _EOS_SENTINEL)
-        yield from _drain()
-    finally:
-        if pool is not None:
-            pool.shutdown(wait=True)
-        ctx.terminate()
-        scan.close_source()
-
-
-def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry=None):
-    """Parallel GROUPED aggregate (GROUP BY). W workers SELF-PULL morsels and
-    ingest each into their OWN private cloned engine (keying + accumulate is
-    GIL-free per-engine), then the W partials are combined into one by the
-    existing per-group merge (key probe + state transplant). Under free-threading
-    that merge is GIL-free (GroupHashEngine.merge over disjoint partitions), so the
-    recombination tax that previously sank this shape no longer dominates.
-
-    The operator stays parallel-unaware: the ENGINE clones it per worker, routes
-    morsels, and recombines. Result is identical to the serial path for every
-    group-key shape merge() supports (single-, multi- and zero-column; null and
-    bool keys) and every mergeable aggregate.
-
-    **Mergeability is decided at RUNTIME, not at plan time.** The grouped engine
-    uses *deferred* collectors that only resolve to a concrete type (int / float /
-    decimal / string / …) on the first morsel, so ``engine.is_mergeable()`` is
-    unknowable before any data flows — the finder can only gate on *shape*. So we
-    ingest the first buffered morsel into the ORIGINAL breaker (single-threaded,
-    through the real middle-op chain) to RESOLVE its collectors, then check
-    ``is_mergeable()``:
-
-      * not mergeable (COUNT DISTINCT / MEDIAN / decimal / string / bool / interval
-        MIN-MAX) → finish the whole query SERIALLY through the breaker (correctness
-        routing by capability — the breaker already holds morsel 0);
-      * mergeable → fan W workers over the REMAINING morsels into per-worker engine
-        clones, then per-group ``merge()`` each worker engine INTO the breaker's
-        engine (which already holds morsel 0's groups) — no work discarded.
-    """
-    import threading
-
-    from opteryx.compiled.thread_pool import CppThreadPool
-    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
-    from opteryx.operators._operators import pull_one
-
-    chains, exit_node, ctx = compile_pipeline(plan)
-    scan = plan[scan_id]
-    breaker = plan[breaker_id]
-    head = plan[middle_ids[0]] if middle_ids else breaker
-
-    def _drain():
-        if exit_node is None:
-            return
-        while exit_node.has_pending():
-            yield exit_node.pop_pending()
-
-    def _finish_serial(remaining):
-        """Drive `remaining` morsels through the original breaker, then EOS."""
-        for m in remaining:
-            if ctx.is_terminated():
-                return
-            push_one(head, m)
-            yield from _drain()
-        while True:
-            if ctx.is_terminated():
-                return
-            m = pull_one(scan)
-            if m is None:
-                break
-            push_one(head, m)
-            yield from _drain()
-        if not ctx.is_terminated():
-            push_one(head, _EOS_SENTINEL)
-            yield from _drain()
-
-    pool = None
-    try:
-        # Row-floor: tiny inputs run serially (clone + thread setup dominate).
-        buffer = []
-        buffered_rows = 0
-        exhausted = False
-        while buffered_rows < config.PARALLEL_MIN_ROWS:
-            morsel = pull_one(scan)
-            if morsel is None:
-                exhausted = True
-                break
-            buffer.append(morsel)
-            buffered_rows += morsel.num_rows
-
-        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
-            yield from _finish_serial(buffer)
-            return
-
-        # ---- Resolve mergeability on the first morsel (single-threaded) -------
-        # Push morsel 0 through the real middle-op chain into the ORIGINAL breaker
-        # so its deferred collectors resolve to concrete typed ones. NO EOS yet, so
-        # the breaker does not finalize/emit. This makes is_mergeable() answerable.
-        if buffer:
-            push_one(head, buffer[0])
-        if not breaker._engine.is_mergeable():
-            # Capability routing: a non-mergeable aggregate cannot be partitioned.
-            # The breaker already holds morsel 0; finish the rest serially.
-            yield from _finish_serial(buffer[1:])
-            return
-
-        # ---- Mergeable → parallel fan-out over the REMAINING morsels ----------
-        clones = [_build_clone_chain(plan, middle_ids, breaker, ctx) for _ in range(workers)]
-        errors = [None] * workers
-        ingested = [0] * workers
-        buf_iter = iter(buffer[1:])
-        pull_lock = threading.Lock()
-
-        def next_input():
-            with pull_lock:
-                if ctx.is_terminated():
-                    return None
-                buffered = next(buf_iter, None)
-                if buffered is not None:
-                    return buffered
-                return pull_one(scan)
-
-        def worker(index):
-            chain_head = clones[index][0]
-            count = 0
-            try:
-                while True:
-                    morsel = next_input()
-                    if morsel is None:
-                        break
-                    push_one(chain_head, morsel)
-                    count += 1
-            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
-                errors[index] = exc
-            ingested[index] = count
-
-        pool = CppThreadPool(workers, "m4-grouped-agg")
-        futures = [pool.submit(worker, k) for k in range(workers)]
-        for future in futures:
-            future.result()
-        for exc in errors:
-            if exc is not None:
-                raise exc
-        if ctx.is_terminated():
-            return
-
-        # Per-group merge of the W worker engines INTO the breaker's engine (which
-        # already holds morsel 0's groups), then finalise via the breaker (drives
-        # the serial tail + EOS). The breaker keeps its node-level finalize state
-        # (implicit COUNT(*), HAVING, aggregation specs).
-        base_engine = breaker._engine
-        for k in range(workers):
-            if ingested[k] > 0:
-                base_engine.merge(clones[k][1]._engine)
         push_one(breaker, _EOS_SENTINEL)
         yield from _drain()
     finally:

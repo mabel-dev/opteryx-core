@@ -194,29 +194,99 @@ inline void SeedDictionaryMapFromArena(
   }
 }
 
+// Flat open-addressing hash map for integer-keyed dictionary interning.
+//
+// Replaces std::unordered_map<T,int32_t> on the primitive (int32/int64) dictionary
+// intern hot path. std::unordered_map is node-based: every insert allocates and the
+// probe chain chases pointers, which dominates decode time on high-cardinality
+// columns (a near-unique int64 column does one insert per row). This is a contiguous
+// power-of-2 table with linear probing — no per-insert allocation, cache-friendly.
+// Slot is empty iff code < 0; codes are dense and non-negative so -1 is a safe
+// vacancy sentinel. Interning semantics are identical (codes assigned in first-seen
+// order), so the decoded output is byte-for-byte unchanged.
+template <typename T>
+struct PrimitiveDictHashMap {
+  struct Slot { T key; int32_t code; };
+  std::vector<Slot> slots;
+  size_t mask = 0;
+  size_t used = 0;
+
+  inline bool empty() const { return used == 0; }
+
+  static inline uint64_t hash_key(T key) {
+    // fmix64 (MurmurHash3 finalizer) — strong avalanche for integer keys.
+    uint64_t x = static_cast<uint64_t>(key);
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+  }
+
+  inline void insert_raw(T key, int32_t code) {
+    size_t b = static_cast<size_t>(hash_key(key)) & mask;
+    while (slots[b].code >= 0) b = (b + 1) & mask;
+    slots[b].key = key;
+    slots[b].code = code;
+    ++used;
+  }
+
+  void grow_to(size_t cap) {
+    std::vector<Slot> old = std::move(slots);
+    slots.assign(cap, Slot{T{}, -1});
+    mask = cap - 1;
+    used = 0;
+    for (const Slot& s : old)
+      if (s.code >= 0) insert_raw(s.key, s.code);
+  }
+
+  void reserve(size_t n) {
+    size_t cap = 16;
+    while (cap < (n * 2 + 1)) cap <<= 1;
+    if (cap > slots.size()) grow_to(cap);
+  }
+
+  // find existing code, or -1 if absent.
+  inline int32_t find(T key) const {
+    if (slots.empty()) return -1;
+    size_t b = static_cast<size_t>(hash_key(key)) & mask;
+    while (slots[b].code >= 0) {
+      if (slots[b].key == key) return slots[b].code;
+      b = (b + 1) & mask;
+    }
+    return -1;
+  }
+
+  // insert a key known to be absent, growing past a 0.75 load factor.
+  inline void put(T key, int32_t code) {
+    if (slots.empty() || (used + 1) * 4 >= slots.size() * 3)
+      grow_to(slots.empty() ? 16 : slots.size() << 1);
+    insert_raw(key, code);
+  }
+};
+
 template <typename T>
 inline int32_t InternPrimitiveToDictionary(
     T value,
-    std::unordered_map<T, int32_t>& dict_map,
+    PrimitiveDictHashMap<T>& dict_map,
     std::vector<T>& dict_values) {
-  auto it = dict_map.find(value);
-  if (it != dict_map.end()) {
-    return it->second;
+  int32_t code = dict_map.find(value);
+  if (code >= 0) {
+    return code;
   }
 
-  int32_t code = static_cast<int32_t>(dict_values.size());
+  code = static_cast<int32_t>(dict_values.size());
   dict_values.push_back(value);
-  dict_map.emplace(value, code);
+  dict_map.put(value, code);
   return code;
 }
 
 template <typename T>
 inline void SeedPrimitiveDictionaryMap(
-    std::unordered_map<T, int32_t>& dict_map,
+    PrimitiveDictHashMap<T>& dict_map,
     const std::vector<T>& dict_values) {
-  dict_map.reserve(dict_values.size() * 2 + 1);
+  dict_map.reserve(dict_values.size());
   for (size_t i = 0; i < dict_values.size(); ++i) {
-    dict_map.emplace(dict_values[i], static_cast<int32_t>(i));
+    dict_map.put(dict_values[i], static_cast<int32_t>(i));
   }
 }
 
@@ -626,8 +696,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
     StringInternTable unified_dict_map;
-    std::unordered_map<int32_t, int32_t> int32_dict_map;
-    std::unordered_map<int64_t, int32_t> int64_dict_map;
+    PrimitiveDictHashMap<int32_t> int32_dict_map;
+    PrimitiveDictHashMap<int64_t> int64_dict_map;
     std::unordered_map<uint32_t, int32_t> float32_dict_map;
     std::unordered_map<uint64_t, int32_t> float64_dict_map;
 

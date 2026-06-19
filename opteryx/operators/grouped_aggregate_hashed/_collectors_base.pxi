@@ -107,44 +107,4 @@ cdef class BaseCollector:
         """Return an output Vector for groups in [start, stop)."""
         return None
 
-    # ---- WP-7 partition-parallel merge -----------------------------------
-    # A parallel engine runs one GroupHashEngine per worker over a disjoint
-    # partition, then combines per-group collector state with merge_group_state
-    # before a single finalize. A collector is mergeable only if combining two
-    # partial per-group accumulators is exact (COUNT→add, SUM→add, MIN/MAX→
-    # seen-aware, AVG→add sums+counts). Collectors whose partials cannot be
-    # combined without the original rows (MEDIAN) or via an API not yet exposed
-    # (COUNT DISTINCT), and the collectors not yet wired for merge (decimal /
-    # string / bool / interval MIN/MAX, decimal AVG/SUM), report is_mergeable()
-    # ==False so the engine keeps the whole aggregation serial rather than
-    # producing a wrong answer.
-    cdef bint is_mergeable(self) noexcept:
-        return False
-
-    cdef void merge_group_state(self, BaseCollector other, int64_t other_idx, int64_t self_idx) except *:
-        """Combine other's group `other_idx` accumulator into self's group
-        `self_idx`. The caller (GroupHashEngine.merge) guarantees
-        type(self) is type(other) BEFORE calling, because the <Type>other cast in
-        the overrides is UNCHECKED — a type mismatch would read the wrong struct
-        layout (memory corruption)."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support partition-parallel merge"
-        )
-
-    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
-        """nogil sibling of merge_group_state for the GIL-free parallel per-bin
-        merge. The numeric mergeable collectors override this with a pure pointer
-        add / seen-aware compare (no allocation, no Python). Same UNCHECKED-cast
-        contract as merge_group_state: the engine verifies type(self) is
-        type(other) once before the nogil span. Default no-op: a collector that
-        is_mergeable()==False is never reached on the nogil merge path (the engine
-        gates on is_mergeable_nogil)."""
-        pass
-
-    cdef bint is_mergeable_nogil(self) noexcept nogil:
-        """True iff this collector's merge_group_state_nogil is a real nogil
-        transplant (every mergeable numeric collector). Distinct from
-        is_mergeable() which is noexcept-but-GIL: the nogil merge needs a
-        GIL-free predicate too. Default False."""
-        return False
 

@@ -2,8 +2,10 @@
 # Cython shim for draken.vectors.bool_vector — E.24 vtable bridge.
 
 from cpython.object cimport PyObject
+from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from libc.stdint cimport uint8_t, uint32_t
 from libc.stddef cimport size_t
+from libc.string cimport memset
 
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL
 from draken.vectors.vector cimport Vector
@@ -51,15 +53,37 @@ cdef class BoolVector(Vector):
         return BoolVector(a_or_b.bool_and(a_and_b.bool_not()))
 
     def to_byte_array(self):
-        cdef list values = self._nb.to_pylist()
-        cdef Py_ssize_t n = len(values)
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef bytearray ba = bytearray(nbytes)
-        cdef Py_ssize_t i
-        for i in range(n):
-            if values[i]:
-                ba[i >> 3] |= (1 << (i & 7))
-        return ba
+        """Pack the logical bool values into an LSB-first byte bitmask (one bit
+        per logical row; NULL rows clear to 0). Fully native: reads the unified
+        DrakenVector bitmap directly (``data[selection[i]]`` AND validity) in a
+        nogil loop — no per-row Python objects, no to_pylist."""
+        cdef const DrakenVector* dv = draken_vector_unwrap(<PyObject*>self._nb)
+        cdef uint32_t n = dv.length
+        cdef Py_ssize_t nbytes = (<Py_ssize_t>n + 7) >> 3
+        cdef object out = PyBytes_FromStringAndSize(NULL, nbytes)
+        if n == 0:
+            return out
+        cdef uint8_t* buf = <uint8_t*>PyBytes_AS_STRING(out)
+        cdef const uint8_t* data = <const uint8_t*>dv.data
+        cdef const uint32_t* sel = dv.selection
+        cdef const uint8_t* validity = dv.validity
+        cdef uint32_t i, code
+        cdef uint8_t bit
+        with nogil:
+            memset(buf, 0, <size_t>nbytes)
+            if validity == NULL:
+                for i in range(n):
+                    code = sel[i]
+                    if (data[code >> 3] >> (code & 7)) & 1:
+                        buf[i >> 3] |= <uint8_t>(1u << (i & 7))
+            else:
+                for i in range(n):
+                    code = sel[i]
+                    bit = <uint8_t>((data[code >> 3] >> (code & 7)) & 1)
+                    bit &= <uint8_t>((validity[i >> 3] >> (i & 7)) & 1)
+                    if bit:
+                        buf[i >> 3] |= <uint8_t>(1u << (i & 7))
+        return out
 
     def any(self):
         return self._nb.bool_any()
