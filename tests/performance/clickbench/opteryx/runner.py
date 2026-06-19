@@ -144,6 +144,7 @@ if __name__ == "__main__":  # pragma: no cover
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _duckdb_dir = os.path.join(_script_dir, "..", "duckdb")
     _local = os.path.join(_duckdb_dir, "results.local.json")
+    # _local = os.path.join(_duckdb_dir, "results.local.single_thread.json")
     _remote = os.path.join(_duckdb_dir, "results.c6a.4xlarge.json")
     if args.duckdb_baseline is None:
         if os.path.exists(_local):

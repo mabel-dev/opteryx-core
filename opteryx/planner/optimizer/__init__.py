@@ -65,6 +65,7 @@ from opteryx.planner.optimizer.strategies import (
     RedundantOperationsStrategy,
     SplitConjunctivePredicatesStrategy,
     StatisticsOnlyResponseStrategy,
+    TimestampCastSinkStrategy,
     TopNScanPushdownStrategy,
 )
 
@@ -142,6 +143,10 @@ class OptimizerVisitor:
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             FilterImpliedGroupKeyReductionStrategy(telemetry),
             ProjectionPushdownStrategy(telemetry),
+            # Sink pure-retag INT64::TIMESTAMP[unit] casts into the scan output
+            # type (reader retags; cast resolves to identity). After projection
+            # pushdown so scan.columns/scan.predicates are settled.
+            TimestampCastSinkStrategy(telemetry),
             JoinEliminationStrategy(telemetry),
             JoinRewriteStrategy(telemetry),
             JoinOrderingStrategy(telemetry),

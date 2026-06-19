@@ -7981,6 +7981,53 @@ NB_MODULE(draken_native, m) {
         "Reinterpret INT64 vector data as TIMESTAMP64 with the given unit "
         "(\"s\"/\"ms\"/\"us\"/\"ns\"; default \"us\"). Returns new Vector.");
 
+    // vector_retag_int64_as_timestamp64 — ZERO-COPY retag of an INT64 vector to
+    // TIMESTAMP64. Where vector_reinterpret_as_timestamp64 materialises a fresh
+    // dense copy, this MOVES the source's owned buffers into the new TIMESTAMP64
+    // owner — no data movement, and the source's shape (identity/constant/dict
+    // selection) is preserved verbatim. The source Vector is consequently
+    // emptied and MUST NOT be used afterwards; the caller must hold the SOLE
+    // reference. Used by the parquet reader's logical-type coercion, where the
+    // just-decoded int64 column is exclusively owned and immediately replaced.
+    m.def("vector_retag_int64_as_timestamp64",
+        [](nb::object obj, const std::string& unit) -> VectorOwner {
+            if (obj.is_none() || !nb::isinstance<VectorOwner>(obj))
+                throw std::invalid_argument(
+                    "vector_retag_int64_as_timestamp64: expected draken Vector");
+            VectorOwner* src = nb::inst_ptr<VectorOwner>(obj);
+            if (src->vec.type != DRAKEN_INT64)
+                throw std::invalid_argument(
+                    "vector_retag_int64_as_timestamp64: requires INT64 vector");
+            // Same payload, retagged type — selection/validity/data unchanged.
+            DrakenVector v = src->vec;
+            v.type = DRAKEN_TIMESTAMP64;
+            // Transfer buffer ownership. data_buf/validity_buf/codes_buf now
+            // belong to the new owner; v's pointers still address them (valid).
+            VectorOwner owner(v,
+                              std::move(src->data_buf),
+                              std::move(src->validity_buf),
+                              std::move(src->codes_buf));
+            // Empty the husk: its unique_ptrs are already null from the move (so
+            // it frees nothing), but null the borrowed pointers and lengths too
+            // so a stray read of the moved-from source sees an empty vector
+            // rather than buffers now owned elsewhere.
+            src->vec.data = nullptr;
+            src->vec.validity = nullptr;
+            src->vec.length = 0;
+            src->vec.data_length = 0;
+            LogicalType lt;
+            lt.kind = LogicalKind::TIMESTAMP;
+            lt.unit = str_to_unit(unit);
+            lt.offset_minutes = 0;
+            owner.logical_type = logical_type_intern(lt);
+            return owner;
+        },
+        nb::arg("vec"), nb::arg("unit") = std::string("us"),
+        "Zero-copy retag of an INT64 Vector to TIMESTAMP64 with the given unit "
+        "(\"s\"/\"ms\"/\"us\"/\"ns\"). MOVES the source's buffers — the source "
+        "Vector is emptied and must not be used afterwards; caller must hold the "
+        "sole reference.");
+
     // vector_reinterpret_as_time32 — INT64 vector → TIME32 (int32, unit-tagged).
     // Values are cast to int32 (counts-since-midnight in `unit`).
     m.def("vector_reinterpret_as_time32",

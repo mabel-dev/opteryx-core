@@ -9,29 +9,33 @@ All measurements: free-threaded CPython 3.14t (GIL off), Apple Silicon (18
 logical / **6 performance** cores), full ClickBench `hits` (~92M rows), scan
 excluded unless stated, warm, min-of-3, W = worker count.
 
-> **⭐ 2026-06-19 — riskiest unknowns now measured with a REAL native scatter
-> kernel; this supersedes earlier estimates.** (1) The real minimal scatter costs
-> **320–420ms @ W8, not the assumed 130ms** → true end-to-end for COUNT is
-> **~2.4–2.9× @ W8, NOT 4.5×** (keying still ~6–7×, but the *serial* scatter is now
-> the prelude bottleneck). (2) **Key skew is a hard killer** — degrades to 1.3× at
-> 50% hot key and **0.7× (loses) at 90%**, crossing serial ~70% — **skew mitigation
-> is mandatory before default-on.** (3) **The holistic-aggregate advantage is REAL
-> and verified** — COUNT(DISTINCT) parallelizes **3.84× @ W8, exactly correct**;
-> the merge model cannot do this at all. (4) Multi-col + NULL keys verified correct.
-> **Reframe: the design's value is parallelizing holistic/non-mergeable aggregates
-> (COUNT(DISTINCT) ≈ 17% of ClickBench, MEDIAN, PERCENTILE), NOT faster COUNT** (which
-> at ~2.4× and skew-fragile is marginal). Two prerequisites: parallelize the scatter
-> (it is ~47% of the COUNT(DISTINCT) total; would lift COUNT→~4×, DISTINCT→~6×) and
-> skew mitigation.
+> **⭐ 2026-06-19 — riskiest unknowns measured with a REAL native scatter
+> kernel.** This block is the current truth; older inline figures in §3/§4 have
+> been reconciled to it.
 >
-> **⭐ Update — both prerequisites now MEASURED green (2026-06-19).** Parallel
-> multi-producer scatter scales **5–6× (NOT bandwidth-bound)** → e2e **COUNT
-> 2.34→3.31×, COUNT(DISTINCT) 3.74→4.78×** (short of the inferred 4×/6× only due to
-> a *serial materialization tail* — `scatter_to_morsels` concat-memcpy + Morsel wrap
-> — which producer-side output buffers / pipelining would recover; not a wall). **Skew
-> handled:** salting rescues mergeable COUNT (90%-hot 0.97→**2.17×**, ~free on
-> uniform, bins balanced); holistic COUNT(DISTINCT) is **naturally robust to
-> group-key skew** (routes by value). **Design is de-risked and worth building.**
+> 1. **Scatter cost.** The real minimal fixed-width scatter costs **320–420ms @ W8**
+>    serial. With a **parallel multi-producer scatter** (scales **5–6×, NOT
+>    bandwidth-bound**) the end-to-end is **COUNT 3.31× @ W8** and **grouped
+>    COUNT(DISTINCT) 4.78× @ W8, exactly correct**. Both fall short of the
+>    keying-only ~7× / ~6× *only* because of a **serial materialization tail**
+>    (`scatter_to_morsels` concat-memcpy + Morsel wrap); producer-side output
+>    buffers / pipelining recover it — an optimization, not a wall.
+> 2. **Holistic aggregates parallelize for free, via the *same* route.** Because
+>    `hash(key)%W` sends every row of a group to one worker, that worker computes
+>    the group's *final* result with no cross-worker combine. This needs **no
+>    special routing** — COUNT(DISTINCT)/MEDIAN/PERCENTILE just work under
+>    route-by-group-key. This is the decisive advantage: the merge model cannot
+>    parallelize these at all. (The earlier "route by the distinct value's hash"
+>    special case is dropped as unwarranted complexity.)
+> 3. **Key skew is the one residual risk.** A single dominant key routes wholly to
+>    one bin (hash mixing distributes *distinct* keys, not occurrences of one key)
+>    → degrades toward serial (measured **0.7× @ 90%-hot**, crossing serial ~70%).
+>    **Salting is rejected:** it splits a key across bins and so reintroduces a
+>    merge, destroying the disjoint-slice→concat invariant that is the design's
+>    clearest win. Skew is handled by **algorithm selection** — the >floor scan
+>    sample (§7) estimates skew and routes dominant-hot-key shapes to serial. ⚑
+>    serial-cutover threshold needs calibration.
+> 4. **Multi-col + NULL keys verified correct == serial.**
 
 ---
 
@@ -97,7 +101,8 @@ concat (S7). Disjoint slices ⇒ **no merge**.
 
 - **Keying (S4) alone: ~7× @ W8** for COUNT and int COUNT(DISTINCT), still
   climbing at W8. This is the real, approximation-free number.
-- **End-to-end: ~4.5×** once S3 + S7 are included (see §4 for why 7 → 4.5).
+- **End-to-end: COUNT 3.31×, grouped COUNT(DISTINCT) 4.78× @ W8** with a parallel
+  scatter (see §4 for the 7 → 3.31 dilution and the recoverable materialization tail).
 - String keys: **~1.4×, walls at W4** (bandwidth-bound).
 
 **Verdict: the design.** It parallelizes the *dominant* stage (keying) instead of
@@ -116,7 +121,8 @@ unless noted; `?` = not measured; `<1` = regression.
 |---|---|---|---|---|
 | S1 Scan-IO | serial / parallel | int/str | 1 / ? | local mmap near-free; parallel folded into decode pool |
 | S2 Decode | parallel | int/str | ? | **already parallel, lock-free** 8-thread C++ pool; ratio never isolated |
-| S3 Scatter (minimal) | parallel | int | cost ≈ 0.09× of serial total | 51ms@W1 → 130ms@W8 (92M); **prototyped kernel, not in tree** |
+| S3 Scatter (minimal, serial) | — | int | 320–420ms@W8 (~0.2× of serial total) | real native kernel, **built** (`dev/_native_scatter.pyx`) |
+| S3 Scatter (minimal, parallel) | parallel | int | **5–6×** over serial scatter | multi-producer, **not bandwidth-bound** (`dev/_native_scatter_parallel.pyx`) |
 | S3 Scatter (`partition_by_hash`) | parallel | int | **catastrophic** | 2.9–4.0s@W8 — the only router in tree; unusable |
 | S3 Scatter | parallel | str | ? | variable-length; not built/measured; expected costlier |
 | S4 Keying | serial | int | 1 | baseline (~1070ms on Q16) |
@@ -141,8 +147,7 @@ unless noted; `?` = not measured; `<1` = regression.
 | Row-routing parallel keying | str | ~1.3–1.4× | bandwidth wall |
 | **COUNT(DISTINCT) grouped (holistic, non-mergeable)** | int | **4.78× total @ W8, correct** | the real prize — merge CANNOT parallelize this; headroom to ~6× |
 | COUNT(DISTINCT) | str | ~1.4× walls W4 | Q06 |
-| Row-routing under **key skew, SALTED** (mergeable) | int | uniform 3.38× → 90% hot **2.17×** (rescued) | salting ~free on uniform; bins balanced |
-| Row-routing under group-key skew (holistic, route-by-value) | int | maxbin unchanged — **naturally robust** | no mitigation needed for group-key skew |
+| Row-routing under key skew (single hot key) | int | uniform 3.31× → 90% hot **0.7×** | one hot key → one bin; salting **rejected** (breaks concat); cost-model routes skewed shapes to serial |
 
 ### Context (non-grouped operators)
 
@@ -173,26 +178,31 @@ unless noted; `?` = not measured; `<1` = regression.
 key routes to the same worker. Each key lives in exactly one worker's table →
 the tables share no keys → finalize is a concatenation, not a reconciliation.
 
-**The 7× vs 4.5× relationship.** They are the *same design at two scopes*:
+**The 7× vs 3.31× relationship.** They are the *same design at two scopes*:
 - 7× = S4 (keying) in isolation: `1708ms serial ÷ 243ms parallel`.
-- 4.5× = end-to-end: `scatter 130 + keying 243 + finalize 13 = 386ms` vs 1772.
+- 3.31× = end-to-end COUNT once S3 (parallel scatter) + S7 are included.
 
-The scatter (~34% of the parallel total) is the entire 7 → 4.5 dilution. Levers
-to push 4.5 toward 7: a cheaper scatter, **parallelizing the scatter** across
-producer threads, or **pipelining** scatter with keying so it overlaps instead of
-being a serial prelude.
+Two things dilute 7 → 3.31: the scatter, and a **serial materialization tail**
+(`scatter_to_morsels` concat-memcpy + Morsel wrap) that runs single-threaded after
+the parallel keying. Levers to push back toward 7: **parallelizing the scatter**
+across producer threads (done — 5–6×), **producer-side output buffers** to kill the
+materialization tail, or **pipelining** scatter with keying so it overlaps instead
+of being a serial prelude.
 
 **The keystone — a minimal native fixed-width scatter (S3).** Everything above
 depends on a scatter that routes by `hash(key)%W` in a single pass, appending a
-narrow fixed-width payload into W buffers, nogil. The only router in the tree
-(`partition_by_hash`) is 2.9–4.0s and unusable; a prototype kernel hit ~130ms, so
-this is feasible — **but it must be built, and scatter+keying have never been run
-end-to-end together.** That is the one unverified link in the 4.5×.
+narrow fixed-width payload into W buffers, nogil. The only router that was in the
+tree (`partition_by_hash`) is 2.9–4.0s and unusable; the purpose-built kernel is
+320–420ms serial and **5–6× parallel**, and scatter+keying have now been run
+end-to-end together (COUNT 3.31×, COUNT(DISTINCT) 4.78×).
 
-**COUNT(DISTINCT) is the same design.** Partition by the *distinct value's* hash
-→ each worker sees disjoint values → per-group distinct counts are summable with
-no double-count. Dedup is a set-insert = a probe, so it parallelizes exactly like
-keying (~7× int).
+**COUNT(DISTINCT) needs no special case.** Under route-by-group-key, every row of
+a group lands on one worker, so that worker holds the group's *entire* input and
+computes the **exact** distinct count locally — there is nothing to sum across
+workers. Dedup is a set-insert = a probe, so it parallelizes exactly like keying
+(~7× int). (A "route by the distinct value's hash" scheme — needed only for a
+*global*/ungrouped `COUNT(DISTINCT)`, a separate operator — is out of scope here
+and is **not** used for the grouped path.)
 
 ### 4.1 The decisive property: holistic aggregates parallelize
 
@@ -220,9 +230,12 @@ all) — simplest, matches what we measured. **Pipelined** (workers key chunks a
 they fill) closes the 7→4.5 gap but is harder; defer. ⚑ One `CppThreadPool` reused
 for producers then consumers, or two pools.
 
-**Worker count.** `resolve_worker_count` (cap currently 8); ⚑ revisit the cap for
-this design — keying was still climbing at W8 on 6 perf cores; prod core counts
-differ.
+**Worker count.** **Softcode** the default — derive it from the CPU count — and
+allow an **environment-variable override** (e.g. `MAX_EXECUTION_WORKERS`) on top,
+so it can be tuned by trial-and-error on Cloud Run (x86) without a rebuild. Keying
+was still climbing at W8 on 6 ARM perf cores and prod core counts differ, so the
+default must track the machine and the optimum be found in the target environment,
+not fixed at a literal.
 
 **Memory, ownership & FT-safety.** Each worker **owns** its hash table + dense
 accumulators → no sharing, no hot-path locks (the FT-safety argument). Scatter
@@ -260,11 +273,15 @@ barrier; a terminate flag is checked at chunk boundaries.
 - Memory-bandwidth headroom (keying is latency-bound).
 
 **Pathological:**
-- **Key skew — the headline risk, and UNMEASURED.** Our benches used near-uniform
-  UserID. If a few hot keys/values dominate, they hash to one bin → one worker
-  does most of the work → collapse toward serial. *Must be benched on a skewed
-  key before the 7× is trusted.* Mitigations if it bites: salting hot keys, a
-  two-level hash, or work-stealing on bin drain.
+- **Key skew — the one residual risk, MEASURED.** Because `hash(key)%W` routes
+  every occurrence of a key to one bin, a single dominant key sends most rows to
+  one worker → collapse toward serial (measured **0.7× @ 90%-hot**, crossing serial
+  ~70%). Hash mixing distributes *distinct* keys well but cannot split one hot key.
+  **Salting is rejected** — it splits a key across bins and so reintroduces a merge,
+  destroying the disjoint-slice→concat invariant that is the design's clearest win.
+  The sanctioned mitigation is **algorithm selection**: the >floor scan sample (§7)
+  estimates skew, and dominant-hot-key shapes route to serial rather than degrade.
+  ⚑ skew threshold for the serial cutover needs calibration.
 - **String / variable-length keys** — bandwidth wall (~1.4×, stalls at W4); the
   scatter is costlier too. Route to serial.
 - **Low cardinality + light aggregate** (e.g. Q08) — keying is trivial; scatter +
@@ -285,13 +302,12 @@ barrier; a terminate flag is checked at chunk boundaries.
 | String keys wall at ~1.4× / W4 | **measured** |
 | Real native scatter (raw int key) = **320–420ms@W8** | **measured** (supersedes the 130ms group_id-scatter estimate) |
 | End-to-end COUNT = **~2.4–2.9×@W8** (NOT 4.5×) | **measured** with real scatter |
-| Key skew: 1.3×@50% hot, **0.7×@90%** (loses), crosses ~70% | **measured** — mitigation mandatory |
-| Holistic aggregate (COUNT DISTINCT) parallelizes **3.84×**, correct | **measured** — the decisive advantage, confirmed |
+| Key skew: 1.3×@50% hot, **0.7×@90%** (loses), crosses ~70% | **measured** — handled by serial cutover, NOT salting |
+| Holistic aggregate (COUNT DISTINCT) parallelizes **3.84×** (serial scatter), correct | **measured** — the decisive advantage, confirmed |
 | Multi-column + NULL-key routing correctness | **measured** correct == serial |
 | Parallel multi-producer scatter scales 5–6× (not bandwidth-bound) | **measured** |
 | Parallel scatter e2e: COUNT **3.31×**, COUNT(DISTINCT) **4.78×** | **measured** (headroom to 4×/6× via removing serial materialization tail) |
-| Salting rescues skewed mergeable COUNT (90%-hot 0.97→2.17×) | **measured**, ~free on uniform |
-| Holistic (route-by-value) naturally robust to group-key skew | **measured** |
+| Salting would rescue skewed mergeable COUNT (90%-hot 0.97→2.17×) | **measured but REJECTED** — breaks disjoint-concat invariant (§4/§5) |
 | Removing the serial materialization tail recovers toward 4×/6× | **inferred** (not yet built) |
 | Decode parallel & lock-free | **measured** (static + timing) |
 | Merge dead (serial 1.1× ceiling, parallel 0.74×) | **measured** |
@@ -302,17 +318,22 @@ barrier; a terminate flag is checked at chunk boundaries.
 
 The design is not universally a win; engage it via a cost model, not a flag:
 
+- **The floor does double duty.** Below `PARALLEL_MIN_ROWS` (≈250k, start at the
+  existing `262_144`, exact value TBC) the input is too small to bother — **stay
+  serial, no estimation**. At/above the floor, the scanned rows are large enough to
+  serve as a **sample for estimating NDV and skew** — accepted as a sample, subject
+  to error — so the gate does **not** depend on precomputed sidecar statistics.
 - **Engage** when ALL hold: (1) key is **fixed-width** (int/temporal/decimal, not
-  string/varbinary); (2) input rows ≥ floor (start at the existing
-  `PARALLEL_MIN_ROWS = 262_144`); (3) keying+accumulate is expected to dominate —
-  proxy: estimated `groups × per-group-agg-cost` above a threshold, OR a holistic
-  aggregate is present (always worth it since serial has no alternative).
+  string/varbinary); (2) input rows ≥ floor; (3) no dominant hot key (from the
+  sample skew estimate); (4) keying+accumulate is expected to dominate — proxy:
+  sampled `groups × per-group-agg-cost` above a threshold, OR a holistic aggregate
+  is present (always worth it since serial has no alternative).
 - **Stay serial** when: **string/var-width** key (bandwidth wall), input below the
-  floor, or low cardinality + light aggregate (e.g. Q08-class: ~tens of groups,
-  COUNT only → overhead > work, measured 0.79×).
-- ⚑ The cardinality/agg-weight threshold needs **calibration from the e2e bench**
-  (§8) — the crossover point where scatter+thread overhead is repaid. Until
-  calibrated, a conservative high floor is safer than engaging marginal queries.
+  floor, **dominant hot key** (skew cutover), or low cardinality + light aggregate
+  (e.g. Q08-class: ~tens of groups, COUNT only → overhead > work, measured 0.79×).
+- ⚑ The cardinality/agg-weight threshold **and the skew cutover point** need
+  **calibration from the e2e bench** (§8). Until calibrated, a conservative high
+  floor is safer than engaging marginal queries.
 - This is legitimate algorithm selection by a cost model — *not* gating-to-where-
   it-wins: the design genuinely cannot win on the excluded shapes.
 
@@ -326,24 +347,26 @@ The design is not universally a win; engage it via a cost model, not a flag:
 - ✅ Skew bench — degrades to 0.7× at 90% hot (mitigation mandatory).
 - ✅ Multi-col + NULL correctness verified.
 
-### Both make-or-break risks RESOLVED (measured green, 2026-06-19)
+### Both make-or-break risks RESOLVED (2026-06-19)
 - ✅ **Parallel scatter recovers** — scales 5–6× (not bandwidth-bound); e2e COUNT
   3.31×, COUNT(DISTINCT) 4.78×. `dev/_native_scatter_parallel.pyx`.
-- ✅ **Skew handled** — salting rescues mergeable COUNT (90%-hot → 2.17×, ~free on
-  uniform); holistic route-by-value is naturally robust to group-key skew.
-  `dev/_native_scatter_salt.pyx`.
+- ✅ **Skew decided** — disjoint-slice→concat is the invariant; salting is
+  **rejected** (it reintroduces a merge). Skew is handled by **algorithm
+  selection** — the >floor sample estimates a dominant hot key and routes that
+  shape to serial. (`dev/_native_scatter_salt.pyx` measured salting at 2.17× but is
+  retained only as rejected evidence, not a build target.)
 
 ### Remaining work (no known blockers — this is a build/optimize phase)
 1. **Kill the serial materialization tail** — build per-worker output buffers in the
    producer phase (or pipeline scatter↔keying) to recover COUNT→~4×, DISTINCT→~6×.
    The remaining headroom, an optimization not a risk.
-2. **Production build** — wire row-routing + parallel scatter + salting into the
-   engine (parallel_engine / GroupedAggregateHashedNode), behind the cost-model gate.
+2. **Production build** — wire row-routing + parallel scatter into the engine
+   (parallel_engine / GroupedAggregateHashedNode), behind the cost-model gate.
    Surface the §4.2 ⚑ decisions (push/pull buffers, one pool vs two, two-phase vs
    pipelined) to the architect before building.
-3. **Cost-model gate** (§7), calibrated from the benches; include the route-by-value
-   low-cardinality bin-imbalance note for holistic aggregates.
-4. **Online hot-key detector** for salting (the bench used an exact pre-pass; prod
-   needs a sampled/online detector).
+3. **Cost-model gate** (§7), calibrated from the benches — the engage/serial
+   crossover and the skew cutover threshold.
+4. **Sampled skew estimate from the >floor scan** feeding the serial cutover (the
+   skew bench used an exact pre-pass; prod reads it off the sample, §7).
 5. **String-key keying** stays on the serial-keying track (Option C in
    `M4_PARALLEL_PATH_FORWARD.md`) — the only lever where parallelism doesn't pay.

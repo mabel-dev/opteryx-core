@@ -55,7 +55,20 @@ from opteryx.types.logical_type import LogicalCategory
 import draken.draken_native as _draken_native_parquet
 _int64_to_decimal  = _draken_native_parquet.vector_reinterpret_as_decimal
 _int64_to_date32   = _draken_native_parquet.vector_reinterpret_as_date32
-_int64_to_timestamp = _draken_native_parquet.vector_reinterpret_as_timestamp64
+# Zero-copy retag (moves the just-decoded int64 buffer into a TIMESTAMP64 view).
+# Safe here because the decoded column is exclusively owned by the reader and is
+# immediately replaced by the retagged result — no other reference survives.
+_int64_to_timestamp = _draken_native_parquet.vector_retag_int64_as_timestamp64
+
+# TimestampUnit enum name -> the unit string vector_reinterpret_as_timestamp64
+# expects. Used to retag int64-stored timestamp columns with the schema's unit
+# (previously this path forced "us"; a stale-unit latent bug).
+_TS_UNIT_BY_NAME = {
+    "SECONDS": "s",
+    "MILLISECONDS": "ms",
+    "MICROSECONDS": "us",
+    "NANOSECONDS": "ns",
+}
 
 # Predicate evaluation is the bytecode VM only — no alternative paths. The
 # compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
@@ -359,6 +372,7 @@ cdef inline void _coerce_logical_types(
     dict decimal_col_map,
     set date_col_set,
     set timestamp_col_set,
+    dict timestamp_unit_map,
 ):
     """Coerce Integer64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
 
@@ -399,7 +413,7 @@ cdef inline void _coerce_logical_types(
                 continue
             v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
             if v_nb.type == _draken_native_parquet.INT64:
-                row_group[col_name] = _int64_to_timestamp(v_nb)
+                row_group[col_name] = _int64_to_timestamp(v_nb, timestamp_unit_map.get(col_name, "us"))
 
 
 cdef list _set_bit_positions(bytes mask_bytes):
@@ -454,6 +468,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     dict decimal_col_map,
     set date_col_set,
     set timestamp_col_set,
+    dict timestamp_unit_map,
     list pass1_column_names,
 ):
     """Pure pass-1 evaluation for a single row group.
@@ -473,7 +488,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     result.empty = False
     result.rows_before_filter = 0
 
-    _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set)
+    _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set, timestamp_unit_map)
 
     # Positional pairing: column order in the data dict matches pass1_column_names order.
     # C++ preserves column order; dict keys (bytes) are not used for identity lookup.
@@ -559,6 +574,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef dict _sp_decimal_col_map
     cdef set _sp_date_col_set
     cdef set _sp_timestamp_col_set
+    cdef dict _sp_timestamp_unit_map
     cdef object _sp_predicate_stats
     cdef list _sp_pass1_column_names
     cdef list _sp_pass2_column_names
@@ -1020,6 +1036,18 @@ cdef class ParquetReadNode(ReaderNode):
             col.name.encode('utf-8') for col in base_schema.columns
             if col.column_type is not None and col.column_type.category == _LC.TIMESTAMP
         }
+        # Per-column reinterpret unit (string) for the int64->timestamp retag,
+        # sourced from the schema's logical unit; defaults to "us". Keyed by the
+        # same bytes names as the set.
+        self._sp_timestamp_unit_map = {}
+        for col in base_schema.columns:
+            ct = col.column_type
+            if ct is None or ct.category != _LC.TIMESTAMP:
+                continue
+            unit_str = "us"
+            if ct.logical is not None and ct.logical.unit is not None:
+                unit_str = _TS_UNIT_BY_NAME.get(ct.logical.unit.name, "us")
+            self._sp_timestamp_unit_map[col.name.encode('utf-8')] = unit_str
         predicate_root = self._compose_predicates(self.predicates or [])
 
         # Compile the predicate to bytecode once per execute() call.
@@ -1127,7 +1155,7 @@ cdef class ParquetReadNode(ReaderNode):
             elif col_b in self._sp_date_col_set:
                 self._sp_coerce_ops.append((2, None))
             elif col_b in self._sp_timestamp_col_set:
-                self._sp_coerce_ops.append((3, None))
+                self._sp_coerce_ops.append((3, self._sp_timestamp_unit_map.get(col_b, "us")))
             else:
                 self._sp_coerce_ops.append((0, None))
         self._sp_needs_coerce = any(op[0] != 0 for op in self._sp_coerce_ops)
@@ -1195,7 +1223,7 @@ cdef class ParquetReadNode(ReaderNode):
             elif kind == 2:
                 vectors[i] = _int64_to_date32(v_nb)
             else:  # kind == 3
-                vectors[i] = _int64_to_timestamp(v_nb)
+                vectors[i] = _int64_to_timestamp(v_nb, op[1])
 
     cdef Morsel _single_pass_next(self):
         """Pull and assemble the next single-pass morsel directly from the native
@@ -1325,6 +1353,7 @@ cdef class ParquetReadNode(ReaderNode):
                 path, rg_idx, row_group, self._compiled_predicate,
                 self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
+                self._sp_timestamp_unit_map,
                 self._sp_pass1_column_names,
             )
             if result.empty:
@@ -1390,6 +1419,7 @@ cdef class ParquetReadNode(ReaderNode):
             _coerce_logical_types(
                 row_group, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
+                self._sp_timestamp_unit_map,
             )
 
             p1_filtered, p1_identity_names = self._lm_p1_cache.pop((path, rg_idx))
