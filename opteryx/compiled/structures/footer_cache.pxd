@@ -9,6 +9,7 @@ cdef class ParquetFooterBytesCache:
     cdef MemoryPool pool
     cdef LRU_K lru
     cdef dict _path_to_ref
+    cdef object _lock
 
     cpdef object get(self, str path)
     cpdef bint put(self, str path, const uint8_t[::1] envelope)

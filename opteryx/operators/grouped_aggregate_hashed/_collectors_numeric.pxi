@@ -116,12 +116,12 @@ cdef inline void _sum_accumulate_int(
     uint8_t* seen,
     Py_ssize_t n_rows,
 ) noexcept nogil:
-    cdef Py_ssize_t i
+    cdef Py_ssize_t j
     cdef int64_t si
-    for i in range(n_rows):
-        if _num_bitmap_valid(nulls, i):
-            si = state_indices[i]
-            sums[si] += <int64_t>data[sel[i]]
+    for j in range(n_rows):
+        if _num_bitmap_valid(nulls, j):
+            si = state_indices[j]
+            sums[si] += <int64_t>data[sel[j]]
             _bitmap_set(seen, si)
 
 
@@ -135,28 +135,28 @@ cdef inline void _minmax_accumulate_int(
     Py_ssize_t n_rows,
     int8_t direction,
 ) noexcept nogil:
-    cdef Py_ssize_t i
+    cdef Py_ssize_t j
     cdef int64_t si, v
     if direction == 0:   # ANY_VALUE — keep the first non-null per group
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
+        for j in range(n_rows):
+            if _num_bitmap_valid(nulls, j):
+                si = state_indices[j]
                 if not _num_bitmap_valid(seen, si):
-                    values[si] = <int64_t>data[sel[i]]
+                    values[si] = <int64_t>data[sel[j]]
                     _bitmap_set(seen, si)
     elif direction == 1:   # MIN
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
-                v = <int64_t>data[sel[i]]
+        for j in range(n_rows):
+            if _num_bitmap_valid(nulls, j):
+                si = state_indices[j]
+                v = <int64_t>data[sel[j]]
                 if not _num_bitmap_valid(seen, si) or v < values[si]:
                     values[si] = v
                 _bitmap_set(seen, si)
     else:                # MAX
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
-                v = <int64_t>data[sel[i]]
+        for j in range(n_rows):
+            if _num_bitmap_valid(nulls, j):
+                si = state_indices[j]
+                v = <int64_t>data[sel[j]]
                 if not _num_bitmap_valid(seen, si) or v > values[si]:
                     values[si] = v
                 _bitmap_set(seen, si)
@@ -171,12 +171,12 @@ cdef inline void _avg_accumulate_int(
     int64_t* counts,
     Py_ssize_t n_rows,
 ) noexcept nogil:
-    cdef Py_ssize_t i
+    cdef Py_ssize_t j
     cdef int64_t si
-    for i in range(n_rows):
-        if _num_bitmap_valid(nulls, i):
-            si = state_indices[i]
-            sums[si] += <double>data[sel[i]]
+    for j in range(n_rows):
+        if _num_bitmap_valid(nulls, j):
+            si = state_indices[j]
+            sums[si] += <double>data[sel[j]]
             counts[si] += 1
 
 
@@ -476,12 +476,13 @@ cdef class CountStarCollector(BaseCollector):
             free_fixed_buffer(self._counts, True)
             self._counts = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._counts, self._capacity, target)
+            if not _grow_fixed_buffer(self._counts, self._capacity, target): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -489,7 +490,8 @@ cdef class CountStarCollector(BaseCollector):
         const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ) noexcept nogil:
-        # COUNT(*) reads no value column — value_view is ignored.
+        # COUNT(*) reads no value column — value_view is ignored. state_indices
+        # is already compact (one entry per processed row); no gather needed.
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         for i in range(n_rows):
@@ -511,6 +513,12 @@ cdef class CountStarCollector(BaseCollector):
         cdef CountStarCollector o = <CountStarCollector>other
         (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>o._counts.data)[other_idx]
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>(<CountStarCollector>other)._counts.data)[other_idx]
+
 # ---------------------------------------------------------------------------
 # COUNT(col) — skip NULLs
 # ---------------------------------------------------------------------------
@@ -529,12 +537,13 @@ cdef class CountValueCollector(BaseCollector):
             free_fixed_buffer(self._counts, True)
             self._counts = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._counts, self._capacity, target)
+            if not _grow_fixed_buffer(self._counts, self._capacity, target): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -565,6 +574,12 @@ cdef class CountValueCollector(BaseCollector):
         cdef CountValueCollector o = <CountValueCollector>other
         (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>o._counts.data)[other_idx]
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>(<CountValueCollector>other)._counts.data)[other_idx]
+
 # ---------------------------------------------------------------------------
 # SUM(int64)
 # ---------------------------------------------------------------------------
@@ -588,15 +603,16 @@ cdef class SumInt64Collector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_bitmap(&self._seen, self._capacity, target, False)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_bitmap(&self._seen, self._capacity, target, False): return False
             self._capacity = target
+        return True
 
-    cdef void accumulate(
+    cdef inline void _acc(
         self,
         const DrakenVector* value_view,
         const uint32_t* state_indices,
@@ -616,6 +632,14 @@ cdef class SumInt64Collector(BaseCollector):
             _sum_accumulate_int(<const int32_t*>value_view.data, sel, nulls, state_indices, sums, seen, n_rows)
         else:
             _sum_accumulate_int(<const int64_t*>value_view.data, sel, nulls, state_indices, sums, seen, n_rows)
+
+    cdef void accumulate(
+        self,
+        const DrakenVector* value_view,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        self._acc(value_view, state_indices, n_rows)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef long long start_ns = _now_ns()
@@ -674,6 +698,19 @@ cdef class SumInt64Collector(BaseCollector):
         if o._seen != NULL and _num_bitmap_valid(o._seen, other_idx) and self._seen != NULL:
             _bitmap_set(self._seen, self_idx)
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        # Borrowed inline casts only — a `cdef SumInt64Collector o = <...>other`
+        # assignment would incref (needs the GIL); read other's buffers through
+        # repeated casts of the (already type-checked) argument instead.
+        cdef int64_t* o_sums = <int64_t*>(<SumInt64Collector>other)._sums.data
+        cdef uint8_t* o_seen = (<SumInt64Collector>other)._seen
+        (<int64_t*>self._sums.data)[self_idx] += o_sums[other_idx]
+        if o_seen != NULL and _num_bitmap_valid(o_seen, other_idx) and self._seen != NULL:
+            _bitmap_set(self._seen, self_idx)
+
 # ---------------------------------------------------------------------------
 # SUM(float64)
 # ---------------------------------------------------------------------------
@@ -696,15 +733,16 @@ cdef class SumFloat64Collector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_bitmap(&self._seen, self._capacity, target, False)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_bitmap(&self._seen, self._capacity, target, False): return False
             self._capacity = target
+        return True
 
-    cdef void accumulate(
+    cdef inline void _acc(
         self,
         const DrakenVector* value_view,
         const uint32_t* state_indices,
@@ -712,20 +750,24 @@ cdef class SumFloat64Collector(BaseCollector):
     ) noexcept nogil:
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
-        cdef double* data
-        cdef const uint32_t* sel
-        cdef uint8_t* nulls
-        cdef Py_ssize_t i
+        cdef double* data = <double*>value_view.data
+        cdef const uint32_t* sel = value_view.selection
+        cdef uint8_t* nulls = value_view.validity
+        cdef Py_ssize_t j
         cdef int64_t si
-
-        data = <double*>value_view.data
-        sel = value_view.selection
-        nulls = value_view.validity
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
-                sums[si] += data[sel[i]]
+        for j in range(n_rows):
+            if _num_bitmap_valid(nulls, j):
+                si = state_indices[j]
+                sums[si] += data[sel[j]]
                 _bitmap_set(seen, si)
+
+    cdef void accumulate(
+        self,
+        const DrakenVector* value_view,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        self._acc(value_view, state_indices, n_rows)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._sums
@@ -778,6 +820,16 @@ cdef class SumFloat64Collector(BaseCollector):
         if o._seen != NULL and _num_bitmap_valid(o._seen, other_idx) and self._seen != NULL:
             _bitmap_set(self._seen, self_idx)
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        cdef double* o_sums = <double*>(<SumFloat64Collector>other)._sums.data
+        cdef uint8_t* o_seen = (<SumFloat64Collector>other)._seen
+        (<double*>self._sums.data)[self_idx] += o_sums[other_idx]
+        if o_seen != NULL and _num_bitmap_valid(o_seen, other_idx) and self._seen != NULL:
+            _bitmap_set(self._seen, self_idx)
+
 # ---------------------------------------------------------------------------
 # MIN/MAX(int64)   direction: +1 = MIN, -1 = MAX
 # ---------------------------------------------------------------------------
@@ -809,7 +861,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t sentinel = INT64_MAX if self._direction == 1 else INT64_MIN
         cdef int64_t old_count = self._capacity
         cdef int64_t target
@@ -818,14 +870,15 @@ cdef class MinMaxInt64Collector(BaseCollector):
 
         if new_count > old_count:
             target = _grow_target(old_count, new_count)
-            _grow_fixed_buffer(self._values, old_count, target)
-            _grow_bitmap(&self._seen, old_count, target, False)
+            if not _grow_fixed_buffer(self._values, old_count, target): return False
+            if not _grow_bitmap(&self._seen, old_count, target, False): return False
             values = <int64_t*>self._values.data
             for i in range(old_count, target):
                 values[i] = sentinel
             self._capacity = target
+        return True
 
-    cdef void accumulate(
+    cdef inline void _acc(
         self,
         const DrakenVector* value_view,
         const uint32_t* state_indices,
@@ -833,13 +886,9 @@ cdef class MinMaxInt64Collector(BaseCollector):
     ) noexcept nogil:
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
-        cdef const uint32_t* sel
-        cdef uint8_t* nulls
-        cdef DrakenType t
-
-        sel = value_view.selection
-        nulls = value_view.validity
-        t = value_view.type
+        cdef const uint32_t* sel = value_view.selection
+        cdef uint8_t* nulls = value_view.validity
+        cdef DrakenType t = value_view.type
         cdef int8_t direction = self._direction
         # Width-aware read: narrow ints (and the 4-byte temporal types DATE32/TIME32)
         # are sign-extended before compare; 8-byte TIMESTAMP64/TIME64 read as int64.
@@ -851,6 +900,14 @@ cdef class MinMaxInt64Collector(BaseCollector):
             _minmax_accumulate_int(<const int32_t*>value_view.data, sel, nulls, state_indices, values, seen, n_rows, direction)
         else:
             _minmax_accumulate_int(<const int64_t*>value_view.data, sel, nulls, state_indices, values, seen, n_rows, direction)
+
+    cdef void accumulate(
+        self,
+        const DrakenVector* value_view,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        self._acc(value_view, state_indices, n_rows)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._values
@@ -933,6 +990,28 @@ cdef class MinMaxInt64Collector(BaseCollector):
             if v > sv[self_idx]:
                 sv[self_idx] = v
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        cdef uint8_t* o_seen = (<MinMaxInt64Collector>other)._seen
+        if o_seen == NULL or not _num_bitmap_valid(o_seen, other_idx):
+            return
+        cdef int64_t v = (<int64_t*>(<MinMaxInt64Collector>other)._values.data)[other_idx]
+        cdef int64_t* sv = <int64_t*>self._values.data
+        cdef int8_t direction = self._direction
+        if self._seen == NULL or not _num_bitmap_valid(self._seen, self_idx):
+            sv[self_idx] = v
+            if self._seen != NULL:
+                _bitmap_set(self._seen, self_idx)
+            return
+        if direction == 1:
+            if v < sv[self_idx]:
+                sv[self_idx] = v
+        elif direction == -1:
+            if v > sv[self_idx]:
+                sv[self_idx] = v
+
 # ---------------------------------------------------------------------------
 # MIN/MAX(float64)
 # ---------------------------------------------------------------------------
@@ -960,7 +1039,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef double sentinel = HUGE_VAL if self._direction == 1 else -HUGE_VAL
         cdef int64_t old_count = self._capacity
         cdef int64_t target
@@ -969,14 +1048,15 @@ cdef class MinMaxFloat64Collector(BaseCollector):
 
         if new_count > old_count:
             target = _grow_target(old_count, new_count)
-            _grow_fixed_buffer(self._values, old_count, target)
-            _grow_bitmap(&self._seen, old_count, target, False)
+            if not _grow_fixed_buffer(self._values, old_count, target): return False
+            if not _grow_bitmap(&self._seen, old_count, target, False): return False
             values = <double*>self._values.data
             for i in range(old_count, target):
                 values[i] = sentinel
             self._capacity = target
+        return True
 
-    cdef void accumulate(
+    cdef inline void _acc(
         self,
         const DrakenVector* value_view,
         const uint32_t* state_indices,
@@ -985,68 +1065,72 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         cdef double* values = <double*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef double* data
-        cdef const uint32_t* sel
-        cdef uint8_t* nulls
-        cdef Py_ssize_t i
+        cdef const uint32_t* sel = value_view.selection
+        cdef uint8_t* nulls = value_view.validity
+        cdef Py_ssize_t j
         cdef int64_t si
         cdef double v
-
-        sel = value_view.selection
-        nulls = value_view.validity
         cdef int8_t direction = self._direction
         cdef const float* fdata
         # FLOAT32 source: read 4-byte floats, widen to double for compare/store.
-        # The float64 hot path below is left untouched.
         if value_view.type == DRAKEN_FLOAT32:
             fdata = <const float*>value_view.data
             if direction == 0:      # ANY_VALUE — first non-null per group
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
+                for j in range(n_rows):
+                    if _num_bitmap_valid(nulls, j):
+                        si = state_indices[j]
                         if not _num_bitmap_valid(seen, si):
-                            values[si] = <double>fdata[sel[i]]
+                            values[si] = <double>fdata[sel[j]]
                             _bitmap_set(seen, si)
             elif direction == 1:
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
-                        v = <double>fdata[sel[i]]
+                for j in range(n_rows):
+                    if _num_bitmap_valid(nulls, j):
+                        si = state_indices[j]
+                        v = <double>fdata[sel[j]]
                         if not _num_bitmap_valid(seen, si) or v < values[si]:
                             values[si] = v
                         _bitmap_set(seen, si)
             else:
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
-                        v = <double>fdata[sel[i]]
+                for j in range(n_rows):
+                    if _num_bitmap_valid(nulls, j):
+                        si = state_indices[j]
+                        v = <double>fdata[sel[j]]
                         if not _num_bitmap_valid(seen, si) or v > values[si]:
                             values[si] = v
                         _bitmap_set(seen, si)
             return
         data = <double*>value_view.data
         if direction == 0:       # ANY_VALUE — first non-null per group
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
+            for j in range(n_rows):
+                if _num_bitmap_valid(nulls, j):
+                    si = state_indices[j]
                     if not _num_bitmap_valid(seen, si):
-                        values[si] = data[sel[i]]
+                        values[si] = data[sel[j]]
                         _bitmap_set(seen, si)
         elif direction == 1:   # MIN
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
+            for j in range(n_rows):
+                if _num_bitmap_valid(nulls, j):
+                    si = state_indices[j]
+                    v = data[sel[j]]
                     if not _num_bitmap_valid(seen, si) or v < values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
         else:                # MAX
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
+            for j in range(n_rows):
+                if _num_bitmap_valid(nulls, j):
+                    si = state_indices[j]
+                    v = data[sel[j]]
                     if not _num_bitmap_valid(seen, si) or v > values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
+
+    cdef void accumulate(
+        self,
+        const DrakenVector* value_view,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        self._acc(value_view, state_indices, n_rows)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._values
@@ -1119,6 +1203,28 @@ cdef class MinMaxFloat64Collector(BaseCollector):
             if v > sv[self_idx]:
                 sv[self_idx] = v
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        cdef uint8_t* o_seen = (<MinMaxFloat64Collector>other)._seen
+        if o_seen == NULL or not _num_bitmap_valid(o_seen, other_idx):
+            return
+        cdef double v = (<double*>(<MinMaxFloat64Collector>other)._values.data)[other_idx]
+        cdef double* sv = <double*>self._values.data
+        cdef int8_t direction = self._direction
+        if self._seen == NULL or not _num_bitmap_valid(self._seen, self_idx):
+            sv[self_idx] = v
+            if self._seen != NULL:
+                _bitmap_set(self._seen, self_idx)
+            return
+        if direction == 1:
+            if v < sv[self_idx]:
+                sv[self_idx] = v
+        elif direction == -1:
+            if v > sv[self_idx]:
+                sv[self_idx] = v
+
 # ---------------------------------------------------------------------------
 # MIN/MAX(bool) — false < true: MIN = AND-reduce, MAX = OR-reduce over non-nulls.
 # One 0/1 byte per group (+ a seen byte). Per-row accumulate is nogil (reads the
@@ -1145,11 +1251,11 @@ cdef class MinMaxBoolCollector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         cdef void* p
         if new_count <= self._capacity:
-            return
+            return True
         target = _grow_target(self._capacity, new_count)
         p = malloc(<size_t>target)
         if self._values != NULL:
@@ -1164,6 +1270,7 @@ cdef class MinMaxBoolCollector(BaseCollector):
         self._seen = <uint8_t*>p
         memset(self._seen + self._capacity, 0, <size_t>(target - self._capacity))
         self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -1261,11 +1368,11 @@ cdef class MinMaxIntervalCollector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         cdef void* p
         if new_count <= self._capacity:
-            return
+            return True
         target = _grow_target(self._capacity, new_count)
         p = malloc(<size_t>target * sizeof(int64_t))
         if self._months != NULL:
@@ -1284,6 +1391,7 @@ cdef class MinMaxIntervalCollector(BaseCollector):
         self._seen = <uint8_t*>p
         memset(self._seen + self._capacity, 0, <size_t>(target - self._capacity))
         self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -1408,12 +1516,12 @@ cdef class MinMaxVarcharCollector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef size_t nc = <size_t>new_count
         cdef size_t target, i
         cdef void* p
         if nc <= self._capacity:
-            return
+            return True
         target = _grow_target(self._capacity, new_count)
         # Grow slot array
         p = draken_malloc(target * sizeof(DrakenStringSlot))
@@ -1432,6 +1540,7 @@ cdef class MinMaxVarcharCollector(BaseCollector):
         self._seen = <uint8_t*>p
         memset(self._seen + self._capacity, 0, target - self._capacity)
         self._capacity = target
+        return True
 
     cdef inline void _ensure_arena(self, size_t need) noexcept nogil:
         cdef size_t new_cap
@@ -1598,35 +1707,30 @@ cdef class AvgCollector(BaseCollector):
             free_fixed_buffer(self._counts, True)
             self._counts = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_fixed_buffer(self._counts, self._capacity, target)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_fixed_buffer(self._counts, self._capacity, target): return False
             self._capacity = target
+        return True
 
-    cdef void accumulate(
+    cdef inline void _acc(
         self,
         const DrakenVector* value_view,
         const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ) noexcept nogil:
-        # Per-row template: one type-dispatch per morsel, typed pointers
-        # cached from the value view, pure-C inner loop.
         cdef DrakenType t = value_view.type
         cdef double* sums = <double*>self._sums.data
         cdef int64_t* counts = <int64_t*>self._counts.data
-        cdef Py_ssize_t i
+        cdef Py_ssize_t j
         cdef int64_t si
         cdef double* f64
         cdef uint8_t* nulls = value_view.validity
         cdef const uint32_t* sel = value_view.selection
 
-        # DECIMAL columns are routed to AvgDecimalCollector (exact int64 sum) by the
-        # deferred resolver, so they never reach here. Integer widths accumulate in
-        # double (overflow-safe for large-magnitude columns like AVG(UserID)) and are
-        # read at their true width; FLOAT64 reads as double directly.
         if t == DRAKEN_INT8:
             _avg_accumulate_int(<const int8_t*>value_view.data, sel, nulls, state_indices, sums, counts, n_rows)
         elif t == DRAKEN_INT16:
@@ -1638,11 +1742,19 @@ cdef class AvgCollector(BaseCollector):
         else:
             # FLOAT64 (and other 8-byte numerics via reinterpret).
             f64 = <double*>value_view.data
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    sums[si] += f64[sel[i]]
+            for j in range(n_rows):
+                if _num_bitmap_valid(nulls, j):
+                    si = state_indices[j]
+                    sums[si] += f64[sel[j]]
                     counts[si] += 1
+
+    cdef void accumulate(
+        self,
+        const DrakenVector* value_view,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        self._acc(value_view, state_indices, n_rows)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._sums
@@ -1693,6 +1805,13 @@ cdef class AvgCollector(BaseCollector):
         (<double*>self._sums.data)[self_idx] += (<double*>o._sums.data)[other_idx]
         (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>o._counts.data)[other_idx]
 
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        return True
+
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        (<double*>self._sums.data)[self_idx] += (<double*>(<AvgCollector>other)._sums.data)[other_idx]
+        (<int64_t*>self._counts.data)[self_idx] += (<int64_t*>(<AvgCollector>other)._counts.data)[other_idx]
+
 
 cdef class AvgDecimalCollector(BaseCollector):
     """AVG for DECIMAL columns.
@@ -1723,13 +1842,14 @@ cdef class AvgDecimalCollector(BaseCollector):
             free_fixed_buffer(self._counts, True)
             self._counts = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_fixed_buffer(self._counts, self._capacity, target)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_fixed_buffer(self._counts, self._capacity, target): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -1822,13 +1942,14 @@ cdef class SumDecimalCollector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_bitmap(&self._seen, self._capacity, target, False)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_bitmap(&self._seen, self._capacity, target, False): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -1932,7 +2053,7 @@ cdef class MinMaxDecimalCollector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t sentinel = INT64_MAX if self._direction == 1 else INT64_MIN
         cdef int64_t old_count = self._capacity
         cdef int64_t target
@@ -1941,12 +2062,13 @@ cdef class MinMaxDecimalCollector(BaseCollector):
 
         if new_count > old_count:
             target = _grow_target(old_count, new_count)
-            _grow_fixed_buffer(self._values, old_count, target)
-            _grow_bitmap(&self._seen, old_count, target, False)
+            if not _grow_fixed_buffer(self._values, old_count, target): return False
+            if not _grow_bitmap(&self._seen, old_count, target, False): return False
             values = <int64_t*>self._values.data
             for i in range(old_count, target):
                 values[i] = sentinel
             self._capacity = target
+        return True
 
     cdef void accumulate(
         self,
@@ -2057,13 +2179,14 @@ cdef class SumDecimal128Collector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_bitmap(&self._seen, self._capacity, target, False)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_bitmap(&self._seen, self._capacity, target, False): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(self, const DrakenVector* value_view, const uint32_t* state_indices, Py_ssize_t n_rows) noexcept nogil:
         cdef int128_t* sums = <int128_t*>self._sums.data
@@ -2144,15 +2267,16 @@ cdef class MinMaxDecimal128Collector(BaseCollector):
             free(self._seen)
             self._seen = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         # No sentinel fill: the _seen bitmap guards first-touch, and untouched slots
         # are masked null at finalize (so any garbage value is never observed).
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._values, self._capacity, target)
-            _grow_bitmap(&self._seen, self._capacity, target, False)
+            if not _grow_fixed_buffer(self._values, self._capacity, target): return False
+            if not _grow_bitmap(&self._seen, self._capacity, target, False): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(self, const DrakenVector* value_view, const uint32_t* state_indices, Py_ssize_t n_rows) noexcept nogil:
         cdef int128_t* values = <int128_t*>self._values.data
@@ -2237,13 +2361,14 @@ cdef class AvgDecimal128Collector(BaseCollector):
             free_fixed_buffer(self._counts, True)
             self._counts = NULL
 
-    cdef void grow(self, int64_t new_count):
+    cdef bint grow_nogil(self, int64_t new_count) noexcept nogil:
         cdef int64_t target
         if new_count > self._capacity:
             target = _grow_target(self._capacity, new_count)
-            _grow_fixed_buffer(self._sums, self._capacity, target)
-            _grow_fixed_buffer(self._counts, self._capacity, target)
+            if not _grow_fixed_buffer(self._sums, self._capacity, target): return False
+            if not _grow_fixed_buffer(self._counts, self._capacity, target): return False
             self._capacity = target
+        return True
 
     cdef void accumulate(self, const DrakenVector* value_view, const uint32_t* state_indices, Py_ssize_t n_rows) noexcept nogil:
         cdef int128_t* sums = <int128_t*>self._sums.data

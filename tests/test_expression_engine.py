@@ -16,9 +16,17 @@ import pytest
 import opteryx
 
 
+def column_values(morsel, col_idx=0):
+    """Return a column's values as a list.
+
+    Morsel subscript is row access, so address the column explicitly by name.
+    """
+    return list(morsel.column(morsel.column_names[col_idx]))
+
+
 def get_first_value(morsel, col_idx=0):
     """Extract first value from a morsel column."""
-    col = list(morsel[col_idx])
+    col = column_values(morsel, col_idx)
     return col[0] if col else None
 
 
@@ -169,8 +177,8 @@ class TestCast:
         """Test: CAST(TRUE AS INTEGER) = 1, CAST(FALSE AS INTEGER) = 0."""
         morsels = list(session.execute_to_morsels("SELECT CAST(TRUE AS INTEGER) AS t, CAST(FALSE AS INTEGER) AS f"))
         assert len(morsels) > 0
-        t_col = list(morsels[0][0])
-        f_col = list(morsels[0][1])
+        t_col = column_values(morsels[0], 0)
+        f_col = column_values(morsels[0], 1)
         assert t_col[0] == 1
         assert f_col[0] == 0
 
@@ -256,7 +264,7 @@ class TestStandingBugs:
             "SELECT CASE WHEN id < 100 THEN 1 END FROM $planets LIMIT 4"
         ))
         assert len(morsels) > 0
-        col = list(morsels[0][0])
+        col = column_values(morsels[0], 0)
         assert col == [1, 1, 1, 1]
 
     def test_case_when_fixed_width_no_else_no_match(self, session):
@@ -265,7 +273,7 @@ class TestStandingBugs:
             "SELECT CASE WHEN id < 0 THEN 1 END FROM $planets LIMIT 4"
         ))
         assert len(morsels) > 0
-        col = list(morsels[0][0])
+        col = column_values(morsels[0], 0)
         assert col == [None, None, None, None]
 
     def test_case_when_fixed_width_else_partial_match(self, session):
@@ -274,7 +282,7 @@ class TestStandingBugs:
             "SELECT CASE WHEN id = 1 THEN 99 ELSE 88 END FROM $planets LIMIT 4"
         ))
         assert len(morsels) > 0
-        col = list(morsels[0][0])
+        col = column_values(morsels[0], 0)
         # Row 0 has id=1, rows 1-3 have id!=1
         assert col[0] == 99
         assert col[1] == 88
@@ -293,7 +301,7 @@ class TestStandingBugs:
             "SELECT CASE WHEN id > 4 THEN NULL ELSE id END FROM $planets LIMIT 6"
         ))
         assert len(morsels) > 0
-        col = list(morsels[0][0])
+        col = column_values(morsels[0], 0)
         assert col == [1, 2, 3, 4, None, None]
 
     def test_case_when_column_result_no_else(self, session):
@@ -306,7 +314,7 @@ class TestStandingBugs:
             "SELECT CASE WHEN id = 1 THEN id END FROM $planets LIMIT 4"
         ))
         assert len(morsels) > 0
-        col = list(morsels[0][0])
+        col = column_values(morsels[0], 0)
         assert col == [1, None, None, None]
 
     def test_case_when_column_result_all_match(self, session):
@@ -315,7 +323,7 @@ class TestStandingBugs:
             "SELECT CASE WHEN id < 100 THEN id END FROM $planets LIMIT 4"
         ))
         assert len(morsels) > 0
-        col = list(morsels[0][0])
+        col = column_values(morsels[0], 0)
         assert col == [1, 2, 3, 4]
 
     def test_case_when_no_else_two_queries_same_session(self, session):
@@ -325,14 +333,14 @@ class TestStandingBugs:
         the first. Same assemble_fixed root cause as repros A/B; this guards
         the session-reuse path that single-query tests don't exercise.
         """
-        col1 = list(list(session.execute_to_morsels(
+        col1 = column_values(list(session.execute_to_morsels(
             "SELECT CASE WHEN id < 100 THEN 1 END FROM $planets LIMIT 4"
-        ))[0][0])
+        ))[0], 0)
         assert col1 == [1, 1, 1, 1]
 
-        col2 = list(list(session.execute_to_morsels(
+        col2 = column_values(list(session.execute_to_morsels(
             "SELECT CASE WHEN id = 1 THEN id END FROM $planets LIMIT 4"
-        ))[0][0])
+        ))[0], 0)
         assert col2 == [1, None, None, None]
 
 

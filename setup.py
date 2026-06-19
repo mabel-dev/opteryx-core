@@ -418,6 +418,20 @@ elif is_linux():
     CPP_FLAGS.append("-fvisibility=default")
     C_FLAGS.append("-fvisibility=default")
 
+# Free-threaded CPython (PEP 703, e.g. 3.14t). When the build interpreter has
+# the GIL disabled, nanobind must be compiled with NB_FREE_THREADED so its
+# internal registries use atomic refcounts and per-object locks, and so each
+# NB_MODULE declares itself free-threading-safe (otherwise importing it forces
+# the GIL back on). The macro must be applied consistently to nb_combined.cpp
+# AND every translation unit that includes nanobind headers, so it lives in the
+# shared CPP_FLAGS. On a regular (GIL) build Py_GIL_DISABLED is unset and we add
+# nothing — the standard build path is untouched.
+import sysconfig as _sysconfig
+
+FREE_THREADED_BUILD = bool(_sysconfig.get_config_var("Py_GIL_DISABLED"))
+if FREE_THREADED_BUILD:
+    CPP_FLAGS.append("-DNB_FREE_THREADED")
+
 # PGO support (opt-in). The CI/release pipeline may run a profile-generate
 # build followed by exercising the binary and then a profile-use rebuild.
 if OPTERYX_ENABLE_PGO and not is_win():
@@ -875,31 +889,15 @@ extensions = [
         extra_link_args=parquet_link_args + LD_EXTRA,
     ),
     Extension(
-        "rugo.jsonl_reader",
+        "rugo.jsonl._jsonl_reader",
         sources=[
-            "rugo/src/jsonl/jsonl_reader.pyx",
-            "rugo/src/jsonl/decode.cpp",
-            "rugo/src/jsonl/yyjson_wrapper.cpp",
-            "src/cpp/simd_env.cpp",
-            "src/cpp/cpu_features.cpp",
-            "src/cpp/simd_search.cpp",
-            "draken/core/vector_alloc.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_objects=["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [],
-    ),
-    Extension(
-        "rugo._jsonl._jsonl_reader",
-        sources=[
-            "rugo/src/_jsonl/_jsonl_reader.pyx",
-            "rugo/src/_jsonl/core/structural_scan.cpp",
-            "rugo/src/_jsonl/core/interpreter.cpp",
-            "rugo/src/_jsonl/core/value_parser.cpp",
-            "rugo/src/_jsonl/core/field_span.cpp",
-            "rugo/src/_jsonl/core/jsonl_reader.cpp",
-            "rugo/src/_jsonl/core/column_builder.cpp",
+            "rugo/src/jsonl/_jsonl_reader.pyx",
+            "rugo/src/jsonl/core/structural_scan.cpp",
+            "rugo/src/jsonl/core/interpreter.cpp",
+            "rugo/src/jsonl/core/value_parser.cpp",
+            "rugo/src/jsonl/core/field_span.cpp",
+            "rugo/src/jsonl/core/jsonl_reader.cpp",
+            "rugo/src/jsonl/core/column_builder.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
@@ -908,39 +906,39 @@ extensions = [
         # Headers in `depends` so editing one forces the extension to recompile.
         # (Without this, header-only changes leave stale .o files behind.)
         depends=[
-            "rugo/src/_jsonl/core/markers.hpp",
-            "rugo/src/_jsonl/core/parse_context.hpp",
-            "rugo/src/_jsonl/core/structural_scan.hpp",
-            "rugo/src/_jsonl/core/interpreter.hpp",
-            "rugo/src/_jsonl/core/value_parser.hpp",
-            "rugo/src/_jsonl/core/field_span.hpp",
-            "rugo/src/_jsonl/core/jsonl_reader.hpp",
-            "rugo/src/_jsonl/core/column_builder.hpp",
-            "rugo/src/_jsonl/core/fast_parsers.hpp",
+            "rugo/src/jsonl/core/markers.hpp",
+            "rugo/src/jsonl/core/parse_context.hpp",
+            "rugo/src/jsonl/core/structural_scan.hpp",
+            "rugo/src/jsonl/core/interpreter.hpp",
+            "rugo/src/jsonl/core/value_parser.hpp",
+            "rugo/src/jsonl/core/field_span.hpp",
+            "rugo/src/jsonl/core/jsonl_reader.hpp",
+            "rugo/src/jsonl/core/column_builder.hpp",
+            "rugo/src/jsonl/core/fast_parsers.hpp",
             "draken/core/draken_bridge.h",
             "draken/core/string_slot.h",
             "draken/core/alloc.h",
             "draken/core/buffers.h",
         ],
-        include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
+        include_dirs=include_dirs + ["rugo/src/jsonl/core"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "rugo._csv._csv_reader",
+        "rugo.csv._csv_reader",
         sources=[
-            "rugo/src/_csv/_csv_reader.pyx",
-            "rugo/src/_csv/core/csv_scan.cpp",
-            "rugo/src/_csv/core/csv_row_map.cpp",
-            "rugo/src/_csv/core/csv_column_builder.cpp",
+            "rugo/src/csv/_csv_reader.pyx",
+            "rugo/src/csv/core/csv_scan.cpp",
+            "rugo/src/csv/core/csv_row_map.cpp",
+            "rugo/src/csv/core/csv_column_builder.cpp",
             "draken/core/vector_alloc.cpp",
         ],
         depends=[
-            "rugo/src/_csv/core/csv_parse_context.hpp",
-            "rugo/src/_csv/core/csv_scan.hpp",
-            "rugo/src/_csv/core/csv_row_map.hpp",
-            "rugo/src/_csv/core/csv_column_builder.hpp",
-            "rugo/src/_jsonl/core/fast_parsers.hpp",
+            "rugo/src/csv/core/csv_parse_context.hpp",
+            "rugo/src/csv/core/csv_scan.hpp",
+            "rugo/src/csv/core/csv_row_map.hpp",
+            "rugo/src/csv/core/csv_column_builder.hpp",
+            "rugo/src/jsonl/core/fast_parsers.hpp",
             "draken/core/draken_bridge.h",
             "draken/core/string_slot.h",
             "draken/core/alloc.h",
@@ -948,8 +946,8 @@ extensions = [
         ],
         include_dirs=include_dirs
         + [
-            "rugo/src/_csv/core",
-            "rugo/src/_jsonl/core",  # fast_parsers.hpp
+            "rugo/src/csv/core",
+            "rugo/src/jsonl/core",  # fast_parsers.hpp
         ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -2320,6 +2318,13 @@ setup(
         compiler_directives={
             "language_level": "3",
             "linetrace": "a" in __version__ or "b" in __version__,
+            # Declare every Cython module free-threading-safe so importing it does
+            # not force the GIL back on under a free-threaded (PEP 703) CPython.
+            # This is a DECLARATION only: it asserts the module's C code is safe to
+            # run without the GIL — it does not make module-level globals/caches
+            # thread-safe. Gated on the build interpreter actually being
+            # free-threaded so GIL builds are unaffected.
+            "freethreading_compatible": FREE_THREADED_BUILD,
         },
     ),
     rust_extensions=[]

@@ -6,49 +6,34 @@
 """
 Parallel execution engine — central scheduler (M4).
 
-The engine parallelises a *pipeline segment* (scan → stateless ops → pipeline
-breaker) over data partitions, recombining at the breaker. Reusable
-infrastructure:
+The engine owns parallelism; the OPERATORS stay parallel-unaware (the founding
+principle). It parallelises only the shapes where extra cores actually pay —
+those with NO cross-worker recombination tax:
 
-  * ``resolve_worker_count`` — query-scoped worker sizing (cap 8, the measured
-    regression boundary; leaves cores for IO/decode).
-  * ``identify_segments`` — cuts the compiled operator DAG into *pipeline
-    segments* (the unit of parallelism). A segment is a maximal linear run of
-    operators ending at the next pipeline breaker (inclusive) or at the sink.
-    Because the push pipeline is single-output topology, every segment is a
-    linear chain; multi-input breakers (joins, union) are the shared tail of
-    their two input segments.
+  * **Standalone selection / projection** (``scan → {filter,projection}* → exit``,
+    no breaker): each morsel is an independent transform, so workers self-pull and
+    STREAM their finished morsels out — no merge, no barrier. ``_stateless_stream``.
+  * **Ungrouped aggregate** (``scan → stateless* → UngroupedAggregate``): no group
+    key, so recombination is a trivial SCALAR merge. ``_ungrouped_agg_stream``.
+  * **Grouped aggregate** (``scan → stateless* → GroupedAggregate``): recombination
+    is a per-group merge (key probe + state transplant). Previously this REGRESSED
+    because the merge was GIL-bound (serial-merge Amdahl wall). Under free-threaded
+    CPython the merge runs GIL-free (``GroupHashEngine.merge`` over per-worker
+    clones, measured 6.4×–7.2× vs serial), so GROUP BY is parallelised again.
+    ``_grouped_agg_stream``. The grouped engine resolves collectors lazily, so
+    mergeability is decided at RUNTIME on the first morsel (not at plan time): a
+    non-mergeable aggregate (COUNT DISTINCT / MEDIAN / decimal / string / bool /
+    interval MIN-MAX) finishes serially through the breaker (capability routing,
+    not a perf gate).
 
-Stage 1 (current scope): the **grouped-aggregate pipeline** —
-``scan → {Filter,Projection}* → Grouped Aggregate``. The whole segment runs on
-W workers, each over a disjoint partition of the scan's morsels into its OWN
-cloned chain (one worker thread per clone — no shared operator state); on EOS
-the W partial engines are combined via the proven WP-7 ``merge()`` into the
-original breaker, which then finalises and drives the serial tail of the plan.
-
-Scope guards (everything else runs serially — strategy selection, NOT silent
-degradation; surfaced via the ``parallel_engaged`` telemetry reading):
-  * exactly one scan (no joins/unions yet — Stage 2);
-  * the scan's segment ends in a *grouped* aggregate whose engine
-    ``is_mergeable()`` (ungrouped agg carries literal state outside the engine
-    and is deferred; non-mergeable aggregates — COUNT DISTINCT / median /
-    decimal / string MIN-MAX — stay serial);
-  * the segment's middle operators are all STATELESS (Filter / Projection);
-  * a row-floor: tiny inputs run serially (clone + thread setup would dominate).
-
-The §6 enforcement-checklist items (PipelineContext atomicity, Union/Exit
-close-counting, _FOOTER_CACHE) are intentionally NOT needed by this drive: the
-scan is pulled single-threaded, each worker owns a private clone, and the merge
-+ EOS happen on the calling thread AFTER the workers join — so there is no
-concurrent writer to the termination flag, no concurrent singleton push, and no
-concurrent scan. They land with the stage that introduces those (parallel scan /
-joins — Stage 2/3), per the contract's "don't harden until needed".
-
-See docs/M4_CENTRAL_SCHEDULER_DESIGN.md.
+Shared infrastructure: ``resolve_worker_count`` (cap 8), ``identify_segments``
+(cut the DAG into pipeline segments), ``pull_one`` (the concurrent-safe scan
+entry, in _operators.pyx), and a row-floor (tiny inputs run serial). The
+remaining ceiling on the parallel shapes is the still-GIL scan pull (wide-column
+decode) and string-expression eval; both are real levers, not gates.
 """
 
 import os
-import queue as _queue
 from dataclasses import dataclass
 from typing import List
 from typing import Optional
@@ -65,13 +50,6 @@ from opteryx.operators.catalog import get_registry
 # merge/recombination tail and DRAM bandwidth dominate). See
 # docs/M4_PARALLEL_AGG_PROTOTYPE.md.
 _MAX_WORKER_CAP = 8
-
-# Per-worker bounded-queue depth — backpressure. A full queue blocks the main
-# thread's morsel hand-off, throttling the scan pull to the workers' rate.
-_QUEUE_DEPTH = 4
-
-# Per-worker queue sentinel: tells a worker loop its partition is complete.
-_WORKER_DONE = object()
 
 
 def resolve_worker_count(requested: int) -> int:
@@ -167,47 +145,114 @@ def identify_segments(plan) -> List[Segment]:
     return segments
 
 
-# ── Stage 1: grouped-aggregate pipeline ──────────────────────────────────────
+# NOTE: GROUP BY parallelism was previously removed because the cross-worker
+# recombination (a per-group merge) was GIL-bound — serial merge was an Amdahl
+# wall that exceeded the keying gain. Under free-threaded CPython that wall is
+# gone: the per-group merge runs GIL-free (GroupHashEngine.merge over per-worker
+# clones), measured 6.4×–7.2× vs serial. So GROUP BY is parallelised again — same
+# clone-per-worker / self-pull / recombine shape as the ungrouped path, just with
+# the per-group merge() instead of a scalar merge.
 
 
 def _find_parallel_grouped_agg(plan):
-    """Return ``(scan_id, middle_ids, breaker_id)`` if the plan is a single-scan
-    grouped-aggregate pipeline this stage can parallelise, else ``None``.
+    """Return ``(scan_id, middle_ids, breaker_id)`` for a single-scan
+    ``scan → stateless* → grouped-aggregate`` pipeline (a candidate by SHAPE),
+    else ``None``.
 
-    Pure plan inspection — no compilation, no side effects.
+    Unlike the ungrouped case the recombination is a per-group merge (key probe +
+    state transplant), not a scalar merge — but under free-threading that merge is
+    GIL-free, so it no longer dominates.
+
+    This finder gates on SHAPE only. It does NOT consult ``engine.is_mergeable()``:
+    the grouped engine resolves its collectors lazily (deferred until the first
+    morsel reveals the column type), so mergeability is unknowable at plan time and
+    is always False here. The mergeable-vs-serial decision is made at runtime in
+    ``_grouped_agg_stream`` once the first morsel resolves the collectors —
+    correctness routing by capability, NOT a perf gate.
     """
     registry = get_registry()
     scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
     if len(scans) != 1:
         return None
     scan_id = scans[0]
-
-    # The scan's segment must end in a mergeable breaker.
     segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
     if segment is None or not segment.tail_is_breaker:
         return None
-    if segment.parallelism != OperatorParallelism.STATEFUL_MERGEABLE:
-        return None
-
     breaker = plan[segment.tail]
-    # Stage 1 = GROUPED aggregate only. The grouped node keeps ALL cross-morsel
-    # state in `_engine`, so WP-7 merge() is a complete recombination. (Ungrouped
-    # agg carries literal state outside the engine — deferred.)
     if breaker.__class__.__name__ != "GroupedAggregateHashedNode":
         return None
-    engine = getattr(breaker, "_engine", None)
-    if engine is None or not engine.is_mergeable():
+    if getattr(breaker, "_engine", None) is None:
         return None
-
-    # Middle operators must be stateless (Filter / Projection) — safe to clone
-    # and run per-worker.
     middle_ids = list(segment.nodes[1:-1])
     for nid in middle_ids:
         meta = registry.get(type(plan[nid]))
         if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
             return None
-
     return scan_id, middle_ids, segment.tail
+
+
+def _find_parallel_ungrouped_agg(plan):
+    """Return ``(scan_id, middle_ids, breaker_id)`` for a single-scan
+    ``scan → stateless* → ungrouped-aggregate`` pipeline, else ``None``.
+
+    Ungrouped agg has NO group key, so recombination is a trivial SCALAR merge
+    (sum/min/max the W partials) — no key exchange, no row copy, no keying tax.
+    This is the embarrassingly-parallel case: the parallel work is the (often
+    non-pushable, CPU-bound) filter/projection + scalar accumulate.
+    """
+    registry = get_registry()
+    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
+    if len(scans) != 1:
+        return None
+    scan_id = scans[0]
+    segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
+    if segment is None or not segment.tail_is_breaker:
+        return None
+    breaker = plan[segment.tail]
+    if breaker.__class__.__name__ != "UngroupedAggregateNode":
+        return None
+    # Require a mergeable engine and NO literal-only aggregates: literal state
+    # lives outside `_engine`, so merging only the engine would drop it (a
+    # capability boundary — literal-agg parallelism is unbuilt, not gated-off).
+    engine = getattr(breaker, "_engine", None)
+    if engine is None or not engine.is_mergeable() or breaker._has_literals:
+        return None
+    middle_ids = list(segment.nodes[1:-1])
+    for nid in middle_ids:
+        meta = registry.get(type(plan[nid]))
+        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+            return None
+    return scan_id, middle_ids, segment.tail
+
+
+def _find_parallel_stateless(plan):
+    """Return ``(scan_id, op_ids, exit_id)`` for a single-scan
+    ``scan → {filter,projection}* → exit`` pipeline with NO breaker (no aggregate,
+    sort, limit, join, union), else ``None``.
+
+    The embarrassingly-parallel case: W workers each filter/project their OWN
+    morsels; the outputs are simply CONCATENATED — no merge, no key, no copy, no
+    recombination tax. There must be at least one stateless op (otherwise it's a
+    bare scan → exit with no compute worth parallelising).
+    """
+    registry = get_registry()
+    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
+    if len(scans) != 1:
+        return None
+    scan_id = scans[0]
+    segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
+    # Tail must be the SINK, not a breaker — i.e. no aggregate/sort/etc. The whole
+    # plan is the single linear scan→stateless*→exit chain.
+    if segment is None or segment.tail_is_breaker:
+        return None
+    op_ids = list(segment.nodes[1:-1])
+    if not op_ids:
+        return None
+    for nid in op_ids:
+        meta = registry.get(type(plan[nid]))
+        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+            return None  # a Limit/Window (stateful) middle → not eligible
+    return scan_id, op_ids, segment.tail
 
 
 def _clone_op(op):
@@ -234,20 +279,23 @@ def _build_clone_chain(plan, middle_ids, breaker, ctx):
 def execute(plan, head_node=None, telemetry=None):
     """Parallel engine entry point.
 
-    Parallelises a single-scan grouped-aggregate pipeline; every other plan
-    shape runs on the serial engine (strategy selection, recorded via the
-    ``parallel_engaged`` telemetry reading — not a hidden fallback).
+    Parallelises the shapes where the cores actually pay — standalone
+    selection/projection and ungrouped aggregates (no cross-worker recombination
+    tax). GROUP BY runs serial (its recombination tax outweighs the gain — see the
+    note above ``_find_parallel_ungrouped_agg``). Everything else runs serial too;
+    this is strategy selection, recorded via ``parallel_engaged`` telemetry.
     """
     from opteryx.managers.execution import serial_engine
 
-    target = _find_parallel_grouped_agg(plan)
-    if target is None:
+    ungrouped = _find_parallel_ungrouped_agg(plan)
+    grouped = None if ungrouped is not None else _find_parallel_grouped_agg(plan)
+    stateless = (
+        None if (ungrouped is not None or grouped is not None) else _find_parallel_stateless(plan)
+    )
+    if ungrouped is None and grouped is None and stateless is None:
         if telemetry is not None:
             telemetry._reading["parallel_engaged"] = 0
         return serial_engine.execute(plan, head_node=head_node, telemetry=telemetry)
-
-    if telemetry is not None:
-        telemetry._reading["parallel_engaged"] = 1
 
     workers = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
     if workers <= 1:
@@ -255,49 +303,41 @@ def execute(plan, head_node=None, telemetry=None):
             telemetry._reading["parallel_engaged"] = 0
         return serial_engine.execute(plan, head_node=head_node, telemetry=telemetry)
 
-    scan_id, middle_ids, breaker_id = target
+    if telemetry is not None:
+        telemetry._reading["parallel_engaged"] = 1
 
-    # Strategy: shuffle (no merge, high-card) vs round-robin (+merge, low/med card).
-    # Shuffle needs the group key materialised in the scan output (plain identifier
-    # keys) so it can partition pre-aggregate. 'auto' (NDV-selected) lands in
-    # Stage 2; until then the default is round-robin.
-    strategy = config.PARALLEL_AGG_STRATEGY
-    breaker = plan[breaker_id]
-    if strategy == "shuffle" and _shuffle_eligible(breaker):
+    if ungrouped is not None:
+        scan_id, middle_ids, breaker_id = ungrouped
         return (
-            _shuffle_agg_stream(plan, scan_id, middle_ids, breaker_id, workers),
+            _ungrouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
             ResultType.TABULAR,
         )
+    if grouped is not None:
+        scan_id, middle_ids, breaker_id = grouped
+        return (
+            _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
+            ResultType.TABULAR,
+        )
+    scan_id, op_ids, exit_id = stateless
     return (
-        _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers),
+        _stateless_stream(plan, scan_id, op_ids, exit_id, workers, telemetry),
         ResultType.TABULAR,
     )
 
 
-def _pow2_floor(n: int) -> int:
-    """Largest power of two <= n (>= 1)."""
-    p = 1
-    while (p << 1) <= n:
-        p <<= 1
-    return p
-
-
-def _shuffle_eligible(breaker) -> bool:
-    """Shuffle partitions rows pre-aggregate, so the group key must already exist
-    in the scan output — i.e. plain identifier group keys, no computed keys and no
-    per-row aggregate expression eval (`_needs_expression_eval`). Computed-key
-    grouped aggs fall back to round-robin."""
-    return bool(getattr(breaker, "group_by_columns", None)) and not breaker._needs_expression_eval
-
-
-def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
-    """Drive the grouped-aggregate pipeline in parallel and yield result morsels.
-
-    Mirrors serial_engine.stream()'s lifecycle: a try/finally that terminates the
-    context and closes the scan source on every exit path.
+def _ungrouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry=None):
+    """Parallel UNGROUPED aggregate (no GROUP BY). W workers SELF-PULL and
+    aggregate their OWN morsels into private plain engines; recombination is a
+    trivial SCALAR merge (sum/min/max the W partials) — no key, no exchange, no
+    row copy. The operator stays parallel-unaware. The parallel work is the
+    (often non-pushable, CPU-bound) filter/projection + scalar accumulate; this is
+    the embarrassingly-parallel case, the opposite of grouped-agg's keying tax.
     """
+    import threading
+
     from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import pull_one
 
     chains, exit_node, ctx = compile_pipeline(plan)
     scan = plan[scan_id]
@@ -311,19 +351,18 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
 
     pool = None
     try:
-        # ── Phase 1: buffer up to the row-floor to decide serial vs parallel ──
+        # Row-floor: tiny inputs run serially (clone + thread setup dominate).
         buffer = []
         buffered_rows = 0
         exhausted = False
         while buffered_rows < config.PARALLEL_MIN_ROWS:
-            morsel = scan._next_morsel_py()
+            morsel = pull_one(scan)
             if morsel is None:
                 exhausted = True
                 break
             buffer.append(morsel)
             buffered_rows += morsel.num_rows
 
-        # ── Small input: run the buffer serially through the ORIGINAL chain ──
         if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
             head = plan[middle_ids[0]] if middle_ids else breaker
             for morsel in buffer:
@@ -336,81 +375,53 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
                 yield from _drain()
             return
 
-        # ── Large input: W cloned chains, one worker thread each ──
         clones = [_build_clone_chain(plan, middle_ids, breaker, ctx) for _ in range(workers)]
-        queues = [_queue.Queue(maxsize=_QUEUE_DEPTH) for _ in range(workers)]
-        errors: list = [None] * workers
+        errors = [None] * workers
+        ingested = [0] * workers
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+
+        def next_input():
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                buffered = next(buf_iter, None)
+                if buffered is not None:
+                    return buffered
+                return pull_one(scan)
 
         def worker(index):
             chain_head = clones[index][0]
-            work_queue = queues[index]
+            count = 0
             try:
                 while True:
-                    morsel = work_queue.get()
-                    if morsel is _WORKER_DONE:
-                        return
+                    morsel = next_input()
+                    if morsel is None:
+                        break
                     push_one(chain_head, morsel)
+                    count += 1
             except BaseException as exc:  # noqa: BLE001 — surface on the main thread
                 errors[index] = exc
-                # Keep draining so the main thread's put() can never block on a
-                # dead worker; discard the rest of this partition.
-                while work_queue.get() is not _WORKER_DONE:
-                    pass
+            ingested[index] = count
 
-        pool = CppThreadPool(workers, "m4-grouped-agg")
+        pool = CppThreadPool(workers, "m4-ungrouped-agg")
         futures = [pool.submit(worker, k) for k in range(workers)]
-
-        # Exclusive morsel ownership: each morsel goes to exactly one worker
-        # (contract rule 1). A full queue blocks here → backpressure to the scan.
-        round_robin = 0
-        received = [0] * workers
-
-        def dispatch(morsel):
-            nonlocal round_robin
-            target = round_robin % workers
-            queues[target].put(morsel)
-            received[target] += 1
-            round_robin += 1
-
-        for morsel in buffer:
-            dispatch(morsel)
-        if not exhausted:
-            while True:
-                if ctx.is_terminated():
-                    break
-                morsel = scan._next_morsel_py()
-                if morsel is None:
-                    break
-                dispatch(morsel)
-
-        for work_queue in queues:
-            work_queue.put(_WORKER_DONE)
         for future in futures:
-            future.result()  # join + propagate any worker exception
-        for index, exc in enumerate(errors):
+            future.result()
+        for exc in errors:
             if exc is not None:
                 raise exc
-
         if ctx.is_terminated():
             return
 
-        # ── Recombine: merge only the engines that actually ingested. A worker
-        # that received no morsels has an EMPTY engine; merging an empty engine
-        # corrupts the AVG finalizer (a latent merge() edge — see report), and
-        # is pointless anyway. We merge into the first populated engine (never the
-        # original's empty one — merge() is validated transplanting into a
-        # non-empty target) and have the original breaker finalise it.
-        populated = [k for k in range(workers) if received[k] > 0]
+        # Scalar merge of the W partial engines into the first populated one, then
+        # finalise via the original breaker (drives the serial tail + EOS).
+        populated = [k for k in range(workers) if ingested[k] > 0]
         if populated:
             base_engine = clones[populated[0]][1]._engine
             for k in populated[1:]:
                 base_engine.merge(clones[k][1]._engine)
             breaker._engine = base_engine
-        # else: no rows reached any worker → the original empty engine finalises
-        # to zero groups, exactly as serial would.
-
-        # Finalise via the original breaker → emits to exit and drives the
-        # serial tail of the plan (any sort/limit downstream of the aggregate).
         push_one(breaker, _EOS_SENTINEL)
         yield from _drain()
     finally:
@@ -420,34 +431,44 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
         scan.close_source()
 
 
-def _shuffle_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
-    """High-cardinality strategy: hash-partition rows by group key into B
-    row-disjoint bins (one worker per bin), aggregate each bin independently, and
-    concatenate — **NO merge**. Removes the round-robin merge() Amdahl term.
+def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry=None):
+    """Parallel GROUPED aggregate (GROUP BY). W workers SELF-PULL morsels and
+    ingest each into their OWN private cloned engine (keying + accumulate is
+    GIL-free per-engine), then the W partials are combined into one by the
+    existing per-group merge (key probe + state transplant). Under free-threading
+    that merge is GIL-free (GroupHashEngine.merge over disjoint partitions), so the
+    recombination tax that previously sank this shape no longer dominates.
 
-    B = the largest power of two <= workers (one bin per worker, no work-stealing
-    yet — that is Stage-3). Each clone chain is identical to the round-robin path
-    (filter → agg); only the dispatch (partition vs whole morsel) and the
-    recombine (finalize-each vs merge) differ.
+    The operator stays parallel-unaware: the ENGINE clones it per worker, routes
+    morsels, and recombines. Result is identical to the serial path for every
+    group-key shape merge() supports (single-, multi- and zero-column; null and
+    bool keys) and every mergeable aggregate.
+
+    **Mergeability is decided at RUNTIME, not at plan time.** The grouped engine
+    uses *deferred* collectors that only resolve to a concrete type (int / float /
+    decimal / string / …) on the first morsel, so ``engine.is_mergeable()`` is
+    unknowable before any data flows — the finder can only gate on *shape*. So we
+    ingest the first buffered morsel into the ORIGINAL breaker (single-threaded,
+    through the real middle-op chain) to RESOLVE its collectors, then check
+    ``is_mergeable()``:
+
+      * not mergeable (COUNT DISTINCT / MEDIAN / decimal / string / bool / interval
+        MIN-MAX) → finish the whole query SERIALLY through the breaker (correctness
+        routing by capability — the breaker already holds morsel 0);
+      * mergeable → fan W workers over the REMAINING morsels into per-worker engine
+        clones, then per-group ``merge()`` each worker engine INTO the breaker's
+        engine (which already holds morsel 0's groups) — no work discarded.
     """
+    import threading
+
     from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.managers.execution.pipeline_compiler import compile_pipeline
-    from opteryx.operators.exchange import ExchangeNode
+    from opteryx.operators._operators import pull_one
 
     chains, exit_node, ctx = compile_pipeline(plan)
     scan = plan[scan_id]
     breaker = plan[breaker_id]
-    key_columns = list(breaker.group_by_columns)
-    # The shuffle is an operator: it owns the partition logic, the scheduler owns
-    # the threads (see docs/M4_CENTRAL_SCHEDULER_DESIGN.md §11).
-    exchange = ExchangeNode(properties=breaker.properties, partition_columns=key_columns)
-
-    # The operator after the aggregate (sort / projection / exit) — we push each
-    # bin's finalized output into it, then a SINGLE EOS drives the serial tail.
-    post_edges = list(plan.outgoing_edges(breaker_id))
-    post = plan[post_edges[0][1]] if post_edges else None
-
-    bins = _pow2_floor(workers)
+    head = plan[middle_ids[0]] if middle_ids else breaker
 
     def _drain():
         if exit_node is None:
@@ -455,101 +476,226 @@ def _shuffle_agg_stream(plan, scan_id, middle_ids, breaker_id, workers):
         while exit_node.has_pending():
             yield exit_node.pop_pending()
 
+    def _finish_serial(remaining):
+        """Drive `remaining` morsels through the original breaker, then EOS."""
+        for m in remaining:
+            if ctx.is_terminated():
+                return
+            push_one(head, m)
+            yield from _drain()
+        while True:
+            if ctx.is_terminated():
+                return
+            m = pull_one(scan)
+            if m is None:
+                break
+            push_one(head, m)
+            yield from _drain()
+        if not ctx.is_terminated():
+            push_one(head, _EOS_SENTINEL)
+            yield from _drain()
+
     pool = None
     try:
-        # ── Phase 1: buffer to the row-floor (same gate as round-robin) ──
+        # Row-floor: tiny inputs run serially (clone + thread setup dominate).
         buffer = []
         buffered_rows = 0
         exhausted = False
         while buffered_rows < config.PARALLEL_MIN_ROWS:
-            morsel = scan._next_morsel_py()
+            morsel = pull_one(scan)
             if morsel is None:
                 exhausted = True
                 break
             buffer.append(morsel)
             buffered_rows += morsel.num_rows
 
-        if (exhausted and buffered_rows < config.PARALLEL_MIN_ROWS) or bins < 2:
-            head = plan[middle_ids[0]] if middle_ids else breaker
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            yield from _finish_serial(buffer)
+            return
+
+        # ---- Resolve mergeability on the first morsel (single-threaded) -------
+        # Push morsel 0 through the real middle-op chain into the ORIGINAL breaker
+        # so its deferred collectors resolve to concrete typed ones. NO EOS yet, so
+        # the breaker does not finalize/emit. This makes is_mergeable() answerable.
+        if buffer:
+            push_one(head, buffer[0])
+        if not breaker._engine.is_mergeable():
+            # Capability routing: a non-mergeable aggregate cannot be partitioned.
+            # The breaker already holds morsel 0; finish the rest serially.
+            yield from _finish_serial(buffer[1:])
+            return
+
+        # ---- Mergeable → parallel fan-out over the REMAINING morsels ----------
+        clones = [_build_clone_chain(plan, middle_ids, breaker, ctx) for _ in range(workers)]
+        errors = [None] * workers
+        ingested = [0] * workers
+        buf_iter = iter(buffer[1:])
+        pull_lock = threading.Lock()
+
+        def next_input():
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                buffered = next(buf_iter, None)
+                if buffered is not None:
+                    return buffered
+                return pull_one(scan)
+
+        def worker(index):
+            chain_head = clones[index][0]
+            count = 0
+            try:
+                while True:
+                    morsel = next_input()
+                    if morsel is None:
+                        break
+                    push_one(chain_head, morsel)
+                    count += 1
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
+                errors[index] = exc
+            ingested[index] = count
+
+        pool = CppThreadPool(workers, "m4-grouped-agg")
+        futures = [pool.submit(worker, k) for k in range(workers)]
+        for future in futures:
+            future.result()
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        # Per-group merge of the W worker engines INTO the breaker's engine (which
+        # already holds morsel 0's groups), then finalise via the breaker (drives
+        # the serial tail + EOS). The breaker keeps its node-level finalize state
+        # (implicit COUNT(*), HAVING, aggregation specs).
+        base_engine = breaker._engine
+        for k in range(workers):
+            if ingested[k] > 0:
+                base_engine.merge(clones[k][1]._engine)
+        push_one(breaker, _EOS_SENTINEL)
+        yield from _drain()
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+        ctx.terminate()
+        scan.close_source()
+
+
+def _stateless_stream(plan, scan_id, op_ids, exit_id, workers, telemetry=None):
+    """Parallel SELECTION/PROJECTION (no aggregate). Filter and projection are
+    per-morsel INDEPENDENT transforms — there is NO recombination/merge and no
+    barrier. Each worker SELF-PULLS, runs its morsel through its OWN cloned chain
+    (stateless ops + a cloned Exit doing the final select/rename), and STREAMS the
+    finished morsel straight to a shared queue. The main generator yields morsels
+    as they arrive — workers produce while the caller consumes (true streaming,
+    bounded by nothing but the caller's pace). Operators stay parallel-unaware.
+    """
+    import queue as _queue
+    import threading
+
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import pull_one
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    scan = plan[scan_id]
+
+    pool = None
+    try:
+        # Row-floor: tiny inputs run serially through the original chain.
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = pull_one(scan)
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            head = plan[op_ids[0]]
             for morsel in buffer:
                 if ctx.is_terminated():
                     break
                 push_one(head, morsel)
-                yield from _drain()
+                while exit_node.has_pending():
+                    yield exit_node.pop_pending()
             if not ctx.is_terminated():
                 push_one(head, _EOS_SENTINEL)
-                yield from _drain()
+                while exit_node.has_pending():
+                    yield exit_node.pop_pending()
             return
 
-        # ── B cloned chains (filter → agg), one worker thread per bin ──
-        clones = [_build_clone_chain(plan, middle_ids, breaker, ctx) for _ in range(bins)]
-        queues = [_queue.Queue(maxsize=_QUEUE_DEPTH) for _ in range(bins)]
-        errors: list = [None] * bins
-        received = [0] * bins
+        # Each worker: clone the stateless ops + a clone of the Exit (which applies
+        # the final select/rename into its own _pending). After each pushed morsel
+        # the worker drains its Exit-clone's pending straight to the shared queue —
+        # no collect, no barrier. (Unbounded queue: the caller drives consumption;
+        # workers never block on put, so abandonment can't deadlock the join.)
+        out_q = _queue.Queue()
+        DONE = object()
+        errors = [None] * workers
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+
+        def next_input():
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                buffered = next(buf_iter, None)
+                if buffered is not None:
+                    return buffered
+                return pull_one(scan)
 
         def worker(index):
-            chain_head = clones[index][0]
-            work_queue = queues[index]
+            ops = [_clone_op(plan[nid]) for nid in op_ids]
+            exit_clone = _clone_op(plan[exit_id])
+            chain = ops + [exit_clone]
+            for i, op in enumerate(chain):
+                op.set_context(ctx)
+                if i + 1 < len(chain):
+                    op.set_downstream(chain[i + 1])
+            head = chain[0]
             try:
                 while True:
-                    sub = work_queue.get()
-                    if sub is _WORKER_DONE:
-                        return
-                    push_one(chain_head, sub)
-            except BaseException as exc:  # noqa: BLE001
+                    morsel = next_input()
+                    if morsel is None:
+                        break
+                    push_one(head, morsel)
+                    while exit_clone.has_pending():
+                        out_q.put(exit_clone.pop_pending())
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
                 errors[index] = exc
-                while work_queue.get() is not _WORKER_DONE:
-                    pass
+            finally:
+                out_q.put(DONE)
 
-        pool = CppThreadPool(bins, "m4-shuffle-agg")
-        futures = [pool.submit(worker, b) for b in range(bins)]
+        pool = CppThreadPool(workers, "m4-stateless")
+        futures = [pool.submit(worker, k) for k in range(workers)]
 
-        def dispatch(morsel):
-            # Hash-partition the raw morsel by key into `bins` disjoint sub-morsels
-            # via the Exchange operator; each sub-morsel is exclusive to one worker
-            # (contract rule 1).
-            subs = exchange.partition(morsel, bins)
-            for b in range(bins):
-                sub = subs[b]
-                if sub.num_rows > 0:
-                    queues[b].put(sub)
-                    received[b] += 1
+        # Stream: yield morsels as workers produce them, until all W signal DONE.
+        done = 0
+        yielded = False
+        while done < workers:
+            item = out_q.get()
+            if item is DONE:
+                done += 1
+                continue
+            yielded = True
+            yield item
 
-        for morsel in buffer:
-            dispatch(morsel)
-        if not exhausted:
-            while True:
-                if ctx.is_terminated():
-                    break
-                morsel = scan._next_morsel_py()
-                if morsel is None:
-                    break
-                dispatch(morsel)
-
-        for work_queue in queues:
-            work_queue.put(_WORKER_DONE)
         for future in futures:
             future.result()
-        for index, exc in enumerate(errors):
+        for exc in errors:
             if exc is not None:
                 raise exc
 
-        if ctx.is_terminated():
-            return
-
-        # ── Recombine = NO merge. Each bin owns disjoint keys; finalize each
-        # populated clone and push its groups into the post-aggregate operator,
-        # then a SINGLE EOS drives the serial tail (sort/limit/exit). ──
-        if post is None:
-            return
-        for index in range(bins):
-            if received[index] == 0:
-                continue
-            for chunk in clones[index][1]._finalize():
-                push_one(post, chunk)
-                yield from _drain()
-        push_one(post, _EOS_SENTINEL)
-        yield from _drain()
+        # Empty result still needs the schema morsel the serial Exit emits on EOS.
+        if not yielded and not ctx.is_terminated():
+            push_one(exit_node, _EOS_SENTINEL)
+            while exit_node.has_pending():
+                yield exit_node.pop_pending()
     finally:
         if pool is not None:
             pool.shutdown(wait=True)

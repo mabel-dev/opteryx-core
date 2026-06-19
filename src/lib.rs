@@ -63,7 +63,10 @@ fn restore_ast(_py: Python, ast: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
 }
 
 
-#[pymodule]
+// gil_used = false declares this module safe to import under a free-threaded
+// (PEP 703) CPython without forcing the GIL back on. The functions here are
+// pure (SQL parse / AST restore, no shared mutable state), so this is sound.
+#[pymodule(gil_used = false)]
 fn compute(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_sql, m)?)?;
     m.add_function(wrap_pyfunction!(restore_ast, m)?)?;

@@ -114,6 +114,32 @@ def match_against(arr, val):
     raise NotImplementedError("MATCH AGAINST is not currently supported.")
 
 
+def position(sub, string):
+    """
+    SQL POSITION(sub IN string) — 1-based byte position of `sub` in `string`,
+    0 when not found, 1 for an empty needle, NULL when either input is NULL.
+
+    Parameter order follows the SQL grammar (needle, haystack); the native
+    kernel takes (haystack, needle), so we swap here.
+
+    vector_position is a nanobind kernel that unwraps raw draken_native
+    Vectors. The non-nb function-call path hands us Cython shims
+    (draken.vectors.vector), so unwrap to ._nb before the call and re-wrap the
+    raw result in a shim — the convention every non-nb function follows
+    (see logical.if_null).
+    """
+    from opteryx.compiled.nanobind.vector_string_misc import vector_position
+    from draken.vectors.vector import Vector as _ShimVector
+
+    if not string.__class__.__module__.startswith("draken.vectors."):
+        raise TypeError(f"POSITION expects a Draken vector haystack, got {type(string).__name__}.")
+    if not sub.__class__.__module__.startswith("draken.vectors."):
+        raise TypeError(f"POSITION expects a Draken vector needle, got {type(sub).__name__}.")
+
+    result = vector_position(string._nb, sub._nb)
+    return _ShimVector(result)
+
+
 def _normalise_replacement(repl: bytes) -> bytes:
     """
     Normalise regex replacement backreferences from double-backslash form to single.

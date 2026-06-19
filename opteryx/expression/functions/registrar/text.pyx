@@ -33,7 +33,6 @@ from opteryx.compiled.nanobind.vector_hash_codec import (
 from opteryx.compiled.nanobind.vector_string_misc3 import vector_soundex
 from opteryx.compiled.nanobind.vector_string_misc import (
     vector_levenshtein,
-    vector_position,
 )
 from opteryx.compiled.nanobind.vector_string_misc2 import (
     vector_replace,
@@ -435,7 +434,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         ),
         FunctionDefinition(
             name="POSITION",
-            aliases=("STRPOS",),
+            aliases=(),
             category="text",
             volatility="immutable",
             deterministic=True,
@@ -453,7 +452,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=lambda sub, string: vector_position(string, sub),
+                        callable_ref=string_functions.position,
                         cost_us_per_million=291.0,
                     ),
                 ),

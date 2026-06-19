@@ -146,5 +146,69 @@ def test_concurrent_ingest_then_merge_equals_serial(round_seed):
         assert m["avg"] == pytest.approx(r["avg"], rel=1e-9)
 
 
+def _cxx_morsel(groups, values):
+    """Cxx-backed morsel → drives the GIL-released `_ingest_cxx_span` path."""
+    return Morsel.from_cxx_vectors(
+        [GROUP, VALUE], [vector_from_sequence(groups), vector_from_sequence(values)]
+    )
+
+
+@pytest.mark.parametrize("round_seed", range(6))
+def test_concurrent_nogil_ingest_equals_serial(round_seed):
+    """S-B.3c: the same harness but every worker ingests Cxx morsels, so the
+    contended barrier-released section is the GIL-RELEASED grouped-agg span
+    (`_ingest_cxx_span`) re-entered concurrently by THREADS real OS threads. A
+    data race in the nogil keying/store/grow/accumulate or a kernel that isn't
+    actually nogil-safe would crash or diverge from the single-threaded
+    reference. Also asserts each engine genuinely took the GIL-free path."""
+    rng = random.Random(round_seed)
+    partitions = [_gen_partition(random.Random(round_seed * 100 + t)) for t in range(THREADS)]
+    all_morsels = [m for part in partitions for m in part]
+    reference = _reference(all_morsels)
+
+    engines = [None] * THREADS
+    errors = []
+    barrier = threading.Barrier(THREADS)
+
+    def worker(t):
+        try:
+            eng = _make_engine()  # use_parvi=False → carchar → nogil eligible
+            built = [_cxx_morsel(g, v) for g, v in partitions[t]]
+            barrier.wait()
+            for m in built:
+                eng.ingest(m)
+            engines[t] = eng
+        except Exception as exc:  # noqa: BLE001 — surface any thread failure
+            errors.append((t, repr(exc)))
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(THREADS)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert not errors, f"worker thread(s) failed under concurrency: {errors[:3]}"
+
+    # Every worker must have actually run the GIL-released span on every morsel.
+    for t, eng in enumerate(engines):
+        fired = eng.telemetry()["nogil_ingest_morsels"]
+        assert fired == MORSELS_PER_THREAD, (t, fired)
+
+    base = engines[0]
+    for other in engines[1:]:
+        base.merge(other)
+    merged = _finalize(base)
+
+    assert merged.keys() == reference.keys()
+    for g in reference:
+        m, r = merged[g], reference[g]
+        assert m["cstar"] == r["cstar"]
+        assert m["cnt"] == r["cnt"]
+        assert m["sum"] == r["sum"]
+        assert m["min"] == r["min"]
+        assert m["max"] == r["max"]
+        assert m["avg"] == pytest.approx(r["avg"], rel=1e-9)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

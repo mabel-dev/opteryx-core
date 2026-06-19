@@ -1,5 +1,5 @@
 """
-Tests for rugo._csv.read_csv
+Tests for rugo.csv.read_csv
 
 Coverage:
   - basic read (all columns)
@@ -22,14 +22,13 @@ Coverage:
 
 import pytest
 
-import draken  # noqa: F401 — must precede rugo._csv to resolve draken symbols
-
-from rugo._csv import read_csv
-
+import draken  # noqa: F401 — must precede rugo.csv to resolve draken symbols
+from rugo.csv import read_csv
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _to_list(draken_vec):
     """Convert a DrakenVector to a Python list (None for nulls)."""
@@ -39,6 +38,7 @@ def _to_list(draken_vec):
 # ---------------------------------------------------------------------------
 # Basic read
 # ---------------------------------------------------------------------------
+
 
 def test_basic_all_columns():
     csv = b"id,name,value\n1,alice,3.14\n2,bob,2.71\n3,charlie,1.41\n"
@@ -76,6 +76,7 @@ def test_header_only_no_data():
 # Projection
 # ---------------------------------------------------------------------------
 
+
 def test_projection_single_column():
     csv = b"a,b,c\n1,2,3\n4,5,6\n"
     r = read_csv(csv, columns=["b"])
@@ -103,6 +104,7 @@ def test_projection_unknown_column_ignored():
 # ---------------------------------------------------------------------------
 # Predicates
 # ---------------------------------------------------------------------------
+
 
 def test_predicate_eq():
     csv = b"id,name\n1,alice\n2,bob\n3,charlie\n"
@@ -145,6 +147,7 @@ def test_predicate_on_non_projected_column():
 # Quoted fields
 # ---------------------------------------------------------------------------
 
+
 def test_quoted_field_with_embedded_delimiter():
     csv = b'id,name\n1,"smith, john"\n2,doe\n'
     r = read_csv(csv)
@@ -183,6 +186,7 @@ def test_doubled_quote_escape():
 # CRLF
 # ---------------------------------------------------------------------------
 
+
 def test_crlf_endings():
     csv = b"a,b\r\n1,2\r\n3,4\r\n"
     r = read_csv(csv)
@@ -194,6 +198,7 @@ def test_crlf_endings():
 # ---------------------------------------------------------------------------
 # has_header=False
 # ---------------------------------------------------------------------------
+
 
 def test_no_header():
     csv = b"1,alice,3.14\n2,bob,2.71\n"
@@ -217,6 +222,7 @@ def test_no_header_projection():
 # Delimiter variants
 # ---------------------------------------------------------------------------
 
+
 def test_tab_delimiter():
     tsv = b"id\tname\tval\n1\talice\t10\n2\tbob\t20\n"
     r = read_csv(tsv, delimiter="\t")
@@ -235,6 +241,7 @@ def test_semicolon_delimiter():
 # ---------------------------------------------------------------------------
 # Null handling
 # ---------------------------------------------------------------------------
+
 
 def test_empty_unquoted_field_is_null():
     csv = b"a,b,c\n1,,3\n"
@@ -262,6 +269,7 @@ def test_all_null_column():
 # ---------------------------------------------------------------------------
 # Type inference
 # ---------------------------------------------------------------------------
+
 
 def test_infers_int64():
     csv = b"n\n1\n-2\n999\n"
@@ -302,6 +310,7 @@ def test_varchar_column():
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 def test_single_column_single_row():
     r = read_csv(b"x\n42\n")
     assert r["num_rows"] == 1
@@ -318,7 +327,7 @@ def test_single_row_many_columns():
 
 
 def test_many_rows_no_threading():
-    rows = "id,val\n" + "".join(f"{i},{i*2}\n" for i in range(1000))
+    rows = "id,val\n" + "".join(f"{i},{i * 2}\n" for i in range(1000))
     r = read_csv(rows.encode(), use_threads=False)
     assert r["num_rows"] == 1000
     ids = _to_list(r["columns"][0])
@@ -327,7 +336,7 @@ def test_many_rows_no_threading():
 
 
 def test_many_rows_with_threading():
-    rows = "id,val\n" + "".join(f"{i},{i*2}\n" for i in range(1000))
+    rows = "id,val\n" + "".join(f"{i},{i * 2}\n" for i in range(1000))
     r = read_csv(rows.encode(), use_threads=True)
     assert r["num_rows"] == 1000
 

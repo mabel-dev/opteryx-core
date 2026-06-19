@@ -167,26 +167,33 @@ cpdef BoolVector vector_like(
         draken_free(out_null)
         raise MemoryError()
 
-    for j in range(data_length):
-        slot = &arena.slots[j]
-        slen = str_length(slot)
-        sdata = str_data(slot, arena.arena)
-        slot_match[j] = <uint8_t>_sv_sql_like_match(
-            sdata, <Py_ssize_t>slen, pat_ptr, pat_len, ignore_case,
-        )
+    # The match + scatter loops touch no Python — str_length/str_data and
+    # _sv_sql_like_match are all noexcept nogil, and the rest is C pointer/bit
+    # arithmetic. Release the GIL so concurrent morsels run LIKE/ILIKE in parallel
+    # rather than serialising on the interpreter lock (§2). All buffers are alive
+    # for the duration (vec/pattern hold the source arenas; dst/slot_match/out_null
+    # are draken/malloc owned here).
+    with nogil:
+        for j in range(data_length):
+            slot = &arena.slots[j]
+            slen = str_length(slot)
+            sdata = str_data(slot, arena.arena)
+            slot_match[j] = <uint8_t>_sv_sql_like_match(
+                sdata, <Py_ssize_t>slen, pat_ptr, pat_len, ignore_case,
+            )
 
-    if negate:
-        for i in range(n):
-            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                continue
-            if slot_match[sel[i]]:
-                dst[i >> 3] &= ~(1 << (i & 7))
-    else:
-        for i in range(n):
-            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                continue
-            if slot_match[sel[i]]:
-                dst[i >> 3] |= (1 << (i & 7))
+        if negate:
+            for i in range(n):
+                if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                    continue
+                if slot_match[sel[i]]:
+                    dst[i >> 3] &= ~(1 << (i & 7))
+        else:
+            for i in range(n):
+                if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                    continue
+                if slot_match[sel[i]]:
+                    dst[i >> 3] |= (1 << (i & 7))
 
     free(slot_match)
     return from_decoded(<void*>dst, out_null, <size_t>n)

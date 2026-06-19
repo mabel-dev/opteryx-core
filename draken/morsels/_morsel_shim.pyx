@@ -231,10 +231,29 @@ cdef class Morsel:
         self._columns.clear()
 
     def __len__(self):
-        return self._num_columns()
+        # Row count — consistent with row-access __getitem__. Production
+        # callers (insert row tallies, cross-join/writer emptiness checks)
+        # all treat len(morsel) as the number of rows. Use num_columns for
+        # the column count.
+        return self.num_rows
 
-    def __getitem__(self, int idx):
-        return self._get_column(idx)
+    def __getitem__(self, Py_ssize_t idx):
+        """Row access: return row ``idx`` as a tuple of per-column values.
+
+        Negative indices follow Python convention. An out-of-range index
+        raises ``IndexError`` — no silent ``(None, ...)`` padding (CLAUDE.md
+        §1: fail fast, never silently degrade). For column access use
+        ``column(name)``.
+        """
+        cdef Py_ssize_t n = self.num_rows
+        cdef Py_ssize_t i = idx
+        if i < 0:
+            i += n
+        if i < 0 or i >= n:
+            raise IndexError("Morsel row index out of range")
+        cdef Py_ssize_t ncols = self._num_columns()
+        cdef Py_ssize_t c
+        return tuple([self._get_column(c)[i] for c in range(ncols)])
 
     @property
     def num_rows(self):
@@ -369,47 +388,158 @@ cdef class Morsel:
         # buf is draken_malloc'd; from_decoded assumes ownership (freed on GC).
         return from_decoded(<void*>buf, NULL, <uint32_t>n, DRAKEN_INT64)
 
-    def __str__(self):
-        """Format morsel as an ASCII table for display."""
+    def _render_table(self, colorize):
+        """Shared implementation for __str__ and to_string."""
         self._ensure_pyobject()
-        if self.num_rows == 0:
-            if self.num_columns == 0:
-                return ""
-            col_names = [name.decode('utf-8') if isinstance(name, bytes) else name
-                         for name in self._col_names]
-            return " | ".join(col_names)
 
-        col_names = [name.decode('utf-8') if isinstance(name, bytes) else name
+        cdef int nc = self.num_columns
+        cdef int nr = self.num_rows
+
+        col_names = [name.decode('utf-8') if isinstance(name, bytes) else str(name)
                      for name in self._col_names]
-        col_data = []
-        for col_idx in range(self.num_columns):
-            vec = self._get_column(col_idx)
-            try:
-                py_list = vec.to_pylist()
-                col_data.append(py_list)
-            except Exception:
-                col_data.append([None] * self.num_rows)
+        col_types = [str(self._get_column(i).type.name) for i in range(nc)]
 
-        max_rows = min(self.num_rows, 5)
+        if nc == 0:
+            return "Morsel{%d rows, 0 columns}" % nr
+
+        # --- Column widths: max of header, type label, and data ---
+        # max_display_width() scans unique slots directly in C++ — no to_pylist.
+        MAX_COL = 30
+        col_w = []
+        for i in range(nc):
+            vec = self._get_column(i)
+            data_w = vec._nb.max_display_width()
+            w = max(len(col_names[i]), len(col_types[i]), data_w)
+            col_w.append(min(w, MAX_COL))
+
+        # Row index width
+        idx_w = max(len(str(nr)), 1) + 1  # +1 for padding
+
+        def _cell(val, width, col_type):
+            if val is None:
+                s = "null"
+                if colorize:
+                    return "\033[38;2;64;75;108m\033[3m" + s.ljust(width) + "\033[0m"
+                return s.ljust(width)
+            s = str(val)
+            if len(s) > width:
+                s = s[:width - 1] + "\u2026"
+            s = s.ljust(width)
+            if not colorize:
+                return s
+            # Type-based colouring matching Orso's palette.
+            # bool must come before int (bool is a subclass of int).
+            import datetime as _dt
+            import decimal as _dec
+            if isinstance(val, bool):
+                return "\033[38;2;139;233;253m\033[3m" + s + "\033[0m"
+            if isinstance(val, int):
+                return "\033[38;2;189;147;249m" + s + "\033[0m"
+            if isinstance(val, (float, _dec.Decimal)):
+                return "\033[38;2;255;121;198m" + s + "\033[0m"
+            if isinstance(val, str):
+                return "\033[38;2;255;171;82m" + s + "\033[0m"
+            if isinstance(val, _dt.datetime):
+                return "\033[38;2;80;250;123m" + s + "\033[0m"
+            if isinstance(val, _dt.date):
+                return "\033[38;2;80;250;123m" + s + "\033[0m"
+            if isinstance(val, _dt.time):
+                return "\033[38;2;26;185;67m" + s + "\033[0m"
+            if isinstance(val, bytes):
+                return "\033[38;5;228m" + s + "\033[0m"
+            return s
+
+        RESET  = "\033[0m"
+        PUNCT  = "\033[38;5;102m"
+        HEAD   = "\033[1m"
+        TYPE_C = "\033[38;2;98;114;164m"
+        IDX_C  = "\033[38;2;98;114;164m"
+
+        def _p(s):
+            return (PUNCT + s + RESET) if colorize else s
+
         lines = []
 
-        if col_names:
-            lines.append(" | ".join(col_names))
-            lines.append("-" * (sum(len(n) for n in col_names) + 3 * (len(col_names) - 1)))
+        # Top border
+        lines.append(
+            _p("\u250c" + ("\u2500" * idx_w) + "\u252c\u2500" +
+               "\u2500\u252c\u2500".join("\u2500" * w for w in col_w) + "\u2500\u2510")
+        )
+        # Header: column names
+        if colorize:
+            name_cells = " \u2502 ".join(
+                HEAD + n.center(w)[:w] + RESET for n, w in zip(col_names, col_w))
+            lines.append(_p("\u2502") + (" " * idx_w) + _p("\u2502 ") + name_cells + _p(" \u2502"))
+        else:
+            lines.append(
+                "\u2502" + (" " * idx_w) + "\u2502 " +
+                " \u2502 ".join(n.center(w)[:w] for n, w in zip(col_names, col_w)) + " \u2502"
+            )
+        # Header: type names
+        if colorize:
+            type_cells = " \u2502 ".join(
+                TYPE_C + t.center(w)[:w] + RESET for t, w in zip(col_types, col_w))
+            lines.append(_p("\u2502") + (" " * idx_w) + _p("\u2502 ") + type_cells + _p(" \u2502"))
+        else:
+            lines.append(
+                "\u2502" + (" " * idx_w) + "\u2502 " +
+                " \u2502 ".join(t.center(w)[:w] for t, w in zip(col_types, col_w)) + " \u2502"
+            )
+        # Header separator: \u255e\u2550\u256a\u2550\u2561
+        lines.append(
+            _p("\u255e" + ("\u2550" * idx_w) + "\u256a\u2550" +
+               "\u2550\u256a\u2550".join("\u2550" * w for w in col_w) + "\u2550\u2561")
+        )
 
-        for row_idx in range(max_rows):
-            row = []
-            for col_idx in range(self.num_columns):
-                val = col_data[col_idx][row_idx]
-                val_str = str(val)[:30] if val is not None else "NULL"
-                row.append(val_str)
-            lines.append(" | ".join(row))
+        if nr == 0:
+            lines.append(
+                _p("\u2514" + ("\u2500" * idx_w) + "\u2534\u2500" +
+                   "\u2500\u2534\u2500".join("\u2500" * w for w in col_w) + "\u2500\u2518")
+            )
+            lines.append("0 rows x %d columns" % nc)
+            return "\n".join(lines)
 
-        if self.num_rows > 5:
-            remaining = self.num_rows - 5
-            lines.append("... %d more rows ..." % remaining)
+        LIMIT = 5
+        top_and_tail = nr > (2 * LIMIT)
+        show_indices = (list(range(LIMIT)) + list(range(nr - LIMIT, nr))) if top_and_tail \
+                       else list(range(min(nr, LIMIT * 2)))
 
-        return "\n".join(lines) if lines else ""
+        # Materialise only the rows we will show
+        col_data = [self._get_column(i).to_pylist() for i in range(nc)]
+
+        for display_pos, row_idx in enumerate(show_indices):
+            if top_and_tail and display_pos == LIMIT:
+                skipped = nr - 2 * LIMIT
+                gap = _p("\u2502") + ".".center(idx_w) + _p("\u2502 ")
+                mid = ("%d more rows" % skipped).center(sum(col_w) + 3 * (nc - 1))
+                lines.append(gap + mid + _p(" \u2502"))
+            formatted = [_cell(col_data[ci][row_idx], col_w[ci], col_types[ci])
+                         for ci in range(nc)]
+            idx_str = (IDX_C + str(row_idx + 1).rjust(idx_w - 1) + RESET) if colorize \
+                      else str(row_idx + 1).rjust(idx_w - 1)
+            lines.append(
+                _p("\u2502") + idx_str + _p(" \u2502 ") +
+                _p(" \u2502 ").join(formatted) + _p(" \u2502")
+            )
+
+        # Bottom border
+        lines.append(
+            _p("\u2514" + ("\u2500" * idx_w) + "\u2534\u2500" +
+               "\u2500\u2534\u2500".join("\u2500" * w for w in col_w) + "\u2500\u2518")
+        )
+        lines.append("%d rows x %d columns" % (nr, nc))
+        return "\n".join(lines)
+
+    def to_string(self, colorize=False):
+        """Render the morsel as a table string.
+
+        colorize=False  plain text (default; same as __str__).
+        colorize=True   ANSI colour codes matching Orso's terminal palette.
+        """
+        return self._render_table(colorize)
+
+    def __str__(self):
+        return self._render_table(colorize=False)
 
     def _column_index_from_name(self, name):
         if isinstance(name, str):
@@ -737,8 +867,8 @@ cdef class Morsel:
         """
         if n_bins < 1 or (n_bins & (n_bins - 1)) != 0:
             raise ValueError("partition_by_hash: n_bins must be a power of two")
-        self._ensure_pyobject()
 
+        cdef bint is_cxx = self._cxx is not None
         cdef Py_ssize_t n = self.num_rows
         cdef Py_ssize_t ncols = self._num_columns()
         cdef uint64_t mask = <uint64_t>(n_bins - 1)
@@ -748,9 +878,12 @@ cdef class Morsel:
 
         if n == 0:
             for b in range(n_bins):
-                sub = _make_morsel()
-                sub._col_names = list(self._col_names)
-                sub._zero_col_num_rows = 0
+                if is_cxx:
+                    sub = Morsel.from_cxx(self._cxx.take([]))
+                else:
+                    sub = _make_morsel()
+                    sub._col_names = list(self._col_names)
+                    sub._zero_col_num_rows = 0
                 result.append(sub)
             return result
 
@@ -802,12 +935,19 @@ cdef class Morsel:
         free(hashes)
         free(cursor)
 
-        # 3) gather each bin's contiguous index slice into a sub-morsel.
+        # 3) gather each bin's contiguous index slice into a sub-morsel. The
+        #    routing is representation-agnostic: a Cxx-backed morsel stays Cxx
+        #    (native take, no materialization); a PyObject morsel takes natively.
         cdef int32_t start, blen
+        cdef list bin_idx
         try:
             for b in range(n_bins):
                 start = offsets[b]
                 blen = counts[b]
+                if is_cxx:
+                    bin_idx = [idx[start + i] for i in range(blen)]
+                    result.append(Morsel.from_cxx(self._cxx.take(bin_idx)))
+                    continue
                 sub = _make_morsel()
                 sub._col_names = list(self._col_names)
                 if ncols == 0:

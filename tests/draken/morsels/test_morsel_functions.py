@@ -732,14 +732,16 @@ def test_row_access_with_negative_and_out_of_bounds():
     table = pa.table({"a": [1, 2, 3]})
     morsel = draken.Morsel.from_arrow(table)
 
-    # Negative indices should work (Python convention)
-    # Note: Based on testing, seems to return (None,) for out of bounds
-    result = morsel[-1]
-    assert isinstance(result, tuple)
+    # Negative indices should work (Python convention).
+    assert morsel[-1] == (3,)
+    assert morsel[-3] == (1,)
 
-    # Out of bounds positive
-    result = morsel[10]
-    assert isinstance(result, tuple)
+    # Out-of-bounds raises IndexError — no silent (None, ...) padding
+    # (CLAUDE.md §1: fail fast, never silently degrade).
+    with pytest.raises(IndexError):
+        morsel[10]
+    with pytest.raises(IndexError):
+        morsel[-4]
 
 
 def test_select_duplicate_columns():

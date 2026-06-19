@@ -18,6 +18,7 @@ Key: file path (str)
 Value: raw footer envelope bytes (stored in MemoryPool, accessed via ref_id)
 """
 
+import threading
 from typing import Optional
 from libc.stdint cimport int64_t, uint8_t
 
@@ -31,7 +32,16 @@ cdef class ParquetFooterBytesCache:
     Stores raw footer bytes (magic + footer_data + magic + length) in a MemoryPool
     with LRU eviction. When the pool fills, oldest LRU entries are evicted.
 
-    Thread-safe: both MemoryPool and LRU_K use RLock internally.
+    Thread-safe. This is a process-global cache (one ``_FOOTER_CACHE`` shared by
+    every scan in every concurrently-executing query), so it is genuinely shared
+    mutable state — per-instance isolation is not possible by design. Under
+    free-threading (no GIL) the compound read-check-write sequences over the
+    Python ``_path_to_ref`` dict and the (un-synchronised) ``LRU_K`` would race
+    across scans, so every public method runs under ``_lock``. The MemoryPool has
+    its own internal ``std::mutex``; the ``with nogil`` pool calls below stay inside
+    ``_lock`` (a Python lock does not hold the GIL, so releasing the GIL while
+    holding it is legal) — ``_lock`` serialises this cache's bookkeeping, the pool
+    mutex serialises the pool.
     """
 
     # cdef attributes declared in footer_cache.pxd
@@ -45,6 +55,7 @@ cdef class ParquetFooterBytesCache:
         self.pool = MemoryPool(pool_size_bytes, name="parquet-footer", auto_resize=False)
         self.lru = LRU_K(k=1, max_memory=0, max_size=0)
         self._path_to_ref = {}
+        self._lock = threading.Lock()
 
     cpdef object get(self, str path):
         """Retrieve cached footer envelope bytes for a path.
@@ -52,16 +63,17 @@ cdef class ParquetFooterBytesCache:
         Returns:
             bytes: The footer envelope, or None if not cached.
         """
-        if path not in self._path_to_ref:
-            return None
+        with self._lock:
+            if path not in self._path_to_ref:
+                return None
 
-        # Update LRU access history
-        self.lru.get(path.encode())
+            # Update LRU access history
+            self.lru.get(path.encode())
 
-        # Read from pool and return as bytes (one copy for safety).
-        # Consumer is a Python parquet metadata parser, so we use the py_ surface.
-        ref_id = self._path_to_ref[path]
-        return self.pool.py_read(ref_id, False, False)
+            # Read from pool and return as bytes (one copy for safety).
+            # Consumer is a Python parquet metadata parser, so we use the py_ surface.
+            ref_id = self._path_to_ref[path]
+            return self.pool.py_read(ref_id, False, False)
 
     cpdef bint put(self, str path, const uint8_t[::1] envelope):
         """Store footer envelope in cache with LRU tracking.
@@ -86,35 +98,37 @@ cdef class ParquetFooterBytesCache:
         if env_len > 0:
             env_ptr = <const void*>&envelope[0]
 
-        while True:
-            with nogil:
-                ref_id = self.pool.commit(env_ptr, env_len)
-            if ref_id != -1:  # Success
-                self._path_to_ref[path] = ref_id
-                self.lru.set(path.encode(), b'', True)  # Dummy value, evict=True
-                return True
+        with self._lock:
+            while True:
+                with nogil:
+                    ref_id = self.pool.commit(env_ptr, env_len)
+                if ref_id != -1:  # Success
+                    self._path_to_ref[path] = ref_id
+                    self.lru.set(path.encode(), b'', True)  # Dummy value, evict=True
+                    return True
 
-            # Pool exhausted, evict oldest LRU entry and retry
-            evict_key, _ = self.lru.evict(False)
-            if evict_key is None:
-                # Nothing to evict
-                return False
+                # Pool exhausted, evict oldest LRU entry and retry
+                evict_key, _ = self.lru.evict(False)
+                if evict_key is None:
+                    # Nothing to evict
+                    return False
 
-            evict_path = evict_key.decode()
-            old_ref = self._path_to_ref.pop(evict_path)
-            with nogil:
-                self.pool.release(old_ref)
+                evict_path = evict_key.decode()
+                old_ref = self._path_to_ref.pop(evict_path)
+                with nogil:
+                    self.pool.release(old_ref)
 
     cpdef void clear(self):
         """Clear all cached footers and reset pool."""
         cdef int64_t ref_id
-        # Release all refs from pool
-        for ref_id in self._path_to_ref.values():
-            with nogil:
-                self.pool.release(ref_id)
+        with self._lock:
+            # Release all refs from pool
+            for ref_id in self._path_to_ref.values():
+                with nogil:
+                    self.pool.release(ref_id)
 
-        self._path_to_ref.clear()
-        self.lru.clear(False)
+            self._path_to_ref.clear()
+            self.lru.clear(False)
 
     cpdef dict stats(self):
         """Return cache statistics.
@@ -129,11 +143,13 @@ cdef class ParquetFooterBytesCache:
                 - lru_misses: LRU misses
         """
         # Python-surface getter — consumer is a Python dict
-        pool_stats = self.pool.py_get_stats()
-        lru_stats = self.lru.stats
+        with self._lock:
+            pool_stats = self.pool.py_get_stats()
+            lru_stats = self.lru.stats
+            cached_paths = len(self._path_to_ref)
 
         return {
-            "cached_paths": len(self._path_to_ref),
+            "cached_paths": cached_paths,
             "pool_used": pool_stats["used_size"],
             "pool_free": pool_stats["free_size"],
             "pool_size": pool_stats["total_size"],

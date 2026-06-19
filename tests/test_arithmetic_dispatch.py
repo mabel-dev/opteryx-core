@@ -103,12 +103,11 @@ class TestArithmeticIntegration:
         # Validate that result contains data
         morsel_count = 0
         for morsel in result:
-            for col in morsel:
-                if hasattr(col, "to_pylist"):
-                    values = col.to_pylist()
-                    assert len(values) > 0
-                    morsel_count += 1
-                    break
+            for name in morsel.column_names:
+                values = morsel.column(name).to_pylist()
+                assert len(values) > 0
+                morsel_count += 1
+                break
         assert morsel_count > 0
 
     def test_subtraction_query(self):

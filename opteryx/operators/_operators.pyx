@@ -890,6 +890,23 @@ cpdef void push_one(BasePlanNode head, object morsel) except *:
         raise _exc if _exc is not None else RuntimeError("pipeline push failed")
 
 
+cpdef object pull_one(BasePlanNode scan):
+    """Python-callable concurrent-pull entry: pull one morsel from `scan` and
+    return it as a Python Morsel, or None on exhaustion.
+
+    The sanctioned pull entry for the M4 morsel-driven scheduler's worker
+    threads. It calls the scan's typed `next_morsel()` override (the
+    thread-safe concurrent-pull path for single-pass parquet — N workers may
+    call this on the SAME scan and receive disjoint morsels), NOT the
+    `_next_morsel_py` generator wrapper (which is not reentrant). The pull
+    itself is GIL-held today (S-B.2 makes it nogil); the decode below is
+    parallel and the nogil ingest the puller feeds overlaps across workers."""
+    cdef shared_ptr[CxxMorsel] cxm = scan.next_morsel()
+    if cxm.get() == NULL:
+        return None
+    return cxx_to_morsel(cxm)
+
+
 cpdef void push_left_one(JoinNode join, object morsel) except *:
     """Python-callable driver for a join's build-side input (see push_one)."""
     cdef shared_ptr[CxxMorsel] cxm = _carrier_from_py(morsel)

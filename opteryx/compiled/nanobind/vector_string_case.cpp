@@ -78,6 +78,14 @@ static nb::object impl_lowercase(nb::object in_obj) {
         throw nb::type_error(
             "vector_lowercase: expected VARCHAR or NVARCHAR Vector");
 
+    // GIL-free compute: in_obj keeps the source arena alive for the whole call
+    // and everything below — allocation, the fold loop, native cleanup — touches
+    // no Python (draken_malloc + string slots). Drop the GIL until we publish the
+    // result (§2). The matching gil_scoped_acquire at the tail re-takes it for
+    // draken_vector_own_string; gil_scoped_release re-acquires in its destructor
+    // during exception unwind too (bad_alloc from the loop).
+    nb::gil_scoped_release _rel;
+
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
 
@@ -190,6 +198,7 @@ static nb::object impl_lowercase(nb::object in_obj) {
 
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     g.release();
     PyObject* out = draken_vector_own_string(
         out_slots, out_arena, arena_used, validity, n, out_type);
@@ -212,6 +221,9 @@ static nb::object impl_uppercase(nb::object in_obj) {
     if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
         throw nb::type_error(
             "vector_uppercase: expected VARCHAR or NVARCHAR Vector");
+
+    // GIL-free compute — see impl_lowercase for the full rationale.
+    nb::gil_scoped_release _rel;
 
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
@@ -295,6 +307,7 @@ static nb::object impl_uppercase(nb::object in_obj) {
     draken_free(tmp_buf); tmp_buf = nullptr;
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     g.release();
     PyObject* out = draken_vector_own_string(
         out_slots, out_arena, arena_used, validity, n, out_type);
@@ -319,6 +332,9 @@ static nb::object impl_initcap(nb::object in_obj) {
     if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
         throw nb::type_error(
             "vector_initcap: expected VARCHAR or NVARCHAR Vector");
+
+    // GIL-free compute — see impl_lowercase for the full rationale.
+    nb::gil_scoped_release _rel;
 
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
@@ -447,6 +463,7 @@ static nb::object impl_initcap(nb::object in_obj) {
     draken_free(tmp_buf); tmp_buf = nullptr;
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     g.release();
     PyObject* out = draken_vector_own_string(
         out_slots, out_arena, arena_used, validity, n, out_type);
@@ -501,6 +518,9 @@ static nb::object impl_reverse(nb::object in_obj) {
     if (!is_string)
         throw nb::type_error(
             "vector_reverse: expected VARCHAR, NVARCHAR, or VARBINARY Vector");
+
+    // GIL-free compute — see impl_lowercase for the full rationale.
+    nb::gil_scoped_release _rel;
 
     const bool nvarchar = (dv->type == DRAKEN_NVARCHAR);
     const uint32_t n    = dv->length;
@@ -583,6 +603,7 @@ static nb::object impl_reverse(nb::object in_obj) {
     draken_free(tmp_buf); tmp_buf = nullptr;
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     g.release();
     PyObject* out = draken_vector_own_string(
         out_slots, out_arena, arena_used, validity, n, dv->type);
@@ -606,6 +627,9 @@ static nb::object impl_trim_common(nb::object in_obj, bool trim_left, bool trim_
         throw std::invalid_argument("vector_trim: VARBINARY is not supported");
     if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
         throw nb::type_error("vector_trim: expected VARCHAR or NVARCHAR Vector");
+
+    // GIL-free compute — see impl_lowercase for the full rationale.
+    nb::gil_scoped_release _rel;
 
     const uint32_t n = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
@@ -689,6 +713,7 @@ static nb::object impl_trim_common(nb::object in_obj, bool trim_left, bool trim_
 
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     g.release();
     PyObject* out = draken_vector_own_string(
         out_slots, out_arena, arena_used, validity, n, out_type);

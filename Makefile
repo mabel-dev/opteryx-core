@@ -10,10 +10,10 @@ SHELL := /bin/bash
 #
 #   make PYTHON_GIL='PYTHON_GIL=0' <target>
 #
-PYTHON_GIL ?=
-# Prefer python3.13 by default for consistent ABI and compiled artifacts.
+PYTHON_GIL ?=0
+# Prefer python3.14 by default for consistent ABI and compiled artifacts.
 # Users may override by passing PYTHON='python3.x' on the make commandline.
-PYTHON ?= $(PYTHON_GIL) python
+PYTHON ?= PYTHON_GIL=$(PYTHON_GIL) PYENV_VERSION=3.14.5t pyenv exec python
 UV := $(PYTHON) -m uv
 PIP := $(UV) pip
 PYTEST := $(PYTHON) -m pytest
@@ -59,13 +59,13 @@ reference: check-python ## Regenerate all reference catalogs (JSON + catalog Pyt
 
 # === LINTING AND FORMATTING ===
 
-# Enforce Python 3.13 for CI and developer tools. This will abort early if the configured
-# python interpreter is not 3.13; set PYTHON to override or install 3.13 via your environment.
+# Enforce Python 3.14 for CI and developer tools. This will abort early if the configured
+# python interpreter is not 3.14; set PYTHON to override or install 3.13 via your environment.
 check-python:
 	@ver=`$(PYTHON) -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')" 2>/dev/null`; \
-	if [ "$$ver" != "3.13" ]; then \
-		echo "\nERROR: Python 3.13 is required for builds in this repository; found $$ver\n" >&2; \
-		echo "Set your local Python to 3.13 (pyenv local 3.13.5) or override with: make PYTHON=python3.13 <target>" >&2; \
+	if [ "$$ver" != "3.14" ]; then \
+		echo "\nERROR: Python 3.14 is required for builds in this repository; found $$ver\n" >&2; \
+		echo "Set your local Python to 3.14 (pyenv local 3.14.5t) or override with: make PYTHON=python3.14 <target>" >&2; \
 		exit 1; \
 	fi
 
@@ -195,6 +195,7 @@ go:
 
 clickbench:
 	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
@@ -296,6 +297,7 @@ c: compile-quick
 clean: ## Clean build artifacts
 	$(call print_blue,"Cleaning build artifacts...")
 	@find . -name '*.so' -delete
+	@$(PYTHON) dev/clean_cython_generated.py
 	@find . -name '*.pyc' -delete
 	@find . -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 	@find . -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true

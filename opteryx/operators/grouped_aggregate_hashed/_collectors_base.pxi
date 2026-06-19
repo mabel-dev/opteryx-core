@@ -131,3 +131,20 @@ cdef class BaseCollector:
             f"{type(self).__name__} does not support partition-parallel merge"
         )
 
+    cdef void merge_group_state_nogil(self, BaseCollector other, int64_t other_idx, int64_t self_idx) noexcept nogil:
+        """nogil sibling of merge_group_state for the GIL-free parallel per-bin
+        merge. The numeric mergeable collectors override this with a pure pointer
+        add / seen-aware compare (no allocation, no Python). Same UNCHECKED-cast
+        contract as merge_group_state: the engine verifies type(self) is
+        type(other) once before the nogil span. Default no-op: a collector that
+        is_mergeable()==False is never reached on the nogil merge path (the engine
+        gates on is_mergeable_nogil)."""
+        pass
+
+    cdef bint is_mergeable_nogil(self) noexcept nogil:
+        """True iff this collector's merge_group_state_nogil is a real nogil
+        transplant (every mergeable numeric collector). Distinct from
+        is_mergeable() which is noexcept-but-GIL: the nogil merge needs a
+        GIL-free predicate too. Default False."""
+        return False
+

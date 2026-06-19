@@ -36,11 +36,11 @@ Every column is a `DrakenVector`:
 struct DrakenVector {
     void*             data;        // typed payload
     const uint32_t*   selection;   // indices into data — never NULL
-    uint32_t          data_length; // unique values in data
+    uint32_t          data_length; // physical value count in data array
     uint32_t          length;      // logical row count
     uint8_t*          validity;    // 1-bit null mask; NULL means all-valid
     DrakenType        type;        // element type (dispatch key)
-    uint8_t           flags;       // layout hints (advisory only)
+    uint8_t           flags;       // layout hints (DRAKEN_SEL_IDENTITY, DRAKEN_SEL_PERMUTATION); 0 = unknown
 }
 ```
 
@@ -54,7 +54,16 @@ The three physical shapes differ only in what `selection` points at:
 | Constant | global zero vector              | `== 1`         |
 | Dict     | owned per-vector codes          | `< length`     |
 
-Specialization is not required for correctness - the access pattern above works for all three.
+`data_length` is the physical size of the `data` array. **Uniqueness of values is guaranteed only by the compress-builders** (e.g. `vector_from_string_dict_sequence`). Other dict constructors may admit duplicate values in `data` — do not assume they are distinct. Kernels always read via `data[selection[i]]` regardless.
+
+Specialization is not required for correctness — the access pattern above works for all three shapes. Shape-specialized fast paths require explicit architect approval (see §11 of the engineering contract).
+
+**`flags` layout hints** (set by constructors, advisory only — never use in hot loops):
+
+| Bit constant             | Meaning |
+|--------------------------|---------|
+| `DRAKEN_SEL_IDENTITY`    | `selection[i] == i` (true dense; implies permutation) |
+| `DRAKEN_SEL_PERMUTATION` | bijection over `data`; `data_length == length` |
 
 ---
 
@@ -74,26 +83,30 @@ the `.so` directly.
 
 `dn.DrakenType` is an enum. Values relevant to Python consumers:
 
-| Member         | Numeric | Python equivalent            |
-|----------------|---------|------------------------------|
-| `INT8`         | 1       | `int`                        |
-| `INT16`        | 2       | `int`                        |
-| `INT32`        | 3       | `int`                        |
-| `INT64`        | 4       | `int`                        |
-| `FLOAT32`      | 20      | `float`                      |
-| `FLOAT64`      | 21      | `float`                      |
-| `DATE32`       | 30      | `datetime.date`              |
-| `TIMESTAMP64`  | 40      | `datetime.datetime`          |
-| `TIME32`       | 41      | `datetime.time`              |
-| `TIME64`       | 42      | `datetime.time`              |
-| `INTERVAL`     | 43      | `(months: int, ms: int)`     |
-| `BOOL`         | 50      | `bool`                       |
-| `VARCHAR`      | 60      | `str` (ASCII)                |
-| `NVARCHAR`     | 63      | `str` (UTF-8 codepoint-aware)|
-| `VARBINARY`    | 64      | `bytes`                      |
-| `ARRAY`        | 80      | `list`                       |
-| `VECTOR_FP16`  | 102     | `list[float]` (embeddings)   |
-| `NULL`         | 101     | `None`                       |
+| Member         | Numeric | Python equivalent                     | Notes |
+|----------------|---------|---------------------------------------|-------|
+| `INT8`         | 1       | `int`                                 | |
+| `INT16`        | 2       | `int`                                 | |
+| `INT32`        | 3       | `int`                                 | |
+| `INT64`        | 4       | `int`                                 | |
+| `DECIMAL`      | 5       | `decimal.Decimal`                     | int64 unscaled value; precision ≤ 18 |
+| `FLOAT32`      | 20      | `float`                               | |
+| `FLOAT64`      | 21      | `float`                               | |
+| `DATE32`       | 30      | `datetime.date`                       | |
+| `TIMESTAMP64`  | 40      | `datetime.datetime`                   | |
+| `TIME32`       | 41      | `datetime.time`                       | |
+| `TIME64`       | 42      | `datetime.time`                       | |
+| `INTERVAL`     | 43      | `(months: int, ms: int)`              | |
+| `BOOL`         | 50      | `bool`                                | |
+| `VARCHAR`      | 60      | `str` (ASCII)                         | |
+| `NVARCHAR`     | 63      | `str` (UTF-8 codepoint-aware)         | |
+| `VARBINARY`    | 64      | `bytes`                               | |
+| `VARIANT`      | 65      | `str` (JSON text)                     | Polymorphic JSON value |
+| `ARRAY`        | 80      | `list`                                | |
+| `NON_NATIVE`   | 100     | —                                     | Fallback/unoptimized; avoid in new code |
+| `NULL`         | 101     | `None`                                | Every row null; no data, no validity |
+| `VECTOR_FP16`  | 102     | `list[float]` (embeddings)            | |
+| `DECIMAL128`   | 103     | `decimal.Decimal`                     | int128 unscaled value; precision ≤ 38 |
 
 Parameterized types carry out-of-band metadata (not stored in the struct):
 
@@ -243,7 +256,7 @@ dn.vector_from_string_dict_sequence(values: list[str | None])  # auto-dedup → 
 
 ## Morsel
 
-A `Morsel` groups related vectors (a column batch). It holds no ownership over the vectors.
+A `Morsel` groups related vectors (a column batch). It holds Python object references (refcount-based keep-alive) but owns no C++ resources directly. A vector is freed only when all holders — including the `Morsel` — have been released.
 
 ```python
 m = dn.Morsel()

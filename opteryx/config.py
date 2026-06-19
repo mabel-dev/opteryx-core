@@ -158,12 +158,17 @@ PARQUET_LOCAL_IO_WORKERS: int = int(get("PARQUET_LOCAL_IO_WORKERS", 8))
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 """Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
 
+import os as _os
+
 MAX_EXECUTION_WORKERS: int = int(get("MAX_EXECUTION_WORKERS", 1))
-"""Central parallel execution scheduler width (M4). 1 = the serial engine, byte-
-identical to the historic path (the default). >1 routes to the parallel engine,
-which parallelises pipeline segments over data partitions on a query-scoped
-CppThreadPool. Capped at 8 (the measured regression boundary) inside the engine.
-See docs/M4_CENTRAL_SCHEDULER_DESIGN.md."""
+"""Central parallel execution scheduler width (M4). **Defaults to 1 (serial).**
+The current parallel grouped-aggregate path uses round-robin + per-group merge,
+which is empirically a net regression on ClickBench (the merge is the wall — see
+docs/M4_PARALLEL_PATH_FORWARD.md). Until the key-partitioned exchange (no-merge)
+model lands, parallel is opt-in only, not the default. Set >1 to engage the
+parallel scheduler (morsel-driven self-pull + per-worker nogil ingest for a
+single-scan grouped-aggregate pipeline; every other plan shape falls back to
+serial). The engine clamps the effective width to min(this, cpu-2, 8)."""
 
 PARALLEL_MIN_ROWS: int = int(get("PARALLEL_MIN_ROWS", 262_144))
 """Row-floor for the parallel scheduler (M4). A pipeline whose scan yields fewer

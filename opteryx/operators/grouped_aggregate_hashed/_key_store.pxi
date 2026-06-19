@@ -245,7 +245,7 @@ cdef inline void gs_accum_free(GsAccum* a) noexcept nogil:
     a.arena_used = 0
 
 
-cdef inline void _gs_reserve_slots(GsAccum* a, Py_ssize_t need) except *:
+cdef inline bint _gs_reserve_slots(GsAccum* a, Py_ssize_t need) noexcept nogil:
     # Invariant: a non-NULL a.nulls validity bitmap always covers slots_cap rows,
     # so it grows here in lockstep with the slots buffer (new bytes 0xFF = all
     # valid; that fill is semantic). This lets gs_accum_append's per-row null
@@ -259,13 +259,13 @@ cdef inline void _gs_reserve_slots(GsAccum* a, Py_ssize_t need) except *:
     cdef void* p
     cdef uint8_t* nb
     if need <= a.slots_cap:
-        return
+        return True
     newcap = a.slots_cap * 2 if a.slots_cap > 0 else 16
     if newcap < need:
         newcap = need
     p = realloc(a.slots, <size_t>newcap * sizeof(DrakenStringSlot))
     if p == NULL:
-        raise MemoryError()
+        return False
     a.slots = <DrakenStringSlot*>p
     if a.nulls != NULL:
         old_bm_bytes = _ks_bitmap_nbytes(a.slots_cap)
@@ -273,36 +273,39 @@ cdef inline void _gs_reserve_slots(GsAccum* a, Py_ssize_t need) except *:
         if new_bm_bytes > old_bm_bytes:
             nb = <uint8_t*>realloc(a.nulls, <size_t>new_bm_bytes)
             if nb == NULL:
-                raise MemoryError()
+                return False
             memset(nb + old_bm_bytes, 0xFF, <size_t>(new_bm_bytes - old_bm_bytes))
             a.nulls = nb
     a.slots_cap = newcap
+    return True
 
 
-cdef inline void _gs_reserve_arena(GsAccum* a, Py_ssize_t need) except *:
+cdef inline bint _gs_reserve_arena(GsAccum* a, Py_ssize_t need) noexcept nogil:
     cdef Py_ssize_t newcap
     cdef void* p
     if need <= a.arena_cap:
-        return
+        return True
     newcap = a.arena_cap * 2 if a.arena_cap > 0 else 64
     if newcap < need:
         newcap = need
     p = realloc(a.arena, <size_t>newcap)
     if p == NULL:
-        raise MemoryError()
+        return False
     a.arena = <uint8_t*>p
     a.arena_cap = newcap
+    return True
 
 
 # Append one group key, sourced from src_slot (in the source arena src_arena).
 # valid=0 → null key (zeroed slot, validity bit cleared). Preserves the source
 # slot's prefix/hash32 verbatim; copies arena bytes only for long strings.
-cdef inline void gs_accum_append(GsAccum* a, const DrakenStringSlot* src_slot,
-                                 const uint8_t* src_arena, bint valid) except *:
+cdef inline bint gs_accum_append(GsAccum* a, const DrakenStringSlot* src_slot,
+                                 const uint8_t* src_arena, bint valid) noexcept nogil:
     cdef Py_ssize_t row = a.rows
     cdef DrakenStringSlot* dst
     cdef Py_ssize_t slen
-    _gs_reserve_slots(a, row + 1)
+    if not _gs_reserve_slots(a, row + 1):
+        return False
     dst = &a.slots[row]
     if not valid:
         str_init_null(dst)
@@ -311,6 +314,9 @@ cdef inline void gs_accum_append(GsAccum* a, const DrakenStringSlot* src_slot,
         # first null, covering the full current capacity — no per-row realloc.
         if a.nulls == NULL:
             a.nulls = _ks_alloc_all_valid_bitmap(a.slots_cap)
+            # slots_cap >= row+1 >= 1 here (reserved above), so NULL == OOM.
+            if a.nulls == NULL:
+                return False
         _ks_bitmap_clear(a.nulls, row)
     elif str_is_inline(src_slot):
         str_clone_with_offset(dst, src_slot, 0)   # inline bytes self-contained
@@ -318,13 +324,15 @@ cdef inline void gs_accum_append(GsAccum* a, const DrakenStringSlot* src_slot,
             _ks_bitmap_set(a.nulls, row)
     else:
         slen = <Py_ssize_t>str_length(src_slot)
-        _gs_reserve_arena(a, a.arena_used + slen)
+        if not _gs_reserve_arena(a, a.arena_used + slen):
+            return False
         memcpy(a.arena + a.arena_used, str_data(src_slot, src_arena), <size_t>slen)
         str_clone_with_offset(dst, src_slot, <uint32_t>a.arena_used)  # rebased, hash kept
         a.arena_used += slen
         if a.nulls != NULL:
             _ks_bitmap_set(a.nulls, row)
     a.rows = row + 1
+    return True
 
 
 # Finalize: transfer the accumulated buffers into a Vector (no copy, no rehash)
@@ -347,14 +355,17 @@ cdef inline Py_ssize_t _ks_bitmap_nbytes(Py_ssize_t length) noexcept nogil:
     return (length + 7) >> 3
 
 
-cdef inline uint8_t* _ks_alloc_all_valid_bitmap(Py_ssize_t length) except NULL:
+cdef inline uint8_t* _ks_alloc_all_valid_bitmap(Py_ssize_t length) noexcept nogil:
+    # Returns NULL for BOTH "no bitmap needed" (nbytes==0) and OOM — the caller
+    # disambiguates via the row count (nbytes>0 + NULL => OOM). The former raise
+    # is gone so this is nogil-callable.
     cdef Py_ssize_t nbytes = _ks_bitmap_nbytes(length)
     cdef uint8_t* bitmap
     if nbytes == 0:
         return NULL
     bitmap = <uint8_t*>malloc(nbytes)
     if bitmap == NULL:
-        raise MemoryError()
+        return NULL
     memset(bitmap, 0xFF, nbytes)
     return bitmap
 
@@ -374,10 +385,10 @@ cdef inline Py_ssize_t _ks_growth_target(Py_ssize_t current_size, Py_ssize_t req
     return target
 
 
-cdef inline void _ks_ensure_fixed_capacity(
+cdef inline bint _ks_ensure_fixed_capacity(
     DrakenFixedBuffer* buf,
     Py_ssize_t required_rows,
-) except *:
+) noexcept nogil:
     # During accumulation buf.length holds the allocated capacity in rows;
     # reconstruct_vectors overwrites it with the logical row count before any
     # consume helper reads it. Growth is amortized doubling against that
@@ -392,23 +403,24 @@ cdef inline void _ks_ensure_fixed_capacity(
     cdef Py_ssize_t cap_rows = <Py_ssize_t>buf.length
 
     if required_rows <= cap_rows:
-        return
+        return True
 
     new_rows_cap = _ks_growth_target(cap_rows, required_rows, 8)
     new_bytes = new_rows_cap * <Py_ssize_t>buf.itemsize
 
     new_data = realloc(buf.data, new_bytes)
     if new_data == NULL:
-        raise MemoryError()
+        return False
     buf.data = new_data
     buf.length = <size_t>new_rows_cap
+    return True
 
 
-cdef inline void _ks_ensure_bitmap_capacity(
+cdef inline bint _ks_ensure_bitmap_capacity(
     uint8_t** bitmap_ref,
     Py_ssize_t current_rows,
     Py_ssize_t required_rows,
-) except *:
+) noexcept nogil:
     cdef Py_ssize_t current_bytes = _ks_bitmap_nbytes(current_rows)
     cdef Py_ssize_t required_bytes = _ks_bitmap_nbytes(required_rows)
     cdef Py_ssize_t new_rows_cap
@@ -422,60 +434,70 @@ cdef inline void _ks_ensure_bitmap_capacity(
     if bitmap_ref[0] == NULL:
         new_rows_cap = _ks_growth_target(current_rows, required_rows, 8)
         bitmap_ref[0] = _ks_alloc_all_valid_bitmap(new_rows_cap)
-        return
+        # NULL with a non-zero byte requirement is OOM, not "empty" → fail clean.
+        if bitmap_ref[0] == NULL and _ks_bitmap_nbytes(new_rows_cap) > 0:
+            return False
+        return True
 
     if required_bytes <= current_bytes:
-        return
+        return True
 
     new_rows_cap = _ks_growth_target(current_rows, required_rows, 8)
     new_bytes_cap = _ks_bitmap_nbytes(new_rows_cap)
 
     grown_bitmap = <uint8_t*>realloc(bitmap_ref[0], new_bytes_cap)
     if grown_bitmap == NULL:
-        raise MemoryError()
+        return False
     memset(grown_bitmap + current_bytes, 0xFF, new_bytes_cap - current_bytes)
     bitmap_ref[0] = grown_bitmap
+    return True
 
 
-cdef inline void _ks_reserve_fixed_direct(
+cdef inline bint _ks_reserve_fixed_direct(
     DrakenFixedBuffer* buf,
     uint8_t** null_bitmap_ref,
     Py_ssize_t current_rows,
     Py_ssize_t additional_rows,
     bint needs_null_bitmap,
-) except *:
+) noexcept nogil:
     cdef Py_ssize_t required_rows = current_rows + additional_rows
 
-    _ks_ensure_fixed_capacity(buf, required_rows)
+    if not _ks_ensure_fixed_capacity(buf, required_rows):
+        return False
     if needs_null_bitmap:
-        _ks_ensure_bitmap_capacity(null_bitmap_ref, current_rows, required_rows)
+        if not _ks_ensure_bitmap_capacity(null_bitmap_ref, current_rows, required_rows):
+            return False
+    return True
 
 
-cdef inline void _ks_append_fixed_direct(
+cdef inline bint _ks_append_fixed_direct(
     DrakenFixedBuffer* buf,
     uint8_t** null_bitmap_ref,
     Py_ssize_t* row_count_ref,
     int64_t value,
     int64_t valid_flag,
-) except *:
+) noexcept nogil:
     cdef Py_ssize_t row_idx = row_count_ref[0]
     cdef int64_t* data
 
-    _ks_ensure_fixed_capacity(buf, row_idx + 1)
+    if not _ks_ensure_fixed_capacity(buf, row_idx + 1):
+        return False
     data = <int64_t*>buf.data
     data[row_idx] = value
 
     if not valid_flag:
-        _ks_ensure_bitmap_capacity(null_bitmap_ref, row_idx, row_idx + 1)
+        if not _ks_ensure_bitmap_capacity(null_bitmap_ref, row_idx, row_idx + 1):
+            return False
         _ks_bitmap_clear(null_bitmap_ref[0], row_idx)
     elif null_bitmap_ref[0] != NULL:
         _ks_bitmap_set(null_bitmap_ref[0], row_idx)
 
     row_count_ref[0] = row_idx + 1
     buf.null_bitmap = null_bitmap_ref[0]
+    return True
 
 
-cdef inline void _ks_store_single_fixed_bulk_bool(
+cdef inline bint _ks_store_single_fixed_bulk_bool(
     DrakenFixedBuffer* buf,
     uint8_t** null_bitmap_ref,
     Py_ssize_t* row_count_ref,
@@ -484,7 +506,7 @@ cdef inline void _ks_store_single_fixed_bulk_bool(
     uint8_t* src_nulls,
     const uint8_t* src_data,
     const uint32_t* src_sel,
-) except *:
+) noexcept nogil:
     cdef Py_ssize_t start_row = row_count_ref[0]
     cdef Py_ssize_t ri
     cdef Py_ssize_t row_idx
@@ -499,13 +521,14 @@ cdef inline void _ks_store_single_fixed_bulk_bool(
             needs_null_bitmap = True
             break
 
-    _ks_reserve_fixed_direct(
+    if not _ks_reserve_fixed_direct(
         buf,
         null_bitmap_ref,
         start_row,
         n_new,
         needs_null_bitmap,
-    )
+    ):
+        return False
 
     dst = <int64_t*>buf.data
     for ri in range(n_new):
@@ -523,6 +546,7 @@ cdef inline void _ks_store_single_fixed_bulk_bool(
 
     row_count_ref[0] = start_row + n_new
     buf.null_bitmap = null_bitmap_ref[0]
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +554,7 @@ cdef inline void _ks_store_single_fixed_bulk_bool(
 # instead of expanding to an N-row dense buffer first.
 # ---------------------------------------------------------------------------
 
-cdef inline void _ks_store_fixed_bulk_dict(
+cdef inline bint _ks_store_fixed_bulk_dict(
     DrakenFixedBuffer* buf,
     uint8_t** null_bitmap_ref,
     Py_ssize_t* row_count_ref,
@@ -540,7 +564,7 @@ cdef inline void _ks_store_fixed_bulk_dict(
     const void* dict_data,
     const uint32_t* codes,
     int src_itemsize,
-) except *:
+) noexcept nogil:
     """Store fixed-width keys via unified selection: data[selection[i]].
 
     dict_data points at the raw DrakenVector.data buffer; `src_itemsize` is the
@@ -566,7 +590,7 @@ cdef inline void _ks_store_fixed_bulk_dict(
     cdef const int16_t* d2 = <const int16_t*>dict_data
     cdef const int8_t*  d1 = <const int8_t*>dict_data
 
-    _ks_ensure_fixed_capacity(buf, start_row + n_new)
+    if not _ks_ensure_fixed_capacity(buf, start_row + n_new): return False
 
     dst = <int64_t*>buf.data
     for ri in range(n_new):
@@ -577,7 +601,7 @@ cdef inline void _ks_store_fixed_bulk_dict(
             if null_bitmap_ref[0] == NULL:
                 # First null seen — lazily allocate bitmap with all prior rows
                 # marked valid (alloc_all_valid_bitmap sets all bits to 1).
-                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new)
+                if not _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new): return False
             _ks_bitmap_clear(null_bitmap_ref[0], out_row)
         else:
             code = codes[row_idx]
@@ -595,9 +619,10 @@ cdef inline void _ks_store_fixed_bulk_dict(
 
     row_count_ref[0] = start_row + n_new
     buf.null_bitmap = null_bitmap_ref[0]
+    return True
 
 
-cdef inline void _ks_store_fixed128_bulk_dict(
+cdef inline bint _ks_store_fixed128_bulk_dict(
     DrakenFixedBuffer* buf,
     uint8_t** null_bitmap_ref,
     Py_ssize_t* row_count_ref,
@@ -606,7 +631,7 @@ cdef inline void _ks_store_fixed128_bulk_dict(
     uint8_t* row_nulls,
     const void* dict_data,
     const uint32_t* codes,
-) except *:
+) noexcept nogil:
     """16-byte (int128 / DECIMAL128) sibling of _ks_store_fixed_bulk_dict.
 
     Stores raw 16-byte values via unified selection: data[selection[i]]. The buffer
@@ -620,7 +645,7 @@ cdef inline void _ks_store_fixed128_bulk_dict(
     cdef int128_t* dst
     cdef const int128_t* src = <const int128_t*>dict_data
 
-    _ks_ensure_fixed_capacity(buf, start_row + n_new)
+    if not _ks_ensure_fixed_capacity(buf, start_row + n_new): return False
 
     dst = <int128_t*>buf.data
     for ri in range(n_new):
@@ -629,7 +654,7 @@ cdef inline void _ks_store_fixed128_bulk_dict(
         if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
             dst[out_row] = 0
             if null_bitmap_ref[0] == NULL:
-                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new)
+                if not _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new): return False
             _ks_bitmap_clear(null_bitmap_ref[0], out_row)
         else:
             code = codes[row_idx]
@@ -639,16 +664,17 @@ cdef inline void _ks_store_fixed128_bulk_dict(
 
     row_count_ref[0] = start_row + n_new
     buf.null_bitmap = null_bitmap_ref[0]
+    return True
 
 
-cdef inline void _ks_gs_store_bulk_dict(
+cdef inline bint _ks_gs_store_bulk_dict(
     GsAccum* a,
     const int64_t* row_indices,
     Py_ssize_t n_new,
     uint8_t* row_nulls,
     DrakenStringArena* dict_garena,
     const uint32_t* codes,
-) except *:
+) noexcept nogil:
     """Append n_new new group keys directly as German-string slots.
 
     For each new row: take its dict code → source slot, and append it to the
@@ -664,12 +690,15 @@ cdef inline void _ks_gs_store_bulk_dict(
         valid = (row_nulls == NULL) or (((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0)
         if valid:
             src = &dict_garena.slots[codes[row_idx]]
-            gs_accum_append(a, src, dict_garena.arena, True)
+            if not gs_accum_append(a, src, dict_garena.arena, True):
+                return False
         else:
-            gs_accum_append(a, NULL, NULL, False)
+            if not gs_accum_append(a, NULL, NULL, False):
+                return False
+    return True
 
 
-cdef inline void _ks_store_multi_bool_bulk(
+cdef inline bint _ks_store_multi_bool_bulk(
     DrakenFixedBuffer* buf,
     uint8_t** null_bitmap_ref,
     Py_ssize_t* row_count_ref,
@@ -678,13 +707,13 @@ cdef inline void _ks_store_multi_bool_bulk(
     uint8_t* src_nulls,
     const uint8_t* src_data,
     const uint32_t* src_sel,
-) except *:
+) noexcept nogil:
     cdef Py_ssize_t start_row = row_count_ref[0]
     cdef Py_ssize_t ri, row_idx, out_row
     cdef uint32_t code
     cdef int64_t* dst
 
-    _ks_ensure_fixed_capacity(buf, start_row + n_new)
+    if not _ks_ensure_fixed_capacity(buf, start_row + n_new): return False
     dst = <int64_t*>buf.data
 
     for ri in range(n_new):
@@ -693,7 +722,7 @@ cdef inline void _ks_store_multi_bool_bulk(
         if src_nulls != NULL and not ((src_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
             dst[out_row] = 0
             if null_bitmap_ref[0] == NULL:
-                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new)
+                if not _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new): return False
             _ks_bitmap_clear(null_bitmap_ref[0], out_row)
         else:
             code = src_sel[row_idx]
@@ -703,6 +732,7 @@ cdef inline void _ks_store_multi_bool_bulk(
 
     row_count_ref[0] = start_row + n_new
     buf.null_bitmap = null_bitmap_ref[0]
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -894,92 +924,14 @@ cdef class KeyStore:
 
         if self._n_cols == 1:
             # ----------------------------------------------------------------
-            # Single-column fast paths — statically dispatched
+            # Single-column path — resolve the key view under the GIL, then run
+            # the nogil view-based store. The engine's nogil ingest_cxx path
+            # calls store_new_rows_single_view directly with a CxxMorsel view.
             # ----------------------------------------------------------------
-            key_kind = self._key_kinds[0]
             vec = morsel._cxx_column(self._group_columns[0])
-
             uv = (<Vector>vec).unified()
-
-            if key_kind == KEY_MULTI_ENCODED_STRING:
-                if self._single_string_direct:
-                    _ks_gs_store_bulk_dict(
-                        &self._single_gs,
-                        row_indices,
-                        n_new,
-                        uv.validity,
-                        <DrakenStringArena*>uv.data,
-                        uv.selection,
-                    )
-                else:
-                    raise RuntimeError("single string codec path removed")
-
-            elif uv.type == DRAKEN_INT64 or uv.type == DRAKEN_INT32 or uv.type == DRAKEN_INT16 or uv.type == DRAKEN_INT8:
-                if self._single_fixed_direct:
-                    _ks_store_fixed_bulk_dict(
-                        self._single_fixed_buf,
-                        &self._single_fixed_nulls,
-                        &self._single_fixed_rows,
-                        row_indices,
-                        n_new,
-                        uv.validity,
-                        <const void*>uv.data,
-                        uv.selection,
-                        _ks_fixed_itemsize(uv.type),
-                    )
-                else:
-                    raise RuntimeError("single fixed key codec path removed")
-
-            elif uv.type == DRAKEN_DECIMAL128:
-                # 16-byte int128 key — needs the wide store (the 8-byte path would
-                # truncate and mis-read the source at the wrong stride).
-                if self._single_fixed_direct:
-                    _ks_store_fixed128_bulk_dict(
-                        self._single_fixed_buf,
-                        &self._single_fixed_nulls,
-                        &self._single_fixed_rows,
-                        row_indices,
-                        n_new,
-                        uv.validity,
-                        <const void*>uv.data,
-                        uv.selection,
-                    )
-                else:
-                    raise RuntimeError("single fixed key codec path removed")
-
-            elif uv.type == DRAKEN_BOOL:
-                if self._single_fixed_direct:
-                    _ks_store_single_fixed_bulk_bool(
-                        self._single_fixed_buf,
-                        &self._single_fixed_nulls,
-                        &self._single_fixed_rows,
-                        row_indices,
-                        n_new,
-                        uv.validity,
-                        <const uint8_t*>uv.data,
-                        uv.selection,
-                    )
-                else:
-                    raise RuntimeError("single fixed key codec path removed")
-
-            else:
-                # Float64 and other fixed-width types — store raw bits as int64,
-                # read at the source's true width (4-byte FLOAT32/DATE32/TIME32
-                # must not be read at int64 stride).
-                if self._single_fixed_direct:
-                    _ks_store_fixed_bulk_dict(
-                        self._single_fixed_buf,
-                        &self._single_fixed_nulls,
-                        &self._single_fixed_rows,
-                        row_indices,
-                        n_new,
-                        uv.validity,
-                        <const void*>uv.data,
-                        uv.selection,
-                        _ks_fixed_itemsize(uv.type),
-                    )
-                else:
-                    raise RuntimeError("single fixed key codec path removed")
+            if not self.store_new_rows_single_view(uv, row_indices, n_new):
+                raise MemoryError()
 
         else:
             # ----------------------------------------------------------------
@@ -1046,16 +998,17 @@ cdef class KeyStore:
                     storage_slot = self._multi_storage_slot[col_idx]
 
                     if disp == _DISPATCH_STRING:
-                        _ks_gs_store_bulk_dict(
+                        if not _ks_gs_store_bulk_dict(
                             &self._multi_gs[storage_slot],
                             row_indices,
                             n_new,
                             <uint8_t*>col_null_ptrs[col_idx],
                             <DrakenStringArena*>col_arena_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
-                        )
+                        ):
+                            raise MemoryError()
                     elif disp == _DISPATCH_INT64 or disp == _DISPATCH_FLOAT64:
-                        _ks_store_fixed_bulk_dict(
+                        if not _ks_store_fixed_bulk_dict(
                             self._multi_fixed_bufs[storage_slot],
                             &self._multi_fixed_nulls[storage_slot],
                             &self._multi_fixed_rows[storage_slot],
@@ -1065,9 +1018,10 @@ cdef class KeyStore:
                             <const void*>col_dense_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
                             col_itemsizes[col_idx],
-                        )
+                        ):
+                            raise MemoryError()
                     elif disp == _DISPATCH_INT128:
-                        _ks_store_fixed128_bulk_dict(
+                        if not _ks_store_fixed128_bulk_dict(
                             self._multi_fixed_bufs[storage_slot],
                             &self._multi_fixed_nulls[storage_slot],
                             &self._multi_fixed_rows[storage_slot],
@@ -1076,9 +1030,10 @@ cdef class KeyStore:
                             <uint8_t*>col_null_ptrs[col_idx],
                             <const void*>col_dense_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
-                        )
+                        ):
+                            raise MemoryError()
                     elif disp == _DISPATCH_BOOL:
-                        _ks_store_multi_bool_bulk(
+                        if not _ks_store_multi_bool_bulk(
                             self._multi_fixed_bufs[storage_slot],
                             &self._multi_fixed_nulls[storage_slot],
                             &self._multi_fixed_rows[storage_slot],
@@ -1087,11 +1042,264 @@ cdef class KeyStore:
                             <uint8_t*>col_null_ptrs[col_idx],
                             <const uint8_t*>col_dense_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
-                        )
+                        ):
+                            raise MemoryError()
                     else:
                         raise RuntimeError("unknown dispatch code in multi-column key store")
             else:
                 raise RuntimeError("legacy key codec path removed")
+
+    cdef bint store_new_rows_single_view(
+        self,
+        const DrakenVector* uv,
+        const int64_t* row_indices,
+        Py_ssize_t n_new,
+    ) noexcept nogil:
+        """nogil single-column key store over a pre-resolved key view.
+
+        Dispatches on uv.type (string / int / decimal128 / bool / other-fixed)
+        to the nogil bulk-store helpers. Returns False on allocation failure or
+        an unreachable codec branch (the GIL store_new_rows raises MemoryError on
+        False; the engine's nogil ingest_cxx span sets ErrCtx and bails). The
+        dispatch is on the physical type, not _key_kinds — a Python-list access
+        would need the GIL and string columns carry a string DrakenType."""
+        if n_new == 0:
+            return True
+        if self._n_cols == 0:
+            return True
+
+        if uv.type == DRAKEN_VARCHAR or uv.type == DRAKEN_NVARCHAR or uv.type == DRAKEN_VARBINARY:
+            if not self._single_string_direct:
+                return False
+            return _ks_gs_store_bulk_dict(
+                &self._single_gs,
+                row_indices,
+                n_new,
+                uv.validity,
+                <DrakenStringArena*>uv.data,
+                uv.selection,
+            )
+
+        if not self._single_fixed_direct:
+            return False
+
+        if uv.type == DRAKEN_DECIMAL128:
+            # 16-byte int128 key — needs the wide store (the 8-byte path would
+            # truncate and mis-read the source at the wrong stride).
+            return _ks_store_fixed128_bulk_dict(
+                self._single_fixed_buf,
+                &self._single_fixed_nulls,
+                &self._single_fixed_rows,
+                row_indices,
+                n_new,
+                uv.validity,
+                <const void*>uv.data,
+                uv.selection,
+            )
+
+        if uv.type == DRAKEN_BOOL:
+            return _ks_store_single_fixed_bulk_bool(
+                self._single_fixed_buf,
+                &self._single_fixed_nulls,
+                &self._single_fixed_rows,
+                row_indices,
+                n_new,
+                uv.validity,
+                <const uint8_t*>uv.data,
+                uv.selection,
+            )
+
+        # INT64/32/16/8 and Float64/other fixed-width — store raw bits, read at
+        # the source's true width (4-byte FLOAT32/DATE32/TIME32 must not be read
+        # at int64 stride).
+        return _ks_store_fixed_bulk_dict(
+            self._single_fixed_buf,
+            &self._single_fixed_nulls,
+            &self._single_fixed_rows,
+            row_indices,
+            n_new,
+            uv.validity,
+            <const void*>uv.data,
+            uv.selection,
+            _ks_fixed_itemsize(uv.type),
+        )
+
+    cdef bint append_groups_from_single(
+        self,
+        KeyStore other,
+        const int64_t* group_indices,
+        Py_ssize_t n_new,
+    ) noexcept nogil:
+        """nogil single-column key copy: append `other`'s already-stored group
+        rows (by group id) into this store's single-column buffer.
+
+        This is the merge-time keystore→keystore path: `other`'s new group keys
+        are already materialized in final form (fixed8 / fixed128 / German-string
+        slots), so copying them needs no source morsel, no rehash and no Python.
+        Mirrors store_new_rows_single_view's three storage shapes. Returns False
+        on allocation failure or if either store is not single-column-direct."""
+        if n_new == 0:
+            return True
+        if self._n_cols != 1 or other._n_cols != 1:
+            return False
+
+        cdef Py_ssize_t ri
+        cdef Py_ssize_t g
+        cdef Py_ssize_t out_row
+        cdef Py_ssize_t start_row
+
+        # ---- German-string single-column key ----
+        if self._single_string_direct:
+            if not other._single_string_direct:
+                return False
+            for ri in range(n_new):
+                g = group_indices[ri]
+                if other._single_gs.nulls != NULL and not _ks_bitmap_is_valid(other._single_gs.nulls, g):
+                    if not gs_accum_append(&self._single_gs, NULL, NULL, False):
+                        return False
+                else:
+                    # Source slot is final-form; arena holds long-string bytes.
+                    if not gs_accum_append(
+                        &self._single_gs,
+                        &other._single_gs.slots[g],
+                        other._single_gs.arena,
+                        True,
+                    ):
+                        return False
+            return True
+
+        # ---- Fixed-width single-column key (8-byte or 16-byte slots) ----
+        if not self._single_fixed_direct or not other._single_fixed_direct:
+            return False
+
+        start_row = self._single_fixed_rows
+        cdef int itemsize = <int>self._single_fixed_buf.itemsize
+        cdef int64_t* src8
+        cdef int64_t* dst8
+        cdef int128_t* src16
+        cdef int128_t* dst16
+        cdef bint src_valid
+
+        if not _ks_ensure_fixed_capacity(self._single_fixed_buf, start_row + n_new):
+            return False
+
+        if itemsize == 16:
+            src16 = <int128_t*>other._single_fixed_buf.data
+            dst16 = <int128_t*>self._single_fixed_buf.data
+            for ri in range(n_new):
+                g = group_indices[ri]
+                out_row = start_row + ri
+                src_valid = _ks_bitmap_is_valid(other._single_fixed_nulls, g)
+                if src_valid:
+                    dst16[out_row] = src16[g]
+                    if self._single_fixed_nulls != NULL:
+                        _ks_bitmap_set(self._single_fixed_nulls, out_row)
+                else:
+                    dst16[out_row] = 0
+                    if self._single_fixed_nulls == NULL:
+                        if not _ks_ensure_bitmap_capacity(&self._single_fixed_nulls, start_row, start_row + n_new):
+                            return False
+                    _ks_bitmap_clear(self._single_fixed_nulls, out_row)
+        else:
+            src8 = <int64_t*>other._single_fixed_buf.data
+            dst8 = <int64_t*>self._single_fixed_buf.data
+            for ri in range(n_new):
+                g = group_indices[ri]
+                out_row = start_row + ri
+                src_valid = _ks_bitmap_is_valid(other._single_fixed_nulls, g)
+                if src_valid:
+                    dst8[out_row] = src8[g]
+                    if self._single_fixed_nulls != NULL:
+                        _ks_bitmap_set(self._single_fixed_nulls, out_row)
+                else:
+                    dst8[out_row] = 0
+                    if self._single_fixed_nulls == NULL:
+                        if not _ks_ensure_bitmap_capacity(&self._single_fixed_nulls, start_row, start_row + n_new):
+                            return False
+                    _ks_bitmap_clear(self._single_fixed_nulls, out_row)
+
+        self._single_fixed_rows = start_row + n_new
+        self._single_fixed_buf.null_bitmap = self._single_fixed_nulls
+        return True
+
+    cdef bint store_new_rows_multi_view(
+        self,
+        const CxxMorsel* m,
+        const int32_t* key_col_idxs,
+        Py_ssize_t n_key_cols,
+        const int64_t* row_indices,
+        Py_ssize_t n_new,
+    ) noexcept nogil:
+        """nogil multi-column key store over CxxMorsel column views.
+
+        Mirrors the multi-column branch of store_new_rows but reads each key
+        column's view straight off the morsel (key_col_idxs are positional in
+        m.columns) and dispatches per column on the physical type, so the whole
+        store runs with the GIL released. Returns False on allocation failure or
+        if the (init-time) direct codec is unavailable. Per-column storage slots
+        come from _multi_storage_slot, set up at resolve identically to the GIL
+        path; string cols land in _multi_gs, fixed cols in _multi_fixed_bufs."""
+        if n_new == 0:
+            return True
+        if not self._multi_direct:
+            return False
+        cdef Py_ssize_t col_idx
+        cdef int storage_slot
+        cdef const DrakenVector* uv
+        cdef DrakenType t
+        for col_idx in range(n_key_cols):
+            uv = &m.columns[key_col_idxs[col_idx]].view
+            storage_slot = self._multi_storage_slot[col_idx]
+            t = uv.type
+            if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
+                if not _ks_gs_store_bulk_dict(
+                    &self._multi_gs[storage_slot],
+                    row_indices,
+                    n_new,
+                    uv.validity,
+                    <DrakenStringArena*>uv.data,
+                    uv.selection,
+                ):
+                    return False
+            elif t == DRAKEN_DECIMAL128:
+                if not _ks_store_fixed128_bulk_dict(
+                    self._multi_fixed_bufs[storage_slot],
+                    &self._multi_fixed_nulls[storage_slot],
+                    &self._multi_fixed_rows[storage_slot],
+                    row_indices,
+                    n_new,
+                    uv.validity,
+                    <const void*>uv.data,
+                    uv.selection,
+                ):
+                    return False
+            elif t == DRAKEN_BOOL:
+                if not _ks_store_multi_bool_bulk(
+                    self._multi_fixed_bufs[storage_slot],
+                    &self._multi_fixed_nulls[storage_slot],
+                    &self._multi_fixed_rows[storage_slot],
+                    row_indices,
+                    n_new,
+                    uv.validity,
+                    <const uint8_t*>uv.data,
+                    uv.selection,
+                ):
+                    return False
+            else:
+                # INT64/32/16/8, Float64, timestamp and other fixed-width.
+                if not _ks_store_fixed_bulk_dict(
+                    self._multi_fixed_bufs[storage_slot],
+                    &self._multi_fixed_nulls[storage_slot],
+                    &self._multi_fixed_rows[storage_slot],
+                    row_indices,
+                    n_new,
+                    uv.validity,
+                    <const void*>uv.data,
+                    uv.selection,
+                    _ks_fixed_itemsize(t),
+                ):
+                    return False
+        return True
 
     # ------------------------------------------------------------------
     # reconstruct_vectors — finalize path, called once

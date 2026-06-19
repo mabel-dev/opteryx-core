@@ -111,6 +111,12 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
         throw std::invalid_argument(
             "vector_levenshtein: input vectors must have the same length");
 
+    // GIL-free compute: a_obj/b_obj keep the source arenas alive for the whole
+    // call and the DP below is pure native (draken_malloc + int workspace). Drop
+    // the GIL; the gil_scoped_acquire at the tail re-takes it for the Python
+    // hand-off. Re-acquires in the destructor during exception unwind too.
+    nb::gil_scoped_release _rel;
+
     // Output data buffer.
     int64_t* out_data = static_cast<int64_t*>(
         draken_malloc(n > 0u ? n * sizeof(int64_t) : sizeof(int64_t)));
@@ -199,6 +205,7 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
     // If no nulls were found, discard unused validity bitmap.
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     PyObject* out = draken_vector_own_raw(out_data, validity, n, DRAKEN_INT64);
     if (!out) throw nb::python_error();
     return nb::steal<nb::object>(out);
@@ -256,6 +263,9 @@ static nb::object impl_position(nb::object hay_obj, nb::object ndl_obj) {
         throw std::invalid_argument(
             "vector_position: haystack and needle must have the same length");
 
+    // GIL-free compute — see impl_levenshtein for the rationale.
+    nb::gil_scoped_release _rel;
+
     int64_t* out_data = static_cast<int64_t*>(
         draken_malloc(n > 0u ? n * sizeof(int64_t) : sizeof(int64_t)));
     if (!out_data) throw std::bad_alloc();
@@ -286,6 +296,7 @@ static nb::object impl_position(nb::object hay_obj, nb::object ndl_obj) {
 
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
 
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     PyObject* out = draken_vector_own_raw(out_data, validity, n, DRAKEN_INT64);
     if (!out) throw nb::python_error();
     return nb::steal<nb::object>(out);

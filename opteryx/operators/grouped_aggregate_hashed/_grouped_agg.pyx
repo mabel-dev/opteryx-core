@@ -35,6 +35,10 @@ from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType,
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash, from_decoded as _from_decoded
 from libc.stddef cimport size_t
+from cpython.object cimport PyObject
+from draken.morsels.cxx_morsel cimport (
+    CxxMorsel, ErrCtx, cxx_hash_c, cxx_morsel_delete, cxx_morsel_raw_ptr,
+)
 
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil

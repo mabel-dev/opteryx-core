@@ -22,9 +22,10 @@ cdef extern from "time.h":
 cdef extern from "time.h":
     clockid_t CLOCK_MONOTONIC
 
-from libc.stdint cimport int64_t, uint64_t, uint32_t, uint8_t
+from libc.stdint cimport int64_t, uint64_t, uint32_t, uint8_t, int32_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
+from libcpp.string cimport string
 
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
@@ -58,11 +59,15 @@ cdef extern from "parvi.hpp" namespace "opteryx::parvi":
 
     cdef cppclass ParviMap:
         ParviMap() except +
-        size_t size() const
-        bint   full() const
-        bint   lookup_fast(uint64_t key, int64_t& payload_ref_out) const
-        ParviResult insert_new(uint64_t key, int64_t payload_ref)
-        void   drain_into(CarcharIndex& target) const
+        size_t size() noexcept nogil
+        bint   full() noexcept nogil
+        bint   lookup_fast(uint64_t key, int64_t& payload_ref_out) noexcept nogil
+        # Pure noexcept C++ (fixed-capacity SIMD map; insert_new never allocates,
+        # drain_into copies into a pre-reserved carchar) → safe to call from the
+        # nogil ingest span. drain_into's internal carchar inserts cannot resize
+        # because the engine reserves the carchar to hold kCapacity before drain.
+        ParviResult insert_new(uint64_t key, int64_t payload_ref) noexcept nogil
+        void   drain_into(CarcharIndex& target) noexcept nogil
 
     const size_t kCapacity
 
@@ -105,6 +110,11 @@ cdef class GroupHashEngine:
     cdef int64_t _num_groups
     cdef vector[uint32_t] _state_indices_buf   # reused per morsel, length == n_rows
     cdef vector[int64_t] _new_row_scratch     # indices of rows that introduced new groups
+    # One keying hash per group, appended in group-id order as groups are created
+    # (both ingest paths). Lets the nogil merge read other's per-group hashes
+    # directly — no reconstruct_vectors, no rehash. Only maintained on the nogil-
+    # merge-eligible (single-col mergeable) path; the GIL merge ignores it.
+    cdef vector[uint64_t] _group_hashes
     cdef vector[int64_t] _code_state          # compressed path: group id per code (-1 = unprobed)
     cdef list _group_columns                  # list[bytes] — init only
     cdef bint _resolved                       # True after first morsel type resolution
@@ -122,6 +132,16 @@ cdef class GroupHashEngine:
     cdef long long _time_reconstruct_multi_ns
     cdef long long _time_build_morsel_ns
     cdef long long _time_slice_output_ns
+    # S-B.3c nogil ingest_cxx state — populated once under the GIL at resolve.
+    # The nogil span reads group/value column views straight off the CxxMorsel
+    # by these positional indices and drives the collectors through borrowed
+    # pointers, so it never touches the Python `self._collectors` list.
+    cdef vector[int32_t] _group_col_idxs      # group cols' positions in the morsel
+    cdef vector[int32_t] _collector_col_idxs  # each collector's source col (-1 = COUNT*)
+    cdef vector[PyObject*] _collector_ptrs    # borrowed refs to collectors (list keeps them alive)
+    cdef bint _all_nogil                      # gate: single-col key + every collector nogil-capable
+    cdef public long long nogil_ingest_morsels  # morsels taken through the GIL-released span
+    cdef public long long gil_ingest_morsels    # morsels that fell to the labelled GIL ingest
 
     def __cinit__(
         self,
@@ -155,6 +175,9 @@ cdef class GroupHashEngine:
         # key_kinds and KeyStore are initialized after first-morsel resolution
         self._index = NULL
         self._key_kinds = [KEY_MULTI_FIXED_INT] * len(group_columns)
+        self._all_nogil = False
+        self.nogil_ingest_morsels = 0
+        self.gil_ingest_morsels = 0
 
     def __dealloc__(self):
         if self._index != NULL:
@@ -175,9 +198,9 @@ cdef class GroupHashEngine:
         convention num_groups++ used by the ingest loop — so no remap of the
         collectors, KeyStore or _num_groups is needed. After this call the
         carchar index holds every live entry from parvi, _use_parvi is False,
-        and _parvi has been freed.
+        and _parvi has been freed. The carchar is pre-allocated at resolve, so
+        promotion is a drain into the existing index (no allocation here).
         """
-        self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
         if self._telemetry_enabled:
             self._parvi_final_size = <int64_t>self._parvi.size()
         self._parvi.drain_into(self._index[0])
@@ -218,13 +241,56 @@ cdef class GroupHashEngine:
                     _ki,
                     morsel._cxx_column(self._group_columns[_ki])._nb.logical_type_precision,
                     morsel._cxx_column(self._group_columns[_ki])._nb.logical_type_scale)
+        # Always allocate the carchar index. When parvi is the active small-map
+        # fast path, the carchar is its promotion target — pre-allocated here
+        # (under the GIL) and sized well above kCapacity, so promotion-on-overflow
+        # inside the nogil span is a pure `drain_into` with no allocation/resize.
+        self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
         if self._use_parvi:
-            # Small-map fast path: no heap hash table, single SIMD group.
-            # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).
             self._parvi = new ParviMap()
-        else:
-            self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
         self._resolved = True
+
+        # ---- S-B.3c nogil ingest_cxx wiring (under the GIL, once) ----------
+        # Resolve group columns to their positional indices in the CxxMorsel
+        # (the same index space m.columns[i] the nogil span reads) by matching
+        # the canonical name vector, and snapshot collector pointers + source
+        # column indices into C arrays so the nogil span never touches Python.
+        cdef const CxxMorsel* cxm = NULL
+        cdef string gtarget
+        cdef object _gname
+        cdef size_t _cj
+        cdef int _found_idx
+        cdef BaseCollector _bc
+        self._group_col_idxs.clear()
+        self._collector_ptrs.clear()
+        self._collector_col_idxs.clear()
+        cdef bint _all_nogil = (len(self._group_columns) >= 1)
+        if morsel._cxx is not None:
+            cxm = cxx_morsel_raw_ptr(<PyObject*>morsel._cxx)
+        if cxm == NULL:
+            _all_nogil = False
+        else:
+            for _ki in range(<Py_ssize_t>len(self._group_columns)):
+                _gname = self._group_columns[_ki]
+                if isinstance(_gname, str):
+                    _gname = _gname.encode("utf-8")
+                gtarget = <string>(<bytes>_gname)
+                _found_idx = -1
+                for _cj in range(cxm.names.size()):
+                    if cxm.names[_cj] == gtarget:
+                        _found_idx = <int>_cj
+                        break
+                if _found_idx < 0:
+                    _all_nogil = False
+                    break
+                self._group_col_idxs.push_back(<int32_t>_found_idx)
+        for collector in self._collectors:
+            _bc = <BaseCollector>collector
+            self._collector_ptrs.push_back(<PyObject*>collector)
+            self._collector_col_idxs.push_back(<int32_t>_bc._col_idx)
+            if not _bc._nogil_capable:
+                _all_nogil = False
+        self._all_nogil = _all_nogil
 
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
@@ -236,9 +302,228 @@ cdef class GroupHashEngine:
             return
         if not self._resolved:
             self._resolve_on_first_morsel(morsel)
-        self._do_ingest(morsel)
 
-    cdef void _do_ingest(self, Morsel morsel) except *:
+        # ---- grouped-agg ingest: one dispatch, the GIL split made VISIBLE ----
+        # No silent fallback. Morsels that can run GIL-free take the nogil span
+        # (keying+store+grow+accumulate, parvi included); the only morsels that
+        # provably cannot are the two genuine DUAL INTERFACES — a collector that
+        # calls into Python (median / count-distinct / approx / array_agg; its
+        # real API is accumulate_gil), and a non-Cxx synthetic source (architect-
+        # agreed Python path). Those take the labelled _ingest_gil, tallied in
+        # gil_ingest_morsels so the split is reported honestly (nogil vs gil),
+        # never hidden behind a silent `else`. parvi is NOT here — it now runs in
+        # the nogil span; only the two permanent dual interfaces remain on GIL.
+        cdef const CxxMorsel* cxm
+        cdef CxxMorsel* hashm
+        cdef const DrakenVector* huv
+        cdef bint compressed
+        cdef Py_ssize_t kdist
+        cdef ErrCtx err
+        cdef int rc
+
+        if (not self._all_nogil) or (morsel._cxx is None):
+            self.gil_ingest_morsels += 1
+            self._ingest_gil(morsel)
+            return
+
+        cxm = cxx_morsel_raw_ptr(<PyObject*>morsel._cxx)
+        if cxm == NULL:
+            raise RuntimeError("grouped-agg ingest: Cxx morsel handle resolved to NULL")
+        hashm = cxx_hash_c(
+            cxm, self._group_col_idxs.data(), <uint32_t>self._group_col_idxs.size()
+        )
+        if hashm == NULL:
+            raise MemoryError("cxx_hash_c failed in grouped-aggregate ingest")
+        huv = &hashm.columns[0].view
+        # parvi and the compressed fast path are mutually exclusive (parvi keys
+        # row-by-row); only consider compressed once carchar is the active map.
+        compressed = (not self._use_parvi) and (draken_is_compressed(huv) != 0)
+        # Hoist every allocating/throwing prep under the GIL so the span below is
+        # alloc-free at the hash-table and scratch level.
+        if <Py_ssize_t>self._state_indices_buf.size() < n_rows:
+            self._state_indices_buf.resize(n_rows)
+        self._new_row_scratch.clear()
+        self._new_row_scratch.reserve(<size_t>n_rows)
+        self._index.reserve(<size_t>(self._num_groups + n_rows))
+        if compressed:
+            kdist = <Py_ssize_t>huv.data_length
+            if <Py_ssize_t>self._code_state.size() < kdist:
+                self._code_state.resize(kdist)
+        err.code = 0
+        err.msg = NULL
+        self.nogil_ingest_morsels += 1
+        with nogil:
+            rc = self._ingest_cxx_span(cxm, huv, compressed, n_rows, &err)
+        cxx_morsel_delete(hashm)
+        if rc != 0:
+            raise MemoryError("grouped-aggregate nogil ingest failed (alloc)")
+
+    cdef int _ingest_cxx_span(
+        self,
+        const CxxMorsel* m,
+        const DrakenVector* huv,
+        bint compressed,
+        Py_ssize_t n_rows,
+        ErrCtx* err,
+    ) noexcept nogil:
+        """GIL-released single-column grouped-aggregate ingest span.
+
+        Mirrors _ingest_gil's carchar keying → store → grow → accumulate, but
+        reads the keying hash (huv), key view and value views straight off the
+        CxxMorsel and drives the collectors through borrowed pointers — zero
+        Python, GIL released. All allocating prep (hash, scratch resizes, index
+        reserve) is done by the caller under the GIL, so the only allocations
+        reachable here are the collectors'/key-store's own nogil realloc paths,
+        which report failure via False → err. Returns 0 on success."""
+        cdef uint32_t* si_buf = self._state_indices_buf.data()
+        cdef const uint64_t* khashes = <const uint64_t*>huv.data
+        cdef const uint32_t* codes = huv.selection
+        cdef int64_t num_groups = self._num_groups
+        cdef int64_t state_idx = 0
+        cdef Py_ssize_t i, c, kdist
+        cdef int64_t* code_state
+        cdef bint _is_new
+        cdef bint _hot_is_new
+        # parvi (low-cardinality) keying state — the SIMD map and its 8-slot
+        # repeat cache, ported into the nogil span so low-card GROUP BY is also
+        # GIL-free. On overflow it drains into the pre-reserved carchar (nogil)
+        # and the morsel finishes on the carchar probe loop.
+        cdef uint64_t h
+        cdef int cache_slot
+        cdef uint64_t cache_keys[8]
+        cdef int64_t cache_vals[8]
+        cdef uint8_t cache_used[8]
+        cdef ParviResult pr
+
+        self._new_row_scratch.clear()
+
+        if self._use_parvi:
+            i = 0
+            for cache_slot in range(8):
+                cache_used[cache_slot] = 0
+            while i < n_rows:
+                h = khashes[codes[i]]
+                cache_slot = <int>(h & 7)
+                if cache_used[cache_slot] and cache_keys[cache_slot] == h:
+                    state_idx = cache_vals[cache_slot]
+                    si_buf[i] = <uint32_t>state_idx
+                    i += 1
+                    continue
+                pr = self._parvi.insert_new(h, num_groups)
+                if pr.found:
+                    state_idx = num_groups
+                    self._new_row_scratch.push_back(i)
+                    self._group_hashes.push_back(h)
+                    num_groups += 1
+                elif pr.slot == _PARVI_CAPACITY:
+                    # Overflow → promote: drain the 16 live entries into the
+                    # pre-reserved carchar (nogil, no resize), flip to carchar,
+                    # and insert the overflow key as the next new group.
+                    if self._telemetry_enabled:
+                        self._parvi_final_size = <int64_t>self._parvi.size()
+                    self._parvi.drain_into(self._index[0])
+                    self._use_parvi = False
+                    self._promoted_from_parvi = True
+                    state_idx = num_groups
+                    _hot_is_new = self._index.find_or_insert_id(h, num_groups, state_idx)
+                    self._new_row_scratch.push_back(i)
+                    self._group_hashes.push_back(h)
+                    num_groups += 1
+                else:
+                    state_idx = <int64_t>pr.slot
+                cache_keys[cache_slot] = h
+                cache_vals[cache_slot] = state_idx
+                cache_used[cache_slot] = 1
+                si_buf[i] = <uint32_t>state_idx
+                i += 1
+                if not self._use_parvi:
+                    break
+            # Mid-morsel promotion → finish the remaining rows on carchar.
+            if not self._use_parvi:
+                while i < n_rows:
+                    if i + _AGG_PROBE_PREFETCH < n_rows:
+                        self._index.prefetch(khashes[codes[i + _AGG_PROBE_PREFETCH]])
+                    _hot_is_new = self._index.find_or_insert_id(khashes[codes[i]], num_groups, state_idx)
+                    if _hot_is_new:
+                        self._new_row_scratch.push_back(i)
+                        self._group_hashes.push_back(khashes[codes[i]])
+                        num_groups += 1
+                    si_buf[i] = <uint32_t>state_idx
+                    i += 1
+        elif compressed:
+            kdist = <Py_ssize_t>huv.data_length
+            code_state = self._code_state.data()
+            for c in range(kdist):
+                code_state[c] = -1
+            for i in range(n_rows):
+                c = <Py_ssize_t>codes[i]
+                state_idx = code_state[c]
+                if state_idx == -1:
+                    _is_new = self._index.find_or_insert_id(khashes[c], num_groups, state_idx)
+                    if _is_new:
+                        self._new_row_scratch.push_back(i)
+                        self._group_hashes.push_back(khashes[c])
+                        num_groups += 1
+                    code_state[c] = state_idx
+                si_buf[i] = <uint32_t>state_idx
+        else:
+            i = 0
+            while i < n_rows:
+                if i + _AGG_PROBE_PREFETCH < n_rows:
+                    self._index.prefetch(khashes[codes[i + _AGG_PROBE_PREFETCH]])
+                _hot_is_new = self._index.find_or_insert_id(khashes[codes[i]], num_groups, state_idx)
+                if _hot_is_new:
+                    self._new_row_scratch.push_back(i)
+                    self._group_hashes.push_back(khashes[codes[i]])
+                    num_groups += 1
+                si_buf[i] = <uint32_t>state_idx
+                i += 1
+
+        self._num_groups = num_groups
+
+        cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
+        cdef const DrakenVector* key_view
+        cdef Py_ssize_t jc
+        cdef int32_t cidx
+        # Collectors are driven through borrowed casts of the stored PyObject*:
+        # the inline `(<BaseCollector>ptr).method()` form takes no owned reference
+        # (an assignment to a `cdef BaseCollector` would incref → need the GIL).
+        if n_new > 0:
+            if self._group_col_idxs.size() == 1:
+                key_view = &m.columns[self._group_col_idxs[0]].view
+                if not self._key_store.store_new_rows_single_view(
+                    key_view, self._new_row_scratch.data(), n_new
+                ):
+                    err.code = 2
+                    err.msg = "key store alloc failed"
+                    return 2
+            else:
+                if not self._key_store.store_new_rows_multi_view(
+                    m,
+                    self._group_col_idxs.data(),
+                    <Py_ssize_t>self._group_col_idxs.size(),
+                    self._new_row_scratch.data(),
+                    n_new,
+                ):
+                    err.code = 2
+                    err.msg = "key store alloc failed"
+                    return 2
+            for jc in range(<Py_ssize_t>self._collector_ptrs.size()):
+                if not (<BaseCollector>self._collector_ptrs[jc]).grow_nogil(num_groups):
+                    err.code = 3
+                    err.msg = "collector grow alloc failed"
+                    return 3
+
+        for jc in range(<Py_ssize_t>self._collector_ptrs.size()):
+            cidx = self._collector_col_idxs[jc]
+            if cidx >= 0:
+                (<BaseCollector>self._collector_ptrs[jc]).accumulate(&m.columns[cidx].view, si_buf, n_rows)
+            else:
+                (<BaseCollector>self._collector_ptrs[jc]).accumulate(NULL, si_buf, n_rows)
+
+        return 0
+
+    cdef void _ingest_gil(self, Morsel morsel) except *:
         """
         Process one input Morsel directly into the global hash table.
         No Python in the inner loop.
@@ -330,6 +615,7 @@ cdef class GroupHashEngine:
                         _is_new = self._index.find_or_insert_id(khashes[c], num_groups, state_idx)
                         if _is_new:
                             self._new_row_scratch.push_back(i)   # first occurrence row
+                            self._group_hashes.push_back(khashes[c])
                             num_groups += 1
                         code_state[c] = state_idx
                     si_buf[i] = <uint32_t>state_idx
@@ -358,6 +644,7 @@ cdef class GroupHashEngine:
                     if pr.found:
                         state_idx = num_groups
                         self._new_row_scratch.push_back(i)
+                        self._group_hashes.push_back(h)
                         num_groups += 1
                     elif pr.slot == _PARVI_CAPACITY:
                         state_idx = num_groups
@@ -365,6 +652,7 @@ cdef class GroupHashEngine:
                         self._promote_parvi_to_carchar()
                         self._index.insert_new(h, state_idx)
                         self._new_row_scratch.push_back(i)
+                        self._group_hashes.push_back(h)
                         num_groups += 1
                     else:
                         state_idx = <int64_t>pr.slot
@@ -392,6 +680,7 @@ cdef class GroupHashEngine:
                         _hot_is_new = self._index.find_or_insert_id(khashes[codes[i]], num_groups, state_idx)
                         if _hot_is_new:
                             self._new_row_scratch.push_back(i)
+                            self._group_hashes.push_back(khashes[codes[i]])
                             num_groups += 1
                         si_buf[i] = <uint32_t>state_idx
                         i += 1
@@ -523,6 +812,17 @@ cdef class GroupHashEngine:
             self._key_kinds = other._key_kinds
             self._num_groups = n_other
             self._resolved = True
+            # Adopt other's per-group hashes too so the merged engine remains
+            # eligible for a subsequent nogil merge as the base.
+            self._group_hashes = other._group_hashes
+            other._group_hashes.clear()
+            # Adopt the nogil-ingest wiring (collector ptrs / col idxs / group col
+            # idxs / _all_nogil) so the adopted collectors are reachable via the
+            # borrowed-pointer nogil paths on this engine.
+            self._group_col_idxs = other._group_col_idxs
+            self._collector_ptrs = other._collector_ptrs
+            self._collector_col_idxs = other._collector_col_idxs
+            self._all_nogil = other._all_nogil
             other._num_groups = 0
             other._resolved = False
             return
@@ -593,6 +893,10 @@ cdef class GroupHashEngine:
             # find_or_insert_id's internal resize cannot fire below.
             self._index.reserve(<size_t>(num_groups + n_other))
 
+        # Keep _group_hashes in lockstep on this GIL merge path too, so a base
+        # combined via the GIL dual interface stays composable as `other` in a
+        # later nogil merge (whose size invariant would otherwise fail loud).
+        self._group_hashes.reserve(<size_t>(num_groups + n_other))
         for g in range(n_other):
             h = khashes[codes[g]]
             if self._use_parvi:
@@ -600,12 +904,14 @@ cdef class GroupHashEngine:
                 if pr.found:
                     slot = num_groups
                     new_rows.push_back(g)
+                    self._group_hashes.push_back(h)
                     num_groups += 1
                 elif pr.slot == _PARVI_CAPACITY:
                     slot = num_groups
                     self._promote_parvi_to_carchar()
                     self._index.insert_new(h, slot)
                     new_rows.push_back(g)
+                    self._group_hashes.push_back(h)
                     num_groups += 1
                     # Promoted mid-loop: reserve the worst-case carchar tail.
                     self._index.reserve(<size_t>(num_groups + (n_other - g)))
@@ -615,6 +921,7 @@ cdef class GroupHashEngine:
                 is_new = self._index.find_or_insert_id(h, num_groups, slot)
                 if is_new:
                     new_rows.push_back(g)
+                    self._group_hashes.push_back(h)
                     num_groups += 1
             self_slot[g] = slot
 
@@ -632,6 +939,166 @@ cdef class GroupHashEngine:
             oc = <BaseCollector>other._collectors[j]
             for g in range(n_other):
                 sc.merge_group_state(oc, g, self_slot[g])
+
+    cpdef bint is_resolved(self):
+        """True once the engine has seen its first non-empty morsel (collectors
+        concrete, key store built). A fresh base is not resolved; the GIL-free
+        merge requires a resolved base, so the first partial into an empty base
+        must go through the adopt-wholesale merge()."""
+        return self._resolved
+
+    cpdef bint is_mergeable_nogil(self):
+        """True iff this engine can be combined via the GIL-free merge_nogil path:
+        a single group column AND every collector has a real nogil transplant.
+        Multi-column / non-nogil collectors fall back to the GIL merge — a genuine
+        dual interface (capability), not a perf gate."""
+        if <Py_ssize_t>len(self._group_columns) != 1:
+            return False
+        cdef Py_ssize_t i
+        for i in range(len(self._collectors)):
+            if not (<BaseCollector>self._collectors[i]).is_mergeable_nogil():
+                return False
+        return True
+
+    # Scratch reused across merge_nogil calls on the SAME base engine (the merge
+    # target). Sized under the GIL before each nogil span; never shared between
+    # concurrently-merging engines (each radix bin has its own base engine).
+    cdef vector[int64_t] _merge_self_slot
+    cdef vector[int64_t] _merge_new_rows
+
+    cpdef int merge_nogil_driver(self, GroupHashEngine other) except -1:
+        """GIL-side driver for the GIL-free per-group merge.
+
+        Validates the dual-interface preconditions, hoists every allocating /
+        throwing step (type checks, index reserve, scratch + group-hash reserve)
+        under the GIL, then runs the pure-C++ transplant with the GIL RELEASED.
+        Returns 1 if the nogil merge ran, 0 if there was nothing to merge.
+        Raises (NotImplementedError / ValueError / MemoryError) on a misuse or
+        an allocation failure — never silently degrades.
+
+        This is the method a parallel scheduler / the dev prototype submits per
+        radix bin; B independent bins each call base.merge_nogil_driver(worker_b)
+        with no shared state, so the only serialization left is whatever the
+        Python call layer adds — the transplant itself is GIL-free."""
+        cdef Py_ssize_t n_collectors = len(self._collectors)
+        if n_collectors != <Py_ssize_t>len(other._collectors):
+            raise ValueError(
+                f"cannot merge engines with {n_collectors} vs "
+                f"{len(other._collectors)} collectors"
+            )
+        if not other._resolved or other._num_groups == 0:
+            return 0
+        if not self._resolved:
+            raise NotImplementedError(
+                "merge_nogil_driver requires a resolved base engine; use merge() "
+                "for the adopt-empty-base case"
+            )
+        if (not self.is_mergeable_nogil()) or (not other.is_mergeable_nogil()):
+            raise NotImplementedError(
+                "merge_nogil_driver requires single-column key + all-nogil "
+                "collectors; use merge() for the GIL dual interface"
+            )
+        if self._use_parvi:
+            raise NotImplementedError(
+                "merge_nogil_driver requires the base engine on the carchar map "
+                "(parvi base not supported on the nogil merge path)"
+            )
+        # other must carry one stored hash per group (the nogil-merge ingest
+        # invariant). If it ingested via a path that did not record them, refuse
+        # loud rather than read a short vector.
+        if <int64_t>other._group_hashes.size() != other._num_groups:
+            raise NotImplementedError(
+                "merge_nogil_driver: other engine has no per-group hashes "
+                "(was it ingested off the nogil-merge path?)"
+            )
+        # The <Type>other cast in merge_group_state_nogil is UNCHECKED — verify
+        # collector types line up once here, under the GIL, before the span.
+        cdef Py_ssize_t i
+        for i in range(n_collectors):
+            if type(self._collectors[i]) is not type(other._collectors[i]):
+                raise ValueError(
+                    f"collector type mismatch at position {i}: "
+                    f"{type(self._collectors[i]).__name__} vs "
+                    f"{type(other._collectors[i]).__name__}"
+                )
+
+        cdef int64_t n_other = other._num_groups
+        # Hoist all allocation under the GIL: index worst-case reserve, the slot
+        # map + new-row scratch, and the group-hash tail. After this the nogil
+        # span touches only the collectors'/key-store's own nogil realloc paths
+        # (which report failure via False), so no std::bad_alloc can escape the
+        # noexcept-nogil body.
+        self._index.reserve(<size_t>(self._num_groups + n_other))
+        self._merge_self_slot.resize(<size_t>n_other)
+        self._merge_new_rows.clear()
+        self._merge_new_rows.reserve(<size_t>n_other)
+        self._group_hashes.reserve(<size_t>(self._num_groups + n_other))
+
+        cdef ErrCtx err
+        err.code = 0
+        err.msg = NULL
+        cdef int rc
+        with nogil:
+            rc = self._merge_nogil(other, &err)
+        if rc != 0:
+            raise MemoryError("merge_nogil failed (alloc)")
+        return 1
+
+    cdef int _merge_nogil(self, GroupHashEngine other, ErrCtx* err) noexcept nogil:
+        """GIL-free per-group transplant. Reads other's stored per-group hashes
+        and final-form group keys directly — no reconstruct, no rehash, no Python.
+        All allocating prep is hoisted by merge_nogil_driver under the GIL, so the
+        only allocations reachable here are nogil realloc paths reporting via
+        False. Returns 0 on success, non-zero (+ err set) on alloc failure."""
+        cdef int64_t n_other = other._num_groups
+        cdef int64_t num_groups = self._num_groups
+        cdef int64_t* self_slot = self._merge_self_slot.data()
+        cdef const uint64_t* o_hashes = other._group_hashes.data()
+        cdef int64_t g
+        cdef int64_t slot
+        cdef uint64_t h
+        cdef bint is_new
+
+        self._merge_new_rows.clear()
+
+        # ---- 1. Map each other-group to a self-group slot (carchar probe) ----
+        for g in range(n_other):
+            h = o_hashes[g]
+            is_new = self._index.find_or_insert_id(h, num_groups, slot)
+            if is_new:
+                self._merge_new_rows.push_back(g)
+                self._group_hashes.push_back(h)
+                num_groups += 1
+            self_slot[g] = slot
+
+        cdef Py_ssize_t n_new = <Py_ssize_t>self._merge_new_rows.size()
+
+        # ---- 2. Copy new group keys (keystore → keystore, nogil) ----
+        if n_new > 0:
+            if not self._key_store.append_groups_from_single(
+                other._key_store, self._merge_new_rows.data(), n_new
+            ):
+                err.code = 2
+                err.msg = "merge key copy alloc failed"
+                return 2
+            # ---- 3. Grow collectors to the new group count ----
+            for g in range(<Py_ssize_t>self._collector_ptrs.size()):
+                if not (<BaseCollector>self._collector_ptrs[g]).grow_nogil(num_groups):
+                    err.code = 3
+                    err.msg = "merge collector grow alloc failed"
+                    return 3
+
+        self._num_groups = num_groups
+
+        # ---- 4. Transplant per-group collector state ----
+        cdef Py_ssize_t jc
+        cdef Py_ssize_t n_collectors = <Py_ssize_t>self._collector_ptrs.size()
+        for jc in range(n_collectors):
+            for g in range(n_other):
+                (<BaseCollector>self._collector_ptrs[jc]).merge_group_state_nogil(
+                    <BaseCollector>other._collector_ptrs[jc], g, self_slot[g]
+                )
+        return 0
 
     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):
         """
@@ -741,4 +1208,6 @@ cdef class GroupHashEngine:
             "used_parvi": self._parvi != NULL or self._promoted_from_parvi,
             "promoted_from_parvi": self._promoted_from_parvi,
             "parvi_final_size": self._parvi_final_size,
+            "nogil_ingest_morsels": self.nogil_ingest_morsels,
+            "gil_ingest_morsels": self.gil_ingest_morsels,
         }

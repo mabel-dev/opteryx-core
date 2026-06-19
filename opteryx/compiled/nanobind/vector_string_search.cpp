@@ -129,39 +129,67 @@ static std::vector<uint8_t> lowercase_needle(const NeedleView& ndl) {
 // String search ops
 // ---------------------------------------------------------------------------
 
+// Prefix/suffix scans are pure C++ over the unwrapped DrakenVectors and their
+// arenas, exactly like impl_contains: hay/ndl stay live for the whole call so the
+// buffers cannot be freed, and the CI needle is lowered (allocated) under the GIL
+// before the scan. Drop the GIL around the scan so concurrent morsels run in
+// parallel (§2). gil_scoped_release re-acquires in its destructor, including
+// during exception unwind.
 static nb::object impl_starts_with(nb::object hay, nb::object ndl) {
     const DrakenVector* h = unwrap_string(hay, "vector_starts_with");
     const DrakenVector* n = unwrap_string(ndl, "vector_starts_with");
     auto nv = extract_needle(n);
     // Null/empty needle → empty-needle convention (always True for non-null rows).
-    return own(draken::ops::str_starts_with(*h, nv.bytes, nv.len));
+    VecResult res;
+    {
+        nb::gil_scoped_release rel;
+        res = draken::ops::str_starts_with(*h, nv.bytes, nv.len);
+    }
+    return own(std::move(res));
 }
 
 static nb::object impl_ci_starts_with(nb::object hay, nb::object ndl) {
     const DrakenVector* h = unwrap_string(hay, "vector_ci_starts_with");
     const DrakenVector* n = unwrap_string(ndl, "vector_ci_starts_with");
     auto nv = extract_needle(n);
-    if (nv.len == 0 || nv.is_null)
-        return own(draken::ops::str_starts_with_ci(*h, nullptr, 0u));
-    auto lo = lowercase_needle(nv);
-    return own(draken::ops::str_starts_with_ci(*h, lo.data(), nv.len));
+    VecResult res;
+    if (nv.len == 0 || nv.is_null) {
+        nb::gil_scoped_release rel;
+        res = draken::ops::str_starts_with_ci(*h, nullptr, 0u);
+    } else {
+        auto lo = lowercase_needle(nv);          // alloc under GIL; outlives the scan
+        nb::gil_scoped_release rel;
+        res = draken::ops::str_starts_with_ci(*h, lo.data(), nv.len);
+    }
+    return own(std::move(res));
 }
 
 static nb::object impl_ends_with(nb::object hay, nb::object ndl) {
     const DrakenVector* h = unwrap_string(hay, "vector_ends_with");
     const DrakenVector* n = unwrap_string(ndl, "vector_ends_with");
     auto nv = extract_needle(n);
-    return own(draken::ops::str_ends_with(*h, nv.bytes, nv.len));
+    VecResult res;
+    {
+        nb::gil_scoped_release rel;
+        res = draken::ops::str_ends_with(*h, nv.bytes, nv.len);
+    }
+    return own(std::move(res));
 }
 
 static nb::object impl_ci_ends_with(nb::object hay, nb::object ndl) {
     const DrakenVector* h = unwrap_string(hay, "vector_ci_ends_with");
     const DrakenVector* n = unwrap_string(ndl, "vector_ci_ends_with");
     auto nv = extract_needle(n);
-    if (nv.len == 0 || nv.is_null)
-        return own(draken::ops::str_ends_with_ci(*h, nullptr, 0u));
-    auto lo = lowercase_needle(nv);
-    return own(draken::ops::str_ends_with_ci(*h, lo.data(), nv.len));
+    VecResult res;
+    if (nv.len == 0 || nv.is_null) {
+        nb::gil_scoped_release rel;
+        res = draken::ops::str_ends_with_ci(*h, nullptr, 0u);
+    } else {
+        auto lo = lowercase_needle(nv);          // alloc under GIL; outlives the scan
+        nb::gil_scoped_release rel;
+        res = draken::ops::str_ends_with_ci(*h, lo.data(), nv.len);
+    }
+    return own(std::move(res));
 }
 
 static nb::object impl_contains(nb::object hay, nb::object ndl, bool ignore_case) {

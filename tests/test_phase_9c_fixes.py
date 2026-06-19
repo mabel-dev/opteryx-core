@@ -67,7 +67,7 @@ def test_defect2_null_arithmetic():
     try:
         result = session.execute_to_morsels("SELECT CAST(NULL AS INTEGER) + 5")
         for morsel in result:
-            values = list(morsel[0])
+            values = list(morsel.column(morsel.column_names[0]))
             assert values[0] is None, f"Expected None, got {values[0]}"
     except Exception as e:
         if "Bus error" in str(e) or "SIGBUS" in str(e):
@@ -78,7 +78,7 @@ def test_defect2_null_arithmetic():
     try:
         result = session.execute_to_morsels("SELECT 10 + CAST(NULL AS INTEGER)")
         for morsel in result:
-            values = list(morsel[0])
+            values = list(morsel.column(morsel.column_names[0]))
             assert values[0] is None, f"Expected None, got {values[0]}"
     except Exception as e:
         if "Bus error" in str(e) or "SIGBUS" in str(e):
@@ -103,7 +103,7 @@ def test_defect3_telemetry_counter():
     result = session.execute_to_morsels("SELECT NULL + 1")
     for morsel in result:
         # Verify the result is null
-        values = list(morsel[0])
+        values = list(morsel.column(morsel.column_names[0]))
         assert values[0] is None
 
     final_count = evaluation.get_c_native_kernel_call_count()

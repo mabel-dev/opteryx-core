@@ -6925,6 +6925,146 @@ NB_MODULE(draken_native, m) {
             if (v.logical_type->kind != LogicalKind::VECTOR) return nb::none();
             return nb::cast(static_cast<int>(v.logical_type->dimension));
         })
+            // max_display_width() — return the maximum rendered byte length across all
+            // logical rows when the vector is formatted for display (e.g. Morsel.__str__).
+            //
+            // For string-family types (VARCHAR/NVARCHAR/VARBINARY/VARIANT) the length is
+            // read directly from the slot header — zero deserialization, zero Python objects.
+            // For dict-encoded string vectors only the data_length unique slots are scanned
+            // (not the full selection array), so dict vectors are O(distinct) not O(rows).
+            //
+            // For all other types the value is formatted into a stack buffer using the same
+            // path as to_pylist, and the byte length of that formatting is measured.
+            // Null rows contribute 4 bytes ("null").  Returns 0 for empty or all-null vectors.
+            .def("max_display_width", [](const VectorOwner& v) -> uint32_t {
+                const uint32_t n = v.vec.length;
+                if (n == 0u) return 0u;
+
+                const uint32_t null_len = 4u;  // len("null")
+                uint32_t best = 0u;
+
+                // --- String family: read lengths directly from the arena slots ----------
+                // Iterate over data_length unique slots — works for dense, constant, and
+                // dict shapes uniformly without touching the selection array at all.
+                if (is_varchar_family(v.vec.type) || v.vec.type == DRAKEN_VARIANT) {
+                    // Check whether any rows are null so we account for "null" width.
+                    bool any_null = false;
+                    for (uint32_t i = 0u; i < n && !any_null; ++i)
+                        if (!row_is_valid(v.vec, i)) any_null = true;
+                    if (any_null && best < null_len) best = null_len;
+
+                    const DrakenStringArena* sa =
+                        static_cast<const DrakenStringArena*>(v.vec.data);
+                    if (sa) {
+                        for (uint32_t k = 0u; k < v.vec.data_length; ++k) {
+                            const uint32_t len = str_length(&sa->slots[k]);
+                            if (len > best) best = len;
+                        }
+                    }
+                    return best;
+                }
+
+                // --- NULL vector: every row is null -----------------------------------
+                if (v.vec.type == DRAKEN_NULL) return null_len;
+
+                // --- All other types: format unique data values into a stack buffer ---
+                // For dict/constant shapes scan only data_length unique values; for dense
+                // shapes data_length == length so this is still O(rows).
+                // A char[64] stack buffer is large enough for any scalar we render:
+                //   int64: max 20 chars; float64: ≤25 chars (ryu); bool: 5; timestamps: 26.
+                char buf[64];
+                const uint32_t nd = v.vec.data_length;
+
+                // Helper: measure a null-row contribution once.
+                bool any_null = false;
+                for (uint32_t i = 0u; i < n && !any_null; ++i)
+                    if (!row_is_valid(v.vec, i)) any_null = true;
+                if (any_null && best < null_len) best = null_len;
+
+                // Iterate over the unique data slots (index k into data[], not selection[]).
+                // We build a synthetic per-unique-slot DrakenVector view that reuses the
+                // existing row_* helpers without allocating anything.
+                for (uint32_t k = 0u; k < nd; ++k) {
+                    size_t len = 0u;
+                    switch (v.vec.type) {
+                        case DRAKEN_INT64:
+                        case DRAKEN_INT8:
+                        case DRAKEN_INT16:
+                        case DRAKEN_INT32: {
+                            // row_narrow_int reads data[selection[i]]; for our synthetic
+                            // dense view selection[k]==k, so pass k directly as the index.
+                            const int64_t val = (v.vec.type == DRAKEN_INT64)
+                                ? static_cast<const int64_t*>(v.vec.data)[k]
+                                : static_cast<int64_t>(([&]() -> int64_t {
+                                    switch (v.vec.type) {
+                                        case DRAKEN_INT8:  return static_cast<const int8_t* >(v.vec.data)[k];
+                                        case DRAKEN_INT16: return static_cast<const int16_t*>(v.vec.data)[k];
+                                        default:           return static_cast<const int32_t*>(v.vec.data)[k];
+                                    }
+                                  })());
+                            len = static_cast<size_t>(
+                                std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(val)));
+                            break;
+                        }
+                        case DRAKEN_FLOAT32:
+                        case DRAKEN_FLOAT64: {
+                            const double val = (v.vec.type == DRAKEN_FLOAT32)
+                                ? static_cast<double>(static_cast<const float* >(v.vec.data)[k])
+                                : static_cast<const double*>(v.vec.data)[k];
+                            len = ryu_format_double(buf, val, 10u);
+                            break;
+                        }
+                        case DRAKEN_BOOL: {
+                            const uint32_t bit_idx = k;
+                            const uint8_t* bdata = static_cast<const uint8_t*>(v.vec.data);
+                            const bool val = static_cast<bool>(
+                                (bdata[bit_idx >> 3] >> (bit_idx & 7)) & 1u);
+                            len = val ? 4u : 5u;  // "true" / "false"
+                            break;
+                        }
+                        case DRAKEN_DATE32: {
+                            // ISO date: YYYY-MM-DD = 10 chars always.
+                            len = 10u;
+                            break;
+                        }
+                        case DRAKEN_TIMESTAMP64: {
+                            // ISO datetime: "YYYY-MM-DD HH:MM:SS" = 19 chars; with microseconds ≤26.
+                            len = 26u;
+                            break;
+                        }
+                        case DRAKEN_TIME32:
+                        case DRAKEN_TIME64: {
+                            // "HH:MM:SS" = 8 chars; with sub-second ≤15.
+                            len = 15u;
+                            break;
+                        }
+                        case DRAKEN_INTERVAL: {
+                            // "Xmo Yd Zh Wm Vs" — conservatively 20 chars.
+                            len = 20u;
+                            break;
+                        }
+                        case DRAKEN_DECIMAL:
+                        case DRAKEN_DECIMAL128: {
+                            // precision digits + sign + decimal point ≤ 42.
+                            len = 42u;
+                            break;
+                        }
+                        default: {
+                            // Unknown type: fall back to a safe estimate.
+                            len = 10u;
+                            break;
+                        }
+                    }
+                    if (static_cast<uint32_t>(len) > best)
+                        best = static_cast<uint32_t>(len);
+                }
+                return best;
+            },
+            "Return the maximum rendered display width (in bytes) across all logical rows.\n"
+            "For string-family vectors, reads slot lengths directly (O(distinct)).\n"
+            "For other types, measures the formatted representation of each unique data value.\n"
+            "Null rows contribute 4 bytes (\"null\"). Returns 0 for empty vectors.")
+
         // _slot_fields(i) — test-only slot inspector for string-family vectors.
         // Short (len ≤ 12): returns (length, inline_bytes) where inline_bytes is
         //   all 12 inline bytes including zero-padding beyond the string content.
