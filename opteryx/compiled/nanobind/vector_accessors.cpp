@@ -32,6 +32,8 @@
 #include <nanobind/nanobind.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #include "core/buffers.h"
 #include "core/alloc.h"
@@ -172,6 +174,27 @@ static nb::object impl_string_emptiness(nb::object v, bool emit_when_empty) {
         std::memcpy(out_validity, validity, nbytes);
         if ((n & 7u) != 0u)
             out_validity[nbytes - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+    }
+
+    // Dict/compressed shape (data_length < length): emptiness is a property of
+    // the unique value, so resolve str_length once per unique slot and gather
+    // the precomputed flag per row. This turns n calls to str_length (each a
+    // random gather into the German-string slots) into data_length calls plus a
+    // cheap byte lookup, while producing bit-identical results to the uniform
+    // data[selection[i]] path (CLAUDE.md §11 sanctioned dict optimization).
+    const uint32_t dl = dv->data_length;
+    if (dl < n && dl > 0u) {
+        uint8_t* slot_match = static_cast<uint8_t*>(draken_malloc(dl));
+        if (!slot_match) { draken_free(bits); draken_free(out_validity); throw std::bad_alloc(); }
+        for (uint32_t j = 0u; j < dl; ++j)
+            slot_match[j] = ((str_length(&arena->slots[j]) == 0u) == emit_when_empty) ? 1u : 0u;
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (validity && !row_valid(validity, i)) continue;
+            if (slot_match[sel[i]])
+                bits[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+        draken_free(slot_match);
+        return wrap_bool(bits, out_validity, n);
     }
 
     for (uint32_t i = 0u; i < n; ++i) {

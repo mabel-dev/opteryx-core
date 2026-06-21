@@ -4,6 +4,19 @@
 #include <string>
 #include <vector>
 
+// Dictionary-membership decode-skip predicate (Phase 2). Evaluated against a
+// dict-encoded column's dictionary BEFORE decoding its data pages: if no unique
+// value satisfies it, the whole row group yields zero rows (for a pushed
+// conjunct) and the data pages are skipped. Valid for any per-value predicate;
+// kinds below cover what the planner pushes today.
+struct DictSkipPredicate {
+  // -1 none, 0 int membership (=/IN), 1 str membership (=/IN),
+  // 2 str starts-with, 3 str ends-with, 4 str contains.
+  int kind = -1;
+  const std::vector<int64_t>*     int_vals = nullptr;  // kind 0
+  const std::vector<std::string>* str_vals = nullptr;  // kinds 1..4 (operands/patterns)
+};
+
 // Structure to hold decoded column data
 struct DecodedColumn {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
@@ -74,6 +87,14 @@ struct DecodedColumn {
   std::vector<uint32_t> rle_str_offsets;     // byte offset per run in arena [num_runs]
   std::vector<int32_t>  rle_str_lens;        // byte length per run value [num_runs]
   int32_t               rle_last_code = -1;  // last dict code accumulated (page-boundary merge)
+
+  // Phase 2 dictionary-membership skip: set when a pushed equality/IN needle set
+  // was supplied for this int dict column and NONE of the needles appears in the
+  // dictionary. The data pages are NOT decoded; the dictionary survives and
+  // num_rows is the logical row count. The consumer builds a Dict vector with
+  // arbitrary (zero) codes — every row is a guaranteed non-match for the
+  // equality, so the codes never surface (0 rows survive the conjunct).
+  bool dict_all_filtered = false;
 };
 
 // Structure to hold a decoded table
@@ -105,22 +126,32 @@ DecodedTable ReadParquet(const uint8_t* data, size_t size);
 // Decode a single column chunk from an isolated range-read buffer.
 // Offsets in target_col must be relative to the start of the buffer
 // (i.e. subtract base_offset before calling).
+// prefer_dict: when true AND the column is dictionary-encoded int32/int64/float,
+// keep the dictionary + per-row codes instead of resolving codes to values (the
+// rle skip-dense path) or materialising dense. The caller then builds a §11
+// "compressed" (Dict-shaped) DrakenVector. No-op on plain pages / non-numeric dict.
+// skip_pred (Phase 2): if non-null and no dictionary value satisfies it, the data
+// pages are not decoded and dict_all_filtered is set.
 DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                     const ColumnStats* target_col,
                                     int64_t* ext_int64   = nullptr,
                                     double*  ext_float64 = nullptr,
                                     int32_t* ext_int32   = nullptr,
                                     float*   ext_float32 = nullptr,
-                                    const uint8_t* row_mask = nullptr);
+                                    const uint8_t* row_mask = nullptr,
+                                    bool prefer_dict = false,
+                                    const DictSkipPredicate* skip_pred = nullptr);
 
 // Convenience overload: no ext_* zero-copy buffers, only a row_mask.
 // Matches the 4-argument Cython binding DecodeColumnFromChunk(data, size, col, mask).
 inline DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                            const ColumnStats* target_col,
-                                           const uint8_t* row_mask) {
+                                           const uint8_t* row_mask,
+                                           bool prefer_dict = false,
+                                           const DictSkipPredicate* skip_pred = nullptr) {
   return DecodeColumnFromChunk(data, size, target_col,
                                nullptr, nullptr, nullptr, nullptr,
-                               row_mask);
+                               row_mask, prefer_dict, skip_pred);
 }
 
 // Decode a specific column from memory buffer for a specific row group.

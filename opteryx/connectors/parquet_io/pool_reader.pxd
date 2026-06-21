@@ -42,6 +42,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t decode_ns
         string error
         bint success
+        bint empty_filtered
+        int64_t empty_rows
 
     # Take ownership of column i's direct buffers (data returned, validity via
     # out param); nulls both slots so MorselRef's destructor won't free them.
@@ -63,6 +65,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
             const vector[ColumnStats]& column_stats,
             const vector[uint8_t]& row_mask,
         ) nogil
+        void add_int_needles(const string& column, const vector[int64_t]& needles) nogil
+        void add_str_pred(const string& column, int kind, const vector[string]& vals) nogil
+        void clear_eq_needles() nogil
         bint try_get_result(MorselRef& out) nogil
         bint wait_and_get_result(MorselRef& out) nogil
         void cancel() nogil

@@ -284,8 +284,6 @@ def execute_logical_plan(
     a Substrait plan. Intended for use by external services that generate
     logical plans (eg. OData service).
     """
-    import uuid
-
     from opteryx.constants import ResultType
     from opteryx.exceptions import SqlError
     from opteryx.managers.execution import execute as execute_plan
@@ -293,10 +291,11 @@ def execute_logical_plan(
     from opteryx.planner.binder import do_bind_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
+    from opteryx.utils import random_string
 
     # Prepare query_id and telemetry defaults
     if query_id is None:
-        query_id = str(uuid.uuid4())
+        query_id = random_string(32)
     if telemetry is None:
         telemetry = QueryTelemetry(query_id)
 

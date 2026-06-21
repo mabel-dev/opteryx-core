@@ -298,6 +298,6 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
     @staticmethod
     def _generate_node_id() -> str:
         """Generate a unique node ID."""
-        import uuid
+        from opteryx.utils import random_string
 
-        return str(uuid.uuid4())
+        return random_string(32)

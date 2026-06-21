@@ -60,6 +60,16 @@ struct CmpGe { static inline bool apply(int64_t a, int64_t b) noexcept { return 
 struct CmpLt { static inline bool apply(int64_t a, int64_t b) noexcept { return a <  b; } };
 struct CmpLe { static inline bool apply(int64_t a, int64_t b) noexcept { return a <= b; } };
 
+// Operand-swapped op: `a OP b` == `b ReversedOp<OP> a`. Lets a constant LEFT
+// operand reduce to the scalar path against the non-constant RIGHT operand.
+template<typename Op> struct ReversedOp;
+template<> struct ReversedOp<CmpEq> { using type = CmpEq; };
+template<> struct ReversedOp<CmpNe> { using type = CmpNe; };
+template<> struct ReversedOp<CmpGt> { using type = CmpLt; };
+template<> struct ReversedOp<CmpGe> { using type = CmpLe; };
+template<> struct ReversedOp<CmpLt> { using type = CmpGt; };
+template<> struct ReversedOp<CmpLe> { using type = CmpGe; };
+
 // ---------------------------------------------------------------------------
 // Internal allocation helpers — prefixed cmp_ to avoid ODR clash with
 // identically-named helpers in int64_arithmetic.h (both headers land in the
@@ -565,6 +575,17 @@ static inline VecResult compare_vector_impl(const DrakenVector& a, const DrakenV
         if (comb) draken_free(comb);
         return r;
     }
+
+    // constant ⇄ non-constant → reduce to the scalar path, which carries the
+    // dict (compressed) and dense fast paths on the non-constant side. The
+    // common WHERE col <op> literal lands here: a dict column vs a constant
+    // literal now compares only the unique values, not all n rows. Skip when the
+    // constant carries a null (validity present): a NULL operand makes every
+    // comparison NULL and is left to the validity-aware generic path below.
+    if (draken_is_constant(&b) && b.validity == nullptr)
+        return compare_scalar_impl<Op>(a, b_data[0]);
+    if (draken_is_constant(&a) && a.validity == nullptr)
+        return compare_scalar_impl<typename ReversedOp<Op>::type>(b, a_data[0]);
 
     if (draken_is_dict(&a) && draken_is_dict(&b) &&
         (uint64_t)a.data_length * b.data_length <= (uint64_t)n) {

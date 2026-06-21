@@ -71,10 +71,49 @@ def extract_predicate_stats(conditions) -> List[Tuple[str, str, Any]]:
         if in_stat is not None:
             result.append(in_stat)
             continue
+        func_stat = _try_extract_str_func(node)
+        if func_stat is not None:
+            result.append(func_stat)
+            continue
         stat = _try_extract(node)
         if stat is not None:
             result.append(stat)
     return result
+
+
+def _try_extract_str_func(node) -> Optional[Tuple[str, str, Any]]:
+    """Return ``(col_name, "_STARTS_WITH"/"_ENDS_WITH"/"InStr", pattern_bytes)`` for
+    a LIKE-rewritten string-match FUNCTION node, or None.
+
+    These are the case-sensitive prefix/suffix/substring predicates the optimizer
+    produces from ``col LIKE 'p%'`` / ``'%s'`` / ``'%x%'``. They are pure
+    per-value predicates, so the dictionary decode-skip can evaluate them against
+    the unique values. (Case-insensitive ``_CI_*`` / ``IInStr`` variants need case
+    folding and are intentionally not extracted here.) Used only by the dict
+    decode-skip; ``_rg_passes_predicates_native`` ignores these op tags (fail-open).
+    """
+    if node is None:
+        return None
+
+    from opteryx.expression import NodeType
+
+    if node.node_type != NodeType.FUNCTION:
+        return None
+    if node.value not in ("_STARTS_WITH", "_ENDS_WITH", "InStr"):
+        return None
+    params = getattr(node, "parameters", None)
+    if not params or len(params) != 2:
+        return None
+    col_node, pat_node = params[0], params[1]
+    if col_node.node_type != NodeType.IDENTIFIER or pat_node.node_type != NodeType.LITERAL:
+        return None
+    col_sc = getattr(col_node, "schema_column", None)
+    if col_sc is None:
+        return None
+    col_name = getattr(col_sc, "name", None)
+    if not col_name:
+        return None
+    return (col_name, node.value, pat_node.value)
 
 
 def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:

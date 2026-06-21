@@ -231,12 +231,17 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
             name = name.lower()
         return (c.schema_column.identity, name)
 
-    all_top_level_identities = [
-        c.schema_column.identity for c in list(node.columns) + list(node.order_by_columns)
-    ]
-    all_top_level_keys = [
-        _output_key(c) for c in list(node.columns) + list(node.order_by_columns)
-    ]
+    top_level_columns = list(node.columns) + list(node.order_by_columns)
+    all_top_level_identities = [c.schema_column.identity for c in top_level_columns]
+    # O(1) membership + identity→first-node-column map so the schema trimming
+    # below is O(n) rather than O(n²) in projection width (wide SELECTs of
+    # computed columns — e.g. ClickBench Q30's 90 SUM(col±k) — were dominated by
+    # these scans during binding).
+    all_top_level_identity_set = set(all_top_level_identities)
+    first_node_column_by_identity = {}
+    for _n in top_level_columns:
+        first_node_column_by_identity.setdefault(_n.schema_column.identity, _n)
+    all_top_level_keys = [_output_key(c) for c in top_level_columns]
     if len(set(all_top_level_keys)) != len(all_top_level_keys):
         from collections import Counter
 
@@ -254,21 +259,15 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     columns = []
     for relation, schema in list(context.schemas.items()):
         schema_columns = [
-            column for column in schema.columns if column.identity in all_top_level_identities
+            column for column in schema.columns if column.identity in all_top_level_identity_set
         ]
         if len(schema_columns) == 0:
             context.schemas.pop(relation)
         else:
             for column in schema_columns:
-                # for each column in the schema, try to find the node's columns
-                node_column = next(
-                    (
-                        n
-                        for n in list(node.columns) + list(node.order_by_columns)
-                        if n.schema_column.identity == column.identity
-                    ),
-                    None,
-                )
+                # for each column in the schema, find the (first) node column with
+                # the same identity via the prebuilt map (was a linear scan).
+                node_column = first_node_column_by_identity.get(column.identity)
                 # update the column reference with any AS aliases
                 if node_column and node_column.alias:
                     if node_column.schema_column.aliases:
@@ -281,8 +280,9 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
                         column.aliases = [node_column.alias]
             # update the schema with columns we have references to, removing redundant columns
             schema.columns = schema_columns
-            for column in list(node.columns) + list(node.order_by_columns):
-                if column.schema_column.identity in [i.identity for i in schema_columns]:
+            schema_column_identities = {i.identity for i in schema_columns}
+            for column in top_level_columns:
+                if column.schema_column.identity in schema_column_identities:
                     columns.append(column)
 
     # We always have a $derived schema, even if it's empty

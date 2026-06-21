@@ -650,6 +650,12 @@ static inline void str_cmp_vec_ord(
 // str_compare_vector — public kernel for string × string.
 // Dispatch-table compatible: (DrakenVector&, DrakenVector&, int) → VecResult.
 // ---------------------------------------------------------------------------
+// Operand-swapped op code: `a OP b` == `b str_swap_op(OP) a`. Eq/Ne symmetric;
+// Gt<->Lt, Ge<->Le. Lets a constant LEFT operand reduce to the scalar path.
+static inline int str_swap_op(int op) {
+    switch (op) { case 2: return 4; case 3: return 5; case 4: return 2; case 5: return 3; default: return op; }
+}
+
 static inline VecResult str_compare_vector(
     const DrakenVector& a, const DrakenVector& b, int op)
 {
@@ -664,6 +670,17 @@ static inline VecResult str_compare_vector(
     const DrakenStringSlot* b_slots = sa_b->slots;
     const uint8_t*          a_arena = sa_a->arena;
     const uint8_t*          b_arena = sa_b->arena;
+
+    // constant ⇄ non-constant → reduce to the scalar path, which carries the
+    // dict (compressed) and dense fast paths on the non-constant side. The
+    // common WHERE str_col <op> 'literal' lands here: a dict-encoded string
+    // column vs a constant literal compares only the unique values, not all n
+    // rows. Skip when the constant is NULL (validity present) — left to the
+    // validity-aware generic path.
+    if (draken_is_constant(&b) && b.validity == nullptr)
+        return str_compare_scalar(a, b_slots[0], b_arena, op);
+    if (draken_is_constant(&a) && a.validity == nullptr)
+        return str_compare_scalar(b, a_slots[0], a_arena, str_swap_op(op));
 
     if (draken_is_constant(&a) && draken_is_constant(&b)) {
         bool bit;

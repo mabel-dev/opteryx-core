@@ -86,7 +86,7 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size,
   try {
     RUGO_TEL_START(_meta_t0);
     FileStats metadata = ReadParquetMetadataFromBuffer(data, size);
-    RUGO_TEL_ACCUM(rugo_tel::metadata_s, _meta_t0);
+    RUGO_TEL_ACCUM(rugo_tel::metadata_ns, _meta_t0);
 
     table.column_names = column_names;
     table.row_groups.resize(metadata.row_groups.size());

@@ -620,11 +620,11 @@ def get_parquet_vendor_sources():
     vendor_sources = []
     RUGO_PARQUET = "rugo/src/parquet"
 
-    # Snappy sources (minimal subset for decompress)
+    # Snappy sources (minimal subset for decompress). Vendored in third_party.
     snappy_sources = [
-        f"{RUGO_PARQUET}/vendor/snappy/snappy.cc",
-        f"{RUGO_PARQUET}/vendor/snappy/snappy-sinksource.cc",
-        f"{RUGO_PARQUET}/vendor/snappy/snappy-stubs-internal.cc",
+        "third_party/snappy/snappy.cc",
+        "third_party/snappy/snappy-sinksource.cc",
+        "third_party/snappy/snappy-stubs-internal.cc",
     ]
     vendor_sources.extend(snappy_sources)
 
@@ -877,13 +877,13 @@ extensions = [
         include_dirs=(
             include_dirs
             + [
-                "rugo/src/parquet/vendor/snappy",
+                "third_party/snappy",
                 "rugo/src/parquet/vendor/zstd",
                 "rugo/src/parquet/vendor/zstd/common",
                 "rugo/src/parquet/vendor/zstd/decompress",
             ]
         ),
-        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
+        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=parquet_link_args + LD_EXTRA,
@@ -2237,6 +2237,12 @@ extensions.append(
         sources=(
             [
                 "opteryx/connectors/parquet_io/pool_reader.pyx",
+                # MemoryPool implementation — pool_reader calls
+                # opteryx::MemoryPool::reserve_for_write (via pool_sink_adapter.hpp).
+                # Must be compiled into this extension: on Linux extensions load
+                # RTLD_LOCAL, so the symbol cannot be borrowed from memory_pool.so
+                # (macOS only resolves it by flat-namespace dynamic_lookup).
+                "src/cpp/memory_pool.cpp",
                 # Rugo parquet sources for DecodeColumnFromChunk and infrastructure
                 "rugo/src/parquet/decode_column.cpp",
                 "rugo/src/parquet/decode.cpp",
@@ -2256,7 +2262,7 @@ extensions.append(
             + [
                 "src/cpp",
                 "rugo/src/parquet",
-                "rugo/src/parquet/vendor/snappy",
+                "third_party/snappy",
                 "rugo/src/parquet/vendor/zstd",
                 "rugo/src/parquet/vendor/zstd/common",
                 "rugo/src/parquet/vendor/zstd/decompress",
@@ -2265,7 +2271,7 @@ extensions.append(
             ]
             + _curl_include_dirs
         ),
-        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
+        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),

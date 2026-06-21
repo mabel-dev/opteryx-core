@@ -1255,6 +1255,17 @@ cdef class ParquetReadNode(ReaderNode):
             decode_ns = pulled[3]
             path = pulled[4]
 
+            # Phase 2 empty row group (dictionary-membership skip): no assembly,
+            # no morsel — just fold in I/O telemetry + the pre-filter row count.
+            if vectors is None:
+                self._scan_mtx.lock()
+                self.bytes_in += bytes_fetched
+                self.scan_readings.time_parquet_read_ranges_ns += read_ns
+                self.scan_readings.time_parquet_decode_columns_ns += decode_ns
+                self._total_rows_before_filter += pulled[6]
+                self._scan_mtx.unlock()
+                continue
+
             # ── Thread-local assembly (no lock) ──────────────────────────────
             if self._sp_needs_coerce:
                 self._coerce_vectors(vectors)
@@ -1347,6 +1358,12 @@ cdef class ParquetReadNode(ReaderNode):
             self.scan_readings.time_parquet_decode_columns_ns += pulled[3]
             path = pulled[4]
             rg_idx = pulled[5]
+            # Phase 2 empty row group: dictionary-membership skip → no survivors,
+            # no pass-2 work. Count pre-filter rows and record the skip.
+            if vectors is None:
+                self._total_rows_before_filter += pulled[6]
+                self.record_pass1_skipped()
+                continue
             n = len(vectors)
             row_group = {self._lm_pass1_names_bytes[i]: vectors[i] for i in range(n)}
             result = _evaluate_pass1_row_group(
@@ -1410,6 +1427,10 @@ cdef class ParquetReadNode(ReaderNode):
             vectors = pulled[0]
             path = pulled[4]
             rg_idx = pulled[5]
+            # Pass-2 runs masked → prefer_dict off → no empty-filtered sentinel.
+            # Defensive skip in case that ever changes.
+            if vectors is None:
+                continue
             # Pass-2 telemetry mirrors the original: bytes only.
             self.scan_readings.record_pass2_decoded(pulled[1])
             self.bytes_in += pulled[1]

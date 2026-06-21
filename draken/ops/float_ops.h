@@ -227,6 +227,16 @@ struct FpCmpGe { template<typename T> static bool apply(T a, T b) noexcept { ret
 struct FpCmpLt { template<typename T> static bool apply(T a, T b) noexcept { return fp_total_lt(a, b); } };
 struct FpCmpLe { template<typename T> static bool apply(T a, T b) noexcept { return fp_total_le(a, b); } };
 
+// Operand-swapped op: `a OP b` == `b FpReversedOp<OP> a`. Lets a constant LEFT
+// operand reduce to the scalar path against the non-constant RIGHT operand.
+template<typename Op> struct FpReversedOp;
+template<> struct FpReversedOp<FpCmpEq> { using type = FpCmpEq; };
+template<> struct FpReversedOp<FpCmpNe> { using type = FpCmpNe; };
+template<> struct FpReversedOp<FpCmpGt> { using type = FpCmpLt; };
+template<> struct FpReversedOp<FpCmpGe> { using type = FpCmpLe; };
+template<> struct FpReversedOp<FpCmpLt> { using type = FpCmpGt; };
+template<> struct FpReversedOp<FpCmpLe> { using type = FpCmpGe; };
+
 // Inner kernel: 8-way byte-pack. Identity==true indexes data[pos] directly
 // (vectorisable); false gathers data[selection[pos]]. Same answer (hint, §11).
 template<typename T, typename Op, bool Identity>
@@ -349,6 +359,15 @@ static inline VecResult fp_compare_vector_impl(
         throw std::invalid_argument("fp_compare_vector: operand lengths must match");
     const T* ad = static_cast<const T*>(a.data);
     const T* bd = static_cast<const T*>(b.data);
+
+    // constant ⇄ non-constant → reduce to the scalar path (dict/dense fast paths
+    // on the non-constant side; covers WHERE float_col <op> literal). Skip when
+    // the constant is NULL — left to the validity-aware generic path. All six
+    // ops, with the operand swap for a constant LEFT operand.
+    if (draken_is_constant(&b) && b.validity == nullptr)
+        return fp_compare_scalar_impl<T, Op>(a, bd[0]);
+    if (draken_is_constant(&a) && a.validity == nullptr)
+        return fp_compare_scalar_impl<T, typename FpReversedOp<Op>::type>(b, ad[0]);
 
     uint8_t* out_null = cmp_and_validity(a.validity, b.validity, n);
     uint8_t* dst = nullptr;

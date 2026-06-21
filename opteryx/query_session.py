@@ -26,7 +26,8 @@ import logging
 import re
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
-from uuid import uuid4
+
+from opteryx.utils import random_string
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class Session(DataFrame):
         self._query_planner = None
         self._collected_stats = None
         self._plan = None
-        self._query_id = query_id if query_id is not None else str(uuid4())
+        self._query_id = query_id if query_id is not None else random_string(32)
         self._telemetry = QueryTelemetry(self._query_id)
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED

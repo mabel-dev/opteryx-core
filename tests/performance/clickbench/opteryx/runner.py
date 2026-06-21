@@ -174,11 +174,11 @@ if __name__ == "__main__":  # pragma: no cover
         elif ratio <= 5.0:
             # Light green: within 50%
             return f"\033[38;2;72;209;204m{ratio_str}\033[0m"
-        elif ratio <= 15.0:
+        elif ratio <= 10.0:
             # Orange: 500% slower
             return f"\033[38;2;255;165;0m{ratio_str}\033[0m"
         else:
-            # Red: 100%+ slower
+            # Red: 1000%+ slower
             return f"\033[38;2;255;69;69m{ratio_str}\033[0m"
 
     start_suite = time.monotonic_ns()

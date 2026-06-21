@@ -425,7 +425,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                                     double*  ext_float64,
                                     int32_t* ext_int32,
                                     float*   ext_float32,
-                                    const uint8_t* row_mask) {
+                                    const uint8_t* row_mask,
+                                    bool prefer_dict,
+                                    const DictSkipPredicate* skip_pred) {
   DecodedColumn result;
   result.ext_int64   = ext_int64;
   result.ext_float64 = ext_float64;
@@ -442,7 +444,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     ext_float32 = nullptr;
   }
 
-  ++rugo_tel::calls;
+  rugo_tel::calls.fetch_add(1, std::memory_order_relaxed);
 
   try {
     // Guard: only supported codecs.
@@ -542,7 +544,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   dict_compressed_data, dict_compressed_size,
                   dict_page_header.uncompressed_page_size, codec,
                   dict_decompressed_data);
-              RUGO_TEL_ACCUM(rugo_tel::decompress_s, _dc_t0); }
+              RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _dc_t0); }
             dict_data_ptr  = dict_decompressed_data.data();
             dict_data_size = dict_decompressed_data.size();
           } catch (...) {
@@ -641,7 +643,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           }
 #endif
         }
-        RUGO_TEL_ACCUM(rugo_tel::dict_parse_s, _dp_t0);
+        RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _dp_t0);
       }
     }
 
@@ -695,6 +697,67 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     bool int64_dict_mode = (result.type == "int64" && dict_size > 0);
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
+
+    // ── Phase 2: dictionary-membership / per-value decode-skip ────────────────
+    // Evaluate the pushed predicate against this dict-encoded column's dictionary
+    // (decoded above, before any data page). If NO unique value satisfies it,
+    // every row is a non-match → skip decoding the data pages and emit an
+    // all-non-match marker. Valid for any per-value conjunct (membership for
+    // int/str =, IN; starts-/ends-with / contains for the LIKE-rewrites) — the
+    // same conjunct assumption as min/max row-group pruning. Only when not masking.
+    if (skip_pred != nullptr && skip_pred->kind >= 0 && row_mask == nullptr &&
+        target_col->num_values > 0) {
+      bool any_match = false;
+      const int kind = skip_pred->kind;
+      if (kind == 0 && (int64_dict_mode || int32_dict_mode) && skip_pred->int_vals) {
+        if (int64_dict_mode) {
+          for (int64_t dv : result.dict_int64_values) {
+            for (int64_t needle : *skip_pred->int_vals) { if (dv == needle) { any_match = true; break; } }
+            if (any_match) break;
+          }
+        } else {
+          for (int32_t dv : result.dict_int32_values) {
+            for (int64_t needle : *skip_pred->int_vals) {
+              if (needle >= INT32_MIN && needle <= INT32_MAX && dv == (int32_t)needle) { any_match = true; break; }
+            }
+            if (any_match) break;
+          }
+        }
+      } else if (kind >= 1 && byte_array_dict_mode && skip_pred->str_vals) {
+        // String dictionary: arena bytes addressed by per-entry offset+len.
+        const int32_t dsz = (int32_t)result.string_dict_lens.size();
+        const uint8_t* arena = result.string_dict_arena.data();
+        for (int32_t k = 0; k < dsz && !any_match; ++k) {
+          const uint8_t* s = arena + result.string_dict_offsets[k];
+          const size_t   sl = (size_t)result.string_dict_lens[k];
+          for (const std::string& pat : *skip_pred->str_vals) {
+            const size_t pl = pat.size();
+            const uint8_t* pd = reinterpret_cast<const uint8_t*>(pat.data());
+            bool hit = false;
+            if (kind == 1) {          // membership (=/IN): exact
+              hit = (sl == pl) && (pl == 0 || std::memcmp(s, pd, pl) == 0);
+            } else if (kind == 2) {   // starts-with
+              hit = (sl >= pl) && (pl == 0 || std::memcmp(s, pd, pl) == 0);
+            } else if (kind == 3) {   // ends-with
+              hit = (sl >= pl) && (pl == 0 || std::memcmp(s + sl - pl, pd, pl) == 0);
+            } else {                  // contains
+              hit = (pl == 0) || (sl >= pl && std::search(s, s + sl, pd, pd + pl) != s + sl);
+            }
+            if (hit) { any_match = true; break; }
+          }
+        }
+      } else {
+        // Predicate kind doesn't match the column's dict shape → can't skip.
+        any_match = true;
+      }
+      if (!any_match) {
+        result.dict_all_filtered = true;
+        result.num_rows = target_col->num_values;
+        result.success = true;
+        return result;
+      }
+    }
+
     StringInternTable unified_dict_map;
     PrimitiveDictHashMap<int32_t> int32_dict_map;
     PrimitiveDictHashMap<int64_t> int64_dict_map;
@@ -709,10 +772,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     //
     // Nullable columns (max_definition_level > 0) continue to use the existing
     // dict_indices path because nulls are interleaved in the index stream.
+    //
+    // prefer_dict (int only): when the caller wants the §11 "compressed"
+    // (Dict-shaped) representation for an int32/int64 dict column, bypass the
+    // rle resolve-to-values path so the dictionary + per-row codes survive
+    // (dict_int64_values/dict_int32_values + dict_indices). Float/string dict
+    // columns are unaffected — they keep the rle skip-dense path.
     const bool rle_path =
         target_col->max_definition_level == 0 &&
         (byte_array_dict_mode || int32_dict_mode || int64_dict_mode ||
-         float32_dict_mode || float64_dict_mode);
+         float32_dict_mode || float64_dict_mode) &&
+        !(prefer_dict && (int32_dict_mode || int64_dict_mode ||
+                          float32_dict_mode || float64_dict_mode));
 
     // ── Tier 1A: Pre-reserve output vectors ────────────────────────────
     // total_needed is known from column metadata; reserve once to eliminate
@@ -805,7 +876,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         std::vector<PageTask> page_tasks;
         page_tasks.reserve(64);
         const int32_t prescan_total = PreScanPages(cursor, chunk_limit, nullptr, page_tasks);
-        RUGO_TEL_ACCUM(rugo_tel::prescan_s, _ps_t0);
+        RUGO_TEL_ACCUM(rugo_tel::prescan_ns, _ps_t0);
 
         if (page_tasks.size() > 2 && prescan_total > 0) {
           // Phase 2: Pre-allocate output buffers exactly (no growth during decode)
@@ -960,7 +1031,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               return batch_remaining.load(std::memory_order_acquire) == 0;
             });
           }
-          RUGO_TEL_ACCUM(rugo_tel::page_parallel_s, _pp_t0);
+          RUGO_TEL_ACCUM(rugo_tel::page_parallel_ns, _pp_t0);
 
           if (!any_error.load()) {
             total_collected = prescan_total;
@@ -1056,7 +1127,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 compressed_data, compressed_size,
                 page_header.uncompressed_page_size, codec,
                 page_decompressed_data);
-            RUGO_TEL_ACCUM(rugo_tel::decompress_s, _pg_t0); }
+            RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pg_t0); }
           data_ptr  = page_decompressed_data.data();
           data_size = page_decompressed_data.size();
         } catch (const std::exception &e) {
@@ -1170,7 +1241,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           { RUGO_TEL_START(_rle_t0);
             int32_t decoded = DecodeRLEBitPackedIndicesToRuns(
                 data_ptr, data_size, present_count, bit_width, run_codes, run_counts);
-            RUGO_TEL_ACCUM(rugo_tel::rle_s, _rle_t0);
+            RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
             if (decoded != present_count) return result; }
 
           if (int64_dict_mode) {
@@ -1265,7 +1336,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           { RUGO_TEL_START(_rle_t0);
             int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
                 data_ptr, data_size, present_count, bit_width, indices);
-            RUGO_TEL_ACCUM(rugo_tel::rle_s, _rle_t0);
+            RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
             if (decoded != present_count) { return result; } }
 
           // ── Scatter packed codes for nullable dict columns ──
@@ -1470,7 +1541,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           }
         }  // end dense path
 
-        RUGO_TEL_ACCUM(rugo_tel::val_expand_s, _vx_t0);
+        RUGO_TEL_ACCUM(rugo_tel::val_expand_ns, _vx_t0);
 
       } else {
         // PLAIN or DELTA encoding
@@ -2331,7 +2402,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       total_collected = out_rows;
     }
     // ── End post-loop row-mask filter ──────────────────────────────────────
-    RUGO_TEL_ACCUM(rugo_tel::mask_filter_s, _mf_t0);
+    RUGO_TEL_ACCUM(rugo_tel::mask_filter_ns, _mf_t0);
 
     result.num_rows = total_collected;
 
@@ -2375,7 +2446,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       // Use SIMD-accelerated bitmap building (AVX2: 8 rows/iteration, scalar fallback)
       parquet_simd::build_validity_bitmap(all_def_levels.data(), total_rows, max_def, result.valid_bits);
     }
-    RUGO_TEL_ACCUM(rugo_tel::validity_bmp_s, _vb_t0); }
+    RUGO_TEL_ACCUM(rugo_tel::validity_bmp_ns, _vb_t0); }
 
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {

@@ -36,7 +36,7 @@ raw Python version.
 
 from cpython.dict cimport PyDict_Copy
 from cpython cimport dict
-from uuid import uuid4
+from opteryx.compiled.functions.random_helper import random_string_c
 
 
 cdef inline object _inner_copy(object obj):
@@ -71,7 +71,7 @@ cdef class Node:
         A UUID is automatically generated for the node unless one is supplied.
         """
         self.node_type = node_type
-        self.uuid = <str>attributes.pop('uuid') if 'uuid' in attributes else str(uuid4())
+        self.uuid = <str>attributes.pop('uuid') if 'uuid' in attributes else random_string_c(32, None)
         self._properties = dict(attributes)
 
     def __getattr__(self, str name):

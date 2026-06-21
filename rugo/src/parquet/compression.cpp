@@ -3,7 +3,7 @@
 #include <sstream>
 
 // Include vendored compression libraries
-#include "vendor/snappy/snappy.h"
+#include "snappy.h"   // third_party/snappy (on the include path)
 #include "vendor/zstd/zstd.h"
 
 namespace rugo {

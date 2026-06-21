@@ -2268,6 +2268,46 @@ extern "C" PyObject* draken_vector_own_dict_i64(
     }
 }
 
+// draken_vector_own_dict_f64 / _f32 — like _i64 but for float dictionaries.
+// data is draken_malloc'd T[data_length] unique values; codes are uint32[length].
+extern "C" PyObject* draken_vector_own_dict_f64(
+    void* data, uint32_t data_length, uint32_t* codes, uint32_t length, uint8_t* validity)
+{
+    try {
+        DrakenVector v = draken_vector_from_dict(data, data_length, codes, length,
+                                                  DRAKEN_FLOAT64, validity);
+        OwnedBuffer<void>    data_buf(data);
+        OwnedBuffer<uint8_t> val_buf(validity);
+        OwnedBuffer<void>    codes_buf(static_cast<void*>(codes));
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+    catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+    catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
+extern "C" PyObject* draken_vector_own_dict_f32(
+    void* data, uint32_t data_length, uint32_t* codes, uint32_t length, uint8_t* validity)
+{
+    try {
+        DrakenVector v = draken_vector_from_dict(data, data_length, codes, length,
+                                                  DRAKEN_FLOAT32, validity);
+        OwnedBuffer<void>    data_buf(data);
+        OwnedBuffer<uint8_t> val_buf(validity);
+        OwnedBuffer<void>    codes_buf(static_cast<void*>(codes));
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+    catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+    catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
 // draken_vector_own_string — wrap hand-allocated string buffers in a string-family Vector.
 //
 // Canonical exit-point for C++ consumers that produce a new string column. Ownership of
@@ -6011,6 +6051,30 @@ NB_MODULE(draken_native, m) {
                     return vecresult_to_owner(draken_fn(                       \
                         pa ? pa->vec : a, pb ? pb->vec : b));                  \
                 }                                                              \
+                /* Mixed-width float arithmetic: dispatch is on a.type, so a  */\
+                /* FLOAT32 vs FLOAT64 pair would read one operand through the */\
+                /* wrong-width kernel (garbage). Widen the FLOAT32 operand to */\
+                /* FLOAT64 — the numeric result type of float32 op float64 is */\
+                /* float64 — before dispatch. (float32_col + 5.0 reaches here */\
+                /* because the literal is a FLOAT64 constant vector.)         */\
+                if (is_float_type(a.type) && is_float_type(b.type)            \
+                        && a.type != b.type) {                                 \
+                    std::unique_ptr<VectorOwner> pa, pb;                       \
+                    const DrakenVector* av = &a;                              \
+                    const DrakenVector* bv = &b;                              \
+                    if (a.type == DRAKEN_FLOAT32) {                           \
+                        pa = std::make_unique<VectorOwner>(                    \
+                            make_float64_from_numeric_vector(self));          \
+                        av = &pa->vec;                                        \
+                    }                                                          \
+                    if (b.type == DRAKEN_FLOAT32) {                           \
+                        pb = std::make_unique<VectorOwner>(                    \
+                            make_float64_from_numeric_vector(bo));            \
+                        bv = &pb->vec;                                        \
+                    }                                                          \
+                    nb::gil_scoped_release _gil;                               \
+                    return vecresult_to_owner(draken_fn(*av, *bv));           \
+                }                                                              \
                 if (a.type != b.type)                                          \
                     throw std::invalid_argument(                               \
                         "cross-type vector arithmetic not supported");         \
@@ -6546,6 +6610,27 @@ NB_MODULE(draken_native, m) {
                 auto pb = maybe_promote(b, wt);
                 return vecresult_to_owner(draken_compare_vector(
                     pa ? pa->vec : a, pb ? pb->vec : b, op));
+            }
+            // Mixed-width float comparison: dispatch is on a.type, so a FLOAT32
+            // vs FLOAT64 pair would read one operand's bytes through the wrong
+            // kernel (a 4-byte float* over an 8-byte double buffer, or vice
+            // versa) and compare against garbage. Widen the FLOAT32 operand to
+            // FLOAT64 so both are read at a common width. Only the FLOAT32 side
+            // is materialized, so a FLOAT64 constant literal keeps its constant
+            // shape and the kernel's scalar fast-path still fires.
+            if (is_float_type(a.type) && is_float_type(b.type) && a.type != b.type) {
+                std::unique_ptr<VectorOwner> pa, pb;
+                const DrakenVector* av = &a;
+                const DrakenVector* bv = &b;
+                if (a.type == DRAKEN_FLOAT32) {
+                    pa = std::make_unique<VectorOwner>(make_float64_from_numeric_vector(self));
+                    av = &pa->vec;
+                }
+                if (b.type == DRAKEN_FLOAT32) {
+                    pb = std::make_unique<VectorOwner>(make_float64_from_numeric_vector(other));
+                    bv = &pb->vec;
+                }
+                return vecresult_to_owner(draken_compare_vector(*av, *bv, op));
             }
             return vecresult_to_owner(draken_compare_vector(a, b, op));
         }, nb::arg("other"), nb::arg("op"),
@@ -8180,7 +8265,10 @@ NB_MODULE(draken_native, m) {
         "Narrow a FLOAT64 vector to FLOAT32 (cast each value to float). Returns new Vector.");
 
     // vector_reinterpret_as_date32 — reinterpret an INT64 vector's data as DATE32.
-    // INT64 values are cast to int32 (days-since-epoch); values outside int32 range raise.
+    // INT64 values are cast to int32 (days-since-epoch). SHAPE-PRESERVING: only the
+    // data buffer (data_length values) is converted; dense stays dense, constant
+    // stays constant, and a Dict-shaped vector keeps its codes (copied) so a
+    // dict-encoded date column survives coercion compressed.
     m.def("vector_reinterpret_as_date32",
         [](nb::object obj) -> VectorOwner {
             const DrakenVector* src = draken_vector_unwrap(obj.ptr());
@@ -8188,14 +8276,17 @@ NB_MODULE(draken_native, m) {
                 throw nb::python_error();
             if (src->type != DRAKEN_INT64)
                 throw std::invalid_argument("vector_reinterpret_as_date32: requires INT64 vector");
-            const uint32_t n = src->length;
-            int32_t* dst = static_cast<int32_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int32_t)));
-            if (!dst) throw std::bad_alloc();
-            OwnedBuffer<void> data_buf(dst);
-            OwnedBuffer<uint8_t> val_buf(nullptr);
+            const uint32_t n  = src->length;
+            const uint32_t dl = src->data_length;
             const int64_t* src_data = static_cast<const int64_t*>(src->data);
-            for (uint32_t i = 0; i < n; ++i)
-                dst[i] = static_cast<int32_t>(src_data[src->selection[i]]);
+            // Convert only the data buffer (dl values), preserving shape.
+            int32_t* dd = static_cast<int32_t*>(draken_malloc((dl > 0 ? dl : 1u) * sizeof(int32_t)));
+            if (!dd) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dd);
+            for (uint32_t k = 0; k < dl; ++k)
+                dd[k] = static_cast<int32_t>(src_data[k]);
+            // Validity is 1-bit-per-logical-row for every shape: copy n bits.
+            OwnedBuffer<uint8_t> val_buf(nullptr);
             uint8_t* validity = nullptr;
             if (src->validity) {
                 const uint32_t nbytes = (n + 7u) / 8u;
@@ -8205,11 +8296,26 @@ NB_MODULE(draken_native, m) {
                 val_buf.reset(validity);
                 std::memcpy(validity, src->validity, nbytes);
             }
-            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_DATE32, validity);
+            if (draken_is_dict(src)) {
+                // Own a copy of the per-row codes (src keeps its own).
+                uint32_t* codes = static_cast<uint32_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(uint32_t)));
+                if (!codes) throw std::bad_alloc();
+                OwnedBuffer<void> codes_buf(static_cast<void*>(codes));
+                std::memcpy(codes, src->selection, static_cast<size_t>(n) * sizeof(uint32_t));
+                DrakenVector v = draken_vector_from_dict(dd, dl, codes, n, DRAKEN_DATE32, validity);
+                return VectorOwner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+            }
+            if (draken_is_constant(src)) {
+                DrakenVector v = draken_vector_from_constant(dd, n, DRAKEN_DATE32, validity);
+                return VectorOwner(v, std::move(data_buf), std::move(val_buf));
+            }
+            // Dense (data_length == length, identity selection).
+            DrakenVector v = draken_vector_from_dense(dd, n, DRAKEN_DATE32, validity);
             return VectorOwner(v, std::move(data_buf), std::move(val_buf));
         },
         nb::arg("vec"),
-        "Reinterpret INT64 vector data as DATE32 (days-since-epoch, cast to int32). Returns new Vector.");
+        "Reinterpret INT64 vector data as DATE32 (days-since-epoch, cast to int32). "
+        "Shape-preserving (dense/constant/dict). Returns new Vector.");
 
     // vector_reinterpret_as_decimal — reinterpret INT64 vector as DECIMAL with given precision/scale.
     // Used by parquet reader to fix up logical type post-IPC deserialization.

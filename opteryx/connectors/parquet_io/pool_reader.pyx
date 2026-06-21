@@ -69,6 +69,15 @@ cdef extern from "core/draken_bridge.h":
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint32_t* codes, uint32_t data_length,
         uint8_t* validity, uint32_t length, DrakenType vec_type)
+    PyObject* draken_vector_own_dict_i64(
+        void* data, uint32_t data_length,
+        uint32_t* codes, uint32_t length, uint8_t* validity)
+    PyObject* draken_vector_own_dict_f64(
+        void* data, uint32_t data_length,
+        uint32_t* codes, uint32_t length, uint8_t* validity)
+    PyObject* draken_vector_own_dict_f32(
+        void* data, uint32_t data_length,
+        uint32_t* codes, uint32_t length, uint8_t* validity)
 
 from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
@@ -141,6 +150,37 @@ cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i):
     return vec
 
 
+cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
+    """Wrap a numeric §11 compressed (Dict-shaped) column into a Vector. `data`
+    (dictionary) + validity come via morsel_take_direct; the codes selection via
+    morsel_take_string (arena is NULL for numeric dicts). The draken own_dict_*
+    entry owns all three buffers; both takes null the MorselRef slots so the
+    destructor frees nothing. dk: 8=int64, 9=float64, 10=float32."""
+    cdef uint32_t dlen = result.columns[i].length
+    cdef uint32_t data_length = result.columns[i].data_length
+    cdef void* data_ptr
+    cdef uint8_t* dval
+    cdef void* arena_ptr
+    cdef void* codes_ptr
+    cdef PyObject* raw
+    cdef Vector vec
+    data_ptr = morsel_take_direct(result[0], i, &dval)
+    morsel_take_string(result[0], i, &arena_ptr, &codes_ptr)
+    if dk == 9:
+        raw = draken_vector_own_dict_f64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
+    elif dk == 10:
+        raw = draken_vector_own_dict_f32(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
+    else:
+        raw = draken_vector_own_dict_i64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_dict_* failed")
+    vec = Vector.__new__(Vector)
+    vec._nb = <object>raw
+    _pr_decref(raw)
+    vec._dv = draken_vector_unwrap(raw)
+    return vec
+
+
 cdef inline Vector _wrap_direct(MorselRef* result, size_t i):
     """Wrap direct column i into a Draken Vector via ownership transfer.
     morsel_take_direct hands the draken_alloc'd buffer + validity to the Vector and
@@ -157,6 +197,8 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i):
         return _wrap_string_direct(result, i)
     if dk == 7:
         return _wrap_string_dict_direct(result, i)
+    if dk == 8 or dk == 9 or dk == 10:
+        return _wrap_num_dict_direct(result, i, dk)
     if dk == 1:
         dtype = DRAKEN_INT64
     elif dk == 2:
@@ -210,6 +252,25 @@ cdef class CppIOPipeline:
         if self.pipeline:
             del self.pipeline
             self.pipeline = NULL
+
+    def add_int_needles(self, str column, list needles):
+        """Phase 2: register pushed int equality/IN needles for a column so the
+        worker can skip data-page decode when the dictionary is disjoint."""
+        cdef vector[int64_t] v
+        cdef int64_t x
+        for x in needles:
+            v.push_back(x)
+        self.pipeline.add_int_needles(column.encode('utf-8'), v)
+
+    def add_str_pred(self, str column, int kind, list patterns):
+        """Phase 2: register a pushed string decode-skip predicate. kind: 1=membership
+        (=/IN), 2=starts-with, 3=ends-with, 4=contains. `patterns` are bytes."""
+        cdef vector[string] v
+        cdef bytes b
+        for p in patterns:
+            b = p if isinstance(p, bytes) else str(p).encode('utf-8')
+            v.push_back(<string>b)
+        self.pipeline.add_str_pred(column.encode('utf-8'), kind, v)
 
     def submit_work(self, str path, int rg_idx, list column_names, list column_stats_dicts):
         """Submit a row group for C++ read+decode+serialize (absolute file offsets)."""
@@ -782,6 +843,13 @@ cdef class IpcRowGroupSource:
         cpp_path = result.path.decode('utf-8')
         path_str = self.cpp_to_orig.get(cpp_path, cpp_path)
 
+        # Phase 2 empty row group: a pushed-conjunct equality column's dictionary
+        # lacked every needle → zero surviving rows. Skip all assembly; the
+        # consumer records telemetry and moves on (vectors=None sentinel).
+        if result.empty_filtered:
+            return (None, result.bytes_fetched, result.read_ns,
+                    result.decode_ns, path_str, result.rg_idx, result.empty_rows)
+
         ncols = result.columns.size()
         vectors = [None] * ncols
         ref_ids = None
@@ -830,6 +898,43 @@ cdef class IpcRowGroupSource:
         if self.footer_map != NULL:
             del self.footer_map
             self.footer_map = NULL
+
+
+def _flatten_dict_skip_predicates(predicates):
+    """Flatten pushed (col, op, value) triples into dictionary decode-skip inputs:
+    ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])})``. kind: 1=membership
+    (=/IN), 2=starts-with, 3=ends-with, 4=contains. One predicate per column for
+    strings (first wins) — a single conjunct is sound for skipping."""
+    int_needles = {}
+    str_preds = {}
+    _kind = {"_STARTS_WITH": 2, "_ENDS_WITH": 3, "InStr": 4}
+    for pred in predicates:
+        p_col, p_op, p_val = pred
+        if p_op == "Eq":
+            if type(p_val) is int:
+                int_needles.setdefault(p_col, []).append(p_val)
+            else:
+                b = p_val if isinstance(p_val, bytes) else (p_val.encode("utf-8") if isinstance(p_val, str) else None)
+                if b is not None and p_col not in str_preds:
+                    str_preds[p_col] = (1, [b])
+        elif p_op == "InList":
+            ints = [vv for vv in (p_val or []) if type(vv) is int]
+            if ints:
+                int_needles.setdefault(p_col, []).extend(ints)
+            elif p_col not in str_preds:
+                strs = []
+                for vv in (p_val or []):
+                    if isinstance(vv, bytes):
+                        strs.append(vv)
+                    elif isinstance(vv, str):
+                        strs.append(vv.encode("utf-8"))
+                if strs:
+                    str_preds[p_col] = (1, strs)
+        elif p_op in _kind:
+            b = p_val if isinstance(p_val, bytes) else (p_val.encode("utf-8") if isinstance(p_val, str) else None)
+            if b is not None and p_col not in str_preds:
+                str_preds[p_col] = (_kind[p_op], [b])
+    return int_needles, str_preds
 
 
 cpdef IpcRowGroupSource open_ipc_source(
@@ -977,6 +1082,17 @@ cpdef IpcRowGroupSource open_ipc_source(
         queue_capacity=1024,
         pool_size=dyn_pool_size,
     )
+    # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
+    # conjunct assumption as min/max row-group pruning above.
+    if predicates:
+        int_needles, str_preds = _flatten_dict_skip_predicates(predicates)
+        for cname, needles in int_needles.items():
+            if needles and cname not in str_preds:
+                src.pipeline.add_int_needles(cname, needles)
+        for cname in str_preds:
+            kind, pats = str_preds[cname]
+            if pats:
+                src.pipeline.add_str_pred(cname, kind, pats)
     return src
 
 
@@ -1094,6 +1210,9 @@ def iter_row_groups_ipc(
             if pulled is None:
                 break
             vectors = pulled[0]
+            if vectors is None:
+                # Phase 2 empty row group (dictionary-membership skip): no columns.
+                continue
             n = len(vectors)
             row_group = {names[i]: vectors[i] for i in range(n)}
             telemetry_dict = {

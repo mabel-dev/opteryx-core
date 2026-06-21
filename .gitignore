@@ -246,7 +246,6 @@ opteryx/expression/**/*.c*
 draken/vectors/*.c*
 draken/poc/*.c*
 draken/poc/*.h
-rugo/src/**/*.c*
 draken/morsels/_morsel_shim.cpp
 **.so
 opteryx/types/vectors/vector_math.cpp
@@ -255,3 +254,4 @@ opteryx/connectors/parquet_io/pool_reader.cpp
 draken/ops/kernels/_kernel_registry.cpp
 rugo/src/csv/_csv_reader.cpp
 rugo/src/jsonl/_jsonl_reader.cpp
+rugo/src/parquet/parquet_reader.cpp

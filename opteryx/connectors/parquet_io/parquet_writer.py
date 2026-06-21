@@ -12,18 +12,18 @@ Do not import pyarrow elsewhere in production code.
 
 import os
 import struct
-import uuid
 from typing import Dict, Optional, Tuple
 
 from draken.morsels.morsel import Morsel
 
 from opteryx.models.file_entry import FileEntry
+from opteryx.utils import random_string
 
 
 def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
     """Write a Morsel as a single parquet file in relation_dir.
 
-    File name is data-{uuid4}.parquet (relative path stored in FileEntry).
+    File name is data-{random_string}.parquet (relative path stored in FileEntry).
 
     Args:
         morsel: Draken Morsel containing the rows to write.
@@ -46,7 +46,7 @@ def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
         raise ValueError("cannot write empty morsel")
 
     table = morsel.to_arrow()
-    file_name = f"data-{uuid.uuid4().hex}.parquet"
+    file_name = f"data-{random_string(32)}.parquet"
     full_path = os.path.join(relation_dir, file_name)
     tmp_path = f"{full_path}.tmp"
 

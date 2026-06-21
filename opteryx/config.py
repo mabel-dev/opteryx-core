@@ -4,6 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 import json
+import os as _os
 import typing
 from os import environ
 from typing import Optional, Union
@@ -152,13 +153,18 @@ ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 
-PARQUET_LOCAL_IO_WORKERS: int = int(get("PARQUET_LOCAL_IO_WORKERS", 8))
-"""Worker threads for local-filesystem Parquet reads (mmap path, IO is near-free from OS cache)."""
+PARQUET_LOCAL_IO_WORKERS: int = int(
+    get("PARQUET_LOCAL_IO_WORKERS", min(16, max(8, (_os.cpu_count() or 8) - 2)))
+)
+"""Worker threads for local-filesystem Parquet reads (mmap path, IO is near-free from OS cache).
+
+Default scales with the host: ``max(8, cpu_count - 2)`` capped at 16. Decode parallelises
+near-linearly (measured ~8.4x at 16 workers on a string-heavy ClickBench scan), so larger
+machines use their cores; the floor of 8 means small instances (e.g. <=8 vCPU Cloud Run) are
+never reduced below the historic default. Override via the env var to tune per deployment."""
 
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 """Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
-
-import os as _os
 
 _max_workers_raw = str(get("MAX_EXECUTION_WORKERS", "auto")).strip().lower()
 MAX_EXECUTION_WORKERS: int = (

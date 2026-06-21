@@ -107,6 +107,13 @@ PyObject* draken_vector_own_dict_i64(
     uint32_t* codes, uint32_t length,
     uint8_t* validity);
 
+// draken_vector_own_dict_f64 / _f32 — float-dictionary analogues of _i64.
+PyObject* draken_vector_own_dict_f64(
+    void* data, uint32_t data_length, uint32_t* codes, uint32_t length, uint8_t* validity);
+PyObject* draken_vector_own_dict_f32(
+    void* data, uint32_t data_length, uint32_t* codes, uint32_t length, uint8_t* validity);
+
+
 // draken_vector_own_string — wrap hand-allocated string buffers in a new string-family Vector.
 //
 // Canonical exit-point for C++ consumers that produce a new string column.

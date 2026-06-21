@@ -71,8 +71,6 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     When we include VIEWs and CTEs in a plan, we randomize the name of the
     relations to avoid conflicts.
     """
-    import uuid
-
     from opteryx.models import LogicalColumn
     from opteryx.utils import random_string
 
@@ -86,7 +84,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
         if node.node_type == LogicalPlanStepType.Scan
     ]:
         alias = f"{prefix}{random_string(4)}"
-        unique_id = str(uuid.uuid4())
+        unique_id = random_string(32)
         relations[node.alias] = (node.relation, alias, unique_id)
         uuid_remap[node.uuid] = unique_id
         node.alias = alias

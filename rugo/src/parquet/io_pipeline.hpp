@@ -29,6 +29,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <map>
+#include <unordered_map>
 
 #include "BS_thread_pool.hpp"
 #include "http_client.hpp"
@@ -71,7 +72,17 @@ enum DirectKind {
     // DrakenStringSlot array; `arena` holds the long-string bytes. DK_VARCHAR is
     // one slot per row (plain). DK_VARCHAR_DICT (reserved, not yet emitted) would
     // carry `data_length` unique-value slots + a `codes` selection of `length`.
-    DK_VARCHAR = 6, DK_VARCHAR_DICT = 7
+    DK_VARCHAR = 6, DK_VARCHAR_DICT = 7,
+    // Numeric "compressed" (§11 Dict-shaped) direct path. `data` is a
+    // draken_alloc'd int64_t[data_length] dictionary of unique values; `codes`
+    // is a uint32_t[length] per-row selection. int32 dictionaries widen to
+    // int64. The consumer wraps via draken_vector_own_dict_i64 (zero copy).
+    DK_INT64_DICT = 8,
+    // Float "compressed" (Dict-shaped) direct path — like DK_INT64_DICT but the
+    // dictionary holds float64/float32 values (no widening). Consumer wraps via
+    // draken_vector_own_dict_f64 / _f32.
+    DK_FLOAT64_DICT = 9,
+    DK_FLOAT32_DICT = 10
 };
 
 struct ColumnOut {
@@ -108,6 +119,10 @@ struct MorselRef {
     uint64_t decode_ns = 0;
     std::string error;
     bool success = false;
+    // Phase 2: this row group yields zero rows (a pushed-conjunct equality
+    // column's dictionary lacked every needle). The consumer skips it entirely.
+    bool empty_filtered = false;
+    int64_t empty_rows = 0;   // pre-filter row count, for telemetry
 
     MorselRef() = default;
     MorselRef(const MorselRef&) = delete;
@@ -174,6 +189,24 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
         d.rle_str_lens.empty() &&
         (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
         return DK_VARCHAR_DICT;
+    // Numeric dict → §11 compressed (Dict-shaped) direct. Requires the dictionary
+    // payload + a per-row code source (dict_indices for non-nullable via
+    // prefer_dict, dict_codes_array for nullable), and NOT a mixed/plain chunk
+    // (int*_values empty) nor the rle resolve-to-values path (rle_* empty).
+    if ((t == "int64" || t == "int32") &&
+        d.int64_values.empty() && d.int32_values.empty() &&
+        d.rle_int64_values.empty() &&
+        (!d.dict_int64_values.empty() || !d.dict_int32_values.empty()) &&
+        (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
+        return DK_INT64_DICT;
+    if (t == "float64" && d.float64_values.empty() && d.rle_float64_values.empty() &&
+        !d.dict_float64_values.empty() &&
+        (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
+        return DK_FLOAT64_DICT;
+    if (t == "float32" && d.float32_values.empty() && d.rle_float64_values.empty() &&
+        !d.dict_float32_values.empty() &&
+        (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
+        return DK_FLOAT32_DICT;
     if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
     if (!d.rle_int64_values.empty() || !d.rle_float64_values.empty() ||
         !d.rle_str_lens.empty()) return DK_POOL;         // RLE skip-dense
@@ -320,6 +353,126 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     out.arena_len = arena_len;
     out.codes = codes;
     out.data_length = dict_size;
+    out.validity = validity;
+    out.length = n;
+    return true;
+}
+
+// Build a numeric "compressed" (§11 Dict-shaped) direct column: a draken_alloc'd
+// int64 dictionary (widening int32 dicts) + a uint32 per-row code selection.
+// Mirrors build_direct_string_dict's code-source handling (dict_codes_array for
+// nullable, dict_indices for non-nullable). On failure frees what it took.
+static inline bool build_direct_int64_dict(const DecodedColumn& d,
+                                           void* (*alloc)(size_t), void (*freefn)(void*),
+                                           ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const bool is32 = !d.dict_int32_values.empty();
+    const uint32_t dsz = is32
+        ? static_cast<uint32_t>(d.dict_int32_values.size())
+        : static_cast<uint32_t>(d.dict_int64_values.size());
+    const bool nullable = !d.valid_bits.empty();
+    const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
+
+    int64_t* dict = static_cast<int64_t*>(alloc((dsz ? dsz : 1u) * sizeof(int64_t)));
+    if (!dict) return false;
+    if (is32) {
+        for (uint32_t k = 0; k < dsz; ++k)
+            dict[k] = static_cast<int64_t>(d.dict_int32_values[k]);
+    } else if (dsz) {
+        std::memcpy(dict, d.dict_int64_values.data(), static_cast<size_t>(dsz) * sizeof(int64_t));
+    }
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) { freefn(dict); return false; }
+    const uint8_t cw = d.code_width;
+    if (!d.dict_codes_array.empty()) {
+        const uint8_t* ca = d.dict_codes_array.data();
+        for (uint32_t row = 0; row < n; ++row) {
+            uint32_t c;
+            if (cw == 1) { c = ca[row]; }
+            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
+            else { std::memcpy(&c, ca + row * 4, 4); }
+            codes[row] = c;
+        }
+    } else {
+        int32_t di = 0;
+        for (uint32_t row = 0; row < n; ++row) {
+            if (nullable && !((nb[row >> 3] >> (row & 7)) & 1))
+                codes[row] = 0u;
+            else
+                codes[row] = static_cast<uint32_t>(d.dict_indices[di++]);
+        }
+    }
+
+    uint8_t* validity = nullptr;
+    if (nullable) {
+        validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!validity) { freefn(codes); freefn(dict); return false; }
+        std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+    }
+
+    out.data = dict;
+    out.data_length = dsz;
+    out.codes = codes;
+    out.validity = validity;
+    out.length = n;
+    return true;
+}
+
+// Float "compressed" (Dict-shaped) direct column: a draken_alloc'd float64/float32
+// dictionary (no widening) + a uint32 per-row code selection. Mirrors
+// build_direct_int64_dict's code-source handling.
+static inline bool build_direct_float_dict(const DecodedColumn& d, bool is_f32,
+                                           void* (*alloc)(size_t), void (*freefn)(void*),
+                                           ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const uint32_t dsz = is_f32
+        ? static_cast<uint32_t>(d.dict_float32_values.size())
+        : static_cast<uint32_t>(d.dict_float64_values.size());
+    const size_t elem = is_f32 ? sizeof(float) : sizeof(double);
+    const bool nullable = !d.valid_bits.empty();
+    const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
+
+    void* dict = alloc((dsz ? dsz : 1u) * elem);
+    if (!dict) return false;
+    if (dsz) {
+        const void* src = is_f32 ? static_cast<const void*>(d.dict_float32_values.data())
+                                 : static_cast<const void*>(d.dict_float64_values.data());
+        std::memcpy(dict, src, static_cast<size_t>(dsz) * elem);
+    }
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) { freefn(dict); return false; }
+    const uint8_t cw = d.code_width;
+    if (!d.dict_codes_array.empty()) {
+        const uint8_t* ca = d.dict_codes_array.data();
+        for (uint32_t row = 0; row < n; ++row) {
+            uint32_t c;
+            if (cw == 1) { c = ca[row]; }
+            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
+            else { std::memcpy(&c, ca + row * 4, 4); }
+            codes[row] = c;
+        }
+    } else {
+        int32_t di = 0;
+        for (uint32_t row = 0; row < n; ++row) {
+            if (nullable && !((nb[row >> 3] >> (row & 7)) & 1))
+                codes[row] = 0u;
+            else
+                codes[row] = static_cast<uint32_t>(d.dict_indices[di++]);
+        }
+    }
+
+    uint8_t* validity = nullptr;
+    if (nullable) {
+        validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!validity) { freefn(codes); freefn(dict); return false; }
+        std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+    }
+
+    out.data = dict;
+    out.data_length = dsz;
+    out.codes = codes;
     out.validity = validity;
     out.length = n;
     return true;
@@ -493,6 +646,17 @@ class ParquetIOPipeline {
     // Destination pool for serialized columns. Set once before any submit via
     // set_pool_sink(); workers reserve+serialize+finalize through it.
     PoolSink pool_sink_;
+
+    // Phase 2 dictionary decode-skip: per-column pushed predicate, keyed by
+    // parquet column name. Set once before any submit (workers read it const, no
+    // coordination). A worker decoding a dict-encoded column whose dictionary
+    // satisfies none of the predicate skips its data pages. Empty = feature off.
+    struct ColDictPred {
+        int kind = -1;                       // see DictSkipPredicate::kind
+        std::vector<int64_t>     int_vals;   // kind 0
+        std::vector<std::string> str_vals;   // kinds 1..4
+    };
+    std::unordered_map<std::string, ColDictPred> dict_preds_;
 
     // Diagnostic counters for queue-contention investigation.
     std::atomic<uint64_t> spin_iterations_{0};
@@ -718,6 +882,43 @@ class ParquetIOPipeline {
                 if (adjusted.dictionary_page_offset >= 0)
                     adjusted.dictionary_page_offset -= base_offset;
 
+                // prefer_dict: keep the dictionary (compressed/Dict shape) for
+                // plain int32/int64 dict columns when not masking. Masked (pass-2)
+                // decode stays on the existing path — it only touches survivor rows
+                // and the masked-dict compaction is out of scope here. The logical
+                // gate (date/timestamp/decimal stay pool) is enforced via lt below.
+                const std::string& pt = col_stats.physical_type;
+                const std::string& cl = col_stats.logical_type;
+                // Roll-out: plain int + int-backed TIMESTAMP/DATE + float. Int/temporal
+                // coercions are shape-preserving (retag / dict-only reinterpret), so a
+                // Dict-shaped int64 stays Dict; float needs no coercion. int-backed
+                // DECIMAL stays pool (reinterpret trap). Phase 2 membership-skip stays
+                // int-only (decode gate) — float equality membership is out of scope.
+                const bool prefer_dict =
+                    (mask_ptr == nullptr) &&
+                    col_stats.dictionary_page_offset >= 0 &&
+                    (((pt == "int64" || pt == "int32") &&
+                      (cl.empty() || cl == "int64" || cl == "int32" ||
+                       cl.rfind("timestamp", 0) == 0 || cl.rfind("date", 0) == 0)) ||
+                     ((pt == "float64" || pt == "float32") &&
+                      (cl.empty() || cl == "float64" || cl == "float32")));
+
+                // Phase 2: pushed dictionary decode-skip predicate for this column
+                // (if any). Independent of prefer_dict — the probe only needs the
+                // dictionary (decoded before any data page), not the dict-shaped
+                // surviving representation.
+                DictSkipPredicate skip;
+                const DictSkipPredicate* skip_ptr = nullptr;
+                if (mask_ptr == nullptr && !dict_preds_.empty()) {
+                    auto nit = dict_preds_.find(col_stats.name);
+                    if (nit != dict_preds_.end()) {
+                        skip.kind = nit->second.kind;
+                        skip.int_vals = &nit->second.int_vals;
+                        skip.str_vals = &nit->second.str_vals;
+                        skip_ptr = &skip;
+                    }
+                }
+
                 DecodedColumn decoded;
                 if (mmap_base != MAP_FAILED) {
                     // Zero-copy: slice directly into the mmap — no heap allocation.
@@ -725,7 +926,7 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     decoded = DecodeColumnFromChunk(
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     result.bytes_fetched += chunk_size;
@@ -735,7 +936,7 @@ class ParquetIOPipeline {
                     result.bytes_fetched += chunk_size;
                     auto t_dec = std::chrono::steady_clock::now();
                     decoded = DecodeColumnFromChunk(
-                        raw.data(), raw.size(), &adjusted, mask_ptr);
+                        raw.data(), raw.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -745,7 +946,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     decoded = DecodeColumnFromChunk(
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }
@@ -753,6 +954,16 @@ class ParquetIOPipeline {
                 if (!decoded.success) {
                     result.success = false;
                     result.error = "Decode failed for column: " + col_stats.name;
+                    break;
+                }
+
+                // Phase 2 fast-exit: a pushed-conjunct equality column whose
+                // dictionary lacks every needle means the WHOLE row group yields
+                // zero rows. Flag it and stop decoding the remaining columns — the
+                // consumer skips this row group entirely (no wrap/filter/morsel).
+                if (decoded.dict_all_filtered) {
+                    result.empty_filtered = true;
+                    result.empty_rows = decoded.num_rows;
                     break;
                 }
 
@@ -799,6 +1010,12 @@ class ParquetIOPipeline {
                         ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_VARCHAR_DICT)
                         ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_INT64_DICT)
+                        ok = build_direct_int64_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_FLOAT64_DICT)
+                        ok = build_direct_float_dict(decoded, false, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_FLOAT32_DICT)
+                        ok = build_direct_float_dict(decoded, true, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else
                         ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     if (!ok) {
@@ -906,6 +1123,19 @@ class ParquetIOPipeline {
     void set_pool_sink(PoolSink sink) {
         pool_sink_ = sink;
     }
+
+    // Phase 2: register a pushed dictionary decode-skip predicate for a column.
+    // Call once per column before any submit. One predicate per column (last
+    // wins); a single conjunct is sound for skipping.
+    void add_int_needles(const std::string& column, const std::vector<int64_t>& needles) {
+        ColDictPred& p = dict_preds_[column];
+        p.kind = 0; p.int_vals = needles;
+    }
+    void add_str_pred(const std::string& column, int kind, const std::vector<std::string>& vals) {
+        ColDictPred& p = dict_preds_[column];
+        p.kind = kind; p.str_vals = vals;
+    }
+    void clear_eq_needles() { dict_preds_.clear(); }
 
     /**
      * Submit a row group for read + decode + serialize.
