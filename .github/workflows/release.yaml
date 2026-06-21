@@ -19,6 +19,9 @@ jobs:
           - runner-python: "3.14"
             pybuild: "3.14t"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
+          - runner-python: "3.14"
+            pybuild: "3.14"
+            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python (runner)
@@ -134,12 +137,19 @@ jobs:
       - name: Create source dist
         run: python setup.py sdist
 
-      - name: Stage linux 3.14t
+      - name: Stage linux 3.14t (free-threaded)
         uses: actions/download-artifact@v4.1.7
         with:
           name: dist-linux-3.14t
           path: dist-linux-3.14t
       - run: mv -v dist-linux-3.14t/* dist/
+
+      - name: Stage linux 3.14 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-3.14
+          path: dist-linux-3.14
+      - run: mv -v dist-linux-3.14/* dist/
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

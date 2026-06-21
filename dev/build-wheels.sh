@@ -23,10 +23,15 @@ PYBIN_CANDIDATES=()
 # If the tag ends with a T/t (free-threaded), try with and without the suffix and both cases
 if [[ "$py_tag" =~ ^([0-9]+)([Tt])$ ]]; then
   base="${BASH_REMATCH[1]}"
+  # manylinux installs free-threaded CPython as cp<ver>-cp<ver>t (no 't' on the
+  # first segment, 't' on the second) — this is the canonical layout and MUST be
+  # tried first. Never fall back to the GIL build (cp<ver>-cp<ver>): selecting it
+  # silently produces a wrong-ABI wheel that won't import on a free-threaded runtime.
+  PYBIN_CANDIDATES+=("/opt/python/cp${base}-cp${base}t/bin")
+  PYBIN_CANDIDATES+=("/opt/python/cp${base}-cp${base}T/bin")
   PYBIN_CANDIDATES+=("/opt/python/cp${py_tag}-cp${py_tag}/bin")
-  PYBIN_CANDIDATES+=("/opt/python/cp${base}-cp${base}/bin")
-  PYBIN_CANDIDATES+=("/opt/python/cp${base}T-cp${base}T/bin")
   PYBIN_CANDIDATES+=("/opt/python/cp${base}t-cp${base}t/bin")
+  PYBIN_CANDIDATES+=("/opt/python/cp${base}T-cp${base}T/bin")
 else
   PYBIN_CANDIDATES+=("/opt/python/cp${py_tag}-cp${py_tag}/bin")
 fi
@@ -47,6 +52,23 @@ if [ -z "$PYBIN" ]; then
   echo "Available /opt/python entries:"; ls -1 /opt/python || true
   exit 1
 fi
+
+# Fail loud if the resolved interpreter's ABI doesn't match what was requested.
+# A free-threaded request (PYTHON_VERSION ending in t/T) MUST resolve to an
+# interpreter whose abiflags contain 't'; otherwise we'd build a wrong-ABI wheel.
+resolved_abiflags="$("${PYBIN}/python" -c 'import sys; print(sys.abiflags)')"
+if [[ "$py_tag" =~ [Tt]$ ]]; then
+  if [[ "$resolved_abiflags" != *t* ]]; then
+    echo "ABI MISMATCH: requested free-threaded (${PYTHON_VERSION}) but ${PYBIN}/python is GIL-enabled (abiflags='${resolved_abiflags}')"
+    exit 1
+  fi
+else
+  if [[ "$resolved_abiflags" == *t* ]]; then
+    echo "ABI MISMATCH: requested GIL build (${PYTHON_VERSION}) but ${PYBIN}/python is free-threaded (abiflags='${resolved_abiflags}')"
+    exit 1
+  fi
+fi
+echo "Using interpreter ${PYBIN}/python (abiflags='${resolved_abiflags}')"
 
 "${PYBIN}/python" -m pip install -U setuptools wheel setuptools-rust numpy cython auditwheel
 
@@ -69,27 +91,27 @@ for whl in dist/*.whl; do
     # not something to vendor into the wheel. Exclude it from bundling.
     AUDITWHEEL_EXCLUDES="--exclude libonnxruntime.so.1"
 
+    auditwheel repair "$whl" -w dist/ $AUDITWHEEL_EXCLUDES
+    repaired=$(ls -t dist/*manylinux*.whl 2>/dev/null | head -n1)
+
     if [ "$IS_FREE_THREADED" = true ]; then
         echo "  -> Free-threaded build detected"
-
-        auditwheel repair "$whl" -w dist/ $AUDITWHEEL_EXCLUDES
-
-        # Rename the repaired wheel to restore the 't' suffix in ABI tag
-        # PyArrow format: cp314-cp314t (no 't' on first, 't' on second)
-        repaired=$(ls -t dist/*manylinux*.whl 2>/dev/null | head -n1)
-        if [ -f "$repaired" ]; then
-            # Restore 't' suffix: cp314-cp314 -> cp314-cp314t
-            restored=$(echo "$repaired" | sed -E 's/-cp([0-9]+)-cp([0-9]+)-/-cp\1-cp\2t-/')
-            if [ "$repaired" != "$restored" ]; then
-                mv -v "$repaired" "$restored"
-                echo "  -> Restored free-threaded ABI tag: $(basename $restored)"
-            else
-                echo "  -> Already has correct tag: $(basename $repaired)"
-            fi
+        # The wheel MUST already carry the free-threaded ABI tag (cp<ver>-cp<ver>t),
+        # produced by building with the free-threaded interpreter. Do NOT rename to
+        # force the tag — that masks an ABI mismatch (a GIL-built .so relabelled as
+        # free-threaded installs cleanly but fails to import). Verify and fail loud.
+        if [[ "$(basename "$repaired")" != *-cp[0-9]*t-* ]]; then
+            echo "  -> ABI TAG ERROR: free-threaded build produced non-'t' wheel: $(basename "$repaired")"
+            echo "     The build interpreter was not free-threaded. Aborting."
+            exit 1
         fi
+        echo "  -> Verified free-threaded ABI tag: $(basename "$repaired")"
     else
         echo "  -> Standard build"
-        auditwheel repair "$whl" -w dist/ $AUDITWHEEL_EXCLUDES
+        if [[ "$(basename "$repaired")" == *-cp[0-9]*t-* ]]; then
+            echo "  -> ABI TAG ERROR: GIL build produced free-threaded ('t') wheel: $(basename "$repaired")"
+            exit 1
+        fi
     fi
 done
 
