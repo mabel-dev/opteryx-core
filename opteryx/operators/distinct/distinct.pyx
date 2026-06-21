@@ -40,6 +40,12 @@ cdef class DistinctNode(BasePlanNode):
     cdef public bint at_least_one_yielded
     cdef public bint _promoted
     cdef public bint _use_phash   # True when PerfectHashSet is active
+    # Row-routing producer seam (M4 parallel DISTINCT). When set to a scatter
+    # collector, `_push_impl` routes each input morsel into per-worker bins by
+    # hash(dedup-key) % W instead of deduping — the dedup runs later, in parallel,
+    # on the disjoint bins. None = normal serial dedup. Mirrors the grouped-agg
+    # `_engine` swap (parallel_engine._ScatterCollectEngine).
+    cdef public object _scatter_engine
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -53,6 +59,7 @@ cdef class DistinctNode(BasePlanNode):
         self.at_least_one_yielded = False
         self._promoted = False
         self._use_phash = False
+        self._scatter_engine = None
 
     @property
     def config(self):  # pragma: no cover
@@ -142,6 +149,13 @@ cdef class DistinctNode(BasePlanNode):
         # carrier (recovering the EOS sentinel) and calls this, surfacing any
         # exception via the ErrCtx path.
         cdef bint is_active_parvi
+        if self._scatter_engine is not None:
+            # Row-routing producer mode: scatter the (already projected-to-key)
+            # input into per-worker bins; emit nothing here. EOS is not forwarded
+            # — the parallel engine drives the deduped output downstream itself.
+            if morsel is not _EOS_SENTINEL:
+                self._scatter_engine.ingest(morsel)
+            return
         if self._hash_set is None:
             # First morsel: try PerfectHashSet for eligible narrow-int columns
             phash = self._try_init_perfect_hash(morsel)

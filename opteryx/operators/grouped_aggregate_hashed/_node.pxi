@@ -91,6 +91,14 @@ class GroupedAggregateHashedNode(BasePlanNode):
 
         self._having_condition = parameters.get("having_condition")
 
+        # Parallel row-routing recombination (M4). When the parallel engine has
+        # keyed the input across W DISJOINT per-worker engines (each owning a
+        # disjoint key slice), it injects them here; _finalize then concatenates
+        # their outputs — no merge, because no key is shared. None ⇒ ordinary
+        # single-engine serial finalize. Mirrors the ungrouped path's engine
+        # injection, generalised from one merged engine to N disjoint engines.
+        self._parallel_engines = None
+
     @property
     def config(self):  # pragma: no cover
         from opteryx.expression import format_expression
@@ -283,7 +291,13 @@ class GroupedAggregateHashedNode(BasePlanNode):
         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
 
     def _finalize(self):
-        yield from self._finalize_engine(self._engine)
+        # Parallel row-routing: concatenate the W disjoint per-worker engines'
+        # outputs (no merge — disjoint key slices). Else the ordinary single engine.
+        if self._parallel_engines is not None:
+            for engine in self._parallel_engines:
+                yield from self._finalize_engine(engine)
+        else:
+            yield from self._finalize_engine(self._engine)
 
     def _finalize_engine(self, engine):
         finalize_start = time.monotonic_ns()

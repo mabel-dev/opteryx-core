@@ -35,6 +35,36 @@ from opteryx.operators._operators import drive_scan
 from draken.draken_native import DrakenType
 
 
+def _special_op_types():
+    from opteryx.operators.explain import ExplainNode
+    from opteryx.operators.set_variable import SetVariableNode
+    from opteryx.operators.show_create import ShowCreateNode
+    from opteryx.operators.show_value import ShowValueNode
+    from opteryx.operators.table_management import TableManagementNode
+    from opteryx.operators.view_management import ViewManagementNode
+    from opteryx.operators.relation_management import RelationManagementNode
+    from opteryx.operators.insert import InsertNode
+
+    return (
+        ExplainNode,
+        SetVariableNode,
+        ShowCreateNode,
+        ShowValueNode,
+        TableManagementNode,
+        ViewManagementNode,
+        RelationManagementNode,
+        InsertNode,
+    )
+
+
+def is_special_op(node) -> bool:
+    """True for a non-pipeline special operation (EXPLAIN / INSERT / SET / SHOW /
+    DDL). These run on ``serial_engine.execute``; every data pipeline (SELECT and
+    friends) runs on the data executor (``parallel_engine``). The dispatcher uses
+    this to triage — serial_engine is NOT a fallback for data pipelines."""
+    return isinstance(node, _special_op_types())
+
+
 def execute(
     plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
 ) -> Tuple[Generator[Morsel, Any, Any], ResultType]:
@@ -77,32 +107,16 @@ def execute(
     if isinstance(head_node, (ShowValueNode, ShowCreateNode)):
         return head_node(None), ResultType.TABULAR
 
-    # ── Push pipeline: streaming generator ───────────────────────────────────
-    chains, exit_node, ctx = compile_pipeline(plan)
-
-    def stream():
-        if exit_node is None:
-            return
-        # drive_scan runs the per-morsel hot path inside Cython — typed
-        # chain_head.push / exit_node.has_pending / exit_node.pop_pending
-        # calls, no Python -> cpdef boundary per morsel. We only re-yield
-        # the morsels it produces (one yield per emitted result).
-        #
-        # try/finally: if the caller abandons this generator (GeneratorExit) or
-        # an operator raises mid-chain, mark the shared context terminated so no
-        # further scan starts. Per-scan source cleanup (closing the rugo
-        # pipeline) is handled by drive_scan's own finally, which runs because
-        # GeneratorExit/exceptions propagate through `yield from`. The original
-        # exception/GeneratorExit is not suppressed.
-        try:
-            for scan, chain_head in chains:
-                yield from drive_scan(scan, chain_head, exit_node, ctx)
-                if ctx.is_terminated():
-                    return
-        finally:
-            ctx.terminate()
-
-    return stream(), ResultType.TABULAR
+    # serial_engine handles ONLY the special, non-pipeline operations above. A
+    # data-pipeline head (Exit — i.e. SELECT and friends) reaching here means the
+    # data executor punted to a hidden serial fallback. We refuse to paper over
+    # that (CLAUDE.md §1/§9: no fallbacks, no hidden behaviour, fail fast). The
+    # data executor (parallel_engine) owns ALL data-pipeline execution — parallel
+    # where it can, serial-driven inline where it cannot.
+    raise InvalidInternalStateError(
+        f"serial_engine received a data-pipeline head ({type(head_node).__name__}); "
+        "SELECT/data plans must run on the data executor (parallel_engine), not here."
+    )
 
 
 def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):

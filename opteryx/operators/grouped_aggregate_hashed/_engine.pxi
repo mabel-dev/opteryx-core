@@ -290,6 +290,48 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
 
+    def group_col_positions(self, Morsel morsel):
+        """Resolve the group-key columns to their positions in `morsel` — the
+        index space `cxx_scatter` / `cxx_hash_c` route on. Pure: mutates no engine
+        state (the parallel producer calls it to route by the SAME key hash the
+        per-worker engines will key with). Returns a Python ``list[int]``, or
+        ``None`` if the morsel is not Cxx-backed or any key column is absent (the
+        caller then routes that morsel to the serial path). Mirrors the matching
+        in `_resolve_on_first_morsel`."""
+        cdef const CxxMorsel* cxm
+        cdef string gtarget
+        cdef object _gname
+        cdef size_t _cj
+        cdef int _found_idx
+        cdef Py_ssize_t _ki
+        if morsel._cxx is None:
+            return None
+        cxm = cxx_morsel_raw_ptr(<PyObject*>morsel._cxx)
+        if cxm == NULL:
+            return None
+        positions = []
+        for _ki in range(<Py_ssize_t>len(self._group_columns)):
+            _gname = self._group_columns[_ki]
+            if isinstance(_gname, str):
+                _gname = _gname.encode("utf-8")
+            gtarget = <string>(<bytes>_gname)
+            _found_idx = -1
+            for _cj in range(cxm.names.size()):
+                if cxm.names[_cj] == gtarget:
+                    _found_idx = <int>_cj
+                    break
+            if _found_idx < 0:
+                return None
+            positions.append(_found_idx)
+        return positions
+
+    def num_groups(self):
+        """Distinct group count keyed so far — this engine's NDV contribution.
+        Read by the parallel engine after the keying barrier to report exact
+        post-keying NDV telemetry (worker slices are disjoint, so the total NDV is
+        the sum across workers). Pure read of the cdef counter."""
+        return self._num_groups
+
     cpdef void ingest(self, Morsel morsel):
         """Route one input Morsel to the appropriate ingest path."""
         cdef Py_ssize_t n_rows = morsel.num_rows

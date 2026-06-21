@@ -5348,6 +5348,40 @@ extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, ui
     return new CxxMorsel(cxx_hash(*m, col_idxs, n_cols));
 }
 
+// Row-routing scatter — partition a morsel into W disjoint sub-morsels by
+// hash(group-key) % W. Reuses cxx_hash (the SAME keying hash, so every
+// occurrence of a key routes to one bin ⇒ the bins share no keys ⇒ a parallel
+// grouped aggregate finalises by concatenation, never a merge) and cxx_take (so
+// every column type, strings included, is materialised by the one tested take
+// path). The only routing-specific work is the single bucketing pass. GIL-free.
+// Group keys are never DRAKEN_ARRAY (the binder rejects them), same as cxx_hash.
+//
+// Uniform access only (§11): the routing key is read as h[selection[i]] with no
+// shape discrimination — a dict-shaped single-key hash routes correctly because
+// the read goes through `selection`, never the raw data array.
+static std::vector<CxxMorsel> cxx_scatter(
+        const CxxMorsel& m, const int32_t* col_idxs, uint32_t n_cols, uint32_t W) {
+    if (W == 0u) throw std::invalid_argument("cxx_scatter: W must be >= 1");
+    if (n_cols == 0u) throw std::invalid_argument("cxx_scatter: no key columns");
+    const uint32_t n = m.num_rows();
+    std::vector<std::vector<int32_t>> bins(W);
+    if (n > 0u) {
+        CxxMorsel hashm = cxx_hash(m, col_idxs, n_cols);   // 1-col INT64 hash vector
+        const DrakenVector& hv = hashm.columns[0].view;
+        const uint64_t* h = static_cast<const uint64_t*>(hv.data);
+        const uint32_t* sel = hv.selection;                // never NULL (§11)
+        for (uint32_t i = 0u; i < n; ++i)
+            bins[h[sel[i]] % W].push_back(static_cast<int32_t>(i));
+    }
+    std::vector<CxxMorsel> out;
+    out.reserve(W);
+    for (uint32_t b = 0u; b < W; ++b) {
+        const uint32_t bn = static_cast<uint32_t>(bins[b].size());
+        out.push_back(cxx_take(m, bn > 0u ? bins[b].data() : nullptr, bn));
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // S-B.1a — boundary bridges (Morsel ⇄ shared_ptr<CxxMorsel>).
 //
@@ -7258,6 +7292,18 @@ NB_MODULE(draken_native, m) {
         })
         .def("slice", [](const CxxMorsel& cm, uint32_t start, uint32_t length) -> CxxMorsel {
             return cxx_slice(cm, start, length);
+        })
+        // Row-routing scatter → list of W disjoint sub-morsels by hash(key) % W
+        // (parallel grouped-agg producer side; also the test surface for the kernel).
+        .def("scatter", [](const CxxMorsel& cm, nb::list key_cols, uint32_t W) -> nb::list {
+            const uint32_t nc = static_cast<uint32_t>(nb::len(key_cols));
+            std::vector<int32_t> cols(nc > 0u ? nc : 1u);
+            for (uint32_t i = 0; i < nc; ++i) cols[i] = nb::cast<int32_t>(key_cols[i]);
+            std::vector<CxxMorsel> bins =
+                cxx_scatter(cm, nc > 0u ? cols.data() : nullptr, nc, W);
+            nb::list out;
+            for (CxxMorsel& b : bins) out.append(nb::cast(std::move(b)));
+            return out;
         })
         .def("mask", [](const CxxMorsel& cm, const VectorOwner& mask) -> CxxMorsel {
             return cxx_mask(cm, mask.vec);

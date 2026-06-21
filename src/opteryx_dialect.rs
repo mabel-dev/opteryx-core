@@ -41,8 +41,12 @@ impl Dialect for OpteryxDialect {
         self.is_identifier_start(ch) || ch.is_ascii_digit()
     }
 
+    // Double quotes are keyword/identifier escapes (standard SQL): `"group"` is the
+    // column named `group`, not a string literal. Single quotes are the only string
+    // delimiter. Backticks are also accepted for identifiers (MySQL heritage, and the
+    // only way to quote hyphenated names - see `is_identifier_part`).
     fn is_delimited_identifier_start(&self, ch: char) -> bool {
-        ch == '`'
+        ch == '`' || ch == '"'
     }
 
     fn identifier_quote_style(&self, _identifier: &str) -> Option<char> {

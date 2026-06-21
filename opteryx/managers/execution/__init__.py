@@ -6,6 +6,7 @@ from opteryx.exceptions import InvalidInternalStateError
 
 from .serial_engine import ResultType
 from .serial_engine import execute as serial_execute
+from .serial_engine import is_special_op
 
 def _with_optional_gc_disabled(
     results: Generator[Any, None, None],
@@ -44,15 +45,19 @@ def execute(plan, telemetry):
     # Label the join legs to ensure left/right ordering
     plan.label_join_legs()
 
-    # Engine selection (M4). MAX_EXECUTION_WORKERS == 1 is the serial engine —
-    # byte-identical to the historic path and the default. > 1 routes to the
-    # parallel scheduler. See docs/M4_CENTRAL_SCHEDULER_DESIGN.md.
-    if config.MAX_EXECUTION_WORKERS > 1:
+    # Triage by plan head. Non-pipeline special operations (EXPLAIN / SET / SHOW /
+    # INSERT / DDL) run on serial_engine — they have no morsel pipeline to drive
+    # and never parallelise. EVERY data pipeline (SELECT and friends) runs on the
+    # data executor (parallel_engine), which owns all data-pipeline execution:
+    # parallel where a strategy fits, serial-driven inline where it does not.
+    # serial_engine is NOT a fallback for data pipelines.
+    head_nodes = list(set(plan.get_exit_points()))
+    if len(head_nodes) == 1 and is_special_op(plan[head_nodes[0]]):
+        results, result_type = serial_execute(plan, telemetry=telemetry)
+    else:
         from .parallel_engine import execute as parallel_execute
 
         results, result_type = parallel_execute(plan, telemetry=telemetry)
-    else:
-        results, result_type = serial_execute(plan, telemetry=telemetry)
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type

@@ -3,26 +3,19 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""M4 Stage 0 — central parallel scheduler infrastructure.
+"""Central parallel scheduler infrastructure.
 
-Validates the reusable machinery the parallel drive (Stage 1) is built on, and
-proves the central CppThreadPool is a safe substrate for the clone-per-worker
-model under real concurrency. See docs/M4_CENTRAL_SCHEDULER_DESIGN.md.
-
-Three things are exercised so none of the Stage 0 code is dead:
+Validates the reusable machinery the parallel drive is built on. See
+docs/M4_CENTRAL_SCHEDULER_DESIGN.md.
 
   1. ``resolve_worker_count`` — query-scoped sizing + the cap-8 boundary.
   2. ``identify_segments`` — the pipeline-segment cut on real planned queries
      (linear-to-sink, breaker+sink, and a join as the shared tail of both legs).
-  3. A pipeline-level concurrency stress harness: N tasks submitted to ONE
-     CppThreadPool, each ingesting a disjoint partition into its OWN engine
-     concurrently, then merged and asserted byte-identical to a single-threaded
-     reference. This mirrors tests/unit/operators/test_grouped_engine_concurrency
-     but drives the work through the central pool the scheduler will own.
+  3. The grouped-aggregate dispatch seam (``_find_parallel_grouped_agg``): which
+     shapes engage row-routing, and that the routed answer equals the serial one.
 """
 
 import os
-import random
 import sys
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
@@ -60,11 +53,16 @@ def _names(plan, segment):
 # ── worker sizing ────────────────────────────────────────────────────────────
 
 
-def test_resolve_worker_count_serial_default():
-    # 1 (or below) always means the serial engine.
+def test_resolve_worker_count_softcoded_when_auto():
+    # Unset / "auto" / impossible (None or <= 0) → SOFTCODED from cores:
+    # max(1, min(cpu-2, 8)). An explicit 1 is honoured (one worker — degree of
+    # parallelism, NOT a serial-engine selector).
+    cpu = os.cpu_count() or 1
+    softcoded = max(1, min(cpu - 2, 8))
+    assert resolve_worker_count(0) == softcoded
+    assert resolve_worker_count(-4) == softcoded
+    assert resolve_worker_count(None) == softcoded
     assert resolve_worker_count(1) == 1
-    assert resolve_worker_count(0) == 1
-    assert resolve_worker_count(-4) == 1
 
 
 def test_resolve_worker_count_caps_at_8():
@@ -149,110 +147,6 @@ def test_every_non_breaker_node_in_exactly_one_segment():
             assert c == 1, f"{plan[nid].name} appeared in {c} segments"
 
 
-# ── pipeline-level concurrency stress (the central pool as substrate) ─────────
-
-from draken.morsels.morsel import Morsel
-from draken.draken_native import vector_from_sequence
-
-from opteryx.compiled.thread_pool import CppThreadPool
-from opteryx.operators._operators import (
-    AggregationSpec,
-    GroupHashEngine,
-    create_collectors,
-)
-
-_GROUP = "g"
-_VALUE = "v"
-_SPECS = [
-    AggregationSpec(alias="cstar", function="count", column="*"),
-    AggregationSpec(alias="sum", function="sum", column=_VALUE),
-    AggregationSpec(alias="min", function="min", column=_VALUE),
-    AggregationSpec(alias="max", function="max", column=_VALUE),
-]
-_ALIASES = ["cstar", "sum", "min", "max"]
-
-_WORKERS = 8
-_MORSELS_PER_WORKER = 6
-_ROWS_PER_MORSEL = 4000
-_N_GROUPS = 256
-
-
-def _engine():
-    collectors, _ = create_collectors(_SPECS, [_GROUP])
-    return GroupHashEngine([_GROUP], collectors, False, False)
-
-
-def _morsel(groups, values):
-    return Morsel.from_vectors(
-        [_GROUP, _VALUE], [vector_from_sequence(groups), vector_from_sequence(values)]
-    )
-
-
-def _finalize(engine):
-    out = {}
-    for chunk in engine.finalize_morsels():
-        gcol = chunk.column(_GROUP).to_pylist()
-        cols = {a: chunk.column(a).to_pylist() for a in _ALIASES}
-        for i, gv in enumerate(gcol):
-            out[gv] = {a: cols[a][i] for a in _ALIASES}
-    return out
-
-
-def _partition(rng):
-    return [
-        (
-            [rng.randrange(_N_GROUPS) for _ in range(_ROWS_PER_MORSEL)],
-            [rng.randint(-(10**9), 10**9) for _ in range(_ROWS_PER_MORSEL)],
-        )
-        for _ in range(_MORSELS_PER_WORKER)
-    ]
-
-
-@pytest.mark.parametrize("round_seed", range(4))
-def test_pool_concurrent_ingest_equals_serial(round_seed):
-    partitions = [_partition(random.Random(round_seed * 100 + t)) for t in range(_WORKERS)]
-    all_morsels = [m for part in partitions for m in part]
-
-    # Single-threaded ground truth, computed before any pool task runs.
-    ref_engine = _engine()
-    for groups, values in all_morsels:
-        ref_engine.ingest(_morsel(groups, values))
-    reference = _finalize(ref_engine)
-
-    # Pre-build morsels so the submitted task is pure concurrent ingestion
-    # (exclusive morsel ownership: each partition's morsels go to exactly one
-    # worker engine — contract rule 1).
-    built = [[_morsel(g, v) for g, v in partitions[t]] for t in range(_WORKERS)]
-
-    def ingest_partition(idx):
-        eng = _engine()
-        for m in built[idx]:
-            eng.ingest(m)
-        return eng
-
-    pool = CppThreadPool(_WORKERS, "m4-stage0-stress")
-    try:
-        futures = [pool.submit(ingest_partition, t) for t in range(_WORKERS)]
-        engines = [f.result() for f in futures]
-    finally:
-        pool.shutdown(wait=True)
-
-    # Merge partials + finalize on the calling thread (exactly the recombination
-    # the scheduler does at a mergeable breaker).
-    base = engines[0]
-    for other in engines[1:]:
-        base.merge(other)
-    merged = _finalize(base)
-
-    assert merged.keys() == reference.keys()
-    for g in reference:
-        m, r = merged[g], reference[g]
-        assert m["cstar"] == r["cstar"]
-        assert m["sum"] == r["sum"]
-        assert m["min"] == r["min"]
-        assert m["max"] == r["max"]
-
-
 # ── dispatch seam ────────────────────────────────────────────────────────────
 
 
@@ -278,6 +172,10 @@ def test_find_parallel_grouped_agg_rejects_unsupported_shapes():
     # A join → more than one scan → deferred to Stage 2.
     join_sql = "SELECT p.name FROM $planets AS p INNER JOIN $planets AS s ON p.id = s.id GROUP BY p.name"
     assert _find_parallel_grouped_agg(_plan(join_sql)) is None
+    # Any non-empty group key is eligible — there is no key-type gate. Both a
+    # string key and a fixed-width (decimal) key route.
+    assert _find_parallel_grouped_agg(_plan("SELECT name, COUNT(*) FROM $planets GROUP BY name")) is not None
+    assert _find_parallel_grouped_agg(_plan("SELECT gravity, COUNT(*) FROM $planets GROUP BY gravity")) is not None
 
 
 @pytest.mark.parametrize(
@@ -285,18 +183,25 @@ def test_find_parallel_grouped_agg_rejects_unsupported_shapes():
     [
         "SELECT gravity, COUNT(*) c, SUM(diameter) s, AVG(diameter) a, MIN(diameter) mn, MAX(diameter) mx FROM $planets GROUP BY gravity ORDER BY gravity",
         "SELECT status, COUNT(*) c, AVG(year) a FROM testdata.astronauts WHERE year > 1950 GROUP BY status ORDER BY status",
-        'SELECT "group" g, COUNT(*) c FROM testdata.astronauts GROUP BY "group" ORDER BY c DESC LIMIT 3',
+        # ORDER BY <agg> DESC + LIMIT downstream of the grouped breaker.
+        "SELECT status, COUNT(*) c FROM testdata.astronauts GROUP BY status ORDER BY c DESC LIMIT 3",
+        # GROUP BY on a double-quoted reserved word (`group` is a real column). The
+        # dialect tokenises "group" as a string; the binder must rebind it to the
+        # column, otherwise the group key collapses to zero columns.
+        'SELECT "group" g, COUNT(*) c FROM testdata.astronauts GROUP BY "group" ORDER BY g',
     ],
 )
 def test_parallel_grouped_agg_equals_serial(monkeypatch, sql):
-    # The real gate: identical answers serial vs parallel, with the floor forced
-    # to 0 so the parallel drive engages even on small fixtures.
+    # The real gate: identical answers serial vs row-routing parallel. Row-routing
+    # is the only grouped strategy; the serial baseline is obtained by raising the
+    # floor above the fixture row count (single-engine keying), the routed run uses
+    # floor=0 so row-routing engages. All SQL here have ORDER BY, so output order is
+    # deterministic and list equality is meaningful.
     import opteryx
 
-    monkeypatch.setattr(opteryx.config, "PARALLEL_MIN_ROWS", 0)
-
-    def _run(workers):
+    def _run(workers, floor):
         monkeypatch.setattr(opteryx.config, "MAX_EXECUTION_WORKERS", workers)
+        monkeypatch.setattr(opteryx.config, "PARALLEL_MIN_ROWS", floor)
         rows = []
         for morsel in opteryx.session().execute_to_morsels(sql):
             if morsel is None:
@@ -306,7 +211,8 @@ def test_parallel_grouped_agg_equals_serial(monkeypatch, sql):
             rows.extend(tuple(c[i] for c in cols) for i in range(morsel.num_rows))
         return rows
 
-    assert _run(1) == _run(4)
+    # Serial floor is above any fixture's row count → row-floor serial path.
+    assert _run(1, 10_000_000) == _run(4, 0)
 
 
 if __name__ == "__main__":

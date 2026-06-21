@@ -160,28 +160,24 @@ PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 
 import os as _os
 
-MAX_EXECUTION_WORKERS: int = int(get("MAX_EXECUTION_WORKERS", 1))
-"""Central parallel execution scheduler width (M4). **Defaults to 1 (serial).**
-The current parallel grouped-aggregate path uses round-robin + per-group merge,
-which is empirically a net regression on ClickBench (the merge is the wall — see
-docs/M4_PARALLEL_PATH_FORWARD.md). Until the key-partitioned exchange (no-merge)
-model lands, parallel is opt-in only, not the default. Set >1 to engage the
-parallel scheduler (morsel-driven self-pull + per-worker nogil ingest for a
-single-scan grouped-aggregate pipeline; every other plan shape falls back to
-serial). The engine clamps the effective width to min(this, cpu-2, 8)."""
+_max_workers_raw = str(get("MAX_EXECUTION_WORKERS", "auto")).strip().lower()
+MAX_EXECUTION_WORKERS: int = (
+    int(_max_workers_raw) if _max_workers_raw.lstrip("-").isdigit() else 0
+)
+"""Central parallel execution scheduler width (M4). **Softcoded by default**:
+unset / "auto" / an impossible value (0 or less) is stored as 0 here, and
+resolve_worker_count derives the effective width from the core count,
+max(1, min(cpu-2, 8)). An explicit positive integer overrides, still clamped to
+that softcoded cap. Worker count is degree-of-parallelism only — it never selects
+a code path (W=1 is one worker, not the serial engine). GROUP BY parallelises by
+ROW-ROUTING (disjoint key bins, no merge) — the only grouped strategy; the
+ungrouped/stateless paths engage above PARALLEL_MIN_ROWS."""
 
 PARALLEL_MIN_ROWS: int = int(get("PARALLEL_MIN_ROWS", 262_144))
 """Row-floor for the parallel scheduler (M4). A pipeline whose scan yields fewer
-buffered rows than this runs serially — below it the per-worker clone + thread
-setup (and the merge) dominate. Bench-tuned; set to 0 to force-engage parallel
-on any input (testing/benchmarking)."""
-
-PARALLEL_AGG_STRATEGY: str = get("PARALLEL_AGG_STRATEGY", "roundrobin")
-"""Parallel grouped-aggregate strategy (M4). 'roundrobin' = whole morsels to
-workers + WP-7 merge() (wins low/medium cardinality). 'shuffle' = hash-partition
-rows by key into disjoint bins, NO merge (wins high cardinality). 'auto' (Stage 2)
-will select by NDV. Default 'roundrobin' until the NDV selector lands. See
-docs/M4_CENTRAL_SCHEDULER_DESIGN.md §11."""
+buffered rows than this runs through the operator's own (single-producer) path —
+below it the per-worker clone + thread setup dominate. Bench-tuned; set to 0 to
+force-engage parallel on any input (testing/benchmarking)."""
 
 
 

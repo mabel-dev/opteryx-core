@@ -121,8 +121,8 @@ unless noted; `?` = not measured; `<1` = regression.
 |---|---|---|---|---|
 | S1 Scan-IO | serial / parallel | int/str | 1 / ? | local mmap near-free; parallel folded into decode pool |
 | S2 Decode | parallel | int/str | ? | **already parallel, lock-free** 8-thread C++ pool; ratio never isolated |
-| S3 Scatter (minimal, serial) | — | int | 320–420ms@W8 (~0.2× of serial total) | real native kernel, **built** (`dev/_native_scatter.pyx`) |
-| S3 Scatter (minimal, parallel) | parallel | int | **5–6×** over serial scatter | multi-producer, **not bandwidth-bound** (`dev/_native_scatter_parallel.pyx`) |
+| S3 Scatter (minimal, serial) | — | int | 320–420ms@W8 (~0.2× of serial total) | measured on a throwaway prototype (now deleted); production kernel to be built in `opteryx/compiled/` |
+| S3 Scatter (minimal, parallel) | parallel | int | **5–6×** over serial scatter | multi-producer, **not bandwidth-bound**; prototype measured then deleted |
 | S3 Scatter (`partition_by_hash`) | parallel | int | **catastrophic** | 2.9–4.0s@W8 — the only router in tree; unusable |
 | S3 Scatter | parallel | str | ? | variable-length; not built/measured; expected costlier |
 | S4 Keying | serial | int | 1 | baseline (~1070ms on Q16) |
@@ -237,6 +237,12 @@ was still climbing at W8 on 6 ARM perf cores and prod core counts differ, so the
 default must track the machine and the optimum be found in the target environment,
 not fixed at a literal.
 
+Worker count is **degree-of-parallelism only — it MUST NOT select a code path.**
+`W=1` runs the row-routing engine with a single worker (scatter → one bin → key →
+concat), the *same* path as `W=8`, not a divert to the serial grouped-agg node.
+There is one parallel implementation; the worker count only sets how many slices
+it splits into. (A divergent `if W==1: serial` path is forbidden — §2.)
+
 **Memory, ownership & FT-safety.** Each worker **owns** its hash table + dense
 accumulators → no sharing, no hot-path locks (the FT-safety argument). Scatter
 buffers are producer-owned and **moved** to the worker on handoff (RAII). The scan
@@ -332,8 +338,15 @@ The design is not universally a win; engage it via a cost model, not a flag:
   floor, **dominant hot key** (skew cutover), or low cardinality + light aggregate
   (e.g. Q08-class: ~tens of groups, COUNT only → overhead > work, measured 0.79×).
 - ⚑ The cardinality/agg-weight threshold **and the skew cutover point** need
-  **calibration from the e2e bench** (§8). Until calibrated, a conservative high
-  floor is safer than engaging marginal queries.
+  **calibration from the e2e bench** (§8).
+- **The floor is the on/off switch, not the worker count.** Until calibrated, ship
+  `PARALLEL_MIN_ROWS` at an effectively-infinite value (e.g. `1_000_000_000_000`) so
+  the gate never selects row-routing in production; lower it (toward ≈250k) for
+  calibration runs and once the crossover is known. Disabling the feature is "raise
+  the floor," never "set workers to 1" — worker count is degree-only (§4.2). Note
+  the distinction from below-floor inputs, which genuinely run the **serial
+  grouped-agg node** (legitimate algorithm selection for small inputs); that serial
+  node is *not* what `W=1` of the parallel path runs.
 - This is legitimate algorithm selection by a cost model — *not* gating-to-where-
   it-wins: the design genuinely cannot win on the excluded shapes.
 
@@ -341,20 +354,23 @@ The design is not universally a win; engage it via a cost model, not a flag:
 
 ## 8. Open work
 
-### Done (measured)
-- ✅ Minimal native scatter built; real cost 320–420ms@W8 (`dev/_native_scatter.pyx`).
+### Done (measured on throwaway prototypes, since deleted)
+- ✅ Minimal native scatter measured; real cost 320–420ms@W8.
 - ✅ Row-routing parallel keying wired e2e — COUNT ~2.4–2.9×, COUNT(DISTINCT) 3.84×.
-- ✅ Skew bench — degrades to 0.7× at 90% hot (mitigation mandatory).
+- ✅ Skew bench — degrades to 0.7× at 90% hot (handled by serial cutover, §5/§7).
 - ✅ Multi-col + NULL correctness verified.
+
+*All prototype kernels were experimental and have been deleted; the production
+kernel is built fresh under `opteryx/compiled/` (see §8 remaining work).*
 
 ### Both make-or-break risks RESOLVED (2026-06-19)
 - ✅ **Parallel scatter recovers** — scales 5–6× (not bandwidth-bound); e2e COUNT
-  3.31×, COUNT(DISTINCT) 4.78×. `dev/_native_scatter_parallel.pyx`.
+  3.31×, COUNT(DISTINCT) 4.78× (prototype, measured then deleted).
 - ✅ **Skew decided** — disjoint-slice→concat is the invariant; salting is
   **rejected** (it reintroduces a merge). Skew is handled by **algorithm
   selection** — the >floor sample estimates a dominant hot key and routes that
-  shape to serial. (`dev/_native_scatter_salt.pyx` measured salting at 2.17× but is
-  retained only as rejected evidence, not a build target.)
+  shape to serial. (Salting was measured at 2.17× on a prototype, now deleted; it
+  is rejected evidence, not a build target.)
 
 ### Remaining work (no known blockers — this is a build/optimize phase)
 1. **Kill the serial materialization tail** — build per-worker output buffers in the
