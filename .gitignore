@@ -253,3 +253,5 @@ opteryx/types/vectors/vector_math.cpp
 opteryx/operators/_operators.cpp
 opteryx/connectors/parquet_io/pool_reader.cpp
 draken/ops/kernels/_kernel_registry.cpp
+rugo/src/csv/_csv_reader.cpp
+rugo/src/jsonl/_jsonl_reader.cpp
