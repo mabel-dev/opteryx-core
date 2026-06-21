@@ -2282,6 +2282,37 @@ extensions.append(
     )
 )
 
+def discover_packages():
+    """Discover packages, including those whose __init__ is a compiled .pyx.
+
+    setuptools.find_packages only treats a directory as a package when it
+    contains a literal __init__.py. This project compiles many __init__.pyx
+    into __init__.so, so those directories are invisible to find_packages —
+    which means find_packages cannot descend into them and any *pure-Python*
+    file living in (or under) such a directory is silently omitted from the
+    wheel, even though the compiled .so ships via ext_modules. That is how
+    opteryx/expression/evaluator/__init__.py went missing.
+
+    We start from find_packages and additionally add any directory under the
+    owned roots that is a package by virtue of an __init__.pyx, so pure-Python
+    siblings (e.g. evaluator/__init__.py, functions/implementations/*.py) ship.
+    """
+    base = set(
+        find_packages(
+            include=[LIBRARY, f"{LIBRARY}.*", "draken", "draken.*", "rugo", "rugo.*"],
+            exclude=["draken.tests", "draken.tests.*", "rugo.tests", "rugo.tests.*"],
+        )
+    )
+    for root in (LIBRARY, "draken", "rugo"):
+        for dirpath, _dirnames, filenames in os.walk(root):
+            parts = dirpath.split(os.sep)
+            if "tests" in parts:
+                continue
+            if "__init__.pyx" in filenames or "__init__.py" in filenames:
+                base.add(".".join(parts))
+    return sorted(base)
+
+
 # Setup configuration
 setup(
     name=LIBRARY,
@@ -2289,10 +2320,7 @@ setup(
     description="Python SQL Query Engine",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(
-        include=[LIBRARY, f"{LIBRARY}.*", "draken", "draken.*", "rugo", "rugo.*"],
-        exclude=["draken.tests", "draken.tests.*", "rugo.tests", "rugo.tests.*"],
-    ),
+    packages=discover_packages(),
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(
