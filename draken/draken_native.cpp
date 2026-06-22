@@ -5311,6 +5311,16 @@ extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t l
 extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) {
     return new CxxMorsel(cxx_mask(*m, *mask));
 }
+// S-B.2: select/reorder columns by identity name (bytes → ptr+len arrays, since
+// identity names are opaque bytes). Pure container op (shares owners, no copy).
+extern "C" CxxMorsel* cxx_select_c(const CxxMorsel* m, const char** name_ptrs,
+                                   const uint32_t* name_lens, uint32_t n) {
+    std::vector<std::string> want;
+    want.reserve(n);
+    for (uint32_t i = 0; i < n; ++i)
+        want.emplace_back(name_ptrs[i], name_lens[i]);
+    return new CxxMorsel(cxx_select(*m, want));
+}
 extern "C" void cxx_morsel_delete(CxxMorsel* m) {
     delete m;
 }

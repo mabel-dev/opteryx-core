@@ -16,6 +16,7 @@ from draken.morsels.morsel cimport Morsel
 from draken.morsels.cxx_morsel cimport (
     CxxMorsel, cxx_morsel_raw_ptr,
     cxx_morsel_shallow_copy, cxx_morsel_to_handle, cxx_morsel_delete,
+    cxx_select_c,
 )
 from draken.vectors.vector cimport Vector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_INT64
@@ -144,6 +145,36 @@ cpdef object _build_from_vectors_for_test(list vectors, list names):
     the OUT bridge) so the cdef builder can be differentially verified against
     Morsel.from_cxx_vectors. Not used in production."""
     return cxx_to_morsel(cxx_morsel_from_vectors_sp(vectors, names))
+
+
+cdef shared_ptr[CxxMorsel] cxx_select_sp(shared_ptr[CxxMorsel] m, list names):
+    """Select/reorder columns of a CxxMorsel by identity name (bytes), returning a new
+    owned CxxMorsel that SHARES the column owners (no data copy). Names not present are
+    skipped; an all-missing select carries the row count. S-B.2 prereq #3 — lets the
+    scan apply its output projection without leaving the substrate. GIL-held only to
+    marshal the name byte-buffers; the select itself is the nogil container op."""
+    cdef Py_ssize_t n = len(names)
+    cdef Py_ssize_t i
+    cdef const char** ptrs = <const char**>draken_malloc(<size_t>n * sizeof(char*))
+    cdef uint32_t* lens = <uint32_t*>draken_malloc(<size_t>n * sizeof(uint32_t))
+    cdef bytes b
+    cdef list keep = []   # keep the byte buffers alive across the call
+    cdef bint freed = False
+    try:
+        for i in range(n):
+            b = names[i] if isinstance(names[i], bytes) else (<str>names[i]).encode("utf-8")
+            keep.append(b)
+            ptrs[i] = <const char*>b
+            lens[i] = <uint32_t>len(b)
+        return shared_ptr[CxxMorsel](cxx_select_c(m.get(), ptrs, lens, <uint32_t>n))
+    finally:
+        draken_free(ptrs)
+        draken_free(lens)
+
+
+cpdef object _select_for_test(object morsel, list names):
+    """Test seam: exercise cxx_select_sp from Python (Morsel in/out via the bridges)."""
+    return cxx_to_morsel(cxx_select_sp(morsel_to_cxx(<Morsel>morsel), names))
 
 
 cdef class Morsel:

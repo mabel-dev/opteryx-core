@@ -121,3 +121,5 @@ cdef shared_ptr[CxxMorsel] morsel_to_cxx(Morsel m)
 cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp)
 # S-B.2: build the native carrier directly from column vectors + names (no Morsel).
 cdef shared_ptr[CxxMorsel] cxx_morsel_from_vectors_sp(list vectors, list names)
+# S-B.2: select/reorder a CxxMorsel's columns by identity name (shares owners).
+cdef shared_ptr[CxxMorsel] cxx_select_sp(shared_ptr[CxxMorsel] m, list names)

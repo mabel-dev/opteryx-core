@@ -745,21 +745,37 @@ cdef class ParquetReadNode(ReaderNode):
             )
         return root
 
+    cdef shared_ptr[CxxMorsel] _cxx_apply_predicate(self, shared_ptr[CxxMorsel] m):
+        """S-B.2 prereq #2: apply the compiled predicate to a CxxMorsel, returning the
+        filtered NATIVE carrier (no PyObject column materialization).
+
+        All-c-native predicates take the one-nogil-span path (filter_morsel_c_native:
+        predicate result DV* feeds straight into cxx_mask_c, no Python BoolVector);
+        anything else falls back to the VM + filter_mask over a thin Cxx-backed shim.
+        The intermediate Morsels are Cxx-backed wrappers (no data copy); morsel_to_cxx
+        is a shallow copy. Lets the scan filter without leaving the CxxMorsel substrate.
+        """
+        if self._compiled_predicate is None:
+            return m
+        cdef Morsel shim = cxx_to_morsel(m)
+        cdef object res = _filter_morsel_c_native(self._compiled_predicate, shim)
+        if res is None:
+            res = shim.filter_mask(execute_bytecode(self._compiled_predicate, shim))
+        return morsel_to_cxx(<Morsel>res)
+
     def _apply_predicates_to_morsel(self, morsel: Morsel):
         """Apply the compiled predicate to a Draken Morsel.
 
-        All evaluation goes through the bytecode VM — the sole evaluation
-        engine. The predicate is compiled once at execute() time; this method
-        just executes it.
+        Routes through the CxxMorsel-native filter (_cxx_apply_predicate): the
+        substrate never materializes PyObject columns. The predicate is compiled once
+        at execute() time; this just applies it.
         """
         if self._compiled_predicate is None:
             return morsel, morsel.num_rows, morsel.num_rows
 
-        rows_before_filter = morsel.num_rows
-        mask = execute_bytecode(self._compiled_predicate, morsel)
-        filtered = morsel.filter_mask(mask)
-        if filtered.num_rows == 0:
-            return morsel.slice(0, 0), rows_before_filter, 0
+        cdef int64_t rows_before_filter = morsel.num_rows
+        cdef Morsel filtered = cxx_to_morsel(
+            self._cxx_apply_predicate(morsel_to_cxx(morsel)))
         return filtered, rows_before_filter, filtered.num_rows
 
     cdef bint _mark_file_seen(self, object path):
