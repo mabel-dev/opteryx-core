@@ -34,6 +34,31 @@ breaker. DuckDB avoids all of it — partitioning lives inside the sink, pipelin
 stream, ordering is an event dependency, and the probe side never materializes.
 We take the DuckDB model.
 
+## Prime constraint — the serial path is the asset (locked)
+
+We are already **~2× DuckDB per core**. The entire gap to DuckDB is the serial
+ceiling, not single-thread efficiency. So this rewrite is **not a speed recipe** —
+it removes a self-imposed ceiling on an already-superior core. The prime directive:
+**spend cores without spending the single-thread lead.** The model only needs to be
+a coherent way to scale; it must not tax the thing we already won.
+
+This makes the cost model **DOP-proportional, not fixed**:
+
+- **Partition degree scales with DOP.** Radix fan-out, thread-local fan-out,
+  Combine, and the k-way merge tail appear ONLY when there is parallelism to pay
+  for them. At `DOP=1` there is **1 partition**.
+- **`DOP=1` ≡ today's serial path.** The whole local/global apparatus collapses to
+  the current lean single-instance operator when there is one worker — no radix
+  overhead, no Combine, no merge. The model is *invisible* at one core.
+- This is the **opposite of DuckDB**, which pays radix-partitioning even
+  single-threaded. We do not — our single-thread path is the asset to protect, and
+  we are not chasing DuckDB's per-core number (we already beat it).
+
+**Gate: single-thread (`DOP=1`) must be within noise of the current serial engine.**
+A single-thread regression means the rewrite is wrong — the model is meant to be
+free at one core and multiplicative above it. Above `DOP=1`, scaling efficiency is
+the only metric that matters.
+
 ## Model (locked)
 
 - **Pipeline** = source → 0..N streaming operators → one sink. The unit of
@@ -95,6 +120,11 @@ DOP per pipeline = `min(source morsels, operator hints, scheduler threads)` — 
 principled version of a row-floor gate. Tiny inputs never oversubscribe and pay no
 recombination tax, with **no tuned floor constant**. Supersedes the fixed
 `resolve_worker_count` + `PARALLEL_MIN_ROWS`.
+
+**Partition degree is derived from DOP** (see Prime constraint): 1 partition at
+`DOP=1`, scaling up only with worker count — so the partitioning apparatus is never
+paid on the serial path. A breaker at `DOP=1` is the current single-instance
+operator, unchanged.
 
 ## The operator contract — a C++-first rewrite (the real work)
 
@@ -170,6 +200,9 @@ matrix — those were the Spark design and are dropped.)
 
 ## Verification
 
+- **Single-thread no-regression gate (primary).** `DOP=1` must be within noise of
+  the current serial engine on `make q` / tpch / clickbench — the model must be free
+  at one core. A serial regression fails the rewrite regardless of parallel gains.
 - `make q` (190) + tpch (22) + shapes + clickbench (43) green; result-identical to
   serial; workers=1 vs N identical.
 - DuckDB oracle on multi-join + GROUP BY + ORDER BY, incl. NULL keys, multi-col

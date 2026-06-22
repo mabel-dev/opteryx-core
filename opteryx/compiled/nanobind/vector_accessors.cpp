@@ -155,6 +155,16 @@ static nb::object impl_string_emptiness(nb::object v, bool emit_when_empty) {
             "(VARCHAR, NVARCHAR, or VARBINARY)");
     }
 
+    // GIL-free compute: `v` keeps the source arena alive for the whole call and
+    // everything below — allocation, the scan loop, native cleanup — touches no
+    // Python (draken_malloc + string slots). Drop the GIL until we publish the
+    // BoolVector. Mirrors the WP-6 string-case kernels (vector_string_case.cpp);
+    // this kernel was missed in that rollout, leaving IS [NOT] EMPTY filters
+    // GIL-held wherever they run (standalone Filter and the scan's pass-1 /
+    // single-pass predicate apply). gil_scoped_release re-acquires in its
+    // destructor during exception unwind (bad_alloc from the loop) too.
+    nb::gil_scoped_release _rel;
+
     const DrakenStringArena* arena = static_cast<const DrakenStringArena*>(dv->data);
     const uint32_t* sel      = dv->selection;
     const uint8_t*  validity = dv->validity;
@@ -194,6 +204,7 @@ static nb::object impl_string_emptiness(nb::object v, bool emit_when_empty) {
                 bits[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
         }
         draken_free(slot_match);
+        nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
         return wrap_bool(bits, out_validity, n);
     }
 
@@ -203,6 +214,7 @@ static nb::object impl_string_emptiness(nb::object v, bool emit_when_empty) {
         if (is_empty == emit_when_empty)
             bits[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
     }
+    nb::gil_scoped_acquire _acq;  // re-take the GIL to publish the result to Python
     return wrap_bool(bits, out_validity, n);
 }
 
