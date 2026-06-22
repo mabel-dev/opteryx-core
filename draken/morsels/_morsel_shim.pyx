@@ -118,6 +118,34 @@ cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp):
     return Morsel.from_cxx(handle)
 
 
+cdef shared_ptr[CxxMorsel] cxx_morsel_from_vectors_sp(list vectors, list names):
+    """Build an owned heap shared_ptr<CxxMorsel> DIRECTLY from column vector handles +
+    identity names, with NO intermediate Python Morsel object. Byte-identical to
+    morsel_to_cxx(Morsel.from_cxx_vectors(names, vectors)) — same nanobind assembly +
+    shallow-copy, sharing the per-column owners (bytes never duplicated) — but skips
+    constructing the transient Morsel wrapper.
+
+    S-B.2 prerequisite: lets a scan / column-producing operator emit the native carrier
+    directly instead of building a Morsel and re-encoding it (parquet_read.pyx:930). It
+    is GIL-held (the vector handles are PyObjects; the assembly is the existing C++
+    builder) — that is fine, since next_morsel is pulled outside the chain's nogil push
+    span. Additive + behaviour-neutral: nothing calls it yet."""
+    from draken.draken_native import cxx_morsel_from_vectors
+    cdef Py_ssize_t n = len(vectors)
+    cdef Py_ssize_t i
+    cdef list handles = [_unwrap(vectors[i]) for i in range(n)]
+    cdef object handle = cxx_morsel_from_vectors(handles, names)
+    cdef const CxxMorsel* p = cxx_morsel_raw_ptr(<PyObject*>handle)
+    return shared_ptr[CxxMorsel](cxx_morsel_shallow_copy(p))
+
+
+cpdef object _build_from_vectors_for_test(list vectors, list names):
+    """Test seam: exercise cxx_morsel_from_vectors_sp from Python (returns a Morsel via
+    the OUT bridge) so the cdef builder can be differentially verified against
+    Morsel.from_cxx_vectors. Not used in production."""
+    return cxx_to_morsel(cxx_morsel_from_vectors_sp(vectors, names))
+
+
 cdef class Morsel:
     def __cinit__(self):
         self._col_names = []

@@ -119,3 +119,5 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
 # transition. Cheap shallow copies (share column owners, not bytes).
 cdef shared_ptr[CxxMorsel] morsel_to_cxx(Morsel m)
 cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp)
+# S-B.2: build the native carrier directly from column vectors + names (no Morsel).
+cdef shared_ptr[CxxMorsel] cxx_morsel_from_vectors_sp(list vectors, list names)
