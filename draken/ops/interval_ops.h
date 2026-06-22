@@ -33,6 +33,7 @@
 #include "core/interval_slot.h"
 #include "logical_type.h"           // TimestampUnit / ts_to_us
 #include "ops/vec_result.h"
+#include "ops/int64_gather.h"       // copy_validity_range (used by interval_slice/take)
 #include "ops/temporal_arith.h"     // ta_days_to_ymd / ta_ymd_to_days / ta_floor_div
 #include "simd_hash.h"
 #include "ops/int64_predicates.h"   // CarcharSet (in_list)

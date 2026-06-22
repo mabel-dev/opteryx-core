@@ -201,6 +201,9 @@ clickbench:
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
+m4-sweep: ## M4 DOP-sweep gate: serial-parity at DOP=1 + scaling above (M4_DATASET=… M4_ITERS=…)
+	@$(PYTHON) dev/m4_dop_sweep.py
+
 tpch-bench: ## Run TPC-H performance benchmark (Opteryx)
 	@clear || true
 	@$(PYTHON) tests/performance/tpch/opteryx/runner.py

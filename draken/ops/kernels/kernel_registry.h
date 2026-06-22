@@ -53,7 +53,13 @@ bool kernel_registry_lookup(const char* name, kernel_fn_t* out_fn, void** out_ct
  */
 
 cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit);
-binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code);
+binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
+                                          unsigned char left_scale,
+                                          unsigned char right_scale,
+                                          unsigned char result_scale,
+                                          unsigned char result_precision,
+                                          unsigned char left_unit,
+                                          unsigned char right_unit);
 extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code);
 
 // Free allocated context (called during bytecode cleanup)

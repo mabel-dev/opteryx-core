@@ -185,6 +185,12 @@ buffered rows than this runs through the operator's own (single-producer) path â
 below it the per-worker clone + thread setup dominate. Bench-tuned; set to 0 to
 force-engage parallel on any input (testing/benchmarking)."""
 
+M4_USE_SCHEDULER: bool = str(get("M4_USE_SCHEDULER", "0")).lower() in ("1", "true", "yes")
+"""Route data pipelines through the M4 event-DAG scheduler skeleton
+(managers/execution/scheduler_engine.py) instead of the current parallel_engine.
+Default off. Stage 0 is a functional no-op (serial-identical output) used to stand
+up and validate the scheduler scaffold; see docs/M4_SEGMENT_SCHEDULER_SHUFFLE_DESIGN.md."""
+
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

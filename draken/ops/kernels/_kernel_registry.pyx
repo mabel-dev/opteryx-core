@@ -41,7 +41,13 @@ cdef extern from "ops/kernels/kernel_registry.h":
     ctypedef extraction_ctx_ extraction_ctx
 
     cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit)
-    binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code)
+    binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
+                                              unsigned char left_scale,
+                                              unsigned char right_scale,
+                                              unsigned char result_scale,
+                                              unsigned char result_precision,
+                                              unsigned char left_unit,
+                                              unsigned char right_unit)
     extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code)
     void kernel_free_context(void* ctx)
 
@@ -88,18 +94,28 @@ def alloc_cast_timestamp_ctx(int unit):
     return <unsigned long long>ctx
 
 
-def alloc_binary_op_ctx(int op_code):
+def alloc_binary_op_ctx(int op_code, int left_scale=0, int right_scale=0,
+                        int result_scale=0, int result_precision=0,
+                        int left_unit=0, int right_unit=0):
     """
     Allocate context for binary operation with op_code dispatch.
 
     Args:
         op_code: BCBinaryOpCode (BOP_PLUS=1, BOP_MINUS=2, etc.)
+        left_scale/right_scale/result_scale: DECIMAL/DECIMAL128 scales (0 otherwise).
+        result_precision: DECIMAL/DECIMAL128 result precision (descriptor; 0 otherwise).
+        left_unit/right_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of TIMESTAMP/TIME
+            operands (0 otherwise; date32 ignores it).
 
     Returns:
         Opaque integer pointer to binary_op_ctx struct
         Caller must free via free_context() when done
     """
-    cdef binary_op_ctx* ctx = kernel_alloc_binary_op_ctx(<uint16_t>op_code)
+    cdef binary_op_ctx* ctx = kernel_alloc_binary_op_ctx(
+        <uint16_t>op_code,
+        <unsigned char>left_scale, <unsigned char>right_scale,
+        <unsigned char>result_scale, <unsigned char>result_precision,
+        <unsigned char>left_unit, <unsigned char>right_unit)
     return <unsigned long long>ctx
 
 

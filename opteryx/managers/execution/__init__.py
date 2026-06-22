@@ -54,6 +54,12 @@ def execute(plan, telemetry):
     head_nodes = list(set(plan.get_exit_points()))
     if len(head_nodes) == 1 and is_special_op(plan[head_nodes[0]]):
         results, result_type = serial_execute(plan, telemetry=telemetry)
+    elif config.M4_USE_SCHEDULER:
+        # M4 event-DAG scheduler (Stage 0: serial-identical no-op). Opt-in flag so
+        # parallel_engine is untouched and the two compare at DOP=1 via make m4-sweep.
+        from .scheduler_engine import execute as scheduler_execute
+
+        results, result_type = scheduler_execute(plan, telemetry=telemetry)
     else:
         from .parallel_engine import execute as parallel_execute
 

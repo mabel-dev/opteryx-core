@@ -2141,6 +2141,16 @@ static VectorOwner vecresult_to_owner(VecResult r) {
         lt.offset_minutes = 0;
         owner.logical_type = logical_type_intern(lt);
     }
+    // S-A.2: attach the DECIMAL precision/scale descriptor when the kernel set one
+    // (dec_precision > 0). Mirrors the timestamp block; the arena DV*/VecResult
+    // carry no LogicalType, so DECIMAL results would otherwise fail to_pylist.
+    if ((r.type == DRAKEN_DECIMAL || r.type == DRAKEN_DECIMAL128) && r.dec_precision > 0u) {
+        LogicalType lt;
+        lt.kind      = LogicalKind::DECIMAL;
+        lt.precision = r.dec_precision;
+        lt.scale     = r.dec_scale;
+        owner.logical_type = logical_type_intern(lt);
+    }
     return owner;
 }
 
@@ -4807,12 +4817,15 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
 // ---------------------------------------------------------------------------
 
 // Resolve an arithmetic operand to (scale, precision) for the decimal kernels.
-// DECIMAL uses its logical-type descriptor. DRAKEN_INT64 is treated as a
-// scale-0 decimal — integer N is exactly DECIMAL(N) with scale 0, and an
-// INT64 vector is laid out identically to a scale-0 decimal (int64 unscaled
-// values), so the kernels read it correctly with scale=0. This is how the
-// "promote scalar to DECIMAL first" intent is satisfied for integer literals
-// (e.g. TPC-H `1 - l_discount`). Other types are unsupported here.
+// DECIMAL/DECIMAL128 uses its logical-type descriptor. An INTEGER operand is a
+// scale-0 decimal — integer N is exactly DECIMAL(digits, 0) — and its precision is
+// the type's max decimal digit count (INT8→3, INT16→5, INT32→10, INT64→19), matching
+// the binder's `type_unification._INT_DIGITS`. Using the actual width (not a flat 18)
+// keeps the runtime's derived result tier (DECIMAL int64 vs DECIMAL128) in lock-step
+// with the bound schema, so no downstream op reads the wrong physical width.
+// Narrow ints (INT8/16/32) are laid out at sub-int64 stride, so the caller widens them
+// to INT64 before the kernels run (see maybe_widen_narrow_int_to_i64); this function
+// only reports (scale, precision) from the ORIGINAL width.
 static inline void decimal_operand_scale_prec(
     const VectorOwner& v, const char* op, uint8_t& scale, uint8_t& prec) {
     if (v.vec.type == DRAKEN_DECIMAL || v.vec.type == DRAKEN_DECIMAL128) {
@@ -4821,12 +4834,18 @@ static inline void decimal_operand_scale_prec(
                 std::string(op) + ": missing logical-type descriptor");
         scale = v.logical_type->scale;
         prec  = v.logical_type->precision;
-    } else if (v.vec.type == DRAKEN_INT64) {
+    } else if (is_integer_type(v.vec.type)) {
         scale = 0;
-        prec  = 18;
+        switch (v.vec.type) {
+            case DRAKEN_INT8:  prec = 3;  break;
+            case DRAKEN_INT16: prec = 5;  break;
+            case DRAKEN_INT32: prec = 10; break;
+            default:           prec = 19; break;  // DRAKEN_INT64
+        }
     } else {
         throw std::invalid_argument(
-            std::string(op) + ": operands must be DRAKEN_DECIMAL or DRAKEN_INT64");
+            std::string(op) + ": operands must be DRAKEN_DECIMAL, DRAKEN_DECIMAL128, "
+            "or an integer type");
     }
 }
 
@@ -4851,6 +4870,19 @@ static VectorOwner widen_decimal_to_i128(
     return owner;
 }
 
+// Widen a narrow-int operand (INT8/16/32) to a dense INT64 VectorOwner. The int64
+// decimal kernels (dec_add/…/dec_mul) and widen_decimal_to_i128 read operands at int64
+// stride; a narrow int must therefore be promoted first or they would misread its data.
+// Returns nullptr for INT64 / DECIMAL / DECIMAL128 (already int64-stride). promote_narrow_int
+// resolves the selection and carries per-logical-row validity (§11).
+static std::unique_ptr<VectorOwner> maybe_widen_narrow_int_to_i64(const VectorOwner& v) {
+    const DrakenType t = v.vec.type;
+    if (t == DRAKEN_INT8 || t == DRAKEN_INT16 || t == DRAKEN_INT32)
+        return std::make_unique<VectorOwner>(
+            vecresult_to_owner(draken::ops::promote_narrow_int(v.vec, DRAKEN_INT64)));
+    return nullptr;
+}
+
 // Shared decimal binary-op dispatch with int64↔int128 PROMOTION (I-5).
 // Tier is int128 when either operand is already int128, OR the result needs more than
 // 18 digits of precision/scale (so it can't fit the int64 fast path). int64-backed
@@ -4858,10 +4890,17 @@ static VectorOwner widen_decimal_to_i128(
 // fast path is used.
 typedef VecResult (*DecKernel)(const DrakenVector&, uint8_t, const DrakenVector&, uint8_t);
 static VectorOwner decimal_binop_promote(
-    const VectorOwner& a, uint8_t sa, uint8_t pa,
-    const VectorOwner& b, uint8_t sb, uint8_t pb,
+    const VectorOwner& a_in, uint8_t sa, uint8_t pa,
+    const VectorOwner& b_in, uint8_t sb, uint8_t pb,
     uint8_t rs, int rp_raw, int rs_raw,
     DecKernel k64, DecKernel k128) {
+    // Widen narrow ints to INT64 once (scale/prec were already taken from the ORIGINAL
+    // widths by the caller, so the result tier still matches the binder). After this,
+    // both the int64 kernels and widen_decimal_to_i128 read every operand at int64 stride.
+    std::unique_ptr<VectorOwner> aw_int = maybe_widen_narrow_int_to_i64(a_in);
+    std::unique_ptr<VectorOwner> bw_int = maybe_widen_narrow_int_to_i64(b_in);
+    const VectorOwner& a = aw_int ? *aw_int : a_in;
+    const VectorOwner& b = bw_int ? *bw_int : b_in;
     const bool a128 = (a.vec.type == DRAKEN_DECIMAL128);
     const bool b128 = (b.vec.type == DRAKEN_DECIMAL128);
     // Promote to DECIMAL128 when either operand is already int128 (mixed-tier), OR
@@ -4929,18 +4968,26 @@ static VectorOwner decimal_mul_dispatch(const VectorOwner& a, const VectorOwner&
                                  draken::ops::dec_mul, draken::ops::dec128_mul);
 }
 
-static VectorOwner decimal_div_dispatch(const VectorOwner& a, const VectorOwner& b) {
+static VectorOwner decimal_div_dispatch(const VectorOwner& a_in, const VectorOwner& b_in) {
     uint8_t sa, pa, sb, pb;
-    decimal_operand_scale_prec(a, "dec_div", sa, pa);
-    decimal_operand_scale_prec(b, "dec_div", sb, pb);
+    decimal_operand_scale_prec(a_in, "dec_div", sa, pa);
+    decimal_operand_scale_prec(b_in, "dec_div", sb, pb);
     // result_scale = max(sa + 6, 6); result_prec ≈ pa + 6 (both capped at the tier max).
     // DIV has a 5-arg kernel signature, so it can't go through decimal_binop_promote
     // (which is typed for 4-arg add/sub/mul/mod) — the int128 promotion is inlined here.
     const int rs_raw = ((int)sa + 6 >= 6) ? (int)sa + 6 : 6;
     const int rp_raw = (int)pa + 6;
+    // Widen narrow ints to INT64 (scale/prec already taken from the original widths).
+    std::unique_ptr<VectorOwner> aw_int = maybe_widen_narrow_int_to_i64(a_in);
+    std::unique_ptr<VectorOwner> bw_int = maybe_widen_narrow_int_to_i64(b_in);
+    const VectorOwner& a = aw_int ? *aw_int : a_in;
+    const VectorOwner& b = bw_int ? *bw_int : b_in;
     const bool a128 = (a.vec.type == DRAKEN_DECIMAL128);
     const bool b128 = (b.vec.type == DRAKEN_DECIMAL128);
-    const bool need128 = a128 || b128;  // mixed-only promotion (I-5), matching the binop path
+    // Promote when either operand is int128, OR the result precision/scale exceeds the
+    // int64 cap of 18 (type-driven overflow) — same posture as decimal_binop_promote, so
+    // the runtime tier matches the bound schema for divides whose result is DECIMAL128.
+    const bool need128 = a128 || b128 || rp_raw > 18 || rs_raw > 18;
 
     if (need128) {
         const uint8_t rs = (rs_raw <= 38) ? (uint8_t)rs_raw : 38u;

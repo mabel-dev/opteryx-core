@@ -164,7 +164,9 @@ def _resolve_kernel_and_context(str kernel_name, context_allocator=None, context
 
     context_wrapper = None
     if context_allocator is not None:
-        if context_arg is not None:
+        if isinstance(context_arg, tuple):
+            ctx_ptr = context_allocator(*context_arg)   # multi-arg ctx (binop scales/units)
+        elif context_arg is not None:
             ctx_ptr = context_allocator(context_arg)
         else:
             ctx_ptr = context_allocator()
@@ -247,9 +249,47 @@ _BOP_CODE = {
 _BINOP_NATIVE_INT = frozenset({"INT8", "INT16", "INT32", "INT64"})
 _BINOP_NATIVE_FLOAT = frozenset({"FLOAT32", "FLOAT64"})
 _BINOP_NATIVE_STRING = frozenset({"VARCHAR", "NVARCHAR", "VARBINARY"})
+_BINOP_NATIVE_INTERVAL = frozenset({"INTERVAL"})
+_BINOP_NATIVE_DECIMAL = frozenset({"DECIMAL", "DECIMAL128"})
+_BINOP_NATIVE_TEMPORAL = frozenset({"DATE32", "TIMESTAMP64"})
 
-def _c_native_binop(int op_code, left_phys, right_phys):
-    """True iff draken_binop handles (op_code, left_phys, right_phys) today."""
+
+def _binop_dec_scale(ct):
+    """DECIMAL/DECIMAL128 scale off a bound ColumnType (0 if not decimal)."""
+    if ct is None or ct.logical is None:
+        return 0
+    s = getattr(ct.logical, "scale", None)
+    return int(s) if s is not None else 0
+
+
+def _binop_dec_precision(ct):
+    """DECIMAL/DECIMAL128 precision off a bound ColumnType (0 if not decimal)."""
+    if ct is None or ct.logical is None:
+        return 0
+    p = getattr(ct.logical, "precision", None)
+    return int(p) if p is not None else 0
+
+
+def _binop_ts_unit(ct):
+    """TimestampUnit int (0=s,1=ms,2=us,3=ns) off a bound TIMESTAMP/TIME ColumnType
+    (0 otherwise; date32 has no unit)."""
+    if ct is None or ct.logical is None:
+        return 0
+    u = getattr(ct.logical, "unit", None)
+    if u is None:
+        return 0
+    v = getattr(u, "value", None)
+    return int(v) if v is not None else int(u)
+
+def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
+    """True iff draken_binop handles (op_code, left_phys, right_phys) today.
+
+    result_phys (the bound result physical type) guards the same-kind decimal case:
+    the dec_*/dec128_* kernels output the SAME kind as their operands, so if the
+    binder promotes the result to a different kind (e.g. DECIMAL × DECIMAL whose
+    precision exceeds 18 → DECIMAL128), the kernel's physical output disagrees with
+    the bound type and a downstream op reads the wrong width. Stay on the closure
+    for those. When result_phys is None (introspection) the guard is skipped."""
     if left_phys is None or right_phys is None:
         return False
     cdef bint l_int = left_phys in _BINOP_NATIVE_INT
@@ -258,6 +298,60 @@ def _c_native_binop(int op_code, left_phys, right_phys):
     cdef bint r_num = r_int or (right_phys in _BINOP_NATIVE_FLOAT)
     # Arithmetic PLUS/MINUS/MULTIPLY/DIVIDE/MODULO/INT_DIVIDE over numeric
     # (draken_binop handles cross-width widening + int/float promotion + true div).
+    # INTERVAL ± INTERVAL → INTERVAL (S-A.1). MUST precede the numeric range check
+    # below: PLUS/MINUS fall in [BOP_PLUS, BOP_INT_DIVIDE], whose `return l_num and
+    # r_num` would short-circuit to False for interval operands. draken_binop wires
+    # the existing component-wise interval_add/sub kernels (same as the closure).
+    # PLUS/MINUS only; interval mul/div/mod are unsupported (stay on the closure).
+    if op_code == BOP_PLUS or op_code == BOP_MINUS:
+        if left_phys in _BINOP_NATIVE_INTERVAL and right_phys in _BINOP_NATIVE_INTERVAL:
+            return True
+    # DECIMAL (S-A.2): same-kind DECIMAL/DECIMAL128, or decimal × float → FLOAT64.
+    # + - * / % only (not INT_DIVIDE). Cross-kind (DECIMAL×DECIMAL128) and decimal×int
+    # have no kernel case yet → stay on the closure. Same-kind results (→ DECIMAL)
+    # carry their precision/scale descriptor across the c-native wrap (the binder
+    # stamps it via ctx; the executor reattaches it). MUST precede the numeric range
+    # check (decimal operands are not l_num/r_num → would short-circuit to False).
+    if BOP_PLUS <= op_code <= BOP_MODULO:
+        l_dec = left_phys in _BINOP_NATIVE_DECIMAL
+        r_dec = right_phys in _BINOP_NATIVE_DECIMAL
+        if l_dec and r_dec and left_phys == right_phys \
+                and (result_phys is None or result_phys == left_phys):
+            return True
+        if (l_dec and right_phys in _BINOP_NATIVE_FLOAT) or \
+                (r_dec and left_phys in _BINOP_NATIVE_FLOAT):
+            return True
+        # DECIMAL(int64) × INT64 → DECIMAL (S-A.3): the INT64 side is a scale-0
+        # decimal, handled by the same dec_* kernels. Only DECIMAL (not DECIMAL128)
+        # and only INT64 (dec_* read int64 stride); the result must stay DECIMAL
+        # (promotion to DECIMAL128 needs int128 widening → closure).
+        if ((left_phys == "DECIMAL" and right_phys == "INT64") or
+                (left_phys == "INT64" and right_phys == "DECIMAL")) and \
+                (result_phys is None or result_phys == "DECIMAL"):
+            return True
+        # DECIMAL128 promotion (S-A.3 completion): DECIMAL128 × INT64 (either order) and
+        # cross-kind DECIMAL × DECIMAL128 (either order). draken_binop widens the
+        # int64-backed operand to int128 and runs dec128_*; the result is always
+        # DECIMAL128 (the rc-5 wrap reattaches precision/scale). INT64 only — narrow ints
+        # (INT8/16/32) stay on the closure, which widens them itself.
+        l128 = left_phys == "DECIMAL128"
+        r128 = right_phys == "DECIMAL128"
+        l_i64dec = left_phys == "DECIMAL" or left_phys == "INT64"
+        r_i64dec = right_phys == "DECIMAL" or right_phys == "INT64"
+        if ((l128 and r_i64dec) or (r128 and l_i64dec)) and \
+                (result_phys is None or result_phys == "DECIMAL128"):
+            return True
+    # TEMPORAL (S-A.2): date/ts ± interval → TIMESTAMP(µs); date/ts − date/ts → INTERVAL.
+    # The TIMESTAMP result carries its unit descriptor across the c-native wrap.
+    if op_code == BOP_PLUS or op_code == BOP_MINUS:
+        l_tmp = left_phys in _BINOP_NATIVE_TEMPORAL
+        r_tmp = right_phys in _BINOP_NATIVE_TEMPORAL
+        if l_tmp and right_phys in _BINOP_NATIVE_INTERVAL:
+            return True
+        if op_code == BOP_PLUS and left_phys in _BINOP_NATIVE_INTERVAL and r_tmp:
+            return True
+        if op_code == BOP_MINUS and l_tmp and r_tmp:
+            return True
     if BOP_PLUS <= op_code <= BOP_INT_DIVIDE:
         return l_num and r_num
     # IP-in-CIDR: BitwiseOr over string operands (left = IP column, right = CIDR
@@ -693,6 +787,8 @@ cdef Py_ssize_t _linearize(
         bin_right_sc = <object>node.right.schema_column if node.right.schema_column != NULL else None
         bin_left_type = bin_left_sc.column_type if bin_left_sc is not None else None
         bin_right_type = bin_right_sc.column_type if bin_right_sc is not None else None
+        bin_result_sc = <object>node.schema_column if node.schema_column != NULL else None
+        bin_result_type = bin_result_sc.column_type if bin_result_sc is not None else None
         bin_op_str = <object>node.value
 
         sub_depth = _linearize(node.left, bc, depth)
@@ -717,19 +813,36 @@ cdef Py_ssize_t _linearize(
         # binop not yet C-native. _c_native_binop is the single source of truth.
         bin_left_phys = getattr(bin_left_type.physical, "name", None) if bin_left_type is not None else None
         bin_right_phys = getattr(bin_right_type.physical, "name", None) if bin_right_type is not None else None
-        if _c_native_binop(slot.op_code, bin_left_phys, bin_right_phys):
+        bin_result_phys = getattr(bin_result_type.physical, "name", None) if bin_result_type is not None else None
+        if _c_native_binop(slot.op_code, bin_left_phys, bin_right_phys, bin_result_phys):
             from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
+            # S-A.2 ctx metadata: DECIMAL scales + TIMESTAMP units from the bound
+            # logical types (the physical DrakenVector carries neither). result_scale
+            # is the binder's own resolved decimal result scale (read, not re-derived,
+            # so byte-identical to the operator_map). All zero for numeric/interval/
+            # string/bitwise, which don't read them.
+            # result_scale/result_precision are the binder's own resolved decimal
+            # result descriptor (read off bin_result_type, not re-derived). The kernel
+            # stamps them onto the VecResult so the executor wrap reattaches the
+            # LogicalType (precision/scale for DECIMAL; unit for TIMESTAMP).
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
-                "draken_binop", alloc_binary_op_ctx, slot.op_code)
+                "draken_binop", alloc_binary_op_ctx,
+                (slot.op_code,
+                 _binop_dec_scale(bin_left_type), _binop_dec_scale(bin_right_type),
+                 _binop_dec_scale(bin_result_type), _binop_dec_precision(bin_result_type),
+                 _binop_ts_unit(bin_left_type), _binop_ts_unit(bin_right_type)))
             if fn_ptr is not None and ctx_wrapper is not None:
                 slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
                 slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
                 bc._hold(ctx_wrapper)   # keep ctx alive for the bytecode's lifetime
                 slot.flags |= BC_INSTR_C_NATIVE
-                # S2: every C-native binop is fixed-width EXCEPT string concat
-                # (BOP_STRING_CONCAT → VARCHAR/NVARCHAR/VARBINARY owner). IP-in-CIDR
-                # (BOP_BITWISE_OR over strings) returns BOOL = fixed-width.
-                if slot.op_code != BOP_STRING_CONCAT:
+                # S2: a C-native binop is BC_C_NATIVE_FIXED (arena-foldable, nogil)
+                # EXCEPT when the result needs a Python-side descriptor wrap: string
+                # concat (string owner) and parameterized DECIMAL/TIMESTAMP results
+                # (precision/scale or unit reattached via the rc-5 wrap). Those are
+                # excluded from the nogil whole-expression fast path.
+                if slot.op_code != BOP_STRING_CONCAT and \
+                        bin_result_phys not in ("DECIMAL", "DECIMAL128", "TIMESTAMP64"):
                     slot.flags |= BC_C_NATIVE_FIXED
 
         # Phase 1 result-wrap pattern: kernels return nanobind Vectors.

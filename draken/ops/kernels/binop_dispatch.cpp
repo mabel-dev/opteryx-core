@@ -9,6 +9,7 @@
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx
 #include "ops/fixed_int_ops.h"            // draken::ops::fi_int_arith, fi_combine_validity
 #include "ops/decimal_arith.h"            // draken::ops::dec_add/sub/mul/div/mod
+#include "ops/interval_ops.h"             // draken::ops::interval_add/sub (S-A.1)
 #include "ops/int_bitwise.h"              // draken::ops::bitwise_and/or/xor/shl/shr
 #include "ops/int64_compare.h"            // draken::ops::cmp_alloc_bool_buf (IP-in-CIDR result)
 #include "ops/kernels/result_helpers.h"   // vecresult_from_string_buffers
@@ -380,36 +381,191 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         // the float true-divide clause. DECIMAL128, decimal×int, decimal×float are
         // later P9.1b sub-stages.
         if (lt == DRAKEN_DECIMAL && rt == DRAKEN_DECIMAL) {
-            const unsigned char sa = static_cast<const binary_op_ctx*>(ctx)->left_scale;
-            const unsigned char sb = static_cast<const binary_op_ctx*>(ctx)->right_scale;
-            const unsigned char rs = static_cast<const binary_op_ctx*>(ctx)->result_scale;
+            const auto* c = static_cast<const binary_op_ctx*>(ctx);
+            const unsigned char sa = c->left_scale;
+            const unsigned char sb = c->right_scale;
+            const unsigned char rs = c->result_scale;
+            VecResult r;
             switch (op) {
-                case BOP_PLUS:     return draken::ops::dec_add(*left, sa, *right, sb);
-                case BOP_MINUS:    return draken::ops::dec_sub(*left, sa, *right, sb);
-                case BOP_MULTIPLY: return draken::ops::dec_mul(*left, sa, *right, sb);
-                case BOP_DIVIDE:   return draken::ops::dec_div(*left, sa, *right, sb, rs);
-                case BOP_MODULO:   return draken::ops::dec_mod(*left, sa, *right, sb);
+                case BOP_PLUS:     r = draken::ops::dec_add(*left, sa, *right, sb); break;
+                case BOP_MINUS:    r = draken::ops::dec_sub(*left, sa, *right, sb); break;
+                case BOP_MULTIPLY: r = draken::ops::dec_mul(*left, sa, *right, sb); break;
+                case BOP_DIVIDE:   r = draken::ops::dec_div(*left, sa, *right, sb, rs); break;
+                case BOP_MODULO:   r = draken::ops::dec_mod(*left, sa, *right, sb); break;
                 default:
                     return draken_error_sentinel_fmt(
                         "draken_binop: unsupported op %d for DECIMAL", op);
             }
+            // Stamp the result descriptor (precision/scale) so the executor wrap can
+            // reattach the LogicalType — the binder's bound result scale equals the
+            // kernel's output scale (downstream consumes that type), so it is correct.
+            r.dec_precision = c->result_precision;
+            r.dec_scale = c->result_scale;
+            return r;
         }
 
         // DECIMAL128 × DECIMAL128 (both int128-backed) → DECIMAL128 (P9.1b-rest),
         // via dec128_* (same scale rules / same kernels as the live path).
         if (lt == DRAKEN_DECIMAL128 && rt == DRAKEN_DECIMAL128) {
-            const unsigned char sa = static_cast<const binary_op_ctx*>(ctx)->left_scale;
-            const unsigned char sb = static_cast<const binary_op_ctx*>(ctx)->right_scale;
-            const unsigned char rs = static_cast<const binary_op_ctx*>(ctx)->result_scale;
+            const auto* c = static_cast<const binary_op_ctx*>(ctx);
+            const unsigned char sa = c->left_scale;
+            const unsigned char sb = c->right_scale;
+            const unsigned char rs = c->result_scale;
+            VecResult r;
             switch (op) {
-                case BOP_PLUS:     return draken::ops::dec128_add(*left, sa, *right, sb);
-                case BOP_MINUS:    return draken::ops::dec128_sub(*left, sa, *right, sb);
-                case BOP_MULTIPLY: return draken::ops::dec128_mul(*left, sa, *right, sb);
-                case BOP_DIVIDE:   return draken::ops::dec128_div(*left, sa, *right, sb, rs);
-                case BOP_MODULO:   return draken::ops::dec128_mod(*left, sa, *right, sb);
+                case BOP_PLUS:     r = draken::ops::dec128_add(*left, sa, *right, sb); break;
+                case BOP_MINUS:    r = draken::ops::dec128_sub(*left, sa, *right, sb); break;
+                case BOP_MULTIPLY: r = draken::ops::dec128_mul(*left, sa, *right, sb); break;
+                case BOP_DIVIDE:   r = draken::ops::dec128_div(*left, sa, *right, sb, rs); break;
+                case BOP_MODULO:   r = draken::ops::dec128_mod(*left, sa, *right, sb); break;
                 default:
                     return draken_error_sentinel_fmt(
                         "draken_binop: unsupported op %d for DECIMAL128", op);
+            }
+            r.dec_precision = c->result_precision;
+            r.dec_scale = c->result_scale;
+            return r;
+        }
+
+        // DECIMAL(int64) op INT64 → DECIMAL (S-A.3). The INT64 operand is a scale-0
+        // decimal: the binder passes scale 0 for it in ctx, so the same dec_* kernels
+        // apply directly (they read int64 data + align scales). Order-preserving via
+        // ctx left/right scale. Only DRAKEN_DECIMAL (int64) × DRAKEN_INT64 — DECIMAL128
+        // or narrower ints would need int128/width widening (binder keeps those on the
+        // closure; result-kind guard keeps promotion-to-DECIMAL128 off this path too).
+        if ((lt == DRAKEN_DECIMAL && rt == DRAKEN_INT64) ||
+            (lt == DRAKEN_INT64 && rt == DRAKEN_DECIMAL)) {
+            const auto* c = static_cast<const binary_op_ctx*>(ctx);
+            const unsigned char sa = c->left_scale;   // 0 on the INT64 side
+            const unsigned char sb = c->right_scale;
+            const unsigned char rs = c->result_scale;
+            VecResult r;
+            switch (op) {
+                case BOP_PLUS:     r = draken::ops::dec_add(*left, sa, *right, sb); break;
+                case BOP_MINUS:    r = draken::ops::dec_sub(*left, sa, *right, sb); break;
+                case BOP_MULTIPLY: r = draken::ops::dec_mul(*left, sa, *right, sb); break;
+                case BOP_DIVIDE:   r = draken::ops::dec_div(*left, sa, *right, sb, rs); break;
+                case BOP_MODULO:   r = draken::ops::dec_mod(*left, sa, *right, sb); break;
+                default:
+                    return draken_error_sentinel_fmt(
+                        "draken_binop: unsupported op %d for DECIMAL×INT64", op);
+            }
+            r.dec_precision = c->result_precision;
+            r.dec_scale = c->result_scale;
+            return r;
+        }
+
+        // DECIMAL128 PROMOTION (S-A.3 completion): at least one operand is int128-backed
+        // DECIMAL128 and the other is int64-backed (DRAKEN_DECIMAL or DRAKEN_INT64) — i.e.
+        // DECIMAL128 × INT64, INT64 × DECIMAL128, or cross-kind DECIMAL × DECIMAL128 (either
+        // order). The int64-backed operand is widened to int128 (widen_i64_to_dec128 —
+        // §11-uniform, validity preserved) and the dec128_* kernels run. The result is
+        // always DECIMAL128 (the wrap reattaches precision/scale from ctx). Same-kind int64
+        // DECIMAL×DECIMAL / DECIMAL×INT64 whose result fits DECIMAL are handled above; the
+        // DECIMAL128-result variants of those stay on the closure (the _c_native_binop guard
+        // requires result_phys == operand kind), so they never reach here.
+        {
+            auto is_i64_decimalish = [](DrakenType t) {
+                return t == DRAKEN_DECIMAL || t == DRAKEN_INT64;
+            };
+            const bool promote128 =
+                (lt == DRAKEN_DECIMAL128 && is_i64_decimalish(rt)) ||
+                (rt == DRAKEN_DECIMAL128 && is_i64_decimalish(lt));
+            if (promote128) {
+                const auto* c = static_cast<const binary_op_ctx*>(ctx);
+                const unsigned char sa = c->left_scale;
+                const unsigned char sb = c->right_scale;
+                const unsigned char rs = c->result_scale;
+                // Widen the int64-backed side(s) to int128; the DECIMAL128 side is used in
+                // place. Exactly one side widens (the other is already DECIMAL128). Temp
+                // buffers are freed after the kernel, including on the throw path.
+                VecResult lw{};
+                VecResult rw{};
+                bool lw_used = false;
+                bool rw_used = false;
+                DrakenVector lv = *left;
+                DrakenVector rv = *right;
+                if (lt != DRAKEN_DECIMAL128) {
+                    lw = draken::ops::widen_i64_to_dec128(*left);
+                    lv = draken_vector_from_dense(lw.data, lw.length, DRAKEN_DECIMAL128, lw.validity);
+                    lw_used = true;
+                }
+                if (rt != DRAKEN_DECIMAL128) {
+                    rw = draken::ops::widen_i64_to_dec128(*right);
+                    rv = draken_vector_from_dense(rw.data, rw.length, DRAKEN_DECIMAL128, rw.validity);
+                    rw_used = true;
+                }
+                auto free_temps = [&]() {
+                    if (lw_used) { draken_free(lw.data); draken_free(lw.validity); }
+                    if (rw_used) { draken_free(rw.data); draken_free(rw.validity); }
+                };
+                VecResult r;
+                try {
+                    switch (op) {
+                        case BOP_PLUS:     r = draken::ops::dec128_add(lv, sa, rv, sb); break;
+                        case BOP_MINUS:    r = draken::ops::dec128_sub(lv, sa, rv, sb); break;
+                        case BOP_MULTIPLY: r = draken::ops::dec128_mul(lv, sa, rv, sb); break;
+                        case BOP_DIVIDE:   r = draken::ops::dec128_div(lv, sa, rv, sb, rs); break;
+                        case BOP_MODULO:   r = draken::ops::dec128_mod(lv, sa, rv, sb); break;
+                        default:
+                            free_temps();
+                            return draken_error_sentinel_fmt(
+                                "draken_binop: unsupported op %d for DECIMAL128 promotion", op);
+                    }
+                } catch (...) {
+                    free_temps();
+                    throw;
+                }
+                free_temps();
+                r.dec_precision = c->result_precision;
+                r.dec_scale = c->result_scale;
+                return r;
+            }
+        }
+
+        // INTERVAL ± INTERVAL → INTERVAL (S-A.1). Component-wise months/µs add/sub —
+        // the SAME draken::ops kernels the live closure calls (byte-identical), so
+        // this just removes the per-morsel Python-closure hop. No scales/units.
+        if (lt == DRAKEN_INTERVAL && rt == DRAKEN_INTERVAL) {
+            switch (op) {
+                case BOP_PLUS:  return draken::ops::interval_add(*left, *right);
+                case BOP_MINUS: return draken::ops::interval_sub(*left, *right);
+                default:
+                    return draken_error_sentinel_fmt(
+                        "draken_binop: unsupported op %d for INTERVAL", op);
+            }
+        }
+
+        // TEMPORAL ± / − (S-A.2). date/ts ± interval → TIMESTAMP64(µs); date/ts −
+        // date/ts → INTERVAL. The SAME draken::ops kernels the closure calls. The
+        // timestamp unit is a LogicalType detail (not on DrakenVector), so it arrives
+        // via ctx (left_unit/right_unit); date32 operands ignore it. signum from op.
+        {
+            auto is_temporal = [](DrakenType t) {
+                return t == DRAKEN_DATE32 || t == DRAKEN_TIMESTAMP64;
+            };
+            const auto* bctx = static_cast<const binary_op_ctx*>(ctx);
+            // temporal ± interval (PLUS either order; MINUS only temporal − interval).
+            // Result is always TIMESTAMP64 in MICROSECONDS (unit 2) — stamp the
+            // descriptor so the executor wrap reattaches the LogicalType.
+            if (is_temporal(lt) && rt == DRAKEN_INTERVAL && (op == BOP_PLUS || op == BOP_MINUS)) {
+                VecResult r = draken::ops::interval_apply_to_temporal(
+                    *left, *right, lt == DRAKEN_DATE32, bctx->left_unit,
+                    op == BOP_PLUS ? 1 : -1);
+                r.ts_unit = 2;  // MICROSECONDS
+                return r;
+            }
+            if (lt == DRAKEN_INTERVAL && is_temporal(rt) && op == BOP_PLUS) {
+                VecResult r = draken::ops::interval_apply_to_temporal(
+                    *right, *left, rt == DRAKEN_DATE32, bctx->right_unit, 1);
+                r.ts_unit = 2;  // MICROSECONDS
+                return r;
+            }
+            // temporal − temporal → INTERVAL
+            if (is_temporal(lt) && is_temporal(rt) && op == BOP_MINUS) {
+                return draken::ops::temporal_minus_temporal(
+                    *left, *right, lt == DRAKEN_DATE32, bctx->left_unit,
+                    rt == DRAKEN_DATE32, bctx->right_unit);
             }
         }
 
@@ -494,11 +650,12 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
             return binop_ip_in_cidr(left, right);
         }
 
-        // Not yet C-native (later P9.1 sub-stages): decimal×integer, cross-kind
-        // DECIMAL×DECIMAL128, temporal, IP-in-CIDR.
+        // Not yet C-native (later P9.1 sub-stages): decimal × NARROW int (INT8/16/32 —
+        // these stay on the closure, which widens them), and any remaining exotic combos.
         return draken_error_sentinel_fmt(
             "draken_binop: combination not yet C-native (covers int/float32/float64 arithmetic, "
-            "true-divide, DECIMAL×DECIMAL, DECIMAL128×DECIMAL128, decimal×float): "
+            "true-divide, DECIMAL×DECIMAL, DECIMAL128×DECIMAL128, DECIMAL×INT64, "
+            "DECIMAL128×INT64, cross-kind DECIMAL×DECIMAL128, decimal×float): "
             "op=%d left_type=%d right_type=%d", op, (int)lt, (int)rt);
     });
 }

@@ -175,10 +175,22 @@ cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit) {
     return ctx;
 }
 
-binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code) {
+binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
+                                          unsigned char left_scale,
+                                          unsigned char right_scale,
+                                          unsigned char result_scale,
+                                          unsigned char result_precision,
+                                          unsigned char left_unit,
+                                          unsigned char right_unit) {
     auto* ctx = static_cast<binary_op_ctx*>(malloc(sizeof(binary_op_ctx)));
     if (ctx) {
         ctx->op_code = op_code;
+        ctx->left_scale = left_scale;
+        ctx->right_scale = right_scale;
+        ctx->result_scale = result_scale;
+        ctx->result_precision = result_precision;
+        ctx->left_unit = left_unit;
+        ctx->right_unit = right_unit;
     }
     return ctx;
 }

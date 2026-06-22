@@ -43,4 +43,7 @@ struct VecResult {
                                                   // it separately (string-family output).
     uint8_t           ts_unit          = 0xFFu;   // TimestampUnit (0..3) for TIMESTAMP64
                                                   // output; 0xFF = no descriptor.
+    uint8_t           dec_precision    = 0u;      // DECIMAL/DECIMAL128 result precision;
+                                                  // 0 = no descriptor (carries scale too).
+    uint8_t           dec_scale        = 0u;      // DECIMAL/DECIMAL128 result scale.
 };

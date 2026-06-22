@@ -111,6 +111,21 @@ static inline VecResult make_decimal128_result(
     return r;
 }
 
+// Widen an int64-backed vector (DRAKEN_DECIMAL or DRAKEN_INT64 — both store int64
+// unscaled values) to a dense int128 DRAKEN_DECIMAL128 VecResult. Resolves the
+// selection (uniform data[selection[i]] access, §11) and copies the per-logical-row
+// validity bitmap unchanged (validity is indexed by logical row, so it carries over).
+// The unscaled value is widened verbatim — scale is unchanged, the caller supplies it
+// to the dec128_* kernel. Caller owns the returned data/validity buffers.
+static inline VecResult widen_i64_to_dec128(const DrakenVector& v) {
+    const uint32_t n = v.length;
+    const int64_t* sd = static_cast<const int64_t*>(v.data);
+    __int128* dst = alloc_i128(n);
+    for (uint32_t i = 0; i < n; ++i)
+        dst[i] = static_cast<__int128>(sd[v.selection[i]]);
+    return make_decimal128_result(dst, copy_validity(v.validity, n), n);
+}
+
 // Safely multiply v by 10, writing result to out. Returns false on int128 overflow.
 static inline bool i128_mul10(__int128 v, __int128& out) {
     // INT128_MAX ≈ 1.7e38; overflow when |v| > INT128_MAX / 10 ≈ 1.7e37.

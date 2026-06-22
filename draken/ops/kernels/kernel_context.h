@@ -59,6 +59,13 @@ struct binary_op_ctx {
     unsigned char left_scale;
     unsigned char right_scale;
     unsigned char result_scale;  // dec_div result scale = max(sa+6,6) capped 18
+    unsigned char result_precision;  // DECIMAL/DECIMAL128 result precision (descriptor)
+    // TIMESTAMP/TIME only (S-A.2): TimestampUnit (0=s,1=ms,2=us,3=ns) of each
+    // temporal operand, supplied by the binder (the unit is a LogicalType detail,
+    // not on the physical DrakenVector). Zero for non-temporal ops. date32 operands
+    // ignore the unit (days); only the TIMESTAMP64 side's unit is read.
+    unsigned char left_unit;
+    unsigned char right_unit;
 };
 
 /**

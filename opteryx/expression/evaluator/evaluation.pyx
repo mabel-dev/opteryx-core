@@ -605,6 +605,7 @@ from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_TIMESTAMP64
 from draken.core.buffers cimport draken_zero_sel, draken_zero_validity
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
@@ -1481,6 +1482,14 @@ cdef inline int _dv_binop_kernel_c(
         return 4
     if (vr.type == DRAKEN_VARCHAR or vr.type == DRAKEN_NVARCHAR
             or vr.type == DRAKEN_VARBINARY):
+        return 5
+    # Parameterized fixed-width results (DECIMAL/DECIMAL128/TIMESTAMP64) carry a
+    # LogicalType descriptor (precision/scale or unit) that the arena DV* cannot
+    # hold — own them as a Vector via the descriptor-attaching wrap (rc 5), like
+    # strings. is_all_c_native excludes these (no BC_C_NATIVE_FIXED), so the nogil
+    # whole-expression fast path never reaches this rc 5 either.
+    if (vr.type == DRAKEN_DECIMAL or vr.type == DRAKEN_DECIMAL128
+            or vr.type == DRAKEN_TIMESTAMP64):
         return 5
     draken_frame_arena_adopt(arena, vr.data)
     if vr.validity != NULL:

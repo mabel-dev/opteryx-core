@@ -134,7 +134,7 @@ breakers to the local/global contract, in C++:
 | Axis | Today | Target |
 |---|---|---|
 | State | one instance owns everything; scheduler clones it | `GlobalSinkState` once + `LocalSinkState` per task |
-| Merge | per-group transplant — **O(groups)** | partition-aligned hand-off — **O(partitions)** |
+| Merge | today's serial path does **no** merge (row-routes disjoint key slices); the reverted hash-partition experiment merged per-group — **O(groups)**, the wall this design exists to avoid | partition-aligned hand-off — **O(partitions)**. **At high cardinality the pointer hand-off alone does NOT scale** (G-A: 1.0–1.5×); the Sink must *route raw to partitions on overflow* (Abandon) so the single aggregation pass happens **once per partition in parallel read-out** (G-A: 4.8× @ DOP8). Abandon is the mechanism, not the pointer hand-off. |
 | Drive | one synchronous `push() nogil` | `Sink`/`Combine`/`Finalize` phases |
 | Read-out | finalize on the instance, ~serial | parallel `Source`, one partition per task |
 
@@ -142,9 +142,17 @@ Rule established by the prototype: **bind orchestration to Python, never the
 morsel.** Morsels stay C++ (`CxxMorsel` / `shared_ptr[CxxMorsel]` — the carrier
 flip already does this); the per-task push loop runs in C++ with the GIL released;
 only the scheduler crosses into Python. This **dissolves the free-threaded
-refcount question** (no PyObject per row) and the nanobind type clash. This rewrite
-converges with the carrier-flip / C++-first morsel initiative
-(`docs/M4_CPP_MORSEL_DESIGN.md`).
+refcount question** (no PyObject per row) and the nanobind type clash.
+
+**Hard prerequisite (not a parallel convergence): the GIL must be genuinely off
+the operator-chain push *bodies* before Stage 1.** The carrier flip
+(`docs/M4_CPP_MORSEL_DESIGN.md`) is structurally landed — the chain currency is
+`shared_ptr[CxxMorsel]` and the push signatures are `noexcept nogil` — but the
+bodies still run under a transitional `with gil:` (only grouped-agg ingest has been
+released so far). Building local/global breakers on a chain that still takes the GIL
+per body means every scaling measurement is taken against a GIL ceiling and model
+wins are indistinguishable from lock contention. Finish the carrier-flip GIL
+release first; then start Stage 1.
 
 ## Deferred from DuckDB (deliberate v1 cuts — not Spark-isms)
 
@@ -166,17 +174,19 @@ cross into Python; GIL off; results checked vs oracles.
 |---|---|---|---|
 | Stateless (scan/filter/project) | `demo_cpp.py` | fused C++ push loop, no per-morsel cast | ✓ |
 | Sort breaker | `demo_sort.py` | local sort + k-way merge | ✓ |
-| Aggregate breaker | `demo_agg.py` | thread-local radix HT, O(partitions) Combine, parallel read-out | ✓ (this IS the DuckDB shape) |
-| Inner join breaker | `demo_join.py` | co-partitioned shuffle + per-partition join | ✗ Spark-style — **redo as stream-the-probe** |
+| Aggregate breaker | `demo_agg.py` / `demo_agg_bench.py` | *correctness* of thread-local radix HT + O(partitions) Combine + parallel read-out; **G-A scaling** showed thread-local HTs flat at high card, route-on-abandon = 4.8× | ✓ shape; scaling needs Abandon (see G-A) |
+| Inner join breaker | `demo_join.py` (old, Spark-style) → `demo_join_stream.py` (G-B) | **stream-the-probe**: shared immutable table + streaming probe + parallel outer-unmatched; correct, probe 6.19× @ DOP8 | ✓ (redone — G-B passed) |
 
-The join demo is the one piece to rebuild to match the model (shared-table build +
-streaming probe).
+The join demo has been rebuilt to match the model (shared-table build + streaming
+probe) in `demo_join_stream.py` — see Gate G-B (passed).
 
 ## Substrate to reuse
 
 `CppThreadPool`; `pull_one` (reentrant scan); `_clone_op`; `identify_segments` +
-`OperatorParallelism`; `PipelineContext` (terminate / `_exc` /
-`set_expected_input_closes`); exported C-ABI handles (`cxx_morsel_raw_ptr`,
+`OperatorParallelism`; `PipelineContext` (terminate / `_exc`; note
+`set_expected_input_closes` does **not** exist yet — only the
+`_expected_input_closes` attribute — the scheduler must add the setter); exported
+C-ABI handles (`cxx_morsel_raw_ptr`,
 `cxx_take_c`) for out-of-tree C++. The agg engine's `merge()` is the embryo of
 `Combine` but must become **radix-aligned (O(partitions))**. **Supersedes**
 `_ScatterCollectEngine`, `_DistinctCollector`, `_parallel_engines`, the four
@@ -197,6 +207,107 @@ matrix — those were the Spark design and are dropped.)
 3. k-way merge kernel for sort.
 4. Parallel read-out `Source` role on breakers.
 5. Retire the single-scan finders/seams.
+
+## v1 parallel surface (explicit scope)
+
+What this plan makes parallel: **grouped/ungrouped aggregate, distinct, inner/equi
+join (streaming probe), sort.** What stays **serial in v1**, by deliberate cut:
+
+- **CROSS / non-equi joins** (keyless — no partition key).
+- **Window functions** (`WindowNode`).
+- **Set-op `ALL`** (INTERSECT/EXCEPT ALL ride on ROW_NUMBER + semi/anti join; they
+  inherit join parallelism only once Stage 4 lands, and the ROW_NUMBER prefix stays
+  serial).
+- **LIMIT-only / subquery / projection-only** segments.
+
+This is stated so "the join parallelised but my windowed query is still
+single-threaded" is a documented boundary, not a surprise. None of these are
+architecturally blocked — they are out of v1 scope.
+
+## De-risking gates (prototype-tier, before the matching engine stage)
+
+The prototype proved the *shapes run correctly vs. an oracle*. It did **not** prove
+the two things this project can actually fail on. Each gate below is cheap
+(prototype / microbench, no engine rewrite) and **must pass before its engine stage
+begins** — so a failure costs a microbench, not a breaker rewrite.
+
+- **Gate G-A → blocks Stage 2. ✅ PASSED (conditionally) — `scratch/ddb_proto/demo_agg_bench.py`.**
+  Microbenched the high-cardinality regime (580k groups, 9.6M rows) at DOP 1/2/4/8.
+  Result, and the condition it imposes on Stage 2:
+  - **Thread-local full hash tables do NOT scale** (1.0–1.5×; fat radix *worse* at
+    0.51×). With round-robin morsels every thread's local HT covers most of the key
+    space → total build work multiplies by ~DOP, `sink` wall-clock never shrinks.
+    This faithfully reproduces the prior reverted result.
+  - **Route-raw + aggregate-once (the design's `Abandon()`) scales: 2.33× / 3.14× /
+    4.80× at DOP 2/4/8.** The Sink only hashes+routes raw keys to partition buffers;
+    the single aggregation pass runs once per partition in the parallel read-out.
+  - **Verdict:** Stage 2 is justified **only if built as route-on-abandon, not
+    thread-local full HTs.** Bounded-adaptive Abandon is load-bearing, not optional.
+  - **Wide-payload qualifier — CLOSED.** Re-ran with a multi-aggregate payload
+    (COUNT+SUM+MIN+MAX, the Q23/Q31/Q33 shape): route-on-abandon scales **4.87×** at
+    DOP8 (vs 4.80× on bare COUNT(*)) while the HT strawman gets *worse* (0.51×) — the
+    bigger per-group state multiplies harder. HT and route cross-check **identical**
+    (580k groups, 2.784M rows), so the win is not a corner cut.
+  - **String keys:** at the aggregate breaker a draken string key reduces to a
+    fixed-width hash slot (hash-only equality, hash computed at scan), so it behaves
+    as the int-hash case already proven — not a separate risk for the breaker. (The
+    real-data Q34/Q13 string-key flatness is end-to-end and likely scan-bound, a
+    separate axis the agg breaker does not own.)
+  *Why this gate existed:* intra-op agg parallelism was already tried and **reverted**
+  — round-robin (0.94×) and hash-partition (0.62–0.72×) both **lost** on ClickBench
+  because recombination cost ≈ aggregation cost at high NDV.
+- **Gate G-B → blocks Stage 4. ✅ PASSED — `scratch/ddb_proto/demo_join_stream.py`.**
+  Rebuilt the join as **stream-the-probe** (the old `demo_join.py` is the disowned
+  Spark-style co-partitioned shuffle). Proven in isolation:
+  - (a) thread-local build collection → ONE shared **immutable** table (finalize);
+  - (b) **streaming probe, no probe materialization** — probe parallelism inherited
+    from the probe scan's morsels;
+  - (c) **parallel emission of unmatched build rows for outer joins** (per-build-row
+    matched flag set during probe, then a parallel range-claimed pass).
+  - **Correctness:** inner match count/sum AND outer unmatched-build count/sum match
+    the oracle, including build keys that never probe.
+  - **Probe scaling:** 2.14× / 4.21× / **6.19×** at DOP 2/4/8 on a fixed read-only
+    table (12.8M probe rows) — near-linear, no recombination tail (there is nothing
+    to recombine on the probe side; that is the model's advantage over the shuffle).
+  - **Verdict:** the highest-risk stage now has a validated prototype. Stage 4 builds
+    this shape (keyless/non-equi joins still fall back to serial per the design).
+
+## Implementation plan (staged)
+
+Sequencing falls out of two lessons — the scheduler is the easy half, and `DOP=1`
+must never regress — plus the ClickBench read: start where headroom *and* our lead
+concentrate (the heavy agg/scan band, Q17–Q35). Each stage ships green; the gate is
+the same every time.
+
+**Cross-cutting gate (every stage):** `make q` (190) + tpch (22) + clickbench (43)
+green · result-identical to serial (`workers=1` vs `N`) · **`DOP=1` within noise of
+today's serial path** · orchestration crosses to Python, never the morsel.
+
+| Stage | Scope | Primary area | Risk |
+|---|---|---|---|
+| **0 · Scheduler skeleton + harness** | Build the DOP-sweep `make` target **first** (it certifies every later stage). Then: event-DAG + pipeline decomposition from `identify_segments`; data-bounded DOP; drive the **existing** operators. **NOT a no-op** — data-bounded DOP replaces `resolve_worker_count` + `PARALLEL_MIN_ROWS` (a live 262 144-row floor), which *is* a worker-count behavioral change. Either keep the floor constants through Stage 0, or prove the DOP formula reproduces today's worker decisions across the q/tpch/clickbench corpus before declaring green. | `opteryx/managers/execution/` (reuse `PipelineContext` — add the missing `set_expected_input_closes` setter —, `drive_scan`, `CppThreadPool`) | low–medium — no operator changes, but the DOP switch is behavioral |
+| **1 · Aggregate → contract, `DOP=1`** | Carrier-flip GIL-off bodies done (hard prereq). Agg exposes `Global/LocalSinkState` + `Sink/Combine/Finalize` in C++; `DOP=1` ⇒ 1 partition ⇒ current path. | `operators/grouped_aggregate_hashed/` + draken `GroupHashEngine` | medium — contract on the real engine |
+| **G-A** | ✅ *Combine microbench gate — PASSED conditionally (above). Verdict: route-on-abandon scales (4.8×), thread-local full HTs do not.* | `scratch/ddb_proto/demo_agg_bench.py` | — gate |
+| **2 · Aggregate parallelism on** | **Route-on-abandon** at `DOP>1` (G-A condition): Sink hashes+routes raw to partitions, aggregation runs **once per partition in parallel read-out**; **O(partitions) Combine**; bounded-adaptive (small/low-card stays local pre-agg, overflow → Abandon). First real win. Re-confirm vs wide payloads + string keys. | same | medium-high — merge/read-out correctness + the win |
+| **3 · Distinct** | Mirror of agg (radix dedup, parallel read-out). | `operators/distinct/` | medium |
+| **G-B** | ✅ *Stream-the-probe prototype gate — PASSED (above). Correct inner+outer; probe scales 6.19× @ DOP8, no probe materialization.* | `scratch/ddb_proto/demo_join_stream.py` | — gate |
+| **4 · Inner/equi join** | Multi-scan pipeline DAG (build-before-probe dependency); thread-local build tables → one shared table → **streaming probe**; keyless → serial. Unlocks join-heavy queries. | `operators/hashed_inner_join/` + join engines | high — multi-input, ordering, engine rewrite |
+| **5 · Sort** | Parallel local sort + k-way merge tail. | `operators/sort/` + new k-way merge kernel | medium |
+| **6 · Cleanup** | Retire the single-scan finders/seams (`_find_parallel_*`, `_ScatterCollectEngine`, `_DistinctCollector`, `_parallel_engines`). | `parallel_engine.py` | low |
+
+**Critical path:** 0 → 1 → G-A → 2 → G-B → 4 (skeleton+harness, then the agg
+contract, prove the Combine win, turn agg on, prove stream-the-probe, then the
+multi-scan unlock). 3 and 5 are independent after 0. G-B is independent of 1–3 and
+should run as early as there is capacity.
+
+**Validation harness (Stage 0's first deliverable, not an afterthought):** extend
+the prototype's `DOP=1` gate into a `make` target — a DOP sweep (1/2/4/8) proving
+both serial parity at `DOP=1` and scaling above it, on the Q17–Q35 band first. No
+stage can be certified without it; that is why it leads Stage 0.
+
+**Deferred (named, not on the path):** radix-join-as-second-strategy (above
+`DOP=1`); the cooperative `BLOCKED` async machine; spill (slots into the sink via
+radix-bit raising). None blocks v1.
 
 ## Verification
 
