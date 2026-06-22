@@ -378,9 +378,11 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         // same kernels the live closure uses, so byte-identical). Scales come from
         // ctx (the binder fills them; DrakenVector carries no scale). DECIMAL `/`
         // stays DECIMAL (dec_div with result_scale), NOT float — handled here before
-        // the float true-divide clause. DECIMAL128, decimal×int, decimal×float are
-        // later P9.1b sub-stages.
-        if (lt == DRAKEN_DECIMAL && rt == DRAKEN_DECIMAL) {
+        // the float true-divide clause. When the bound result precision exceeds the
+        // int64 tier (>18) the result is DECIMAL128: skip this int64 path and fall to
+        // the promotion block below (which widens both operands to int128).
+        if (lt == DRAKEN_DECIMAL && rt == DRAKEN_DECIMAL &&
+            static_cast<const binary_op_ctx*>(ctx)->result_precision <= 18) {
             const auto* c = static_cast<const binary_op_ctx*>(ctx);
             const unsigned char sa = c->left_scale;
             const unsigned char sb = c->right_scale;
@@ -430,11 +432,14 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         // DECIMAL(int64) op INT64 → DECIMAL (S-A.3). The INT64 operand is a scale-0
         // decimal: the binder passes scale 0 for it in ctx, so the same dec_* kernels
         // apply directly (they read int64 data + align scales). Order-preserving via
-        // ctx left/right scale. Only DRAKEN_DECIMAL (int64) × DRAKEN_INT64 — DECIMAL128
-        // or narrower ints would need int128/width widening (binder keeps those on the
-        // closure; result-kind guard keeps promotion-to-DECIMAL128 off this path too).
-        if ((lt == DRAKEN_DECIMAL && rt == DRAKEN_INT64) ||
-            (lt == DRAKEN_INT64 && rt == DRAKEN_DECIMAL)) {
+        // ctx left/right scale. Only DRAKEN_DECIMAL (int64) × DRAKEN_INT64 with an
+        // int64-tier result (precision ≤ 18); when the bound result precision exceeds
+        // 18 the result is DECIMAL128 and falls to the promotion block below (which
+        // widens both operands to int128). Narrower ints (INT8/16/32) stay on the
+        // closure, which widens them itself.
+        if (((lt == DRAKEN_DECIMAL && rt == DRAKEN_INT64) ||
+             (lt == DRAKEN_INT64 && rt == DRAKEN_DECIMAL)) &&
+            static_cast<const binary_op_ctx*>(ctx)->result_precision <= 18) {
             const auto* c = static_cast<const binary_op_ctx*>(ctx);
             const unsigned char sa = c->left_scale;   // 0 on the INT64 side
             const unsigned char sb = c->right_scale;
@@ -455,22 +460,33 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
             return r;
         }
 
-        // DECIMAL128 PROMOTION (S-A.3 completion): at least one operand is int128-backed
-        // DECIMAL128 and the other is int64-backed (DRAKEN_DECIMAL or DRAKEN_INT64) — i.e.
-        // DECIMAL128 × INT64, INT64 × DECIMAL128, or cross-kind DECIMAL × DECIMAL128 (either
-        // order). The int64-backed operand is widened to int128 (widen_i64_to_dec128 —
+        // DECIMAL128 PROMOTION (S-A.3 completion): the result is int128-backed
+        // DECIMAL128 and at least one operand is int64-backed, in one of two shapes:
+        //   (i)  one operand is already DECIMAL128 and the other is int64-backed
+        //        (DRAKEN_DECIMAL or DRAKEN_INT64) — DECIMAL128 × INT64, INT64 × DECIMAL128,
+        //        or cross-kind DECIMAL × DECIMAL128 (either order); or
+        //   (ii) both operands are int64-backed (at least one a DRAKEN_DECIMAL) but the
+        //        bound result precision exceeds the int64 tier (>18) — e.g.
+        //        DECIMAL(10,2) × INT64, DECIMAL(15,2) × DECIMAL(15,2).
+        // Each int64-backed operand is widened to int128 (widen_i64_to_dec128 —
         // §11-uniform, validity preserved) and the dec128_* kernels run. The result is
-        // always DECIMAL128 (the wrap reattaches precision/scale from ctx). Same-kind int64
-        // DECIMAL×DECIMAL / DECIMAL×INT64 whose result fits DECIMAL are handled above; the
-        // DECIMAL128-result variants of those stay on the closure (the _c_native_binop guard
-        // requires result_phys == operand kind), so they never reach here.
+        // always DECIMAL128 (the wrap reattaches precision/scale from ctx). The int64
+        // DEC×DEC / DEC×INT64 branches above handle only the int64-tier (≤18) results;
+        // their DECIMAL128-result variants fall through here. Narrower ints (INT8/16/32)
+        // are not int64-stride and stay on the closure (the _c_native_binop guard keeps
+        // them off this path).
         {
             auto is_i64_decimalish = [](DrakenType t) {
                 return t == DRAKEN_DECIMAL || t == DRAKEN_INT64;
             };
+            const unsigned char rprec =
+                static_cast<const binary_op_ctx*>(ctx)->result_precision;
+            const bool both_i64dec = is_i64_decimalish(lt) && is_i64_decimalish(rt);
+            const bool one_is_decimal = (lt == DRAKEN_DECIMAL || rt == DRAKEN_DECIMAL);
             const bool promote128 =
                 (lt == DRAKEN_DECIMAL128 && is_i64_decimalish(rt)) ||
-                (rt == DRAKEN_DECIMAL128 && is_i64_decimalish(lt));
+                (rt == DRAKEN_DECIMAL128 && is_i64_decimalish(lt)) ||
+                (both_i64dec && one_is_decimal && rprec > 18);
             if (promote128) {
                 const auto* c = static_cast<const binary_op_ctx*>(ctx);
                 const unsigned char sa = c->left_scale;
@@ -655,7 +671,8 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         return draken_error_sentinel_fmt(
             "draken_binop: combination not yet C-native (covers int/float32/float64 arithmetic, "
             "true-divide, DECIMAL×DECIMAL, DECIMAL128×DECIMAL128, DECIMAL×INT64, "
-            "DECIMAL128×INT64, cross-kind DECIMAL×DECIMAL128, decimal×float): "
+            "DECIMAL128×INT64, cross-kind DECIMAL×DECIMAL128, int64→int128 promotion to "
+            "DECIMAL128, decimal×float): "
             "op=%d left_type=%d right_type=%d", op, (int)lt, (int)rt);
     });
 }

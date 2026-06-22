@@ -155,25 +155,26 @@ static inline bool i128_fits_i64(__int128 v) {
     return v >= (__int128)INT64_MIN && v <= (__int128)INT64_MAX;
 }
 
-// Half-even (banker's) rounding of floor(num / den).
-// den > 0 required. num may be negative.
+// Half-even (banker's) rounding of num / den. Sign-robust: either operand may
+// be negative. Rounds the *magnitude* |num|/|den| half-to-even, then reapplies
+// the result sign = sign(num) XOR sign(den). This equals half-even on the real
+// value because evenness is preserved under negation. Mirrors dec128_div, which
+// is correct precisely because it works on unsigned magnitudes.
 static inline __int128 half_even_div(__int128 num, __int128 den) {
-    __int128 q = num / den;   // C++ truncates toward zero
-    __int128 r = num % den;   // remainder has sign of num
-    if (r == 0) return q;
+    const bool neg = (num < 0) ^ (den < 0);
+    // Negation is safe: num fits int128 per the i128_scale overflow guard (and
+    // is never INT128_MIN — see dec_div), and |den| ≤ INT64_MAX by construction.
+    const __int128 unum = (num < 0) ? -num : num;
+    const __int128 uden = (den < 0) ? -den : den;
 
-    const __int128 abs_r   = (r < 0) ? -r : r;
-    const __int128 two_r   = abs_r * 2;  // safe: abs_r < den so 2*abs_r < 2*den, no overflow for den≤INT64
-
-    if (two_r < den) {
-        return q;           // |r| < den/2: round toward zero
-    } else if (two_r > den) {
-        return (num < 0) ? q - 1 : q + 1;  // |r| > den/2: round away from zero
-    } else {
-        // |r| == den/2: tie — round to even
-        if ((q % 2) == 0) return q;
-        return (num < 0) ? q - 1 : q + 1;
+    __int128 q = unum / uden;   // q ≥ 0
+    const __int128 r = unum % uden;   // 0 ≤ r < uden
+    if (r != 0) {
+        const __int128 two_r = r * 2;  // safe: r < uden ≤ INT64_MAX, no overflow
+        if (two_r > uden || (two_r == uden && (q & 1) != 0))
+            q += 1;            // round away from zero (in magnitude)
     }
+    return neg ? -q : q;
 }
 
 // ---------------------------------------------------------------------------

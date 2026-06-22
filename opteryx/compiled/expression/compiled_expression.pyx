@@ -307,27 +307,35 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
         if left_phys in _BINOP_NATIVE_INTERVAL and right_phys in _BINOP_NATIVE_INTERVAL:
             return True
     # DECIMAL (S-A.2): same-kind DECIMAL/DECIMAL128, or decimal × float → FLOAT64.
-    # + - * / % only (not INT_DIVIDE). Cross-kind (DECIMAL×DECIMAL128) and decimal×int
-    # have no kernel case yet → stay on the closure. Same-kind results (→ DECIMAL)
-    # carry their precision/scale descriptor across the c-native wrap (the binder
-    # stamps it via ctx; the executor reattaches it). MUST precede the numeric range
-    # check (decimal operands are not l_num/r_num → would short-circuit to False).
+    # + - * / % only (not INT_DIVIDE). All same-kind, cross-kind (DECIMAL×DECIMAL128),
+    # decimal×float and decimal×INT64 are now c-native — incl. promotion to DECIMAL128
+    # (draken_binop widens int64 operands to int128). Only narrower ints (INT8/16/32)
+    # stay on the closure. Results carry their precision/scale descriptor across the
+    # c-native wrap (binder stamps it via ctx; executor reattaches it). MUST precede
+    # the numeric range check (decimal operands are not l_num/r_num → would short-circuit).
     if BOP_PLUS <= op_code <= BOP_MODULO:
         l_dec = left_phys in _BINOP_NATIVE_DECIMAL
         r_dec = right_phys in _BINOP_NATIVE_DECIMAL
+        # Same-kind DECIMAL×DECIMAL / DECIMAL128×DECIMAL128. The result is the operand
+        # kind when it fits the int64 tier; a DECIMAL pair whose precision exceeds 18
+        # promotes to DECIMAL128 (draken_binop widens both operands to int128 and runs
+        # dec128_*). Both carry their precision/scale descriptor across the c-native wrap.
         if l_dec and r_dec and left_phys == right_phys \
-                and (result_phys is None or result_phys == left_phys):
+                and (result_phys is None or result_phys == left_phys
+                     or (left_phys == "DECIMAL" and result_phys == "DECIMAL128")):
             return True
         if (l_dec and right_phys in _BINOP_NATIVE_FLOAT) or \
                 (r_dec and left_phys in _BINOP_NATIVE_FLOAT):
             return True
-        # DECIMAL(int64) × INT64 → DECIMAL (S-A.3): the INT64 side is a scale-0
-        # decimal, handled by the same dec_* kernels. Only DECIMAL (not DECIMAL128)
-        # and only INT64 (dec_* read int64 stride); the result must stay DECIMAL
-        # (promotion to DECIMAL128 needs int128 widening → closure).
+        # DECIMAL(int64) × INT64 → DECIMAL or DECIMAL128 (S-A.3). The INT64 side is a
+        # scale-0 decimal; draken_binop runs dec_* (int64-tier result, ≤18) or widens
+        # both operands to int128 and runs dec128_* (result DECIMAL128, >18). INT64 only
+        # (dec_* read int64 stride); narrower ints (INT8/16/32) stay on the closure,
+        # which widens them itself.
         if ((left_phys == "DECIMAL" and right_phys == "INT64") or
                 (left_phys == "INT64" and right_phys == "DECIMAL")) and \
-                (result_phys is None or result_phys == "DECIMAL"):
+                (result_phys is None or result_phys == "DECIMAL"
+                 or result_phys == "DECIMAL128"):
             return True
         # DECIMAL128 promotion (S-A.3 completion): DECIMAL128 × INT64 (either order) and
         # cross-kind DECIMAL × DECIMAL128 (either order). draken_binop widens the
