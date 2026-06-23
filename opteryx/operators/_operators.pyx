@@ -16,7 +16,7 @@
 
 from libcpp.memory cimport shared_ptr
 from draken.morsels.morsel cimport Morsel, morsel_to_cxx, cxx_to_morsel
-from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos
+from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos, cxx_morsel_delete
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector, mix_hash
 from draken.core.buffers cimport (

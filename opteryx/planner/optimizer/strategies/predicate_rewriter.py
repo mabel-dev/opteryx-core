@@ -41,6 +41,7 @@ a = ANY(z) OR b = ANY(z) OR c = ANY(z)      → (a, b, c) @> z
 a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
+import math
 import re
 from typing import Callable, Dict
 
@@ -697,6 +698,96 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     return predicate
 
 
+# Operator flip for when the integer side appears on the right of the literal.
+_INT_FRAC_FLIP = {
+    "Eq": "Eq",
+    "NotEq": "NotEq",
+    "Lt": "Gt",
+    "LtEq": "GtEq",
+    "Gt": "Lt",
+    "GtEq": "LtEq",
+}
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry):
+    """
+    Rewrite `integer_expr <op> float_literal` to an equivalent integer comparison.
+
+    An integer can never lie strictly between two consecutive integers, so a
+    comparison against a float literal collapses to an exact integer bound:
+
+        id >  4.5  → id >= 5        id <  4.5  → id <= 4
+        id >= 4.5  → id >= 5        id <= 4.5  → id <= 4
+        id =  4.5  → FALSE          id != 4.5  → TRUE
+        id =  4.0  → id =  4        id >  4.0  → id >  4   (whole float: exact)
+
+    This keeps the comparison on the native integer fast path (no FLOAT64
+    promotion of the column) and lets integer predicates push to storage for
+    row-group pruning. The runtime float-promotion path remains the general
+    fallback for the cases this rewrite declines (non-finite literals, or
+    floor/ceil outside the INT64 range).
+    """
+    if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+        return predicate
+    op = predicate.value
+    if op not in _INT_FRAC_FLIP:
+        return predicate
+
+    # Identify the integer-expression side and the float-literal side. The
+    # literal may sit on either side; normalise to `col <op> lit` order.
+    left, right = predicate.left, predicate.right
+    if right.node_type == NodeType.LITERAL and left.node_type != NodeType.LITERAL:
+        col_node, lit_node = left, right
+    elif left.node_type == NodeType.LITERAL and right.node_type != NodeType.LITERAL:
+        col_node, lit_node = right, left
+        op = _INT_FRAC_FLIP[op]
+    else:
+        return predicate
+
+    col_cat = getattr(getattr(col_node, "schema_column", None), "category", None)
+    if col_cat != LogicalCategory.INTEGER:
+        return predicate
+
+    val = lit_node.value
+    if not isinstance(val, float) or isinstance(val, bool):
+        return predicate
+    if not math.isfinite(val):
+        return predicate
+
+    lo = math.floor(val)
+    hi = math.ceil(val)
+    if lo < _INT64_MIN or hi > _INT64_MAX:
+        return predicate
+
+    telemetry.optimization_predicate_rewriter_int_fractional_const += 1
+
+    # Fractional literal where equality can never hold: collapse to a constant.
+    if lo != hi and op in ("Eq", "NotEq"):
+        predicate.node_type = NodeType.LITERAL
+        predicate.type = _lt.BOOLEAN
+        predicate.value = op == "NotEq"
+        predicate.left = None
+        predicate.right = None
+        if predicate.schema_column is not None:
+            predicate.schema_column.column_type = _lt.BOOLEAN
+        return predicate
+
+    if lo == hi:
+        # Whole-valued float (e.g. 4.0): exact integer comparison, same operator.
+        final_op, bound = op, lo
+    elif op in ("Gt", "GtEq"):
+        final_op, bound = "GtEq", hi
+    else:  # Lt, LtEq
+        final_op, bound = "LtEq", lo
+
+    predicate.left = col_node
+    predicate.right = build_literal_node(int(bound))
+    predicate.value = final_op
+    return predicate
+
+
 # Define dispatcher conditions and actions
 dispatcher: Dict[str, Callable] = {
     "rewrite_in_to_eq": rewrite_in_to_eq,
@@ -822,6 +913,14 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         rewritten = rewrite_string_empty_compare(predicate, telemetry)
         if rewritten is not predicate:
             return rewritten
+
+    # Rewrite `integer_expr <op> fractional_literal` to an exact integer bound.
+    # May collapse the comparison to a boolean literal (e.g. `id = 4.5` → FALSE),
+    # so return early when it is no longer a comparison.
+    if predicate.node_type == NodeType.COMPARISON_OPERATOR:
+        predicate = rewrite_int_vs_fractional_const(predicate, telemetry)
+        if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+            return predicate
 
     if predicate.right.type == _lt.VARCHAR:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:

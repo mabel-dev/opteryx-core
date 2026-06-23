@@ -123,6 +123,15 @@ DecodedTable ReadParquet(const uint8_t* data, size_t size,
 // Overload that decodes all columns when none are specified
 DecodedTable ReadParquet(const uint8_t* data, size_t size);
 
+// Overload with a row-group skip mask. `row_group_mask[rg] == 0` skips decoding
+// that row group entirely (it is emitted empty) — used for predicate pushdown,
+// where the caller has already pruned via footer statistics. An empty mask
+// decodes every row group. The mask is sized to the file's row-group count;
+// out-of-range / short masks treat missing entries as "decode".
+DecodedTable ReadParquet(const uint8_t* data, size_t size,
+                         const std::vector<std::string>& column_names,
+                         const std::vector<uint8_t>& row_group_mask);
+
 // Decode a single column chunk from an isolated range-read buffer.
 // Offsets in target_col must be relative to the start of the buffer
 // (i.e. subtract base_offset before calling).

@@ -6,8 +6,8 @@
 """
 Parquet writer for opteryx-managed relations.
 
-This module is the SOLE permitted location for pyarrow usage in opteryx.
-Do not import pyarrow elsewhere in production code.
+Uses the native rugo writer (rugo.parquet_writer) — NO pyarrow. Morsels are
+serialized straight to well-formed, PyArrow-readable parquet bytes.
 """
 
 import os
@@ -15,6 +15,7 @@ import struct
 from typing import Dict, Optional, Tuple
 
 from draken.morsels.morsel import Morsel
+from rugo.parquet_writer import write_parquet_with_bounds
 
 from opteryx.models.file_entry import FileEntry
 from opteryx.utils import random_string
@@ -27,42 +28,37 @@ def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
 
     Args:
         morsel: Draken Morsel containing the rows to write.
-        relation_dir: Absolute or relative path to the relation directory.
-                      Must already exist.
+        relation_dir: Path to the relation directory. Must already exist.
 
     Returns:
         FileEntry with file_path (relative to relation_dir), file_format="PARQUET",
         record_count, file_size_in_bytes, and lower_bounds/upper_bounds populated
-        from parquet footer metadata where available.
+        from the writer's per-column min/max statistics where available.
 
     Raises:
         ValueError: If morsel is empty (zero rows).
         OSError: If write fails.
     """
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     if len(morsel) == 0:
         raise ValueError("cannot write empty morsel")
 
-    table = morsel.to_arrow()
+    data, bounds = write_parquet_with_bounds(morsel, compression="zstd")
+
     file_name = f"data-{random_string(32)}.parquet"
     full_path = os.path.join(relation_dir, file_name)
     tmp_path = f"{full_path}.tmp"
 
-    pq.write_table(table, tmp_path, compression="snappy")
+    with open(tmp_path, "wb") as f:
+        f.write(data)
     os.replace(tmp_path, full_path)
 
-    pf = pq.ParquetFile(full_path)
-
-    record_count = pf.metadata.num_rows
     file_size_in_bytes = os.path.getsize(full_path)
-    lower_bounds, upper_bounds = _extract_bounds(pf.metadata, table.schema)
+    lower_bounds, upper_bounds = _bounds_to_entry(bounds)
 
     return FileEntry(
         file_path=file_name,
         file_format="PARQUET",
-        record_count=record_count,
+        record_count=len(morsel),
         file_size_in_bytes=file_size_in_bytes,
         uncompressed_size_in_bytes=None,
         lower_bounds=lower_bounds,
@@ -77,75 +73,19 @@ def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
     )
 
 
-def _extract_bounds(
-    metadata, schema
+def _bounds_to_entry(
+    bounds: Dict[int, Tuple[object, object]],
 ) -> Tuple[Optional[Dict[int, bytes]], Optional[Dict[int, bytes]]]:
-    """Extract min/max bounds from parquet file metadata.
-
-    Iterates row groups and columns, computing file-level min/max statistics.
-    Skips columns with missing statistics or nested types.
-
-    Args:
-        metadata: pyarrow parquet metadata object
-        schema: pyarrow table schema
-
-    Returns:
-        Tuple of (lower_bounds dict, upper_bounds dict) indexed by field_id (column index).
-        Either or both may be None if no statistics are available.
-    """
-    lower_bounds = {}
-    upper_bounds = {}
-
-    for field_idx in range(len(schema)):
-        schema_field = schema.field(field_idx)
-
-        if _is_nested_type(schema_field.type):
-            continue
-
-        col_min = None
-        col_max = None
-
-        for row_group_idx in range(metadata.num_row_groups):
-            rg = metadata.row_group(row_group_idx)
-            col_meta = rg.column(field_idx)
-
-            if not col_meta.is_stats_set:
-                continue
-
-            stats = col_meta.statistics
-            if not stats or not stats.has_min_max:
-                continue
-
-            min_val = stats.min
-            max_val = stats.max
-
-            if col_min is None:
-                col_min = min_val
-                col_max = max_val
-            else:
-                col_min = min(col_min, min_val)
-                col_max = max(col_max, max_val)
-
-        if col_min is not None and col_max is not None:
-            lower_bounds[field_idx] = _serialize_bound(col_min)
-            upper_bounds[field_idx] = _serialize_bound(col_max)
-
-    return (
-        lower_bounds if lower_bounds else None,
-        upper_bounds if upper_bounds else None,
-    )
-
-
-def _is_nested_type(arrow_type) -> bool:
-    """Check if an Arrow type is nested (struct, list, map, fixed_size_list, etc)."""
-    import pyarrow as pa
-
-    return (
-        pa.types.is_struct(arrow_type)
-        or pa.types.is_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-        or pa.types.is_map(arrow_type)
-    )
+    """Serialize {col_index: (min, max)} typed values into the FileEntry bound
+    byte format (keyed by column index). Returns (None, None) if empty."""
+    if not bounds:
+        return (None, None)
+    lower: Dict[int, bytes] = {}
+    upper: Dict[int, bytes] = {}
+    for idx, (col_min, col_max) in bounds.items():
+        lower[idx] = _serialize_bound(col_min)
+        upper[idx] = _serialize_bound(col_max)
+    return (lower or None, upper or None)
 
 
 def _serialize_bound(value) -> bytes:

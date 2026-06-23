@@ -60,12 +60,12 @@ Connector Development:
 Example Custom Connector:
     class MyConnector(BaseConnector):
         def read_dataset(self, dataset, **kwargs):
-            # Read data and return PyArrow table
-            return pa.table(data)
+            # Yield Draken Morsels (no pyarrow in the engine)
+            yield morsel
 
         def get_dataset_schema(self, dataset):
-            # Return schema information
-            return pa.schema([...])
+            # Return a RelationSchema
+            return RelationSchema(...)
 
 Performance Considerations:
 - Implement predicate pushdown to reduce data transfer

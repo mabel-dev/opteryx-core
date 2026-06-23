@@ -30,63 +30,14 @@ _logger = logging.getLogger(__name__)
 from collections import defaultdict
 from typing import Generator
 
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.types.schema import RelationSchema
-from opteryx.types.logical_type import LogicalCategory
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
-
-# Null vector factory: maps LogicalCategory → draken_native constructor for null constants.
-# Built once at module import. All constructors accept (value=None, length).
-cdef dict _NULL_CONSTRUCTORS = {}
-
-def _build_null_constructors():
-    """Build null vector constructor table: LogicalCategory → callable(n) → Vector."""
-    from draken.draken_native import (
-        vector_from_constant,
-        vector_float64_from_constant,
-        vector_varchar_from_constant,
-        vector_from_bool_constant,
-        vector_null_from_length,
-    )
-    # All lambdas take (n: int) and return a null vector of appropriate type
-    table = [
-        ("INTEGER",   lambda n: vector_from_constant(None, n)),
-        ("INT8",      lambda n: vector_from_constant(None, n)),
-        ("INT16",     lambda n: vector_from_constant(None, n)),
-        ("INT32",     lambda n: vector_from_constant(None, n)),
-        ("INT64",     lambda n: vector_from_constant(None, n)),
-        ("DOUBLE",    lambda n: vector_float64_from_constant(None, n)),
-        ("FLOAT32",   lambda n: vector_float64_from_constant(None, n)),
-        ("FLOAT64",   lambda n: vector_float64_from_constant(None, n)),
-        ("VARCHAR",   lambda n: vector_varchar_from_constant(None, n)),
-        ("TEXT",      lambda n: vector_varchar_from_constant(None, n)),
-        ("BLOB",      lambda n: vector_varchar_from_constant(None, n)),
-        ("BOOLEAN",   lambda n: vector_from_bool_constant(None, n)),
-        ("DATE",      lambda n: vector_null_from_length(n)),
-        ("TIMESTAMP", lambda n: vector_null_from_length(n)),
-        ("TIME",      lambda n: vector_null_from_length(n)),
-        ("INTERVAL",  lambda n: vector_null_from_length(n)),
-    ]
-    out = {}
-    for name, ctor in table:
-        member = getattr(LogicalCategory, name, None)
-        if member is not None:
-            out[member] = ctor
-    return out
-
-_NULL_CONSTRUCTORS = _build_null_constructors()
-
-
-cdef inline object _create_null_vector(object column, Py_ssize_t num_rows):
-    """Create a null vector of the correct type for a schema column."""
-    ctor = _NULL_CONSTRUCTORS.get(column.category)
-    if ctor is None:
-        return _draken_native.vector_null_from_length(<uint32_t>num_rows)
-    return ctor(<uint32_t>num_rows)
 
 
 cdef Morsel normalize_morsel(object schema, Morsel morsel):
@@ -123,13 +74,25 @@ cdef Morsel normalize_morsel(object schema, Morsel morsel):
         else:
             col_name_bytes = col_name
 
+        # Fail clean (§1): this path only ever serves internal virtual datasets,
+        # where schema() and read() come from the same provider — every schema
+        # column is present in the source morsel. A miss here is therefore an
+        # internal inconsistency (e.g. a binder/optimizer rename that detached a
+        # scan column from its physical name), NOT a "missing column" to be padded.
+        # Silently substituting a NULL placeholder of the schema's default width
+        # masked exactly such a bug as wrong data; surface it instead.
         try:
             vector = morsel.column(col_identity, col_name_bytes)
-            names.append(col_identity)
-            vectors.append(vector)
         except (KeyError, ValueError):
-            names.append(col_identity)
-            vectors.append(_create_null_vector(column, num_rows))
+            raise InvalidInternalStateError(
+                f"Reader could not map schema column identity={col_identity!r} "
+                f"name={col_name_bytes!r} (schema '{getattr(schema, 'name', None)}') "
+                f"to the source data; available columns: {list(morsel.column_names)}. "
+                "The schema and the data disagree — an upstream planning step has "
+                "corrupted this column's identity/name."
+            )
+        names.append(col_identity)
+        vectors.append(vector)
 
     return Morsel.from_vectors(names, vectors)
 

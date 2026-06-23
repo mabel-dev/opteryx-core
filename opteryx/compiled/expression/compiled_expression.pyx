@@ -29,9 +29,11 @@ from opteryx.exceptions import IncorrectTypeError
 
 import datetime as _datetime
 import decimal as _decimal
+import struct as _struct
 
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
@@ -84,6 +86,21 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         # (mirrors the datetime.date / datetime.datetime branches below). Without
         # this the constant would surface as a bare INT64 and downstream temporal
         # kernels (e.g. DATE + INTERVAL) would reject it.
+        # Narrow-int / float physical tags are set by the comparison binder when a
+        # scalar literal is coerced to a column's physical type so the c-native
+        # compare fast path (draken_compare_dv, identical-type only) can fire. The
+        # value-fits check is enforced by the binder before tagging; the narrow
+        # constructors raise on overflow as a backstop.
+        if physical_type == <int>DRAKEN_INT8:
+            return Vector(_draken_native.vector_int8_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_INT16:
+            return Vector(_draken_native.vector_int16_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_INT32:
+            return Vector(_draken_native.vector_int32_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_FLOAT32:
+            return Vector(_draken_native.vector_float32_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_FLOAT64:
+            return Vector(_draken_native.vector_float64_from_constant(value, 1))
         int_vec = _draken_native.vector_from_constant(value, 1)
         if physical_type == <int>DRAKEN_DATE32:
             return Vector(_draken_native.vector_reinterpret_as_date32(int_vec))
@@ -91,6 +108,8 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
             return Vector(_draken_native.vector_reinterpret_as_timestamp64(int_vec))
         return Vector(int_vec)
     if isinstance(value, float):
+        if physical_type == <int>DRAKEN_FLOAT32:
+            return Vector(_draken_native.vector_float32_from_constant(value, 1))
         return Vector(_draken_native.vector_float64_from_constant(value, 1))
     if isinstance(value, (str, bytes)):
         if isinstance(value, str):
@@ -126,6 +145,61 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         f"_materialise_constant_literal: cannot materialise constant for literal "
         f"{value!r} (type {type(value).__name__})"
     )
+
+
+cdef bint _exact_as_float32(object v) except -1:
+    """True if numeric ``v`` round-trips exactly through IEEE-754 binary32.
+
+    Bind-time only (one call per coerced literal). The magnitude guard keeps the
+    pack/unpack in range so it never raises — a value outside binary32 range or
+    a NaN literal returns False and is left to the Python compare fallback.
+    """
+    if v != v:                              # NaN literal — fallback handles it
+        return False
+    if v < -3.4e38 or v > 3.4e38:           # outside binary32 range
+        return False
+    return _struct.unpack("<f", _struct.pack("<f", v))[0] == v
+
+
+cdef int _coerce_literal_physical(object col_type, object lit_value) except -99:
+    """Decide the DrakenType a scalar literal must be materialised as so it shares
+    the column's physical type and the c-native compare fast path
+    (``draken_compare_dv``, identical-type only) can fire instead of declining to
+    the Python fallback. Returns the DrakenType int, or -1 to leave the literal at
+    its natural type.
+
+    Only value-EXACT numeric coercions are returned: a literal that cannot be
+    represented in the column's physical type without loss is left untouched, so
+    the fallback yields the same answer it does today (CLAUDE.md §1 correctness).
+    INT64 column vs int literal and FLOAT64 column vs float literal already share a
+    type, so they return -1 (no re-materialisation needed).
+    """
+    if col_type is None or lit_value is None:
+        return -1
+    if isinstance(lit_value, bool):             # bool → BC_LOAD_LIT_BOOL, never here
+        return -1
+    cdef object phys = col_type.physical
+    cdef str pname = getattr(phys, "name", None)
+    if pname is None:
+        return -1
+    if isinstance(lit_value, int):
+        if pname == "INT8":
+            return <int>DRAKEN_INT8 if -128 <= lit_value <= 127 else -1
+        if pname == "INT16":
+            return <int>DRAKEN_INT16 if -32768 <= lit_value <= 32767 else -1
+        if pname == "INT32":
+            return <int>DRAKEN_INT32 if -2147483648 <= lit_value <= 2147483647 else -1
+        if pname == "FLOAT64":
+            # every |int| <= 2**53 is exactly representable in binary64
+            return <int>DRAKEN_FLOAT64 if -9007199254740992 <= lit_value <= 9007199254740992 else -1
+        if pname == "FLOAT32":
+            return <int>DRAKEN_FLOAT32 if _exact_as_float32(lit_value) else -1
+        return -1
+    if isinstance(lit_value, float):
+        if pname == "FLOAT32":
+            return <int>DRAKEN_FLOAT32 if _exact_as_float32(lit_value) else -1
+        return -1
+    return -1
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +615,8 @@ cdef Py_ssize_t _linearize(
     cdef object extr_op_str, extr_key, extr_callable, extr_key_vec
     cdef bint right_is_inlist_literal
     cdef object inlist_set_obj
+    cdef int coerce_phys
+    cdef object coerce_lit_val
     cdef object cast_target_type, cast_unit, cast_params, cast_kernel, cast_py_node
     cdef object src
     cdef object const_lit
@@ -724,6 +800,29 @@ cdef Py_ssize_t _linearize(
                 ]
             else:
                 inlist_set_obj = None  # scalar literal — don't fold
+
+        # C-native compare fast path enablement: when comparing a column (or any
+        # non-literal expression) against a scalar literal, materialise the literal
+        # in the column's PHYSICAL type so draken_compare_dv (identical-type only)
+        # fires instead of declining to the Python fallback (which permanently
+        # clears is_all_c_native). Only value-exact numeric coercions are applied;
+        # everything else is left to the fallback, unchanged. The literal node's
+        # physical_type is consumed by _materialise_constant_literal below.
+        if not right_is_inlist_literal:
+            if (node.right.node_type == _NT_LITERAL
+                    and node.left.node_type != _NT_LITERAL
+                    and node.right.value != NULL):
+                coerce_lit_val = <object>node.right.value
+                coerce_phys = _coerce_literal_physical(left_type, coerce_lit_val)
+                if coerce_phys >= 0:
+                    node.right.physical_type = coerce_phys
+            elif (node.left.node_type == _NT_LITERAL
+                    and node.right.node_type != _NT_LITERAL
+                    and node.left.value != NULL):
+                coerce_lit_val = <object>node.left.value
+                coerce_phys = _coerce_literal_physical(right_type, coerce_lit_val)
+                if coerce_phys >= 0:
+                    node.left.physical_type = coerce_phys
 
         sub_depth = _linearize(node.left, bc, depth)
         if not right_is_inlist_literal:

@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+import copy
 from typing import Tuple
 
 from opteryx.managers.virtual_datasets import derived
@@ -73,20 +74,28 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
                 if column.schema_column.identity == schema_column.identity
             ]
             projection_column = projection_matches[0] if projection_matches else None
-            if not schema_column.origin:
-                schema_column.origin = []
+
+            # The subquery's OUTPUT column carries the user-facing alias as its
+            # name. It must be a SEPARATE object from the underlying scan's column:
+            # the scan column keeps its physical name (e.g. `id`) so the reader can
+            # map the connector's physically-named data back to this identity, while
+            # the output column below is renamed to the alias (e.g. `k`) for outer
+            # resolution. Mutating the shared column in place renamed the scan column
+            # too, leaving the reader unable to find the physical column (it then
+            # emitted a NULL placeholder of the wrong width).
+            out_column = copy.copy(schema_column)
             source_relations.extend(schema_column.origin or [])
             if projection_column:
                 projection_column.source = node.alias
-            schema_column.origin += [node.alias]
+            out_column.origin = list(schema_column.origin or []) + [node.alias]
 
-            schema_column.name = (
-                projection_column.current_name if projection_column else schema_column.name
+            out_column.name = (
+                projection_column.current_name if projection_column else out_column.name
             )
 
-            if "." in schema_column.name:
+            if "." in out_column.name:
                 # If the column is not in the projection, it should retain its name without any prefix
-                schema_column.name = schema_column.name.split(".")[-1]
+                out_column.name = out_column.name.split(".")[-1]
 
             # Carry every additional alias from sibling projection columns
             # so the outer query can resolve any of the user's output names.
@@ -95,10 +104,10 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
                 extra_name = extra.current_name
                 if "." in (extra_name or ""):
                     extra_name = extra_name.split(".")[-1]
-                if extra_name and extra_name != schema_column.name and extra_name not in extra_aliases:
+                if extra_name and extra_name != out_column.name and extra_name not in extra_aliases:
                     extra_aliases.append(extra_name)
-            schema_column.aliases = extra_aliases
-            columns.append(schema_column)
+            out_column.aliases = extra_aliases
+            columns.append(out_column)
         if name[0] != "$" and name in context.relations:
             context.relations.pop(name)
     context.relations[node.alias] = "subquery"

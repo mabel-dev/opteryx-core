@@ -62,6 +62,7 @@ from opteryx.planner.optimizer.strategies import (
     PredicatePushdownStrategy,
     PredicateRewriteStrategy,
     ProjectionPushdownStrategy,
+    RedundantCastEliminationStrategy,
     RedundantOperationsStrategy,
     SplitConjunctivePredicatesStrategy,
     StatisticsOnlyResponseStrategy,
@@ -124,6 +125,7 @@ class OptimizerVisitor:
             ConstantFoldingStrategy(telemetry),
             StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
+            RedundantCastEliminationStrategy(telemetry),  # CAST(x AS T) where x is T -> x
             CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             DisjunctionSimplificationStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),

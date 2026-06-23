@@ -24,6 +24,7 @@ from .filter_implied_group_key_reduction import FilterImpliedGroupKeyReductionSt
 from .group_key_reduction import GroupKeyReductionStrategy
 from .predicate_rewriter import PredicateRewriteStrategy
 from .projection_pushdown import ProjectionPushdownStrategy
+from .redundant_cast import RedundantCastEliminationStrategy
 from .redundant_operators import RedundantOperationsStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
 from .statistics_only_response import StatisticsOnlyResponseStrategy
@@ -57,6 +58,7 @@ __all__ = [
     "GroupKeyReductionStrategy",
     "PredicateRewriteStrategy",
     "ProjectionPushdownStrategy",
+    "RedundantCastEliminationStrategy",
     "RedundantOperationsStrategy",
     "SplitConjunctivePredicatesStrategy",
     "StatisticsOnlyResponseStrategy",

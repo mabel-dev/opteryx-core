@@ -5,9 +5,9 @@
 
 """Virtual datasets package.
 
-This package exposes several small built-in datasets. Importing the
-individual dataset modules triggers imports of heavy libraries (pyarrow,
-zstandard, etc.), so we lazily load those modules on first access.
+This package exposes several small built-in datasets, built natively as Draken
+Morsels (no pyarrow). Modules are loaded lazily on first access to keep import
+of the package itself cheap.
 """
 
 _MODULES = {
@@ -22,8 +22,8 @@ _MODULES = {
 def __getattr__(name: str):
     """Lazily import and return submodules like `planets`, `missions`, etc.
 
-    This allows code to reference `opteryx.managers.virtual_datasets.planets` without
-    importing pyarrow until the dataset module is actually used.
+    Lets code reference `opteryx.managers.virtual_datasets.planets` without
+    loading every dataset module up front.
     """
     if name in _MODULES:
         import importlib

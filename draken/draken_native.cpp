@@ -6532,6 +6532,18 @@ NB_MODULE(draken_native, m) {
                 return vecresult_to_owner(
                     draken_float_compare_scalar(v.vec, s, op));
             }
+            // Integer vector vs Python float scalar: promote the column to
+            // FLOAT64 and compare as reals (SQL DOUBLE-promotion; matches
+            // DuckDB). Without this an INT column vs a fractional literal would
+            // truncate the literal to int and return a wrong mask. Narrow ints
+            // widen to INT64 first (make_float64_from_numeric_vector needs INT64).
+            if (is_integer_type(v.vec.type) && PyFloat_Check(scalar.ptr())) {
+                const double s = nb::cast<double>(scalar);
+                std::unique_ptr<VectorOwner> wv = maybe_promote(v.vec, DRAKEN_INT64);
+                VectorOwner fv = make_float64_from_numeric_vector(wv ? *wv : v);
+                nb::gil_scoped_release _gil;
+                return vecresult_to_owner(draken_float_compare_scalar(fv.vec, s, op));
+            }
             // INT64 (and other types): expect int scalar.
             const int64_t si = nb::cast<int64_t>(scalar);
             nb::gil_scoped_release _gil;
@@ -6688,6 +6700,24 @@ NB_MODULE(draken_native, m) {
                     bv = &pb->vec;
                 }
                 return vecresult_to_owner(draken_compare_vector(*av, *bv, op));
+            }
+            // Mixed integer/float comparison: dispatch is on a.type, so the
+            // low-level kernel reads BOTH operands through one type — an INT
+            // buffer read as FLOAT64 (or vice versa) compares against garbage.
+            // Promote both operands to FLOAT64 and compare as reals (SQL
+            // DOUBLE-promotion semantics; matches DuckDB). int64 values >2^53
+            // lose precision under this promotion, as they would in any engine.
+            // make_float64_from_numeric_vector handles INT64/FLOAT32/FLOAT64 but
+            // not narrow ints, so widen INT8/16/32 to INT64 first.
+            if ((is_integer_type(a.type) && is_float_type(b.type)) ||
+                (is_float_type(a.type) && is_integer_type(b.type))) {
+                std::unique_ptr<VectorOwner> wa =
+                    is_integer_type(a.type) ? maybe_promote(a, DRAKEN_INT64) : nullptr;
+                std::unique_ptr<VectorOwner> wb =
+                    is_integer_type(b.type) ? maybe_promote(b, DRAKEN_INT64) : nullptr;
+                VectorOwner fa = make_float64_from_numeric_vector(wa ? *wa : self);
+                VectorOwner fb = make_float64_from_numeric_vector(wb ? *wb : other);
+                return vecresult_to_owner(draken_compare_vector(fa.vec, fb.vec, op));
             }
             return vecresult_to_owner(draken_compare_vector(a, b, op));
         }, nb::arg("other"), nb::arg("op"),

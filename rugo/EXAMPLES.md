@@ -79,7 +79,7 @@ for morsel in morsels:
 import os, sys
 sys.path.insert(1, os.path.join(sys.path[0], ".."))
 
-from rugo.parquet_reader import read_metadata, test_bloom_filter
+from rugo.parquet_reader import read_metadata, bloom_filter_maybe_contains
 
 meta = read_metadata("testdata/planets/planets.parquet")
 
@@ -87,7 +87,7 @@ meta = read_metadata("testdata/planets/planets.parquet")
 for rg in meta["row_groups"]:
     for col_stats in rg["columns"]:
         if col_stats["name"] == "name" and col_stats["bloom_length"] > 0:
-            present = test_bloom_filter(
+            present = bloom_filter_maybe_contains(
                 "testdata/planets/planets.parquet",
                 col_stats["bloom_offset"],
                 col_stats["bloom_length"],

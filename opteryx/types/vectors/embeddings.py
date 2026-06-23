@@ -181,8 +181,10 @@ class _StaticHashEmbeddingProvider:
         return vv
 
     def _extract_active_texts(self, values):
-        if getattr(values, "to_arrow", None) is not None:
-            values = values.to_arrow().to_pylist()
+        # Draken vectors expose to_pylist(); plain sequences are iterated as-is.
+        to_pylist = getattr(values, "to_pylist", None)
+        if to_pylist is not None:
+            values = to_pylist()
         positions = []
         texts = []
         for index, value in enumerate(values):

@@ -1,35 +1,89 @@
+"""
+rugo — reading and writing examples for all three formats (Parquet, CSV, JSONL).
+
+Run from the repo root (after `make c`):
+    PYTHON_GIL=0 PYENV_VERSION=3.14.5t pyenv exec python rugo/_example.py
+"""
+
 import os
 import sys
 
-from numpy.random.mtrand import beta
-
 sys.path.insert(1, os.path.join(sys.path[0], ".."))
 
-from rugo.parquet_reader import read_metadata, read_parquet
+import opteryx  # only to produce a Morsel to write in the example
 
-# Schema-only metadata (footer parse, no column data)
-meta = read_metadata("testdata/planets/planets.parquet")
-# -> {"num_rows": int, "schema_columns": [ {name, physical_type, logical_type, nullable}, ... ]}
-
-# Decode columns from an in-memory buffer
-with open("testdata/planets/planets.parquet", "rb") as f:
-    morsels = read_parquet(f.read(), column_names=["id", "name"])
-
-
-*** why does read_metadata accept a filename but read_parquet does not
-*** I think the interface should be more like this (I'm open to discuss)
-"""python
 from rugo import parquet
+from rugo.csv import write_csv
+from rugo.jsonl import write_jsonl
 
-filename = "testdata/planets/planets.parquet"
-with parquet.read_parquet(filename, column_names=[], filters=[]) as f:
-    for morsel in f:
-        print(morsel)
+PLANETS = "testdata/planets/planets.parquet"
 
-from rugo import json
 
-filename = "testdata/planets/planets.json"
-with json.read_json(filename, column_names=[], filters=[]) as f:
-    for morsel in f:
-        print(morsel)
-"""
+# --------------------------------------------------------------------------- #
+# Reading
+# --------------------------------------------------------------------------- #
+
+# Schema-only metadata (footer parse, no column data). Accepts a path OR bytes.
+meta = parquet.read_metadata(PLANETS)
+print("rows:", meta.num_rows)
+print("columns:", [c.name for c in meta.schema_columns])
+
+# Streaming read: one Morsel per row group. Source may be a filename or bytes.
+# `columns` projects; `filters` prune whole row groups via footer statistics.
+with parquet.read_parquet(PLANETS, columns=["id", "name", "gravity"]) as reader:
+    for morsel in reader:
+        print("morsel:", morsel.column_names, "rows:", len(morsel))
+        print("  ids:", morsel.column(b"id").to_pylist()[:5])
+
+# Predicate pushdown — row groups that cannot match are never decoded.
+# Filters are (column, op, value); ops: =, ==, !=, <, <=, >, >=, in, not in.
+with parquet.read_parquet(PLANETS, columns=["name"], filters=[("id", ">", 4)]) as reader:
+    kept = [m.column(b"name").to_pylist() for m in reader]
+    print("names where a row group with id>4 survived:", kept)
+
+# A filter that prunes every row group decodes nothing:
+with parquet.read_parquet(PLANETS, filters=[("id", ">", 10_000)]) as reader:
+    print("fully pruned ->", list(reader))
+
+
+# --------------------------------------------------------------------------- #
+# Writing
+# --------------------------------------------------------------------------- #
+
+# Any Draken Morsel can be written. Here we get one from a query.
+morsel = next(
+    iter(
+        opteryx.session().execute_to_morsels(
+            "SELECT id, name, gravity FROM $planets"
+        )
+    )
+)
+
+# write_parquet returns the file as bytes (ZSTD by default; "none" to disable).
+data = parquet.write_parquet(morsel, compression="zstd")
+out_path = "/tmp/rugo_planets.parquet"
+with open(out_path, "wb") as f:
+    f.write(data)
+print(f"wrote {len(data)} bytes -> {out_path}")
+
+# Round-trip: read back what we just wrote.
+with parquet.read_parquet(out_path) as reader:
+    rt = next(iter(reader))
+    print("round-trip names:", rt.column(b"name").to_pylist()[:5])
+
+
+# --------------------------------------------------------------------------- #
+# CSV and JSONL — same Morsel, different formats (all native, no pyarrow)
+# --------------------------------------------------------------------------- #
+
+small = next(
+    iter(opteryx.session().execute_to_morsels("SELECT id, name, gravity FROM $planets LIMIT 3"))
+)
+
+# CSV: RFC 4180; header on by default, comma delimiter; nulls are empty fields.
+csv_bytes = write_csv(small, delimiter=",", header=True)
+print("\nCSV:\n" + csv_bytes.decode())
+
+# JSONL: one JSON object per row.
+jsonl_bytes = write_jsonl(small)
+print("JSONL:\n" + jsonl_bytes.decode())

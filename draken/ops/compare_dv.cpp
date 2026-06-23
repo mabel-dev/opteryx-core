@@ -95,12 +95,25 @@ extern "C" DrakenVector* draken_compare_dv(
                 // ordering. Same kernel.
                 vr = draken::ops::i64_compare_vector(*left, *right, op_code);
                 break;
+            case DRAKEN_INT8:
+                vr = draken::ops::i8_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_INT16:
+                vr = draken::ops::i16_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_INT32:
+                vr = draken::ops::i32_compare_vector(*left, *right, op_code);
+                break;
             case DRAKEN_FLOAT64:
                 vr = draken::ops::float_compare_vector<double>(*left, *right, op_code);
                 break;
+            case DRAKEN_FLOAT32:
+                vr = draken::ops::float_compare_vector<float>(*left, *right, op_code);
+                break;
             case DRAKEN_DATE32:
                 // DATE32 is int32 storage (days-since-epoch); ordering on
-                // the underlying int32 is identical to date ordering.
+                // the underlying int32 is identical to date ordering. Same
+                // kernel as DRAKEN_INT32.
                 vr = draken::ops::i32_compare_vector(*left, *right, op_code);
                 break;
             case DRAKEN_VARCHAR:

@@ -82,6 +82,13 @@ bool CanDecode(const uint8_t *data, size_t size) {
 
 DecodedTable ReadParquet(const uint8_t *data, size_t size,
                          const std::vector<std::string> &column_names) {
+  static const std::vector<uint8_t> kNoMask;
+  return ReadParquet(data, size, column_names, kNoMask);
+}
+
+DecodedTable ReadParquet(const uint8_t *data, size_t size,
+                         const std::vector<std::string> &column_names,
+                         const std::vector<uint8_t> &row_group_mask) {
   DecodedTable table;
   try {
     RUGO_TEL_START(_meta_t0);
@@ -92,6 +99,11 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size,
     table.row_groups.resize(metadata.row_groups.size());
 
     for (size_t rg_idx = 0; rg_idx < metadata.row_groups.size(); rg_idx++) {
+      // Pushdown: skip row groups the caller pruned via footer stats. A short
+      // or empty mask leaves the row group in (decode).
+      if (rg_idx < row_group_mask.size() && row_group_mask[rg_idx] == 0)
+        continue; // leave this row group empty
+
       const RowGroupStats &row_group = metadata.row_groups[rg_idx];
       size_t ncols = column_names.size();
       table.row_groups[rg_idx].resize(ncols);

@@ -31,9 +31,13 @@ from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
 from opteryx.expression.evaluator.evaluation import filter_morsel_c_native as _filter_morsel_c_native
 from opteryx.models import QueryProperties
 
-from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
+from libc.stdint cimport uint32_t
+from libc.stdlib cimport malloc, free
+from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode, BytecodeInstr
+from opteryx.expression.evaluator._impl cimport _dv_cxx_resolve_caches, _dv_filter_span_cxx
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DrakenVector
+from draken.morsels.cxx_morsel cimport cxx_select_c
 
 # BasePlanNode is defined at the top of _operators.pyx (the umbrella unit) and
 # is in scope here via textual include.
@@ -202,6 +206,22 @@ cdef class FilterNode(BasePlanNode):
     cdef public list function_evaluations
     cdef public list _const_replacements
     cdef CompiledBytecode _compiled_filter
+    # S-B genuine-nogil filter path: cache the predicate resolve ONCE and run the
+    # pure-nogil span per morsel (no GIL re-acquire in the hot body).
+    cdef bint _flt_nogil_ok            # c-native predicate AND no const-repl/post-filter
+    cdef bint _flt_resolved            # caches populated (first push)
+    cdef BytecodeInstr* _flt_instrs    # cached bc.instrs (read nogil from self)
+    cdef int _flt_count                # cached bc.count
+    cdef int _flt_col_idx[256]         # LOAD_COL identity → column index (resolved once)
+    cdef DrakenVector* _flt_lit_dv[256]  # LOAD_LIT_CONST literal DV* (resolved once)
+    # post-filter column projection applied natively (cxx_select_c) in the nogil span;
+    # the keep-column names are resolved ONCE (first push) from the morsel schema.
+    cdef bint _flt_has_post            # apply the post-filter select
+    cdef const char** _flt_keep_ptrs   # keep-column name pointers (owned malloc)
+    cdef uint32_t* _flt_keep_lens      # keep-column name lengths (owned malloc)
+    cdef uint32_t _flt_keep_n          # keep-column count
+    cdef list _flt_keep_buffers        # keep the name bytes alive for the ptrs
+    cdef public unsigned long long nogil_filter_morsels   # telemetry: nogil-path count
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -223,6 +243,60 @@ cdef class FilterNode(BasePlanNode):
         else:
             self._compiled_filter = None
 
+        # S-B nogil path eligibility: the predicate must be all-C-native and have no
+        # constant replacements (the only remaining GIL-bound step). The post-filter
+        # column select IS supported nogil via cxx_select_c (keep-columns resolved
+        # once, below). Ineligible cases keep the transitional gil-wrapped _push_impl.
+        self._flt_resolved = False
+        self._flt_has_post = False
+        self._flt_keep_ptrs = NULL
+        self._flt_keep_lens = NULL
+        self._flt_keep_n = 0
+        self._flt_keep_buffers = None
+        self.nogil_filter_morsels = 0
+        # Tentative eligibility (no constant replacements). is_all_c_native is read at
+        # FIRST PUSH, not here: the flag is finalised after construction, so reading it
+        # in __init__ is stale. The runtime resolve below confirms it and pins the
+        # caches; an ineligible predicate sets _flt_nogil_ok False and never retries.
+        if self._compiled_filter is not None and not self._const_replacements:
+            self._flt_nogil_ok = True
+            self._flt_instrs = self._compiled_filter.instrs
+            self._flt_count = self._compiled_filter.count
+        else:
+            self._flt_nogil_ok = False
+
+    def __dealloc__(self):
+        if self._flt_keep_ptrs != NULL:
+            free(self._flt_keep_ptrs)
+        if self._flt_keep_lens != NULL:
+            free(self._flt_keep_lens)
+
+    cdef void _flt_resolve_keep(self, const CxxMorsel* m):
+        """GIL: resolve the post-filter keep-columns ONCE from the morsel schema
+        (input column order ∩ post_filter_columns). Only applied if it actually
+        reduces the column count (mirrors _push_impl)."""
+        cdef Py_ssize_t i, nn = <Py_ssize_t>m.names.size()
+        cdef bytes nm
+        cdef list keep = []
+        if self.post_filter_columns:
+            for i in range(nn):
+                nm = m.names[i]
+                if nm in self.post_filter_columns:
+                    keep.append(nm)
+        if not self.post_filter_columns or len(keep) >= nn:
+            self._flt_has_post = False
+            return
+        self._flt_has_post = True
+        self._flt_keep_n = <uint32_t>len(keep)
+        self._flt_keep_buffers = keep   # keep bytes alive for the ptrs
+        self._flt_keep_ptrs = <const char**>malloc(<size_t>len(keep) * sizeof(char*))
+        self._flt_keep_lens = <uint32_t*>malloc(<size_t>len(keep) * sizeof(uint32_t))
+        cdef bytes b
+        for i in range(len(keep)):
+            b = keep[i]
+            self._flt_keep_ptrs[i] = <const char*>b
+            self._flt_keep_lens[i] = <uint32_t>len(b)
+
     @property
     def config(self):  # pragma: no cover
         return format_expression(self.filter)
@@ -230,6 +304,57 @@ cdef class FilterNode(BasePlanNode):
     @property
     def name(self):  # pragma: no cover
         return "Filter"
+
+    cdef int _dispatch_push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
+        """S-B genuine-nogil filter. For an all-c-native predicate (and no constant
+        replacements / post-filter select), evaluate the predicate and gather the
+        survivors ENTIRELY nogil, then forward the native carrier via _emit_cdef — no
+        GIL re-acquire in the hot body, so parallel workers don't serialize here. The
+        column resolve needs the GIL ONCE (first morsel); thereafter the span is pure
+        nogil. EOS passes through; ineligible predicates and any kernel rc != 0 fall
+        back to the transitional gil-wrapped _push_impl."""
+        cdef CxxMorsel* raw = m.get()
+        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        cdef CxxMorsel* filtered = NULL
+        cdef CxxMorsel* selected = NULL
+        cdef int err_op = 0
+        cdef int rc
+        if is_eos:
+            return self._emit_cdef(m, err)        # forward the EOS carrier
+        if self._flt_nogil_ok:
+            if not self._flt_resolved:
+                with gil:
+                    # is_all_c_native is only reliable now (finalised post-construction).
+                    if (not self._compiled_filter.is_all_c_native
+                            or _dv_cxx_resolve_caches(self._compiled_filter, raw,
+                                                      self._flt_col_idx, self._flt_lit_dv) != 0):
+                        self._flt_nogil_ok = False   # not c-native / column not found
+                    else:
+                        self._flt_resolve_keep(raw)  # post-filter keep-columns (once)
+                        self._flt_resolved = True
+            if self._flt_nogil_ok:
+                rc = _dv_filter_span_cxx(self._flt_instrs, self._flt_count, raw,
+                                         self._flt_col_idx, self._flt_lit_dv,
+                                         &filtered, &err_op)
+                if rc == 0:
+                    self.nogil_filter_morsels += 1
+                    if filtered != NULL and filtered.num_rows() > 0:
+                        if self._flt_has_post:
+                            selected = cxx_select_c(filtered, self._flt_keep_ptrs,
+                                                    self._flt_keep_lens, self._flt_keep_n)
+                            cxx_morsel_delete(filtered)
+                            return self._emit_cdef(shared_ptr[CxxMorsel](selected), err)
+                        return self._emit_cdef(shared_ptr[CxxMorsel](filtered), err)
+                    if filtered != NULL:
+                        cxx_morsel_delete(filtered)   # empty result → drop
+                    return 0
+                # rc != 0 (kernel error / not applicable): fall through to the gil path.
+        with gil:
+            try:
+                self._push_impl(cxx_to_morsel(m))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                self._stash_exc(exc, err)
+        return err.code if err != NULL else 0
 
     cpdef void _push_impl(self, Morsel morsel) except *:
         # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++

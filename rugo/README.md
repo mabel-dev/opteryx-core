@@ -1,6 +1,8 @@
 # Rugo
 
-Rugo is Opteryx Core's internal file reader for Parquet, JSONL, and CSV. Zero external dependencies — no PyArrow, no NumPy on any read path. Compiled as Cython/C++ extensions. All readers emit Draken vectors. Not separately installable or versioned; built as part of this repository. Depends on Draken (`../draken/README.md`).
+Rugo is Opteryx Core's internal file engine for Parquet, JSONL, and CSV — reading **and** writing. Zero external dependencies — no PyArrow, no NumPy on any read or write path. Compiled as Cython/C++ extensions. Readers emit Draken vectors; the writer consumes Draken Morsels and emits well-formed, PyArrow-readable Parquet. Not separately installable or versioned; built as part of this repository. Depends on Draken (`../draken/README.md`).
+
+See [`_example.py`](_example.py) for a runnable read + write example.
 
 ---
 
@@ -11,63 +13,98 @@ make compile   # full rebuild
 make c         # incremental rebuild
 ```
 
-Python 3.13 required for local builds.
+Python 3.14 (free-threaded, `3.14.5t`) is used for local builds.
 
 ---
 
 ## Modules
 
-| Package               | Purpose                                         |
-|-----------------------|-------------------------------------------------|
-| `rugo.parquet_reader` | Parquet metadata + column decoding              |
-| `rugo.jsonl`          | JSONL schema inference + decoding               |
-| `rugo.csv`            | CSV schema inference + decoding                 |
-| `rugo.converters`     | Schema/format conversion helpers (Orso)         |
+| Package               | Purpose                                              |
+|-----------------------|------------------------------------------------------|
+| `rugo.parquet`        | **Unified Parquet read/write facade** (recommended)  |
+| `rugo.parquet_reader` | Low-level Parquet metadata + column decoding         |
+| `rugo.parquet_writer` | Low-level Parquet writing (Morsel → bytes)           |
+| `rugo.jsonl`          | JSONL read (`read_jsonl`) + write (`write_jsonl`)    |
+| `rugo.csv`            | CSV read (`read_csv`) + write (`write_csv`)          |
+| `rugo.converters`     | Schema/format conversion helpers (Orso)              |
 
 ---
 
 ## Parquet
 
+`rugo.parquet` is the recommended surface: one symmetric module for reading and
+writing that accepts a filename or an in-memory buffer, streams row-group
+Morsels, applies predicate pushdown, and writes Morsels back to bytes.
+
 ### Quick start
 
 ```python
-from rugo.parquet_reader import read_metadata, read_parquet
+from rugo import parquet
 
-# Footer parse only — no column data read
-meta = read_metadata("testdata/planets/planets.parquet")
-print(meta["num_rows"])        # e.g. 9
-print(meta["schema_columns"])  # list of {name, physical_type, logical_type, nullable}
+# Schema-only metadata (footer parse, no column data). Path OR bytes.
+meta = parquet.read_metadata("testdata/planets/planets.parquet")
+print(meta.num_rows)                       # 9
+print([c.name for c in meta.schema_columns])
 
-# Decode selected columns into Draken Morsels
-with open("testdata/planets/planets.parquet", "rb") as f:
-    morsels = read_parquet(f.read(), column_names=["id", "name"])
-    # morsels is list[Morsel] (one per row group), or None on failure
-    for morsel in morsels:
-        for vec in morsel.vectors:
-            print(vec.type, vec.length)
+# Streaming read: one Morsel per row group. `columns` projects; `filters`
+# prune whole row groups via footer statistics (rows in surviving groups are
+# NOT filtered — apply row-level predicates downstream).
+with parquet.read_parquet(
+    "testdata/planets/planets.parquet",
+    columns=["id", "name"],
+    filters=[("id", ">", 4)],              # ops: = == != < <= > >= in "not in"
+) as reader:
+    for morsel in reader:
+        print(morsel.column(b"name").to_pylist())
+
+# Write a Draken Morsel to Parquet bytes (ZSTD by default; "none" to disable).
+data = parquet.write_parquet(morsel, compression="zstd")
+with open("out.parquet", "wb") as f:
+    f.write(data)
 ```
 
-### API
+### `rugo.parquet` API
+
+| Function | Returns |
+|----------|---------|
+| `read_parquet(source, columns=None, filters=None)` | context manager yielding one Morsel per surviving row group |
+| `read_metadata(source)` | `ParquetMetadata` (`num_rows`, `schema_columns`) |
+| `write_parquet(morsel, compression="zstd")` | `bytes` (whole file) |
+| `write_parquet_with_bounds(morsel, compression="zstd")` | `(bytes, {col_index: (min, max)})` |
+
+`source` is a filename (`str`) or `bytes`/`bytearray`/`memoryview`. `filters`
+is a list of `(column, op, value)`; pruning is at row-group granularity.
+
+### Low-level API (`rugo.parquet_reader`)
+
+Most callers should use `rugo.parquet` above. The low-level module is exposed for
+fine-grained control.
 
 #### Metadata
 
 | Function | Returns |
 |----------|---------|
-| `read_metadata(path: str)` | `{num_rows, schema_columns}` |
+| `read_metadata(path: str)` | `ParquetMetadata(num_rows, schema_columns)` (typed object) |
 | `read_metadata_from_bytes(data: bytes)` | same |
 | `read_metadata_from_memoryview(mv: memoryview)` | same (memoryview must be contiguous) |
+| `read_rowgroup_stats(data)` | `list[{num_rows, columns:[{name, physical_type, logical_type, min, max, null_count}]}]` — per-row-group stats for pushdown |
 
-`schema_columns` is a list of dicts: `{"name": str, "physical_type": str, "logical_type": str, "nullable": bool}`.
+`schema_columns` is a tuple of `SchemaColumn(name, physical_type, logical_type, nullable)`.
+`read_rowgroup_stats` `min`/`max` are raw stat bytes (or `None`); decode with `decode_value`.
 
 #### Decode
 
 ```python
-read_parquet(data, column_names=None)
+read_parquet(data, column_names=None, row_group_mask=None)
 ```
 
 - `data` — `bytes`, `bytearray`, or `memoryview` holding the full Parquet file.
 - `column_names` — `list[str]` to project, or `None` for all columns.
-- Returns `list[Morsel]` (one per row group), or `None` on failure. On partial decode failure an individual column within a Morsel may be `None`.
+- `row_group_mask` — optional iterable, one truthy/falsy entry per row group; a
+  falsy entry skips decoding that row group (predicate pushdown). `rugo.parquet`'s
+  `filters=` builds this from `read_rowgroup_stats`.
+- Returns `list[Morsel]` (one per decoded row group), or `None` on failure. On
+  partial decode failure an individual column within a Morsel may be `None`.
 
 #### Compatibility
 
@@ -90,7 +127,7 @@ read_parquet(data, column_names=None)
 #### Bloom filters
 
 ```python
-test_bloom_filter(path, bloom_offset, bloom_length, value)  # -> bool
+bloom_filter_maybe_contains(path, bloom_offset, bloom_length, value)  # -> bool
 ```
 
 Evaluates a column bloom filter at the given byte offset/length for a candidate `value`. Bloom filter offsets and lengths are exposed in the per-column metadata returned by `read_metadata`.
@@ -113,6 +150,29 @@ Evaluates a column bloom filter at the given byte offset/length for a candidate 
 | Encodings | `PLAIN`, dictionary pages (`PLAIN_DICTIONARY` / `RLE_DICTIONARY`), `DELTA_BINARY_PACKED`, `DELTA_BYTE_ARRAY` |
 | Input | In-memory `bytes` / `memoryview` with column selection |
 
+### Writing
+
+`rugo.parquet_writer` (and the `rugo.parquet` facade) serialize a Draken Morsel
+to a well-formed, PyArrow-readable Parquet file.
+
+```python
+from rugo.parquet_writer import write_parquet, write_parquet_with_bounds
+data = write_parquet(morsel, compression="zstd")          # -> bytes
+data, bounds = write_parquet_with_bounds(morsel)          # + per-column min/max
+```
+
+| Area | Support |
+|------|---------|
+| Column types | INT8/16/32/64 (→INT64), FLOAT32 (→DOUBLE), FLOAT64, BOOL, VARCHAR/NVARCHAR/VARBINARY, VARIANT (→STRING), DATE32, TIME32/64, TIMESTAMP64 (µs/ms/ns), INTERVAL (FLBA-12), DECIMAL/DECIMAL128 (FLBA), ARRAY/LIST of those (int/float/bool/string elements), all-null (→INT32). FP16 not yet. |
+| Encoding | `PLAIN` values, `RLE` definition levels, one data page per column chunk |
+| Compression | `ZSTD` (default) or uncompressed |
+| Statistics | per-column min/max/null_count + `column_orders` (so readers trust them) |
+| Bloom filters | split-block (SBBF), XXH64, on equality-friendly columns; `bloom_filters=True\|False\|[names]` |
+| Layout | single row group per Morsel |
+
+Unsupported column types fail loud (no silent skip). Nested LIST/MAP/STRUCT and
+dictionary-encoded *output* are not yet implemented.
+
 ### Limitations
 
 - Not a full Parquet replacement reader; decode support is intentionally narrow.
@@ -127,11 +187,23 @@ Evaluates a column bloom filter at the given byte offset/length for a candidate 
 
 ### Performance
 
-Metadata reads (schema + row-group stats, no column data) are fast and comparable to PyArrow. Decode benchmarks for the full column path (`decode_column_from_chunk`) are pending completion of the Draken vector migration (E.28); the high-level `read_parquet()` API is not the production path — Opteryx drives `decode_column_from_chunk` directly, which bypasses the stubs.
+Metadata reads (schema + row-group stats, no column data) are fast and comparable to PyArrow. The high-level `read_parquet()` / `rugo.parquet` path is a serial utility: it reconstructs Draken vectors from decoded columns via the native sequence constructors and materializes through Python, so it is correctness-first, not the performance path. Opteryx's production scan path (`opteryx.connectors.parquet_io`) builds vectors zero-copy off-GIL and is independent of this API. (The Draken vector-migration gaps E.28-1..3,5..9 that previously stubbed this path are fixed; only nested/array decode, E.28-4, remains.)
 
 ---
 
 ## JSONL
+
+### Writing
+
+```python
+from rugo.jsonl import write_jsonl
+data = write_jsonl(morsel)   # -> bytes, one JSON object per row
+```
+
+Native (no pyarrow); value formatting in C++. Doubles use `std::to_chars`
+(shortest round-trip); dates/timestamps render ISO-8601 strings; decimals are
+JSON numbers; arrays render as JSON arrays (null list / empty list / null
+element are all distinguished); nulls are `null`.
 
 ### Quick start
 
@@ -220,6 +292,17 @@ Infers the schema from the first `sample_size` rows. Returns `{"columns": []}` o
 ---
 
 ## CSV
+
+### Writing
+
+```python
+from rugo.csv import write_csv
+data = write_csv(morsel, delimiter=",", header=True)   # -> bytes (RFC 4180)
+```
+
+Native (no pyarrow); fields are quoted per RFC 4180 (delimiter/quote/newline →
+quoted, quotes doubled), nulls are empty fields, and ARRAY columns render as a
+(quoted) JSON array. Shares the C++ value formatter with the JSONL writer.
 
 ### Quick start
 

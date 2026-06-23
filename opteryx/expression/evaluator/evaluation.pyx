@@ -1829,6 +1829,38 @@ cdef int _dv_cxx_resolve_caches(
     return 0
 
 
+cdef int _dv_filter_span_cxx(
+    BytecodeInstr* instrs, int count, const CxxMorsel* m,
+    int* col_idx, DrakenVector** lit_dv,
+    CxxMorsel** out_filtered, int* err_op,
+) noexcept nogil:
+    """Pure-nogil filter span: fill the DV* cache from a PRE-RESOLVED (col_idx,
+    lit_dv) pair, evaluate the predicate, and gather the surviving rows via
+    cxx_mask_c. Owns its frame arena (created/destroyed here). Returns the
+    c_execute rc: 0 → ``*out_filtered`` is a NEW owned CxxMorsel; 4 → kernel error;
+    99 → arena OOM; other → not applicable. (col_idx, lit_dv) are resolved ONCE by
+    the caller via _dv_cxx_resolve_caches and reused across morsels — that resolve is
+    the only GIL-needing step; this span has no PyObject access, so a converted
+    operator can call it inside `with nogil`."""
+    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_stack[64]
+    cdef DrakenVector  dv_store[64]
+    cdef Py_ssize_t num_rows = m.num_rows()
+    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
+    cdef int rc
+    cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    if arena == NULL:
+        err_op[0] = -99
+        return 99
+    _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
+                            arena, nbytes, <uint32_t>num_rows, err_op)
+    if rc == 0:
+        out_filtered[0] = cxx_mask_c(m, dv_stack[0])
+    draken_frame_arena_destroy(arena)
+    return rc
+
+
 cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
     """S3.2: evaluate an all-c-native predicate AND apply its mask in ONE nogil
     span over the CxxMorsel — the predicate result DV* feeds straight into
@@ -1842,44 +1874,27 @@ cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
     cdef Py_ssize_t num_rows = morsel.ptr.num_rows
     if num_rows == 0:
         return None
-    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef int col_idx[256]
     cdef DrakenVector* lit_dv[256]
-    cdef DrakenVector* dv_cache[256]
-    cdef DrakenVector* dv_stack[64]
-    cdef DrakenVector  dv_store[64]
     cdef int err_op = 0
     cdef int rc
     cdef CxxMorsel* filtered = NULL
     cdef object err_msg
     if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
         return None
-    cdef DrakenFrameArena* arena = draken_frame_arena_create()
-    if arena == NULL:
-        raise MemoryError("filter_morsel_c_native: failed to create DrakenFrameArena")
-    try:
-        with nogil:
-            _dv_fill_cache_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, dv_cache)
-            rc = c_execute_dv_inner(
-                bc.instrs, bc.count, dv_cache, dv_stack, dv_store,
-                arena, nbytes, <uint32_t>num_rows, &err_op)
-            if rc == 0:
-                # mask DV* (dv_stack[0]) is a BOOL result; cxx_mask_c derives the
-                # surviving rows and gathers every column — new owners, not arena.
-                filtered = cxx_mask_c(m, dv_stack[0])
-        if rc == 0:
-            return cxx_to_morsel(shared_ptr[CxxMorsel](filtered))
-        if rc == 4:
-            err_msg = (
-                draken_get_error_message().decode("utf-8", "replace")
-                if draken_has_error() else "C kernel error"
-            )
-            draken_error_message_clear()
-            raise ValueError(err_msg)
-        # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
-        return None
-    finally:
-        draken_frame_arena_destroy(arena)
+    with nogil:
+        rc = _dv_filter_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, &filtered, &err_op)
+    if rc == 0:
+        return cxx_to_morsel(shared_ptr[CxxMorsel](filtered))
+    if rc == 4:
+        err_msg = (
+            draken_get_error_message().decode("utf-8", "replace")
+            if draken_has_error() else "C kernel error"
+        )
+        draken_error_message_clear()
+        raise ValueError(err_msg)
+    # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
+    return None
 
 
 cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):

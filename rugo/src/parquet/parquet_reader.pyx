@@ -116,6 +116,12 @@ cdef extern from "type_widening_wrappers.hpp":
 from draken.vectors.vector cimport Vector
 from draken.morsels.morsel cimport Morsel
 
+# E.28 reconstruction: the simple read_parquet path rebuilds Draken vectors from
+# decoded column values via the native sequence constructors (null-safe; None =
+# null). This is the SERIAL utility path — the parallel execution scan path
+# (pool_reader) uses zero-copy buffer construction and is unaffected.
+import draken.draken_native as _dn
+
 
 # --- value decoder ---
 cdef inline bint _text_is_printable(str text):
@@ -416,6 +422,57 @@ def read_metadata_from_memoryview(memoryview mv):
     return _make_metadata(fs)
 
 
+def read_rowgroup_stats(data):
+    """Per-row-group column statistics, for predicate pushdown.
+
+    Args:
+        data: bytes, bytearray, or memoryview holding the full parquet file.
+
+    Returns a list with one entry per row group:
+        {"num_rows": int,
+         "columns": [
+             {"name": str, "physical_type": str, "logical_type": str,
+              "min": bytes|None, "max": bytes|None, "null_count": int}, ...]}
+
+    `min`/`max` are the raw parquet statistic bytes (None when absent); decode
+    them to typed values with `decode_value(physical_type, logical_type, raw)`.
+    """
+    cdef const uint8_t[::1] mem_view
+    if isinstance(data, (bytes, bytearray)):
+        mem_view = memoryview(data).cast('B')
+    elif isinstance(data, memoryview):
+        mem_view = data.cast('B')
+    else:
+        raise TypeError("data must be bytes, bytearray, or memoryview")
+    cdef size_t size = mem_view.shape[0]
+
+    cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataFromBuffer(
+        &mem_view[0], size)
+
+    cdef list row_groups = []
+    cdef list cols
+    cdef size_t rg_i, c_i, n_rg, n_col
+    n_rg = fs.row_groups.size()
+    for rg_i in range(n_rg):
+        cols = []
+        n_col = fs.row_groups[rg_i].columns.size()
+        for c_i in range(n_col):
+            cols.append({
+                "name": fs.row_groups[rg_i].columns[c_i].name.decode("utf-8"),
+                "physical_type": fs.row_groups[rg_i].columns[c_i].physical_type.decode("utf-8"),
+                "logical_type": fs.row_groups[rg_i].columns[c_i].logical_type.decode("utf-8"),
+                "min": (<bytes>fs.row_groups[rg_i].columns[c_i].min)
+                       if fs.row_groups[rg_i].columns[c_i].has_min else None,
+                "max": (<bytes>fs.row_groups[rg_i].columns[c_i].max)
+                       if fs.row_groups[rg_i].columns[c_i].has_max else None,
+                "null_count": fs.row_groups[rg_i].columns[c_i].null_count,
+                "bloom_offset": fs.row_groups[rg_i].columns[c_i].bloom_offset,
+                "bloom_length": fs.row_groups[rg_i].columns[c_i].bloom_length,
+            })
+        row_groups.append({"num_rows": fs.row_groups[rg_i].num_rows, "columns": cols})
+    return row_groups
+
+
 def can_decode(str path):
     """Check if a parquet file can be decoded with our limited decoder.
 
@@ -428,8 +485,17 @@ def can_decode(str path):
     cdef string cpp_path = path_bytes
     return parquet_reader.CanDecode(cpp_path)
 
-def test_bloom_filter(path, bloom_offset, bloom_length, value):
-    """Evaluate a parquet column bloom filter at the given offset."""
+def bloom_filter_maybe_contains(path, bloom_offset, bloom_length, bytes value):
+    """Probe a parquet column bloom filter at the given offset.
+
+    Returns False only if the value is DEFINITELY absent; True means it MAY be
+    present (bloom filters have no false negatives, but allow false positives).
+
+    `value` is the raw PLAIN-encoded bytes of the candidate — exactly the bytes
+    the writer hashed (e.g. 8 little-endian bytes for int64, the UTF-8/raw bytes
+    for byte_array). Encoding the candidate to plain bytes is the caller's job
+    (the boundary); rugo performs no type coercion.
+    """
     if bloom_offset is None:
         raise ValueError("Bloom filter offset is required")
 
@@ -445,16 +511,9 @@ def test_bloom_filter(path, bloom_offset, bloom_length, value):
         if native_length <= 0:
             native_length = -1
 
-    cdef str path_str = os.fspath(path)
-    cdef bytes path_bytes = path_str.encode("utf-8")
-
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        value_bytes = bytes(value)
-    else:
-        value_bytes = str(value).encode("utf-8")
-
+    cdef bytes path_bytes = os.fspath(path).encode("utf-8")
     cdef parquet_reader.string c_path = path_bytes
-    cdef parquet_reader.string c_value = value_bytes
+    cdef parquet_reader.string c_value = value
 
     return bool(parquet_reader.TestBloomFilter(c_path, native_offset, native_length, c_value))
 
@@ -516,58 +575,197 @@ cdef inline void _expand_rle_float64_into(double* dst,
         off += cnt
 
 
+# --- E.28 reconstruction helpers ---------------------------------------------
+# Materialize a decoded column's values (any shape: plain dense, dictionary via
+# indices or packed codes, or RLE) into a Python list with None for nulls, then
+# build a Draken vector via the null-safe native sequence constructor. Dense and
+# dictionary value buffers hold only NON-NULL values, indexed past nulls via the
+# valid_bits bitmap (Arrow-style, 1 = valid), matching the C++ decoder.
+
+cdef inline bint _row_valid(parquet_reader.DecodedColumn& col, Py_ssize_t i) noexcept:
+    if col.valid_bits.size() == 0:
+        return True
+    return ((col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0
+
+
+cdef inline uint32_t _read_code(vector[uint8_t]& arr, Py_ssize_t i, uint8_t width) noexcept:
+    cdef Py_ssize_t off = i * width
+    if width == 1:
+        return arr[off]
+    if width == 2:
+        return arr[off] | (<uint32_t>arr[off + 1] << 8)
+    return (arr[off] | (<uint32_t>arr[off + 1] << 8)
+            | (<uint32_t>arr[off + 2] << 16) | (<uint32_t>arr[off + 3] << 24))
+
+
+cdef inline bytes _dict_str_at(parquet_reader.DecodedColumn& col, Py_ssize_t idx):
+    cdef uint32_t start = col.string_dict_offsets[idx]
+    cdef int32_t ln = col.string_dict_lens[idx]
+    cdef const uint8_t* base = col.string_dict_arena.data()
+    return (<char*>(base + start))[:ln]
+
+
+cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
+                      bint from_int32):
+    cdef list out = [None] * num_rows
+    cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
+    cdef bint has_v = col.valid_bits.size() > 0
+    cdef uint8_t cw
+    if _decoded_has_dictionary(col):
+        if not col.dict_codes_array.empty():
+            cw = col.code_width if col.code_width in (1, 2, 4) else 1
+            for i in range(num_rows):
+                if has_v and not _row_valid(col, i):
+                    continue
+                if from_int32:
+                    out[i] = <int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
+                else:
+                    out[i] = col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
+        else:
+            for i in range(num_rows):
+                if has_v and not _row_valid(col, i):
+                    continue
+                if from_int32:
+                    out[i] = <int64_t>col.dict_int32_values[col.dict_indices[vi]]
+                else:
+                    out[i] = col.dict_int64_values[col.dict_indices[vi]]
+                vi += 1
+        return out
+    if not from_int32 and col.rle_run_lengths.size() > 0:
+        for r in range(col.rle_run_lengths.size()):
+            cnt = col.rle_run_lengths[r]
+            for j in range(cnt):
+                out[off + j] = col.rle_int64_values[r]
+            off += cnt
+        return out
+    for i in range(num_rows):
+        if has_v and not _row_valid(col, i):
+            continue
+        if from_int32:
+            out[i] = <int64_t>col.int32_values[vi]
+        else:
+            out[i] = col.int64_values[vi]
+        vi += 1
+    return out
+
+
+cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
+                        bint from_float32):
+    cdef list out = [None] * num_rows
+    cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
+    cdef bint has_v = col.valid_bits.size() > 0
+    cdef uint8_t cw
+    if _decoded_has_dictionary(col):
+        if not col.dict_codes_array.empty():
+            cw = col.code_width if col.code_width in (1, 2, 4) else 1
+            for i in range(num_rows):
+                if has_v and not _row_valid(col, i):
+                    continue
+                if from_float32:
+                    out[i] = <double>col.dict_float32_values[_read_code(col.dict_codes_array, i, cw)]
+                else:
+                    out[i] = col.dict_float64_values[_read_code(col.dict_codes_array, i, cw)]
+        else:
+            for i in range(num_rows):
+                if has_v and not _row_valid(col, i):
+                    continue
+                if from_float32:
+                    out[i] = <double>col.dict_float32_values[col.dict_indices[vi]]
+                else:
+                    out[i] = col.dict_float64_values[col.dict_indices[vi]]
+                vi += 1
+        return out
+    if not from_float32 and col.rle_run_lengths.size() > 0:
+        for r in range(col.rle_run_lengths.size()):
+            cnt = col.rle_run_lengths[r]
+            for j in range(cnt):
+                out[off + j] = col.rle_float64_values[r]
+            off += cnt
+        return out
+    for i in range(num_rows):
+        if has_v and not _row_valid(col, i):
+            continue
+        if from_float32:
+            out[i] = <double>col.float32_values[vi]
+        else:
+            out[i] = col.float64_values[vi]
+        vi += 1
+    return out
+
+
+cdef list _string_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
+    cdef list out = [None] * num_rows
+    cdef Py_ssize_t i, vi = 0
+    cdef bint has_v = col.valid_bits.size() > 0
+    cdef uint8_t cw
+    if _decoded_has_dictionary(col):
+        if not col.dict_codes_array.empty():
+            cw = col.code_width if col.code_width in (1, 2, 4) else 1
+            for i in range(num_rows):
+                if has_v and not _row_valid(col, i):
+                    continue
+                out[i] = _dict_str_at(col, _read_code(col.dict_codes_array, i, cw))
+        else:
+            for i in range(num_rows):
+                if has_v and not _row_valid(col, i):
+                    continue
+                out[i] = _dict_str_at(col, col.dict_indices[vi])
+                vi += 1
+        return out
+    for i in range(num_rows):
+        if has_v and not _row_valid(col, i):
+            continue
+        out[i] = bytes(col.string_values[vi])
+        vi += 1
+    return out
+
+
+cdef list _bool_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
+    cdef list out = [None] * num_rows
+    cdef Py_ssize_t i, vi = 0
+    cdef bint has_v = col.valid_bits.size() > 0
+    for i in range(num_rows):
+        if has_v and not _row_valid(col, i):
+            continue
+        out[i] = col.boolean_values[vi] != 0
+        vi += 1
+    return out
+
+
 cdef Vector _make_int64_from_int32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: Integer64Vector dense constructor + ptr.data write access "
-        "has no new-draken equivalent; tracked as E.28-gap-1."
-    )
+    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: Integer64Vector dense constructor + ptr.data write access "
-        "has no new-draken equivalent; tracked as E.28-gap-1."
-    )
+    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, False)))
 
 
 cdef Vector _make_float64_from_float32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: Float64Vector dense constructor + ptr.data write access "
-        "has no new-draken equivalent; tracked as E.28-gap-2."
-    )
+    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_int32_as_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: Integer64Vector dense constructor + ptr.data write access "
-        "has no new-draken equivalent; tracked as E.28-gap-1."
-    )
+    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_float64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: Float64Vector dense constructor + ptr.data write access "
-        "has no new-draken equivalent; tracked as E.28-gap-2."
-    )
+    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
 
 
 cdef Vector _make_string_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: StringVectorBuilder has no new-draken equivalent; "
-        "tracked as E.28-gap-3."
-    )
+    return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
 
 
 
@@ -735,46 +933,31 @@ cdef int _fill_dict_codes_and_validity(
 cdef Vector _make_typed_int64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: int64_from_dict / int64_from_dict_nullable / int64_from_packed_dict "
-        "have no new-draken equivalent; tracked as E.28-gap-5."
-    )
+    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, False)))
 
 
 cdef Vector _make_typed_int64_from_int32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: int64_from_dict / int64_from_dict_nullable / int64_from_packed_dict "
-        "have no new-draken equivalent; tracked as E.28-gap-5."
-    )
+    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_typed_float64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: float64_from_dict / float64_from_dict_nullable / float64_from_packed_dict "
-        "have no new-draken equivalent; tracked as E.28-gap-6."
-    )
+    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
 
 
 cdef Vector _make_typed_float64_from_float32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: float64_from_dict / float64_from_dict_nullable / float64_from_packed_dict "
-        "have no new-draken equivalent; tracked as E.28-gap-6."
-    )
+    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_typed_string_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: string_from_dict_buffers / make_string_dict_only "
-        "have no new-draken equivalent; tracked as E.28-gap-7."
-    )
+    return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
 
 
 cdef Vector _make_dictionary_vector(
@@ -805,19 +988,25 @@ cdef Vector _make_dictionary_vector(
 cdef Vector _make_typed_constant_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: Integer64Vector.from_constant / Float64Vector.from_constant / "
-        "StringVector.from_constant have no new-draken equivalent; tracked as E.28-gap-8."
-    )
+    # A constant is just a dict of size 1; reuse the materializers (dense vector).
+    cdef bytes col_type = decoded_col.type
+    if col_type == b"int64":
+        return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, False)))
+    if col_type == b"int32":
+        return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
+    if col_type == b"float64":
+        return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
+    if col_type == b"float32":
+        return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, True)))
+    if col_type == b"byte_array":
+        return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
+    raise ValueError(f"unsupported constant column type: {col_type!r}")
 
 
 cdef Vector _make_bool_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    raise NotImplementedError(
-        "rugo migration gap: bool_vector_from_bits requires draken/core/bitmap_ops.cpp "
-        "to be added to rugo.parquet_reader sources in setup.py; tracked as E.28-gap-9."
-    )
+    return Vector(_dn.vector_from_bool_sequence(_bool_list(decoded_col, num_rows)))
 
 
 cdef Vector _make_array_vector(
@@ -828,7 +1017,7 @@ cdef Vector _make_array_vector(
     )
 
 
-def read_parquet(data, column_names=None):
+def read_parquet(data, column_names=None, row_group_mask=None):
     """Read parquet data from memory with optional column selection.
 
     Designed for serial use; Opteryx achieves parallelism by running
@@ -837,13 +1026,19 @@ def read_parquet(data, column_names=None):
     Args:
         data: bytes, bytearray, or memoryview containing parquet data
         column_names: list of column names to read, or None to read all columns
+        row_group_mask: optional iterable of truthy/falsy values, one per row
+            group; a falsy entry skips decoding that row group entirely
+            (predicate pushdown — see rugo.parquet.read_parquet's filters=).
+            None decodes every row group.
 
     Returns:
-        list of Morsels (one per row group), or None if reading failed.
+        list of Morsels (one per row group), or None if reading failed. Row
+        groups skipped by the mask contribute no Morsel.
     """
     cdef const uint8_t[::1] mem_view
     cdef size_t size
     cdef vector[string] cpp_column_names
+    cdef vector[uint8_t] cpp_mask
 
     if isinstance(data, (bytes, bytearray)):
         mem_view = memoryview(data).cast('B')
@@ -855,18 +1050,37 @@ def read_parquet(data, column_names=None):
     size = mem_view.shape[0]
 
     cdef parquet_reader.DecodedTable result
+    cdef parquet_reader.FileStats fs
 
     cdef double _t0, _t1
 
+    cdef uint8_t _mbit
+    if row_group_mask is not None:
+        for m in row_group_mask:
+            _mbit = 1 if m else 0
+            cpp_mask.push_back(_mbit)
+
     _t0 = _time.perf_counter()
-    if column_names is None:
+    if column_names is None and row_group_mask is None:
         with nogil:
             result = parquet_reader.ReadParquet(&mem_view[0], size)
     else:
-        for name in column_names:
-            cpp_column_names.push_back(str(name).encode("utf-8"))
-        with nogil:
-            result = parquet_reader.ReadParquet(&mem_view[0], size, cpp_column_names)
+        if column_names is None:
+            # Mask given without explicit projection: decode all columns.
+            fs = parquet_reader.ReadParquetMetadataFromBuffer(&mem_view[0], size)
+            if fs.row_groups.size() > 0:
+                for col in fs.row_groups[0].columns:
+                    cpp_column_names.push_back(col.name)
+        else:
+            for name in column_names:
+                cpp_column_names.push_back(str(name).encode("utf-8"))
+        if row_group_mask is None:
+            with nogil:
+                result = parquet_reader.ReadParquet(&mem_view[0], size, cpp_column_names)
+        else:
+            with nogil:
+                result = parquet_reader.ReadParquet(
+                    &mem_view[0], size, cpp_column_names, cpp_mask)
     _t1 = _time.perf_counter()
     _TEL["cpp_decode_s"] += _t1 - _t0
     _TEL["calls"] += 1
@@ -890,6 +1104,10 @@ def read_parquet(data, column_names=None):
     cdef Vector vec
 
     for rg_idx in range(<Py_ssize_t>result.row_groups.size()):
+        # A row group pruned by row_group_mask is left with no columns — emit
+        # no Morsel for it.
+        if result.row_groups[rg_idx].size() == 0:
+            continue
         # Get row count from first successful column in this row group
         num_rows = 0
         for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):

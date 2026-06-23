@@ -603,6 +603,41 @@ def get_zstd_vendor_sources():
     return sources
 
 
+def get_text_writer_cast_sources():
+    """draken batch cast-to-string kernels (int/bool/date/timestamp) used by the
+    rugo CSV/JSONL writers, plus their deps (ryu for the float caster symbol)."""
+    return [
+        "draken/ops/kernels/cast_numeric.cpp",
+        "draken/ops/kernels/cast_temporal.cpp",
+        "draken/ops/kernels/result_helpers.cpp",
+        "draken/core/vector_alloc.cpp",
+        "third_party/ulfjack/ryu/d2fixed.c",
+        "third_party/ulfjack/ryu/d2s.c",
+    ]
+
+
+def get_zstd_compress_sources():
+    """Return the vendored zstd COMPRESSION sources (single-threaded; no zstdmt,
+    so no pool/threading deps). Compiled as C++ — byte-identical to upstream
+    zstd 1.5.5 lib/compress/*.c, renamed .cpp like the decompress set."""
+    RUGO_PARQUET = "rugo/src/parquet"
+    names = [
+        "zstd_compress",
+        "zstd_compress_literals",
+        "zstd_compress_sequences",
+        "zstd_compress_superblock",
+        "fse_compress",
+        "huf_compress",
+        "hist",
+        "zstd_double_fast",
+        "zstd_fast",
+        "zstd_lazy",
+        "zstd_ldm",
+        "zstd_opt",
+    ]
+    return [f"{RUGO_PARQUET}/vendor/zstd/compress/{n}.cpp" for n in names]
+
+
 def get_lz4_vendor_sources():
     """Return vendored lz4 block-codec sources."""
     RUGO_PARQUET = "rugo/src/parquet"
@@ -887,6 +922,53 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=parquet_link_args + LD_EXTRA,
+    ),
+    # Parquet writer — header-only C++ core (_parquet_writer.hpp /
+    # _thrift_writer.hpp); reads draken vectors and emits PyArrow-readable
+    # parquet. No vendored sources: it only reads (str_data/str_length are
+    # static-inline headers) and constructs no vectors.
+    Extension(
+        "rugo.parquet_writer",
+        sources=(
+            ["rugo/src/parquet/parquet_writer.pyx"]
+            + get_zstd_vendor_sources()  # common + decompress (shared common syms)
+            + get_zstd_compress_sources()
+        ),
+        include_dirs=(
+            include_dirs
+            + [
+                "rugo/src/parquet/vendor/zstd",
+                "rugo/src/parquet/vendor/zstd/common",
+                "rugo/src/parquet/vendor/zstd/decompress",
+                "rugo/src/parquet/vendor/zstd/compress",
+            ]
+        ),
+        define_macros=[("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
+    # JSONL writer — Morsel -> JSONL bytes. C++ formatting (_value_format.hpp /
+    # _text_render.hpp); int/bool/date/timestamp use draken's batch cast-to-
+    # string kernels, float uses std::to_chars.
+    Extension(
+        "rugo.jsonl._jsonl_writer",
+        sources=["rugo/src/jsonl/_jsonl_writer.pyx"] + get_text_writer_cast_sources(),
+        include_dirs=include_dirs + ["rugo/src"],
+        depends=["rugo/src/_value_format.hpp", "rugo/src/_text_render.hpp"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
+    # CSV writer — Morsel -> CSV bytes (RFC 4180). Same C++ formatting core.
+    Extension(
+        "rugo.csv._csv_writer",
+        sources=["rugo/src/csv/_csv_writer.pyx"] + get_text_writer_cast_sources(),
+        include_dirs=include_dirs + ["rugo/src"],
+        depends=["rugo/src/_value_format.hpp", "rugo/src/_text_render.hpp"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "rugo.jsonl._jsonl_reader",
