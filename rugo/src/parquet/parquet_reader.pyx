@@ -1009,12 +1009,163 @@ cdef Vector _make_bool_vector(
     return Vector(_dn.vector_from_bool_sequence(_bool_list(decoded_col, num_rows)))
 
 
+# --- list / array reconstruction ---------------------------------------------
+# A repeated (LIST) column is decoded by C++ into parallel rep_levels/def_levels
+# (one entry per leaf position) plus the present leaf values (compact, in order).
+# Both the rugo writer and pyarrow emit the standard all-nullable nesting scheme
+# for a list nested D deep (D == max_rep_level): max_def_level == 2*D + 1, where
+# for list level k (1 = outermost .. D = innermost):
+#   * list k is non-null      when def >= 2k - 1
+#   * list k has a child entry when def >= 2k
+#   * the leaf element exists  when def >= 2D   (null element at 2D, present at 2D+1)
+# and repetition level r means list levels 1..r continue the previous record;
+# a fresh sub-structure begins at depth r+1. A value is consumed from the leaf
+# stream only when def == max_def_level (present element).
+#
+# Element types: int32/int64 (-> INT64), float32/float64 (-> FLOAT64), bool,
+# and byte_array (-> VARCHAR str). Draken's vector_array_from_sequence detects
+# the child type from the leaf Python objects (bool before int), so leaves are
+# materialized as the matching Python scalar type.
+
+
+cdef list _array_leaf_values(parquet_reader.DecodedColumn& col):
+    """Present leaf values, in stream order, as a Python list.
+
+    Mirrors the per-type/per-encoding accessors used by the scalar
+    materializers (plain dense, dict via packed per-level codes, dict via
+    compact present-order indices)."""
+    cdef bytes col_type = col.type
+    cdef Py_ssize_t n_levels = col.def_levels.size()
+    cdef int32_t max_def = col.max_def_level
+    cdef Py_ssize_t i, vi = 0
+    cdef bint has_dict = _decoded_has_dictionary(col)
+    cdef bint use_codes = has_dict and (not col.dict_codes_array.empty())
+    cdef uint8_t cw = col.code_width if col.code_width in (1, 2, 4) else 1
+    cdef list vals = []
+
+    if col_type == b"int64":
+        for i in range(n_levels):
+            if col.def_levels[i] != max_def:
+                continue
+            if use_codes:
+                vals.append(col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)])
+            elif has_dict:
+                vals.append(col.dict_int64_values[col.dict_indices[vi]]); vi += 1
+            else:
+                vals.append(col.int64_values[vi]); vi += 1
+    elif col_type == b"int32":
+        for i in range(n_levels):
+            if col.def_levels[i] != max_def:
+                continue
+            if use_codes:
+                vals.append(<int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)])
+            elif has_dict:
+                vals.append(<int64_t>col.dict_int32_values[col.dict_indices[vi]]); vi += 1
+            else:
+                vals.append(<int64_t>col.int32_values[vi]); vi += 1
+    elif col_type == b"byte_array":
+        # Draken's array constructor detects a string child by PyUnicode, so leaf
+        # values must be `str` (utf-8), matching the scalar string path's logical
+        # VARCHAR semantics.
+        for i in range(n_levels):
+            if col.def_levels[i] != max_def:
+                continue
+            if use_codes:
+                vals.append(_dict_str_at(col, _read_code(col.dict_codes_array, i, cw)).decode("utf-8"))
+            elif has_dict:
+                vals.append(_dict_str_at(col, col.dict_indices[vi]).decode("utf-8")); vi += 1
+            else:
+                vals.append(bytes(col.string_values[vi]).decode("utf-8")); vi += 1
+    elif col_type == b"float64":
+        for i in range(n_levels):
+            if col.def_levels[i] != max_def:
+                continue
+            if use_codes:
+                vals.append(col.dict_float64_values[_read_code(col.dict_codes_array, i, cw)])
+            elif has_dict:
+                vals.append(col.dict_float64_values[col.dict_indices[vi]]); vi += 1
+            else:
+                vals.append(col.float64_values[vi]); vi += 1
+    elif col_type == b"float32":
+        for i in range(n_levels):
+            if col.def_levels[i] != max_def:
+                continue
+            if use_codes:
+                vals.append(<double>col.dict_float32_values[_read_code(col.dict_codes_array, i, cw)])
+            elif has_dict:
+                vals.append(<double>col.dict_float32_values[col.dict_indices[vi]]); vi += 1
+            else:
+                vals.append(<double>col.float32_values[vi]); vi += 1
+    elif col_type == b"boolean":
+        # boolean is never dictionary-encoded by the decoder.
+        for i in range(n_levels):
+            if col.def_levels[i] != max_def:
+                continue
+            vals.append(col.boolean_values[vi] != 0); vi += 1
+    else:
+        raise NotImplementedError(
+            "rugo array reader: unsupported list element physical type %r" % col_type
+        )
+    return vals
+
+
 cdef Vector _make_array_vector(
         parquet_reader.DecodedColumn& decoded_col):
-    raise NotImplementedError(
-        "rugo migration gap: StringVectorBuilder + array_vector_from_parts "
-        "have no new-draken equivalent; tracked as E.28-gap-3 and E.28-gap-4."
-    )
+    cdef int32_t D = decoded_col.max_rep_level
+    cdef int32_t max_def = decoded_col.max_def_level
+    cdef Py_ssize_t n_levels = decoded_col.def_levels.size()
+    cdef Py_ssize_t i, li = 0
+    cdef int32_t r, d, k
+
+    if D < 1:
+        raise NotImplementedError(
+            "rugo array reader: column has max_rep_level=%d but was routed to the "
+            "array path" % D
+        )
+    if max_def != 2 * D + 1:
+        raise NotImplementedError(
+            "rugo array reader: unsupported list level scheme (max_rep_level=%d, "
+            "max_def_level=%d; expected max_def_level=%d for all-nullable nesting)."
+            % (D, max_def, 2 * D + 1)
+        )
+
+    cdef list leaf_vals = _array_leaf_values(decoded_col)  # raises for float/bool
+    cdef list out = []
+    # open_lists[k] is the currently-open list at depth k (1..D); index 0 unused.
+    cdef list open_lists = [None] * (D + 1)
+    cdef list parent
+    cdef list new
+    cdef bint has_leaf
+
+    for i in range(n_levels):
+        r = decoded_col.rep_levels[i]
+        d = decoded_col.def_levels[i]
+        has_leaf = True
+        # Open new sub-lists from depth r+1 down as deep as `d` defines them.
+        k = r + 1
+        while k <= D:
+            parent = out if k == 1 else open_lists[k - 1]
+            if d >= 2 * k - 1:               # list k is non-null
+                new = []
+                parent.append(new)
+                open_lists[k] = new
+                if d < 2 * k:                # present but EMPTY -> no children
+                    has_leaf = False
+                    break
+            else:                            # list k is null
+                parent.append(None)
+                has_leaf = False
+                break
+            k += 1
+        if not has_leaf:
+            continue
+        # The innermost open list receives the leaf element.
+        if d == max_def:                     # present element
+            open_lists[D].append(leaf_vals[li]); li += 1
+        else:                                # d == 2*D -> null element
+            open_lists[D].append(None)
+
+    return Vector(_dn.vector_array_from_sequence(out))
 
 
 def read_parquet(data, column_names=None, row_group_mask=None):
@@ -1128,7 +1279,15 @@ def read_parquet(data, column_names=None, row_group_mask=None):
 
             _t0 = _time.perf_counter()
 
-            if column.type == b"int64":
+            if column.rep_levels.size() > 0:
+                # Repeated (LIST) column — reconstruct nested vector from
+                # rep/def levels. Must precede the scalar type branches so a
+                # list<int64> / list<float64> etc. is never flattened.
+                vec = _make_array_vector(column)
+                if column.string_dict_lens.size() > 0:
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
+                _TEL["cython_str_s"] += _time.perf_counter() - _t0
+            elif column.type == b"int64":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
                 elif _should_emit_dictionary_vector(column, num_rows):
@@ -1148,11 +1307,6 @@ def read_parquet(data, column_names=None, row_group_mask=None):
                         _TEL["parquet_dict_materialize_fallbacks"] += 1
                     vec = _make_int64_from_int32_vector(column, num_rows)
                 _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-            elif column.type == b"byte_array" and column.rep_levels.size() > 0:
-                vec = _make_array_vector(column)
-                if column.string_dict_lens.size() > 0:
-                    _TEL["parquet_dict_materialize_fallbacks"] += 1
-                _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif column.type == b"byte_array":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
@@ -1490,7 +1644,12 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     num_rows = <int32_t>result.num_rows
 
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
-    if result.type == b"int32":
+    if result.rep_levels.size() > 0:
+        # Repeated (LIST) column — reconstruct from rep/def levels. Must precede
+        # the scalar type branches so a nested column is never flattened.
+        return _make_array_vector(result)
+
+    elif result.type == b"int32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1507,10 +1666,6 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_vector(result, num_rows)
-
-    elif result.type == b"byte_array" and result.rep_levels.size() > 0:
-        # LIST / repeated column — mirror the dispatch in read_parquet()
-        return _make_array_vector(result)
 
     elif result.type == b"byte_array":
         if _should_emit_constant_vector(result, num_rows):

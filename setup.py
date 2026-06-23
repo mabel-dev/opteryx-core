@@ -943,7 +943,14 @@ extensions = [
                 "rugo/src/parquet/vendor/zstd/compress",
             ]
         ),
-        define_macros=[("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
+        define_macros=[
+            ("HAVE_ZSTD", "1"),
+            ("ZSTD_STATIC_LINKING_ONLY", "1"),
+            # parquet `created_by` footer label, from the canonical version
+            # (opteryx/__version__.py, maintained by dev/build_counter.py).
+            ("RUGO_PARQUET_CREATED_BY",
+             '"opteryx-rugo version %s (build %s)"' % (__version__, __build__)),
+        ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,

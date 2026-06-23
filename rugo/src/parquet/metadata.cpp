@@ -143,12 +143,21 @@ static inline std::string CanonicalizeColumnName(std::string name) {
   if (name.rfind("schema.", 0) == 0) {
     name.erase(0, 7); // strip schema.
   }
-  if (name.size() >= 13 &&
-      name.compare(name.size() - 13, 13, ".list.element") == 0) {
-    name.erase(name.size() - 13);
-  } else if (name.size() >= 10 &&
-             name.compare(name.size() - 10, 10, ".list.item") == 0) {
-    name.erase(name.size() - 10);
+  // A nested list flattens to a repeated ".list.element" (or ".list.item")
+  // suffix PER nesting level, e.g. list<list<int64>> -> "x.list.element.list.element".
+  // Strip every trailing list-wrapper suffix so a nested column reports its
+  // top-level field name ("x"), matching single-level lists. Struct paths
+  // (e.g. "address.city") are preserved — only list wrappers are removed.
+  for (;;) {
+    if (name.size() >= 13 &&
+        name.compare(name.size() - 13, 13, ".list.element") == 0) {
+      name.erase(name.size() - 13);
+    } else if (name.size() >= 10 &&
+               name.compare(name.size() - 10, 10, ".list.item") == 0) {
+      name.erase(name.size() - 10);
+    } else {
+      break;
+    }
   }
   return name;
 }

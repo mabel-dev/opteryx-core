@@ -4062,6 +4062,9 @@ static VectorOwner take_child(const VectorOwner& src_child,
         return make_array_take(src_child, cidx.data(), cn);
     if (src_child.vec.type == DRAKEN_VECTOR_FP16)
         return make_fp16_take(src_child, cidx.data(), cn);
+    // bool is bit-packed; draken_take has no bool slot — mirror vector_take_impl.
+    if (src_child.vec.type == DRAKEN_BOOL)
+        return make_bool_take(src_child, cidx.data(), cn);
     auto result = vecresult_to_owner(draken_take(src_child.vec, cidx.data(), cn));
     result.vec.type     = src_child.vec.type;
     result.logical_type = src_child.logical_type;
@@ -4080,7 +4083,7 @@ static VectorOwner take_child(const VectorOwner& src_child,
 static VectorOwner make_array_from_sequence(nb::list seq) {
     const uint32_t length = static_cast<uint32_t>(seq.size());
 
-    enum ChildType { CT_UNKNOWN, CT_INT64, CT_STRING, CT_ARRAY };
+    enum ChildType { CT_UNKNOWN, CT_INT64, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
     ChildType child_type = CT_UNKNOWN;
 
     // Pass 1: detect child type, compute offsets, collect flat child elements.
@@ -4104,13 +4107,16 @@ static VectorOwner make_array_from_sequence(nb::list seq) {
 
         if (child_type == CT_UNKNOWN && sub_len > 0u) {
             nb::object first = sub[0];
-            if      (PyLong_Check(first.ptr()))                        child_type = CT_INT64;
+            // bool must precede int: Python bool is a subclass of int.
+            if      (PyBool_Check(first.ptr()))                        child_type = CT_BOOL;
+            else if (PyLong_Check(first.ptr()))                        child_type = CT_INT64;
+            else if (PyFloat_Check(first.ptr()))                       child_type = CT_FLOAT64;
             else if (PyUnicode_Check(first.ptr()))                     child_type = CT_STRING;
             else if (PyList_Check(first.ptr()) || PyTuple_Check(first.ptr())) child_type = CT_ARRAY;
             else
                 throw std::invalid_argument(
                     "vector_array_from_sequence: unsupported child element type "
-                    "(expected int, str, or list)");
+                    "(expected bool, int, float, str, or list)");
         }
         for (uint32_t j = 0u; j < sub_len; ++j)
             flat_children.append(sub[static_cast<Py_ssize_t>(j)]);
@@ -4169,6 +4175,13 @@ static VectorOwner make_array_from_sequence(nb::list seq) {
         }
         case CT_ARRAY:
             child = std::make_unique<VectorOwner>(make_array_from_sequence(flat_children));
+            break;
+        case CT_FLOAT64:
+            child = std::make_unique<VectorOwner>(
+                make_float_from_sequence<double, DRAKEN_FLOAT64>(flat_children));
+            break;
+        case CT_BOOL:
+            child = std::make_unique<VectorOwner>(make_bool_from_sequence(flat_children));
             break;
         default:
             child = std::make_unique<VectorOwner>(make_int64_from_sequence(flat_children));

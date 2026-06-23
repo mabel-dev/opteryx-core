@@ -255,3 +255,5 @@ draken/ops/kernels/_kernel_registry.cpp
 rugo/src/csv/_csv_reader.cpp
 rugo/src/jsonl/_jsonl_reader.cpp
 rugo/src/parquet/parquet_reader.cpp
+rugo/src/csv/_csv_writer.cpp
+rugo/src/jsonl/_jsonl_writer.cpp
