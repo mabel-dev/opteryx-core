@@ -122,6 +122,14 @@ from draken.morsels.morsel cimport Morsel
 # (pool_reader) uses zero-copy buffer construction and is unaffected.
 import draken.draken_native as _dn
 
+# Leaf-element DrakenType codes, resolved once from the native enum, used to tell
+# the array constructor the child type when a list column carries no inferable
+# leaf value (every row null or empty) — see _make_array_vector.
+cdef int _DK_EL_VARCHAR = int(_dn.VARCHAR.value)
+cdef int _DK_EL_INT64 = int(_dn.INT64.value)
+cdef int _DK_EL_FLOAT64 = int(_dn.FLOAT64.value)
+cdef int _DK_EL_BOOL = int(_dn.BOOL.value)
+
 
 # --- value decoder ---
 cdef inline bint _text_is_printable(str text):
@@ -466,6 +474,8 @@ def read_rowgroup_stats(data):
                 "max": (<bytes>fs.row_groups[rg_i].columns[c_i].max)
                        if fs.row_groups[rg_i].columns[c_i].has_max else None,
                 "null_count": fs.row_groups[rg_i].columns[c_i].null_count,
+                "distinct_count": (fs.row_groups[rg_i].columns[c_i].distinct_count
+                       if fs.row_groups[rg_i].columns[c_i].distinct_count >= 0 else None),
                 "bloom_offset": fs.row_groups[rg_i].columns[c_i].bloom_offset,
                 "bloom_length": fs.row_groups[rg_i].columns[c_i].bloom_length,
             })
@@ -1165,7 +1175,26 @@ cdef Vector _make_array_vector(
         else:                                # d == 2*D -> null element
             open_lists[D].append(None)
 
-    return Vector(_dn.vector_array_from_sequence(out))
+    # Leaf element type comes from the schema, not value inference: an all-null
+    # or all-empty list column (e.g. manifest min/max_values_display over numeric
+    # columns) has no leaf value to infer from. D is the list nesting depth, so
+    # the constructor knows to build ARRAY children above the leaf level.
+    cdef bytes col_type = decoded_col.type
+    cdef int el_type
+    if col_type == b"byte_array":
+        el_type = _DK_EL_VARCHAR
+    elif col_type == b"int64" or col_type == b"int32":
+        el_type = _DK_EL_INT64
+    elif col_type == b"float64" or col_type == b"float32":
+        el_type = _DK_EL_FLOAT64
+    elif col_type == b"boolean":
+        el_type = _DK_EL_BOOL
+    else:
+        raise NotImplementedError(
+            "rugo array reader: unsupported list element physical type %r" % col_type
+        )
+
+    return Vector(_dn.vector_array_from_sequence(out, el_type, D))
 
 
 def read_parquet(data, column_names=None, row_group_mask=None):

@@ -4078,9 +4078,18 @@ static VectorOwner take_child(const VectorOwner& src_child,
 //   int   → DRAKEN_INT64
 //   str   → DRAKEN_VARCHAR
 //   list  → DRAKEN_ARRAY (recursive)
-// Defaults to DRAKEN_INT64 if all rows are null or empty.
+//
+// When a level carries no inferable child (every row null or empty), the child
+// type is resolved from the schema instead of the values:
+//   * element_type — the DrakenType of the innermost (leaf) scalar element.
+//   * nesting_depth — list nesting depth at this level (1 = leaf list). When
+//     >= 2 the resolved child is DRAKEN_ARRAY (one nesting level removed) and
+//     the leaf element_type is threaded down through the recursion.
+// element_type < 0 / nesting_depth <= 0 selects the legacy value-only behaviour
+// (default DRAKEN_INT64 when nothing can be inferred).
 // ---------------------------------------------------------------------------
-static VectorOwner make_array_from_sequence(nb::list seq) {
+static VectorOwner make_array_from_sequence(
+        nb::list seq, int element_type = -1, int nesting_depth = 0) {
     const uint32_t length = static_cast<uint32_t>(seq.size());
 
     enum ChildType { CT_UNKNOWN, CT_INT64, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
@@ -4105,24 +4114,48 @@ static VectorOwner make_array_from_sequence(nb::list seq) {
         nb::list sub = nb::cast<nb::list>(row);
         const uint32_t sub_len = static_cast<uint32_t>(sub.size());
 
-        if (child_type == CT_UNKNOWN && sub_len > 0u) {
-            nb::object first = sub[0];
-            // bool must precede int: Python bool is a subclass of int.
-            if      (PyBool_Check(first.ptr()))                        child_type = CT_BOOL;
-            else if (PyLong_Check(first.ptr()))                        child_type = CT_INT64;
-            else if (PyFloat_Check(first.ptr()))                       child_type = CT_FLOAT64;
-            else if (PyUnicode_Check(first.ptr()))                     child_type = CT_STRING;
-            else if (PyList_Check(first.ptr()) || PyTuple_Check(first.ptr())) child_type = CT_ARRAY;
-            else
-                throw std::invalid_argument(
-                    "vector_array_from_sequence: unsupported child element type "
-                    "(expected bool, int, float, str, or list)");
+        if (child_type == CT_UNKNOWN) {
+            // Infer from the first NON-null element in this row. A leading None
+            // (e.g. an all-null list<string>) must not throw — the type is
+            // resolved from the schema (element_type/nesting_depth) below.
+            for (uint32_t j = 0u; j < sub_len; ++j) {
+                nb::object first = sub[static_cast<Py_ssize_t>(j)];
+                if (first.is_none()) continue;
+                // bool must precede int: Python bool is a subclass of int.
+                if      (PyBool_Check(first.ptr()))                        child_type = CT_BOOL;
+                else if (PyLong_Check(first.ptr()))                        child_type = CT_INT64;
+                else if (PyFloat_Check(first.ptr()))                       child_type = CT_FLOAT64;
+                else if (PyUnicode_Check(first.ptr()))                     child_type = CT_STRING;
+                else if (PyList_Check(first.ptr()) || PyTuple_Check(first.ptr())) child_type = CT_ARRAY;
+                else
+                    throw std::invalid_argument(
+                        "vector_array_from_sequence: unsupported child element type "
+                        "(expected bool, int, float, str, or list)");
+                break;
+            }
         }
         for (uint32_t j = 0u; j < sub_len; ++j)
             flat_children.append(sub[static_cast<Py_ssize_t>(j)]);
         offsets[i + 1u] = offsets[i] + static_cast<int32_t>(sub_len);
     }
-    if (child_type == CT_UNKNOWN) child_type = CT_INT64;
+    if (child_type == CT_UNKNOWN) {
+        // No value could be inferred at this level — fall back to the schema.
+        if (nesting_depth >= 2) {
+            // One or more list levels remain below this one.
+            child_type = CT_ARRAY;
+        } else {
+            switch (element_type) {
+                case DRAKEN_VARCHAR:
+                case DRAKEN_NVARCHAR:
+                case DRAKEN_VARBINARY: child_type = CT_STRING;  break;
+                case DRAKEN_FLOAT64:   child_type = CT_FLOAT64; break;
+                case DRAKEN_BOOL:      child_type = CT_BOOL;    break;
+                case DRAKEN_ARRAY:     child_type = CT_ARRAY;   break;
+                case DRAKEN_INT64:     child_type = CT_INT64;   break;
+                default:               child_type = CT_INT64;   break;  // legacy
+            }
+        }
+    }
 
     // Build offsets buffer.
     const size_t off_bytes = (length + 1u) * sizeof(int32_t);
@@ -4174,7 +4207,8 @@ static VectorOwner make_array_from_sequence(nb::list seq) {
             break;
         }
         case CT_ARRAY:
-            child = std::make_unique<VectorOwner>(make_array_from_sequence(flat_children));
+            child = std::make_unique<VectorOwner>(make_array_from_sequence(
+                flat_children, element_type, nesting_depth - 1));
             break;
         case CT_FLOAT64:
             child = std::make_unique<VectorOwner>(
@@ -8044,11 +8078,20 @@ NB_MODULE(draken_native, m) {
     //
     // Ownership: parent owns child; freeing parent frees entire subtree.
     m.def("vector_array_from_sequence",
-        [](nb::list seq) { return make_array_from_sequence(seq); },
+        [](nb::list seq, int element_type, int nesting_depth) {
+            return make_array_from_sequence(seq, element_type, nesting_depth);
+        },
         nb::arg("sequence"),
+        nb::arg("element_type") = -1,
+        nb::arg("nesting_depth") = 0,
         "Build a dense DRAKEN_ARRAY Vector from a Python list[list | None].\n"
         "Each non-null element must be a list (or tuple) of homogeneous elements.\n"
         "Child type inferred: int → INT64, str → STRING, list → ARRAY (recursive).\n"
+        "When a level has no inferable child (all rows null/empty), the child type\n"
+        "is taken from the schema: element_type is the leaf scalar DrakenType and\n"
+        "nesting_depth is the list nesting depth (>=2 forces an ARRAY child, the\n"
+        "leaf type threading down the recursion). element_type<0/nesting_depth<=0\n"
+        "keeps the legacy value-only behaviour (default INT64 leaf).\n"
         "None elements become null rows (validity bit cleared).\n"
         "[] elements become valid empty sublists (distinct from null).\n"
         "Parent owns child; RAII destructor frees the entire nested subtree.\n"

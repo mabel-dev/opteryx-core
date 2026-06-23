@@ -170,9 +170,3 @@ cdef extern from "type_widening.hpp" namespace "parquet_simd":
     # SIMD-accelerated type widening functions
     void widen_int32_to_int64(const int32_t* src, int64_t* dst, size_t count) nogil
     void widen_float32_to_float64(const float* src, double* dst, size_t count) nogil
-
-cdef extern from "_string_materialize.hpp" namespace "rugo_strmat":
-    # Pass 1: SIMD gather + horizontal-sum of dict_lens[codes].
-    int64_t sum_dict_lens(const int32_t* dict_lens, const int32_t* codes, size_t count) nogil
-    # Pass 2: SIMD-gather + exclusive prefix-sum into out_offsets[0..count].
-    int32_t build_offsets(const int32_t* dict_lens, const int32_t* codes, size_t count, int32_t* out_offsets) nogil

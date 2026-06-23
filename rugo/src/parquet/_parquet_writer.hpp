@@ -319,6 +319,11 @@ struct ColumnStats {
   std::vector<uint8_t> min_bytes;
   std::vector<uint8_t> max_bytes;
   int64_t null_count = 0;
+  // Hash-derived NDV (distinct non-null values), set only for bloom-eligible
+  // columns where the bloom build already computes it for free. -1 = not
+  // present. Hash-distinct, so a collision (xxhash64, vanishingly rare at these
+  // counts) would undercount — same hash-only equality basis as the bloom.
+  int64_t distinct_count = -1;
 };
 
 // unsigned-byte lexicographic compare (memcmp + shorter-is-smaller tiebreak),
@@ -819,13 +824,15 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     w.writeI64Field(6, (int64_t)uncompressed_total); // total_uncompressed_size
     w.writeI64Field(7, (int64_t)compressed_total);   // total_compressed_size
     w.writeI64Field(9, page_offset);               // data_page_offset
-    // statistics (field 12): null_count(3), max_value(5), min_value(6),
-    // is_max_value_exact(7), is_min_value_exact(8). Ascending ids. Omitted for
-    // LIST columns (nested null semantics — no leaf stats emitted).
+    // statistics (field 12): null_count(3), distinct_count(4), max_value(5),
+    // min_value(6), is_max_value_exact(7), is_min_value_exact(8). Ascending
+    // ids. Omitted for LIST columns (nested null semantics — no leaf stats).
     if (!c.is_array) {
       w.writeFieldHeader(CT_STRUCT, 12);
       w.structBegin(); // Statistics
       w.writeI64Field(3, stats.null_count);
+      if (stats.distinct_count >= 0)
+        w.writeI64Field(4, stats.distinct_count); // hash-derived NDV
       if (stats.has_minmax) {
         w.writeBinaryField(5, stats.max_bytes.data(), stats.max_bytes.size());
         w.writeBinaryField(6, stats.min_bytes.data(), stats.min_bytes.size());
@@ -893,7 +900,9 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     std::vector<uint64_t> hashes = bloom_hashes(cols[i], num_rows);
     if (hashes.empty())
       continue; // all-null column: nothing to filter
-    BloomFilter bf = bloom_build(hashes, bloom_ndv(hashes), 0.01);
+    size_t ndv = bloom_ndv(hashes);
+    stats[i].distinct_count = (int64_t)ndv; // surface NDV in Statistics (field 4)
+    BloomFilter bf = bloom_build(hashes, ndv, 0.01);
     std::vector<uint8_t> hdr = build_bloom_header((int32_t)bf.bitset.size());
     bloom_offset[i] = (int64_t)file.size();
     bloom_length[i] = (int32_t)(hdr.size() + bf.bitset.size());
