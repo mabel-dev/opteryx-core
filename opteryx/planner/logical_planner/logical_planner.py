@@ -1800,12 +1800,34 @@ def plan_analyze_query(statement, **kwargs) -> LogicalPlan:
 
     plan = LogicalPlan()
     analyze_node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
+    analyze_node.action = "analyze_table"
     analyze_node.table_name = ".".join(
         part["Identifier"]["value"] for part in statement[root]["table_name"]
     )
+    # FOR COLUMNS <list> scopes the analysis; empty list = whole table.
+    # NB: not `.columns` — that attribute is reserved by the binder for
+    # projection columns (post_bind expects bound column objects there).
+    analyze_node.analyze_columns = [c["value"] for c in statement[root].get("columns") or []]
 
     analyze_id = random_string()
     plan.add_node(analyze_id, analyze_node)
+
+    return plan
+
+
+def plan_drop_statistics(statement, **kwargs) -> LogicalPlan:
+    """DROP STATISTICS ON t [FOR COLUMNS …] — synthesized by the planner's
+    pre-parse interception (no native sqlparser grammar). Reuses the Analyze
+    logical node / Table Management physical node, dispatching on `action`."""
+    root = "DropStatistics"
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
+    node.action = "drop_statistics"
+    node.table_name = statement[root]["table_name"]
+    node.analyze_columns = list(statement[root].get("columns") or [])
+
+    node_id = random_string()
+    plan.add_node(node_id, node)
 
     return plan
 
@@ -1938,6 +1960,7 @@ def plan_comment(statement, **kwargs):
 
 QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
+    "DropStatistics": plan_drop_statistics,
     "Comment": plan_comment,
     "Explain": plan_explain,
     "Query": plan_query,

@@ -1,8 +1,49 @@
-# `ANALYZE … FOR COLUMNS` — Skip-Structure Sidecars: Design & Decision
+# `ANALYZE … FOR COLUMNS` — Statistics Sidecars: Design & Status
 
-**Status:** Awaiting architect ratification. Design-only; no engine code proposed here.
+**Status:** IMPLEMENTED (local filesystem), `make q` 190/190. Bloom filters were
+explicitly cut by the architect — see "Decision log" below. What shipped:
+column-scoped NDV (KMV) statistics via `ANALYZE … FOR COLUMNS`, and removal via
+`DROP STATISTICS ON t [FOR COLUMNS …]`.
 **Date:** 2026-06-24.
 **Related:** [`docs/NDV_STATISTICS_DESIGN.md`](NDV_STATISTICS_DESIGN.md) (WP-8, sidecar generation/freshness).
+
+## Decision log (what changed from the original design)
+
+- **Blooms cut.** The architect chose to skip bloom filters entirely. Blooms in
+  this codebase are *embedded in the Parquet file* (read via `bloom_offset` in
+  the footer), not sidecars — there is no sidecar-bloom reader. Adding them
+  would have meant either a new scan-side consumer (sidecar path) or rewriting
+  user data (embedded path). Out of scope.
+- **Correctness landmine gone with them.** The remaining artifacts (NDV/KMV,
+  and prospectively histograms) are *advisory* — used only for cost estimation.
+  A stale stat yields a worse plan, never a wrong answer. So the §7
+  version-binding discipline is **not required**; the loader's existing
+  field-id staleness check is sufficient.
+- **Scope: local filesystem.** The local FS exposes no write/delete API, so
+  sidecars are written via `os` on the local paths (they *are* local files).
+  Remote/object-store writes are a later increment; an unsupported backend
+  fails loudly (`UnsupportedSyntaxError`).
+- **Bare `ANALYZE TABLE t` analyzes all columns** (the old path was dead —
+  `action` was never set, `refresh_manifest` did not exist). This supersedes
+  the §8.1 "keep bare ANALYZE as manifest refresh" suggestion.
+
+## What was built
+
+- Format: the existing v1 `.stats.json` sidecar (`field_ids` = full schema,
+  `min_k_hashes` = analyzed columns only). KMV core promoted to
+  [`opteryx/utils/kmv.py`](../opteryx/utils/kmv.py) (stdlib BLAKE2b, no pyarrow).
+- Orchestration: [`opteryx/operators/table_management/_analyze.py`](../opteryx/operators/table_management/_analyze.py)
+  — native read via `rugo.read_parquet`, per-file KMV, atomic sidecar write;
+  and the drop path (column-scoped edit or whole-file delete, idempotent).
+- Wiring: `plan_analyze_query` reads `columns` + sets `action`; `DROP STATISTICS`
+  recognized in the planner pre-parse layer (`_intercept_drop_statistics`) and
+  routed through the same Analyze/Table-Management node by `action`.
+- Tests: [`tests/storage/test_analyze_statistics.py`](../tests/storage/test_analyze_statistics.py)
+  (7 cases — lifecycle, exact NDV, idempotent drop, loud failures).
+
+The sections below are the original design discussion, retained for context.
+
+---
 
 ---
 

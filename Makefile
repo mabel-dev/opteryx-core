@@ -198,6 +198,10 @@ clickbench:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
+clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
+	@clear || true
+	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile
+
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 

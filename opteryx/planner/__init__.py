@@ -182,6 +182,43 @@ def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=N
     return root
 
 
+import re as _re
+
+# DROP STATISTICS ON <table> [FOR COLUMNS <c1>, <c2>, ...]
+_DROP_STATS_RE = _re.compile(
+    r"^\s*DROP\s+STATISTICS\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+FOR\s+COLUMNS\s+(?P<cols>.+?))?\s*;?\s*$",
+    _re.IGNORECASE | _re.DOTALL,
+)
+_DROP_STATS_LEAD = _re.compile(r"^\s*DROP\s+STATISTICS\b", _re.IGNORECASE)
+
+
+def _intercept_drop_statistics(clean_sql: str):
+    """Recognize `DROP STATISTICS ON t [FOR COLUMNS …]` before the SQL parser.
+
+    Returns a synthesized single-statement AST list, or None if the statement is
+    not a DROP STATISTICS. A statement that begins with DROP STATISTICS but does
+    not match the full grammar fails loudly rather than falling through to the
+    parser (which would emit a confusing error or, worse, mis-parse it)."""
+    if not _DROP_STATS_LEAD.match(clean_sql):
+        return None
+    match = _DROP_STATS_RE.match(clean_sql)
+    if match is None:
+        from opteryx.exceptions import UnsupportedSyntaxError
+
+        raise UnsupportedSyntaxError(
+            "Expected: DROP STATISTICS ON <table> [FOR COLUMNS <col>, ...]"
+        )
+    cols_raw = match.group("cols")
+    columns = []
+    if cols_raw:
+        for part in cols_raw.split(","):
+            name = part.strip().strip('"').strip("`")
+            if name:
+                columns.append(name)
+    return [{"DropStatistics": {"table_name": match.group("table"), "columns": columns}}]
+
+
 def query_planner(
     operation: str,
     parameters: Union[Iterable, Dict, None],
@@ -214,13 +251,18 @@ def query_planner(
     else:
         params = [p for p in parameters or []]
 
-    # Parser converts the SQL command into an AST
-    try:
-        parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
-    except ValueError as parser_error:
-        from opteryx.exceptions import SqlError
+    # Parser converts the SQL command into an AST.
+    # DROP STATISTICS has no native sqlparser grammar (and `ALTER TABLE … DROP
+    # STATISTICS` mis-parses STATISTICS as a column name), so it is recognized
+    # here in the pre-parse layer and synthesized into an AST directly.
+    parsed_statements = _intercept_drop_statistics(clean_sql)
+    if parsed_statements is None:
+        try:
+            parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
+        except ValueError as parser_error:
+            from opteryx.exceptions import SqlError
 
-        raise SqlError(parser_error) from parser_error
+            raise SqlError(parser_error) from parser_error
     # AST Rewriter adds temporal filters and parameters to the AST
     start = time.monotonic_ns()
     parsed_statement = do_ast_rewriter(parsed_statements, parameters=params)[0]

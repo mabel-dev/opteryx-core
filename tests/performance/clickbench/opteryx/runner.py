@@ -138,6 +138,13 @@ if __name__ == "__main__":  # pragma: no cover
         default=None,
         help="Path to DuckDB baseline results JSON (defaults to duckdb.local.json if present, then duckdb.c6a.4xlarge.json)",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="After the benchmark, run a tracing pass (EXPLAIN ANALYZE) and report "
+        "per-operator self-time, per-query and aggregated across the suite.",
+    )
     args = parser.parse_args()
 
     # Resolve DuckDB baseline path: prefer local results if present
@@ -310,6 +317,80 @@ if __name__ == "__main__":  # pragma: no cover
                 failures.append((statement, err))
 
     print("--- ✅ \033[0;32mdone\033[0m")
+
+    if args.profile:
+        import collections
+
+        # A query's accurate per-operator SELF time only accrues with tracing on
+        # (it lets push() subtract downstream_time out of the inclusive
+        # execution_time). The only sanctioned path that flips tracing on every
+        # node is EXPLAIN ANALYZE, so we drive each query that way in a SEPARATE
+        # pass — the benchmark numbers above stay tracing-free and honest.
+        print(f"\n{'=' * 80}")
+        print("PER-OPERATOR PROFILE (tracing pass — EXPLAIN ANALYZE self-time)")
+        print(f"{'=' * 80}\n")
+
+        suite_self = collections.defaultdict(int)  # operator name -> self_time ns
+        suite_plan_ns = 0
+        suite_exec_ns = 0
+        per_query_rows = []  # (query_num, exec_ms, top_operator, top_share)
+
+        for index, (statement, _err) in enumerate(STATEMENTS):
+            statement = statement.replace("{DATASET}", f"{DATASET.value}")
+            query_num = f"Q{(index + 1):02d}"
+            gc.collect()
+            session = None
+            try:
+                session = opteryx.session()
+                for _ in session.execute_to_morsels(f"EXPLAIN ANALYZE {statement}"):
+                    pass
+
+                op_self = collections.defaultdict(int)
+                for nid in session._plan.nodes():
+                    node = session._plan[nid]
+                    if node is None or node.name in ("Explain", "Exit"):
+                        continue
+                    op_self[node.name] += node.sensors().get("self_time", 0)
+
+                for name, t in op_self.items():
+                    suite_self[name] += t
+                suite_plan_ns += session._telemetry.time_planning
+                suite_exec_ns += session._telemetry.time_executing
+
+                total = sum(op_self.values()) or 1
+                top_name, top_t = max(op_self.items(), key=lambda x: x[1], default=("-", 0))
+                per_query_rows.append(
+                    (query_num, total / 1e6, top_name, 100.0 * top_t / total)
+                )
+            except opteryx.exceptions.MissingSqlStatement:
+                continue
+            except Exception as e:  # noqa: BLE001 - profiling is best-effort
+                per_query_rows.append((query_num, 0.0, f"ERROR: {str(e)[:40]}", 0.0))
+            finally:
+                if session is not None:
+                    session.close()
+
+        # Per-query: where each query spends its time.
+        print(f"{'Query':<8} {'ExecSelf':>12}   {'Dominant operator':<32} {'Share':>7}")
+        print("-" * 70)
+        for query_num, exec_ms, top_name, top_share in per_query_rows:
+            print(f"{query_num:<8} {exec_ms:>9.2f}ms   {top_name:<32} {top_share:>6.1f}%")
+
+        # Suite-wide: where the whole battery spends its time.
+        suite_total = sum(suite_self.values()) or 1
+        print(f"\n{'=' * 80}")
+        print("SUITE-WIDE OPERATOR SELF-TIME (sum across all queries)")
+        print(f"{'=' * 80}\n")
+        print(f"{'Operator':<34} {'Self time':>12} {'Share':>8}")
+        print("-" * 56)
+        for name, t in sorted(suite_self.items(), key=lambda x: -x[1]):
+            print(f"{name:<34} {t / 1e6:>9.2f}ms {100.0 * t / suite_total:>6.1f}%")
+        print("-" * 56)
+        print(f"{'TOTAL operator self-time':<34} {suite_total / 1e6:>9.2f}ms")
+        print(
+            f"\n{'Planning (total)':<34} {suite_plan_ns / 1e6:>9.2f}ms"
+            f"\n{'Execution (total, traced)':<34} {suite_exec_ns / 1e6:>9.2f}ms"
+        )
 
     if failed > 0:
         print("\n\033[38;2;139;233;253m\033[3mFAILURES\033[0m")

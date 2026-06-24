@@ -31,11 +31,15 @@ class TableManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
-        # Action should be one of: 'create_view', 'alter_view', 'drop_view'
+        # Action should be one of: 'create_view', 'alter_view', 'drop_view',
+        # 'analyze_table', 'drop_statistics'
         self.action: str = parameters.get("action")
 
         # CREATE / ALTER
         self.table_name: str = parameters.get("table_name")
+
+        # ANALYZE / DROP STATISTICS — FOR COLUMNS scope ([] = whole table)
+        self.columns: list = parameters.get("analyze_columns") or []
 
     @property
     def name(self):  # pragma: no cover - simple string
@@ -50,19 +54,21 @@ class TableManagementNode(BasePlanNode):
 
         if self.action == "analyze_table":
             from opteryx.connectors import connector_factory
+            from opteryx.operators.table_management._analyze import analyze_table
 
             connector = connector_factory(self.table_name, telemetry=self.telemetry)
-            entity_type, entity = connector.locate_object(self.table_name)
-            if entity is None:
-                raise Exception(f"Table '{self.table_name}' does not exist.")
-            if entity_type != TableType.Table:
-                raise UnsupportedSyntaxError(
-                    f"ANALYZE TABLE can only be performed on tables, not {entity_type.value}."
-                )
+            table_engine = connector.table_engine(self.table_name, telemetry=self.telemetry)
+            written = analyze_table(table_engine, self.columns)
+            return NonTabularResult(record_count=written, status=QueryStatus.SQL_SUCCESS)
 
-            entity.refresh_manifest("system")
+        elif self.action == "drop_statistics":
+            from opteryx.connectors import connector_factory
+            from opteryx.operators.table_management._analyze import drop_statistics
 
-            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+            connector = connector_factory(self.table_name, telemetry=self.telemetry)
+            table_engine = connector.table_engine(self.table_name, telemetry=self.telemetry)
+            removed = drop_statistics(table_engine, self.columns)
+            return NonTabularResult(record_count=removed, status=QueryStatus.SQL_SUCCESS)
 
         else:
-            raise NotImplementedError(f"Unsupported view action: {self.action}")
+            raise NotImplementedError(f"Unsupported table action: {self.action}")
