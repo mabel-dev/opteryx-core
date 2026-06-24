@@ -36,15 +36,7 @@ PageHeader ParsePageHeader(TInput &in) {
         case 2:  // encoding
           header.encoding = ReadI32(in);
           break;
-        case 3:  // is_sorted
-          if (dph_fh.type == T_BOOL_TRUE) {
-            header.dictionary_is_sorted = true;
-          } else if (dph_fh.type == T_BOOL_FALSE) {
-            header.dictionary_is_sorted = false;
-          } else {
-            header.dictionary_is_sorted = ReadBool(in);
-          }
-          break;
+        // fields 3/4 (definition/repetition level encodings) are not needed.
         default:
           SkipField(in, dph_fh.type);
           break;
@@ -64,6 +56,15 @@ PageHeader ParsePageHeader(TInput &in) {
           break;
         case 2:  // encoding
           header.encoding = ReadI32(in);
+          break;
+        case 3:  // is_sorted (dictionary entries in ascending order)
+          if (dph_fh.type == T_BOOL_TRUE) {
+            header.dictionary_is_sorted = true;
+          } else if (dph_fh.type == T_BOOL_FALSE) {
+            header.dictionary_is_sorted = false;
+          } else {
+            header.dictionary_is_sorted = ReadBool(in);
+          }
           break;
         default:
           SkipField(in, dph_fh.type);

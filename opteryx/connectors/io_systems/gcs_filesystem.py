@@ -373,7 +373,7 @@ class OpteryxGcsFileSystem:
         if columns or filters:
             raise NotImplementedError(
                 "Column projection and filtering are not supported for GCS open_input_stream/file. "
-                "Use fetch_columns() for column-selective reads."
+                "Column-selective reads go through the native Parquet scan path."
             )
         # Ensure token is fresh before handing it to GcsFile (which reads immediately).
         _ = self._bearer
@@ -390,7 +390,7 @@ class OpteryxGcsFileSystem:
         if columns or filters:
             raise NotImplementedError(
                 "Column projection and filtering are not supported for GCS open_input_stream/file. "
-                "Use fetch_columns() for column-selective reads."
+                "Column-selective reads go through the native Parquet scan path."
             )
         # Ensure token is fresh before handing it to GcsFile (which reads immediately).
         _ = self._bearer

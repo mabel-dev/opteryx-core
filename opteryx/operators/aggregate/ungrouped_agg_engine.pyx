@@ -214,6 +214,10 @@ cdef class UngroupedAggregateEngine:
             # without GROUP BY, which routes through SumFloat64Aggregate).
             if agg.result_type == AGG_RESULT_F64:
                 vectors.append(vector_from_sequence([agg.get_result()], dtype=_draken_native.DrakenType.FLOAT64))
+            elif agg.result_type == AGG_RESULT_BYTES:
+                # String MIN/MAX returns bytes (or None); build a VARCHAR vector.
+                # The generic (numeric) vector_from_sequence path bad_casts on bytes.
+                vectors.append(vector_from_sequence([agg.get_result()], dtype="VARCHAR"))
             else:
                 value = agg.get_result()
                 # DECIMAL results must build a real DECIMAL vector — the generic int64

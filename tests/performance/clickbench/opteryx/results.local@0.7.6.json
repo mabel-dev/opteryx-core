@@ -54,5 +54,5 @@ Q42/41          53.72ms        53.18ms              -     53.45ms       53.18ms 
 Q43/42          52.40ms        52.26ms              -     52.33ms       52.26ms       52.40ms  [4.75x]
 --- ✅ done
 
-COMPLETE (73.32 seconds) <- best ever
+COMPLETE (73.12 seconds) <- best ever
 0.26.8 (251.24 seconds)

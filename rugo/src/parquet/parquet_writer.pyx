@@ -99,7 +99,7 @@ cdef inline string _to_std_string(object name):
 
 
 def write_parquet(Morsel morsel not None, str compression="zstd",
-                  bloom_filters=True):
+                  bloom_filters=True, bint dictionary=True):
     """Serialize a Morsel to a parquet file (bytes).
 
     compression: "zstd" (default) or "none". Anything else raises ValueError.
@@ -107,26 +107,32 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
         equality-friendly columns (ints, strings/binary, date, timestamp,
         decimal); False writes none; an iterable of column names limits it to
         those. Float and bool columns never get a bloom filter.
+    dictionary: True (default) dictionary-encodes eligible columns
+        (VARCHAR/NVARCHAR/VARBINARY/VARIANT, INT8/16/32/64, FLOAT32/64, DATE32,
+        TIMESTAMP64). A column arriving dict/constant-shaped keeps its existing
+        dictionary (zero re-hash); a low-cardinality dense column is
+        auto-dictionaried; otherwise PLAIN. False forces PLAIN everywhere.
 
     Supported column types: INT8/16/32/64, FLOAT64, BOOL, VARCHAR, NVARCHAR,
     VARBINARY, DATE32, TIMESTAMP64, DECIMAL, DECIMAL128, and all-null (NULL)
     columns. Any other physical type raises ValueError (fail loud).
     """
-    return _encode(morsel, compression, False, bloom_filters)[0]
+    return _encode(morsel, compression, False, bloom_filters, dictionary)[0]
 
 
 def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
-                              bloom_filters=True):
+                              bloom_filters=True, bint dictionary=True):
     """Like write_parquet, but also returns per-column min/max bounds.
 
     Returns (data_bytes, bounds) where bounds is {col_index: (min, max)} of
     typed Python values for bound-eligible plain columns (INT64/FLOAT64/BOOL/
     UTF8 string). Logical-typed and VARBINARY columns are omitted.
     """
-    return _encode(morsel, compression, True, bloom_filters)
+    return _encode(morsel, compression, True, bloom_filters, dictionary)
 
 
-cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filters):
+cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filters,
+             bint use_dict=True):
     cdef int codec
     # Resolve the bloom-filter request: all-eligible / none / a name set.
     cdef bint bloom_all = (bloom_filters is True)
@@ -167,6 +173,8 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef vector[vector[uint8_t]] dec_store   # raw native-endian unscaled bytes
     cdef vector[vector[uint8_t]] null_store  # synthesized all-null validity masks
     cdef vector[vector[uint8_t]] level_store # array rep/def level buffers
+    cdef vector[vector[uint32_t]] codes_store # per-row dict codes (preserve path)
+    codes_store.reserve(ncols)
     i32_store.reserve(ncols)
     i64_store.reserve(ncols)
     f64_store.reserve(ncols)
@@ -200,7 +208,11 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef vector[StrSlice] tmps
     cdef vector[uint8_t] tmpdec
     cdef vector[uint8_t] tmpnull
+    cdef vector[uint32_t] tmpc
     cdef StrSlice ss
+    cdef bint did_preserve
+    cdef bint dict_shape
+    cdef uint32_t dict_n
     cdef int dec_w
     cdef long mul
     cdef int64_t months, us, days, millis
@@ -225,8 +237,15 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef vector[uint8_t] elem_b
     cdef vector[StrSlice] elem_s
 
+    # Keep every column Vector (and ARRAY child Vector) referenced until after
+    # WriteParquet: StrSlice pointers and preserved dict buffers point into
+    # vector-owned memory, and a rebound loop-local would free a child arena
+    # mid-build (zeroing already-captured string element bytes).
+    cdef list keepalive = []
+
     for i in range(ncols):
         v = morsel._get_column(i)
+        keepalive.append(v)
         dv = v.unified()
         sel = dv.selection
         t = dv.type
@@ -235,12 +254,27 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         ci.name = _to_std_string(names[i])
         ci.validity = dv.validity
 
+        # A compressed-shape vector (constant or true dict) already carries a
+        # dictionary: `data` holds dict_n unique values and `selection` the
+        # per-row codes. Eligible-type branches preserve it (set did_preserve);
+        # the codes are stamped centrally after the type dispatch.
+        did_preserve = False
+        dict_n = dv.data_length
+        dict_shape = use_dict and dict_n >= 1 and dict_n < <uint32_t>nrows
+
         if t == DRAKEN_INT64:
             tmp64 = vector[int64_t]()
-            tmp64.resize(nrows)
             src64 = <const int64_t*>dv.data
-            for j in range(nrows):
-                tmp64[j] = src64[sel[j]]
+            if dict_shape:
+                tmp64.resize(dict_n)
+                for j in range(dict_n):
+                    tmp64[j] = src64[j]
+                did_preserve = True
+            else:
+                tmp64.resize(nrows)
+                for j in range(nrows):
+                    tmp64[j] = src64[sel[j]]
+                ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.i64 = i64_store.back().data()
@@ -248,26 +282,47 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
             # Narrow integers widen losslessly to INT64.
             tmp64 = vector[int64_t]()
-            tmp64.resize(nrows)
-            if t == DRAKEN_INT32:
-                for j in range(nrows):
-                    tmp64[j] = (<const int32_t*>dv.data)[sel[j]]
-            elif t == DRAKEN_INT16:
-                for j in range(nrows):
-                    tmp64[j] = (<const int16_t*>dv.data)[sel[j]]
+            if dict_shape:
+                tmp64.resize(dict_n)
+                if t == DRAKEN_INT32:
+                    for j in range(dict_n):
+                        tmp64[j] = (<const int32_t*>dv.data)[j]
+                elif t == DRAKEN_INT16:
+                    for j in range(dict_n):
+                        tmp64[j] = (<const int16_t*>dv.data)[j]
+                else:
+                    for j in range(dict_n):
+                        tmp64[j] = (<const int8_t*>dv.data)[j]
+                did_preserve = True
             else:
-                for j in range(nrows):
-                    tmp64[j] = (<const int8_t*>dv.data)[sel[j]]
+                tmp64.resize(nrows)
+                if t == DRAKEN_INT32:
+                    for j in range(nrows):
+                        tmp64[j] = (<const int32_t*>dv.data)[sel[j]]
+                elif t == DRAKEN_INT16:
+                    for j in range(nrows):
+                        tmp64[j] = (<const int16_t*>dv.data)[sel[j]]
+                else:
+                    for j in range(nrows):
+                        tmp64[j] = (<const int8_t*>dv.data)[sel[j]]
+                ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.i64 = i64_store.back().data()
 
         elif t == DRAKEN_FLOAT64:
             tmpf = vector[double]()
-            tmpf.resize(nrows)
             srcf = <const double*>dv.data
-            for j in range(nrows):
-                tmpf[j] = srcf[sel[j]]
+            if dict_shape:
+                tmpf.resize(dict_n)
+                for j in range(dict_n):
+                    tmpf[j] = srcf[j]
+                did_preserve = True
+            else:
+                tmpf.resize(nrows)
+                for j in range(nrows):
+                    tmpf[j] = srcf[sel[j]]
+                ci.dict_enabled = use_dict
             f64_store.push_back(tmpf)
             ci.type = PT_DOUBLE
             ci.f64 = f64_store.back().data()
@@ -288,12 +343,22 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             # VARIANT is German-string-backed JSON text -> written as a STRING.
             arena = <DrakenStringArena*>dv.data
             tmps = vector[StrSlice]()
-            tmps.resize(nrows)
-            for j in range(nrows):
-                slot = &arena.slots[sel[j]]
-                ss.ptr = str_data(slot, arena.arena)
-                ss.len = str_length(slot)
-                tmps[j] = ss
+            if dict_shape:
+                tmps.resize(dict_n)
+                for j in range(dict_n):
+                    slot = &arena.slots[j]
+                    ss.ptr = str_data(slot, arena.arena)
+                    ss.len = str_length(slot)
+                    tmps[j] = ss
+                did_preserve = True
+            else:
+                tmps.resize(nrows)
+                for j in range(nrows):
+                    slot = &arena.slots[sel[j]]
+                    ss.ptr = str_data(slot, arena.arena)
+                    ss.len = str_length(slot)
+                    tmps[j] = ss
+                ci.dict_enabled = use_dict
             str_store.push_back(tmps)
             ci.type = PT_BYTE_ARRAY
             ci.is_utf8 = (t != DRAKEN_VARBINARY)  # VARIANT/VARCHAR/NVARCHAR -> UTF8
@@ -302,9 +367,16 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_FLOAT32:
             # widen losslessly to DOUBLE (every float32 is exact in float64)
             tmpf = vector[double]()
-            tmpf.resize(nrows)
-            for j in range(nrows):
-                tmpf[j] = (<const float*>dv.data)[sel[j]]
+            if dict_shape:
+                tmpf.resize(dict_n)
+                for j in range(dict_n):
+                    tmpf[j] = (<const float*>dv.data)[j]
+                did_preserve = True
+            else:
+                tmpf.resize(nrows)
+                for j in range(nrows):
+                    tmpf[j] = (<const float*>dv.data)[sel[j]]
+                ci.dict_enabled = use_dict
             f64_store.push_back(tmpf)
             ci.type = PT_DOUBLE
             ci.f64 = f64_store.back().data()
@@ -361,10 +433,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
 
         elif t == DRAKEN_DATE32:
             tmp32 = vector[int32_t]()
-            tmp32.resize(nrows)
             src32 = <const int32_t*>dv.data
-            for j in range(nrows):
-                tmp32[j] = src32[sel[j]]
+            if dict_shape:
+                tmp32.resize(dict_n)
+                for j in range(dict_n):
+                    tmp32[j] = src32[j]
+                did_preserve = True
+            else:
+                tmp32.resize(nrows)
+                for j in range(nrows):
+                    tmp32[j] = src32[sel[j]]
+                ci.dict_enabled = use_dict
             i32_store.push_back(tmp32)
             ci.type = PT_INT32
             ci.logical = LK_DATE
@@ -393,10 +472,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                     "write_parquet: unsupported timestamp unit %r for %r"
                     % (unit, names[i]))
             tmp64 = vector[int64_t]()
-            tmp64.resize(nrows)
             src64 = <const int64_t*>dv.data
-            for j in range(nrows):
-                tmp64[j] = src64[sel[j]] * mul
+            if dict_shape:
+                tmp64.resize(dict_n)
+                for j in range(dict_n):
+                    tmp64[j] = src64[j] * mul
+                did_preserve = True
+            else:
+                tmp64.resize(nrows)
+                for j in range(nrows):
+                    tmp64[j] = src64[sel[j]] * mul
+                ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.logical = LK_TIMESTAMP
@@ -443,6 +529,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             # 3=present; rep: 0=new row, 1=continuation.
             offs = <const int32_t*>dv.data
             child = Vector(v._nb.array_child)
+            keepalive.append(child)
             cdv = child.unified()
             ct = cdv.type
             child_sel = cdv.selection
@@ -540,6 +627,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 "DECIMAL/DECIMAL128, ARRAY of those, NULL; FP16 not yet)"
                 % (<int>t, names[i])
             )
+
+        # PRESERVE path: stamp the per-row dict codes (= the vector's selection)
+        # and dictionary entry count. The typed buffer above holds dict_n values.
+        if did_preserve:
+            tmpc = vector[uint32_t]()
+            tmpc.resize(nrows)
+            for j in range(nrows):
+                tmpc[j] = sel[j]
+            codes_store.push_back(tmpc)
+            ci.codes = codes_store.back().data()
+            ci.dict_count = dict_n
 
         # Bloom filter: equality-friendly types only (skip FLOAT/BOOL/INTERVAL).
         if t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,

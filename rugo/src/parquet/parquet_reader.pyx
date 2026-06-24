@@ -10,6 +10,31 @@
 
 # distutils: language = c++
 # distutils: extra_compile_args = -Wno-unreachable-code-fallthrough
+#
+# =============================================================================
+# THIS IS RUGO'S STANDALONE READER — NOT THE OPTERYX EXECUTION SCAN.
+# =============================================================================
+#
+# Endpoint: rugo's public `read_parquet()` / `decode_column_from_chunk()` API.
+# Its consumers are GENERAL-PURPOSE and Python-facing — `read_parquet` is a
+# library entry point, used for catalog/manifest reads and the rugo test suite,
+# where the caller wants ordinary Python values out the other end.
+#
+# BECAUSE OF THAT ENDPOINT, this reader deliberately MATERIALISES dictionary-
+# encoded columns into per-row Python lists and re-builds dense/auto-dict
+# vectors (see `_int64_list` / `_float64_list` / `_string_list` /
+# `_make_typed_*_dictionary_vector`). The dict on disk is FLATTENED to Python
+# objects here ON PURPOSE — that is what a standalone Python reader is for. It
+# is NOT a bug and NOT the hot path.
+#
+# The OPTERYX QUERY ENGINE DOES NOT USE THIS FILE TO SCAN DATA. The execution
+# scan is the native C++ pipeline in
+# `opteryx/connectors/parquet_io/pool_reader.pyx` (`iter_row_groups_ipc`), which
+# PRESERVES dictionary shape end-to-end (DK_*_DICT, zero Python objects per row).
+# If you are chasing scan performance or §11 dict-shape behaviour, look THERE,
+# not here. Do not "fix" this reader to preserve dicts on the assumption it
+# feeds the engine — it does not.
+# =============================================================================
 import datetime
 import os
 import struct
@@ -617,6 +642,11 @@ cdef inline bytes _dict_str_at(parquet_reader.DecodedColumn& col, Py_ssize_t idx
 
 cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                       bint from_int32):
+    # FLATTEN-TO-PYTHON BY DESIGN (see module banner). This is rugo's standalone
+    # reader endpoint: even when the column is dict-encoded on disk, we expand it
+    # into a per-row Python list (`out[i] = dict_values[code]`) for a Python
+    # consumer. This is NOT the opteryx scan — that path (pool_reader) keeps the
+    # dict shape and never builds Python objects per row.
     cdef list out = [None] * num_rows
     cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
     cdef bint has_v = col.valid_bits.size() > 0
@@ -661,6 +691,8 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
 
 cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                         bint from_float32):
+    # FLATTEN-TO-PYTHON BY DESIGN — standalone rugo reader endpoint; see
+    # `_int64_list` and the module banner. Not the opteryx scan path.
     cdef list out = [None] * num_rows
     cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
     cdef bint has_v = col.valid_bits.size() > 0
@@ -704,6 +736,8 @@ cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
 
 
 cdef list _string_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
+    # FLATTEN-TO-PYTHON BY DESIGN — standalone rugo reader endpoint; see
+    # `_int64_list` and the module banner. Not the opteryx scan path.
     cdef list out = [None] * num_rows
     cdef Py_ssize_t i, vi = 0
     cdef bint has_v = col.valid_bits.size() > 0
@@ -973,11 +1007,15 @@ cdef Vector _make_typed_string_dictionary_vector(
 cdef Vector _make_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    """Build a dictionary-encoded Vector from decoded parquet dictionary payload.
+    """Build a Vector from a decoded parquet dictionary payload, for rugo's
+    STANDALONE reader endpoint (see module banner).
 
-    This is a compatibility shim that delegates to the typed dictionary
-    constructors (e.g. :meth:`Integer64Vector.from_dict`). This avoids exposing
-    ``DictionaryVector`` as part of the public/parquet path.
+    NOTE: despite the name, this does NOT preserve the on-disk dictionary. It
+    routes to the `_make_typed_*_dictionary_vector` makers, which FLATTEN the
+    column to a per-row Python list (`_int64_list` / `_string_list`) and rebuild
+    a dense/auto-dict vector — because this path serves Python consumers
+    (read_parquet / catalog / tests), not the engine. The opteryx execution scan
+    keeps dict shape natively in pool_reader; it never calls this.
     """
     cdef bytes col_type = decoded_col.type
 
@@ -1199,6 +1237,13 @@ cdef Vector _make_array_vector(
 
 def read_parquet(data, column_names=None, row_group_mask=None):
     """Read parquet data from memory with optional column selection.
+
+    RUGO STANDALONE READER ENDPOINT (see module banner). This is the public,
+    Python-facing library entry point — used for catalog/manifest reads and
+    tests. It FLATTENS dict-encoded columns to Python values by design. It is
+    NOT how the opteryx query engine scans data: that is the native pipeline in
+    opteryx/connectors/parquet_io/pool_reader.pyx (iter_row_groups_ipc), which
+    preserves dictionary shape end-to-end.
 
     Designed for serial use; Opteryx achieves parallelism by running
     multiple read_parquet calls concurrently across different files.
@@ -1557,8 +1602,13 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
 def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     """Decode a single column from an isolated range-read buffer (default: returns Draken Vector).
 
-    This is the primary API for the columnar range-read design.  Rather than
-    passing the entire file into memory, the caller:
+    RUGO STANDALONE READER ENDPOINT (see module banner) — a Python-facing single-
+    column decode used by the rugo test suite and range-read callers. Dict-encoded
+    columns are FLATTENED to Python values here by design (this serves a Python
+    consumer). The opteryx execution scan does NOT use this; it scans via the
+    native pool_reader pipeline, which preserves dictionary shape.
+
+    Rather than passing the entire file into memory, the caller:
 
       1. Reads only the bytes for this column chunk via read_ranges()
          (from base_offset = min(dict_page_offset, data_page_offset) for

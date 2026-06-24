@@ -351,6 +351,8 @@ cdef class MinBytesAggregate(UngroupedAggregate):
         cdef const char* ptr_a
         cdef const char* ptr_b
         cdef size_t      len_a, len_b
+        cdef bint        seen_code
+        cdef uint32_t    c, best_code
 
         if self._col_type == _VTYPE_STRING:
             svec = <Vector>raw
@@ -358,6 +360,31 @@ cdef class MinBytesAggregate(UngroupedAggregate):
             arena = <DrakenStringArena*>uv.data
             sel   = <const uint32_t*>uv.selection
             nulls = uv.validity
+            # Sorted-dictionary fast-path: code order == compare_bytes order, so the
+            # minimum value is the SMALLEST present code — an integer scan plus a
+            # single string extraction, instead of a compare_bytes per row.
+            if (uv.data_length > 1 and uv.data_length < uv.length
+                    and (uv.flags & DRAKEN_DICT_KEYS_SORTED)):
+                seen_code = False
+                best_code = 0
+                for i in range(nrows):
+                    if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                        continue
+                    c = sel[i]
+                    if not seen_code or c < best_code:
+                        seen_code = True
+                        best_code = c
+                if seen_code:
+                    slot  = &arena.slots[best_code]
+                    ptr_b = <const char*>str_data(slot, arena.arena)
+                    len_b = <size_t>str_length(slot)
+                    if self._result is None:
+                        self._result = ptr_b[:len_b]
+                    else:
+                        ptr_a = self._result; len_a = len(self._result)
+                        if compare_bytes(ptr_b, len_b, ptr_a, len_a) < 0:
+                            self._result = ptr_b[:len_b]
+                return
             for i in range(nrows):
                 if nulls != NULL and not _bitmap_is_valid(nulls, i):
                     continue
@@ -425,6 +452,8 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
         cdef const char* ptr_a
         cdef const char* ptr_b
         cdef size_t      len_a, len_b
+        cdef bint        seen_code
+        cdef uint32_t    c, best_code
 
         if self._col_type == _VTYPE_STRING:
             svec = <Vector>raw
@@ -432,6 +461,31 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
             arena = <DrakenStringArena*>uv.data
             sel   = <const uint32_t*>uv.selection
             nulls = uv.validity
+            # Sorted-dictionary fast-path: code order == compare_bytes order, so the
+            # maximum value is the LARGEST present code — an integer scan plus a
+            # single string extraction, instead of a compare_bytes per row.
+            if (uv.data_length > 1 and uv.data_length < uv.length
+                    and (uv.flags & DRAKEN_DICT_KEYS_SORTED)):
+                seen_code = False
+                best_code = 0
+                for i in range(nrows):
+                    if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                        continue
+                    c = sel[i]
+                    if not seen_code or c > best_code:
+                        seen_code = True
+                        best_code = c
+                if seen_code:
+                    slot  = &arena.slots[best_code]
+                    ptr_b = <const char*>str_data(slot, arena.arena)
+                    len_b = <size_t>str_length(slot)
+                    if self._result is None:
+                        self._result = ptr_b[:len_b]
+                    else:
+                        ptr_a = self._result; len_a = len(self._result)
+                        if compare_bytes(ptr_b, len_b, ptr_a, len_a) > 0:
+                            self._result = ptr_b[:len_b]
+                return
             for i in range(nrows):
                 if nulls != NULL and not _bitmap_is_valid(nulls, i):
                     continue

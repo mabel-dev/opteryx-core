@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "string_slot.h"
-
 // =============================================================================
 // Draken unified ABI — single source of truth (CLAUDE.md §11).
 //
@@ -169,7 +168,16 @@ typedef struct {
 // changes the answer. Containment: IDENTITY ⟹ PERMUTATION ⟹ data_length==length.
 #define DRAKEN_SEL_IDENTITY     (1u << 0)  // selection[i] == i (true dense)
 #define DRAKEN_SEL_PERMUTATION  (1u << 1)  // bijection, data_length == length
-// bits 2..7 reserved for future layout hints
+#define DRAKEN_DICT_KEYS_SORTED (1u << 2)  // dict `data` ascending by engine order:
+                                           // code_a < code_b ⟹ data[code_a] ≤ data[code_b].
+                                           // Lets range/eq predicates collapse to a code
+                                           // interval. Pure hint; set ONLY when certain.
+#define DRAKEN_DICT_CODES_DENSE (1u << 3)  // every code in [0,data_length) is referenced by
+                                           // at least one VALID row (no dead entries). Set by
+                                           // the compacting take/mask. With KEYS_SORTED this
+                                           // means data[0] / data[data_length-1] ARE the column
+                                           // min / max (the "ends" shortcut). Pure hint.
+// bits 4..7 reserved for future layout hints
 
 // Shape predicates — canonical tests for the encoding shapes.
 // Use these instead of open-coding data_length comparisons at call sites.
@@ -192,6 +200,20 @@ static inline int draken_is_constant(const DrakenVector* v) {
 }
 static inline int draken_is_dict(const DrakenVector* v) {
     return v->data_length > 1 && v->data_length < v->length;
+}
+// True iff this is a dict whose `data` is known-ascending (DRAKEN_DICT_KEYS_SORTED).
+// A false result never means "unsorted" — only "not known sorted": fall back to
+// the uniform path, which is always correct.
+static inline int draken_dict_is_sorted(const DrakenVector* v) {
+    return draken_is_dict(v) && (v->flags & DRAKEN_DICT_KEYS_SORTED);
+}
+// True iff this is a compressed (dict/constant) vector whose value array is both
+// ascending AND fully referenced by valid rows — so data[0] is the column min and
+// data[data_length-1] the column max (no dead entries can bracket the live ones).
+static inline int draken_dict_sorted_dense(const DrakenVector* v) {
+    return draken_is_compressed(v)
+        && (v->flags & DRAKEN_DICT_KEYS_SORTED)
+        && (v->flags & DRAKEN_DICT_CODES_DENSE);
 }
 
 // =============================================================================

@@ -200,6 +200,7 @@ static void serialize_rle_string_as_dict(ByteSink& out,
     uint8_t cw = code_width_for(dict_size);
     write_u32(out, dict_size);
     write_u8(out, cw);
+    write_u8(out, 0);  // is_sorted: RLE runs are in occurrence order, not sorted
 
     uint32_t codes_len = num_rows * cw;
     write_u32(out, codes_len);
@@ -259,6 +260,7 @@ static void serialize_numeric_dict(ByteSink& out,
     uint8_t cw = col.code_width > 0 ? col.code_width : code_width_for(dict_size);
     write_u32(out, dict_size);
     write_u8(out, cw);
+    write_u8(out, col.dict_ordered ? 1 : 0);  // is_sorted (sorted-dictionary hint)
 
     uint32_t codes_len = static_cast<uint32_t>(col.num_rows) * cw;
     write_u32(out, codes_len);
@@ -436,6 +438,7 @@ static void serialize_string_dict(ByteSink& out, const DecodedColumn& col) {
                                      : code_width_for(dict_size);
     write_u32(out, dict_size);
     write_u8(out, cw);
+    write_u8(out, col.dict_ordered ? 1 : 0);  // is_sorted (sorted-dictionary hint)
 
     uint32_t codes_len = static_cast<uint32_t>(col.num_rows) * cw;
     write_u32(out, codes_len);

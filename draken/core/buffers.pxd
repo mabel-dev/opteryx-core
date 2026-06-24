@@ -43,6 +43,8 @@ cdef extern from "core/buffers.h":
     # Category-A layout hint bits (informational; 0 = "don't know").
     unsigned int DRAKEN_SEL_IDENTITY
     unsigned int DRAKEN_SEL_PERMUTATION
+    unsigned int DRAKEN_DICT_KEYS_SORTED
+    unsigned int DRAKEN_DICT_CODES_DENSE
 
     # Fixed-width column
     ctypedef struct DrakenFixedBuffer:

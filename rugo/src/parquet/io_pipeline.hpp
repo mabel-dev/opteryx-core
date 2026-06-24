@@ -101,6 +101,7 @@ struct ColumnOut {
     size_t   arena_len = 0;          // valid bytes in arena
     void*    codes = nullptr;        // DK_VARCHAR_DICT: uint32 code per row
     uint32_t data_length = 0;        // DK_VARCHAR_DICT: number of unique-value slots
+    bool     dict_sorted = false;    // dict shapes: `data` is ascending (is_sorted)
 };
 
 // Owns the direct-path Draken buffers (data + validity) it carries: any not
@@ -355,6 +356,7 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     out.data_length = dict_size;
     out.validity = validity;
     out.length = n;
+    out.dict_sorted = d.dict_ordered;
     return true;
 }
 
@@ -416,6 +418,7 @@ static inline bool build_direct_int64_dict(const DecodedColumn& d,
     out.codes = codes;
     out.validity = validity;
     out.length = n;
+    out.dict_sorted = d.dict_ordered;
     return true;
 }
 

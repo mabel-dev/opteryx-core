@@ -24,6 +24,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 import time
+import struct
 
 # Native mutex for thread-safe concurrent pull (M4 / no-GIL target). The lock is
 # the real cross-thread synchronisation once the GIL is gone; today it is held
@@ -48,6 +49,10 @@ from draken.core.buffers cimport (
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from cpython.ref cimport PyObject
 
+# All-NULL column factory for schema-evolution NULL-fill (a projected column
+# absent from a file). NULL-typed: no storage, absorbed by type promotion.
+from draken.draken_native import vector_null_from_length
+
 # Stage 4b: wrap worker-built direct string slots into a VARCHAR Vector. Mirrors
 # column_deserializer._wrap_raw_pyobj — draken_vector_own_string copies the
 # slots+arena into a self-owned block and frees the inputs, so the worker buffers
@@ -62,6 +67,7 @@ cdef extern from *:
 
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
+    int draken_vector_mark_dict_sorted(PyObject* obj)
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType vec_type)
@@ -81,6 +87,7 @@ cdef extern from "core/draken_bridge.h":
 
 from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
+from rugo.parquet_reader cimport TestBloomFilter
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
 from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchParquetFootersMany
 
@@ -147,6 +154,8 @@ cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i):
     vec._nb = <object>raw
     _pr_decref(raw)
     vec._dv = draken_vector_unwrap(raw)
+    if result.columns[i].dict_sorted:
+        draken_vector_mark_dict_sorted(raw)
     return vec
 
 
@@ -178,6 +187,8 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     vec._nb = <object>raw
     _pr_decref(raw)
     vec._dv = draken_vector_unwrap(raw)
+    if result.columns[i].dict_sorted:
+        draken_vector_mark_dict_sorted(raw)
     return vec
 
 
@@ -326,11 +337,15 @@ cdef class CppIOPipeline:
         cdef string cpp_col_name
         cdef size_t i
 
+        # A projected column absent from this file (schema evolution) has no
+        # ColumnStats — push the name only when a stat is found, keeping names and
+        # stats strictly parallel. The consumer (next_vectors) realigns the decoded
+        # columns back to the full projection, filling missing ones with NULLs.
         for col_name in column_names:
             cpp_col_name = col_name.encode('utf-8')
-            col_names_vec.push_back(cpp_col_name)
             for i in range(rg.columns.size()):
                 if rg.columns[i].name == cpp_col_name:
+                    col_names_vec.push_back(cpp_col_name)
                     col_stats_vec.push_back(rg.columns[i])
                     break
 
@@ -349,11 +364,13 @@ cdef class CppIOPipeline:
         cdef Py_ssize_t packed_len = (num_rows + 7) >> 3
         cdef const uint8_t* mask_ptr = <const uint8_t*>row_mask
 
+        # Schema evolution: keep names and stats strictly parallel (push the name
+        # only when its stat is found) — the consumer realigns + NULL-fills.
         for col_name in column_names:
             cpp_col_name = col_name.encode('utf-8')
-            col_names_vec.push_back(cpp_col_name)
             for i in range(rg.columns.size()):
                 if rg.columns[i].name == cpp_col_name:
+                    col_names_vec.push_back(cpp_col_name)
                     col_stats_vec.push_back(rg.columns[i])
                     break
 
@@ -650,8 +667,85 @@ cpdef tuple fetch_column_stats(
     return fs.num_rows, footer_bytes, col_stats
 
 
-cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates):
-    """Evaluate AND-combined predicates against RowGroupStats min/max without materialising a Python dict."""
+cdef inline bint _is_local_path(str path):
+    """True for filesystem paths the C++ bloom probe (ifstream) can open."""
+    return not (path.startswith("gs://") or path.startswith("s3://")
+                or path.startswith("http://") or path.startswith("https://")
+                or path.startswith("file://"))
+
+
+cdef bint _bloom_value_bytes(const string& physical_type, object value, string* out):
+    """Encode a predicate literal into the exact PLAIN bytes the writer hashed
+    into the bloom filter for this physical type. Returns False (=> skip the
+    bloom probe) for any type/value we can't encode byte-identically — never
+    guess, a wrong encoding would prune live rows.
+
+    Matches _parquet_writer.hpp bloom_hashes: int32=4 LE, int64=8 LE,
+    byte_array=raw value bytes (no length prefix)."""
+    cdef bytes b
+    # bool is an int subclass but boolean columns are never bloom-filtered.
+    if isinstance(value, bool):
+        return False
+    if physical_type == b"byte_array":
+        if isinstance(value, str):
+            b = (<str>value).encode("utf-8")
+        elif isinstance(value, (bytes, bytearray)):
+            b = bytes(value)
+        else:
+            return False
+    elif physical_type == b"int64":
+        if not isinstance(value, int):
+            return False
+        try:
+            b = struct.pack("<q", value)
+        except (struct.error, OverflowError):
+            return False
+    elif physical_type == b"int32":
+        if not isinstance(value, int):
+            return False
+        try:
+            b = struct.pack("<i", value)
+        except (struct.error, OverflowError):
+            return False
+    else:
+        # int96/float/double/fixed_len_byte_array(decimal): not wired yet.
+        return False
+    out[0] = <string>b
+    return True
+
+
+cdef bint _bloom_excludes(str cpp_path, ColumnStats* col, object op, object value):
+    """True only when the column's bloom filter PROVES the predicate cannot
+    match this row group (safe to prune). Eq -> the value is absent; InList ->
+    every candidate is absent. Any probe error or unencodable value fails OPEN
+    (returns False = keep the row group)."""
+    cdef string path_b = cpp_path.encode("utf-8")
+    cdef string vbytes
+    if op == "Eq":
+        if not _bloom_value_bytes(col.physical_type, value, &vbytes):
+            return False
+        try:
+            return not TestBloomFilter(path_b, col.bloom_offset, col.bloom_length, vbytes)
+        except Exception:
+            return False
+    elif op == "InList":
+        # Prune only if NONE of the candidates may be present.
+        for v in value:
+            if not _bloom_value_bytes(col.physical_type, v, &vbytes):
+                return False  # can't prove this one absent -> can't prune
+            try:
+                if TestBloomFilter(path_b, col.bloom_offset, col.bloom_length, vbytes):
+                    return False  # a candidate may be present
+            except Exception:
+                return False
+        return True
+    return False
+
+
+cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str cpp_path):
+    """Evaluate AND-combined predicates against RowGroupStats min/max (and bloom
+    filters, for Eq/InList on local files) without materialising a Python dict.
+    `cpp_path` is the local file path for bloom probing, or None to skip it."""
     cdef size_t i
     cdef string col_str
     cdef object min_val, max_val, value, col_name, op
@@ -662,6 +756,12 @@ cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates):
         for i in range(rg.columns.size()):
             if rg.columns[i].name != col_str:
                 continue
+            # Bloom membership pruning runs first: it can exclude on equality
+            # even when min/max stats are absent, and is independent of them.
+            if (cpp_path is not None and rg.columns[i].bloom_offset >= 0
+                    and (op == "Eq" or op == "InList")):
+                if _bloom_excludes(cpp_path, &rg.columns[i], op, value):
+                    return False
             min_val = _decode_value_c(
                 rg.columns[i].physical_type, rg.columns[i].logical_type,
                 rg.columns[i].min, False,
@@ -732,6 +832,7 @@ cdef class IpcRowGroupSource:
     cdef list work_items                 # [(path, rg_idx)]
     cdef list column_names               # str, submission order
     cdef list column_names_bytes         # bytes, for name-keyed callers
+    cdef list column_null_fillers        # per-column callable n->Vector (schema-evolution NULL-fill); None = untyped
     cdef unordered_map[string, FileStats]* footer_map
     cdef object prefetched_footers
     cdef dict orig_to_cpp
@@ -748,6 +849,7 @@ cdef class IpcRowGroupSource:
         self.footer_map = NULL
         self._closed = False
         self.pipeline = None
+        self.column_null_fillers = None
         self.next_to_submit = 0
         self.results_received = 0
         self.n_items = 0
@@ -774,6 +876,7 @@ cdef class IpcRowGroupSource:
         cdef string path_bytes_cpp
         cdef RowGroupStats* rg_ptr
         cdef list column_stats_dicts
+        cdef list present_names
         cdef object meta, rg_meta, col_meta, col_name
         if self.masks is not None:
             # Pass-2 late materialization: decode only surviving rows (the
@@ -786,13 +889,17 @@ cdef class IpcRowGroupSource:
         if self.prefetched_footers and path in self.prefetched_footers:
             meta = self.prefetched_footers[path]
             rg_meta = meta["row_groups"][rg_idx]
+            # Keep names and stats parallel: a projected column absent from this
+            # file contributes neither (schema evolution). next_vectors realigns.
             column_stats_dicts = []
+            present_names = []
             for col_name in self.column_names:
                 for col_meta in rg_meta["columns"]:
                     if col_meta["name"] == col_name:
                         column_stats_dicts.append(col_meta)
+                        present_names.append(col_name)
                         break
-            self.pipeline.submit_work(cpp_path, rg_idx, self.column_names, column_stats_dicts)
+            self.pipeline.submit_work(cpp_path, rg_idx, present_names, column_stats_dicts)
         else:
             path_bytes_cpp = path.encode('utf-8')
             rg_ptr = &self.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
@@ -808,8 +915,12 @@ cdef class IpcRowGroupSource:
         cdef list vectors
         cdef dict ref_ids
         cdef dict pool_dict
-        cdef Py_ssize_t i, ncols, max_len, this_len
+        cdef dict present
+        cdef list aligned
+        cdef Py_ssize_t i, ncols, max_len, this_len, nreq, k
         cdef int submit_start, submit_end, idx
+        cdef int64_t fill_rows
+        cdef bytes req_name
         cdef str cpp_path, path_str
 
         # ── Claim phase (under the cursor lock): advance the submit window to keep
@@ -883,8 +994,52 @@ cdef class IpcRowGroupSource:
                         f"C++ decoder produced zero-length column in non-empty row "
                         f"group for path={path_str!r} rg={result.rg_idx}"
                     )
+
+        # ── Schema-evolution realignment ────────────────────────────────────
+        # The decoded columns cover only the projected columns PRESENT in this
+        # file, in projection order. Realign them to the full projection,
+        # inserting an all-NULL column for any column the file lacks, so the
+        # caller's positional pairing (identity names ↔ vectors) stays correct.
+        # NULL-typed columns are absorbed by type promotion downstream and are
+        # skipped by the DATE/TIMESTAMP/DECIMAL coercion (type != INT64).
+        nreq = len(self.column_names_bytes)
+        if ncols != nreq:
+            present = {}
+            for i in range(ncols):
+                present[result.column_names[i]] = vectors[i]
+            fill_rows = max_len
+            if fill_rows == 0:
+                fill_rows = self._rg_num_rows(path_str, result.rg_idx)
+            aligned = [None] * nreq
+            for k in range(nreq):
+                req_name = self.column_names_bytes[k]
+                if req_name in present:
+                    aligned[k] = present[req_name]
+                elif self.column_null_fillers is not None:
+                    # Typed all-NULL column of the column's physical type, so it
+                    # concatenates cleanly with the same column from files that
+                    # do carry it (small-morsel combine).
+                    aligned[k] = Vector(self.column_null_fillers[k](<uint32_t>fill_rows))
+                else:
+                    # No type info supplied (non-schema-driven callers): a
+                    # NULL-typed all-null column. Correct for the scan; absorbed
+                    # by type promotion where the consumer is type-uniform.
+                    aligned[k] = Vector(vector_null_from_length(<uint32_t>fill_rows))
+            vectors = aligned
+
         return (vectors, result.bytes_fetched, result.read_ns,
                 result.decode_ns, path_str, result.rg_idx)
+
+    cdef int64_t _rg_num_rows(self, str path_str, int rg_idx):
+        """Row-group logical row count, for NULL-filling a row group whose every
+        projected column is absent from the file. Reads the already-parsed footer
+        (native footer_map keyed by original path, or the prefetched footer dict)."""
+        cdef string key = path_str.encode('utf-8')
+        if self.footer_map != NULL and self.footer_map[0].count(key) > 0:
+            return self.footer_map[0][key].row_groups[rg_idx].num_rows
+        if self.prefetched_footers and path_str in self.prefetched_footers:
+            return self.prefetched_footers[path_str]["row_groups"][rg_idx]["num_rows"]
+        return 0
 
     cpdef void close(self):
         """Cancel outstanding work, drain the pool, free the footer map. Safe to
@@ -948,6 +1103,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     query_id=None,
     prefetched_footers=None,
     footer_bytes_cache=None,
+    null_fillers=None,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -958,6 +1114,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     cdef IpcRowGroupSource src = IpcRowGroupSource()
     src.column_names = list(column_names)
     src.column_names_bytes = [c.encode('utf-8') for c in src.column_names]
+    src.column_null_fillers = list(null_fillers) if null_fillers is not None else None
     src.prefetched_footers = prefetched_footers
     src.footer_map = new unordered_map[string, FileStats]()
 
@@ -1036,9 +1193,13 @@ cpdef IpcRowGroupSource open_ipc_source(
                 src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
                     footer_buf_ptr, footer_buf_size
                 )
+            # Local file path for bloom probing (None for remote — the C++
+            # bloom probe opens the file via ifstream and can't read URLs).
+            cpp_path_str = orig_to_cpp.get(path, path)
+            bloom_path = cpp_path_str if _is_local_path(cpp_path_str) else None
             for rg_i in range(src.footer_map[0][path_bytes_cpp].row_groups.size()):
                 if predicates and not _rg_passes_predicates_native(
-                    src.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates
+                    src.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
                 ):
                     continue
                 work_items.append((path, rg_i))
@@ -1105,6 +1266,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     connector=None,
     query_id=None,
     footer_bytes_cache=None,
+    null_fillers=None,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -1120,6 +1282,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     cdef IpcRowGroupSource src = IpcRowGroupSource()
     src.column_names = list(column_names)
     src.column_names_bytes = [c.encode('utf-8') for c in src.column_names]
+    src.column_null_fillers = list(null_fillers) if null_fillers is not None else None
     src.prefetched_footers = None
     src.footer_map = new unordered_map[string, FileStats]()
 

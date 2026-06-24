@@ -327,6 +327,30 @@ def test_unsupported_type_fails_loud():
         write_parquet(morsel)
 
 
+def test_two_string_array_columns_keep_values():
+    """Regression: two list<string> columns in one morsel. The first column's
+    string-element bytes used to be zeroed because the ARRAY child Vector was a
+    loop-local freed when the second array column rebound it — leaving captured
+    StrSlice pointers dangling (length survived, bytes did not)."""
+    import draken.draken_native as dn
+    from draken.vectors.vector import Vector
+    from draken.morsels.morsel import Morsel
+
+    # mostly-null first column with rare populated lists (the real-data shape)
+    cves = [None, None, ["CVE-2021-3490"], None, None, ["CVE-2021-31252"]]
+    tags = [["x", "y"], None, ["z"], [], ["only"], None]
+    morsel = Morsel.from_vectors(
+        ["cves", "tags"],
+        [
+            Vector(dn.vector_array_from_sequence(cves)),
+            Vector(dn.vector_array_from_sequence(tags)),
+        ],
+    )
+    cols, _ = _read_pyarrow(write_parquet(morsel))
+    assert cols["cves"] == cves
+    assert cols["tags"] == tags
+
+
 if __name__ == "__main__":
     test_all_types_with_nulls("zstd")
     test_all_types_with_nulls("none")
@@ -342,4 +366,5 @@ if __name__ == "__main__":
     test_null_typed_column_writes_as_int32()
     test_rugo_can_parse_own_footer()
     test_unsupported_type_fails_loud()
+    test_two_string_array_columns_keep_values()
     print("✅ okay")

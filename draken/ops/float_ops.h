@@ -34,6 +34,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
+#include "ops/dict_take.h"
 #include "ops/int64_compare.h"  // cmp_alloc_bool_buf, cmp_copy_validity, cmp_and_validity
 #include "simd_hash.h"          // simd_hash_i64, NULL_HASH
 #include "carchar_set.hpp"      // CarcharSet
@@ -710,6 +711,10 @@ static inline VecResult float_take(
     const uint32_t n        = n_indices;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
+
+    // Compression-preserving + compacting gather (see ops/dict_take.h).
+    if (v.data_length <= n && draken_is_compressed(&v))
+        return fixed_dict_compact_take<T, TAG>(v, indices, n);
 
     T* dst = fp_alloc<T>(n);
     uint8_t* out_null = nullptr;

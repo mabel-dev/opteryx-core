@@ -41,6 +41,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
+#include "ops/dict_take.h"
 #include "ops/int64_compare.h"    // CmpEq/Ne/Gt/Ge/Lt/Le, cmp_alloc_bool_buf,
                                   // cmp_copy_validity, cmp_and_validity
 #include "ops/int64_predicates.h" // BetweenOp<lo_incl,hi_incl>
@@ -806,6 +807,10 @@ static inline VecResult fixed_int_take(
     const uint32_t n        = n_indices;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
+
+    // Compression-preserving + compacting gather (see ops/dict_take.h).
+    if (v.data_length <= n && draken_is_compressed(&v))
+        return fixed_dict_compact_take<T, TAG>(v, indices, n);
 
     T* dst = fi_alloc<T>(n);
 

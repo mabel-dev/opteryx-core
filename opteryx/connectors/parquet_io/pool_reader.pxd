@@ -31,6 +31,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         size_t arena_len     # DK_VARCHAR*: valid arena bytes
         void* codes          # DK_VARCHAR_DICT: uint32 code per row
         uint32_t data_length # DK_VARCHAR_DICT: unique-value slot count
+        bint dict_sorted     # dict shapes: `data` is ascending (is_sorted)
 
     cdef cppclass MorselRef:
         string path
@@ -111,4 +112,4 @@ cdef tuple _read_footer_payload(
     ParquetFooterBytesCache footer_cache,
 )
 
-cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates)
+cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str cpp_path)

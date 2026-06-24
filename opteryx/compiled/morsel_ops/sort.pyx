@@ -19,17 +19,19 @@ Returns a uint32 array where perm[i] is the original row index for sorted
 position i.  Multi-column sort uses LSD (Least Significant Digit) stable
 radix sort, processing columns from least-significant to most-significant.
 
-Dense string columns use a 7-byte prefix radix sort (via compress_into) with
-a full-content memcmp tiebreak applied inside any bin whose strings share
-their first 7 bytes.
+String columns are materialized into a contiguous byte buffer (resolving the
+unified selection through the arena slots) and sorted by full-content memcmp
+via std::sort.
 
-Dictionary-encoded columns are sorted by semantic value order, making the
-result ORDER BY-correct.  A remap table is built by sorting the D dictionary
-entries and assigning rank 0..D-1; codes are replaced with ranks before the
-radix pass.  The remap table is small (D ≤ 256 for uint8 codes, ≤ 65536 for
-uint16 codes) and fits in L1/L2 cache, so scalar lookup is fast.  The
-SIMD-accelerated simd_remap_u8 / simd_remap_u16 functions in simd_remap.cpp
-are available for external callers that apply remaps across many morsels.
+A sorted-dictionary fast-path applies when a string dictionary carries the
+DRAKEN_DICT_KEYS_SORTED flag: its codes are assigned in the same unsigned-byte
+order this routine sorts by, so sorting by CODE (an integer radix pass on the
+selection) is byte-for-byte equivalent to the materialize + string-compare
+path, and skips the O(total_bytes) copy entirely.
+
+Numeric, temporal, boolean and dictionary-encoded numeric columns are sorted
+via vec.compress(), which returns a sortable signed int64 per logical row for
+every encoding shape; the keys are sign-flipped and fed to the radix pass.
 
 Nulls are represented as INT64_MIN by compress_into, which maps to the
 smallest unsigned key after the sign-bit flip, giving NULLS FIRST for ASC.
@@ -46,25 +48,12 @@ from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport (
     DrakenVector,
-    DrakenVarBuffer,
     DrakenStringArena,
-    DrakenStringSlot,
     str_length,
     str_data,
-    DrakenType,
-    DRAKEN_INT8,
-    DRAKEN_INT16,
-    DRAKEN_INT32,
-    DRAKEN_INT64,
-    DRAKEN_FLOAT32,
-    DRAKEN_FLOAT64,
-    DRAKEN_BOOL,
     DRAKEN_VARCHAR,
     DRAKEN_NVARCHAR,
-    DRAKEN_DATE32,
-    DRAKEN_TIMESTAMP64,
-    DRAKEN_TIME32,
-    DRAKEN_TIME64,
+    DRAKEN_DICT_KEYS_SORTED,
 )
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
@@ -97,59 +86,6 @@ cdef extern from * nogil:
                 return ascending ? (r < 0) : (r > 0);
             });
     }
-
-    // O(D log D) sort for numeric dictionary remap building.
-    // Sorts the order[] array by sort_keys[order[i]] ascending.
-    static void _sort_numeric_remap(
-        uint32_t* order,
-        uint32_t D,
-        const int64_t* sort_keys
-    ) {
-        std::sort(order, order + D,
-            [sort_keys](uint32_t a, uint32_t b) {
-                return sort_keys[a] < sort_keys[b];
-            });
-    }
-
-    // O(D log D) sort for string dictionary remap building.
-    // Sorts the order[] array by lexicographic value of string at order[i].
-    static void _sort_string_remap(
-        uint32_t* order,
-        uint32_t D,
-        const char* data,
-        const int32_t* offsets
-    ) {
-        std::sort(order, order + D,
-            [data, offsets](uint32_t a, uint32_t b) {
-                int32_t sa = offsets[a], la = offsets[a + 1] - sa;
-                int32_t sb = offsets[b], lb = offsets[b + 1] - sb;
-                int32_t cm = (la < lb) ? la : lb;
-                int r = cm ? std::memcmp(data + sa, data + sb, (size_t)cm) : 0;
-                if (r == 0) r = la - lb;
-                return r < 0;
-            });
-    }
-
-    // O(D log D) sort for German-string dictionary remap building.
-    // Slots are 16-byte DrakenStringSlot entries backed by an arena for extern strings.
-    static void _sort_german_string_remap(
-        const DrakenStringSlot* slots,
-        const uint8_t* arena,
-        uint32_t D,
-        uint32_t* order
-    ) {
-        std::sort(order, order + D,
-            [slots, arena](uint32_t a, uint32_t b) {
-                uint32_t la = str_length(&slots[a]);
-                uint32_t lb = str_length(&slots[b]);
-                const uint8_t* pa = str_data(&slots[a], arena);
-                const uint8_t* pb = str_data(&slots[b], arena);
-                uint32_t cm = (la < lb) ? la : lb;
-                int r = cm ? std::memcmp(pa, pb, (size_t)cm) : 0;
-                if (r == 0) r = (int)la - (int)lb;
-                return r < 0;
-            });
-    }
     """
     void _sort_strings(
         uint32_t* perm,
@@ -157,26 +93,6 @@ cdef extern from * nogil:
         const char* data,
         const int32_t* offsets,
         bint ascending,
-    ) nogil
-
-    void _sort_numeric_remap(
-        uint32_t* order,
-        uint32_t D,
-        const int64_t* sort_keys,
-    ) nogil
-
-    void _sort_string_remap(
-        uint32_t* order,
-        uint32_t D,
-        const char* data,
-        const int32_t* offsets,
-    ) nogil
-
-    void _sort_german_string_remap(
-        const DrakenStringSlot* slots,
-        const uint8_t* arena,
-        uint32_t D,
-        uint32_t* order,
     ) nogil
 
 
@@ -270,150 +186,6 @@ cdef inline uint64_t _asc_xor = <uint64_t>0x8000000000000000ULL
 cdef inline uint64_t _desc_xor = <uint64_t>0x7FFFFFFFFFFFFFFFULL
 
 
-# ── Dictionary remap helpers ──────────────────────────────────────────────────
-
-cdef inline int64_t _dict_value_as_int64(
-    const DrakenVarBuffer* dv,
-    DrakenType value_type,
-    uint32_t code,
-) noexcept nogil:
-    """
-    Read the dictionary value at position 'code' as a sortable int64.
-    Returns INT64_MIN for null entries.  Handles fixed-width numeric types.
-    For DRAKEN_VARCHAR, the caller must handle string comparison separately.
-    """
-    cdef uint8_t* nulls = <uint8_t*>dv.null_bitmap
-    cdef int64_t bits
-    cdef double d
-    cdef int32_t fbits
-    cdef float f
-
-    if nulls != NULL and ((nulls[code >> 3] >> (code & 7)) & 1) == 0:
-        return <int64_t>-9223372036854775808LL  # INT64_MIN
-
-    if value_type == DRAKEN_INT64 or value_type == DRAKEN_TIMESTAMP64 or value_type == DRAKEN_TIME64:
-        return (<int64_t*>dv.data)[code]
-    if value_type == DRAKEN_INT32 or value_type == DRAKEN_DATE32 or value_type == DRAKEN_TIME32:
-        return <int64_t>((<int32_t*>dv.data)[code])
-    if value_type == DRAKEN_INT16:
-        return <int64_t>((<int16_t*>dv.data)[code])
-    if value_type == DRAKEN_INT8:
-        return <int64_t>((<int8_t*>dv.data)[code])
-    if value_type == DRAKEN_FLOAT64:
-        # Reinterpret double bits as int64, apply IEEE 754 sort fix.
-        # Positive doubles: bit-pattern order == value order.
-        # Negative doubles: bit-patterns are reversed → XOR all bits.
-        d = (<double*>dv.data)[code]
-        memcpy(&bits, &d, 8)
-        if bits < 0:
-            bits = bits ^ <int64_t>0x7FFFFFFFFFFFFFFFLL
-        return bits
-    if value_type == DRAKEN_FLOAT32:
-        f = (<float*>dv.data)[code]
-        memcpy(&fbits, &f, 4)
-        if fbits < 0:
-            fbits = fbits ^ <int32_t>0x7FFFFFFF
-        return <int64_t>fbits
-    if value_type == DRAKEN_BOOL:
-        return <int64_t>(((<uint8_t*>dv.data)[code >> 3] >> (code & 7)) & 1)
-    # Unknown type: return code as key (preserves existing GROUP BY behaviour).
-    return <int64_t>code
-
-
-cdef uint32_t* _build_numeric_dict_remap(
-    const DrakenVector* uv,
-) noexcept:
-    """
-    Build a remap table for a numeric-valued dictionary column.
-
-    remap[old_code] = rank   where rank 0 is the semantically smallest value.
-    The caller inverts order for descending sort by XOR-ing keys with the
-    all-ones mask for the code width.
-
-    Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
-    The caller is responsible for freeing it with PyMem_Free.
-    """
-    cdef DrakenVarBuffer* dv = <DrakenVarBuffer*>uv.data
-    if dv == NULL:
-        return NULL
-
-    cdef Py_ssize_t D = <Py_ssize_t>dv.length
-    if D == 0:
-        return NULL
-
-    # Build an array of (sortable_int64_key, original_code) pairs.
-    cdef int64_t* sort_keys = <int64_t*>PyMem_Malloc(D * sizeof(int64_t))
-    cdef uint32_t* order = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
-    cdef uint32_t* remap = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
-
-    if sort_keys == NULL or order == NULL or remap == NULL:
-        PyMem_Free(sort_keys)
-        PyMem_Free(order)
-        PyMem_Free(remap)
-        return NULL
-
-    cdef Py_ssize_t i
-    for i in range(D):
-        sort_keys[i] = _dict_value_as_int64(dv, dv.type, <uint32_t>i)
-        order[i] = <uint32_t>i
-
-    # O(D log D) sort via std::sort — correct for all dictionary sizes,
-    # including uint16 codes where D can reach 65536.
-    _sort_numeric_remap(order, <uint32_t>D, sort_keys)
-
-    # Invert permutation: remap[old_code] = rank.
-    for i in range(D):
-        remap[order[i]] = <uint32_t>i
-
-    PyMem_Free(sort_keys)
-    PyMem_Free(order)
-    return remap
-
-
-cdef uint32_t* _build_string_dict_remap(
-    const DrakenVector* uv,
-) noexcept:
-    """
-    Build a remap table for a string-valued dictionary column.
-
-    The dictionary backing store is DrakenStringArena (German-string slots +
-    byte arena).  Sorts D slots lexicographically ascending; assigns rank 0 to
-    the lexicographically smallest string.  The caller handles descending sort
-    by XOR-ing keys with the all-ones mask for the code width.
-
-    Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
-    """
-    cdef DrakenStringArena* ga = <DrakenStringArena*>uv.data
-    if ga == NULL:
-        return NULL
-
-    cdef Py_ssize_t D = <Py_ssize_t>ga.length
-    if D == 0:
-        return NULL
-
-    cdef uint32_t* order = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
-    cdef uint32_t* remap = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
-
-    if order == NULL or remap == NULL:
-        PyMem_Free(order)
-        PyMem_Free(remap)
-        return NULL
-
-    cdef Py_ssize_t i
-    for i in range(D):
-        order[i] = <uint32_t>i
-
-    # O(D log D) lexicographic sort via std::sort on German-string slots.
-    _sort_german_string_remap(ga.slots, ga.arena, <uint32_t>D, order)
-
-    # Invert permutation: remap[old_code] = rank.
-    for i in range(D):
-        remap[order[i]] = <uint32_t>i
-
-    PyMem_Free(order)
-    return remap
-
-
 # ── Public API ────────────────────────────────────────────────────────────────
 
 cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
@@ -463,7 +235,6 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
     cdef Vector sv
     cdef uint64_t key_xor
     cdef bint asc
-    cdef uint32_t* remap = NULL
     cdef uint64_t flip
     cdef int[::1] rv
     cdef DrakenVector* sort_uv
@@ -491,6 +262,25 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                 sort_uv = sv.unified()
                 sort_arena = <DrakenStringArena*>sort_uv.data
                 sort_sel = <uint32_t*>sort_uv.selection
+
+                # Sorted-dictionary fast-path: a dict whose values are ascending
+                # (DRAKEN_DICT_KEYS_SORTED) assigns codes in the SAME unsigned-byte
+                # order this routine sorts by — so sorting by CODE is byte-for-byte
+                # equivalent to the materialize+string-compare path below (null rows
+                # included: both order by slots[code]). Replaces an O(total_bytes)
+                # copy + string compares with an integer radix sort on the codes.
+                if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n
+                        and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
+                    with nogil:
+                        if asc:
+                            for i in range(n):
+                                keys[i] = <uint64_t>sort_sel[i]
+                        else:
+                            for i in range(n):
+                                keys[i] = ~(<uint64_t>sort_sel[i])
+                        if not vergesort_u64(perm_buf, tmp_buf, keys, n):
+                            _radix_sort(perm_buf, tmp_buf, keys, n, 8)
+                    continue
                 sort_total_bytes = 0
                 for sort_di in range(n):
                     sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
@@ -540,4 +330,3 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
         PyMem_Free(perm_buf)
         PyMem_Free(tmp_buf)
         PyMem_Free(keys)
-        PyMem_Free(remap)   # NULL-safe

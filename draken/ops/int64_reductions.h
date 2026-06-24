@@ -80,10 +80,27 @@ static inline uint32_t i64_sum(const DrakenVector& v, int64_t* out_value) noexce
 // Returns count of valid rows; *out_min is set only when count > 0.
 // If count == 0 (empty or all-null), *out_min is undefined — caller raises.
 // ---------------------------------------------------------------------------
+// Count valid rows from a validity bitmap (last byte masked to n bits).
+static inline uint32_t red_valid_count(const uint8_t* validity, uint32_t n) noexcept {
+    if (validity == nullptr) return n;
+    uint32_t cnt = 0; const uint32_t fb = n >> 3;
+    for (uint32_t b = 0; b < fb; ++b) cnt += static_cast<uint32_t>(__builtin_popcount(validity[b]));
+    if (n & 7u) cnt += static_cast<uint32_t>(__builtin_popcount(validity[fb] & ((1u << (n & 7u)) - 1u)));
+    return cnt;
+}
+
 static inline uint32_t i64_min(const DrakenVector& v, int64_t* out_min) noexcept {
     const uint32_t n = v.length;
     const int64_t* data = static_cast<const int64_t*>(v.data);
     const uint8_t* validity = v.validity;
+
+    // Ends shortcut: a sorted + codes-dense dict has its min at data[0] (every
+    // code is referenced by a valid row, so no dead entry can sit before it).
+    // O(n/64) count instead of an O(n) value scan.
+    if (draken_dict_sorted_dense(&v)) {
+        *out_min = data[0];
+        return red_valid_count(validity, n);
+    }
 
     int64_t m = INT64_MAX;
     uint32_t count = 0;
@@ -131,6 +148,12 @@ static inline uint32_t i64_max(const DrakenVector& v, int64_t* out_max) noexcept
     const uint32_t n = v.length;
     const int64_t* data = static_cast<const int64_t*>(v.data);
     const uint8_t* validity = v.validity;
+
+    // Ends shortcut: a sorted + codes-dense dict has its max at data[data_length-1].
+    if (draken_dict_sorted_dense(&v)) {
+        *out_max = data[v.data_length - 1u];
+        return red_valid_count(validity, n);
+    }
 
     int64_t m = INT64_MIN;
     uint32_t count = 0;

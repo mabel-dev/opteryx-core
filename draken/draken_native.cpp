@@ -2182,6 +2182,30 @@ extern "C" const DrakenVector* draken_vector_unwrap(PyObject* obj) {
     return &nb::inst_ptr<VectorOwner>(h)->vec;
 }
 
+// draken_vector_mark_dict_sorted — OR DRAKEN_DICT_KEYS_SORTED onto a dict-shaped
+// Vector's flags. Used by the parquet scan to carry a sorted dictionary's
+// is_sorted property into execution. No-op (returns 0) for non-dict vectors —
+// the flag is meaningless outside the dict shape. Returns -1 + TypeError if obj
+// is not a Vector. Pure hint: kernels fall back to the uniform path if unset.
+extern "C" int draken_vector_mark_dict_sorted(PyObject* obj) {
+    if (!obj || obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_vector_mark_dict_sorted: expected Vector, got None");
+        return -1;
+    }
+    nb::handle h(obj);
+    if (!nb::isinstance<VectorOwner>(h)) {
+        PyErr_Format(PyExc_TypeError,
+            "draken_vector_mark_dict_sorted: expected Vector, got %.100s",
+            Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    DrakenVector& v = nb::inst_ptr<VectorOwner>(h)->vec;
+    if (draken_is_dict(&v))
+        v.flags |= DRAKEN_DICT_KEYS_SORTED;
+    return 0;
+}
+
 // draken_array_child_unwrap — borrowed child DrakenVector* from a DRAKEN_ARRAY Vector.
 //
 // Fails loud on any bad input: TypeError for non-Vector, RuntimeError for non-array
@@ -4831,6 +4855,102 @@ static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
     return VectorOwner(rv, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
 }
 
+// Forward declaration — concat_array delegates to concat_owners to vertically
+// concatenate the gathered child vectors, and concat_owners routes ARRAY parts
+// back into concat_array (mutual recursion handles array-of-array).
+static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts);
+
+// CONCAT — DRAKEN_ARRAY (offsets + child, recursive RAII).
+//
+// Result layout mirrors make_array_take: dense int32 offsets[n+1], a single
+// child VectorOwner holding every used element of every part (in part order),
+// and a row-level validity bitmap. Each part's used child elements are gathered
+// via take_child (which references that part's OWN child indices) and the
+// per-part gathered children are then vertically concatenated via concat_owners.
+//
+// NULL-typed / empty parts: a part that contributes no elements (all rows null
+// or empty sublists, e.g. a schema-evolution all-null array column whose child
+// type was never resolved) is simply skipped from the child concat. The concrete
+// element type is therefore adopted from the parts that do carry data, and the
+// skipped part's rows survive as null/empty in the offsets+validity (offsets[i]
+// == offsets[i+1]). If no part carries any element the result has no child.
+static VectorOwner concat_array(const std::vector<const VectorOwner*>& parts) {
+    uint64_t total = 0u;
+    bool any_null = false;
+    for (const VectorOwner* p : parts) {
+        total += p->vec.length;
+        if (p->vec.validity != nullptr) any_null = true;
+    }
+    if (total > static_cast<uint64_t>(UINT32_MAX))
+        throw std::overflow_error("concat: total length exceeds u32");
+    const uint32_t n = static_cast<uint32_t>(total);
+
+    const size_t off_bytes = (static_cast<size_t>(n) + 1u) * sizeof(int32_t);
+    int32_t* new_offsets = static_cast<int32_t*>(draken_malloc(off_bytes));
+    if (!new_offsets) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(new_offsets);
+    new_offsets[0] = 0;
+
+    OwnedBuffer<uint8_t> val_buf;
+    uint8_t* validity = nullptr;
+    if (any_null) {
+        const uint32_t bm     = (n + 7u) / 8u;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        const size_t   vbytes = padded > 0u ? padded : 8u;
+        validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) throw std::bad_alloc();
+        val_buf.reset(validity);
+        std::memset(validity, 0xFF, vbytes);
+    }
+
+    // Gather each part's used child elements; own the gathered children so their
+    // buffers outlive the concat_owners call below.
+    std::vector<VectorOwner> gathered;
+    gathered.reserve(parts.size());
+
+    uint32_t out = 0u;
+    for (const VectorOwner* p : parts) {
+        const DrakenVector& v = p->vec;
+        const int32_t* src_off = static_cast<const int32_t*>(v.data);
+        std::vector<int32_t> child_idx;
+        for (uint32_t i = 0u; i < v.length; ++i, ++out) {
+            if (!row_is_valid(v, i)) {
+                if (validity)
+                    validity[out >> 3] &= static_cast<uint8_t>(~(1u << (out & 7u)));
+                new_offsets[out + 1u] = new_offsets[out];
+                continue;
+            }
+            const uint32_t sel_i = v.selection[i];
+            const int32_t  start = src_off[sel_i];
+            const int32_t  end   = src_off[sel_i + 1u];
+            for (int32_t j = start; j < end; ++j)
+                child_idx.push_back(j);
+            new_offsets[out + 1u] = new_offsets[out] + (end - start);
+        }
+        if (!child_idx.empty()) {
+            if (!p->child_owner)
+                throw std::invalid_argument(
+                    "concat: ARRAY part has elements but no child vector");
+            gathered.push_back(take_child(*p->child_owner, child_idx));
+        }
+    }
+
+    std::unique_ptr<VectorOwner> child;
+    if (!gathered.empty()) {
+        std::vector<const VectorOwner*> child_parts;
+        child_parts.reserve(gathered.size());
+        for (VectorOwner& g : gathered)
+            child_parts.push_back(&g);
+        child = std::make_unique<VectorOwner>(concat_owners(child_parts));
+    }
+
+    DrakenVector vr = draken_vector_from_dense(new_offsets, n, DRAKEN_ARRAY, validity);
+    VectorOwner owner(vr, std::move(data_buf), std::move(val_buf));
+    owner.logical_type = parts[0]->logical_type;
+    owner.child_owner = std::move(child);
+    return owner;
+}
+
 static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
     if (parts.empty())
         throw std::invalid_argument("concat: empty input");
@@ -4844,6 +4964,8 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
         return concat_string(parts, type);
     if (type == DRAKEN_BOOL)
         return concat_bool(parts);
+    if (type == DRAKEN_ARRAY)
+        return concat_array(parts);
     const size_t itemsize = concat_fixed_itemsize(type);
     if (itemsize == 0u)
         throw std::invalid_argument("concat: unsupported type");
@@ -5148,6 +5270,12 @@ static VectorOwner vector_slice_impl(const VectorOwner& v, uint32_t start, uint3
     auto result = vecresult_to_owner(draken_slice(v.vec, start, length));
     result.vec.type     = v.vec.type;
     result.logical_type = v.logical_type;
+    // Slicing rows copies the dictionary VERBATIM (same values, same order) when the
+    // result keeps the full dictionary (data_length unchanged), so a sorted dict stays
+    // sorted — carry the DRAKEN_DICT_KEYS_SORTED hint through (CLAUDE.md §6).
+    if ((v.vec.flags & DRAKEN_DICT_KEYS_SORTED) && draken_is_dict(&result.vec) &&
+        result.vec.data_length == v.vec.data_length)
+        result.vec.flags |= DRAKEN_DICT_KEYS_SORTED;
     return result;
 }
 
@@ -7148,6 +7276,9 @@ NB_MODULE(draken_native, m) {
         .def_prop_ro("is_constant", [](const VectorOwner& v) {
             return draken_is_constant(&v.vec) != 0;
         })
+        .def_prop_ro("dict_keys_sorted", [](const VectorOwner& v) {
+            return draken_dict_is_sorted(&v.vec) != 0;
+        })
         .def_prop_ro("data_length", [](const VectorOwner& v) {
             return v.vec.data_length;
         })
@@ -7399,6 +7530,14 @@ NB_MODULE(draken_native, m) {
         "values: list of unique int64 (the dictionary).\n"
         "codes:  list of int (uint32 index per logical row).\n"
         "nullable: optional list of bool (True=valid); omit for all-valid.");
+
+    // TEST ONLY: assert the dict value array is ascending (the writer/scan would
+    // set this; exposed so tests can exercise the sorted/codes-dense fast paths).
+    m.def("_test_mark_dict_keys_sorted",
+        [](nb::handle h) {
+            nb::inst_ptr<VectorOwner>(h)->vec.flags |= DRAKEN_DICT_KEYS_SORTED;
+        },
+        nb::arg("vector"), "TEST ONLY: OR DRAKEN_DICT_KEYS_SORTED onto a Vector.");
 
     // D.1 — VARCHAR ingestion (default string type; unchanged behavior).
     m.def("vector_from_string_sequence",

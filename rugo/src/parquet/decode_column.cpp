@@ -705,8 +705,41 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // all-non-match marker. Valid for any per-value conjunct (membership for
     // int/str =, IN; starts-/ends-with / contains for the LIKE-rewrites) — the
     // same conjunct assumption as min/max row-group pruning. Only when not masking.
+    //
+    // SOUNDNESS GUARD: the skip is only valid if the dictionary covers EVERY
+    // value in the chunk. Parquet dictionary FALLBACK (used by Arrow/Spark/etc.
+    // once a dictionary outgrows its page-size limit) emits PLAIN/DELTA data
+    // pages whose values are NOT in the dictionary page — skipping on a dict
+    // miss there silently drops real matches (e.g. `WHERE name = 'Trump'` when
+    // 'Trump' landed in a fallback PLAIN page). Pre-scan the data-page headers
+    // (header-only, no decompression) and only permit the skip when every DATA
+    // page is dictionary-encoded (RLE_DICTIONARY=8 / PLAIN_DICTIONARY=2). Any
+    // non-dict page, or any header we can't safely advance past, disables it.
+    bool dict_covers_all_rows = true;
     if (skip_pred != nullptr && skip_pred->kind >= 0 && row_mask == nullptr &&
         target_col->num_values > 0) {
+      const uint8_t* hscan = cursor;  // == data_page_offset
+      while (hscan < chunk_limit) {
+        TInput hin{hscan, chunk_limit};
+        PageHeader ph = ParsePageHeader(hin);
+        size_t hsize = (size_t)(hin.p - hscan);
+        if (hsize == 0) { dict_covers_all_rows = false; break; }
+        if (ph.page_type == 2) {  // dictionary page in the data range
+          hscan += hsize + (size_t)ph.compressed_page_size;
+          continue;
+        }
+        if (ph.page_type != 0) break;  // not a data page → end of data pages
+        if (ph.encoding != 8 && ph.encoding != 2) {  // PLAIN/DELTA fallback
+          dict_covers_all_rows = false;
+          break;
+        }
+        size_t cs = (size_t)ph.compressed_page_size;
+        if (cs == 0) { dict_covers_all_rows = false; break; }  // can't advance
+        hscan += hsize + cs;
+      }
+    }
+    if (skip_pred != nullptr && skip_pred->kind >= 0 && row_mask == nullptr &&
+        target_col->num_values > 0 && dict_covers_all_rows) {
       bool any_match = false;
       const int kind = skip_pred->kind;
       if (kind == 0 && (int64_dict_mode || int32_dict_mode) && skip_pred->int_vals) {

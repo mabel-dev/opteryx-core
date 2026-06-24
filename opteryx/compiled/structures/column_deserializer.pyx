@@ -61,6 +61,7 @@ cdef extern from *:
 
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
+    int draken_vector_mark_dict_sorted(PyObject* obj)
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType vec_type)
@@ -296,6 +297,8 @@ cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
     p = _read_u32(p, &dict_size)
     cdef uint8_t code_width = p[0]
     p += 1
+    cdef uint8_t is_sorted = p[0]   # sorted-dictionary hint
+    p += 1
     cdef uint32_t codes_len
     p = _read_u32(p, &codes_len)
     cdef const uint8_t* codes_ptr = p
@@ -347,7 +350,10 @@ cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
         memcpy(validity_buf, null_bitmap, null_bitmap_len)
 
     # All three buffers are now draken_malloc'd; ownership transferred on call.
-    return _dict_i64_from_decoded(dict_vals, dict_size, codes_buf, num_rows, validity_buf)
+    cdef Vector _v = _dict_i64_from_decoded(dict_vals, dict_size, codes_buf, num_rows, validity_buf)
+    if is_sorted:
+        draken_vector_mark_dict_sorted(<PyObject*>_v._nb)
+    return _v
 
 
 cdef object _build_numeric_dict_float32(const uint8_t* p, uint32_t num_rows,
@@ -357,6 +363,7 @@ cdef object _build_numeric_dict_float32(const uint8_t* p, uint32_t num_rows,
     p = _read_u32(p, &dict_size)
     cdef uint8_t code_width = p[0]
     p += 1
+    p += 1   # is_sorted byte: float dicts densify, hint unused (skip to stay in sync)
     cdef uint32_t codes_len
     p = _read_u32(p, &codes_len)
     cdef const uint8_t* codes_ptr = p
@@ -408,6 +415,7 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
     p = _read_u32(p, &dict_size)
     cdef uint8_t code_width = p[0]
     p += 1
+    p += 1   # is_sorted byte: float dicts densify, hint unused (skip to stay in sync)
     cdef uint32_t codes_len
     p = _read_u32(p, &codes_len)
     cdef const uint8_t* codes_ptr = p
@@ -461,6 +469,8 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
     p = _read_u32(p, &dict_size)
 
     cdef uint8_t code_width = p[0]
+    p += 1
+    cdef uint8_t is_sorted = p[0]   # sorted-dictionary hint
     p += 1
 
     cdef uint32_t codes_len
@@ -584,6 +594,8 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
         validity_buf, num_rows, DRAKEN_VARCHAR)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string_dict failed")
+    if is_sorted:
+        draken_vector_mark_dict_sorted(raw)
     return _wrap_raw_pyobj(raw)
 
 

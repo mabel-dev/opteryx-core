@@ -57,6 +57,12 @@ extern "C" {
 // Returns a borrowed pointer valid ONLY while `obj` is kept alive.
 const DrakenVector* draken_vector_unwrap(PyObject* obj);
 
+// draken_vector_mark_dict_sorted — set DRAKEN_DICT_KEYS_SORTED on a dict-shaped
+// Vector (no-op for non-dict shapes). Lets the parquet scan carry a sorted
+// dictionary's is_sorted property into execution. Returns 0 on success, -1 +
+// TypeError if obj is not a Vector. Pure hint; never changes query answers.
+int draken_vector_mark_dict_sorted(PyObject* obj);
+
 // draken_array_child_unwrap — extract the child DrakenVector* of a DRAKEN_ARRAY Vector.
 //
 // obj must be an instance of draken.draken_native.Vector with type DRAKEN_ARRAY.

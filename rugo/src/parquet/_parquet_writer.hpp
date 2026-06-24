@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HAVE_ZSTD
@@ -76,9 +77,9 @@ enum PType : int32_t {
 };
 
 // Encoding / codec / page / repetition / converted-type enum values.
-enum { ENC_PLAIN = 0, ENC_RLE = 3 };
+enum { ENC_PLAIN = 0, ENC_PLAIN_DICTIONARY = 2, ENC_RLE = 3, ENC_RLE_DICTIONARY = 8 };
 enum { CODEC_UNCOMPRESSED = 0, CODEC_ZSTD = 6 };
-enum { PAGE_DATA = 0 };
+enum { PAGE_DATA = 0, PAGE_DICTIONARY = 2 };
 enum { REP_REQUIRED = 0, REP_OPTIONAL = 1, REP_REPEATED = 2 };
 // ConvertedType values (parquet.thrift enum ConvertedType).
 enum {
@@ -143,6 +144,26 @@ struct ColumnInput {
   bool ts_utc = false;      // TIMESTAMP isAdjustedToUTC
 
   bool bloom = false;       // emit a split-block bloom filter for this column
+
+  // ---- dictionary encoding ----
+  //
+  // Two ways a column becomes dictionary-encoded (RLE_DICTIONARY):
+  //
+  //   1. PRESERVE — the edge already holds a dictionary (the incoming
+  //      DrakenVector was dict/constant-shaped). It sets `codes` (one dict
+  //      code per logical row; null rows carry an arbitrary in-range code),
+  //      `dict_count`, and points the typed buffers (i32/i64/f64/strs) at the
+  //      `dict_count` DICTIONARY VALUES rather than per-row values. `codes !=
+  //      nullptr` is the discriminator for this mode: encode/stats/bloom then
+  //      read value[codes[i]] for logical row i.
+  //
+  //   2. AUTO-BUILD — the edge holds plain per-row buffers and sets
+  //      `dict_enabled`. The encoder hashes the column; if the cardinality is
+  //      low enough it builds a dictionary internally, otherwise it falls back
+  //      to PLAIN. Never set together with `codes`.
+  const uint32_t *codes = nullptr; // per-row dict codes (PRESERVE mode)
+  uint32_t dict_count = 0;         // number of dictionary entries
+  bool dict_enabled = false;       // attempt AUTO-BUILD for plain buffers
 
   // ---- ARRAY (LIST) columns ----
   // When `is_array`, this column is a list. The element values live in the
@@ -342,6 +363,10 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
     if (!is_valid(col.validity, i))
       st.null_count++;
 
+  // PRESERVE mode: typed buffers hold dict values; logical row i reads
+  // value[codes[i]]. Plain/auto-build: codes==nullptr => value[i].
+  const uint32_t *codes = col.codes;
+
   switch (col.type) {
   case PT_INT32: {
     bool any = false;
@@ -349,7 +374,7 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
-      int32_t v = col.i32[i];
+      int32_t v = col.i32[codes ? codes[i] : i];
       if (!any) { lo = hi = v; any = true; }
       else { if (v < lo) lo = v; if (v > hi) hi = v; }
     }
@@ -366,7 +391,7 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
-      int64_t v = col.i64[i];
+      int64_t v = col.i64[codes ? codes[i] : i];
       if (!any) {
         lo = hi = v;
         any = true;
@@ -421,7 +446,7 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
-      double v = col.f64[i];
+      double v = col.f64[codes ? codes[i] : i];
       if (v != v) // skip NaN (parquet: NaN excluded from min/max)
         continue;
       if (!any) {
@@ -464,7 +489,7 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
-      const StrSlice &s = col.strs[i];
+      const StrSlice &s = col.strs[codes ? codes[i] : i];
       if (!any) {
         lo = hi = s;
         any = true;
@@ -493,29 +518,32 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
 inline std::vector<uint64_t> bloom_hashes(const ColumnInput &col, size_t num_rows) {
   std::vector<uint64_t> hashes;
   uint8_t buf[16];
+  // PRESERVE mode resolves value[codes[i]]; see compute_stats.
+  const uint32_t *codes = col.codes;
   for (size_t i = 0; i < num_rows; i++) {
     if (!is_valid(col.validity, i))
       continue;
+    size_t vi = codes ? codes[i] : i;
     switch (col.type) {
     case PT_INT32: {
-      int32_t v = col.i32[i];
+      int32_t v = col.i32[vi];
       std::memcpy(buf, &v, 4);
       hashes.push_back(bloom_hash(buf, 4));
       break;
     }
     case PT_INT64: {
-      int64_t v = col.i64[i];
+      int64_t v = col.i64[vi];
       std::memcpy(buf, &v, 8);
       hashes.push_back(bloom_hash(buf, 8));
       break;
     }
     case PT_DOUBLE: {
-      std::memcpy(buf, &col.f64[i], 8);
+      std::memcpy(buf, &col.f64[vi], 8);
       hashes.push_back(bloom_hash(buf, 8));
       break;
     }
     case PT_BYTE_ARRAY: {
-      const StrSlice &s = col.strs[i];
+      const StrSlice &s = col.strs[vi];
       hashes.push_back(bloom_hash(s.ptr, s.len));
       break;
     }
@@ -666,6 +694,326 @@ inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
   return pb;
 }
 
+// ---- dictionary encoding ----
+//
+// Auto-build cardinality gate: build a dictionary only when it pays off — the
+// distinct count must be at most half the present (non-null) values (>=2x
+// repetition) AND not exceed DICT_MAX_CARDINALITY entries (bounds the
+// dictionary-page size and the code bit width for pathological inputs). Both
+// thresholds are deliberately conservative; ZSTD recovers most of what a looser
+// gate would catch. Surfaced here for tuning.
+static const uint32_t DICT_MAX_CARDINALITY = 1u << 20; // 1,048,576 entries
+
+// BuiltDict owns the dictionary values + per-row codes produced by an
+// auto-build; it must outlive the build_dict_column call that reads it.
+struct BuiltDict {
+  std::vector<int32_t> i32;
+  std::vector<int64_t> i64;
+  std::vector<double> f64;
+  std::vector<StrSlice> strs;
+  std::vector<uint32_t> codes; // one code per logical row (null rows => 0)
+};
+
+// Minimum bit width to represent dict codes [0, dict_count). 0 when the
+// dictionary has <=1 entry (every present code is 0 — no index bits on the
+// wire, matching the reader's bit_width==0 fast path).
+inline int dict_bit_width(uint32_t dict_count) {
+  if (dict_count <= 1)
+    return 0;
+  uint32_t maxv = dict_count - 1;
+  int bw = 0;
+  while (maxv) {
+    bw++;
+    maxv >>= 1;
+  }
+  return bw;
+}
+
+// RLE/bit-packing-hybrid encode of dictionary codes (the RLE_DICTIONARY data
+// stream, no length prefix). Greedy: a run of >=8 equal codes becomes an RLE
+// run; everything else is bit-packed in groups of 8 (trailing group
+// zero-padded), LSB-first, at `bit_width`. Inverse of
+// DecodeRLEBitPackedIndicesNoPrefix in decode_encodings.cpp.
+inline std::vector<uint8_t> encode_dict_indices(const uint32_t *codes, size_t n,
+                                                int bit_width) {
+  std::vector<uint8_t> out;
+  if (bit_width == 0)
+    return out; // single-entry dict: reader fills zeros, nothing on the wire
+  const int value_bytes = (bit_width + 7) / 8;
+  const uint32_t mask =
+      (bit_width >= 32) ? 0xFFFFFFFFu : ((1u << bit_width) - 1u);
+  size_t i = 0;
+  while (i < n) {
+    size_t run = 1;
+    while (i + run < n && codes[i + run] == codes[i])
+      run++;
+    if (run >= 8) {
+      put_varint(out, (uint64_t)run << 1); // low bit 0 => RLE run
+      uint32_t v = codes[i] & mask;
+      for (int b = 0; b < value_bytes; b++)
+        out.push_back((uint8_t)((v >> (8 * b)) & 0xFF));
+      i += run;
+      continue;
+    }
+    // Accumulate a bit-packed literal segment up to the next run of >=8.
+    size_t lit_start = i;
+    while (i < n) {
+      size_t r = 1;
+      while (i + r < n && codes[i + r] == codes[i])
+        r++;
+      if (r >= 8)
+        break;
+      i += r;
+    }
+    size_t lit_n = i - lit_start;
+    size_t groups = (lit_n + 7) / 8;
+    put_varint(out, ((uint64_t)groups << 1) | 1u); // low bit 1 => bit-packed
+    uint64_t acc = 0;
+    int nbits = 0;
+    size_t total = groups * 8; // values, zero-padded to a whole group
+    for (size_t k = 0; k < total; k++) {
+      uint32_t v = (k < lit_n) ? (codes[lit_start + k] & mask) : 0u;
+      acc |= (uint64_t)v << nbits;
+      nbits += bit_width;
+      while (nbits >= 8) {
+        out.push_back((uint8_t)(acc & 0xFF));
+        acc >>= 8;
+        nbits -= 8;
+      }
+    }
+    // total*bit_width is a whole number of bytes, so acc is drained here.
+  }
+  return out;
+}
+
+// Auto-build a dictionary over fixed-width values. Returns false (=> emit
+// PLAIN) once the distinct count exceeds the gate; on success `dict` holds the
+// unique values in first-seen order and `codes` one code per logical row.
+template <typename T>
+inline bool build_numeric_dict(const T *vals, const uint8_t *validity,
+                               size_t num_rows, size_t present,
+                               std::vector<T> &dict,
+                               std::vector<uint32_t> &codes) {
+  const size_t cap =
+      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
+  std::unordered_map<T, uint32_t> seen;
+  codes.assign(num_rows, 0);
+  for (size_t i = 0; i < num_rows; i++) {
+    if (!is_valid(validity, i))
+      continue;
+    T v = vals[i];
+    auto it = seen.find(v);
+    if (it != seen.end()) {
+      codes[i] = it->second;
+    } else {
+      if (dict.size() >= cap)
+        return false;
+      uint32_t code = (uint32_t)dict.size();
+      seen.emplace(v, code);
+      dict.push_back(v);
+      codes[i] = code;
+    }
+  }
+  return true;
+}
+
+// Doubles are keyed by their bit pattern, not value: -0.0 and +0.0 must NOT
+// share an entry (writing one for the other would change the bytes), and each
+// NaN bit pattern stays distinct.
+inline bool build_double_dict(const double *vals, const uint8_t *validity,
+                              size_t num_rows, size_t present,
+                              std::vector<double> &dict,
+                              std::vector<uint32_t> &codes) {
+  const size_t cap =
+      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
+  std::unordered_map<uint64_t, uint32_t> seen;
+  codes.assign(num_rows, 0);
+  for (size_t i = 0; i < num_rows; i++) {
+    if (!is_valid(validity, i))
+      continue;
+    uint64_t bits;
+    std::memcpy(&bits, &vals[i], 8);
+    auto it = seen.find(bits);
+    if (it != seen.end()) {
+      codes[i] = it->second;
+    } else {
+      if (dict.size() >= cap)
+        return false;
+      uint32_t code = (uint32_t)dict.size();
+      seen.emplace(bits, code);
+      dict.push_back(vals[i]);
+      codes[i] = code;
+    }
+  }
+  return true;
+}
+
+inline bool build_string_dict(const StrSlice *vals, const uint8_t *validity,
+                              size_t num_rows, size_t present,
+                              std::vector<StrSlice> &dict,
+                              std::vector<uint32_t> &codes) {
+  const size_t cap =
+      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
+  std::unordered_map<std::string_view, uint32_t> seen;
+  codes.assign(num_rows, 0);
+  for (size_t i = 0; i < num_rows; i++) {
+    if (!is_valid(validity, i))
+      continue;
+    const StrSlice &s = vals[i];
+    std::string_view key((const char *)s.ptr, s.len);
+    auto it = seen.find(key);
+    if (it != seen.end()) {
+      codes[i] = it->second;
+    } else {
+      if (dict.size() >= cap)
+        return false;
+      uint32_t code = (uint32_t)dict.size();
+      seen.emplace(key, code);
+      dict.push_back(s);
+      codes[i] = code;
+    }
+  }
+  return true;
+}
+
+// Build a dictionary page (PLAIN-encoded dict values) followed by an
+// RLE_DICTIONARY data page. `col` must point its typed buffers at the
+// `col.dict_count` dictionary values, with `col.codes` (one per logical row)
+// and `col.validity` (per logical row) set. Returns the concatenated page
+// bytes plus the dictionary-page length so the caller can locate the data page.
+struct DictColumnBuild {
+  std::vector<uint8_t> bytes;
+  size_t uncompressed_total; // both page headers + both raw bodies
+  size_t dict_page_len;      // bytes occupied by the dictionary page
+};
+
+inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows,
+                                         int codec, int zstd_level) {
+  ColumnInput dv = col;
+  dv.validity = nullptr; // dict values carry no nulls
+  dv.codes = nullptr;    // read the dict buffer positionally [0, dict_count)
+
+  // ---- sort the dictionary (WORM: pay the ordering cost once at write) ----
+  //
+  // A sorted dictionary lets a reader turn a range/equality predicate into a
+  // contiguous CODE interval (two binary searches + an integer range compare),
+  // advertised via DictionaryPageHeader.is_sorted. Sortable types: INT32/INT64
+  // (incl. DATE32/TIMESTAMP64) numerically, BYTE_ARRAY by unsigned-byte
+  // lexicographic order (matches compute_stats / Parquet BYTE_ARRAY ordering).
+  // Floats are deliberately excluded — NaN / -0.0 break monotonic code ranges.
+  // We emit the dictionary-page values in sorted order and remap each row's
+  // code through the inverse permutation; column stats and bloom were computed
+  // from the original codes upstream, so they are unaffected.
+  const uint32_t D = col.dict_count;
+  bool sorted = (col.type == PT_INT32 || col.type == PT_INT64 ||
+                 col.type == PT_BYTE_ARRAY);
+  std::vector<uint32_t> inv;     // inv[old_code] = new_code (sorted only)
+  std::vector<int32_t> s_i32;    // dict values reordered for the dict page
+  std::vector<int64_t> s_i64;
+  std::vector<StrSlice> s_str;
+  if (sorted && D > 0) {
+    std::vector<uint32_t> perm(D); // perm[new_code] = old_code
+    for (uint32_t k = 0; k < D; k++)
+      perm[k] = k;
+    if (col.type == PT_INT64)
+      std::sort(perm.begin(), perm.end(),
+                [&](uint32_t a, uint32_t b) { return col.i64[a] < col.i64[b]; });
+    else if (col.type == PT_INT32)
+      std::sort(perm.begin(), perm.end(),
+                [&](uint32_t a, uint32_t b) { return col.i32[a] < col.i32[b]; });
+    else // PT_BYTE_ARRAY
+      std::sort(perm.begin(), perm.end(), [&](uint32_t a, uint32_t b) {
+        return str_lt(col.strs[a], col.strs[b]);
+      });
+    inv.assign(D, 0);
+    for (uint32_t k = 0; k < D; k++)
+      inv[perm[k]] = k;
+    if (col.type == PT_INT64) {
+      s_i64.resize(D);
+      for (uint32_t k = 0; k < D; k++)
+        s_i64[k] = col.i64[perm[k]];
+      dv.i64 = s_i64.data();
+    } else if (col.type == PT_INT32) {
+      s_i32.resize(D);
+      for (uint32_t k = 0; k < D; k++)
+        s_i32[k] = col.i32[perm[k]];
+      dv.i32 = s_i32.data();
+    } else {
+      s_str.resize(D);
+      for (uint32_t k = 0; k < D; k++)
+        s_str[k] = col.strs[perm[k]];
+      dv.strs = s_str.data();
+    }
+  }
+
+  // ---- dictionary page: PLAIN values, all present (in sorted order) ----
+  std::vector<uint8_t> dict_body;
+  encode_values(dv, col.dict_count, dict_body);
+  size_t dict_uncompressed = dict_body.size();
+  std::vector<uint8_t> dict_stored = (codec == CODEC_ZSTD)
+                                         ? zstd_compress_block(dict_body, zstd_level)
+                                         : dict_body;
+
+  TCompactWriter dh;
+  dh.structBegin();
+  dh.writeI32Field(1, PAGE_DICTIONARY);             // type
+  dh.writeI32Field(2, (int32_t)dict_uncompressed);  // uncompressed_page_size
+  dh.writeI32Field(3, (int32_t)dict_stored.size()); // compressed_page_size
+  dh.writeFieldHeader(CT_STRUCT, 7);                // dictionary_page_header
+  dh.structBegin();
+  dh.writeI32Field(1, (int32_t)col.dict_count);     // num_values
+  dh.writeI32Field(2, ENC_PLAIN);                   // encoding (PLAIN values)
+  dh.writeBoolField(3, sorted);                     // is_sorted (see above)
+  dh.structEnd();
+  dh.structEnd();
+
+  // ---- data page: def levels, bit_width byte, RLE/bit-packed indices ----
+  std::vector<uint8_t> data_body;
+  std::vector<uint8_t> def = encode_def_levels(col.validity, num_rows);
+  put_u32_le(data_body, (uint32_t)def.size());
+  data_body.insert(data_body.end(), def.begin(), def.end());
+  int bw = dict_bit_width(col.dict_count);
+  data_body.push_back((uint8_t)bw);
+  std::vector<uint32_t> present;
+  present.reserve(num_rows);
+  for (size_t i = 0; i < num_rows; i++)
+    if (is_valid(col.validity, i))
+      present.push_back(sorted ? inv[col.codes[i]] : col.codes[i]);
+  std::vector<uint8_t> idx =
+      encode_dict_indices(present.data(), present.size(), bw);
+  data_body.insert(data_body.end(), idx.begin(), idx.end());
+
+  size_t data_uncompressed = data_body.size();
+  std::vector<uint8_t> data_stored = (codec == CODEC_ZSTD)
+                                         ? zstd_compress_block(data_body, zstd_level)
+                                         : data_body;
+
+  TCompactWriter ph;
+  ph.structBegin();
+  ph.writeI32Field(1, PAGE_DATA);
+  ph.writeI32Field(2, (int32_t)data_uncompressed);
+  ph.writeI32Field(3, (int32_t)data_stored.size());
+  ph.writeFieldHeader(CT_STRUCT, 5); // data_page_header
+  ph.structBegin();
+  ph.writeI32Field(1, (int32_t)num_rows);  // num_values (incl. nulls)
+  ph.writeI32Field(2, ENC_RLE_DICTIONARY); // encoding
+  ph.writeI32Field(3, ENC_RLE);            // definition_level_encoding
+  ph.writeI32Field(4, ENC_RLE);            // repetition_level_encoding
+  ph.structEnd();
+  ph.structEnd();
+
+  DictColumnBuild out;
+  out.dict_page_len = dh.buf.size() + dict_stored.size();
+  out.uncompressed_total =
+      dh.buf.size() + dict_uncompressed + ph.buf.size() + data_uncompressed;
+  out.bytes.reserve(out.dict_page_len + ph.buf.size() + data_stored.size());
+  out.bytes.insert(out.bytes.end(), dh.buf.begin(), dh.buf.end());
+  out.bytes.insert(out.bytes.end(), dict_stored.begin(), dict_stored.end());
+  out.bytes.insert(out.bytes.end(), ph.buf.begin(), ph.buf.end());
+  out.bytes.insert(out.bytes.end(), data_stored.begin(), data_stored.end());
+  return out;
+}
+
 // ---- schema serialization ----
 
 inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols) {
@@ -793,21 +1141,33 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
 // ---- ColumnMetaData / ColumnChunk / RowGroup ----
 
 inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
-                               size_t num_rows, int64_t page_offset,
+                               size_t num_rows, int64_t data_page_offset,
+                               int64_t dict_page_offset,
                                size_t compressed_total, size_t uncompressed_total,
                                int codec, const ColumnStats &stats,
                                int64_t bloom_offset, int32_t bloom_length) {
   w.structBegin(); // ColumnChunk
-  w.writeI64Field(2, page_offset);                 // file_offset
+  // file_offset points at the first page of the chunk (the dictionary page
+  // when present, otherwise the data page).
+  w.writeI64Field(2, dict_page_offset >= 0 ? dict_page_offset : data_page_offset);
   w.writeFieldHeader(CT_STRUCT, 3);                // meta_data
   {
     w.structBegin(); // ColumnMetaData
     w.writeI32Field(1, (int32_t)(c.is_array ? c.elem_type : c.type)); // type
-    // encodings: [PLAIN, RLE]
-    w.writeFieldHeader(CT_LIST, 2);
-    w.writeListHeader(CT_I32, 2);
-    w.writeListI32(ENC_PLAIN);
-    w.writeListI32(ENC_RLE);
+    // encodings: dict chunks declare [RLE_DICTIONARY, PLAIN, RLE] (data page,
+    // dict page, def levels); plain chunks declare [PLAIN, RLE].
+    if (dict_page_offset >= 0) {
+      w.writeFieldHeader(CT_LIST, 2);
+      w.writeListHeader(CT_I32, 3);
+      w.writeListI32(ENC_RLE_DICTIONARY);
+      w.writeListI32(ENC_PLAIN);
+      w.writeListI32(ENC_RLE);
+    } else {
+      w.writeFieldHeader(CT_LIST, 2);
+      w.writeListHeader(CT_I32, 2);
+      w.writeListI32(ENC_PLAIN);
+      w.writeListI32(ENC_RLE);
+    }
     // path_in_schema: [name] for primitives; [name,"list","element"] for lists.
     w.writeFieldHeader(CT_LIST, 3);
     if (c.is_array) {
@@ -823,7 +1183,9 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     w.writeI64Field(5, (int64_t)(c.is_array ? c.num_levels : num_rows)); // num_values
     w.writeI64Field(6, (int64_t)uncompressed_total); // total_uncompressed_size
     w.writeI64Field(7, (int64_t)compressed_total);   // total_compressed_size
-    w.writeI64Field(9, page_offset);               // data_page_offset
+    w.writeI64Field(9, data_page_offset);          // data_page_offset
+    if (dict_page_offset >= 0)
+      w.writeI64Field(11, dict_page_offset);       // dictionary_page_offset
     // statistics (field 12): null_count(3), distinct_count(4), max_value(5),
     // min_value(6), is_max_value_exact(7), is_min_value_exact(8). Ascending
     // ids. Omitted for LIST columns (nested null semantics — no leaf stats).
@@ -866,24 +1228,87 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   const char *MAGIC = "PAR1";
   file.insert(file.end(), MAGIC, MAGIC + 4);
 
-  // Write all data pages, recording their offsets and sizes (compressed +
-  // uncompressed) for the column metadata.
-  std::vector<int64_t> offsets(cols.size());
+  // Write all column chunks, recording page offsets and sizes (compressed +
+  // uncompressed) for the column metadata. A chunk is either a single PLAIN
+  // data page or a [dictionary page][RLE_DICTIONARY data page] pair.
+  std::vector<int64_t> data_offsets(cols.size());
+  std::vector<int64_t> dict_offsets(cols.size(), -1);
   std::vector<size_t> sizes(cols.size());
   std::vector<size_t> uncompressed(cols.size());
   std::vector<ColumnStats> stats(cols.size());
   for (size_t i = 0; i < cols.size(); i++) {
-    offsets[i] = (int64_t)file.size();
-    PageBuild pb;
+    int64_t page_start = (int64_t)file.size();
     if (cols[i].is_array) {
-      pb = build_array_data_page(cols[i], codec, zstd_level); // stats[i] left empty
-    } else {
-      stats[i] = compute_stats(cols[i], num_rows);
-      pb = build_data_page(cols[i], num_rows, codec, zstd_level);
+      PageBuild pb = build_array_data_page(cols[i], codec, zstd_level); // stats[i] empty
+      data_offsets[i] = page_start;
+      sizes[i] = pb.bytes.size();
+      uncompressed[i] = pb.uncompressed_total;
+      file.insert(file.end(), pb.bytes.begin(), pb.bytes.end());
+      continue;
     }
-    sizes[i] = pb.bytes.size();
-    uncompressed[i] = pb.uncompressed_total;
-    file.insert(file.end(), pb.bytes.begin(), pb.bytes.end());
+
+    // Stats read cols[i] directly: PLAIN/auto-build use per-row buffers
+    // (codes==nullptr); PRESERVE resolves dict[codes[i]] (codes set).
+    stats[i] = compute_stats(cols[i], num_rows);
+
+    bool use_dict = false;
+    DictColumnBuild dcb;
+    BuiltDict bd; // owns auto-built dict buffers for the build call below
+    if (cols[i].codes != nullptr) {
+      // PRESERVE: the edge already supplied a dictionary.
+      use_dict = true;
+      dcb = build_dict_column(cols[i], num_rows, codec, zstd_level);
+    } else if (cols[i].dict_enabled) {
+      // AUTO-BUILD: hash per-row values; encode as a dictionary on success.
+      size_t present = num_rows - (size_t)stats[i].null_count;
+      ColumnInput dcol = cols[i];
+      bool built = false;
+      if (present > 0) {
+        switch (cols[i].type) {
+        case PT_INT32:
+          built = build_numeric_dict<int32_t>(cols[i].i32, cols[i].validity,
+                                              num_rows, present, bd.i32, bd.codes);
+          if (built) { dcol.i32 = bd.i32.data(); dcol.dict_count = (uint32_t)bd.i32.size(); }
+          break;
+        case PT_INT64:
+          built = build_numeric_dict<int64_t>(cols[i].i64, cols[i].validity,
+                                              num_rows, present, bd.i64, bd.codes);
+          if (built) { dcol.i64 = bd.i64.data(); dcol.dict_count = (uint32_t)bd.i64.size(); }
+          break;
+        case PT_DOUBLE:
+          built = build_double_dict(cols[i].f64, cols[i].validity,
+                                    num_rows, present, bd.f64, bd.codes);
+          if (built) { dcol.f64 = bd.f64.data(); dcol.dict_count = (uint32_t)bd.f64.size(); }
+          break;
+        case PT_BYTE_ARRAY:
+          built = build_string_dict(cols[i].strs, cols[i].validity,
+                                    num_rows, present, bd.strs, bd.codes);
+          if (built) { dcol.strs = bd.strs.data(); dcol.dict_count = (uint32_t)bd.strs.size(); }
+          break;
+        default:
+          break;
+        }
+      }
+      if (built) {
+        dcol.codes = bd.codes.data();
+        use_dict = true;
+        dcb = build_dict_column(dcol, num_rows, codec, zstd_level);
+      }
+    }
+
+    if (use_dict) {
+      dict_offsets[i] = page_start;
+      data_offsets[i] = page_start + (int64_t)dcb.dict_page_len;
+      sizes[i] = dcb.bytes.size();
+      uncompressed[i] = dcb.uncompressed_total;
+      file.insert(file.end(), dcb.bytes.begin(), dcb.bytes.end());
+    } else {
+      PageBuild pb = build_data_page(cols[i], num_rows, codec, zstd_level);
+      data_offsets[i] = page_start;
+      sizes[i] = pb.bytes.size();
+      uncompressed[i] = pb.uncompressed_total;
+      file.insert(file.end(), pb.bytes.begin(), pb.bytes.end());
+    }
   }
 
   size_t total_byte_size = 0;
@@ -926,8 +1351,8 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     fm.writeFieldHeader(CT_LIST, 1);
     fm.writeListHeader(CT_STRUCT, (uint32_t)cols.size());
     for (size_t i = 0; i < cols.size(); i++)
-      write_column_chunk(fm, cols[i], num_rows, offsets[i], sizes[i],
-                         uncompressed[i], codec, stats[i],
+      write_column_chunk(fm, cols[i], num_rows, data_offsets[i], dict_offsets[i],
+                         sizes[i], uncompressed[i], codec, stats[i],
                          bloom_offset[i], bloom_length[i]);
     fm.writeI64Field(2, (int64_t)total_byte_size); // total_byte_size
     fm.writeI64Field(3, (int64_t)num_rows);        // num_rows

@@ -29,6 +29,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
+#include "ops/dict_take.h"
 
 namespace draken { namespace ops {
 
@@ -90,6 +91,13 @@ static inline VecResult i64_take(
     const uint32_t n   = n_indices;
     const int64_t* data = static_cast<const int64_t*>(v.data);
     const uint8_t* src_null = v.validity;
+
+    // Compression-preserving + compacting gather (see ops/dict_take.h): when the
+    // value array is no larger than the output and the input is compressed, keep
+    // (and compact away any dead entries from) the dict shape instead of
+    // materialising n values.
+    if (v.data_length <= n && draken_is_compressed(&v))
+        return fixed_dict_compact_take<int64_t, DRAKEN_INT64>(v, indices, n);
 
     // Allocate output data (at least 1 element to keep data non-null).
     size_t data_bytes = (n > 0 ? n : 1u) * sizeof(int64_t);

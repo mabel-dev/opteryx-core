@@ -39,7 +39,6 @@ from copy import deepcopy
 from typing import Generator
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
-from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io.pool_reader import open_ipc_source
 from opteryx.connectors.parquet_io.pool_reader import open_pass2_source
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -69,6 +68,37 @@ _TS_UNIT_BY_NAME = {
     "MICROSECONDS": "us",
     "NANOSECONDS": "ns",
 }
+
+# Producer-side typed-sequence dispatcher for the schema-evolution NULL fill.
+from draken.interop.vector_sequence import vector_from_sequence as _vector_from_sequence_typed
+
+
+def _null_filler_for(column_type):
+    """Return a callable ``n -> Vector`` that builds an all-NULL column of
+    ``column_type``'s physical type and length ``n``.
+
+    Used to fill a projected column a given file lacks (schema evolution): the
+    union schema declares the type, the file does not carry it. The typed fill
+    (vs an untyped NULL-type column) lets the result concatenate cleanly with the
+    same column from files that DO carry it when small morsels are combined.
+    Length-parametric so one filler serves every row group."""
+    if column_type is None:
+        return lambda n: _draken_native_parquet.vector_null_from_length(n)
+    name = column_type.physical.name
+    if name == "DECIMAL128" or name == "DECIMAL":
+        prec = 18
+        scale = 6
+        if column_type.logical is not None:
+            prec = column_type.logical.precision
+            scale = column_type.logical.scale
+        if name == "DECIMAL128":
+            return lambda n: _draken_native_parquet.vector_decimal128_from_sequence([None] * n, prec, scale)
+        return lambda n: _draken_native_parquet.vector_decimal_from_sequence([None] * n, prec, scale)
+    if name == "TIME64":
+        return lambda n: _draken_native_parquet.vector_time64_from_sequence([None] * n)
+    # The producer-side dispatcher covers ARRAY / BOOL / DATE32 / floats / ints /
+    # INTERVAL / NVARCHAR / TIME32 / TIMESTAMP64 / VARBINARY / VARCHAR directly.
+    return lambda n: _vector_from_sequence_typed([None] * n, dtype=name)
 
 # Predicate evaluation is the bytecode VM only — no alternative paths. The
 # compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
@@ -580,6 +610,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef list _sp_pass2_column_names
     cdef dict _sp_pass1_name_to_identity
     cdef dict _sp_pass2_name_to_identity
+    cdef dict _sp_null_filler_by_name     # schema-evolution typed NULL-fill, by physical column name
     cdef bint _sp_topn_active
     cdef bint _sp_two_pass_eligible
     cdef CompiledBytecode _compiled_predicate
@@ -1004,6 +1035,13 @@ cdef class ParquetReadNode(ReaderNode):
 
         base_schema = self.parameters["schema"]
 
+        # Per-column typed NULL-fill factories, keyed by physical name. Used to
+        # materialize a column a given file lacks (schema evolution) so the scan
+        # never desyncs the name↔vector pairing. Built once from the union schema.
+        self._sp_null_filler_by_name = {
+            col.name: _null_filler_for(col.column_type) for col in base_schema.columns
+        }
+
         if self._planner_name_to_identity_cached is None:
             self._planner_name_to_identity_cached = {
                 col.schema_column.name: col.schema_column.identity
@@ -1197,6 +1235,7 @@ cdef class ParquetReadNode(ReaderNode):
                 connector=connector_type,
                 query_id=self._sp_query_id,
                 footer_bytes_cache=_FOOTER_CACHE,
+                null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
             )
             return
 
@@ -1211,6 +1250,7 @@ cdef class ParquetReadNode(ReaderNode):
             connector=connector_type,
             query_id=self._sp_query_id,
             footer_bytes_cache=_FOOTER_CACHE,
+            null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -1417,6 +1457,7 @@ cdef class ParquetReadNode(ReaderNode):
             connector=self._sp_connector_type,
             query_id=self._sp_query_id,
             footer_bytes_cache=_FOOTER_CACHE,
+            null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
         )
         self._lm_pass1_done = True
 

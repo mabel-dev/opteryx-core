@@ -237,7 +237,7 @@ class OpteryxHttpFileSystem:
         if columns or filters:
             raise NotImplementedError(
                 "Column projection and filtering are not supported for HTTP open_input_stream. "
-                "Use fetch_columns() or range-read based APIs for selective reads."
+                "Column-selective reads go through the native Parquet scan path."
             )
 
         url = self._normalize_url(path)
@@ -262,7 +262,7 @@ class OpteryxHttpFileSystem:
         if columns or filters:
             raise NotImplementedError(
                 "Column projection and filtering are not supported for HTTP open_input_file. "
-                "Use fetch_columns() or range-read based APIs for selective reads."
+                "Column-selective reads go through the native Parquet scan path."
             )
 
         # HTTP requires full file load for random access (no server-side seeking)

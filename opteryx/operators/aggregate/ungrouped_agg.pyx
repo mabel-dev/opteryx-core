@@ -22,6 +22,7 @@ from draken.core.buffers cimport (
     DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
     DRAKEN_FLOAT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_DECIMAL, DrakenType,
     DRAKEN_ARRAY, DRAKEN_NULL, DRAKEN_VECTOR_FP16,
+    DRAKEN_DICT_KEYS_SORTED,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept
