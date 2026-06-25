@@ -254,7 +254,7 @@ static nb::object impl_vector_length(nb::object v) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_accessors, m) {
+void register_vector_accessors(nb::module_ &m) {
 
     m.def("vector_string_length",
         [](nb::object v) -> nb::object { return impl_vector_string_length(v, false); },

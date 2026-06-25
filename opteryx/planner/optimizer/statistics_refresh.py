@@ -198,10 +198,23 @@ def _empty_stats(row_count: int = 0) -> RelationStatistics:
 
 
 def _column_name(col) -> Optional[str]:
-    """Best-effort column name extractor for join keys, group keys, etc."""
+    """Best-effort column name extractor for join keys, group keys, etc.
+
+    Join keys reach this as raw column *identities* — ``bytes`` (or ``str``)
+    rather than column Node objects (e.g. ``b'tes_c_c_r6Fy7PvB'``). A bytes
+    identity has no ``.value``/``.name`` attribute, so it must be decoded
+    directly; otherwise the key is dropped and ``_join_stats`` falls back to a
+    cross-product estimate.
+    """
     if col is None:
         return None
+    if isinstance(col, bytes):
+        return col.decode("utf-8", "replace")
+    if isinstance(col, str):
+        return col
     name = getattr(col, "source_column", None) or getattr(col, "value", None)
+    if isinstance(name, bytes):
+        return name.decode("utf-8", "replace")
     if isinstance(name, str):
         return name
     return getattr(col, "name", None)
@@ -436,12 +449,24 @@ def _join_stats(
 
     left_col = left.get_column(left_key)
     right_col = right.get_column(right_key)
+    left_ndv = left_col.distinct_count if left_col else None
+    right_ndv = right_col.distinct_count if right_col else None
+    # When NDV is absent on both sides (common with Parquet files that omit
+    # distinct-count row-group statistics), fall back to tdom = min(row_counts).
+    # Assuming FK-PK structure, the smaller relation upper-bounds the distinct
+    # key count, giving a far better estimate than a flat 0.1 selectivity.
+    # Ebergen (2022) §3.2.  Only fires when BOTH sides are unknown — if one
+    # side has a real NDV, _key_selectivity already uses it.
+    if left_ndv is None and right_ndv is None:
+        tdom = max(1, min(left.row_count, right.row_count))
+        left_ndv = tdom
+        right_ndv = tdom
     left_key_stats = KeyStats(
-        ndv=left_col.distinct_count if left_col else None,
+        ndv=left_ndv,
         null_fraction=left_col.null_fraction if left_col else None,
     )
     right_key_stats = KeyStats(
-        ndv=right_col.distinct_count if right_col else None,
+        ndv=right_ndv,
         null_fraction=right_col.null_fraction if right_col else None,
     )
     out_rows = estimate_join_cardinality(

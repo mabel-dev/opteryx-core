@@ -368,7 +368,7 @@ static nb::object impl_contains_all(nb::object arr, nb::object items) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_string_search, m) {
+void register_vector_string_search(nb::module_ &m) {
 
     m.def("vector_starts_with",
         [](nb::object h, nb::object n) -> nb::object { return impl_starts_with(h, n); },

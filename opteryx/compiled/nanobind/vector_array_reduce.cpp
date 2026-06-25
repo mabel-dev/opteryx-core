@@ -133,7 +133,7 @@ static nb::object wrap(VecResult res) {
 // NB_MODULE — 8 functions, one module.
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_array_reduce, m) {
+void register_vector_array_reduce(nb::module_ &m) {
 
     m.def("vector_anyop_eq",  ARR_REDUCE_FN(vector_anyop_eq,  draken::ops::arr_any_eq),
         nb::arg("column"), nb::arg("literal").none(),

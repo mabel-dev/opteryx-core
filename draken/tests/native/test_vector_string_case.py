@@ -13,7 +13,7 @@ Run with:  python -m pytest draken/tests/native/test_vector_string_case.py -v
 import pytest
 
 import draken.draken_native as dn
-from opteryx.compiled.nanobind.vector_string_case import vector_lowercase
+from opteryx.compiled.nanobind.vectors import vector_lowercase
 
 
 def make_varchar(lst):

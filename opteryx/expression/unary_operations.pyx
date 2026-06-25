@@ -4,8 +4,8 @@ Thin Cython dispatch over the underlying Draken / vector_ops kernels. All
 `values` inputs must be Draken vectors; an AttributeError surfaces if not.
 """
 
-from opteryx.compiled.nanobind.vector_bitwise import vector_bitwise_not
-from opteryx.compiled.nanobind.vector_accessors import (
+from opteryx.compiled.nanobind.vectors import vector_bitwise_not
+from opteryx.compiled.nanobind.vectors import (
     vector_string_is_empty,
     vector_string_is_not_empty,
 )

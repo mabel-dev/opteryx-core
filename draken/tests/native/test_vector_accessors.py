@@ -40,7 +40,7 @@ import pytest
 def _load_vector_accessors():
     pattern = os.path.join(
         os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vector_accessors*.so"
+        "opteryx", "compiled", "nanobind", "vectors*.so"
     )
     matches = glob.glob(pattern)
     if not matches:
@@ -48,7 +48,7 @@ def _load_vector_accessors():
             "vector_accessors extension not built — run make compile first"
         )
     spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vector_accessors", matches[0]
+        "opteryx.compiled.nanobind.vectors", matches[0]
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

@@ -397,7 +397,7 @@ static nb::object dispatch_from_unixtimestamp(nb::object values) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_temporal_convert, m) {
+void register_vector_temporal_convert(nb::module_ &m) {
 
     m.def("vector_date32_to_timestamp",
         [](nb::object v, nb::object unit_obj) -> nb::object {

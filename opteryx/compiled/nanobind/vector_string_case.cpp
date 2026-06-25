@@ -725,7 +725,7 @@ static nb::object impl_trim_common(nb::object in_obj, bool trim_left, bool trim_
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_string_case, m) {
+void register_vector_string_case(nb::module_ &m) {
     m.def("vector_lowercase",
         [](nb::object input) -> nb::object {
             return impl_lowercase(input);

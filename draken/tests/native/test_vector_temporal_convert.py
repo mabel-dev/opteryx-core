@@ -68,7 +68,7 @@ import pytest
 def _load_vector_temporal_convert():
     pattern = os.path.join(
         os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vector_temporal_convert*.so"
+        "opteryx", "compiled", "nanobind", "vectors*.so"
     )
     matches = glob.glob(pattern)
     if not matches:
@@ -77,7 +77,7 @@ def _load_vector_temporal_convert():
             allow_module_level=True,
         )
     spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vector_temporal_convert", matches[0]
+        "opteryx.compiled.nanobind.vectors", matches[0]
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

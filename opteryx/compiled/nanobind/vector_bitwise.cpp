@@ -50,7 +50,7 @@ static nb::object wrap(VecResult res) {
 // NB_MODULE — six functions, one module.
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_bitwise, m) {
+void register_vector_bitwise(nb::module_ &m) {
 
     m.def("vector_bitwise_and",
         [](nb::object left, nb::object right) -> nb::object {

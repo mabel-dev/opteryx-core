@@ -533,7 +533,7 @@ static nb::object string_to_date32_apply(nb::object obj) {
 // NB_MODULE — four functions, one module.
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_casts, m) {
+void register_vector_casts(nb::module_ &m) {
 
     m.def("vector_cast_int64_to_string",
         [](nb::object v) -> nb::object {

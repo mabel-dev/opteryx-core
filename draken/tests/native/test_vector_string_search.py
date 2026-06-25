@@ -47,7 +47,7 @@ import pytest
 def _load_mod():
     pattern = os.path.join(
         os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vector_string_search*.so"
+        "opteryx", "compiled", "nanobind", "vectors*.so"
     )
     matches = glob.glob(pattern)
     if not matches:
@@ -56,7 +56,7 @@ def _load_mod():
             allow_module_level=True,
         )
     spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vector_string_search", matches[0]
+        "opteryx.compiled.nanobind.vectors", matches[0]
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

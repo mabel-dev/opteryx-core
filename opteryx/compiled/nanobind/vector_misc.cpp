@@ -411,7 +411,7 @@ static int parse_ip_to_int(
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_misc, m) {
+void register_vector_misc(nb::module_ &m) {
 
     m.def("vector_log",
         [](nb::object v, nb::object base_v) -> nb::object {

@@ -66,7 +66,7 @@ import pytest
 def _load_temporal_arith():
     pattern = os.path.join(
         os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vector_temporal_arith*.so"
+        "opteryx", "compiled", "nanobind", "vectors*.so"
     )
     matches = glob.glob(pattern)
     if not matches:
@@ -75,7 +75,7 @@ def _load_temporal_arith():
             allow_module_level=True,
         )
     spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vector_temporal_arith", matches[0]
+        "opteryx.compiled.nanobind.vectors", matches[0]
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

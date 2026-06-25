@@ -211,7 +211,7 @@ static nb::object impl_split(nb::object vec_obj, nb::object delim_obj)
 // Module definition
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_split_native, m) {
+void register_vector_split_native(nb::module_ &m) {
     m.doc() =
         "vector_split_native — bytewise single-byte string split → DRAKEN_ARRAY[VARCHAR].\n"
         "Milestone E.16b.  Replaces opteryx/compiled/vector_ops/vector_split.pyx.";

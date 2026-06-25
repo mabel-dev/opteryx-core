@@ -85,7 +85,7 @@ static nb::object wrap_bool(uint8_t* data, uint32_t n) {
 // NB_MODULE — four functions, one module.
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_bool_ops, m) {
+void register_vector_bool_ops(nb::module_ &m) {
 
     m.def("bool_vector_from_int8_mask",
         [](nb::object mask_obj, int64_t n_signed) -> nb::object {

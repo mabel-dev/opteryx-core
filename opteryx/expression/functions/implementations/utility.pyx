@@ -259,13 +259,13 @@ def cosine_similarity(arr, val):
     here because it is fundamentally Python-bound (calls the embedding provider).
     """
     if len(arr) == 0:
-        from opteryx.compiled.nanobind.vector_string_misc2 import vector_cosine_similarity
+        from opteryx.compiled.nanobind.vectors import vector_cosine_similarity
         return vector_cosine_similarity(arr, val)
 
     if _is_text_input(arr, val):
         return _cosine_similarity_text(arr, val)
 
-    from opteryx.compiled.nanobind.vector_string_misc2 import vector_cosine_similarity
+    from opteryx.compiled.nanobind.vectors import vector_cosine_similarity
     return vector_cosine_similarity(arr, val)
 
 
@@ -276,14 +276,14 @@ def cosine_distance(arr, val):
     falls back to scoring then clipping in Python.
     """
     if len(arr) == 0:
-        from opteryx.compiled.nanobind.vector_string_misc2 import vector_cosine_distance
+        from opteryx.compiled.nanobind.vectors import vector_cosine_distance
         return vector_cosine_distance(arr, val)
 
     if _is_text_input(arr, val):
         scores = _cosine_similarity_text(arr, val)
         return [1.0 - max(-1.0, min(float(s), 1.0)) for s in scores]
 
-    from opteryx.compiled.nanobind.vector_string_misc2 import vector_cosine_distance
+    from opteryx.compiled.nanobind.vectors import vector_cosine_distance
     return vector_cosine_distance(arr, val)
 
 

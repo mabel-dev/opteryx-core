@@ -44,13 +44,13 @@ import pytest
 def _load_vector_bool_ops():
     pattern = os.path.join(
         os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vector_bool_ops*.so"
+        "opteryx", "compiled", "nanobind", "vectors*.so"
     )
     matches = glob.glob(pattern)
     if not matches:
         pytest.skip("vector_bool_ops extension not built — run make compile first", allow_module_level=True)
     spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vector_bool_ops", matches[0]
+        "opteryx.compiled.nanobind.vectors", matches[0]
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

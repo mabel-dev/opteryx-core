@@ -1,8 +1,8 @@
 from typing import List
 
 # Local implementation imports (kept as late imports inside function if heavy)
-from opteryx.compiled.nanobind.vector_selection_concat import vector_coalesce as _vector_coalesce
-from opteryx.compiled.nanobind.vector_selection_concat import vector_iif as _vector_iif
+from opteryx.compiled.nanobind.vectors import vector_coalesce as _vector_coalesce
+from opteryx.compiled.nanobind.vectors import vector_iif as _vector_iif
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,

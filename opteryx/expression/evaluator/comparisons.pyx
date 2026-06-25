@@ -16,7 +16,7 @@ from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
 )
-from opteryx.compiled.nanobind.vector_array_reduce import (
+from opteryx.compiled.nanobind.vectors import (
     vector_allop_eq,
     vector_allop_neq,
     vector_anyop_eq,
@@ -26,10 +26,10 @@ from opteryx.compiled.nanobind.vector_array_reduce import (
     vector_anyop_gte,
     vector_anyop_lte,
 )
-from opteryx.compiled.nanobind.vector_string_search import vector_contains
+from opteryx.compiled.nanobind.vectors import vector_contains
 from libc.stdint cimport int16_t
 
-from opteryx.compiled.nanobind.vector_misc import vector_in_list
+from opteryx.compiled.nanobind.vectors import vector_in_list
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 # Note: _json_at_arrow, _json_array_contains_all, _json_at_question,

@@ -14,7 +14,7 @@ Includes:
 - Random: RANDOM, NORMAL, RANDOM_STRING
 """
 
-from opteryx.compiled.nanobind.vector_math import (
+from opteryx.compiled.nanobind.vectors import (
     round1,
     round2,
     ceiling,
@@ -27,8 +27,8 @@ from opteryx.compiled.nanobind.vector_math import (
     random_normal,
     vector_power as safe_power,
 )
-from opteryx.compiled.nanobind.vector_misc import vector_log as log
-from opteryx.compiled.nanobind.vector_string_misc import vector_random_strings as random_strings
+from opteryx.compiled.nanobind.vectors import vector_log as log
+from opteryx.compiled.nanobind.vectors import vector_random_strings as random_strings
 
 __all__ = [
     "round1",

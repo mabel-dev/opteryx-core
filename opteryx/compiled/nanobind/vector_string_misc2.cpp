@@ -463,7 +463,7 @@ static nb::object impl_regex_replace(
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_string_misc2, m) {
+void register_vector_string_misc2(nb::module_ &m) {
 
     m.def("vector_replace",
         [](nb::object hay, nb::object ndl, nb::object rep) -> nb::object {

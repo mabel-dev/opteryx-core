@@ -109,8 +109,6 @@ class build_ext(build_ext_orig):
         super().build_extensions()
 
     def build_extension(self, ext):
-        # Derive a stable per-extension subdirectory from the shared base so
-        # that object files from different extensions never collide.
         orig_base = self.__dict__.get("_build_temp_base", "") or ""
         safe_name = ext.name.replace(".", "_")
         per_ext_build_temp = os.path.join(orig_base, safe_name)
@@ -1533,6 +1531,13 @@ if not (
         "Please run `python tools/vendor_nanobind.py --tag <tag>` or add the headers to the repo."
     )
 
+# E.2 — C′ pattern pilot: 6 bitwise ops as pure nanobind C++.
+# draken_vector_unwrap / draken_vector_own_raw are implemented in draken_native.so
+# and resolved at import time (draken/__init__.py loads draken_native with
+# RTLD_GLOBAL before any consumer extension is imported).
+_bitwise_bridge_link_args = (
+    ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
+)
 extensions.append(
     Extension(
         "opteryx.compiled.nanobind.vector_length",
@@ -1551,403 +1556,70 @@ extensions.append(
         language="c++",
     )
 )
-
-# E.2 — C′ pattern pilot: 6 bitwise ops as pure nanobind C++.
-# draken_vector_unwrap / draken_vector_own_raw are implemented in draken_native.so
-# and resolved at import time (draken/__init__.py loads draken_native with
-# RTLD_GLOBAL before any consumer extension is imported).
-_bitwise_bridge_link_args = (
-    ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
-)
+# ── Consolidated C′ vector-op module ──────────────────────────────────────
+# Each vector_*.cpp below exposes `void register_<name>(nb::module_&)` instead of
+# its own NB_MODULE; _vectors_module.cpp owns the single NB_MODULE(vectors, …) and
+# calls them all, so the 21 kernels link into ONE shared object rather than 21.
+# This removes the per-extension duplication of vector_alloc.cpp / nb_combined.cpp
+# that bloated the wheel. New vector-op file → add it here AND register it in
+# _vectors_module.cpp. (vector_length / vector_search / carchar / usearch / minilm
+# stay separate — independent native libraries, not C′ kernels.)
+_vectors_op_cpp = [
+    "opteryx/compiled/nanobind/vector_accessors.cpp",
+    "opteryx/compiled/nanobind/vector_array_reduce.cpp",
+    "opteryx/compiled/nanobind/vector_bitwise.cpp",
+    "opteryx/compiled/nanobind/vector_bool_ops.cpp",
+    "opteryx/compiled/nanobind/vector_casts.cpp",
+    "opteryx/compiled/nanobind/vector_codec.cpp",
+    "opteryx/compiled/nanobind/vector_hash_codec.cpp",
+    "opteryx/compiled/nanobind/vector_json.cpp",
+    "opteryx/compiled/nanobind/vector_math.cpp",
+    "opteryx/compiled/nanobind/vector_misc.cpp",
+    "opteryx/compiled/nanobind/vector_selection_concat.cpp",
+    "opteryx/compiled/nanobind/vector_special.cpp",
+    "opteryx/compiled/nanobind/vector_split_native.cpp",
+    "opteryx/compiled/nanobind/vector_string_case.cpp",
+    "opteryx/compiled/nanobind/vector_string_misc.cpp",
+    "opteryx/compiled/nanobind/vector_string_misc2.cpp",
+    "opteryx/compiled/nanobind/vector_string_misc3.cpp",
+    "opteryx/compiled/nanobind/vector_string_search.cpp",
+    "opteryx/compiled/nanobind/vector_string_slice.cpp",
+    "opteryx/compiled/nanobind/vector_temporal_arith.cpp",
+    "opteryx/compiled/nanobind/vector_temporal_convert.cpp",
+]
+# Vendored sources pulled in by individual kernels — compiled ONCE for the module.
+_vectors_extra_sources = [
+    # vector_codec — mabel base64 / base85 (base64 is NOT a unity build: list all)
+    "opteryx/third_party/mabel/base64/_base64.c",
+    "opteryx/third_party/mabel/base64/_base64_dispatch.c",
+    "opteryx/third_party/mabel/base64/_base64_neon.c",
+    "opteryx/third_party/mabel/base64/_base64_avx2.c",
+    "opteryx/third_party/mabel/base64/_base64_rvv.c",
+    "opteryx/third_party/mabel/base85/_base85.c",
+    # vector_hash_codec — vendored crypto digests + mabel base16 (unity build)
+    "third_party/crypto/md5.cpp",
+    "third_party/crypto/sha1.cpp",
+    "third_party/crypto/sha2.cpp",
+    "third_party/crypto/sha512.cpp",
+    "opteryx/third_party/mabel/base16/_base16.c",
+    # vector_json — yyjson (compiled as C11 by build_extension's .c handling)
+    "third_party/yyjson/src/yyjson.c",
+    # vector_string_case — SIMD string ops (+ cpu_features dep)
+    "src/cpp/simd_string_ops.cpp",
+    "src/cpp/cpu_features.cpp",
+]
 extensions.append(
     Extension(
-        "opteryx.compiled.nanobind.vector_bitwise",
-        sources=[
-            "opteryx/compiled/nanobind/vector_bitwise.cpp",
-            "draken/core/vector_alloc.cpp",  # draken_identity_sel, draken_zero_sel
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.3 — C′ pattern: abs / sign / sqrt / round as pure nanobind C++.
-# Uses the same RTLD_GLOBAL bridge pattern as E.2 (vector_bitwise).
-# boost::math vendored in third_party/boost_math/ but NOT used for round
-# (boost::math::round is half-away-from-zero; round uses 2^52 trick instead).
-# boost stays vendored for future log/exp/trig/special phases.
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_math",
-        sources=[
-            "opteryx/compiled/nanobind/vector_math.cpp",
-            "draken/core/vector_alloc.cpp",  # draken_identity_sel, draken_zero_sel
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.19 — C′ pattern: subscript + math remainders as pure nanobind C++.
-#
-# vector_special: 2 functions (map_access_string, map_access_array).
-#   Replaces: vector_subscript.pyx (deleted; vector_get_element was dead code).
-#
-# (ceil/floor/trunc/power/random/random_normal extended vector_math.cpp — same E.19.)
-
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_special",
-        sources=[
-            "opteryx/compiled/nanobind/vector_special.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.4 — C′ pattern: base64/85 codec + bool utility ops as pure nanobind C++.
-# Uses the same RTLD_GLOBAL bridge pattern as E.2/E.3 (vector_bitwise/vector_math).
-#
-# vector_codec: 4 functions (b64_encode/decode, b85_encode/decode).
-#   Links vendored mabel C sources directly.  No new draken op layer (mabel is
-#   already vendored C++; adding a draken wrapper op would be vestigial).
-#   Output is always DENSE; dict-preserving output deferred (needs Part A bridge).
-#
-# vector_bool_ops: 4 functions (from_int8_mask, from_inverted_bitmap, all_true,
-#   and_chain).  Kernel logic lives in draken/ops/bool_logical.h (already built
-#   in D.5).  No new draken-side work needed.
-#
-# Replaces: bool_vector_ops.pyx, vector_base64.pyx, vector_base85.pyx (deleted).
-
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_codec",
-        sources=[
-            "opteryx/compiled/nanobind/vector_codec.cpp",
-            "draken/core/vector_alloc.cpp",
-            # Mabel vendored C sources (base64 + base85).
-            "opteryx/third_party/mabel/base64/_base64.c",
-            "opteryx/third_party/mabel/base64/_base64_dispatch.c",
-            "opteryx/third_party/mabel/base64/_base64_neon.c",
-            "opteryx/third_party/mabel/base64/_base64_avx2.c",
-            "opteryx/third_party/mabel/base64/_base64_rvv.c",
-            "opteryx/third_party/mabel/base85/_base85.c",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "opteryx/third_party/mabel/base64",  # _base64.h
-            "opteryx/third_party/mabel/base85",  # _base85.h
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_bool_ops",
-        sources=[
-            "opteryx/compiled/nanobind/vector_bool_ops.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.5 — C′ pattern: array element-reduction ops (ANY/ALL over array columns).
-# Uses draken_array_child_unwrap (new bridge function) + array_reductions.h.
-# Replaces: vector_anyop_{eq,neq,gt,gte,lt,lte}.pyx + vector_allop_{eq,neq}.pyx (8 files deleted).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_array_reduce",
-        sources=[
-            "opteryx/compiled/nanobind/vector_array_reduce.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.6 — C′ batch: string length/emptiness + array element count (4 consumer functions).
-# Replaces: vector_string_length.pyx, vector_string_emptiness.pyx, vector_length.pyx (3 deleted).
-# vector_get_element.pyx split into vector_json_extract.pyx + vector_map_access.pyx (Cython).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_accessors",
-        sources=[
-            "opteryx/compiled/nanobind/vector_accessors.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.8 — C′ pattern: hex encode/decode + MD5/SHA digest as pure nanobind C++.
-# First consumers to use draken_vector_own_string (Phase-6 bridge) directly.
-# Replaces: vector_hex.pyx, vector_md5.pyx, vector_sha.pyx (deleted from vector_ops/).
-#
-# Links vendored crypto (MD5, SHA-1, SHA-256, SHA-512) and mabel base16 C sources.
-# Output is always DENSE (identity selection); all hash outputs are long-form (>12 chars).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_hash_codec",
-        sources=[
-            "opteryx/compiled/nanobind/vector_hash_codec.cpp",
-            "draken/core/vector_alloc.cpp",
-            # Vendored crypto digest implementations.
-            "third_party/crypto/md5.cpp",
-            "third_party/crypto/sha1.cpp",
-            "third_party/crypto/sha2.cpp",
-            "third_party/crypto/sha512.cpp",
-            # Mabel vendored C source (base16 hex encode/decode).
-            # _base16.c is a unity build — it #includes _dispatch/_neon/_avx2 internally.
-            # Do NOT add the sub-files separately; they would produce duplicate symbols.
-            "opteryx/third_party/mabel/base16/_base16.c",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "opteryx/third_party/mabel/base16",  # _base16.h
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.9 Phase 8 C′: cast cluster — int↔string + string→int + int→timestamp.
-#
-# Replaces: vector_cast_int64_to_string.pyx, vector_cast_uint64_to_string.pyx,
-#           vector_cast_string_to_int.pyx, vector_cast_int64_to_timestamp.pyx.
-# Uses the same RTLD_GLOBAL bridge pattern as E.8 (vector_hash_codec).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_casts",
-        sources=[
-            "opteryx/compiled/nanobind/vector_casts.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.10 C′: bytewise string-search + array membership consumers.
-#
-# Replaces: vector_starts_ends.pyx, vector_contains.pyx,
-#           vector_contains_all.pyx, vector_contains_any.pyx.
-# Contains: vector_{starts_with,ci_starts_with,ends_with,ci_ends_with,
-#                    contains,contains_any,contains_all}.
-# Uses the same RTLD_GLOBAL bridge pattern as E.9 (vector_casts).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_string_search",
-        sources=[
-            "opteryx/compiled/nanobind/vector_string_search.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.11 C′: coalesce + iif + concat — multi-arg selection + bytewise string concat.
-#
-# Replaces: vector_coalesce.pyx, vector_iif.pyx, vector_concat.pyx
-#           (vector_concat_array / vector_concat_ws_array had no callers; deleted).
-# Contains: vector_coalesce, vector_iif, vector_concat.
-# Uses the same RTLD_GLOBAL bridge pattern as E.10 (vector_string_search).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_selection_concat",
-        sources=[
-            "opteryx/compiled/nanobind/vector_selection_concat.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.12 C′: temporal conversion cluster — DATE32↔TIMESTAMP64, unix seconds, floor.
-#
-# Replaces: vector_date32_to_timestamp.pyx, vector_timestamp_to_date32.pyx,
-#           vector_unixtime.pyx, vector_floor_temporal.pyx.
-# Contains: vector_date32_to_timestamp, vector_timestamp_to_date32,
-#           vector_unixtime, vector_floor_temporal.
-# Uses the same RTLD_GLOBAL bridge pattern as E.11 (vector_selection_concat).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_temporal_convert",
-        sources=[
-            "opteryx/compiled/nanobind/vector_temporal_convert.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.13 C′: temporal arithmetic cluster — date_part, date_diff, date_trunc, date_format.
-#
-# Replaces: vector_date_part.pyx, vector_date_diff.pyx,
-#           vector_date_trunc.pyx, vector_date_format.pyx.
-# Contains: vector_date_part, vector_date_diff, vector_date_trunc, vector_date_format.
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_temporal_arith",
-        sources=[
-            "opteryx/compiled/nanobind/vector_temporal_arith.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.15 C′: levenshtein + position + random_strings — bytewise + ASCII output.
-#
-# Replaces: vector_levenshtein.pyx, vector_position.pyx, vector_random_string.pyx (deleted).
-# Contains: vector_levenshtein, vector_position, vector_random_strings.
-# Uses the same RTLD_GLOBAL bridge pattern as E.14 (vector_misc).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_string_misc",
-        sources=[
-            "opteryx/compiled/nanobind/vector_string_misc.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.16 C′: replace + cosine_similarity + cosine_distance — mixed string/fp16 ops.
-#
-# Part A: draken/ops/vector_cosine.h (fp16 cosine kernel; widened to float64).
-# Replaces: vector_replace.pyx, vector_cosine.pyx (deleted).
-# Contains: vector_replace, vector_cosine_similarity, vector_cosine_distance.
-# vector_split split out to Phase 15b (requires draken_vector_own_array bridge).
-# Uses the same RTLD_GLOBAL bridge pattern as E.15 (vector_string_misc).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_string_misc2",
+        "opteryx.compiled.nanobind.vectors",
         sources=(
-            [
-                "opteryx/compiled/nanobind/vector_string_misc2.cpp",
+            ["opteryx/compiled/nanobind/_vectors_module.cpp"]
+            + _vectors_op_cpp
+            + _vectors_extra_sources
+            + [
                 "draken/core/vector_alloc.cpp",
                 "third_party/nanobind/src/nb_combined.cpp",
             ]
-            + sorted(
+            + sorted(  # vector_string_misc2 — re2
                 glob.glob("third_party/re2/re2/*.cc")
                 + [
                     "third_party/re2/util/strutil.cc",
@@ -1957,165 +1629,11 @@ extensions.append(
         ),
         include_dirs=include_dirs
         + [
-            "third_party/usearch/fp16/include",  # fp16_ieee_to_fp32_value (D.11)
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.17 C′: Soundex — dead-helper cleanup + ASCII phonetic encoding.
-#
-# Replaces: vector_soundex.pyx, vector_encode_utf8.pyx (deleted; encode_utf8 was
-#   identity-only with no callers).  Dead helpers deleted: _helper_const,
-#   _helper_select, _helper_string, _helper_trim, _helper_vector_conversion,
-#   _string_vec_iter, case_helpers (all confirmed no-cimport consumers).
-# Contains: vector_soundex.
-# Uses the same RTLD_GLOBAL bridge pattern as E.16 (vector_string_misc2).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_string_misc3",
-        sources=[
-            "opteryx/compiled/nanobind/vector_string_misc3.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.16b C′: vector_split — bytewise single-byte string split → DRAKEN_ARRAY[VARCHAR].
-#
-# Requires draken_vector_own_array bridge (added in draken_native.cpp for E.16b).
-# Replaces: vector_split.pyx (deleted).
-# Contains: vector_split.
-# Uses the same RTLD_GLOBAL bridge pattern as E.15/E.16.
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_split_native",
-        sources=[
-            "opteryx/compiled/nanobind/vector_split_native.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.18 C′: vector_json_extract + vector_map_access — JSON field extraction via yyjson.
-#
-# Replaces: vector_json_extract.pyx, vector_map_access.pyx (deleted).
-#           Non-JSON subscript functions moved to vector_subscript.pyx.
-# Contains: vector_json_extract (full JSONPath), vector_map_access (top-level key).
-# Uses the same RTLD_GLOBAL bridge pattern as E.17 (vector_string_misc3).
-# Links yyjson.o (pre-compiled C library) for JSON parsing + serialisation.
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_json",
-        sources=[
-            "opteryx/compiled/nanobind/vector_json.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/yyjson/src/yyjson.c",  # compiled as C11; no pre-built .o dep
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
+            "opteryx/third_party/mabel/base64",
+            "opteryx/third_party/mabel/base85",
+            "opteryx/third_party/mabel/base16",
             "third_party/yyjson/src",
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.14 C′: log / in_list / ip_in_cidr as pure nanobind C++.
-#
-# Replaces: vector_log.pyx, vector_in_list.pyx, vector_ip_in_cidr.pyx (deleted).
-# Contains: vector_log, vector_in_list, vector_ip_in_cidr.
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_misc",
-        sources=[
-            "opteryx/compiled/nanobind/vector_misc.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.26 C′: UTF-8 cluster pilot — vector_lowercase with per-type dispatch.
-#
-# VARCHAR: ASCII-only fold via simd_to_lower (non-ASCII bytes unchanged).
-# NVARCHAR: Unicode codepoint fold via utf8.h utf8lwr (length-preserving).
-# VARBINARY: raises ValueError (case ops on opaque bytes unsupported).
-# Replaces (partially): vector_lowercase.pyx — old .pyx kept until all five
-# cluster files are ported; see cleanup ticket.
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_string_case",
-        sources=[
-            "opteryx/compiled/nanobind/vector_string_case.cpp",
-            "src/cpp/simd_string_ops.cpp",
-            "src/cpp/cpu_features.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-# E.26 C′: string slice / substring operations — slice_left, slice_right, substring.
-# Replaces: vector_string_slice.pyx (deleted).
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_string_slice",
-        sources=[
-            "opteryx/compiled/nanobind/vector_string_slice.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
+            "third_party/usearch/fp16/include",
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",

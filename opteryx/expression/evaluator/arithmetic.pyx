@@ -173,7 +173,7 @@ cdef object _build_string_concat_closure():
     _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
 
     def kernel(left, right):
-        from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
+        from opteryx.compiled.nanobind.vectors import vector_concat as _vc
         # Determine row count from string operand or default to 1.
         n = len(left) if getattr(left, "type", None) in _str_types else (
             len(right) if getattr(right, "type", None) in _str_types else 1
@@ -190,7 +190,7 @@ cdef object _build_bitwise_closure(int op_code):
     passes whatever was in anchor[sp] (typically a Cython Vector), so we
     must unwrap here, not return the bare kernel.
     """
-    from opteryx.compiled.nanobind.vector_bitwise import (
+    from opteryx.compiled.nanobind.vectors import (
         vector_bitwise_or as _vector_bitwise_or,
         vector_bitwise_and as _vector_bitwise_and,
         vector_bitwise_xor as _vector_bitwise_xor,
@@ -279,7 +279,7 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
         # Special case: BitwiseOr on VARCHAR → IP-in-CIDR
         if op_code == BOP_BITWISE_OR:
             if (left_cat == LogicalCategory.VARCHAR or right_cat == LogicalCategory.VARCHAR):
-                from opteryx.compiled.nanobind.vector_misc import vector_ip_in_cidr
+                from opteryx.compiled.nanobind.vectors import vector_ip_in_cidr
                 def _ip_in_cidr_kernel(left, right, _k=vector_ip_in_cidr):
                     return _k(_unwrap_nb(left), _unwrap_nb(right))
                 return _ip_in_cidr_kernel

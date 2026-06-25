@@ -35,7 +35,7 @@ def split(arr, delimiter=",", limit=None):
             raise InvalidFunctionParameterError("SPLIT limit must be a greater than 0")
 
     if len(delimiter) == 1 and limit is None:
-        from opteryx.compiled.nanobind.vector_split_native import vector_split
+        from opteryx.compiled.nanobind.vectors import vector_split
 
         return vector_split(arr, ord(delimiter))
 
@@ -128,7 +128,7 @@ def position(sub, string):
     raw result in a shim — the convention every non-nb function follows
     (see logical.if_null).
     """
-    from opteryx.compiled.nanobind.vector_string_misc import vector_position
+    from opteryx.compiled.nanobind.vectors import vector_position
     from draken.vectors.vector import Vector as _ShimVector
 
     if not string.__class__.__module__.startswith("draken.vectors."):
@@ -164,7 +164,7 @@ def _normalise_replacement(repl: bytes) -> bytes:
 
 def regex_replace(array, pattern, replacement):
     """Regex replacement using the vendored RE2 engine."""
-    from opteryx.compiled.nanobind.vector_string_misc2 import vector_regex_replace
+    from opteryx.compiled.nanobind.vectors import vector_regex_replace
 
     # Unwrap Cython Vector shim to nanobind Vector if needed
     nb_array = getattr(array, "_nb", array)

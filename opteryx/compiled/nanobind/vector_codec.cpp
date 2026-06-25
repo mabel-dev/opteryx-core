@@ -237,7 +237,7 @@ static size_t b85_decoded_size_wrap(size_t n) {
 // NB_MODULE — four functions, one module.
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_codec, m) {
+void register_vector_codec(nb::module_ &m) {
 
     m.def("vector_base64_encode",
         [](nb::object v) -> nb::object {

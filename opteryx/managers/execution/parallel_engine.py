@@ -1159,10 +1159,11 @@ def _run_breaker_segment(
             build_ids = set(shape.build_scan_ids)
         else:
             build_ids = {shape.build_scan_id}
-        # Map each scan NODE in the compiler's chains back to its plan id (so the build
-        # set membership test is by id, not object identity scan of the whole plan).
-        scan_node_to_id = {
-            plan[nid]: nid
+        # Map each scan NODE (by object identity) in the compiler's chains back to its
+        # plan id, so the build-set membership test is keyed on the plan id without
+        # depending on node __eq__/__hash__ (some plan nodes override equality).
+        scan_obj_to_id = {
+            id(plan[nid]): nid
             for nid in plan.nodes()
             if getattr(plan[nid], "is_scan", False)
         }
@@ -1171,7 +1172,7 @@ def _run_breaker_segment(
         for sc, hd in chains:
             if sc is scan:
                 probe_head = hd
-            elif scan_node_to_id.get(sc) in build_ids:
+            elif scan_obj_to_id.get(id(sc)) in build_ids:
                 build_chains.append((sc, hd))
                 build_scans.append(sc)
         head = probe_head  # the floor/empty path drives the ORIGINAL probe chain

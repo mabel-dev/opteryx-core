@@ -3,7 +3,7 @@
 import re as _re
 
 from opteryx.compiled import vector_ops
-from opteryx.compiled.nanobind.vector_array_reduce import (
+from opteryx.compiled.nanobind.vectors import (
     vector_anyop_eq as _anyop_eq,
     vector_anyop_neq as _anyop_neq,
     vector_anyop_gt as _anyop_gt,
@@ -13,7 +13,7 @@ from opteryx.compiled.nanobind.vector_array_reduce import (
     vector_allop_eq as _allop_eq,
     vector_allop_neq as _allop_neq,
 )
-from opteryx.compiled.nanobind.vector_string_search import (
+from opteryx.compiled.nanobind.vectors import (
     vector_contains_any as _vector_contains_any,
     vector_contains_all as _vector_contains_all,
 )

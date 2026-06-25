@@ -6,7 +6,7 @@ AttributeError surfaces from the downstream kernel — that's an upstream
 bug, not a fallback to mask.
 """
 
-from opteryx.compiled.nanobind.vector_misc import vector_in_list as _vector_in_list
+from opteryx.compiled.nanobind.vectors import vector_in_list as _vector_in_list
 from draken.vectors.vector import Vector
 
 

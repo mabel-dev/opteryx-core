@@ -286,7 +286,7 @@ static nb::object impl_map_access(nb::object docs, nb::bytes key_bytes) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_json, m) {
+void register_vector_json(nb::module_ &m) {
 
     m.def("vector_json_extract",
         [](nb::object docs, nb::bytes path) -> nb::object {

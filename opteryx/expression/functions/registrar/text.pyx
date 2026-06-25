@@ -13,38 +13,38 @@ set of compiled vector ops when available.
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.nanobind.vector_string_case import (
+from opteryx.compiled.nanobind.vectors import (
     vector_lowercase,
     vector_uppercase,
     vector_initcap,
     vector_reverse,
 )
-from opteryx.compiled.nanobind.vector_string_slice import (
+from opteryx.compiled.nanobind.vectors import (
     vector_string_slice_left,
     vector_string_slice_right,
     vector_string_substring,
 )
-from opteryx.compiled.nanobind.vector_hash_codec import (
+from opteryx.compiled.nanobind.vectors import (
     vector_md5,
     vector_sha1,
     vector_sha256,
     vector_sha512,
 )
-from opteryx.compiled.nanobind.vector_string_misc3 import vector_soundex
-from opteryx.compiled.nanobind.vector_string_misc import (
+from opteryx.compiled.nanobind.vectors import vector_soundex
+from opteryx.compiled.nanobind.vectors import (
     vector_levenshtein,
 )
-from opteryx.compiled.nanobind.vector_string_misc2 import (
+from opteryx.compiled.nanobind.vectors import (
     vector_replace,
     vector_regex_replace,
 )
-from opteryx.compiled.nanobind.vector_string_search import (
+from opteryx.compiled.nanobind.vectors import (
     vector_ci_ends_with,
     vector_ci_starts_with,
     vector_ends_with,
     vector_starts_with,
 )
-from opteryx.compiled.nanobind.vector_accessors import (
+from opteryx.compiled.nanobind.vectors import (
     vector_length,
     vector_octet_length,
     vector_string_length,
@@ -336,7 +336,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     Combined with the core group in one module for maintainability.
     """
     from opteryx.compiled import vector_ops as compiled_vector_ops
-    from opteryx.compiled.nanobind.vector_string_case import (
+    from opteryx.compiled.nanobind.vectors import (
         vector_ltrim,
         vector_rtrim,
         vector_trim,

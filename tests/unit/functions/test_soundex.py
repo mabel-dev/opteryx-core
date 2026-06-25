@@ -7,7 +7,7 @@ import pytest
 import jellyfish
 
 import draken.draken_native as dn
-from opteryx.compiled.nanobind.vector_string_misc3 import vector_soundex
+from opteryx.compiled.nanobind.vectors3 import vector_soundex
 
 # Test cases for soundex algorithm - these are just the input names
 # We'll compare against jellyfish (reference implementation) rather than hardcoded values

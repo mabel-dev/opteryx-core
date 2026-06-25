@@ -208,7 +208,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     These functions are grouped with utility functions per the requested merge.
     """
     # Local imports to keep startup lightweight
-    from opteryx.compiled.nanobind.vector_string_search import (
+    from opteryx.compiled.nanobind.vectors import (
         vector_contains_all,
         vector_contains_any,
     )

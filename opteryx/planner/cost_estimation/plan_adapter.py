@@ -15,6 +15,7 @@ The chain shape and leaf descriptors come from
 ``cross_join_chain_reorder``; this module only consumes them.
 """
 
+from collections import defaultdict
 from typing import Any
 from typing import Dict
 from typing import List
@@ -151,6 +152,78 @@ def _classify_predicate(
     return left_leaf, right_leaf, pred.value == "Eq"
 
 
+def _build_equiv_tdoms(
+    cross_equi: List[Tuple[int, int, Node]],
+    per_leaf_scans: List[Dict[str, Any]],
+    vertices: List[JoinVertex],
+) -> Dict[Tuple[int, str], int]:
+    """Compute tdom for each join column using equivalence sets (Ebergen 2022 §3.2).
+
+    Columns that are transitively joined by equality form one equivalence set.
+    tdom for the set = max(known NDVs in set) if any NDV is available,
+                       min(row_count of leaves in set) otherwise.
+
+    The fallback (min row_count) assumes the smallest table is the PK/dimension
+    side, so its cardinality upper-bounds the number of distinct join-key values.
+    This is strictly better than a magic constant because it uses actual table
+    sizes from the manifest.
+
+    Returns a dict mapping (leaf_idx, col_name) → tdom for every column seen in
+    a join predicate. Columns not present in the returned dict had no join
+    predicate and are unaffected.
+    """
+    parent: Dict[Tuple[int, str], Tuple[int, str]] = {}
+
+    def find(key: Tuple[int, str]) -> Tuple[int, str]:
+        if key not in parent:
+            parent[key] = key
+        root = key
+        while parent[root] != root:
+            root = parent[root]
+        # Path compression.
+        cur = key
+        while cur != root:
+            parent[cur], cur = root, parent[cur]
+        return root
+
+    def union(a: Tuple[int, str], b: Tuple[int, str]) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for left_leaf, right_leaf, pred in cross_equi:
+        left_col = _identifier_column(pred.left)
+        right_col = _identifier_column(pred.right)
+        if left_col is not None and right_col is not None:
+            union((left_leaf, left_col), (right_leaf, right_col))
+
+    # Group members by representative.
+    sets: Dict[Tuple[int, str], List[Tuple[int, str]]] = defaultdict(list)
+    for key in parent:
+        sets[find(key)].append(key)
+
+    result: Dict[Tuple[int, str], int] = {}
+    for members in sets.values():
+        known_ndvs: List[int] = []
+        leaf_set: set = set()
+        for leaf_idx, col_name in members:
+            leaf_set.add(leaf_idx)
+            for scan in per_leaf_scans[leaf_idx].values():
+                stats = getattr(scan, "statistics", None)
+                if stats is None:
+                    continue
+                col_stat = stats.columns.get(col_name)
+                if col_stat is not None and col_stat.distinct_count is not None:
+                    known_ndvs.append(col_stat.distinct_count)
+
+        tdom = max(known_ndvs) if known_ndvs else min(vertices[li].row_count for li in leaf_set)
+        tdom = max(1, tdom)
+        for member in members:
+            result[member] = tdom
+
+    return result
+
+
 def build_join_graph(
     plan: LogicalPlan,
     leaves: List[Any],
@@ -205,6 +278,20 @@ def build_join_graph(
         name = leaf.rel_names[0] if leaf.rel_names else f"leaf_{i}"
         vertices.append(JoinVertex(id=i, name=name, row_count=rows, payload=leaf))
 
+    # Compute equivalence-set tdoms from all cross-equi predicates. When NDV is
+    # absent from scan statistics (common with Parquet files) the tdom falls
+    # back to min(row_count of leaves in the set), which is far better than the
+    # flat 0.1 constant used by _key_selectivity. See Ebergen (2022) §3.2.
+    equiv_tdoms = _build_equiv_tdoms(cross_equi, per_leaf_scans, vertices)
+
+    def _key_stats_with_tdom(scan_node, col_name: Optional[str], leaf_idx: int) -> KeyStats:
+        ks = _key_stats(scan_node, col_name)
+        if ks.ndv is None and col_name is not None:
+            tdom = equiv_tdoms.get((leaf_idx, col_name))
+            if tdom is not None:
+                ks = KeyStats(ndv=tdom, null_fraction=ks.null_fraction)
+        return ks
+
     # Build edges, one JoinEdge per equality predicate (DPccp combines them).
     edges: List[JoinEdge] = []
     for left_leaf, right_leaf, pred in cross_equi:
@@ -221,7 +308,10 @@ def build_join_graph(
 
         left_scan = per_leaf_scans[left_leaf].get(left_src) if left_src else None
         right_scan = per_leaf_scans[right_leaf].get(right_src) if right_src else None
-        equi = ((_key_stats(left_scan, left_col), _key_stats(right_scan, right_col)),)
+        equi = ((
+            _key_stats_with_tdom(left_scan, left_col, left_leaf),
+            _key_stats_with_tdom(right_scan, right_col, right_leaf),
+        ),)
         edges.append(
             JoinEdge(
                 left=left_leaf,

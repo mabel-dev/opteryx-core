@@ -805,7 +805,7 @@ static nb::object impl_vector_concat(nb::args args) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_selection_concat, m) {
+void register_vector_selection_concat(nb::module_ &m) {
 
     m.def("vector_coalesce",
         [](nb::args args) -> nb::object { return impl_coalesce(args); },

@@ -9,7 +9,7 @@ All computation and dispatch logic lives in:
 This module provides backward-compatible imports for the registrar.
 """
 
-from opteryx.compiled.nanobind.vector_temporal_arith import (
+from opteryx.compiled.nanobind.vectors import (
     date_part,
     date_diff,
     date_format,
@@ -17,7 +17,7 @@ from opteryx.compiled.nanobind.vector_temporal_arith import (
     trunc_date,
     trunc_timestamp,
 )
-from opteryx.compiled.nanobind.vector_temporal_convert import (
+from opteryx.compiled.nanobind.vectors import (
     date_floor,
     unixtime,
     from_unixtimestamp,

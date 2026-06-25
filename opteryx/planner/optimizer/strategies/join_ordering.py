@@ -103,22 +103,34 @@ class JoinOrderingStrategy(OptimizationStrategy):
             pass
 
         if node.node_type == LogicalPlanStepType.Join and node.type == "inner":
-            # Apply join ordering rules from COST-BASED-OPTIMIZER.md, fed from the
-            # refreshed per-node statistics (post-filter row counts and join-key
-            # NDV/null fractions) rather than the binder's pre-filter size estimate.
-            left_stats, right_stats = self._side_statistics(
-                context.pre_optimized_tree, context.node_id
-            )
-            left_rows = self._side_rows(left_stats, node.left_size)
-            right_rows = self._side_rows(right_stats, node.right_size)
-            left_ndv = self._key_ndv(left_stats, node.left_columns)
-            right_ndv = self._key_ndv(right_stats, node.right_columns)
-            left_null = self._key_null_fraction(left_stats, node.left_columns)
-            right_null = self._key_null_fraction(right_stats, node.right_columns)
+            # Only reorder joins whose legs carry reader UUIDs. Joins without
+            # them (window-function partitions, set-op / IN-subquery rewrites)
+            # are leg-resolved by relation-name matching in
+            # physical_plan._label_join_legs_by_relation, which a swap would
+            # break — and one side is a synthetic relation ($win-*, derived)
+            # whose statistics are meaningless for build-side selection anyway.
+            # The non-equi / nested-loop classification below still runs for
+            # these joins (it's a correctness concern), only the swap is gated.
+            can_reorder = bool(node.left_readers) and bool(node.right_readers)
 
-            should_swap = _decide_swap(
-                left_rows, right_rows, left_ndv, right_ndv, left_null, right_null
-            )
+            should_swap = False
+            if can_reorder:
+                # Apply join ordering rules from COST-BASED-OPTIMIZER.md, fed from the
+                # refreshed per-node statistics (post-filter row counts and join-key
+                # NDV/null fractions) rather than the binder's pre-filter size estimate.
+                left_stats, right_stats = self._side_statistics(
+                    context.pre_optimized_tree, context.node_id
+                )
+                left_rows = self._side_rows(left_stats, node.left_size)
+                right_rows = self._side_rows(right_stats, node.right_size)
+                left_ndv = self._key_ndv(left_stats, node.left_columns)
+                right_ndv = self._key_ndv(right_stats, node.right_columns)
+                left_null = self._key_null_fraction(left_stats, node.left_columns)
+                right_null = self._key_null_fraction(right_stats, node.right_columns)
+
+                should_swap = _decide_swap(
+                    left_rows, right_rows, left_ndv, right_ndv, left_null, right_null
+                )
 
             # Perform the swap if needed
             if should_swap:
@@ -166,14 +178,28 @@ class JoinOrderingStrategy(OptimizationStrategy):
     def _side_statistics(plan, join_nid):
         """Return (left_stats, right_stats) RelationStatistics for the join's two
         inputs, identified by the 'left'/'right' edge labels. Either may be None
-        when statistics are absent or a side is unlabelled."""
+        when statistics are absent or a side is unlabelled.
+
+        Cross-join→inner-converted joins carry unlabelled ingoing edges
+        (label ``None``); without a fallback every such join would read the
+        binder's pre-filter size estimate instead of the refreshed post-filter
+        statistics. When labels are missing we fall back to ingoing-edge
+        insertion order (left, then right) — mirroring
+        ``statistics_refresh._split_join_children``.
+        """
         left = right = None
+        ordered = []
         for child_nid, _, label in plan.ingoing_edges(join_nid):
             stats = getattr(plan[child_nid], "statistics", None)
+            ordered.append(stats)
             if label == "left":
                 left = stats
             elif label == "right":
                 right = stats
+        if left is None and ordered:
+            left = ordered[0]
+        if right is None and len(ordered) > 1:
+            right = ordered[1]
         return left, right
 
     @staticmethod

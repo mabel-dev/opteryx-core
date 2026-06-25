@@ -292,7 +292,7 @@ static nb::object impl_substring(nb::object str_obj, nb::object from_obj, nb::ob
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_string_slice, m) {
+void register_vector_string_slice(nb::module_ &m) {
     m.def("vector_string_slice_left",
         [](nb::object vec, nb::object length) -> nb::object {
             return impl_slice_left(vec, length);

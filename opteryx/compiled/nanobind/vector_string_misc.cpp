@@ -392,7 +392,7 @@ static nb::object impl_random_strings(int row_count, int width) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_string_misc, m) {
+void register_vector_string_misc(nb::module_ &m) {
 
     m.def("vector_levenshtein",
         [](nb::object a, nb::object b) -> nb::object {

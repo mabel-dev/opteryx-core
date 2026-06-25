@@ -5,7 +5,7 @@ for the @>, @?, AtArrow and AtQuestion operators on ArrayVector /
 StringVector-of-JSON columns.
 """
 
-from opteryx.compiled.nanobind.vector_string_search import (
+from opteryx.compiled.nanobind.vectors import (
     vector_contains_all,
     vector_contains_any,
 )

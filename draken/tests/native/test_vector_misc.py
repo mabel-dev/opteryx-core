@@ -20,15 +20,15 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.join(_HERE, "..", "..", "..")
 _SO = None
 for _fname in os.listdir(os.path.join(_ROOT, "opteryx/compiled/nanobind")):
-    if _fname.startswith("vector_misc") and _fname.endswith(".so"):
+    if _fname.startswith("vectors") and _fname.endswith(".so"):
         _SO = os.path.join(_ROOT, "opteryx/compiled/nanobind", _fname)
         break
 if _SO is None:
     pytest.skip("vector_misc.so not found; run DRAKEN_BUILD=1 make c first", allow_module_level=True)
 
-_spec = importlib.util.spec_from_file_location("opteryx.compiled.nanobind.vector_misc", _SO)
+_spec = importlib.util.spec_from_file_location("opteryx.compiled.nanobind.vectors", _SO)
 _vm = importlib.util.module_from_spec(_spec)
-sys.modules["opteryx.compiled.nanobind.vector_misc"] = _vm
+sys.modules["opteryx.compiled.nanobind.vectors"] = _vm
 _spec.loader.exec_module(_vm)
 
 vector_in_list = _vm.vector_in_list

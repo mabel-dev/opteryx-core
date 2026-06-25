@@ -350,7 +350,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     at bind time, from the physical source type. Raises NotImplementedError for
     unsupported pairs — no row-loop fallback.
     """
-    from opteryx.compiled.nanobind.vector_casts import (
+    from opteryx.compiled.nanobind.vectors import (
         vector_cast_int64_to_float64,
         vector_cast_bool_to_float64,
         vector_cast_integer_to_float64,
@@ -372,7 +372,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_string_to_nvarchar,
         vector_cast_int64_to_timestamp,
     )
-    from opteryx.compiled.nanobind.vector_temporal_convert import (
+    from opteryx.compiled.nanobind.vectors import (
         vector_date32_to_timestamp,
         vector_timestamp_to_date32,
     )

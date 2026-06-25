@@ -82,7 +82,7 @@ static int64_t extract_scalar_int(nb::object seq) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_math, m) {
+void register_vector_math(nb::module_ &m) {
 
     m.def("vector_abs",
         [](nb::object v) -> nb::object {

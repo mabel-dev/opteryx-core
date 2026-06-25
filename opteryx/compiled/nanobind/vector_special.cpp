@@ -181,7 +181,7 @@ static nb::object impl_map_access_array(nb::object vec_obj, nb::object key_obj) 
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_special, m) {
+void register_vector_special(nb::module_ &m) {
 
     m.def("vector_map_access_string",
         [](nb::object vec, nb::object key) -> nb::object {

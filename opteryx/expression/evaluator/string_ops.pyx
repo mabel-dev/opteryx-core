@@ -12,8 +12,8 @@ from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
 )
-from opteryx.compiled.nanobind.vector_misc import vector_in_list
-from opteryx.compiled.nanobind.vector_string_search import vector_contains
+from opteryx.compiled.nanobind.vectors import vector_in_list
+from opteryx.compiled.nanobind.vectors import vector_contains
 
 from draken.vectors.bool_vector import BoolVector
 import draken.draken_native as _draken_native

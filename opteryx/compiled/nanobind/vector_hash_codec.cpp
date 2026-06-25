@@ -311,7 +311,7 @@ static size_t b16_decoded_size_wrap(size_t n) { return b16_decoded_size(n); }
 // NB_MODULE — six functions, one module.
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_hash_codec, m) {
+void register_vector_hash_codec(nb::module_ &m) {
 
     m.def("vector_hex_encode",
         [](nb::object v) -> nb::object {

@@ -11,7 +11,7 @@ operand's class and the requested op string.
 
 from libc.stdint cimport int16_t
 
-from opteryx.compiled.nanobind.vector_misc import vector_in_list
+from opteryx.compiled.nanobind.vectors import vector_in_list
 from opteryx.types.logical_type import LogicalCategory
 
 from datetime import datetime as _datetime

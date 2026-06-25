@@ -20,8 +20,8 @@ from opteryx.compiled.expression.compiled_expression import (
 )
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet as _PerfectHashSet
-from opteryx.compiled.nanobind.vector_bitwise import vector_bitwise_not as _vector_bitwise_not
-from opteryx.compiled.nanobind.vector_accessors import (
+from opteryx.compiled.nanobind.vectors import vector_bitwise_not as _vector_bitwise_not
+from opteryx.compiled.nanobind.vectors import (
     vector_string_is_empty as _vector_string_is_empty,
     vector_string_is_not_empty as _vector_string_is_not_empty,
 )
@@ -35,10 +35,10 @@ from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_ve
 from draken.vectors.bool_vector import BoolVector as _BoolVector
 from draken.morsels.morsel import Morsel as _Morsel
 import draken.draken_native as _draken_native
-from opteryx.compiled.nanobind.vector_bool_ops import vector_uint64_eq_scalar as _vector_uint64_eq_scalar
-from opteryx.compiled.nanobind.vector_special import vector_map_access_string as _vector_map_access_string
-from opteryx.compiled.nanobind.vector_json import vector_json_extract as _vector_json_extract
-from opteryx.compiled.nanobind.vector_json import vector_json_extract_text as _vector_json_extract_text
+from opteryx.compiled.nanobind.vectors import vector_uint64_eq_scalar as _vector_uint64_eq_scalar
+from opteryx.compiled.nanobind.vectors import vector_map_access_string as _vector_map_access_string
+from opteryx.compiled.nanobind.vectors import vector_json_extract as _vector_json_extract
+from opteryx.compiled.nanobind.vectors import vector_json_extract_text as _vector_json_extract_text
 from draken.draken_native import vector_array_map_access as _vector_array_map_access
 
 # ---------------------------------------------------------------------------

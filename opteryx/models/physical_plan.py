@@ -76,13 +76,21 @@ class PhysicalPlan(Graph):
                     self._label_join_legs_by_relation(nid, join)
                 continue
 
-            # Iterate through incoming edges and label them based on join sides
-            # If left_readers contains ANY Scan node UUID that the provider reaches,
-            # label that provider edge as "left"
+            # Iterate through incoming edges and label them based on join sides.
+            # If left_readers contains ANY Scan node UUID that the provider
+            # reaches, label that provider edge as "left".
+            #
+            # First pass: assign every edge we can resolve by UUID. Second pass:
+            # assign the rest by complement (the side not already claimed),
+            # falling back to insertion order only when complement is ambiguous.
+            # Complement-before-position matters because join_ordering swaps the
+            # recorded left_readers/right_readers without reordering the physical
+            # ingoing edges: when one side is a derived relation (subquery / view)
+            # whose reader UUID is not BFS-reachable, blind positional order
+            # contradicts the swap and both edges collapse onto the same side.
             ingoing = list(self.ingoing_edges(nid))
+            assignments: list = [None] * len(ingoing)
             for idx, (provider, provider_target, provider_relation) in enumerate(ingoing):
-                # Use UUID matching to honour join_ordering swaps.
-                # Position (idx) is used only as a fallback when readers are not populated.
                 reader_edges = {
                     (source, target, relation)
                     for source, target, relation in self.breadth_first_search(
@@ -92,23 +100,33 @@ class PhysicalPlan(Graph):
                 if getattr(self[provider], "uuid", None) is not None:
                     reader_edges.add((provider, provider_target, provider_relation))
 
-                labelled = False
                 for s, t, r in reader_edges:
                     node = self[s]
                     if getattr(node, "uuid", None) is None:
                         continue
                     if node.uuid in join.left_readers:
-                        self.add_edge(provider, nid, "left")
-                        labelled = True
+                        assignments[idx] = "left"
                         break
                     elif node.uuid in join.right_readers:
-                        self.add_edge(provider, nid, "right")
-                        labelled = True
+                        assignments[idx] = "right"
                         break
 
-                if not labelled:
-                    # Fallback: no UUID match — use insertion order
-                    self.add_edge(provider, nid, "left" if idx == 0 else "right")
+            claimed = {a for a in assignments if a is not None}
+            for idx, (provider, _pt, _pr) in enumerate(ingoing):
+                side = assignments[idx]
+                if side is None:
+                    # Complement: take the side no resolved edge has claimed.
+                    # Only one side claimed → this edge is the other side. This
+                    # honours a join_ordering swap that positional order would
+                    # contradict. If both or neither side is claimed, fall back
+                    # to insertion order.
+                    if claimed == {"left"}:
+                        side = "right"
+                    elif claimed == {"right"}:
+                        side = "left"
+                    else:
+                        side = "left" if idx == 0 else "right"
+                self.add_edge(provider, nid, side)
 
             tester = self.breadth_first_search(nid, reverse=True)
             if not any(r == "left" for s, t, r in tester):

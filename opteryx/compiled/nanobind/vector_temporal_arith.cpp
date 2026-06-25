@@ -629,7 +629,7 @@ static nb::object dispatch_date_format(nb::object dates, nb::object pattern_seq)
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_temporal_arith, m) {
+void register_vector_temporal_arith(nb::module_ &m) {
 
     m.def("vector_date_part",
         [](nb::object v, nb::object part_obj) -> nb::object {

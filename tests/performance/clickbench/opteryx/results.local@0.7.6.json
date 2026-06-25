@@ -57,7 +57,7 @@ Q43/42          55.24ms        55.11ms              -     55.18ms       55.11ms 
 make clickbench (49.09 seconds) <- best ever
 0.26.8 (251.24 seconds)
 
-make tpch - (5030.9ms [13.72x]) <- best ever
+make tpch - (4766.7ms) <- best ever
 make job - (66156.2ms) (59 fails)
 make h2o - (431.3s) (2 fails)
 make medicare1 - (1581.1ms) (4 fails)

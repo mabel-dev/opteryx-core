@@ -189,7 +189,7 @@ static nb::object impl_soundex(nb::object vec_obj) {
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
-NB_MODULE(vector_string_misc3, m) {
+void register_vector_string_misc3(nb::module_ &m) {
 
     m.def("vector_soundex",
         [](nb::object vec) -> nb::object {

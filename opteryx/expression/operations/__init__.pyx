@@ -23,8 +23,8 @@ from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
 )
-from opteryx.compiled.nanobind.vector_misc import vector_in_list
-from opteryx.compiled.nanobind.vector_string_search import vector_contains
+from opteryx.compiled.nanobind.vectors import vector_in_list
+from opteryx.compiled.nanobind.vectors import vector_contains
 # Phase 4: draken_compare (string-keyed) deleted; use draken_compare_int with
 # bind-time-resolved op_code. The shim below stays plan-time-only.
 from opteryx.expression.evaluator.comparisons import draken_compare_int

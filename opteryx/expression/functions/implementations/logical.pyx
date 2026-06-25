@@ -30,8 +30,8 @@ def if_null(values, replacements):
     Replace null values in the input array with corresponding values from the replacement array.
     IIF(IS_NULL(values), replacements, values)
     """
-    from opteryx.compiled.nanobind.vector_selection_concat import vector_iif
-    from opteryx.compiled.nanobind.vector_bool_ops import bool_vector_from_int8_mask
+    from opteryx.compiled.nanobind.vectors import vector_iif
+    from opteryx.compiled.nanobind.vectors import bool_vector_from_int8_mask
     from draken.vectors.vector import Vector as _ShimVector
 
     if not values.__class__.__module__.startswith("draken.vectors."):
@@ -63,8 +63,8 @@ def if_not_null(values, replacements):
     """
     from array import array as _array
 
-    from opteryx.compiled.nanobind.vector_selection_concat import vector_iif
-    from opteryx.compiled.nanobind.vector_bool_ops import bool_vector_from_int8_mask
+    from opteryx.compiled.nanobind.vectors import vector_iif
+    from opteryx.compiled.nanobind.vectors import bool_vector_from_int8_mask
     from draken.vectors.vector import Vector as _ShimVector
 
     if not values.__class__.__module__.startswith("draken.vectors."):
