@@ -177,12 +177,12 @@ if __name__ == "__main__":  # pragma: no cover
         # Color codes based on ratio thresholds
         if ratio < 1.0:
             # Deep green: faster than DuckDB
-            return f"\033[38;2;34;197;94m{ratio_str}\033[0m"
-        elif ratio <= 5.0:
-            # Light green: within 50%
+            return f"\033[1;38;2;34;197;94m{ratio_str}\033[0m"  # Pure bright green
+        elif ratio <= 3.0:
+            # Light green: within 300%
             return f"\033[38;2;72;209;204m{ratio_str}\033[0m"
         elif ratio <= 10.0:
-            # Orange: 500% slower
+            # Orange: 1000% slower
             return f"\033[38;2;255;165;0m{ratio_str}\033[0m"
         else:
             # Red: 1000%+ slower

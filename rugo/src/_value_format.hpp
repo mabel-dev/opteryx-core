@@ -12,6 +12,7 @@
 
 #include "core/buffers.h"
 #include "core/string_slot.h"
+#include "../../third_party/ulfjack/ryu/ryu.h"
 
 namespace rugo_text {
 
@@ -25,13 +26,10 @@ inline void fmt_int64(std::string &out, int64_t v) {
 }
 
 inline void fmt_double(std::string &out, double v) {
-  // shortest round-trippable, conventional notation (like Python repr)
-  char buf[64];
-  std::to_chars_result r = std::to_chars(
-      buf, buf + sizeof(buf), v,
-      std::chars_format::general,
-      std::numeric_limits<double>::max_digits10);
-  out.append(buf, r.ptr - buf);
+  // shortest round-trippable via ryu
+  char buf[32];
+  int n = d2s_buffered_n(v, buf);
+  out.append(buf, n);
 }
 
 // Howard Hinnant's civil-from-days (days since 1970-01-01).

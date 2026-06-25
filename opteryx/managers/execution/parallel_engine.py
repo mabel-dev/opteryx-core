@@ -45,6 +45,9 @@ from typing import Tuple
 from opteryx import EOS as _EOS_SENTINEL
 from opteryx import config
 from opteryx.constants import ResultType
+from opteryx.managers.execution.pipeline_sink import RecombClass
+from opteryx.managers.execution.pipeline_sink import make_sink
+from opteryx.managers.execution.pipeline_sink import recombination_class_for
 from opteryx.operators._operators import push_one
 from opteryx.operators.catalog import OperatorParallelism
 from opteryx.operators.catalog import get_registry
@@ -428,6 +431,243 @@ class _ParallelJoinShape:
     exit_id: str
 
 
+@dataclass(frozen=True)
+class _ParallelJoinAggShape:
+    """The detected parallel ``join → stateless* → AGG-breaker → exit`` shape (Step 5).
+
+    A SHARED_SOURCE inner-equi join feeding a generic agg sink (grouped or
+    ungrouped). The join's BUILD leg is prepared once serially (the SHARED_SOURCE
+    contribution); then W workers each own a private join engine and probe a disjoint
+    slice of the probe scan, with the join output flowing through the (stateless)
+    ``agg_middle_ids`` into the AGG breaker's per-worker sink — all driven through the
+    ONE ``_run_breaker_segment`` skeleton via a ``source_prep`` (a ``_SharedSourceJoin``).
+
+    The fields mirror ``_ParallelJoinShape`` for the join legs, plus the agg tail:
+    ``agg_middle_ids`` are the STATELESS ops between the join and the AGG breaker;
+    ``breaker_id`` is the AGG breaker (the sink); ``exit_id`` is the Exit after it."""
+
+    build_scan_id: str
+    build_middle_ids: list
+    probe_scan_id: str
+    probe_middle_ids: list
+    join_id: str
+    agg_middle_ids: list
+    breaker_id: str
+    exit_id: str
+
+
+def _join_legs(plan, join_id, registry):
+    """Resolve the build (left) + probe (right) legs of ``join_id`` to
+    ``((build_scan, build_middle), (probe_scan, probe_middle))`` linear chains, or
+    ``None`` if either leg is not a clean ``scan → stateless* → join`` chain. Shared by
+    ``_find_parallel_join`` and ``_find_parallel_join_agg`` (the leg topology is the
+    same; only the downstream tail differs)."""
+    legs = {}
+    for idx, (provider, _target, label) in enumerate(plan.ingoing_edges(join_id)):
+        if not label:
+            label = "left" if idx == 0 else "right"
+        legs[label] = provider
+    if "left" not in legs or "right" not in legs:
+        return None
+    build_leg = _walk_leg_to_scan(plan, legs["left"], join_id, registry)
+    probe_leg = _walk_leg_to_scan(plan, legs["right"], join_id, registry)
+    if build_leg is None or probe_leg is None:
+        return None
+    return build_leg, probe_leg
+
+
+def _safe_parallel_join(plan, registry):
+    """Return the single ``DrakenInnerJoinNode`` id if the plan has the
+    provably-safe parallel inner-equi-join PREFIX (2 scans, 1 inner join, empty
+    ``_compiled_right_evals``), else ``None``. The DOWNSTREAM tail (stateless→exit
+    vs stateless→agg→exit) is checked by the caller — this gates only the join
+    itself + its build/probe legs being clonable."""
+    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
+    if len(scans) != 2:
+        return None
+    joins = [nid for nid in plan.nodes() if getattr(plan[nid], "is_join", False)]
+    if len(joins) != 1:
+        return None
+    join_id = joins[0]
+    join = plan[join_id]
+    if join.__class__.__name__ != "DrakenInnerJoinNode":
+        return None
+    # A non-empty right ON-eval appends to the shared `right_columns` during probe —
+    # a data race across workers sharing the original column list (the Phase-1 gate).
+    if getattr(join, "_compiled_right_evals", None):
+        return None
+    return join_id
+
+
+def _find_parallel_join_agg(plan):
+    """Return a ``_ParallelJoinAggShape`` for a single-inner-join feeding a generic
+    AGG breaker — ``[build-scan, probe-scan] → INNER JOIN → stateless* → AGG → exit`` —
+    else ``None``.
+
+    This is the Step-5 ``join → agg`` shape: the SHARED_SOURCE join composes with the
+    grouped/ungrouped agg sink THROUGH the contract (no monolithic ``_join_agg_stream``).
+    It reuses ``_find_parallel_join``'s exact leg topology (``_join_legs``) and the same
+    safety gate (``_safe_parallel_join``); the ONLY difference is the downstream walk —
+    where ``_find_parallel_join`` requires ``stateless* → exit``, this requires
+    ``stateless* → AGG-breaker → exit`` (a grouped or ungrouped aggregate, the breakers
+    the generic sink factory builds). The intervening agg-middle ops MUST be STATELESS
+    (out-of-order probe emission feeds the agg, which is order-independent)."""
+    registry = get_registry()
+    join_id = _safe_parallel_join(plan, registry)
+    if join_id is None:
+        return None
+
+    legs = _join_legs(plan, join_id, registry)
+    if legs is None:
+        return None
+    (build_scan_id, build_middle_ids), (probe_scan_id, probe_middle_ids) = legs
+
+    # Downstream walk: join → stateless* → AGG breaker → exit. Collect the stateless
+    # middle ops, then require the NEXT node to be a generic AGG breaker whose sink the
+    # factory builds (grouped/ungrouped), then the Exit.
+    agg_middle_ids = []
+    cur = join_id
+    breaker_id = None
+    while True:
+        outs = list(plan.outgoing_edges(cur))
+        if not outs:
+            return None
+        nxt = outs[0][1]
+        node = plan[nxt]
+        cls = node.__class__.__name__
+        if cls in ("GroupedAggregateHashedNode", "UngroupedAggregateNode"):
+            breaker_id = nxt
+            break
+        # A non-agg breaker (sort/distinct/limit) in the tail → not this shape.
+        meta = registry.get(type(node))
+        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+            return None
+        agg_middle_ids.append(nxt)
+        cur = nxt
+
+    breaker = plan[breaker_id]
+    bcls = breaker.__class__.__name__
+    # Apply the SAME eligibility gates the single-scan agg finders enforce, so the
+    # generic sink the composition reuses has the state it needs.
+    if bcls == "GroupedAggregateHashedNode":
+        if not breaker.group_by_columns:
+            return None  # degenerate grouped breaker — no key to route on
+    else:  # UngroupedAggregateNode
+        engine = getattr(breaker, "_engine", None)
+        if engine is None or not engine.is_mergeable() or breaker._has_literals:
+            return None
+
+    # The AGG breaker must feed the Exit directly (the sink injects its result into the
+    # breaker, whose EOS emits downstream → Exit). A post-agg stateless op / breaker is
+    # NOT supported by this composition (it would need its own segment) → reject.
+    outs = list(plan.outgoing_edges(breaker_id))
+    if not outs:
+        return None
+    exit_id = outs[0][1]
+    if plan[exit_id].__class__.__name__ != "ExitNode":
+        return None
+
+    return _ParallelJoinAggShape(
+        build_scan_id=build_scan_id,
+        build_middle_ids=build_middle_ids,
+        probe_scan_id=probe_scan_id,
+        probe_middle_ids=probe_middle_ids,
+        join_id=join_id,
+        agg_middle_ids=agg_middle_ids,
+        breaker_id=breaker_id,
+        exit_id=exit_id,
+    )
+
+
+class _SharedSourceJoin:
+    """The SHARED_SOURCE contribution of an inner-equi join, lifted out of
+    ``_join_probe_stream`` so the join can compose with the generic agg sink through
+    the ONE ``_run_breaker_segment`` skeleton (design §1.3, Step 5).
+
+    It captures the read-only build state ONCE (``build``) — the build-before-probe
+    dependency, run before the worker fan-out — and hands each worker a private join
+    engine built over the shared ``left_morsel`` (``prepare_worker_clone``). No worker
+    mutates shared probe state: each owns its own ``left_hash`` (thread-local-full).
+
+    The skeleton uses it as a ``source_prep``: the self-pulled scan is the PROBE scan,
+    and each worker's chain prefix is ``[probe-middle* → JoinRightAdapter(cloned_join) →
+    cloned_join]`` ahead of the agg-middle ops + the agg sink clone."""
+
+    __slots__ = (
+        "_plan",
+        "_shape",
+        "_ctx",
+        "left_morsel",
+        "left_columns",
+        "left_is_empty",
+        "columns",
+        "load_factor",
+    )
+
+    def __init__(self, plan, shape, ctx):
+        self._plan = plan
+        self._shape = shape
+        self._ctx = ctx
+        self.left_morsel = None
+        self.left_columns = None
+        self.left_is_empty = False
+        self.columns = None
+        self.load_factor = None
+
+    def build(self, build_scan, build_head, exit_node):
+        """Drive the BUILD leg to completion serially — the join accumulates left +
+        builds ``left_hash`` at left-EOS, emitting NOTHING downstream (build EOS is
+        absorbed). Then capture the shared read-only build state. Run ONCE, before the
+        worker fan-out (the build-before-probe Event edge)."""
+        from opteryx.operators._operators import drive_scan
+
+        j = self._plan[self._shape.join_id]
+        for _ in drive_scan(build_scan, build_head, exit_node, self._ctx):
+            pass
+        if self._ctx.is_terminated():
+            return
+        self.left_morsel = j.left_morsel
+        self.left_columns = j.left_columns
+        self.left_is_empty = j.left_is_empty
+        self.columns = j.columns
+        self.load_factor = j.carchar_probe_load_factor
+
+    def prepare_worker_clone(self, cloned_join):
+        """Build THIS worker's private join engine over the shared READ-ONLY
+        ``left_morsel`` (no shared mutable probe state — thread-local-full). Mirrors
+        ``_join_probe_stream``'s per-worker setup exactly."""
+        from opteryx.operators._operators import build_side_carchar_morsel_map
+
+        cloned_join.left_morsel = self.left_morsel
+        cloned_join.left_columns = self.left_columns
+        cloned_join.columns = self.columns
+        cloned_join.left_is_empty = self.left_is_empty
+        cloned_join.carchar_probe_load_factor = self.load_factor
+        cloned_join.left_hash = build_side_carchar_morsel_map(
+            self.left_morsel,
+            self.left_columns,
+            self.load_factor,
+            cloned_join.kernel_metrics,
+        )
+        cloned_join._build_complete = True
+        cloned_join.set_context(self._ctx)
+
+
+@dataclass(frozen=True)
+class _JoinSourcePrep:
+    """The ``source_prep`` describing a join's per-worker chain PREFIX for
+    ``_run_breaker_segment`` (Step 5). ``shared`` is the ``_SharedSourceJoin`` carrying
+    the build state + ``prepare_worker_clone``; ``join_id`` + ``probe_middle_ids`` let
+    the skeleton clone the ``[probe-middle* → JoinRightAdapter → cloned_join]`` prefix
+    that sits ahead of the agg-middle ops + the agg sink clone. ``probe_scan_id`` is the
+    scan the skeleton self-pulls (the PROBE scan, NOT the build scan)."""
+
+    shared: "_SharedSourceJoin"
+    join_id: str
+    probe_middle_ids: list
+    probe_scan_id: str
+
+
 def _clone_op(op):
     """A fresh, independent instance of a push operator — re-running __init__
     rebuilds its private state (compiled bytecode, a clean aggregate engine).
@@ -467,6 +707,406 @@ def _serial_stream(plan):
                 break
     finally:
         ctx.terminate()
+
+
+def _pipeline_stream(plan, workers, telemetry=None):
+    """The GENERIC pipeline-parallel executor (M4_GENERIC_PIPELINE).
+
+    Detects a single ``scan → stateless* → breaker`` segment whose breaker exposes a
+    generic recombination class (SCALAR_MERGE for ungrouped agg, HASH_REPARTITION
+    for grouped agg), picks the matching ``PipelineSink`` adapter, and drives it
+    through the ONE shared breaker-segment skeleton (``_run_breaker_segment``). Any
+    shape the contract does not cover (``RecombClass.NONE``, multi-scan, etc.) falls
+    back to ``_serial_stream`` — never a hidden punt to another engine.
+
+    This is the strangler-fig replacement for the bespoke ``_ungrouped_agg_stream`` /
+    ``_grouped_agg_route``: the SAME skeleton serves BOTH sinks (the proof the
+    contract generalises). The bespoke functions stay as the flag-OFF baseline.
+    """
+    # Reuse the existing finders to delimit the scan→stateless*→breaker segment and
+    # classify the breaker — they already enforce the single-scan / all-stateless /
+    # mergeable-engine invariants the generic sinks require.
+    grouped = _find_parallel_grouped_agg(plan)
+    if grouped is not None:
+        scan_id, middle_ids, breaker_id = grouped
+        breaker = plan[breaker_id]
+        recomb = recombination_class_for(breaker)
+        if recomb is RecombClass.HASH_REPARTITION:
+            if telemetry is not None:
+                telemetry._reading["parallel_engaged"] = 1
+                telemetry._reading["generic_pipeline"] = 1
+            return _run_breaker_segment(
+                plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry
+            )
+
+    ungrouped = _find_parallel_ungrouped_agg(plan)
+    if ungrouped is not None:
+        scan_id, middle_ids, breaker_id = ungrouped
+        breaker = plan[breaker_id]
+        recomb = recombination_class_for(breaker)
+        if recomb is RecombClass.SCALAR_MERGE:
+            if telemetry is not None:
+                telemetry._reading["parallel_engaged"] = 1
+                telemetry._reading["generic_pipeline"] = 1
+            return _run_breaker_segment(
+                plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry
+            )
+
+    # DISTINCT is also HASH_REPARTITION (same scatter+combine as grouped agg; the
+    # finalize DEDUPES instead of aggregating — the per-class adapter map in make_sink
+    # picks `_DistinctSink`). It threads `exit_id` (the breaker's real downstream node)
+    # so the sink can push its deduped survivors there.
+    distinct = _find_parallel_distinct(plan)
+    if distinct is not None:
+        scan_id, middle_ids, breaker_id, exit_id = distinct
+        breaker = plan[breaker_id]
+        recomb = recombination_class_for(breaker)
+        if recomb is RecombClass.HASH_REPARTITION:
+            if telemetry is not None:
+                telemetry._reading["parallel_engaged"] = 1
+                telemetry._reading["generic_pipeline"] = 1
+            return _run_breaker_segment(
+                plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry,
+                exit_id=exit_id,
+            )
+
+    # join → agg (Step 5): a SHARED_SOURCE inner-equi join feeding a generic AGG sink.
+    # The join's BUILD leg is prepared once serially; W workers each probe a disjoint
+    # slice with their OWN private engine, the join output flowing through the agg-middle
+    # ops into the SAME agg sink (grouped HASH_REPARTITION / ungrouped SCALAR_MERGE) the
+    # plain-agg path uses — composed through the ONE skeleton via a `source_prep`, NO
+    # monolithic `_join_agg_stream`.
+    join_agg = _find_parallel_join_agg(plan)
+    if join_agg is not None:
+        breaker = plan[join_agg.breaker_id]
+        recomb = recombination_class_for(breaker)
+        if recomb in (RecombClass.HASH_REPARTITION, RecombClass.SCALAR_MERGE):
+            if telemetry is not None:
+                telemetry._reading["parallel_engaged"] = 1
+                telemetry._reading["generic_pipeline"] = 1
+                telemetry._reading["generic_join_agg"] = 1
+            # The shared-source helper needs a ctx to drive the build leg + set the
+            # cloned-join context. `_run_breaker_segment` owns the real ctx (it
+            # re-compiles), so we build the `_SharedSourceJoin` against THAT ctx by
+            # threading it lazily: the helper captures plan+shape now and is bound to the
+            # skeleton's ctx inside `build` / `prepare_worker_clone` (it reads
+            # `self._ctx`). We pass a placeholder ctx that the skeleton overwrites.
+            shared = _SharedSourceJoin(plan, join_agg, ctx=None)
+            source_prep = _JoinSourcePrep(
+                shared=shared,
+                join_id=join_agg.join_id,
+                probe_middle_ids=join_agg.probe_middle_ids,
+                probe_scan_id=join_agg.probe_scan_id,
+            )
+            return _run_breaker_segment(
+                plan,
+                join_agg.probe_scan_id,
+                join_agg.agg_middle_ids,
+                join_agg.breaker_id,
+                recomb,
+                workers,
+                telemetry,
+                source_prep=source_prep,
+            )
+
+    # No generic sink handles this shape — serial-inline (the data executor still
+    # owns it end-to-end; this is not a punt to another engine).
+    if telemetry is not None:
+        telemetry._reading["parallel_engaged"] = 0
+    return _serial_stream(plan)
+
+
+def _run_breaker_segment(
+    plan,
+    scan_id,
+    middle_ids,
+    breaker_id,
+    recomb_class,
+    workers,
+    telemetry=None,
+    exit_id=None,
+    source_prep=None,
+):
+    """The ONE generic breaker-segment skeleton (design §1.2).
+
+    Drives a ``source → stateless* → breaker`` segment in parallel via a
+    ``PipelineSink`` adapter. The 7-part skeleton — verified identical across the
+    bespoke functions — lives here ONCE; the adapter supplies only
+    ``make_local_sink_state`` / ``combine`` / ``finalize_source``. This single
+    function serves SCALAR_MERGE (trivial combine + finalize), HASH_REPARTITION agg
+    (bin-handoff combine + parallel-readout AGGREGATE finalize), HASH_REPARTITION
+    distinct (same bin-handoff combine + parallel-readout DEDUP finalize) AND
+    ``join → agg`` (the SHARED_SOURCE join composed with the agg sink — Step 5). The
+    distinct-specific thread is ``exit_id`` — the breaker's real downstream node, which
+    the distinct sink pushes its deduped survivors into (the operator's ``_downstream``
+    pointer is a private ``cdef`` not readable from the sink); ``None`` for the agg
+    sinks, which inject their result into the breaker itself and rely on the EOS push.
+
+    ``source_prep`` (a ``_JoinSourcePrep``) is the Step-5 composition seam: when set,
+    the self-pulled ``scan`` is the PROBE scan, each worker's chain is prefixed with the
+    join's ``[probe-middle* → JoinRightAdapter → cloned_join]`` (its private engine built
+    by ``source_prep.shared.prepare_worker_clone``), and ``middle_ids`` are the
+    STATELESS agg-middle ops between the join and the AGG breaker. The SAME skeleton
+    serves plain agg (``source_prep=None``) and join→agg (``source_prep`` set) — NO
+    forked skeleton, NO ``_join_agg_stream``. The build leg is driven serially ONCE
+    before the worker fan-out (the build-before-probe dependency).
+
+    Steps:
+      1. ``compile_pipeline``.
+      1b. (join→agg only) drive the BUILD leg serially → capture shared build state.
+      2. ROW-FLOOR serial fallback: below ``PARALLEL_MIN_ROWS`` (or empty build side)
+         drive the ORIGINAL un-cloned chain through the ORIGINAL breaker (byte-identical
+         to serial — the DOP=1 guarantee, §3). For join→agg the original join (built by
+         step 1b) + original agg are driven from the PROBE chain.
+      3. W self-pull workers: each ``sink.make_local_sink_state(k)`` → a cloned
+         ``[ (probe-prefix) → middle → clone-breaker]`` chain; self-pull disjoint
+         morsels (gated on ``is_concurrent_pull_safe``, buffered-floor-first).
+      4. errors barrier; ``sink.combine(locals)``.
+      5. ``finalize_source()`` read-out, then push EOS through the ORIGINAL breaker
+         and drain the exit (the read-out flows downstream → exit).
+      6. ``finally``: pool shutdown, ctx terminate, close source(s).
+    """
+    import threading
+
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import pull_one
+
+    # ---- 1. compile ---------------------------------------------------------------
+    chains, exit_node, ctx = compile_pipeline(plan)
+    scan = plan[scan_id]
+    breaker = plan[breaker_id]
+    head = plan[middle_ids[0]] if middle_ids else breaker
+
+    # join→agg: the probe chain HEAD is the join's probe-leg head (probe-middle* or the
+    # join itself), resolved from the compiler's wired chains. The ORIGINAL probe chain
+    # already runs join → agg-middle* → breaker → exit, so driving it serially (floor /
+    # empty build) is byte-identical to serial.
+    probe_head = None
+    build_head = None
+    if source_prep is not None:
+        # Bind the skeleton's ctx into the shared-source helper (it drives the build leg
+        # + sets the cloned-join context against THIS ctx, the one compile_pipeline made).
+        source_prep.shared._ctx = ctx
+        scan = plan[source_prep.probe_scan_id]
+        build_scan = plan[source_prep.shared._shape.build_scan_id]
+        for sc, hd in chains:
+            if sc is build_scan:
+                build_head = hd
+            elif sc is scan:
+                probe_head = hd
+        head = probe_head  # the floor/empty path drives the ORIGINAL probe chain
+        if probe_head is None or build_head is None:
+            # Compiler did not produce the expected legs — refuse to guess, run serial.
+            ctx.terminate()
+            yield from _serial_stream(plan)
+            return
+
+    def _drain():
+        if exit_node is None:
+            return
+        while exit_node.has_pending():
+            yield exit_node.pop_pending()
+
+    # radix for HASH_REPARTITION: next power of two >= workers (>= DOP read-out width).
+    radix = 1
+    while radix < workers:
+        radix <<= 1
+
+    pool = None
+    try:
+        # ---- 1b. join→agg: drive the BUILD leg ONCE, serially (build-before-probe) --
+        if source_prep is not None:
+            source_prep.shared.build(build_scan, build_head, exit_node)
+            if ctx.is_terminated():
+                return
+            if source_prep.shared.left_is_empty:
+                # Empty build side: an inner join yields nothing. Push EOS through the
+                # ORIGINAL wired probe chain once so the join's EOS path (→ agg → exit)
+                # runs exactly once, emitting the empty grouped/ungrouped result
+                # identically to serial.
+                push_one(head, _EOS_SENTINEL)
+                yield from _drain()
+                return
+
+        # ---- 2. row-floor: tiny inputs run serially through the ORIGINAL breaker --
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = pull_one(scan)
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            # Drive the ORIGINAL un-cloned chain through the ORIGINAL breaker — its
+            # real engine, untouched. Byte-identical to serial (the prime constraint).
+            # For join→agg this is the original probe chain (join built by step 1b →
+            # agg-middle* → original breaker → exit).
+            for morsel in buffer:
+                if ctx.is_terminated():
+                    break
+                push_one(head, morsel)
+                yield from _drain()
+            if not ctx.is_terminated():
+                push_one(head, _EOS_SENTINEL)
+                yield from _drain()
+            return
+
+        # Build the sink adapter. HASH_REPARTITION needs the radix + a read-out pool
+        # factory (the skeleton owns pool lifecycle; finalize spawns the read-out).
+        def _readout_pool_factory():
+            return CppThreadPool(max(1, min(radix, workers)), "m4-generic-readout")
+
+        # The distinct sink pushes its deduped survivors into the breaker's real
+        # downstream node (its `_downstream` cdef pointer isn't readable from Python),
+        # so resolve it from `exit_id` when the caller threaded one through. The agg
+        # sinks ignore `downstream` (they inject into the breaker + rely on the EOS push).
+        downstream = plan[exit_id] if exit_id is not None else None
+        sink = make_sink(
+            breaker,
+            recomb_class,
+            radix=radix,
+            pool_factory=_readout_pool_factory,
+            ctx=ctx,
+            downstream=downstream,
+            telemetry=telemetry,
+        )
+        if sink is None:
+            # Unhandled recombination class — fail loud (the dispatcher must only
+            # reach here for a class the sink factory builds).
+            raise RuntimeError(
+                f"_run_breaker_segment: no sink adapter for {recomb_class!r}"
+            )
+
+        if telemetry is not None:
+            telemetry._reading["generic_pipeline_workers"] = workers
+            if recomb_class is RecombClass.HASH_REPARTITION:
+                telemetry._reading["generic_pipeline_radix"] = radix
+
+        # ---- 3. W self-pull workers, each driving its local sink ------------------
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+        concurrent_safe = scan.is_concurrent_pull_safe()
+
+        def next_input():
+            # Buffered floor sample first, then self-pull the scan. The pull is
+            # lockless only when the source is reentrant; otherwise serialise the
+            # whole pull (a correctness gate, not a perf toggle).
+            if concurrent_safe:
+                with pull_lock:
+                    m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                if ctx.is_terminated():
+                    return None
+                return pull_one(scan)
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                return pull_one(scan)
+
+        local_states = [None] * workers
+        local_rows = [0] * workers
+        errors = [None] * workers
+
+        def worker(index):
+            try:
+                clone = sink.make_local_sink_state(index)
+                # Wire [middle clones → clone-breaker]; the clone is the local sink
+                # (its seam IS the accumulator). The breaker clone has no downstream —
+                # the worker only ingests (never EOS), so it never emits.
+                chain = [_clone_op(plan[nid]) for nid in middle_ids]
+                chain.append(clone)
+                for i, op in enumerate(chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(chain):
+                        op.set_downstream(chain[i + 1])
+                chain_head = chain[0]
+
+                # join→agg: prepend the join's per-worker prefix
+                # [probe-middle* → JoinRightAdapter → cloned_join] ahead of the
+                # agg-middle chain. The cloned join gets its OWN private engine over the
+                # shared READ-ONLY left_morsel (zero shared mutable probe state). The
+                # join's output flows into `chain_head` (agg-middle* → local sink).
+                if source_prep is not None:
+                    from opteryx.operators import JoinRightAdapter
+
+                    cloned_join = _clone_op(plan[source_prep.join_id])
+                    source_prep.shared.prepare_worker_clone(cloned_join)
+                    cloned_join.set_downstream(chain_head)
+                    probe_ops = [
+                        _clone_op(plan[nid]) for nid in source_prep.probe_middle_ids
+                    ]
+                    adapter = JoinRightAdapter(cloned_join)
+                    adapter.set_context(ctx)
+                    probe_chain = probe_ops + [adapter]
+                    for i, op in enumerate(probe_chain):
+                        op.set_context(ctx)
+                        if i + 1 < len(probe_chain):
+                            op.set_downstream(probe_chain[i + 1])
+                    chain_head = probe_chain[0]
+
+                count = 0
+                while True:
+                    morsel = next_input()
+                    if morsel is None:
+                        break
+                    push_one(chain_head, morsel)
+                    count += morsel.num_rows
+                local_states[index] = clone
+                local_rows[index] = count
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
+                errors[index] = exc
+
+        pool = CppThreadPool(workers, "m4-generic-sink")
+        futures = [pool.submit(worker, k) for k in range(workers)]
+        for future in futures:
+            future.result()
+        # ---- 4. errors barrier; combine ------------------------------------------
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        locals_ = [
+            (local_states[k], local_rows[k])
+            for k in range(workers)
+            if local_states[k] is not None
+        ]
+        sink.combine(locals_)
+
+        # ---- 5. finalize read-out, then push terminal EOS through the sink's EOS
+        #         target. For the agg sinks the target IS the ORIGINAL breaker (whose
+        #         _finalize emits the injected result). For distinct the breaker holds
+        #         NO state (its survivors went straight to its downstream), so its EOS
+        #         target is the real downstream node — pushing EOS through the empty
+        #         breaker would re-enter its dedup-init on the EOS sentinel and crash.
+        #         Either way the EOS flows to the Exit, which emits the empty-result
+        #         schema morsel when nothing survived (byte-identical to serial).
+        for m in sink.finalize_source():
+            if ctx.is_terminated():
+                return
+            yield m
+        if ctx.is_terminated():
+            return
+        push_one(sink.eos_target(), _EOS_SENTINEL)
+        yield from _drain()
+    finally:
+        # ---- 6. teardown ----------------------------------------------------------
+        if pool is not None:
+            pool.shutdown(wait=True)
+        ctx.terminate()
+        scan.close_source()
+        if source_prep is not None:
+            build_scan.close_source()
 
 
 def execute(plan, head_node=None, telemetry=None):
@@ -517,6 +1157,41 @@ def execute(plan, head_node=None, telemetry=None):
     # back to the serial-inline path (treat it as no parallel strategy).
     if distinct is not None and workers < 2:
         distinct = None
+
+    # GENERIC join → agg (M4_GENERIC_PIPELINE, Step 5): a TWO-scan inner-join feeding a
+    # generic AGG sink. None of the single-scan finders match it, and `_find_parallel_join`
+    # rejects it (its downstream is an AGG breaker, not stateless→exit) — so today it falls
+    # SERIAL. Detect it only when no single-scan strategy claimed the plan and the flag is
+    # on; `_pipeline_stream` re-detects + composes the SHARED_SOURCE join with the agg sink
+    # through the ONE skeleton.
+    join_agg = (
+        _find_parallel_join_agg(plan)
+        if (
+            config.M4_GENERIC_PIPELINE
+            and grouped is None
+            and ungrouped is None
+            and distinct is None
+            and stateless is None
+        )
+        else None
+    )
+
+    # GENERIC pipeline-parallel path (M4_GENERIC_PIPELINE): grouped + ungrouped
+    # aggregate AND distinct run through ONE breaker-segment skeleton + a PipelineSink
+    # adapter (the Steps 2/3/4 contract), instead of the bespoke _ungrouped_agg_stream
+    # / _grouped_agg_route / _distinct_stream. join→agg (Step 5) composes the SHARED_SOURCE
+    # join with the SAME agg sink through the SAME skeleton. stateless / bare join keep
+    # their bespoke strategies even when the flag is on. _pipeline_stream re-detects the
+    # shape and falls back to _serial_stream for anything it does not handle. (distinct
+    # already dropped to None above when workers < 2 — DOP=1 runs the serial dedup, the
+    # prime constraint.)
+    if config.M4_GENERIC_PIPELINE and (
+        grouped is not None
+        or ungrouped is not None
+        or distinct is not None
+        or join_agg is not None
+    ):
+        return _pipeline_stream(plan, workers, telemetry), ResultType.TABULAR
 
     if (
         grouped is None

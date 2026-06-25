@@ -204,6 +204,17 @@ path (``_grouped_agg_stream``) — kept as the A/B reference the sweep gate togg
 retired (W1.3) once route has soaked. String GROUP BY is decode-capped (~1.8×) pending the
 unified thread budget — see docs/PARALLEL_ENGINE_DESIGN.md."""
 
+M4_GENERIC_PIPELINE: bool = str(get("M4_GENERIC_PIPELINE", "0")).lower() in ("1", "true", "yes")
+"""M4 — route data pipelines through the ONE generic pipeline-parallel executor
+(``parallel_engine._pipeline_stream``) instead of the five bespoke ``_find_parallel_*``
+finders + ``_serial_stream`` cascade. **Default off.** When on (Steps 0+1): a STATELESS
+segment (scan → filter/projection* → exit, no breaker) parallelises through the generic
+executor (identical machinery to ``_stateless_stream``); ANY plan with a breaker tail falls
+through to ``_serial_stream`` (every breaker's recombination class is ``NONE`` until Steps
+2-8 register ``SCALAR_MERGE`` / ``HASH_REPARTITION`` / etc.). This is the strangler-fig
+target the bespoke strategies retire into — see docs/GENERIC_PIPELINE_PARALLELISM_DESIGN.md.
+Independent of ``M4_USE_SCHEDULER`` (the Step-7 fold target)."""
+
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

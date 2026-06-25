@@ -3187,8 +3187,7 @@ static inline size_t ryu_format_double(char* buf, double d, uint32_t precision) 
     }
 
     if (d >= 9.9e24 || d <= -9.9e24) {
-        const int n = std::snprintf(buf, 32u, "%.17g", d);
-        if (n < 0) throw std::runtime_error("vector_cast_float64_to_string: snprintf failed");
+        const int n = d2s_buffered_n(d, buf);
         return static_cast<size_t>(n);
     }
 
