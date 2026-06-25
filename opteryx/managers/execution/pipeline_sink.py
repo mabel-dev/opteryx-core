@@ -6,8 +6,7 @@
 """
 Generic pipeline parallelism — the ``PipelineSink`` contract and its adapters.
 
-The bespoke per-shape strategies in ``parallel_engine.py`` (``_ungrouped_agg_stream``,
-``_grouped_agg_route``, …) all copy-paste the SAME 7-part skeleton; the ONLY thing
+Every parallelisable breaker shape shares the SAME 7-part skeleton; the ONLY thing
 that differs per shape is *what the sink does*. This module lifts "what the sink
 does" into a thin per-breaker contract — pure-Python **adapter** classes that
 operate on the breaker operator's EXISTING public seams (``_engine``,
@@ -112,8 +111,8 @@ class PipelineSink:
 class _ScalarMergeSink(PipelineSink):
     """SCALAR_MERGE adapter for the UNGROUPED aggregate breaker.
 
-    Lifts ``_ungrouped_agg_stream``'s recombination verbatim onto the contract:
-    each worker aggregates its own morsels into a private cloned engine; the W
+    The ungrouped recombination: each worker aggregates its own morsels into a
+    private cloned engine; the W
     engines scalar-merge (sum/min/max the partials) into the first populated one;
     the ORIGINAL breaker's ``_engine`` is set to that merged engine and its EOS
     path emits the single merged row downstream.
@@ -137,8 +136,7 @@ class _ScalarMergeSink(PipelineSink):
     def combine(self, locals_):
         # Scalar-merge the W clones' engines into the first populated one. `locals_`
         # is the list of (clone, ingested_rows) pairs the skeleton collected; only
-        # clones that ingested rows carry state worth merging (mirrors
-        # _ungrouped_agg_stream's `populated` filter at ~674).
+        # clones that ingested rows carry state worth merging (the `populated` filter).
         populated = [clone for (clone, rows) in locals_ if rows > 0]
         if not populated:
             # No worker ingested anything; the original breaker's own (empty) engine
@@ -163,8 +161,7 @@ class _ScalarMergeSink(PipelineSink):
 class _HashRepartitionSink(PipelineSink):
     """HASH_REPARTITION adapter for the GROUPED aggregate breaker.
 
-    Lifts ``_grouped_agg_route``'s scatter / combine / parallel-readout verbatim
-    onto the contract:
+    The route-raw scatter / combine / parallel-readout, on the contract:
 
       * ``make_local_sink_state`` clones the breaker and swaps its ``_engine`` for a
         thread-local ``_ScatterCollectEngine(radix, real_engine)`` — the worker
@@ -211,9 +208,9 @@ class _HashRepartitionSink(PipelineSink):
         return clone
 
     def combine(self, locals_):
-        # O(radix) hand-off of thread-local bins → global per-partition lists. Mirror
-        # _grouped_agg_route ~1302-1310. `locals_` is the list of (clone, rows) the
-        # skeleton collected; the scatter bins live on the clone's swapped _engine.
+        # O(radix) hand-off of thread-local bins → global per-partition lists.
+        # `locals_` is the list of (clone, rows) the skeleton collected; the scatter
+        # bins live on the clone's swapped _engine.
         radix = self._radix
         global_bins = [[] for _ in range(radix)]
         for (clone, _rows) in locals_:
@@ -225,7 +222,7 @@ class _HashRepartitionSink(PipelineSink):
 
     def finalize_source(self):
         # PARALLEL per-partition read-out: ≤radix workers each aggregate one global
-        # partition into a fresh engine. Mirror _grouped_agg_route ~1312-1351. The
+        # partition into a fresh engine. The
         # populated partition engines are injected into the ORIGINAL breaker's
         # _parallel_engines; the skeleton's EOS push through the original then drives
         # _finalize (concat, no merge) downstream → exit.
@@ -449,8 +446,8 @@ class _DistinctSink(PipelineSink):
         # into the ORIGINAL breaker's real downstream. Returns an empty iterator — the
         # skeleton's EOS push through the ORIGINAL breaker drives the downstream/Exit
         # EOS handling (the empty-result schema morsel when nothing survived),
-        # preserving DOP=1 byte-identity. This is the bespoke ``_distinct_stream``
-        # non-fuse phase-B dedup lifted onto the contract: ``hash(key) % radix``
+        # preserving DOP=1 byte-identity. The per-partition dedup on the contract:
+        # ``hash(key) % radix``
         # co-locates every copy of a value in ONE partition, so the per-partition
         # carchar sets are disjoint key slices — NO cross-worker merge.
         from opteryx.managers.execution.parallel_engine import push_one

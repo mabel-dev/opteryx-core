@@ -299,6 +299,11 @@ draken: check-python ## Build draken extensions only — isolated from opteryx C
 # Alias for backward compatibility
 c: compile-quick
 
+check-symbols: ## Verify no undefined symbols in compiled extensions (run after compile)
+	$(call print_blue,"Checking for undefined symbols...")
+	@$(PYTHON) dev/check_undefined_symbols.py || (echo "❌ Undefined symbols found — setup.py missing vendored library sources" && exit 1)
+	$(call print_green,"✓ All symbols resolved")
+
 # === CLEANUP ===
 
 clean: ## Clean build artifacts

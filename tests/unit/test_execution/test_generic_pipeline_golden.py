@@ -152,24 +152,28 @@ def _md5_sorted(rows):
 
 
 class _Cfg:
-    """Save/restore the three config knobs the paths read, so the test is hermetic."""
+    """Save/restore the two config knobs the SOLE engine reads, so the test is hermetic.
+
+    The generic ``_pipeline_stream`` is now the ONLY data engine (no flag, no dual
+    path). The serial REFERENCE is taken by forcing ``PARALLEL_MIN_ROWS`` above the
+    input so the row-floor branch drives the ORIGINAL un-cloned breaker (the serial
+    truth, byte-identical to the parallel sink by the prime constraint); the parallel
+    path is forced with ``floor=0``. ``generic`` is accepted but no longer toggles a
+    flag — it is asserted True (the serial reference is the floor, not a flag flip)."""
 
     def __enter__(self):
         self._saved = (
-            config.M4_GENERIC_PIPELINE,
             config.MAX_EXECUTION_WORKERS,
             config.PARALLEL_MIN_ROWS,
         )
         return self
 
     def set(self, *, generic, workers, floor):
-        config.M4_GENERIC_PIPELINE = generic
         config.MAX_EXECUTION_WORKERS = workers
         config.PARALLEL_MIN_ROWS = floor
 
     def __exit__(self, *exc):
         (
-            config.M4_GENERIC_PIPELINE,
             config.MAX_EXECUTION_WORKERS,
             config.PARALLEL_MIN_ROWS,
         ) = self._saved
@@ -232,8 +236,297 @@ def test_generic_pipeline_byte_identical(name, sql, expected_class, min_workers)
     assert g8_fired == [(expected_class, 8)], f"{name}: DOP=8 fired {g8_fired}"
 
 
+# =============================================================================
+# Step 5 — join → agg golden differential (SHARED_SOURCE join composed with the
+# generic agg sink through the ONE _run_breaker_segment skeleton).
+#
+# Every TPC-H query is `join → agg`; this is the benchmark-payoff shape AND the
+# catastrophic-bug operators (inner join + grouped agg). The composition must be
+# byte-identical to serial at every DOP, fire the SAME agg sink the plain-agg path
+# uses (HASH_REPARTITION grouped / SCALAR_MERGE ungrouped), and — critically — go
+# through the ONE skeleton with a `source_prep` (NOT a forked `_join_agg_stream`),
+# proven by the spy seeing `source_prep is not None`.
+#
+# Uses testdata.tpch_1 (in the main checkout): orders ⋈ lineitem on orderkey, the
+# real Q12-shaped join. The grouped key is small (l_shipmode = 7 values) so the
+# join probe dominates — the case that should scale.
+# =============================================================================
+
+_O = "testdata.tpch_1.orders"
+_L = "testdata.tpch_1.lineitem"
+_J = f"FROM {_O} o INNER JOIN {_L} l ON o.o_orderkey = l.l_orderkey"
+
+# (name, sql, expected_recomb_class)  — all fire at W>=1 (agg sinks, like plain agg).
+_JOIN_AGG_QUERIES = [
+    # The gate query (TPC-H Q12 shape): GROUP BY single col, COUNT + SUM.
+    (
+        "joinagg_q12_shape",
+        f"SELECT l.l_shipmode, COUNT(*) c, SUM(l.l_quantity) q {_J} "
+        f"GROUP BY l.l_shipmode",
+        RecombClass.HASH_REPARTITION,
+    ),
+    # multi-column GROUP BY over join output.
+    (
+        "joinagg_multi_col",
+        f"SELECT l.l_shipmode, l.l_returnflag, COUNT(*) c, SUM(l.l_quantity) q {_J} "
+        f"GROUP BY l.l_shipmode, l.l_returnflag",
+        RecombClass.HASH_REPARTITION,
+    ),
+    # NULL-bearing GROUP BY key (NULLIF synthesises NULLs into the key).
+    (
+        "joinagg_null_key",
+        f"SELECT NULLIF(l.l_shipmode, 'AIR') k, COUNT(*) c {_J} "
+        f"GROUP BY NULLIF(l.l_shipmode, 'AIR')",
+        RecombClass.HASH_REPARTITION,
+    ),
+    # AVG (recompute-at-finalize) + SUM over join output.
+    (
+        "joinagg_avg_sum",
+        f"SELECT l.l_shipmode, AVG(l.l_quantity) a, SUM(l.l_extendedprice) s {_J} "
+        f"GROUP BY l.l_shipmode",
+        RecombClass.HASH_REPARTITION,
+    ),
+    # Wide payload incl. MIN/MAX over a TEMPORAL (DATE) column — the type-preserving
+    # grouped MIN/MAX path (the corruption-prone operator) over join output.
+    (
+        "joinagg_minmax_temporal",
+        f"SELECT l.l_shipmode, MIN(l.l_shipdate) mn, MAX(l.l_commitdate) mx, "
+        f"COUNT(*) c, SUM(l.l_quantity) q {_J} GROUP BY l.l_shipmode",
+        RecombClass.HASH_REPARTITION,
+    ),
+]
+
+
+def _run_join_agg_with_spy(sql):
+    """Run ``sql`` through the generic path, recording every ``_run_breaker_segment``
+    entry as ``(recomb_class, workers, used_source_prep)``. ``used_source_prep`` is the
+    Step-5 proof: the join→agg composition drives the SAME skeleton with a
+    ``source_prep`` (a ``_JoinSourcePrep``) — never a bespoke fusion function."""
+    fired = []
+    original = parallel_engine._run_breaker_segment
+
+    def spy(plan, scan_id, middle_ids, breaker_id, recomb_class, workers, *args, **kwargs):
+        fired.append((recomb_class, workers, kwargs.get("source_prep") is not None))
+        return original(
+            plan, scan_id, middle_ids, breaker_id, recomb_class, workers, *args, **kwargs
+        )
+
+    parallel_engine._run_breaker_segment = spy
+    try:
+        rows = _run_rows(sql)
+    finally:
+        parallel_engine._run_breaker_segment = original
+    return rows, fired
+
+
+@pytest.mark.parametrize(
+    "name,sql,expected_class", _JOIN_AGG_QUERIES, ids=[q[0] for q in _JOIN_AGG_QUERIES]
+)
+def test_join_agg_byte_identical(name, sql, expected_class):
+    with _Cfg() as cfg:
+        # --- serial reference: generic OFF, floor above the input so the join + agg
+        #     run through the ORIGINAL un-cloned operators (the serial truth). --------
+        cfg.set(generic=False, workers=1, floor=10**12)
+        serial = _md5_sorted(_run_rows(sql))
+
+        # --- generic @ DOP=1, floor 0 (force the composed sink at W=1) -------------
+        cfg.set(generic=True, workers=1, floor=0)
+        g1_rows, g1_fired = _run_join_agg_with_spy(sql)
+        g1 = _md5_sorted(g1_rows)
+
+        # --- generic @ DOP=8, floor 0 ---------------------------------------------
+        cfg.set(generic=True, workers=8, floor=0)
+        g8_rows, g8_fired = _run_join_agg_with_spy(sql)
+        g8 = _md5_sorted(g8_rows)
+
+    # Byte-identity across all three paths (the prime constraint), incl. NULL keys,
+    # multi-col, temporal MIN/MAX, AVG over join output.
+    assert serial == g1 == g8, (
+        f"{name}: serial={serial} generic@DOP1={g1} generic@DOP8={g8}"
+    )
+
+    # The composition must FIRE through the ONE skeleton WITH a source_prep at every
+    # DOP — the Step-5 single-skeleton invariant (no _join_agg_stream). A silent serial
+    # fallback (source_prep False / no fire) can never pass green.
+    assert g1_fired == [(expected_class, 1, True)], f"{name}: DOP=1 fired {g1_fired}"
+    assert g8_fired == [(expected_class, 8, True)], f"{name}: DOP=8 fired {g8_fired}"
+
+
+# =============================================================================
+# Step 6 — SORT-TAIL TOLERANCE + MULTI-JOIN build prelude.
+#
+# Real TPC-H queries are `[multi-]join → grouped-agg → ORDER BY [LIMIT] → exit`. Two
+# generalisations make them parallelise end-to-end through the SOLE engine:
+#
+#   A. SORT-TAIL TOLERANCE — the AGG breaker may be followed by a SERIAL TAIL
+#      (Sort / HeapSort / Limit / stateless ops) before Exit, not only the Exit
+#      directly. The agg is parallelised; the sort runs SERIALLY on the recombined
+#      grouped output, so ORDER BY ordering is preserved. (Single-join + agg + ORDER BY.)
+#   B. MULTI-JOIN build prelude — the TOP join feeding the agg may have a BUILD leg
+#      that is itself a join subtree; the build subtree is driven ONCE serially, and
+#      only the TOP join's fact-scan PROBE parallelises. (Multi-join + agg + ORDER BY.)
+#
+# These cases carry an ORDER BY, so the test asserts BOTH the order-insensitive md5
+# (the values match) AND the LIST-ORDER-PRESERVING compare (the ORDER BY / LIMIT
+# ordering is byte-identical to serial — the sort runs after the parallel agg
+# recombines). The spy proves the parallel path FIRES (the agg sink through the ONE
+# skeleton with a source_prep for the join cases).
+# =============================================================================
+
+# (name, sql, expected_recomb_class, expects_join, expects_multi_join)
+_SORT_TAIL_QUERIES = [
+    # --- A: grouped agg + ORDER BY, NO join (single-scan, sort tail) --------------
+    (
+        "grouped_orderby_sort_tail",
+        f"SELECT user_verified, COUNT(*) c FROM {_DS} "
+        f"GROUP BY user_verified ORDER BY c DESC, user_verified",
+        RecombClass.HASH_REPARTITION,
+        False,
+        False,
+    ),
+    # --- A: single-join + grouped agg + ORDER BY + LIMIT (TPC-H Q12-ish + sort) ----
+    (
+        "joinagg_orderby_limit_q12like",
+        f"SELECT l.l_shipmode, COUNT(*) c, SUM(l.l_quantity) q {_J} "
+        f"GROUP BY l.l_shipmode ORDER BY l.l_shipmode LIMIT 5",
+        RecombClass.HASH_REPARTITION,
+        True,
+        False,
+    ),
+]
+
+# Multi-join + agg + ORDER BY — the TPC-H Q10 shape: a TOP inner join whose BUILD leg
+# is a join subtree (customer ⋈ orders [⋈ nation]) and whose PROBE leg is the lineitem
+# FACT scan, feeding a grouped agg with an ORDER BY [LIMIT] tail. The selective filters
+# (orderdate range, returnflag) drive the optimizer to put the big fact (lineitem) on the
+# probe (right) side of the TOP join — the shape this engine parallelises (the dimension
+# join subtree is the small BUILD side, built once serially; only the fact probe scales).
+# These are the REAL Q10 plan shape; the un-filtered variant where the optimizer puts the
+# nested join on the probe side stays serial (probe must be a raw fact scan), by design.
+_C = "testdata.tpch_1.customer"
+_N = "testdata.tpch_1.nation"
+_MULTI_JOIN_QUERIES = [
+    # The real TPC-H Q10 (customer ⋈ orders ⋈ lineitem ⋈ nation, GROUP BY + ORDER BY +
+    # LIMIT) — the canonical multi-join + grouped-agg + sort-tail benchmark query.
+    (
+        "tpch_q10",
+        "SELECT c_custkey, c_name, SUM(l_extendedprice * (1 - l_discount)) AS revenue, "
+        "c_acctbal, n_name, c_address, c_phone, c_comment "
+        f"FROM {_C}, {_O}, {_L}, {_N} "
+        "WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey "
+        "AND o_orderdate >= '1993-07-01'::DATE AND o_orderdate < '1993-10-01'::DATE "
+        "AND l_returnflag = 'R' AND c_nationkey = n_nationkey "
+        "GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment "
+        "ORDER BY revenue DESC LIMIT 20",
+        RecombClass.HASH_REPARTITION,
+    ),
+    # A Q10-shaped variant grouping by nation (4-table build subtree, fact probe).
+    (
+        "multijoin_nation_grouped",
+        "SELECT n.n_name, COUNT(*) n_cnt, SUM(l.l_quantity) q "
+        f"FROM {_C} c, {_O} o, {_L} l, {_N} n "
+        "WHERE c.c_custkey = o.o_custkey AND l.l_orderkey = o.o_orderkey "
+        "AND c.c_nationkey = n.n_nationkey "
+        "AND o.o_orderdate >= '1994-01-01'::DATE AND o.o_orderdate < '1994-04-01'::DATE "
+        "AND l.l_returnflag = 'R' "
+        "GROUP BY n.n_name ORDER BY q DESC, n.n_name LIMIT 10",
+        RecombClass.HASH_REPARTITION,
+    ),
+]
+
+
+def _md5_listorder(rows):
+    """ORDER-PRESERVING fingerprint — the ORDER BY / LIMIT output order must match
+    serial exactly (the serial sort runs AFTER the parallel agg recombines)."""
+    return hashlib.md5(repr(rows).encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "name,sql,expected_class,expects_join,expects_multi",
+    _SORT_TAIL_QUERIES,
+    ids=[q[0] for q in _SORT_TAIL_QUERIES],
+)
+def test_sort_tail_byte_identical(name, sql, expected_class, expects_join, expects_multi):
+    with _Cfg() as cfg:
+        cfg.set(generic=False, workers=1, floor=10**12)
+        serial_rows = _run_rows(sql)
+        serial_sorted = _md5_sorted(serial_rows)
+        serial_order = _md5_listorder(serial_rows)
+
+        cfg.set(generic=True, workers=1, floor=0)
+        g1_rows, g1_fired = _run_join_agg_with_spy(sql)
+
+        cfg.set(generic=True, workers=8, floor=0)
+        g8_rows, g8_fired = _run_join_agg_with_spy(sql)
+
+    # Order-insensitive (values) AND order-preserving (the ORDER BY/LIMIT) byte-identity.
+    assert serial_sorted == _md5_sorted(g1_rows) == _md5_sorted(g8_rows), f"{name}: values differ"
+    assert serial_order == _md5_listorder(g1_rows) == _md5_listorder(g8_rows), (
+        f"{name}: ORDER BY output order differs from serial"
+    )
+
+    # The parallel agg sink must FIRE at every DOP (a source_prep iff there is a join).
+    assert g1_fired == [(expected_class, 1, expects_join)], f"{name}: DOP=1 fired {g1_fired}"
+    assert g8_fired == [(expected_class, 8, expects_join)], f"{name}: DOP=8 fired {g8_fired}"
+
+
+@pytest.mark.parametrize(
+    "name,sql,expected_class", _MULTI_JOIN_QUERIES, ids=[q[0] for q in _MULTI_JOIN_QUERIES]
+)
+def test_multi_join_agg_byte_identical(name, sql, expected_class):
+    fired = []
+    original = parallel_engine._run_breaker_segment
+
+    def spy(plan, scan_id, middle_ids, breaker_id, recomb_class, workers, *args, **kwargs):
+        sp = kwargs.get("source_prep")
+        is_multi = sp is not None and sp.shared._shape.build_scan_ids is not None
+        fired.append((recomb_class, workers, sp is not None, is_multi))
+        return original(
+            plan, scan_id, middle_ids, breaker_id, recomb_class, workers, *args, **kwargs
+        )
+
+    with _Cfg() as cfg:
+        cfg.set(generic=False, workers=1, floor=10**12)
+        serial_rows = _run_rows(sql)
+        serial_sorted = _md5_sorted(serial_rows)
+        serial_order = _md5_listorder(serial_rows)
+
+        parallel_engine._run_breaker_segment = spy
+        try:
+            cfg.set(generic=True, workers=1, floor=0)
+            fired.clear()
+            g1_rows = _run_rows(sql)
+            g1_fired = list(fired)
+
+            cfg.set(generic=True, workers=8, floor=0)
+            fired.clear()
+            g8_rows = _run_rows(sql)
+            g8_fired = list(fired)
+        finally:
+            parallel_engine._run_breaker_segment = original
+
+    assert serial_sorted == _md5_sorted(g1_rows) == _md5_sorted(g8_rows), f"{name}: values differ"
+    assert serial_order == _md5_listorder(g1_rows) == _md5_listorder(g8_rows), (
+        f"{name}: ORDER BY output order differs from serial"
+    )
+
+    # The MULTI-JOIN composition must fire the grouped agg sink through the ONE skeleton
+    # WITH a source_prep AND the multi-join build prelude (build_scan_ids set) at every DOP.
+    assert g1_fired == [(expected_class, 1, True, True)], f"{name}: DOP=1 fired {g1_fired}"
+    assert g8_fired == [(expected_class, 8, True, True)], f"{name}: DOP=8 fired {g8_fired}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     for _name, _sql, _cls, _mw in _QUERIES:
         test_generic_pipeline_byte_identical(_name, _sql, _cls, _mw)
+        print(f"OK  {_name}")
+    for _name, _sql, _cls in _JOIN_AGG_QUERIES:
+        test_join_agg_byte_identical(_name, _sql, _cls)
+        print(f"OK  {_name}")
+    for _name, _sql, _cls, _ej, _em in _SORT_TAIL_QUERIES:
+        test_sort_tail_byte_identical(_name, _sql, _cls, _ej, _em)
+        print(f"OK  {_name}")
+    for _name, _sql, _cls in _MULTI_JOIN_QUERIES:
+        test_multi_join_agg_byte_identical(_name, _sql, _cls)
         print(f"OK  {_name}")
     print("\nAll generic-pipeline golden differentials passed.")

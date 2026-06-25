@@ -740,6 +740,7 @@ extensions = [
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "third_party/ulfjack/ryu/d2fixed.c",
+            "third_party/ulfjack/ryu/d2s.c",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
@@ -792,6 +793,8 @@ extensions = [
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
+            "third_party/ulfjack/ryu/d2fixed.c",
+            "third_party/ulfjack/ryu/d2s.c",
         ],
         include_dirs=include_dirs,
         extra_compile_args=CPP_FLAGS,

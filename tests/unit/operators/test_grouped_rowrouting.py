@@ -155,32 +155,29 @@ def test_skew_ndv_telemetry_emitted():
             config.PARALLEL_MIN_ROWS,
         ) = saved
 
+    # The SOLE grouped path is the HASH_REPARTITION PipelineSink (route-raw + parallel
+    # per-partition read-out); it emits the generic-pipeline + route-agg telemetry.
     for k in (
-        "rowrouting_workers",
-        "rowrouting_sample_rows",
-        "rowrouting_sample_maxbin_rows",
-        "rowrouting_total_rows",
-        "rowrouting_maxbin_rows",
-        "rowrouting_ndv",
+        "generic_pipeline_workers",
+        "generic_pipeline_radix",
+        "route_agg_total_rows",
+        "route_agg_ndv",
     ):
         assert k in rd, f"missing telemetry reading: {k}"
 
-    w = rd["rowrouting_workers"]
-    total = rd["rowrouting_total_rows"]
+    w = rd["generic_pipeline_workers"]
+    total = rd["route_agg_total_rows"]
     assert 1 <= w <= 4
+    assert rd["generic_pipeline_radix"] >= w  # radix = next pow2 >= DOP
     assert total == total_from_counts  # COUNT(*) per group sums to all input rows
-    assert rd["rowrouting_ndv"] == group_count  # exact distinct group count
-    # pigeonhole: average <= busiest bin <= total
-    assert total / w <= rd["rowrouting_maxbin_rows"] <= total
-    assert 0 < rd["rowrouting_sample_rows"] <= total
-    assert rd["rowrouting_sample_maxbin_rows"] <= rd["rowrouting_sample_rows"]
+    assert rd["route_agg_ndv"] == group_count  # exact distinct group count
 
 
 def test_w1_runs_rowrouting_path():
-    # W=1 must GENUINELY run the row-routing path (one worker), not divert to
-    # serial. Prove it ran via the telemetry only _grouped_agg_stream emits (so
-    # the assertion can't pass vacuously by both runs being serial), and that the
-    # result still matches serial.
+    # W=1 must GENUINELY run the parallel grouped path (one worker), not divert to
+    # serial. Prove it ran via the generic-pipeline telemetry the sole grouped sink
+    # emits (so the assertion can't pass vacuously by both runs being serial), and
+    # that the result still matches serial.
     sql = "SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity"
     _assert_matches_serial(sql, workers=1)
 
@@ -201,8 +198,11 @@ def test_w1_runs_rowrouting_path():
             config.PARALLEL_MIN_ROWS,
         ) = saved
 
-    assert rd.get("rowrouting_workers") == 1, "W=1 must run row-routing (1 worker), not serial"
-    assert "rowrouting_ndv" in rd
+    assert rd.get("generic_pipeline_workers") == 1, (
+        "W=1 must run the parallel grouped sink (1 worker), not serial"
+    )
+    assert rd.get("generic_pipeline") == 1
+    assert "route_agg_ndv" in rd
 
 
 if __name__ == "__main__":
