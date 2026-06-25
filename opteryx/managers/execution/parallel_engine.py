@@ -293,6 +293,141 @@ def _find_parallel_stateless(plan):
     return scan_id, op_ids, segment.tail
 
 
+def _walk_leg_to_scan(plan, provider_id, join_id, registry):
+    """Walk a join leg UP from the join's input node (`provider_id`) to its scan,
+    collecting the (stateless) middle ops between scan and join.
+
+    The push topology is single-output, so each leg is a linear chain
+    scan → middle* → join. Returns ``(scan_id, middle_ids)`` where ``middle_ids``
+    is in dataflow order (scan-first), or ``None`` if the leg is not a clean
+    linear chain of a scan + STATELESS middle ops (any stateful middle op — a
+    Limit/Window/aggregate/sort — disqualifies the whole parallel shape)."""
+    chain = []  # provider_id first as we walk up, reversed to dataflow order later
+    cur = provider_id
+    while True:
+        node = plan[cur]
+        if getattr(node, "is_scan", False):
+            scan_id = cur
+            break
+        # A middle op must be STATELESS and feed exactly this leg (one outgoing
+        # edge into the chain). Anything else (a breaker, a fan-in) rejects.
+        meta = registry.get(type(node))
+        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+            return None
+        ins = list(plan.ingoing_edges(cur))
+        if len(ins) != 1:
+            return None
+        chain.append(cur)
+        cur = ins[0][0]
+    chain.reverse()  # now scan-side-first (dataflow order), excludes scan & join
+    return scan_id, chain
+
+
+def _find_parallel_join(plan):
+    """Return a struct describing a parallel INNER-EQUI-JOIN shape, else ``None``.
+
+    THREAD-LOCAL-FULL parallel probe: the build side is prepared ONCE serially
+    (the join accumulates left + builds ``left_hash`` at left-EOS); then W workers
+    each rebuild their OWN private join engine from the shared read-only
+    ``left_morsel`` and probe a DISJOINT slice of the probe scan. No shared mutable
+    engine → no data race → no draken/C++ change.
+
+    Detect ONLY the provably-safe shape; anything else returns ``None`` (serial):
+      * exactly 2 scans, exactly 1 join, and the join is ``DrakenInnerJoinNode``
+        (inner-equi only — Outer/Semi/Anti/Cross/NonEqui/Asof/Filter rejected by
+        class);
+      * the join's ``_compiled_right_evals`` is empty — a non-empty right ON-eval
+        mutates the shared ``self.right_columns`` during probe (a data race);
+      * both legs are a clean linear ``scan → stateless* → join`` chain;
+      * every node between the join and the Exit is STATELESS — no aggregate /
+        sort / distinct / limit may depend on probe emission order (workers emit
+        out of order).
+
+    Returns a struct with build/probe scan + middle ids, join id, the downstream
+    ids (join→exit, exclusive), and the exit id."""
+    registry = get_registry()
+    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
+    if len(scans) != 2:
+        return None
+    joins = [nid for nid in plan.nodes() if getattr(plan[nid], "is_join", False)]
+    if len(joins) != 1:
+        return None
+    join_id = joins[0]
+    join = plan[join_id]
+    if join.__class__.__name__ != "DrakenInnerJoinNode":
+        return None
+    # A non-empty right ON-eval appends to the shared `right_columns` list during
+    # probe — a data race across workers sharing the original column list. v1
+    # requires it empty. (Left evals are fine: they run once in the serial build.)
+    if getattr(join, "_compiled_right_evals", None):
+        return None
+
+    # Identify the two legs by edge label ('left' = build, 'right' = probe). The
+    # label may be empty on synthesised joins → fall back to ingoing-edge order
+    # (first = left, second = right), mirroring pipeline_compiler.
+    legs = {}
+    for idx, (provider, _target, label) in enumerate(plan.ingoing_edges(join_id)):
+        if not label:
+            label = "left" if idx == 0 else "right"
+        legs[label] = provider
+    if "left" not in legs or "right" not in legs:
+        return None
+
+    build_leg = _walk_leg_to_scan(plan, legs["left"], join_id, registry)
+    probe_leg = _walk_leg_to_scan(plan, legs["right"], join_id, registry)
+    if build_leg is None or probe_leg is None:
+        return None
+    build_scan_id, build_middle_ids = build_leg
+    probe_scan_id, probe_middle_ids = probe_leg
+
+    # Downstream chain join → exit (exclusive of both): every node must be
+    # STATELESS so out-of-order probe emission is safe (no sort/agg/distinct/limit
+    # may sit here). The single-output topology makes the walk unambiguous.
+    downstream_ids = []
+    cur = join_id
+    exit_id = None
+    while True:
+        outs = list(plan.outgoing_edges(cur))
+        if not outs:
+            # `cur` is a sink with no Exit — degenerate; reject.
+            return None
+        nxt = outs[0][1]
+        node = plan[nxt]
+        if node.__class__.__name__ == "ExitNode":
+            exit_id = nxt
+            break
+        meta = registry.get(type(node))
+        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+            return None
+        downstream_ids.append(nxt)
+        cur = nxt
+    if exit_id is None:
+        return None
+
+    return _ParallelJoinShape(
+        build_scan_id=build_scan_id,
+        build_middle_ids=build_middle_ids,
+        probe_scan_id=probe_scan_id,
+        probe_middle_ids=probe_middle_ids,
+        join_id=join_id,
+        downstream_ids=downstream_ids,
+        exit_id=exit_id,
+    )
+
+
+@dataclass(frozen=True)
+class _ParallelJoinShape:
+    """The detected parallel inner-equi-join shape (see ``_find_parallel_join``)."""
+
+    build_scan_id: str
+    build_middle_ids: list
+    probe_scan_id: str
+    probe_middle_ids: list
+    join_id: str
+    downstream_ids: list
+    exit_id: str
+
+
 def _clone_op(op):
     """A fresh, independent instance of a push operator — re-running __init__
     rebuilds its private state (compiled bytecode, a clean aggregate engine).
@@ -361,6 +496,19 @@ def execute(plan, head_node=None, telemetry=None):
         if (grouped is not None or ungrouped is not None or distinct is not None)
         else _find_parallel_stateless(plan)
     )
+    # The join shape is a TWO-scan plan, so none of the single-scan finders above
+    # can match it — try it only when they all declined (it currently falls to the
+    # serial-inline path).
+    join = (
+        _find_parallel_join(plan)
+        if (
+            grouped is None
+            and ungrouped is None
+            and distinct is None
+            and stateless is None
+        )
+        else None
+    )
 
     workers = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
 
@@ -370,7 +518,13 @@ def execute(plan, head_node=None, telemetry=None):
     if distinct is not None and workers < 2:
         distinct = None
 
-    if grouped is None and ungrouped is None and distinct is None and stateless is None:
+    if (
+        grouped is None
+        and ungrouped is None
+        and distinct is None
+        and stateless is None
+        and join is None
+    ):
         # No PARALLEL strategy for this shape (joins, set ops, window, sort,
         # limit-only, subqueries, bare/projection-only scans, DISTINCT at W=1) —
         # drive it SERIAL-INLINE. This is the "serial-driven inline where it cannot
@@ -390,6 +544,16 @@ def execute(plan, head_node=None, telemetry=None):
         agg_stream = _grouped_agg_route if config.M4_ROUTE_AGG else _grouped_agg_stream
         return (
             agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
+            ResultType.TABULAR,
+        )
+
+    # Parallel inner-equi-join (THREAD-LOCAL-FULL probe). Build once serially,
+    # then W workers probe disjoint slices with their own private engines.
+    if join is not None:
+        if telemetry is not None:
+            telemetry._reading["parallel_engaged"] = 1
+        return (
+            _join_probe_stream(plan, join, workers, telemetry),
             ResultType.TABULAR,
         )
 
@@ -1315,3 +1479,221 @@ def _stateless_stream(plan, scan_id, op_ids, exit_id, workers, telemetry=None):
             pool.shutdown(wait=True)
         ctx.terminate()
         scan.close_source()
+
+
+def _join_probe_stream(plan, shape, workers, telemetry=None):
+    """Parallel INNER-EQUI-JOIN by THREAD-LOCAL-FULL probe (M4).
+
+    The build side is prepared ONCE serially through the normal push chain — the
+    join accumulates its left input and builds ``left_hash`` at left-EOS, emitting
+    NOTHING downstream during the build. Then W workers each rebuild their OWN
+    private join engine (a fresh ``build_side_carchar_morsel_map`` over the shared
+    READ-ONLY ``left_morsel``) and probe a DISJOINT slice of the probe scan,
+    streaming matches through a cloned ``[probe-middle* → JoinRightAdapter →
+    join → downstream* → Exit]`` chain into a shared queue. No worker mutates the
+    original join, and the shared ``left_morsel`` is immutable column data — so no
+    data race, and no draken/C++ change. Probe emission is unordered across
+    workers; the finder guarantees no downstream op depends on order."""
+    import queue as _queue
+    import threading
+
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import build_side_carchar_morsel_map
+    from opteryx.operators._operators import drive_scan
+    from opteryx.operators._operators import pull_one
+    from opteryx.operators import JoinRightAdapter
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    build_scan = plan[shape.build_scan_id]
+    probe_scan = plan[shape.probe_scan_id]
+    j = plan[shape.join_id]
+
+    # Resolve the (scan, chain_head) pairs the compiler wired for each leg.
+    build_head = None
+    probe_head = None
+    for scan, head in chains:
+        if scan is build_scan:
+            build_head = head
+        elif scan is probe_scan:
+            probe_head = head
+    if build_head is None or probe_head is None:
+        # Compiler did not produce the expected legs — refuse to guess, run serial.
+        ctx.terminate()
+        yield from _serial_stream(plan)
+        return
+
+    def _drain():
+        if exit_node is None:
+            return
+        while exit_node.has_pending():
+            yield exit_node.pop_pending()
+
+    pool = None
+    try:
+        # ---- SERIAL BUILD PRELUDE ------------------------------------------------
+        # Drive the BUILD leg to completion. The join accumulates left + builds
+        # left_hash at left-EOS and emits NOTHING downstream (build-side EOS is
+        # absorbed), so this yields nothing — it just builds the engine on j.
+        for _ in drive_scan(build_scan, build_head, exit_node, ctx):
+            pass
+        if ctx.is_terminated():
+            return
+
+        # Capture the prepared build state (post ON-eval / projection).
+        left_morsel = j.left_morsel
+        left_columns = j.left_columns
+        left_is_empty = j.left_is_empty
+        columns = j.columns
+        load_factor = j.carchar_probe_load_factor
+
+        # Empty build side: an inner join yields nothing. Push EOS through the
+        # original wired probe chain once so the join's EOS path (telemetry flush +
+        # downstream EOS → the schema morsel) runs exactly once, then return.
+        if left_is_empty:
+            push_one(probe_head, _EOS_SENTINEL)
+            yield from _drain()
+            return
+
+        # ---- Row-floor: tiny probe inputs run serially (clone + thread setup
+        # dominates). Buffer the floor sample, and if the probe is below the floor
+        # drive the WHOLE join serially through the original probe chain — this is
+        # byte-identical to _serial_stream's probe drive (and to DOP=1).
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = pull_one(probe_scan)
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            for morsel in buffer:
+                if ctx.is_terminated():
+                    break
+                push_one(probe_head, morsel)
+                yield from _drain()
+            if not ctx.is_terminated():
+                push_one(probe_head, _EOS_SENTINEL)
+                yield from _drain()
+            return
+
+        # ---- PARALLEL PROBE ------------------------------------------------------
+        out_q = _queue.Queue()
+        DONE = object()
+        errors = [None] * workers
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+        concurrent_safe = probe_scan.is_concurrent_pull_safe()
+
+        def _next_input():
+            # Buffered floor sample first (locked; tiny), then self-pull the scan.
+            # The pull is lockless only when the source is reentrant; otherwise the
+            # whole pull is serialised (a correctness gate, not a perf toggle).
+            if concurrent_safe:
+                with pull_lock:
+                    m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                if ctx.is_terminated():
+                    return None
+                return pull_one(probe_scan)
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                return pull_one(probe_scan)
+
+        def worker(index):
+            # Each worker owns a fresh, private join clone + its own engine built
+            # over the shared READ-ONLY left_morsel. No worker touches `j`.
+            clone_join = _clone_op(j)
+            clone_join.left_morsel = left_morsel
+            clone_join.left_columns = left_columns
+            clone_join.columns = columns
+            clone_join.left_is_empty = left_is_empty
+            clone_join.carchar_probe_load_factor = load_factor
+            clone_join.left_hash = build_side_carchar_morsel_map(
+                left_morsel, left_columns, load_factor, clone_join.kernel_metrics
+            )
+            clone_join._build_complete = True
+            clone_join.set_context(ctx)
+
+            # Build the worker's downstream chain: clone_join → downstream* → Exit.
+            downstream_chain = [_clone_op(plan[nid]) for nid in shape.downstream_ids]
+            exit_clone = _clone_op(plan[shape.exit_id])
+            tail = downstream_chain + [exit_clone]
+            for i, op in enumerate(tail):
+                op.set_context(ctx)
+                if i + 1 < len(tail):
+                    op.set_downstream(tail[i + 1])
+            clone_join.set_downstream(tail[0])
+
+            # Build the worker's probe-ops chain → adapter (the adapter routes into
+            # clone_join.push_right; adapters have NO downstream of their own).
+            probe_ops = [_clone_op(plan[nid]) for nid in shape.probe_middle_ids]
+            adapter = JoinRightAdapter(clone_join)
+            adapter.set_context(ctx)
+            probe_chain = probe_ops + [adapter]
+            for i, op in enumerate(probe_chain):
+                op.set_context(ctx)
+                if i + 1 < len(probe_chain):
+                    op.set_downstream(probe_chain[i + 1])
+            probe_head_clone = probe_chain[0]
+
+            try:
+                while True:
+                    morsel = _next_input()
+                    if morsel is None:
+                        break
+                    push_one(probe_head_clone, morsel)
+                    while exit_clone.has_pending():
+                        out_q.put(exit_clone.pop_pending())
+                if not ctx.is_terminated():
+                    # Probe-side EOS: clone_join flushes + emits EOS to exit_clone.
+                    push_one(probe_head_clone, _EOS_SENTINEL)
+                    while exit_clone.has_pending():
+                        out_q.put(exit_clone.pop_pending())
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
+                errors[index] = exc
+            finally:
+                out_q.put(DONE)
+
+        pool = CppThreadPool(workers, "m4-join-probe")
+        futures = [pool.submit(worker, k) for k in range(workers)]
+
+        # Stream matches to the caller as workers produce them.
+        done = 0
+        yielded = False
+        while done < workers:
+            item = out_q.get()
+            if item is DONE:
+                done += 1
+                continue
+            yielded = True
+            yield item
+
+        for future in futures:
+            future.result()
+        for exc in errors:
+            if exc is not None:
+                raise exc
+
+        # An all-non-matching join still needs the schema morsel the Exit emits on
+        # EOS. The per-worker Exit clones each emit their own EOS schema morsel
+        # already when they produced rows; when NO worker produced anything, drive
+        # a single EOS through the original chain so the schema morsel surfaces.
+        if not yielded and not ctx.is_terminated():
+            push_one(probe_head, _EOS_SENTINEL)
+            yield from _drain()
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+        ctx.terminate()
+        build_scan.close_source()
+        probe_scan.close_source()

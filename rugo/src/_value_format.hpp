@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 
 #include "core/buffers.h"
@@ -25,8 +26,11 @@ inline void fmt_int64(std::string &out, int64_t v) {
 
 inline void fmt_double(std::string &out, double v) {
   // shortest round-trippable, conventional notation (like Python repr)
-  char buf[32];
-  std::to_chars_result r = std::to_chars(buf, buf + sizeof(buf), v);
+  char buf[64];
+  std::to_chars_result r = std::to_chars(
+      buf, buf + sizeof(buf), v,
+      std::chars_format::general,
+      std::numeric_limits<double>::max_digits10);
   out.append(buf, r.ptr - buf);
 }
 
