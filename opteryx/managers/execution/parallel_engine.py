@@ -386,8 +386,10 @@ def execute(plan, head_node=None, telemetry=None):
         if telemetry is not None:
             telemetry._reading["parallel_engaged"] = 1
         scan_id, middle_ids, breaker_id = grouped
+        # M4 Stage 2: route-on-abandon (parallel sink) when enabled; else row-routing.
+        agg_stream = _grouped_agg_route if config.M4_ROUTE_AGG else _grouped_agg_stream
         return (
-            _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
+            agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetry),
             ResultType.TABULAR,
         )
 
@@ -686,13 +688,27 @@ def _distinct_stream(plan, scan_id, middle_ids, breaker_id, exit_id, workers, te
         shuffle = [None] * workers
         err_a = [None] * workers
 
+        # Concurrent self-pull is correct ONLY if the source's next_morsel is
+        # reentrant (native single-pass parquet). For any other source (two-pass
+        # latmat, empty-manifest fallback, non-parquet generators) the live pull
+        # MUST be serialised, or N workers re-enter one non-reentrant generator
+        # and crash. This is a correctness gate, not a perf toggle.
+        concurrent_safe = scan.is_concurrent_pull_safe()
+
         def _next_input():
-            # Buffered floor sample first (locked; tiny), then reentrant self-pull.
+            if concurrent_safe:
+                # Buffered floor sample first (locked; tiny), then reentrant self-pull.
+                with input_lock:
+                    m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                return pull_one(scan)
+            # Non-reentrant source: serialise the whole pull under the lock.
             with input_lock:
                 m = next(buf_iter, None)
-            if m is not None:
-                return m
-            return pull_one(scan)
+                if m is not None:
+                    return m
+                return pull_one(scan)
 
         def pipe1_worker(w):
             dest = [[] for _ in range(workers)]
@@ -992,6 +1008,188 @@ def _grouped_agg_stream(plan, scan_id, middle_ids, breaker_id, workers, telemetr
         push_one(breaker, _EOS_SENTINEL)
         yield from _drain()
     finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+        ctx.terminate()
+        scan.close_source()
+
+
+def _grouped_agg_route(plan, scan_id, middle_ids, breaker_id, workers, telemetry=None):
+    """Parallel GROUP BY by ROUTE-RAW (M4 Stage 2, route-on-abandon SINK).
+
+    Unlike ``_grouped_agg_stream`` (one SERIAL producer scatters every morsel, then W
+    workers key their bin), here each worker SELF-PULLS its own morsels, runs them
+    through its OWN cloned ``scan→middle→breaker-prepare`` chain, and routes the
+    prepared morsels raw into its OWN thread-local ``radix`` partition bins. There is
+    NO serial scatter — that serial pass is the Amdahl ceiling the row-routing path
+    hits (~2.73× on real int-key data). A short Combine hands the thread-local bins off
+    to global per-partition lists; then a parallel per-partition read-out aggregates
+    each partition exactly once (``hash(key) % radix`` co-locates a group in ONE
+    partition, so the partition engines concat with NO merge — the identical
+    ``breaker._parallel_engines`` finalize the row-routing path uses).
+
+    Increment 1: ALWAYS route (no bounded-adaptive pre-aggregate yet — that switch is
+    prototype-validated in scratch/ddb_proto/demo_agg_adaptive.py and lands next). The
+    result is identical to serial; gated behind ``config.M4_ROUTE_AGG``, DOP-sweep-gated.
+    """
+    import threading
+
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import pull_one
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    scan = plan[scan_id]
+    breaker = plan[breaker_id]
+    head = plan[middle_ids[0]] if middle_ids else breaker
+
+    # radix = next power of two >= workers (>= so the read-out has >= DOP parallelism).
+    radix = 1
+    while radix < workers:
+        radix <<= 1
+
+    def _drain():
+        if exit_node is None:
+            return
+        while exit_node.has_pending():
+            yield exit_node.pop_pending()
+
+    pool = None
+    rpool = None
+    try:
+        # Row-floor: tiny inputs run serially through the ORIGINAL breaker (real engine,
+        # untouched) — identical to _grouped_agg_stream's floor.
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = pull_one(scan)
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            for morsel in buffer:
+                if ctx.is_terminated():
+                    break
+                push_one(head, morsel)
+                yield from _drain()
+            if not ctx.is_terminated():
+                push_one(head, _EOS_SENTINEL)
+                yield from _drain()
+            return
+
+        if telemetry is not None:
+            telemetry._reading["parallel_engaged"] = 1
+            telemetry._reading["route_agg_workers"] = workers
+            telemetry._reading["route_agg_radix"] = radix
+
+        # ---- Parallel route-raw SINK: each worker self-pulls, prepares, routes -----
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+
+        def next_input():
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                buffered = next(buf_iter, None)
+                if buffered is not None:
+                    return buffered
+                return pull_one(scan)
+
+        sink_bins = [None] * workers  # sink_bins[w][p] -> list[Morsel]
+        errors = [None] * workers
+
+        def sink_worker(index):
+            try:
+                clones = [_clone_op(plan[nid]) for nid in middle_ids]
+                cloned_breaker = _clone_op(breaker)
+                chain = clones + [cloned_breaker]
+                for i, op in enumerate(chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(chain):
+                        op.set_downstream(chain[i + 1])
+                # Swap the cloned breaker's GroupHashEngine for a thread-local scatter
+                # into `radix` bins (its own real engine is the key-position resolver).
+                route_engine = _ScatterCollectEngine(radix, cloned_breaker._engine)
+                cloned_breaker._engine = route_engine
+                h = chain[0]
+                while True:
+                    morsel = next_input()
+                    if morsel is None:
+                        break
+                    push_one(h, morsel)  # → cloned prepare/select → scatter to bins
+                sink_bins[index] = route_engine.bins
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
+                errors[index] = exc
+
+        pool = CppThreadPool(workers, "m4-route-sink")
+        futures = [pool.submit(sink_worker, k) for k in range(workers)]
+        for future in futures:
+            future.result()
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        # ---- Combine: O(partitions) hand-off of thread-local bins → global lists ---
+        global_bins = [[] for _ in range(radix)]
+        for w in range(workers):
+            wb = sink_bins[w]
+            if wb is None:
+                continue
+            for p in range(radix):
+                if wb[p]:
+                    global_bins[p].extend(wb[p])
+
+        # ---- Parallel per-partition READ-OUT: aggregate each partition ONCE --------
+        part_engines = [None] * radix
+        part_rows = [0] * radix
+        rerr = [None] * radix
+
+        def readout_worker(p):
+            try:
+                engine = _clone_op(breaker)._engine
+                count = 0
+                for chunk in global_bins[p]:
+                    if ctx.is_terminated():
+                        break
+                    engine.ingest(chunk)
+                    count += chunk.num_rows
+                part_engines[p] = engine
+                part_rows[p] = count
+            except BaseException as exc:  # noqa: BLE001
+                rerr[p] = exc
+
+        rpool = CppThreadPool(max(1, min(radix, workers)), "m4-route-readout")
+        rfutures = [rpool.submit(readout_worker, p) for p in range(radix)]
+        for future in rfutures:
+            future.result()
+        for exc in rerr:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        if telemetry is not None:
+            telemetry._reading["route_agg_total_rows"] = sum(part_rows)
+            telemetry._reading["route_agg_ndv"] = sum(
+                e.num_groups() for e in part_engines if e is not None
+            )
+
+        # ---- Finalize: concat the populated partition engines (no merge) via Exit --
+        populated = [p for p in range(radix) if part_rows[p] > 0]
+        breaker._parallel_engines = (
+            [part_engines[p] for p in populated] if populated else [_clone_op(breaker)._engine]
+        )
+        push_one(breaker, _EOS_SENTINEL)
+        yield from _drain()
+    finally:
+        if rpool is not None:
+            rpool.shutdown(wait=True)
         if pool is not None:
             pool.shutdown(wait=True)
         ctx.terminate()

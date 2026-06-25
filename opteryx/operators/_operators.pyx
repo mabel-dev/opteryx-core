@@ -543,6 +543,21 @@ cdef class BasePlanNode:
         if close is not None:
             close()
 
+    cpdef bint is_concurrent_pull_safe(self) except *:
+        """May N worker threads call ``pull_one(self)`` (i.e. ``next_morsel``)
+        CONCURRENTLY and each receive a distinct morsel, with no external lock?
+
+        This is a CORRECTNESS capability, not a performance hint. The default is
+        ``False``: the base source iterates a non-reentrant Python generator
+        (``_next_morsel_py`` → ``read_morsels()``), so concurrent callers would
+        re-enter the same generator and crash (``generator already executing``)
+        or corrupt its state. Only a source whose ``next_morsel`` override is
+        genuinely reentrant (its own internal mutex hands each caller a disjoint,
+        already-decoded unit) may return ``True``. The parallel strategies use
+        this to decide between lockless self-pull and a serialised (locked) pull;
+        a ``False`` here forces the safe serialised path, never silent breakage."""
+        return False
+
     # ---- Pipeline wiring (called by pipeline_compiler) --------------------------
     cpdef void set_downstream(self, BasePlanNode node) except *:
         self._downstream = node

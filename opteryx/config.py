@@ -191,6 +191,19 @@ M4_USE_SCHEDULER: bool = str(get("M4_USE_SCHEDULER", "0")).lower() in ("1", "tru
 Default off. Stage 0 is a functional no-op (serial-identical output) used to stand
 up and validate the scheduler scaffold; see docs/M4_SEGMENT_SCHEDULER_SHUFFLE_DESIGN.md."""
 
+M4_ROUTE_AGG: bool = str(get("M4_ROUTE_AGG", "1")).lower() in ("1", "true", "yes")
+"""M4 — route-on-abandon grouped aggregate (parallel SINK). **Now the DEFAULT** grouped
+GROUP BY path (``_grouped_agg_route``): each worker SELF-PULLS + prepares its own morsels
+and routes raw to thread-local radix partition buffers (no serial scatter — the Amdahl
+ceiling the legacy row-routing path hits), then a parallel per-partition read-out
+aggregates each partition once. Certified on full ``scratch.hits`` by ``make m4-sweep``:
+byte-identical to the serial path (COUNT/SUM/MIN/MAX/AVG/APPROX_PERCENTILE/COUNT(DISTINCT),
+NULL keys, int/temporal/string/multi-col), DOP=1 within noise, and 4.5–5.1× @ DOP8 on
+cheap-decode aggregates. Set ``M4_ROUTE_AGG=0`` to fall back to the legacy serial-scatter
+path (``_grouped_agg_stream``) — kept as the A/B reference the sweep gate toggles, to be
+retired (W1.3) once route has soaked. String GROUP BY is decode-capped (~1.8×) pending the
+unified thread budget — see docs/PARALLEL_ENGINE_DESIGN.md."""
+
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

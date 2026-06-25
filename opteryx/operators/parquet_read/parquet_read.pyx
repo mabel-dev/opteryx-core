@@ -940,6 +940,19 @@ cdef class ParquetReadNode(ReaderNode):
             new_pass2_work.append((key[0], key[1], bytes(reduced)))
         return new_pass2_work, winners_by_rg
 
+    cpdef bint is_concurrent_pull_safe(self) except *:
+        """Reentrant for concurrent ``pull_one`` ONLY in single-pass mode (see
+        ``next_morsel``'s contract). The two-pass LATMAT state machine (shared
+        ``_lm_p1_cache``, unguarded pass-1 barrier) and the empty-manifest
+        FALLBACK generator are NOT reentrant. The mode is a runtime decision, so
+        resolve it here under the same init lock the pull uses, then report it —
+        the parallel strategies branch lockless-vs-serialised pull on this."""
+        self._scan_mtx.lock()
+        if not self._scan_started:
+            self._ensure_scan_started()
+        self._scan_mtx.unlock()
+        return self._scan_mode == _SCAN_SINGLE
+
     cdef shared_ptr[CxxMorsel] next_morsel(self) except *:
         """Native source iterator (overrides BasePlanNode). On first call it
         plans the scan; thereafter it returns one morsel per call as the C++
