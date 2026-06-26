@@ -1024,6 +1024,45 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         func = "COUNT"
         duplicate_treatment = "Distinct"
 
+    # NULLIF(a, b) → IIF(a = b, NULL, a). Lowered to a native comparison + IIF at
+    # plan-build time so it never touches a Python kernel. `a` is shared between the
+    # equality and the else-branch — the evaluator CSEs by node identity, matching
+    # the existing CASE→IIF / CASE→IFNULL rewrites. The NULL literal carries type
+    # NULL; vector_iif adopts `a`'s type for the result (incl. DECIMAL/TIMESTAMP).
+    if func == "NULLIF":
+        if len(args) != 2:
+            raise SqlError("NULLIF expects exactly two arguments.")
+        value_node, compare_node = args[0], args[1]
+        equality = Node(
+            NodeType.COMPARISON_OPERATOR, value="Eq", left=value_node, right=compare_node
+        )
+        null_literal = Node(NodeType.LITERAL, type=_CT_NULL, value=None)
+        node = Node(
+            node_type=NodeType.FUNCTION,
+            value="IIF",
+            parameters=[equality, null_literal, value_node],
+            alias=alias,
+        )
+        node.qualified_name = format_expression(node)
+        return node
+
+    # ARRAY_CONTAINS(arr, item) → item = ANY(arr). A single-item membership test
+    # is exactly the native AnyOpEq operator (the same `= ANY` / `@>` family),
+    # so lower it at plan-build time instead of routing through a Python kernel.
+    if func == "ARRAY_CONTAINS":
+        if len(args) != 2:
+            raise SqlError("ARRAY_CONTAINS expects exactly two arguments.")
+        array_node, item_node = args[0], args[1]
+        node = Node(
+            NodeType.COMPARISON_OPERATOR,
+            value="AnyOpEq",
+            left=item_node,
+            right=array_node,
+            alias=alias,
+        )
+        node.qualified_name = format_expression(node)
+        return node
+
     node = Node(
         node_type=node_type,
         value=func,

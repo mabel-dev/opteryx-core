@@ -32,7 +32,9 @@ helpers (``_clone_op``, ``_ScatterCollectEngine``) are imported lazily inside th
 adapter methods so ``parallel_engine`` can import this module at the top level.
 """
 
+from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class RecombClass(Enum):
@@ -49,8 +51,6 @@ class RecombClass(Enum):
                                per-partition read-out. Grouped aggregate, distinct.
       * ``SHARED_SOURCE``    — inner-equi join; combine = no-op (built once);
                                finalize = streaming probe. (Step 5, reserved.)
-      * ``ORDER_MERGE``      — sort; combine = register a sorted run; finalize =
-                               k-way merge tail. (Step 8, reserved.)
       * ``NONE``             — no generic parallel sink; the segment runs serial
                                (today's ``_finalize`` verbatim). Everything un-migrated.
     """
@@ -58,8 +58,36 @@ class RecombClass(Enum):
     SCALAR_MERGE = "scalar_merge"
     HASH_REPARTITION = "hash_repartition"
     SHARED_SOURCE = "shared_source"
-    ORDER_MERGE = "order_merge"
     NONE = "none"
+
+
+@dataclass(frozen=True)
+class ParallelSinkSpec:
+    """A breaker's declared parallel-sink capability — the catalog field that
+    retires the class-name dispatch dicts (design §1.4 Phase A).
+
+    The operator gains ONE piece of self-knowledge — "here is my parallel-sink
+    factory, or None" — a declared capability, not parallel logic (Option A). The
+    recombination contract still lives OUTSIDE the operator (the adapter); the
+    catalog merely carries the pointer to it.
+
+      ``recomb_class`` — how W per-worker partials recombine (the dispatch key the
+                         generic executor reads).
+      ``adapter``      — the concrete ``PipelineSink`` subclass to instantiate.
+      ``min_workers``  — the segment parallelises only at ``>= this DOP``. Distinct's
+                         serial dedup is fine at ``W=1`` (scatter + thread setup is
+                         pure overhead there), so its sink declares ``2``.
+      ``eligible``     — per-instance gate, or ``None`` (always eligible). Some
+                         breakers parallelise only for certain configurations — a
+                         mergeable ungrouped engine, a grouped breaker with real
+                         group columns. ``eligible(node) -> False`` runs the segment
+                         serial *by declaration*, not by falling off a matcher.
+    """
+
+    recomb_class: RecombClass
+    adapter: type
+    min_workers: int = 1
+    eligible: object = None
 
 
 class PipelineSink:
@@ -513,35 +541,59 @@ class _DistinctSink(PipelineSink):
 
 
 # ---------------------------------------------------------------------------------
-# Dispatch registries (design §1.3). Two maps, both keyed by operator class NAME (not
-# the class object, to avoid importing the Cython operators here):
+# Declared sink capabilities (design §1.4 Phase A). Each parallelisable breaker
+# declares a ``ParallelSinkSpec`` on its catalog metadata (``catalog.py``); the
+# specs below are the concrete capabilities the three migrated breakers expose. The
+# previous class-name dispatch dicts (``_RECOMB_BY_CLASS`` / ``_ADAPTER_BY_CLASS``)
+# are retired — resolution is now off the catalog meta, not ``node.__class__``.
 #
-#   _RECOMB_BY_CLASS  — breaker class → RecombClass taxonomy label (the dispatch key
-#                       the generic executor reads). Distinct and grouped agg are
-#                       BOTH HASH_REPARTITION yet recombine via DIFFERENT adapters.
-#   _ADAPTER_BY_CLASS — breaker class → the concrete PipelineSink adapter. Resolves
-#                       the Distinct-vs-grouped-agg ambiguity the coarse taxonomy
-#                       cannot: same RecombClass, different finalize.
-#
-# An operator absent from _RECOMB_BY_CLASS is NONE → the segment runs serial.
+# A breaker whose catalog meta carries no spec resolves to ``RecombClass.NONE`` →
+# the segment runs serial *by declaration*, not by falling off a matcher.
 # ---------------------------------------------------------------------------------
-_RECOMB_BY_CLASS = {
-    "UngroupedAggregateNode": RecombClass.SCALAR_MERGE,
-    "GroupedAggregateHashedNode": RecombClass.HASH_REPARTITION,
-    "DistinctNode": RecombClass.HASH_REPARTITION,
-}
 
-_ADAPTER_BY_CLASS = {
-    "UngroupedAggregateNode": _ScalarMergeSink,
-    "GroupedAggregateHashedNode": _HashRepartitionSink,
-    "DistinctNode": _DistinctSink,
-}
+
+def _ungrouped_eligible(node) -> bool:
+    """An ungrouped aggregate parallelises only with a MERGEABLE engine and NO
+    literal-only aggregates (literal state lives outside ``_engine``, so a scalar
+    merge of only the engine would drop it). Matches the gate the bespoke
+    ``_find_parallel_ungrouped_agg`` matcher enforced."""
+    engine = getattr(node, "_engine", None)
+    return engine is not None and engine.is_mergeable() and not node._has_literals
+
+
+def _grouped_eligible(node) -> bool:
+    """A grouped aggregate with NO group columns is degenerate — there is no key to
+    route on. Matches the gate the bespoke ``_find_parallel_grouped_agg`` enforced."""
+    return bool(node.group_by_columns)
+
+
+# Module-level spec instances, referenced from the catalog's ``parallel_sink`` field.
+SCALAR_MERGE_SINK_SPEC = ParallelSinkSpec(
+    RecombClass.SCALAR_MERGE, _ScalarMergeSink, min_workers=1, eligible=_ungrouped_eligible
+)
+HASH_REPARTITION_AGG_SINK_SPEC = ParallelSinkSpec(
+    RecombClass.HASH_REPARTITION, _HashRepartitionSink, min_workers=1, eligible=_grouped_eligible
+)
+HASH_REPARTITION_DISTINCT_SINK_SPEC = ParallelSinkSpec(
+    RecombClass.HASH_REPARTITION, _DistinctSink, min_workers=2, eligible=None
+)
+
+
+def parallel_sink_spec_for(node) -> Optional[ParallelSinkSpec]:
+    """The declared parallel-sink capability for a breaker node (its catalog
+    ``parallel_sink``), or ``None`` if it declares no parallel sink."""
+    from opteryx.operators.catalog import get_registry
+
+    meta = get_registry().get(type(node))
+    return meta.parallel_sink if meta is not None else None
 
 
 def recombination_class_for(node) -> RecombClass:
-    """The recombination class for a breaker node, or ``NONE`` if no generic sink
-    handles its shape (→ serial)."""
-    return _RECOMB_BY_CLASS.get(node.__class__.__name__, RecombClass.NONE)
+    """The recombination class for a breaker node, resolved off its catalog
+    ``parallel_sink`` capability, or ``NONE`` if it declares no generic sink
+    (→ serial)."""
+    spec = parallel_sink_spec_for(node)
+    return spec.recomb_class if spec is not None else RecombClass.NONE
 
 
 def make_sink(
@@ -554,28 +606,28 @@ def make_sink(
     downstream=None,
     telemetry=None,
 ):
-    """Construct the ``PipelineSink`` adapter for ``node``.
+    """Construct the ``PipelineSink`` adapter for ``node`` from its declared catalog
+    capability (``parallel_sink``).
 
-    The adapter is chosen by NODE CLASS (``_ADAPTER_BY_CLASS``), not by the coarse
-    ``recomb_class`` taxonomy — Distinct and grouped aggregate are BOTH
-    HASH_REPARTITION yet need DIFFERENT adapters (``_DistinctSink`` vs
+    The adapter class is the one the spec names — Distinct and grouped aggregate are
+    BOTH HASH_REPARTITION yet name DIFFERENT adapters (``_DistinctSink`` vs
     ``_HashRepartitionSink``). ``recomb_class`` is still validated against the
-    per-class taxonomy so a mismatch fails loud rather than silently picking the
-    wrong sink.
+    declared spec so a mismatch fails loud rather than silently picking the wrong
+    sink.
 
     ``radix`` / ``pool_factory`` / ``ctx`` are required only for HASH_REPARTITION
     (the parallel read-out); ``downstream`` (the breaker's real downstream node) is
-    required only for the distinct sink. Returns ``None`` when no adapter handles the
-    class (→ the segment runs serial)."""
-    adapter = _ADAPTER_BY_CLASS.get(node.__class__.__name__)
-    if adapter is None:
+    required only for the distinct sink. Returns ``None`` when the node declares no
+    sink (→ the segment runs serial)."""
+    spec = parallel_sink_spec_for(node)
+    if spec is None:
         return None
-    expected = _RECOMB_BY_CLASS.get(node.__class__.__name__)
-    if expected is not recomb_class:
+    if spec.recomb_class is not recomb_class:
         raise RuntimeError(
-            f"make_sink: recomb_class {recomb_class!r} does not match the "
-            f"registered class for {node.__class__.__name__} ({expected!r})"
+            f"make_sink: recomb_class {recomb_class!r} does not match the declared "
+            f"spec for {node.__class__.__name__} ({spec.recomb_class!r})"
         )
+    adapter = spec.adapter
     if adapter is _ScalarMergeSink:
         return _ScalarMergeSink(node)
     if adapter is _HashRepartitionSink:

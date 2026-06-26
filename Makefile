@@ -46,7 +46,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et q reference
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et q reference function-costs
 
 # Default target
 .DEFAULT_GOAL := help
@@ -56,6 +56,24 @@ endef
 reference: check-python ## Regenerate all reference catalogs (JSON + catalog Python files)
 	$(call print_blue,"Regenerating reference catalogs...")
 	@$(PYTHON) dev/generate_reference.py
+
+# Calibration target (like clickbench-duckdb / tpch-bench-duckdb): re-runs a
+# benchmark to regenerate stored numbers. Deliberately OUTSIDE `reference` and the
+# pre-commit hook — it is slow and machine-dependent. It measures each function
+# kernel's marginal per-row cost through the real bytecode evaluator, writes the
+# results into the registrars, recompiles so the catalog carries them, then
+# regenerates `reference` (function_signatures.json embeds cost_us_per_million).
+# Override the sweep with COST_ARGS, e.g. COST_ARGS="--budget 0.3 --reps 5".
+function-costs: check-python ## Re-measure function execution costs and bake them into the catalog + reference (slow)
+	$(call print_blue,"Sweeping function execution costs (subprocess-isolated; a few minutes)...")
+	@$(PYTHON) dev/sweep_function_costs.py --output dev/function_costs.json $(COST_ARGS)
+	$(call print_blue,"Writing measured costs into the registrars...")
+	@$(PYTHON) dev/import_function_costs.py dev/function_costs.json --apply
+	$(call print_blue,"Recompiling so the catalog carries the refreshed costs...")
+	@$(MAKE) c
+	$(call print_blue,"Regenerating reference catalogs (signatures embed cost)...")
+	@$(MAKE) reference
+	$(call print_green,"Function costs refreshed and baked into the catalog + reference.")
 
 # === LINTING AND FORMATTING ===
 

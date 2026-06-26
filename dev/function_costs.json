@@ -1,1333 +1,1179 @@
 {
-  "timestamp": 1774303760.0702589,
-  "total_functions": 87,
-  "total_kernels": 96,
-  "successful": 96,
+  "method": "marginal per-row cost via bytecode evaluator (func - identity baseline)",
+  "driver": "sweep_function_costs.py (subprocess-isolated)",
+  "timestamp": 1782479043.6129751,
+  "sample_size": 200000,
+  "measured_kernels": 55,
+  "failed_kernels": 44,
+  "crashed_functions": [
+    "BASE64_DECODE",
+    "HEX_DECODE"
+  ],
   "functions": {
-    "UPPER": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 8.0668,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.167,
-        "max_us": 29.875,
-        "avg_us": 8.0668,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LOWER": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 7.708400000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.209,
-        "max_us": 27.542,
-        "avg_us": 7.7084,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LENGTH": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 6.424600000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.25,
-        "max_us": 21.416,
-        "avg_us": 6.424600000000001,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 5.9164,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.542,
-        "max_us": 17.333,
-        "avg_us": 5.9164,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CONCAT": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 2.1,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.75,
-        "max_us": 7.0,
-        "avg_us": 2.1,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SUBSTRING": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.2082000000000002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 4.625,
-        "avg_us": 1.2082000000000002,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0412000000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 3.666,
-        "avg_us": 1.0412000000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CHAR": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 2.4916,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.541,
-        "max_us": 9.625,
-        "avg_us": 2.4916,
-        "success": true,
-        "error": null
-      }
-    ],
-    "ASCII": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 109566.64180000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 106815.458,
-        "max_us": 117641.334,
-        "avg_us": 109566.64180000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LEFT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 2.1,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 8.834,
-        "avg_us": 2.1,
-        "success": true,
-        "error": null
-      }
-    ],
-    "RIGHT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.1664,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 4.417,
-        "avg_us": 1.1664,
-        "success": true,
-        "error": null
-      }
-    ],
-    "REVERSE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 11.966800000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.292,
-        "max_us": 48.625,
-        "avg_us": 11.966800000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SOUNDEX": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 9.1,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.333,
-        "max_us": 34.834,
-        "avg_us": 9.1,
-        "success": true,
-        "error": null
-      }
-    ],
-    "INITCAP": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 5.975,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.208,
-        "max_us": 20.5,
-        "avg_us": 5.975,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CONCAT_WS": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 1.5912000000000002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 6.291,
-        "avg_us": 1.5912000000000002,
-        "success": true,
-        "error": null
-      }
-    ],
-    "POSITION": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 0.7252,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 2.209,
-        "avg_us": 0.7252,
-        "success": true,
-        "error": null
-      }
-    ],
-    "TRIM": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 1.05,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 3.75,
-        "avg_us": 1.05,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LTRIM": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 0.9667999999999998,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 3.417,
-        "avg_us": 0.9667999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "RTRIM": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 0.8834,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.25,
-        "max_us": 3.083,
-        "avg_us": 0.8834,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LPAD": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0584,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.375,
-        "max_us": 3.625,
-        "avg_us": 1.0584,
-        "success": true,
-        "error": null
-      }
-    ],
-    "RPAD": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7163999999999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.375,
-        "max_us": 1.958,
-        "avg_us": 0.7163999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LEVENSHTEIN": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.767,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.334,
-        "max_us": 2.292,
-        "avg_us": 0.767,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SPLIT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 8.224799999999998,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.375,
-        "max_us": 30.791,
-        "avg_us": 8.224799999999998,
-        "success": true,
-        "error": null
-      }
-    ],
-    "_MATCH_AGAINST": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.1669999999999998,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 4.292,
-        "avg_us": 1.1669999999999998,
-        "success": true,
-        "error": null
-      }
-    ],
-    "REPLACE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.3336,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.417,
-        "max_us": 4.792,
-        "avg_us": 1.3336,
-        "success": true,
-        "error": null
-      }
-    ],
-    "REGEXP_REPLACE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.2332,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.375,
-        "max_us": 4.292,
-        "avg_us": 1.2332,
-        "success": true,
-        "error": null
-      }
-    ],
-    "_GET_STRING": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.6417999999999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.25,
-        "max_us": 1.958,
-        "avg_us": 0.6417999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "ROUND": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 4.9084,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 1.5,
-        "max_us": 17.458,
-        "avg_us": 4.9084,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 0.8416,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 2.75,
-        "avg_us": 0.8416,
-        "success": true,
-        "error": null
-      }
-    ],
     "ABS": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 221.0254,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 130.792,
-        "max_us": 554.709,
-        "avg_us": 221.0254,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CEILING": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 137.675,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 132.125,
-        "max_us": 154.584,
-        "avg_us": 137.675,
-        "success": true,
-        "error": null
-      }
-    ],
-    "FLOOR": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 134.2418,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 128.583,
-        "max_us": 141.667,
-        "avg_us": 134.2418,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SQRT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 242.0582,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 219.791,
-        "max_us": 303.5,
-        "avg_us": 242.0582,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SIGN": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 327.025,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 296.334,
-        "max_us": 439.708,
-        "avg_us": 327.025,
-        "success": true,
-        "error": null
-      }
-    ],
-    "TRUNC": [
-      {
-        "kernel_id": "numeric",
-        "engine": "arrow",
-        "cost_us_per_million": 142.78320000000002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 134.458,
-        "max_us": 154.542,
-        "avg_us": 142.78320000000002,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "temporal",
-        "engine": "arrow",
-        "cost_us_per_million": 0.9584,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 3.292,
-        "avg_us": 0.9583999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "POWER": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.8584000000000002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 2.834,
-        "avg_us": 0.8584000000000002,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LOG": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0417999999999998,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 3.75,
-        "avg_us": 1.0417999999999998,
-        "success": true,
-        "error": null
-      }
-    ],
-    "COALESCE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 15852.508399999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 15319.25,
-        "max_us": 16170.875,
-        "avg_us": 15852.5084,
-        "success": true,
-        "error": null
-      }
-    ],
-    "IFNULL": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.5252,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 6.083,
-        "avg_us": 1.5252,
-        "success": true,
-        "error": null
-      }
-    ],
-    "IFNOTNULL": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7419999999999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 2.167,
-        "avg_us": 0.7419999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "NULLIF": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7165999999999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 2.25,
-        "avg_us": 0.7165999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "IIF": [
-      {
-        "kernel_id": "default",
-        "engine": "draken",
-        "cost_us_per_million": 1.3830000000000002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.375,
-        "max_us": 5.166,
-        "avg_us": 1.3830000000000002,
-        "success": true,
-        "error": null
-      }
-    ],
-    "_PASSTHRU": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.2832,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.042,
-        "max_us": 1.083,
-        "avg_us": 0.2832,
-        "success": true,
-        "error": null
-      }
-    ],
-    "_CASE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0416,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 3.666,
-        "avg_us": 1.0416,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CURRENT_DATE": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0498,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 3.708,
-        "avg_us": 1.0498,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CURRENT_TIME": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7332000000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 2.25,
-        "avg_us": 0.7332000000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CURRENT_TIMESTAMP": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 3.5,
-        "avg_us": 1.0002,
-        "success": true,
-        "error": null
-      }
-    ],
-    "UTC_TIMESTAMP": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.8246,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 2.791,
-        "avg_us": 0.8246,
-        "success": true,
-        "error": null
-      }
-    ],
-    "VERSION": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7752,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 2.5,
-        "avg_us": 0.7752,
-        "success": true,
-        "error": null
-      }
-    ],
-    "CONNECTION_ID": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.5998000000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 1.583,
-        "avg_us": 0.5998000000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "DATABASE": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7082,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 2.083,
-        "avg_us": 0.7082,
-        "success": true,
-        "error": null
-      }
-    ],
-    "USER": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.9334,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.375,
-        "max_us": 3.125,
-        "avg_us": 0.9334,
-        "success": true,
-        "error": null
-      }
-    ],
-    "PI": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7747999999999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 2.542,
-        "avg_us": 0.7747999999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "PHI": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.7832000000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 2.458,
-        "avg_us": 0.7832000000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "E": [
-      {
-        "kernel_id": "constant",
-        "engine": "arrow",
-        "cost_us_per_million": 0.8,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.334,
-        "max_us": 2.458,
-        "avg_us": 0.8,
-        "success": true,
-        "error": null
-      }
-    ],
-    "EXTRACT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.867,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.334,
-        "max_us": 2.709,
-        "avg_us": 0.867,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.9664000000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 3.375,
-        "avg_us": 0.9664000000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "TIME_BUCKET": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0752,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.375,
-        "max_us": 3.583,
-        "avg_us": 1.0752,
-        "success": true,
-        "error": null
-      }
-    ],
-    "DATEDIFF": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.8832000000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.416,
-        "max_us": 2.5,
-        "avg_us": 0.8832000000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "TIMEDIFF": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.6752,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 1.958,
-        "avg_us": 0.6752,
-        "success": true,
-        "error": null
-      }
-    ],
-    "DATE_FORMAT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.85,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.25,
-        "max_us": 2.916,
-        "avg_us": 0.85,
-        "success": true,
-        "error": null
-      }
-    ],
-    "FROM_UNIXTIME": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 3.175,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.75,
-        "max_us": 11.875,
-        "avg_us": 3.175,
-        "success": true,
-        "error": null
-      }
-    ],
-    "UNIXTIME": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 8.8416,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.917,
-        "max_us": 29.5,
-        "avg_us": 8.8416,
-        "success": true,
-        "error": null
-      }
-    ],
-    "GREATEST": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 4482220.2916,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 4458235.042,
-        "max_us": 4520606.125,
-        "avg_us": 4482220.2916,
-        "success": true,
-        "error": null
-      }
-    ],
-    "LEAST": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 4419443.3666,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 4365774.875,
-        "max_us": 4466320.167,
-        "avg_us": 4419443.3666,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SORT": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 4.924799999999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 1.166,
-        "max_us": 18.333,
-        "avg_us": 4.924799999999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "_ARRAY": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.24959999999999996,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.041,
-        "max_us": 1.0,
-        "avg_us": 0.24959999999999996,
-        "success": true,
-        "error": null
-      }
-    ],
-    "_TRY_ARRAY": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.3084,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.083,
-        "max_us": 1.125,
-        "avg_us": 0.3084,
-        "success": true,
-        "error": null
-      }
-    ],
-    "HASH": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 437424.6918,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 434767.167,
-        "max_us": 441372.0,
-        "avg_us": 437424.6918,
-        "success": true,
-        "error": null
-      }
-    ],
-    "MD5": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 8.4416,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.416,
-        "max_us": 30.459,
-        "avg_us": 8.4416,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SHA1": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 5.1,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.042,
-        "max_us": 16.875,
-        "avg_us": 5.1,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SHA224": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 634394.8164,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 627205.958,
-        "max_us": 642242.25,
-        "avg_us": 634394.8164,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SHA256": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 7.558400000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.292,
-        "max_us": 27.5,
-        "avg_us": 7.558400000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SHA384": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 714225.825,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 704473.209,
-        "max_us": 726251.375,
-        "avg_us": 714225.825,
-        "success": true,
-        "error": null
-      }
-    ],
-    "SHA512": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 7.475,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.333,
-        "max_us": 26.75,
-        "avg_us": 7.475,
-        "success": true,
-        "error": null
-      }
-    ],
-    "RANDOM": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 85541.625,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 84343.291,
-        "max_us": 86628.959,
-        "avg_us": 85541.625,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "zero_arg",
-        "engine": "arrow",
-        "cost_us_per_million": 84973.53339999999,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 83818.958,
-        "max_us": 85706.5,
-        "avg_us": 84973.53339999999,
-        "success": true,
-        "error": null
-      }
-    ],
-    "NORMAL": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 86571.94200000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 85192.0,
-        "max_us": 89093.0,
-        "avg_us": 86571.94200000001,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "zero_arg",
-        "engine": "arrow",
-        "cost_us_per_million": 85861.93340000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 85162.875,
-        "max_us": 87089.125,
-        "avg_us": 85861.93340000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "RANDOM_STRING": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 372872.8334,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 364990.917,
-        "max_us": 380889.083,
-        "avg_us": 372872.8334,
-        "success": true,
-        "error": null
-      }
-    ],
-    "BASE64_ENCODE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 3.3998000000000004,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.792,
-        "max_us": 12.833,
-        "avg_us": 3.3998000000000004,
-        "success": true,
-        "error": null
-      }
-    ],
-    "BASE64_DECODE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 2.6,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.875,
-        "max_us": 8.833,
-        "avg_us": 2.6,
-        "success": true,
-        "error": null
-      }
-    ],
-    "BASE85_ENCODE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1328408.1332,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 1319781.333,
-        "max_us": 1335683.542,
-        "avg_us": 1328408.1332,
-        "success": true,
-        "error": null
-      }
-    ],
-    "BASE85_DECODE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 7.350200000000001,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 2.292,
-        "max_us": 24.0,
-        "avg_us": 7.350200000000001,
-        "success": true,
-        "error": null
-      }
-    ],
-    "HEX_ENCODE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 539725.9918,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 531046.875,
-        "max_us": 550943.833,
-        "avg_us": 539725.9918,
-        "success": true,
-        "error": null
-      }
-    ],
-    "HEX_DECODE": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 3.8747999999999996,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 1.375,
-        "max_us": 12.458,
-        "avg_us": 3.8747999999999996,
+        "function_name": "ABS",
+        "overload_id": "ABS_1",
+        "kernel": "abs_value",
+        "current_cost": 1.5,
+        "cost_us_per_million": 268.755,
+        "ns_per_row": 0.2688,
         "success": true,
         "error": null
       }
     ],
     "ARRAY_CONTAINS": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.1916,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 4.458,
-        "avg_us": 1.1916,
-        "success": true,
-        "error": null
-      }
-    ],
-    "ARRAY_CONTAINS_ANY": [
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0246000000000002,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 3.458,
-        "avg_us": 1.0246000000000002,
-        "success": true,
-        "error": null
+        "function_name": "ARRAY_CONTAINS",
+        "overload_id": "ARRAY_CONTAINS_default",
+        "kernel": "array_contains",
+        "current_cost": 1.19,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "NotImplementedError: ARRAY_CONTAINS must be lowered to `item = ANY(arr)` (AnyOpEq) during planning; the array_contains kernel should never be invoked."
       }
     ],
     "ARRAY_CONTAINS_ALL": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.2084,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.291,
-        "max_us": 4.5,
-        "avg_us": 1.2084,
+        "function_name": "ARRAY_CONTAINS_ALL",
+        "overload_id": "ARRAY_CONTAINS_ALL_default",
+        "kernel": "array_contains_all",
+        "current_cost": 1.21,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: cannot use 'list' as a set element (unhashable type: 'list')"
+      }
+    ],
+    "ARRAY_CONTAINS_ANY": [
+      {
+        "function_name": "ARRAY_CONTAINS_ANY",
+        "overload_id": "ARRAY_CONTAINS_ANY_default",
+        "kernel": "array_contains_any",
+        "current_cost": 1.02,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: cannot use 'list' as a set element (unhashable type: 'list')"
+      }
+    ],
+    "BASE64_ENCODE": [
+      {
+        "function_name": "BASE64_ENCODE",
+        "overload_id": "BASE64_ENCODE_default",
+        "kernel": "vector_base64_encode",
+        "current_cost": 3.4,
+        "cost_us_per_million": 7359.605,
+        "ns_per_row": 7.3596,
         "success": true,
         "error": null
       }
     ],
-    "JSONB_OBJECT_KEYS": [
+    "BASE85_DECODE": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 590.2082,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 577.167,
-        "max_us": 627.083,
-        "avg_us": 590.2082,
+        "function_name": "BASE85_DECODE",
+        "overload_id": "BASE85_DECODE_default",
+        "kernel": "vector_base85_decode",
+        "current_cost": 2.85,
+        "cost_us_per_million": 9456.985,
+        "ns_per_row": 9.457,
+        "success": true,
+        "error": null
+      }
+    ],
+    "BASE85_ENCODE": [
+      {
+        "function_name": "BASE85_ENCODE",
+        "overload_id": "BASE85_ENCODE_default",
+        "kernel": "vector_base85_encode",
+        "current_cost": 3.6,
+        "cost_us_per_million": 8871.004,
+        "ns_per_row": 8.871,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CEILING": [
+      {
+        "function_name": "CEILING",
+        "overload_id": "CEILING_1",
+        "kernel": "ceiling",
+        "current_cost": 1.8,
+        "cost_us_per_million": 336.258,
+        "ns_per_row": 0.3363,
+        "success": true,
+        "error": null
+      }
+    ],
+    "COALESCE": [
+      {
+        "function_name": "COALESCE",
+        "overload_id": "COALESCE_variadic",
+        "kernel": "vector_coalesce",
+        "current_cost": 15852.0,
+        "cost_us_per_million": 3613.755,
+        "ns_per_row": 3.6138,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CONCAT": [
+      {
+        "function_name": "CONCAT",
+        "overload_id": "CONCAT_variadic",
+        "kernel": "lambda3",
+        "current_cost": 523.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got str, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "CONCAT_WS": [
+      {
+        "function_name": "CONCAT_WS",
+        "overload_id": "CONCAT_WS_variadic",
+        "kernel": "_concat_ws_kernel",
+        "current_cost": 587.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "AttributeError: 'draken.vectors.vector.Vector' object has no attribute 'join'"
+      }
+    ],
+    "CONNECTION_ID": [
+      {
+        "function_name": "CONNECTION_ID",
+        "overload_id": "CONNECTION_ID_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "COSINE_DISTANCE": [
+      {
+        "function_name": "COSINE_DISTANCE",
+        "overload_id": "COSINE_DISTANCE_VECTOR",
+        "kernel": "cosine_distance",
+        "current_cost": 1.17,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: parameter type_family 'numeric_vector'"
+      },
+      {
+        "function_name": "COSINE_DISTANCE",
+        "overload_id": "COSINE_DISTANCE_TEXT",
+        "kernel": "cosine_distance",
+        "current_cost": 1.17,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "MissingDependencyError: EMBED and text-based COSINE_SIMILARITY/COSINE_DISTANCE require the optional embeddings capability, which is not installed.\nInstall it with:  pip install opteryx-embeddings\nor register your own provider via opteryx.register_embedding_provider(...)."
+      }
+    ],
+    "COSINE_SIMILARITY": [
+      {
+        "function_name": "COSINE_SIMILARITY",
+        "overload_id": "COSINE_SIMILARITY_VECTOR",
+        "kernel": "cosine_similarity",
+        "current_cost": 1.33,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: parameter type_family 'numeric_vector'"
+      },
+      {
+        "function_name": "COSINE_SIMILARITY",
+        "overload_id": "COSINE_SIMILARITY_TEXT",
+        "kernel": "cosine_similarity",
+        "current_cost": 1.33,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "MissingDependencyError: EMBED and text-based COSINE_SIMILARITY/COSINE_DISTANCE require the optional embeddings capability, which is not installed.\nInstall it with:  pip install opteryx-embeddings\nor register your own provider via opteryx.register_embedding_provider(...)."
+      }
+    ],
+    "CURRENT_DATE": [
+      {
+        "function_name": "CURRENT_DATE",
+        "overload_id": "CURRENT_DATE_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "CURRENT_TIME": [
+      {
+        "function_name": "CURRENT_TIME",
+        "overload_id": "CURRENT_TIME_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "CURRENT_TIMESTAMP": [
+      {
+        "function_name": "CURRENT_TIMESTAMP",
+        "overload_id": "CURRENT_TIMESTAMP_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "DATABASE": [
+      {
+        "function_name": "DATABASE",
+        "overload_id": "DATABASE_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "DATEDIFF": [
+      {
+        "function_name": "DATEDIFF",
+        "overload_id": "DATEDIFF_default",
+        "kernel": "date_diff",
+        "current_cost": 0.88,
+        "cost_us_per_million": 2651.107,
+        "ns_per_row": 2.6511,
+        "success": true,
+        "error": null
+      }
+    ],
+    "DATE_FORMAT": [
+      {
+        "function_name": "DATE_FORMAT",
+        "overload_id": "DATE_FORMAT_default",
+        "kernel": "date_format",
+        "current_cost": 0.85,
+        "cost_us_per_million": 33328.428,
+        "ns_per_row": 33.3284,
+        "success": true,
+        "error": null
+      }
+    ],
+    "E": [
+      {
+        "function_name": "E",
+        "overload_id": "E_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "EXTRACT": [
+      {
+        "function_name": "EXTRACT",
+        "overload_id": "EXTRACT_2",
+        "kernel": "date_part",
+        "current_cost": 0.87,
+        "cost_us_per_million": 5714.003,
+        "ns_per_row": 5.714,
+        "success": true,
+        "error": null
+      },
+      {
+        "function_name": "EXTRACT",
+        "overload_id": "EXTRACT_INT",
+        "kernel": "date_part",
+        "current_cost": 0.97,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: vector_date_part: expected DRAKEN_TIMESTAMP64 or DRAKEN_DATE32 Vector, got type 4"
+      }
+    ],
+    "FLOOR": [
+      {
+        "function_name": "FLOOR",
+        "overload_id": "FLOOR_1",
+        "kernel": "floor_dispatch",
+        "current_cost": 1.8,
+        "cost_us_per_million": 337.235,
+        "ns_per_row": 0.3372,
+        "success": true,
+        "error": null
+      }
+    ],
+    "FROM_UNIXTIME": [
+      {
+        "function_name": "FROM_UNIXTIME",
+        "overload_id": "FROM_UNIXTIME_default",
+        "kernel": "from_unixtimestamp",
+        "current_cost": 3.17,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: Failed to convert timestamp to datetime"
+      }
+    ],
+    "GREATEST": [
+      {
+        "function_name": "GREATEST",
+        "overload_id": "GREATEST_1",
+        "kernel": "_inner",
+        "current_cost": 4482220.29,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "HASH": [
+      {
+        "function_name": "HASH",
+        "overload_id": "HASH_default",
+        "kernel": "_inner",
+        "current_cost": 437424.69,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "HEX_ENCODE": [
+      {
+        "function_name": "HEX_ENCODE",
+        "overload_id": "HEX_ENCODE_default",
+        "kernel": "vector_hex_encode",
+        "current_cost": 539725.99,
+        "cost_us_per_million": 9438.31,
+        "ns_per_row": 9.4383,
         "success": true,
         "error": null
       }
     ],
     "HUMANIZE": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 775947.1668,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 771386.5,
-        "max_us": 782410.167,
-        "avg_us": 775947.1668,
+        "function_name": "HUMANIZE",
+        "overload_id": "HUMANIZE_default",
+        "kernel": "humanize",
+        "current_cost": 775947.17,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: must be real number, not str"
+      }
+    ],
+    "IFNOTNULL": [
+      {
+        "function_name": "IFNOTNULL",
+        "overload_id": "IFNOTNULL_1",
+        "kernel": "vector_ifnotnull",
+        "current_cost": 0.74,
+        "cost_us_per_million": 3731.346,
+        "ns_per_row": 3.7313,
         "success": true,
         "error": null
       }
     ],
-    "COSINE_SIMILARITY": [
+    "IFNULL": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.3336,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 5.042,
-        "avg_us": 1.3336,
-        "success": true,
-        "error": null
-      },
-      {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 0.8999999999999998,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 2.917,
-        "avg_us": 0.8999999999999998,
+        "function_name": "IFNULL",
+        "overload_id": "IFNULL_1",
+        "kernel": "vector_ifnull",
+        "current_cost": 1.53,
+        "cost_us_per_million": 3550.779,
+        "ns_per_row": 3.5508,
         "success": true,
         "error": null
       }
     ],
-    "COSINE_DISTANCE": [
+    "IIF": [
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.1748,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.333,
-        "max_us": 4.208,
-        "avg_us": 1.1748,
+        "function_name": "IIF",
+        "overload_id": "IIF_1",
+        "kernel": "vector_iif",
+        "current_cost": 1.38,
+        "cost_us_per_million": 3550.226,
+        "ns_per_row": 3.5502,
+        "success": true,
+        "error": null
+      }
+    ],
+    "INITCAP": [
+      {
+        "function_name": "INITCAP",
+        "overload_id": "INITCAP_default",
+        "kernel": "vector_initcap",
+        "current_cost": 161.0,
+        "cost_us_per_million": 13525.112,
+        "ns_per_row": 13.5251,
+        "success": true,
+        "error": null
+      }
+    ],
+    "JSONB_OBJECT_KEYS": [
+      {
+        "function_name": "JSONB_OBJECT_KEYS",
+        "overload_id": "JSONB_OBJECT_KEYS_default",
+        "kernel": "jsonb_object_keys",
+        "current_cost": 590.21,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "AttributeError: 'dict' object has no attribute 'pos'"
+      }
+    ],
+    "LEAST": [
+      {
+        "function_name": "LEAST",
+        "overload_id": "LEAST_1",
+        "kernel": "_inner",
+        "current_cost": 4419443.37,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "LEFT": [
+      {
+        "function_name": "LEFT",
+        "overload_id": "LEFT_default",
+        "kernel": "vector_string_slice_left",
+        "current_cost": 96.0,
+        "cost_us_per_million": 9702.413,
+        "ns_per_row": 9.7024,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LENGTH": [
+      {
+        "function_name": "LENGTH",
+        "overload_id": "LENGTH_string",
+        "kernel": "vector_string_length",
+        "current_cost": 221.0,
+        "cost_us_per_million": 268.106,
+        "ns_per_row": 0.2681,
         "success": true,
         "error": null
       },
       {
-        "kernel_id": "default",
-        "engine": "arrow",
-        "cost_us_per_million": 1.0003999999999997,
-        "sample_size": 1000000,
-        "runs": 5,
-        "min_us": 0.292,
-        "max_us": 3.417,
-        "avg_us": 1.0003999999999997,
+        "function_name": "LENGTH",
+        "overload_id": "LENGTH_array",
+        "kernel": "vector_length",
+        "current_cost": 221.0,
+        "cost_us_per_million": 297.409,
+        "ns_per_row": 0.2974,
         "success": true,
         "error": null
+      }
+    ],
+    "LEVENSHTEIN": [
+      {
+        "function_name": "LEVENSHTEIN",
+        "overload_id": "LEVENSHTEIN_default",
+        "kernel": "vector_levenshtein",
+        "current_cost": 2148.0,
+        "cost_us_per_million": 77587.331,
+        "ns_per_row": 77.5873,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LOG": [
+      {
+        "function_name": "LOG",
+        "overload_id": "LOG_default",
+        "kernel": "vector_log",
+        "current_cost": 1.04,
+        "cost_us_per_million": 4880.072,
+        "ns_per_row": 4.8801,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LOWER": [
+      {
+        "function_name": "LOWER",
+        "overload_id": "LOWER_default",
+        "kernel": "vector_lowercase",
+        "current_cost": 6350.0,
+        "cost_us_per_million": 6669.162,
+        "ns_per_row": 6.6692,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LPAD": [
+      {
+        "function_name": "LPAD",
+        "overload_id": "LPAD_3",
+        "kernel": "left_pad",
+        "current_cost": 318.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "LTRIM": [
+      {
+        "function_name": "LTRIM",
+        "overload_id": "LTRIM_1",
+        "kernel": "vector_ltrim",
+        "current_cost": 87.0,
+        "cost_us_per_million": 3439.15,
+        "ns_per_row": 3.4392,
+        "success": true,
+        "error": null
+      }
+    ],
+    "MD5": [
+      {
+        "function_name": "MD5",
+        "overload_id": "MD5_default",
+        "kernel": "vector_md5",
+        "current_cost": 8.44,
+        "cost_us_per_million": 84186.651,
+        "ns_per_row": 84.1867,
+        "success": true,
+        "error": null
+      }
+    ],
+    "NORMAL": [
+      {
+        "function_name": "NORMAL",
+        "overload_id": "NORMAL_default",
+        "kernel": "random_normal",
+        "current_cost": 86571.94,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "RuntimeError: std::bad_cast"
+      },
+      {
+        "function_name": "NORMAL",
+        "overload_id": "NORMAL_0",
+        "kernel": "random_normal",
+        "current_cost": 86571.94,
+        "cost_us_per_million": 7569.449,
+        "ns_per_row": 7.5694,
+        "success": true,
+        "error": null
+      }
+    ],
+    "NULLIF": [
+      {
+        "function_name": "NULLIF",
+        "overload_id": "NULLIF_1",
+        "kernel": "null_if",
+        "current_cost": 0.72,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "NotImplementedError: NULLIF must be lowered to IIF(a = b, NULL, a) during planning; the null_if kernel should never be invoked."
+      }
+    ],
+    "OCTET_LENGTH": [
+      {
+        "function_name": "OCTET_LENGTH",
+        "overload_id": "OCTET_LENGTH_string",
+        "kernel": "vector_octet_length",
+        "current_cost": 221.0,
+        "cost_us_per_million": 269.251,
+        "ns_per_row": 0.2693,
+        "success": true,
+        "error": null
+      }
+    ],
+    "PHI": [
+      {
+        "function_name": "PHI",
+        "overload_id": "PHI_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "PI": [
+      {
+        "function_name": "PI",
+        "overload_id": "PI_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "POSITION": [
+      {
+        "function_name": "POSITION",
+        "overload_id": "POSITION_2",
+        "kernel": "position",
+        "current_cost": 291.0,
+        "cost_us_per_million": 11277.286,
+        "ns_per_row": 11.2773,
+        "success": true,
+        "error": null
+      }
+    ],
+    "POWER": [
+      {
+        "function_name": "POWER",
+        "overload_id": "POWER_default",
+        "kernel": "vector_power",
+        "current_cost": 0.86,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: vector_power(): incompatible function arguments. The following argument types are supported:\n    1. vector_power(v: object, exponent: float) -> object\n\nInvoked with types: draken.draken_native.Vector, draken.draken_native.Vector"
+      }
+    ],
+    "RANDOM": [
+      {
+        "function_name": "RANDOM",
+        "overload_id": "RANDOM_default",
+        "kernel": "random_number",
+        "current_cost": 85541.62,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "RuntimeError: std::bad_cast"
+      },
+      {
+        "function_name": "RANDOM",
+        "overload_id": "RANDOM_0",
+        "kernel": "random_number",
+        "current_cost": 85541.62,
+        "cost_us_per_million": 2915.525,
+        "ns_per_row": 2.9155,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RANDOM_STRING": [
+      {
+        "function_name": "RANDOM_STRING",
+        "overload_id": "RANDOM_STRING_default",
+        "kernel": "vector_random_strings",
+        "current_cost": 372872.83,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: vector_random_strings(): incompatible function arguments. The following argument types are supported:\n    1. vector_random_strings(row_count: int, width: int) -> object\n\nInvoked with types: draken.draken_native.Vector"
+      }
+    ],
+    "REGEXP_REPLACE": [
+      {
+        "function_name": "REGEXP_REPLACE",
+        "overload_id": "REGEXP_REPLACE_3",
+        "kernel": "regex_replace",
+        "current_cost": 1876.0,
+        "cost_us_per_million": 26641.021,
+        "ns_per_row": 26.641,
+        "success": true,
+        "error": null
+      }
+    ],
+    "REPLACE": [
+      {
+        "function_name": "REPLACE",
+        "overload_id": "REPLACE_default",
+        "kernel": "vector_replace",
+        "current_cost": 152.0,
+        "cost_us_per_million": 9242.944,
+        "ns_per_row": 9.2429,
+        "success": true,
+        "error": null
+      }
+    ],
+    "REVERSE": [
+      {
+        "function_name": "REVERSE",
+        "overload_id": "REVERSE_default",
+        "kernel": "vector_reverse",
+        "current_cost": 98.0,
+        "cost_us_per_million": 5180.78,
+        "ns_per_row": 5.1808,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RIGHT": [
+      {
+        "function_name": "RIGHT",
+        "overload_id": "RIGHT_default",
+        "kernel": "vector_string_slice_right",
+        "current_cost": 98.0,
+        "cost_us_per_million": 8802.507,
+        "ns_per_row": 8.8025,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ROUND": [
+      {
+        "function_name": "ROUND",
+        "overload_id": "ROUND_1",
+        "kernel": "round1",
+        "current_cost": 2.0,
+        "cost_us_per_million": 359.417,
+        "ns_per_row": 0.3594,
+        "success": true,
+        "error": null
+      },
+      {
+        "function_name": "ROUND",
+        "overload_id": "ROUND_2",
+        "kernel": "round2",
+        "current_cost": 2.0,
+        "cost_us_per_million": 559.336,
+        "ns_per_row": 0.5593,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RPAD": [
+      {
+        "function_name": "RPAD",
+        "overload_id": "RPAD_3",
+        "kernel": "right_pad",
+        "current_cost": 321.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "RTRIM": [
+      {
+        "function_name": "RTRIM",
+        "overload_id": "RTRIM_1",
+        "kernel": "vector_rtrim",
+        "current_cost": 89.0,
+        "cost_us_per_million": 3266.285,
+        "ns_per_row": 3.2663,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA1": [
+      {
+        "function_name": "SHA1",
+        "overload_id": "SHA1_default",
+        "kernel": "vector_sha1",
+        "current_cost": 5.1,
+        "cost_us_per_million": 149147.129,
+        "ns_per_row": 149.1471,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA224": [
+      {
+        "function_name": "SHA224",
+        "overload_id": "SHA224_default",
+        "kernel": "vector_sha224",
+        "current_cost": 7.56,
+        "cost_us_per_million": 168413.483,
+        "ns_per_row": 168.4135,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA256": [
+      {
+        "function_name": "SHA256",
+        "overload_id": "SHA256_default",
+        "kernel": "vector_sha256",
+        "current_cost": 7.56,
+        "cost_us_per_million": 168533.901,
+        "ns_per_row": 168.5339,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA384": [
+      {
+        "function_name": "SHA384",
+        "overload_id": "SHA384_default",
+        "kernel": "vector_sha384",
+        "current_cost": 7.47,
+        "cost_us_per_million": 220058.171,
+        "ns_per_row": 220.0582,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA512": [
+      {
+        "function_name": "SHA512",
+        "overload_id": "SHA512_default",
+        "kernel": "vector_sha512",
+        "current_cost": 7.47,
+        "cost_us_per_million": 229131.296,
+        "ns_per_row": 229.1313,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SIGN": [
+      {
+        "function_name": "SIGN",
+        "overload_id": "SIGN_1",
+        "kernel": "sign_value",
+        "current_cost": 1.2,
+        "cost_us_per_million": 469.525,
+        "ns_per_row": 0.4695,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SORT": [
+      {
+        "function_name": "SORT",
+        "overload_id": "SORT_1",
+        "kernel": "_inner",
+        "current_cost": 4.92,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "SOUNDEX": [
+      {
+        "function_name": "SOUNDEX",
+        "overload_id": "SOUNDEX_default",
+        "kernel": "vector_soundex",
+        "current_cost": 152.0,
+        "cost_us_per_million": 21941.432,
+        "ns_per_row": 21.9414,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SPLIT": [
+      {
+        "function_name": "SPLIT",
+        "overload_id": "SPLIT_2",
+        "kernel": "split",
+        "current_cost": 531.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      },
+      {
+        "function_name": "SPLIT",
+        "overload_id": "SPLIT_3",
+        "kernel": "split",
+        "current_cost": 589.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "SQRT": [
+      {
+        "function_name": "SQRT",
+        "overload_id": "SQRT_1",
+        "kernel": "sqrt_value",
+        "current_cost": 3.2,
+        "cost_us_per_million": 467.538,
+        "ns_per_row": 0.4675,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SUBSTRING": [
+      {
+        "function_name": "SUBSTRING",
+        "overload_id": "SUBSTRING_2",
+        "kernel": "lambda5",
+        "current_cost": 378.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: draken_vector_unwrap: expected draken.draken_native.Vector, got draken.vectors.vector.Vector"
+      },
+      {
+        "function_name": "SUBSTRING",
+        "overload_id": "SUBSTRING_3",
+        "kernel": "vector_string_substring",
+        "current_cost": 429.0,
+        "cost_us_per_million": 10096.518,
+        "ns_per_row": 10.0965,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TIMEDIFF": [
+      {
+        "function_name": "TIMEDIFF",
+        "overload_id": "TIMEDIFF_default",
+        "kernel": "time_diff",
+        "current_cost": 0.68,
+        "cost_us_per_million": 2857.646,
+        "ns_per_row": 2.8576,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TIME_BUCKET": [
+      {
+        "function_name": "TIME_BUCKET",
+        "overload_id": "TIME_BUCKET_default",
+        "kernel": "date_floor",
+        "current_cost": 1.08,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "TypeError: Failed to extract integer scalar from constant vector"
+      }
+    ],
+    "TO_ASCII": [
+      {
+        "function_name": "TO_ASCII",
+        "overload_id": "TO_ASCII_1",
+        "kernel": "to_ascii",
+        "current_cost": 6.8,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: only single character unicode strings can be converted to Py_UCS4, got length 12"
+      }
+    ],
+    "TO_CHAR": [
+      {
+        "function_name": "TO_CHAR",
+        "overload_id": "TO_CHAR_1",
+        "kernel": "to_char",
+        "current_cost": 8.2,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: result is not a length-200000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+      }
+    ],
+    "TRIM": [
+      {
+        "function_name": "TRIM",
+        "overload_id": "TRIM_1",
+        "kernel": "vector_trim",
+        "current_cost": 98.0,
+        "cost_us_per_million": 3706.45,
+        "ns_per_row": 3.7064,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TRUNC": [
+      {
+        "function_name": "TRUNC",
+        "overload_id": "TRUNC_numeric",
+        "kernel": "trunc_dispatch",
+        "current_cost": 1.7,
+        "cost_us_per_million": 337.364,
+        "ns_per_row": 0.3374,
+        "success": true,
+        "error": null
+      },
+      {
+        "function_name": "TRUNC",
+        "overload_id": "TRUNC_date",
+        "kernel": "trunc_date",
+        "current_cost": 0.92,
+        "cost_us_per_million": 1148.308,
+        "ns_per_row": 1.1483,
+        "success": true,
+        "error": null
+      },
+      {
+        "function_name": "TRUNC",
+        "overload_id": "TRUNC_timestamp",
+        "kernel": "trunc_timestamp",
+        "current_cost": 0.96,
+        "cost_us_per_million": 1141.669,
+        "ns_per_row": 1.1417,
+        "success": true,
+        "error": null
+      }
+    ],
+    "UNIXTIME": [
+      {
+        "function_name": "UNIXTIME",
+        "overload_id": "UNIXTIME_default",
+        "kernel": "unixtime",
+        "current_cost": 8.84,
+        "cost_us_per_million": 525.516,
+        "ns_per_row": 0.5255,
+        "success": true,
+        "error": null
+      }
+    ],
+    "UPPER": [
+      {
+        "function_name": "UPPER",
+        "overload_id": "UPPER_default",
+        "kernel": "vector_uppercase",
+        "current_cost": 6138.97,
+        "cost_us_per_million": 6461.275,
+        "ns_per_row": 6.4613,
+        "success": true,
+        "error": null
+      }
+    ],
+    "USER": [
+      {
+        "function_name": "USER",
+        "overload_id": "USER_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "UTC_TIMESTAMP": [
+      {
+        "function_name": "UTC_TIMESTAMP",
+        "overload_id": "UTC_TIMESTAMP_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "VERSION": [
+      {
+        "function_name": "VERSION",
+        "overload_id": "VERSION_default",
+        "kernel": "lambda",
+        "current_cost": 1.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
+      }
+    ],
+    "_ARRAY": [
+      {
+        "function_name": "_ARRAY",
+        "overload_id": "_ARRAY_2",
+        "kernel": "lambda7",
+        "current_cost": 0.25,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: parse_column_type: unknown type \"b'AB'\""
+      }
+    ],
+    "_CI_ENDS_WITH": [
+      {
+        "function_name": "_CI_ENDS_WITH",
+        "overload_id": "_CI_ENDS_WITH_default",
+        "kernel": "vector_ci_ends_with",
+        "current_cost": 64.0,
+        "cost_us_per_million": 876.199,
+        "ns_per_row": 0.8762,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_CI_STARTS_WITH": [
+      {
+        "function_name": "_CI_STARTS_WITH",
+        "overload_id": "_CI_STARTS_WITH_default",
+        "kernel": "vector_ci_starts_with",
+        "current_cost": 64.0,
+        "cost_us_per_million": 883.162,
+        "ns_per_row": 0.8832,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_DFA_EXTRACT": [
+      {
+        "function_name": "_DFA_EXTRACT",
+        "overload_id": "_DFA_EXTRACT_2",
+        "kernel": "vector_dfa_extract",
+        "current_cost": 112.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: vector_dfa_extract: unsupported compiled program version"
+      }
+    ],
+    "_ENDS_WITH": [
+      {
+        "function_name": "_ENDS_WITH",
+        "overload_id": "_ENDS_WITH_default",
+        "kernel": "vector_ends_with",
+        "current_cost": 64.0,
+        "cost_us_per_million": 2204.889,
+        "ns_per_row": 2.2049,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_PASSTHRU": [
+      {
+        "function_name": "_PASSTHRU",
+        "overload_id": "_PASSTHRU_1",
+        "kernel": "lambda2",
+        "current_cost": 0.28,
+        "cost_us_per_million": -0.011,
+        "ns_per_row": -0.0,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_STARTS_WITH": [
+      {
+        "function_name": "_STARTS_WITH",
+        "overload_id": "_STARTS_WITH_default",
+        "kernel": "vector_starts_with",
+        "current_cost": 64.0,
+        "cost_us_per_million": 2196.94,
+        "ns_per_row": 2.1969,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_TRY_ARRAY": [
+      {
+        "function_name": "_TRY_ARRAY",
+        "overload_id": "_TRY_ARRAY_2",
+        "kernel": "lambda8",
+        "current_cost": 0.31,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: parse_column_type: unknown type \"b'AB'\""
       }
     ]
   }

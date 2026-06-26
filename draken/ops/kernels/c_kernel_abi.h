@@ -34,4 +34,3 @@
 #include "ops/kernels/cast_kernels.h"
 #include "ops/kernels/binary_op_kernels.h"
 #include "ops/kernels/extraction_kernels.h"
-#include "ops/kernels/function_kernels.h"

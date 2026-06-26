@@ -3,6 +3,8 @@ from typing import List
 # Local implementation imports (kept as late imports inside function if heavy)
 from opteryx.compiled.nanobind.vectors import vector_coalesce as _vector_coalesce
 from opteryx.compiled.nanobind.vectors import vector_iif as _vector_iif
+from opteryx.compiled.nanobind.vectors import vector_ifnull as _vector_ifnull
+from opteryx.compiled.nanobind.vectors import vector_ifnotnull as _vector_ifnotnull
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -14,8 +16,6 @@ from opteryx.expression.functions import (
 from opteryx.expression.functions.implementations.logical import (
     array_contains as _lf_array_contains,
 )
-from opteryx.expression.functions.implementations.logical import if_null as _lf_if_null
-from opteryx.expression.functions.implementations.logical import if_not_null as _lf_if_not_null
 from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
 from opteryx.expression.functions.implementations.utility import (
     cosine_similarity as _lf_cosine_similarity,
@@ -42,8 +42,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
     # Small adapter object bundling kernels implemented elsewhere
     class other_functions:
         array_contains = staticmethod(_lf_array_contains)
-        if_null = staticmethod(_lf_if_null)
-        if_not_null = staticmethod(_lf_if_not_null)
         null_if = staticmethod(_lf_null_if)
         cosine_similarity = staticmethod(_lf_cosine_similarity)
         humanize = staticmethod(_lf_humanize)
@@ -102,7 +100,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=other_functions.if_null,
+                        callable_ref=_vector_ifnull,
                         null_policy="passthru",
                         cost_us_per_million=1.53,
                     ),
@@ -129,7 +127,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=other_functions.if_not_null,
+                        callable_ref=_vector_ifnotnull,
                         null_policy="passthru",
                         cost_us_per_million=0.74,
                     ),
@@ -179,7 +177,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="true_value", type_family="any"),
                         ParameterSpec(name="false_value", type_family="any"),
                     ),
-                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=1),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_iif_return_type),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

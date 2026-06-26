@@ -2892,6 +2892,26 @@ extern "C" PyObject* draken_vector_own_time64(
       catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
 }
 
+extern "C" PyObject* draken_vector_own_decimal(
+    void* data, uint8_t* validity, uint32_t length, uint8_t precision, uint8_t scale)
+{
+    OwnedBuffer<void>    data_guard(data);
+    OwnedBuffer<uint8_t> val_guard(validity);
+    try {
+        void* final_data = data_guard.release();
+        DrakenVector v = draken_vector_from_dense(final_data, length, DRAKEN_DECIMAL, validity);
+        OwnedBuffer<void>    data_buf(final_data);
+        OwnedBuffer<uint8_t> vbuf(val_guard.release());
+        VectorOwner owner(v, std::move(data_buf), std::move(vbuf));
+        LogicalType lt; lt.kind = LogicalKind::DECIMAL; lt.precision = precision; lt.scale = scale;
+        owner.logical_type = logical_type_intern(lt);
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr(); Py_INCREF(result); return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+      catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+      catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
 // draken_vector_own — wrap a VecResult op result in a new Python Vector handle.
 //
 // C++ only (declared in bridge header under #ifdef __cplusplus).

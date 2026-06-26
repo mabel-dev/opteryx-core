@@ -1,6 +1,21 @@
 #include "sha2.h"
 #include <cstring>
 
+/* Hardware acceleration: ARMv8 SHA-256 crypto extensions when available at
+ * runtime, scalar core otherwise. The accelerated transform is compiled with a
+ * function-level target attribute so it builds even when crypto is not in the
+ * global -march (manylinux aarch64), and is selected only after a runtime
+ * feature check — Raspberry Pi cores (Cortex-A72/A76) lack the extensions and
+ * fall back to scalar. The AVX2 multi-buffer x86 path lives separately and is
+ * CI-verified (cannot be built or run on the ARM dev host). */
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+#endif
+
 /* SHA-256 implementation (adapted for C++) */
 static const uint32_t K256[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
@@ -15,7 +30,7 @@ static const uint32_t K256[64] = {
 
 static uint32_t rotr32(uint32_t x, unsigned n) { return (x >> n) | (x << (32 - n)); }
 
-static void sha256_transform(uint32_t state[8], const unsigned char data[64]) {
+static void sha256_transform_scalar(uint32_t state[8], const unsigned char data[64]) {
     uint32_t W[64];
     uint32_t a,b,c,d,e,f,g,h,t1,t2;
     int t;
@@ -40,6 +55,170 @@ static void sha256_transform(uint32_t state[8], const unsigned char data[64]) {
     }
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+#if defined(__aarch64__)
+/* ARMv8 SHA-256 single-block transform using the crypto extensions. State is the
+ * canonical {a,b,c,d} / {e,f,g,h} layout, matching the scalar core. Messages are
+ * loaded little-endian then byte-reversed (SHA-256 is big-endian). */
+__attribute__((target("crypto")))
+static void sha256_transform_neon(uint32_t state[8], const unsigned char data[64]) {
+    uint32x4_t STATE0 = vld1q_u32(&state[0]);
+    uint32x4_t STATE1 = vld1q_u32(&state[4]);
+    const uint32x4_t ABEF_SAVE = STATE0;
+    const uint32x4_t CDGH_SAVE = STATE1;
+
+    uint32x4_t MSG0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data +  0)));
+    uint32x4_t MSG1 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16)));
+    uint32x4_t MSG2 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 32)));
+    uint32x4_t MSG3 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 48)));
+    uint32x4_t TMP0, TMP1, TMP2;
+
+    TMP0 = vaddq_u32(MSG0, vld1q_u32(&K256[0]));
+
+    /* Rounds 0-3 */
+    MSG0 = vsha256su0q_u32(MSG0, MSG1);
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG1, vld1q_u32(&K256[4]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+    MSG0 = vsha256su1q_u32(MSG0, MSG2, MSG3);
+
+    /* Rounds 4-7 */
+    MSG1 = vsha256su0q_u32(MSG1, MSG2);
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG2, vld1q_u32(&K256[8]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+    MSG1 = vsha256su1q_u32(MSG1, MSG3, MSG0);
+
+    /* Rounds 8-11 */
+    MSG2 = vsha256su0q_u32(MSG2, MSG3);
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG3, vld1q_u32(&K256[12]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+    MSG2 = vsha256su1q_u32(MSG2, MSG0, MSG1);
+
+    /* Rounds 12-15 */
+    MSG3 = vsha256su0q_u32(MSG3, MSG0);
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG0, vld1q_u32(&K256[16]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+    MSG3 = vsha256su1q_u32(MSG3, MSG1, MSG2);
+
+    /* Rounds 16-19 */
+    MSG0 = vsha256su0q_u32(MSG0, MSG1);
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG1, vld1q_u32(&K256[20]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+    MSG0 = vsha256su1q_u32(MSG0, MSG2, MSG3);
+
+    /* Rounds 20-23 */
+    MSG1 = vsha256su0q_u32(MSG1, MSG2);
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG2, vld1q_u32(&K256[24]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+    MSG1 = vsha256su1q_u32(MSG1, MSG3, MSG0);
+
+    /* Rounds 24-27 */
+    MSG2 = vsha256su0q_u32(MSG2, MSG3);
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG3, vld1q_u32(&K256[28]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+    MSG2 = vsha256su1q_u32(MSG2, MSG0, MSG1);
+
+    /* Rounds 28-31 */
+    MSG3 = vsha256su0q_u32(MSG3, MSG0);
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG0, vld1q_u32(&K256[32]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+    MSG3 = vsha256su1q_u32(MSG3, MSG1, MSG2);
+
+    /* Rounds 32-35 */
+    MSG0 = vsha256su0q_u32(MSG0, MSG1);
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG1, vld1q_u32(&K256[36]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+    MSG0 = vsha256su1q_u32(MSG0, MSG2, MSG3);
+
+    /* Rounds 36-39 */
+    MSG1 = vsha256su0q_u32(MSG1, MSG2);
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG2, vld1q_u32(&K256[40]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+    MSG1 = vsha256su1q_u32(MSG1, MSG3, MSG0);
+
+    /* Rounds 40-43 */
+    MSG2 = vsha256su0q_u32(MSG2, MSG3);
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG3, vld1q_u32(&K256[44]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+    MSG2 = vsha256su1q_u32(MSG2, MSG0, MSG1);
+
+    /* Rounds 44-47 */
+    MSG3 = vsha256su0q_u32(MSG3, MSG0);
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG0, vld1q_u32(&K256[48]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+    MSG3 = vsha256su1q_u32(MSG3, MSG1, MSG2);
+
+    /* Rounds 48-51 */
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG1, vld1q_u32(&K256[52]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+
+    /* Rounds 52-55 */
+    TMP2 = STATE0;
+    TMP0 = vaddq_u32(MSG2, vld1q_u32(&K256[56]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+
+    /* Rounds 56-59 */
+    TMP2 = STATE0;
+    TMP1 = vaddq_u32(MSG3, vld1q_u32(&K256[60]));
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
+
+    /* Rounds 60-63 */
+    TMP2 = STATE0;
+    STATE0 = vsha256hq_u32(STATE0, STATE1, TMP1);
+    STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP1);
+
+    STATE0 = vaddq_u32(STATE0, ABEF_SAVE);
+    STATE1 = vaddq_u32(STATE1, CDGH_SAVE);
+
+    vst1q_u32(&state[0], STATE0);
+    vst1q_u32(&state[4], STATE1);
+}
+
+static bool sha256_hw_detect(void) {
+#if defined(__APPLE__)
+    return true;  /* every Apple Silicon core implements FEAT_SHA256 */
+#elif defined(__linux__)
+    return (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+#else
+    return false;  /* unknown OS: take the portable scalar path */
+#endif
+}
+static const bool g_sha256_hw = sha256_hw_detect();
+#endif  /* __aarch64__ */
+
+static inline void sha256_transform(uint32_t state[8], const unsigned char data[64]) {
+#if defined(__aarch64__)
+    if (g_sha256_hw) { sha256_transform_neon(state, data); return; }
+#endif
+    sha256_transform_scalar(state, data);
 }
 
 int SHA256_Init(SHA256_CTX *c) {

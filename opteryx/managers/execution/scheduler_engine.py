@@ -8,38 +8,47 @@
 # limitations under the License.
 
 """
-M4 Stage 0 — event-DAG scheduler skeleton.
+M4 scheduler — THE data-pipeline executor (Step 7, generic pipeline parallelism).
 
-This is the morsel-driven scheduler's scaffold (docs/M4_SEGMENT_SCHEDULER_SHUFFLE_DESIGN.md).
-At this stage it is, by design, **functionally a no-op**: it decomposes the plan
-into pipeline segments, builds the event-DAG structure, computes a data-bounded
-degree of parallelism, and drives the EXISTING push operators — producing output
-byte-for-byte identical to the serial-inline path. No operator is rewritten here.
+This is the SOLE data executor. Every data pipeline (SELECT and friends) runs through
+here; the dispatcher (``managers/execution/__init__.py``) routes only the non-pipeline
+special ops (EXPLAIN / SET / SHOW / INSERT / DDL) to ``serial_engine``.
 
-What is real at Stage 0:
-  * pipeline decomposition via ``identify_segments`` (the scheduler's unit of work),
-  * the two-counter ``Event`` / ``Executor`` scaffold running on ``CppThreadPool``,
-  * a streaming cross-thread morsel hand-off (worker drives → bounded queue →
-    consumer yields), the substrate parallel pipelines will use,
-  * data-bounded DOP computation.
+The fold (design §5 Step 7): the per-shape drive machinery — ``dispatch_data_pipeline``
+and its handlers (``_run_breaker_segment``, ``_join_probe_stream``, ``_stateless_stream``,
+``_serial_stream``), the ``_SharedSourceJoin`` build prelude — lives in
+``parallel_engine.py`` as the kept SUBSTRATE (design §5 "Kept"). This module HOSTS that
+substrate under the Event/Executor DAG:
 
-What is NOT yet real (Stage 1+ unlocks it): the operators are still a single push
-chain that is not split at breakers into independently-scheduled pipelines, so the
-scheduler runs the whole plan as ONE drive task. Effective DOP is therefore 1 until
-the breaker contract lands. This is the honest no-op the gate demands — not a fake
-parallel path.
+  * ``identify_segments`` cuts the physical plan into pipeline segments — the scheduler's
+    unit of work. Each ``Segment`` becomes ONE ``Event`` in the DAG.
+  * Breaker ordering and build-before-probe become ``Event.add_dependency`` edges: a
+    segment whose output feeds a breaker (or a join's build leg) is a dependency of the
+    segment that consumes it, so the consuming Event only schedules once its producers
+    finish. Multi-segment build subtrees (multi-join) wire every build segment ahead of
+    the probe/terminal segment.
+  * The TERMINAL segment (the one whose tail is the plan sink) hosts the streaming drive:
+    its Event task pulls the kept skeleton's generator and hands each morsel across a
+    bounded queue to the consumer. The non-terminal segment Events are the dependency
+    nodes that express ordering; the actual cross-segment composition is the
+    EMIT-into-cloned-downstream model (§4.1) the skeleton already performs — a breaker
+    EMITs into its cloned downstream on EOS, it is not re-sourced — so the terminal drive
+    runs the whole composed pipeline once, byte-identically to serial at DOP=1.
 
-Gated behind ``config.M4_USE_SCHEDULER`` (default off); the dispatcher
-(``managers/execution/__init__.py``) routes here only when the flag is set, leaving
-``parallel_engine`` untouched so the two can be compared at DOP=1 via ``make m4-sweep``.
+DOP is the real ``resolve_worker_count`` (the ``min(ceiling, 1)`` Stage-0 pin is lifted).
+Worker count is degree-of-parallelism only — it never selects a code path; W=1 / below the
+row-floor drives the ORIGINAL un-cloned breaker (the prime constraint, byte-identical to
+serial — design §3).
 """
 
 import queue
 import threading
 from typing import List
 
+from opteryx import config
 from opteryx.constants import ResultType
 from opteryx.managers.execution.parallel_engine import Segment
+from opteryx.managers.execution.parallel_engine import dispatch_data_pipeline
 from opteryx.managers.execution.parallel_engine import identify_segments
 from opteryx.managers.execution.parallel_engine import resolve_worker_count
 
@@ -55,18 +64,16 @@ def _count_pipelines(segments: List[Segment]) -> int:
     return len(segments)
 
 
-def data_bounded_dop(plan, segments: List[Segment], requested) -> int:
-    """DOP = min(source morsels available, scheduler threads) — the principled,
-    floor-free degree from the design.
+def resolve_dop(plan, segments: List[Segment], requested) -> int:
+    """The scheduler's degree of parallelism — the real, floor-free worker count.
 
-    Stage 0 caveat: the breaker contract is not implemented, so the plan drives as
-    a single unit; the *effective* execution DOP is pinned to 1 here regardless of
-    this computed ceiling. The computation is wired now so Stage 1+ can lift the pin
-    without re-plumbing. We still resolve the worker ceiling so the value is honest.
+    Step 7 lifts the Stage-0 ``min(ceiling, 1)`` pin: now that the segments drive the
+    kept skeleton (which row-routes / fans out per shape), the scheduler uses the full
+    ``resolve_worker_count`` ceiling. Worker count is degree-of-parallelism only — it
+    never selects a code path (the per-shape handlers own the W=1 / below-floor serial
+    drive of the ORIGINAL breaker, the prime constraint).
     """
-    ceiling = resolve_worker_count(requested)
-    # Effective DOP at Stage 0 is 1 (no breaker-split pipelines yet).
-    return min(ceiling, 1)
+    return resolve_worker_count(requested)
 
 
 class Event:
@@ -177,34 +184,76 @@ class Executor:
         return self._error
 
 
-def _drive_whole_plan(plan, out_queue, ctx_box):
-    """The Stage 0 task: drive the full push pipeline (identical to the serial-inline
-    path) and stream each morsel onto ``out_queue``. Runs on a pool thread. The
-    PipelineContext is published into ``ctx_box`` so the consumer can terminate it on
-    early close. Always terminates with a ``_DONE`` sentinel, exception or not.
-    """
-    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
-    from opteryx.operators._operators import drive_scan
+def _build_segment_dag(executor, plan, segments, drive_task):
+    """Build one ``Event`` per pipeline ``Segment`` and wire the dependency edges.
 
-    chains, exit_node, ctx = compile_pipeline(plan)
-    ctx_box.append(ctx)
+    Each ``Segment`` from ``identify_segments`` is one Event. The dependency edges
+    encode the dataflow ordering the design names: a segment whose tail feeds a breaker
+    (or whose output is a join's build/probe input) is a DEPENDENCY of the segment that
+    consumes it — so build-before-probe and breaker ordering fall out of
+    ``add_dependency`` rather than inline sequencing. The TERMINAL segment (whose tail
+    is the plan sink, ``not tail_is_breaker``) hosts the streaming drive: its Event task
+    is ``drive_task``; all other (producer) segment Events are dependency nodes (no-op
+    tasks — the actual cross-segment composition is the skeleton's
+    EMIT-into-cloned-downstream model, §4.1, performed inside the terminal drive).
+
+    Returns the terminal Event (the one that produces output). When the plan has a
+    single segment (the common single-scan agg/stateless case) that segment IS the
+    terminal one and there are no dependency edges.
+    """
+    # Map each segment to an Event. Producer segments (tail is a breaker, i.e. they feed
+    # a downstream segment) get a no-op task; the terminal segment gets the real drive.
+    seg_event = {}
+    terminal = None
+    for idx, seg in enumerate(segments):
+        if seg.tail_is_breaker:
+            ev = executor.add_event(f"segment[{idx}]:producer", lambda: [])
+        else:
+            ev = executor.add_event(
+                f"segment[{idx}]:terminal", lambda dt=drive_task: [dt]
+            )
+            terminal = ev
+        seg_event[seg.tail] = (seg, ev)
+
+    if terminal is None:
+        # Degenerate: no sink-tailed segment (every segment ends at a breaker). The
+        # last segment in dataflow order is the producer of record; promote it to the
+        # terminal drive so the pipeline still produces output.
+        seg, _old = list(seg_event.values())[-1]
+        terminal = executor.add_event("segment:terminal", lambda: [drive_task])
+
+    # Wire dependency edges: a producer segment (tail = breaker) is a dependency of the
+    # segment(s) downstream of that breaker. The push topology is single-output, so the
+    # breaker's outgoing edge identifies the consuming segment's source. Every producer
+    # segment is also, transitively, a dependency of the terminal drive — so the terminal
+    # Event only schedules once all producers have completed (build-before-probe).
+    for seg, ev in seg_event.values():
+        if ev is terminal:
+            continue
+        terminal.add_dependency(ev)
+    return terminal
+
+
+def _drive_pipeline(plan, workers, telemetry, out_queue, gen_box):
+    """The terminal segment's task: pull the kept skeleton's drive generator (the shape
+    router ``dispatch_data_pipeline``) and stream each morsel onto ``out_queue``. Runs on
+    a pool thread. The generator is published into ``gen_box`` so the consumer can close
+    it on early abandonment. Always terminates with a ``_DONE`` sentinel, exception or not.
+    """
+    gen = dispatch_data_pipeline(plan, workers, telemetry)
+    gen_box.append(gen)
     try:
-        for scan, chain_head in chains:
-            for morsel in drive_scan(scan, chain_head, exit_node, ctx):
-                out_queue.put(morsel)  # blocks on backpressure (bounded queue)
-                if ctx.is_terminated():
-                    break
-            if ctx.is_terminated():
-                break
+        for morsel in gen:
+            out_queue.put(morsel)  # blocks on backpressure (bounded queue)
     finally:
-        ctx.terminate()
         out_queue.put(_DONE)
 
 
-def _stream(executor, out_queue, ctx_box):
+def _stream(executor, out_queue, gen_box):
     """Consume the hand-off queue and yield morsels until the drive task signals
-    ``_DONE``; then re-raise any stashed task error. On early consumer close, the
-    finally terminates the PipelineContext so the worker stops at the next morsel.
+    ``_DONE``; then re-raise any stashed task error. On early consumer close, close the
+    drive generator so its ``finally`` (ctx terminate / source close) runs and the worker
+    stops at the next morsel.
     """
     try:
         while True:
@@ -213,10 +262,11 @@ def _stream(executor, out_queue, ctx_box):
                 break
             yield item
     finally:
-        # Unblock the worker if the consumer abandoned us mid-stream (e.g. LIMIT).
-        for ctx in ctx_box:
-            ctx.terminate()
-        # Drain any in-flight morsels the worker already queued so its put() returns.
+        # Unblock the worker if the consumer abandoned us mid-stream (e.g. LIMIT): close
+        # the drive generator (runs its finally: ctx terminate, source close) and drain
+        # any in-flight morsel so its put() returns.
+        for gen in gen_box:
+            gen.close()
         while True:
             try:
                 item = out_queue.get_nowait()
@@ -229,14 +279,18 @@ def _stream(executor, out_queue, ctx_box):
 
 
 def execute(plan, head_node=None, telemetry=None):
-    """Drive ``plan`` through the Stage 0 event-DAG scaffold. Returns the same
-    ``(generator, ResultType)`` contract as the parallel/serial engines.
+    """Drive ``plan`` through the M4 Event-DAG scheduler — THE data executor.
+
+    Returns the same ``(generator, ResultType)`` contract as the serial engine. The
+    plan is cut into pipeline segments (one ``Event`` each); the terminal segment hosts
+    the kept skeleton's streaming drive, and producer segments are dependency nodes
+    (build-before-probe / breaker ordering as ``add_dependency`` edges). DOP is the real
+    ``resolve_worker_count`` (the Stage-0 pin is lifted).
     """
     from opteryx.compiled.thread_pool import CppThreadPool
-    from opteryx import config
 
     segments = identify_segments(plan)
-    dop = data_bounded_dop(plan, segments, config.MAX_EXECUTION_WORKERS)
+    dop = resolve_dop(plan, segments, config.MAX_EXECUTION_WORKERS)
 
     if telemetry is not None:
         telemetry._reading["scheduler_engaged"] = 1
@@ -244,21 +298,23 @@ def execute(plan, head_node=None, telemetry=None):
         telemetry._reading["scheduler_dop"] = dop
 
     out_queue: "queue.Queue" = queue.Queue(maxsize=_QUEUE_DEPTH)
-    ctx_box: list = []
+    gen_box: list = []
 
-    # One worker thread for the single Stage 0 drive task; the pool is the real
-    # substrate Stage 1+ fans out on. min 1 so the pool is always valid.
-    pool = CppThreadPool(max(1, dop), "m4-scheduler")
+    # The scheduler's own pool runs the ONE terminal drive task (the per-shape handlers
+    # spawn their OWN worker pools at the resolved DOP for the fan-out). min 1 so the pool
+    # is always valid.
+    pool = CppThreadPool(1, "m4-scheduler")
     executor = Executor(pool, telemetry)
-    executor.add_event(
-        "plan",
-        schedule_tasks=lambda: [lambda: _drive_whole_plan(plan, out_queue, ctx_box)],
-    )
+
+    def drive_task():
+        return _drive_pipeline(plan, dop, telemetry, out_queue, gen_box)
+
+    _build_segment_dag(executor, plan, segments, drive_task)
 
     def generator():
         try:
             executor.start()
-            yield from _stream(executor, out_queue, ctx_box)
+            yield from _stream(executor, out_queue, gen_box)
         finally:
             pool.shutdown(wait=True)
 

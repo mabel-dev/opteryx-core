@@ -73,11 +73,9 @@ cdef class SortNode(BasePlanNode):
 
         column_names = []
         ascending_flags = []
-
         for column, ascending in self.order_by:
             try:
-                identity = column.schema_column.identity
-                column_names.append(identity)
+                column_names.append(column.schema_column.identity)
             except ColumnNotFoundError as cnfe:  # pragma: no cover
                 raise ColumnNotFoundError(
                     f"`ORDER BY` must reference columns as they appear in the `SELECT` clause. {cnfe}"

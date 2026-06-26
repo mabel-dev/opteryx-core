@@ -181,6 +181,13 @@ def _coalesce_return_type(arg_nodes):
     return find_compatible_type(column_types) or _CT_NULL
 
 
+def _iif_return_type(arg_nodes):
+    """IIF(cond, when_true, when_false): common type of the two value branches,
+    NULL-aware. The condition (arg 0) is excluded; a NULL branch defers to the
+    other (so NULLIF's lowering IIF(a = b, NULL, a) resolves to a's type)."""
+    return _coalesce_return_type(arg_nodes[1:])
+
+
 def _datepart_return_type(arg_nodes):
     """EXTRACT/DATEPART return type depends on the part name literal."""
     part_val = getattr(arg_nodes[0], "value", None) if arg_nodes else None

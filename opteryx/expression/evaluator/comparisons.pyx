@@ -213,6 +213,18 @@ cdef _bool_compare(int op_code, left, right):
 # Main dispatch — int-op variant (used by bytecode executor)
 # ---------------------------------------------------------------------------
 
+cdef object _anyop_literal_scalar(object left):
+    """`literal = ANY(array)` tests a SINGLE literal against each array row; the
+    array-reduce kernel takes the raw Python scalar (int/str/bytes/None), not a
+    Vector. The bytecode materializes scalar literals as constant Vectors, so
+    unwrap element 0. A bare scalar passes through unchanged."""
+    if isinstance(left, Vector):
+        return (<Vector>left)._nb[0]
+    if is_draken_vector(left):
+        return left[0]
+    return left
+
+
 cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, int16_t right_schema_type=0):
     """Same as draken_compare but takes pre-computed integer op_code and BCTypeCode type codes.
 
@@ -227,11 +239,11 @@ cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, i
     # Direct dispatch for array/set operations before standard ops.
     # These do not use the negation/type-dispatch machinery below.
     if op_code == OP_ANYOP_EQ:
-        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        left_nb = _anyop_literal_scalar(left)
         right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
         return BoolVector(vector_anyop_eq(literal=left_nb, column=right_nb))
     if op_code == OP_ANYOP_NOT_EQ:
-        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        left_nb = _anyop_literal_scalar(left)
         right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
         return BoolVector(vector_anyop_neq(literal=left_nb, column=right_nb))
     if op_code == OP_ANYOP_GT:

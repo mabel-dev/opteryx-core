@@ -105,8 +105,18 @@ static inline bool is_float_type(DrakenType t) {
 // the pair cannot be promoted (e.g. mismatched DECIMAL/temporal) — the caller
 // raises. DECIMAL/DATE/TIME/TIMESTAMP/INTERVAL only ever match same-type here;
 // cross-family scaling is genuinely ambiguous and stays an error.
+// Canonicalize a fixed-width result type to match the binder's declared type.
+// The binder widens narrow ints (INT8/16/32) → INT64 via find_compatible_type
+// for IIF/COALESCE/IFNULL results; the declared type drives C-native cast-kernel
+// selection, so the produced vector must be INT64 too. DATE32/TIME32 (also 4-byte)
+// and DECIMAL/temporal are distinct tags and pass through unchanged.
+static inline DrakenType canon_fixed(DrakenType t) {
+    if (t == DRAKEN_INT8 || t == DRAKEN_INT16 || t == DRAKEN_INT32) return DRAKEN_INT64;
+    return t;
+}
+
 static inline DrakenType promote_fixed(DrakenType a, DrakenType b) {
-    if (a == b) return a;
+    if (a == b) return canon_fixed(a);
     if (is_int_type(a) && is_int_type(b)) return DRAKEN_INT64;
     if ((is_int_type(a) || is_float_type(a)) &&
         (is_int_type(b) || is_float_type(b))) return DRAKEN_FLOAT64;
@@ -240,6 +250,74 @@ static nb::object own_string(DrakenStringSlot* slots, uint8_t* arena, size_t are
 }
 
 // ---------------------------------------------------------------------------
+// Logical-type descriptor propagation for fixed-width results.
+//
+// DECIMAL (scale/precision) and TIMESTAMP/TIME (unit) carry a logical descriptor
+// on the Python-side VectorOwner, NOT on the DrakenVector the kernel sees. The
+// generic own_raw wrap drops it, so a selection result (iif/coalesce) of those
+// types renders as "missing its logical-type descriptor". We copy the descriptor
+// from the input branch that supplies the value and wrap via the descriptor-aware
+// own_* variants. (Mixed-scale DECIMAL branches are not rescaled — the descriptor
+// is taken from the first branch; selection over differing scales is a separate
+// concern. The NULLIF lowering and same-descriptor selections are exact.)
+// kind: 0 none, 1 TIMESTAMP64, 2 TIME32/TIME64, 3 DECIMAL.
+struct LogicalDesc {
+    int     kind      = 0;
+    char    unit[8]   = {0};   // "s" / "ms" / "us" / "ns"
+    uint8_t precision = 0;
+    uint8_t scale     = 0;
+};
+
+// Read the descriptor an output of out_type requires from a source Vector object.
+// Returns kind=0 for types without a logical descriptor, or when the source
+// unexpectedly lacks one (caller then falls back to a raw wrap, preserving the
+// pre-existing behaviour for an already-malformed input).
+static LogicalDesc read_logical_desc(nb::handle obj, DrakenType out_type) {
+    LogicalDesc d;
+    if (out_type == DRAKEN_TIMESTAMP64 || out_type == DRAKEN_TIME32 ||
+        out_type == DRAKEN_TIME64) {
+        PyObject* raw = PyObject_GetAttrString(obj.ptr(), "logical_type_unit");
+        if (!raw) { PyErr_Clear(); return d; }
+        nb::object u = nb::steal<nb::object>(raw);
+        if (u.is_none()) return d;
+        const char* s = PyUnicode_AsUTF8(u.ptr());
+        if (!s) { PyErr_Clear(); return d; }
+        std::strncpy(d.unit, s, sizeof(d.unit) - 1u);
+        d.kind = (out_type == DRAKEN_TIMESTAMP64) ? 1 : 2;
+        return d;
+    }
+    if (out_type == DRAKEN_DECIMAL) {
+        PyObject* rp = PyObject_GetAttrString(obj.ptr(), "logical_type_precision");
+        if (!rp) { PyErr_Clear(); return d; }
+        nb::object p = nb::steal<nb::object>(rp);
+        PyObject* rs = PyObject_GetAttrString(obj.ptr(), "logical_type_scale");
+        if (!rs) { PyErr_Clear(); return d; }
+        nb::object sc = nb::steal<nb::object>(rs);
+        if (p.is_none() || sc.is_none()) return d;
+        d.precision = static_cast<uint8_t>(nb::cast<int>(p));
+        d.scale     = static_cast<uint8_t>(nb::cast<int>(sc));
+        d.kind = 3;
+    }
+    return d;
+}
+
+// Wrap fixed-width result buffers, attaching the logical descriptor when present.
+static nb::object own_fixed(void* data, uint8_t* validity, uint32_t n,
+                            DrakenType type, const LogicalDesc& d) {
+    PyObject* out;
+    switch (d.kind) {
+        case 1:  out = draken_vector_own_timestamp(data, validity, n, d.unit); break;
+        case 2:  out = (type == DRAKEN_TIME32)
+                           ? draken_vector_own_time32(data, validity, n, d.unit)
+                           : draken_vector_own_time64(data, validity, n, d.unit); break;
+        case 3:  out = draken_vector_own_decimal(data, validity, n, d.precision, d.scale); break;
+        default: out = draken_vector_own_raw(data, validity, n, type); break;
+    }
+    if (!out) throw nb::python_error();
+    return nb::steal<nb::object>(out);
+}
+
+// ---------------------------------------------------------------------------
 // RAII guard for in-flight string output buffers
 // ---------------------------------------------------------------------------
 
@@ -324,7 +402,7 @@ static nb::object iif_bool(const DrakenVector* cond, const DrakenVector* true_v,
 // ---------------------------------------------------------------------------
 
 static nb::object coalesce_fixed(const std::vector<const DrakenVector*>& vecs,
-                                  uint32_t n, DrakenType type) {
+                                  uint32_t n, DrakenType type, const LogicalDesc& desc) {
     const size_t isz    = fixed_itemsize(type);
     const size_t alloc  = n > 0u ? static_cast<size_t>(n) * isz : isz;
     uint8_t* out_data   = static_cast<uint8_t*>(draken_malloc(alloc));
@@ -351,11 +429,12 @@ static nb::object coalesce_fixed(const std::vector<const DrakenVector*>& vecs,
     if (!any_null && out_valid) { draken_free(out_valid); out_valid = nullptr; g.v = nullptr; }
 
     g.d = nullptr; g.v = nullptr;
-    return own_raw(out_data, out_valid, n, type);
+    return own_fixed(out_data, out_valid, n, type, desc);
 }
 
 static nb::object iif_fixed(const DrakenVector* cond, const DrakenVector* true_v,
-                              const DrakenVector* false_v, uint32_t n, DrakenType type) {
+                              const DrakenVector* false_v, uint32_t n, DrakenType type,
+                              const LogicalDesc& desc) {
     const size_t isz   = fixed_itemsize(type);
     const size_t alloc = n > 0u ? static_cast<size_t>(n) * isz : isz;
     uint8_t* out_data  = static_cast<uint8_t*>(draken_malloc(alloc));
@@ -378,7 +457,50 @@ static nb::object iif_fixed(const DrakenVector* cond, const DrakenVector* true_v
     if (!any_null && out_valid) { draken_free(out_valid); out_valid = nullptr; g.v = nullptr; }
 
     g.d = nullptr; g.v = nullptr;
-    return own_raw(out_data, out_valid, n, type);
+    return own_fixed(out_data, out_valid, n, type, desc);
+}
+
+// Power-of-ten for DECIMAL rescale; scale difference is bounded to [0, 18].
+static inline int64_t pow10_i64(int e) {
+    static const int64_t P[] = {
+        1LL, 10LL, 100LL, 1000LL, 10000LL, 100000LL, 1000000LL, 10000000LL,
+        100000000LL, 1000000000LL, 10000000000LL, 100000000000LL, 1000000000000LL,
+        10000000000000LL, 100000000000000LL, 1000000000000000LL,
+        10000000000000000LL, 100000000000000000LL, 1000000000000000000LL };
+    return (e >= 0 && e <= 18) ? P[e] : 1LL;
+}
+
+// DECIMAL iif: int64 unscaled values. The two branches may carry different scales,
+// so rescale each selected value up to out_scale (= max of the two) — matching the
+// binder's declared scale — before storing. (DRAKEN_DECIMAL only; 8-byte int64.)
+static nb::object iif_decimal(const DrakenVector* cond, const DrakenVector* true_v,
+                              const DrakenVector* false_v, uint32_t n,
+                              uint8_t out_prec, uint8_t out_scale,
+                              uint8_t true_scale, uint8_t false_scale) {
+    const int64_t mul_t = pow10_i64(static_cast<int>(out_scale) - static_cast<int>(true_scale));
+    const int64_t mul_f = pow10_i64(static_cast<int>(out_scale) - static_cast<int>(false_scale));
+    const size_t alloc = (n > 0u ? static_cast<size_t>(n) : 1u) * sizeof(int64_t);
+    int64_t* out_data = static_cast<int64_t*>(draken_malloc(alloc));
+    if (!out_data) throw std::bad_alloc();
+    std::memset(out_data, 0, alloc);
+    uint8_t* out_valid = alloc_validity(n);
+    struct DG { int64_t* d; uint8_t* v;
+                ~DG() { if (d) draken_free(d); if (v) draken_free(v); } } g{out_data, out_valid};
+
+    bool any_null = false;
+    for (uint32_t row = 0u; row < n; ++row) {
+        const bool choose_true = row_is_valid(cond, row) && read_bool_row(cond, row);
+        const DrakenVector* src = choose_true ? true_v : false_v;
+        if (!row_is_valid(src, row)) { any_null = true; continue; }
+        const int64_t v = static_cast<const int64_t*>(src->data)[src->selection[row]];
+        out_data[row] = v * (choose_true ? mul_t : mul_f);
+        if (out_valid) set_bit(out_valid, row);
+    }
+    if (!any_null && out_valid) { draken_free(out_valid); out_valid = nullptr; g.v = nullptr; }
+    g.d = nullptr; g.v = nullptr;
+    PyObject* out = draken_vector_own_decimal(out_data, out_valid, n, out_prec, out_scale);
+    if (!out) throw nb::python_error();
+    return nb::steal<nb::object>(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -690,7 +812,7 @@ static nb::object impl_coalesce(nb::args args) {
             }
             out_type = promoted;
         }
-        return coalesce_fixed(vecs, n, out_type);
+        return coalesce_fixed(vecs, n, out_type, read_logical_desc(args[0], out_type));
     }
 
     PyErr_Format(PyExc_TypeError,
@@ -716,6 +838,53 @@ static nb::object impl_iif(nb::object mask_obj, nb::object true_obj, nb::object 
     }
 
     const DrakenType tt = true_v->type, ft = false_v->type;
+
+    // NULL-branch handling: a literal NULL (DRAKEN_NULL ⟹ every row null) on one
+    // side adopts the OTHER branch's type and yields NULL wherever it is selected.
+    // This is what SQL `IIF(c, NULL, x)` / `IIF(c, x, NULL)` mean, and the lowering
+    // target for NULLIF (→ IIF(a = b, NULL, a)). We model the NULL side as an
+    // all-invalid vector of the result type and reuse the existing same-family
+    // kernels — they never read a row they deem null, so its data is untouched.
+    if (tt == DRAKEN_NULL || ft == DRAKEN_NULL) {
+        if (tt == DRAKEN_NULL && ft == DRAKEN_NULL)
+            throw nb::type_error("vector_iif: both branches are NULL");
+
+        const DrakenVector* present = (tt == DRAKEN_NULL) ? false_v : true_v;
+        const DrakenType    pt      = present->type;
+
+        DrakenType out_type;
+        if (is_bool_type(pt))                                   out_type = DRAKEN_BOOL;
+        else if (is_string_type(pt))                            out_type = canon_string_type(pt);
+        else if (is_fixed_type(pt) && fixed_itemsize(pt) != 0u) out_type = canon_fixed(pt);
+        else {
+            PyErr_Format(PyExc_TypeError,
+                "vector_iif: NULL branch paired with unsupported type %d",
+                static_cast<int>(pt));
+            throw nb::python_error();
+        }
+
+        // Synthetic all-invalid branch of out_type: validity all-zero ⟹ every row
+        // null. data stays NULL (never dereferenced — the kernels guard on
+        // row_is_valid); selection borrows the present branch's (length n, non-NULL)
+        // purely to honour the "selection is never NULL" invariant.
+        uint8_t* null_validity = alloc_validity(n);
+        struct VG { uint8_t* v; ~VG() { if (v) draken_free(v); } } vg{null_validity};
+
+        DrakenVector null_branch;
+        std::memset(&null_branch, 0, sizeof(null_branch));
+        null_branch.selection = present->selection;
+        null_branch.length    = n;
+        null_branch.validity  = null_validity;
+        null_branch.type      = out_type;
+
+        const DrakenVector* tv = (tt == DRAKEN_NULL) ? &null_branch : true_v;
+        const DrakenVector* fv = (ft == DRAKEN_NULL) ? &null_branch : false_v;
+
+        if (is_bool_type(out_type))   return iif_bool(cond, tv, fv, n);
+        if (is_string_type(out_type)) return iif_string(cond, tv, fv, n, out_type);
+        nb::object present_obj = (tt == DRAKEN_NULL) ? false_obj : true_obj;
+        return iif_fixed(cond, tv, fv, n, out_type, read_logical_desc(present_obj, out_type));
+    }
 
     if (is_bool_type(tt) && is_bool_type(ft))
         return iif_bool(cond, true_v, false_v, n);
@@ -755,13 +924,64 @@ static nb::object impl_iif(nb::object mask_obj, nb::object true_obj, nb::object 
                 static_cast<int>(tt), static_cast<int>(ft));
             throw nb::python_error();
         }
-        return iif_fixed(cond, true_v, false_v, n, out_type);
+        // DECIMAL: branches are int64 unscaled and may carry different scales.
+        // Rescale to the common (max) scale so the result matches the binder's
+        // declared scale (find_compatible_type widens to the larger scale).
+        if (out_type == DRAKEN_DECIMAL) {
+            const LogicalDesc dt = read_logical_desc(true_obj, DRAKEN_DECIMAL);
+            const LogicalDesc df = read_logical_desc(false_obj, DRAKEN_DECIMAL);
+            const uint8_t out_scale = dt.scale > df.scale ? dt.scale : df.scale;
+            int p = dt.precision > df.precision ? dt.precision : df.precision;
+            if (p < out_scale) p = out_scale;
+            if (p > 18) p = 18;
+            return iif_decimal(cond, true_v, false_v, n,
+                               static_cast<uint8_t>(p), out_scale, dt.scale, df.scale);
+        }
+        return iif_fixed(cond, true_v, false_v, n, out_type,
+                         read_logical_desc(true_obj, out_type));
     }
 
     PyErr_Format(PyExc_TypeError,
         "vector_iif: unsupported branch types (true_v %d, false_v %d)",
         static_cast<int>(tt), static_cast<int>(ft));
     throw nb::python_error();
+}
+
+// ---------------------------------------------------------------------------
+// IFNULL / IFNOTNULL — null-aware selection, lowered onto vector_iif.
+//
+// IFNULL(value, default)    = IIF(value IS NULL, default, value)
+// IFNOTNULL(value, result)  = IIF(value IS NULL, value,   result)
+//
+// The `value IS NULL` mask is built natively from `value`'s validity (no Python),
+// then handed to impl_iif so all of its type/NULL-branch/descriptor/narrow-int
+// handling is reused verbatim.
+// ---------------------------------------------------------------------------
+
+// Build isnull(v) as a fresh dense BOOL Vector (bit set = v is null at that row).
+static nb::object isnull_bool_vector(const DrakenVector* v, uint32_t n) {
+    const uint32_t padded = ((((n + 7u) >> 3u) + 7u) & ~7u);
+    const size_t   sz     = padded ? static_cast<size_t>(padded) : 8u;
+    uint8_t* bits = static_cast<uint8_t*>(draken_malloc(sz));
+    if (!bits) throw std::bad_alloc();
+    std::memset(bits, 0, sz);
+    for (uint32_t row = 0u; row < n; ++row) {
+        if (!row_is_valid(v, row)) set_bit(bits, row);
+    }
+    // validity NULL: the mask itself is never null. own_raw makes it dense.
+    return own_raw(bits, nullptr, n, DRAKEN_BOOL);
+}
+
+static nb::object impl_ifnull(nb::object value_obj, nb::object default_obj) {
+    const DrakenVector* v = unwrap(value_obj, "vector_ifnull");
+    nb::object cond = isnull_bool_vector(v, v->length);
+    return impl_iif(cond, default_obj, value_obj);
+}
+
+static nb::object impl_ifnotnull(nb::object value_obj, nb::object result_obj) {
+    const DrakenVector* v = unwrap(value_obj, "vector_ifnotnull");
+    nb::object cond = isnull_bool_vector(v, v->length);
+    return impl_iif(cond, value_obj, result_obj);
 }
 
 static nb::object impl_vector_concat(nb::args args) {
@@ -825,6 +1045,22 @@ void register_vector_selection_concat(nb::module_ &m) {
         "Null or false mask → when_false (SQL CASE WHEN NULL = ELSE branch). "
         "Null in selected branch → null in output. "
         "Fails loud on non-Vector, type mismatch, or length mismatch.");
+
+    m.def("vector_ifnull",
+        [](nb::object values, nb::object default_) -> nb::object {
+            return impl_ifnull(values, default_);
+        },
+        nb::arg("values"), nb::arg("default"),
+        "SQL IFNULL(values, default) = IIF(values IS NULL, default, values). "
+        "Native null-aware selection; reuses the vector_iif type machinery.");
+
+    m.def("vector_ifnotnull",
+        [](nb::object values, nb::object result) -> nb::object {
+            return impl_ifnotnull(values, result);
+        },
+        nb::arg("values"), nb::arg("result"),
+        "SQL IFNOTNULL(values, result) = IIF(values IS NULL, values, result). "
+        "Native null-aware selection; reuses the vector_iif type machinery.");
 
     m.def("vector_concat",
         [](nb::args args) -> nb::object { return impl_vector_concat(args); },

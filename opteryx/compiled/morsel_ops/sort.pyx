@@ -76,7 +76,15 @@ cdef extern from * nogil:
         const int32_t* offsets,
         bool ascending
     ) {
-        std::sort(perm, perm + n,
+        // STABLE string sort — std::stable_sort, NOT std::sort.
+        //   Multi-column LSD: morsel_sort runs columns least-significant first;
+        //   each pass MUST preserve the order the prior (less-significant) passes
+        //   established for equal keys. std::sort is unstable, so a string pass
+        //   destroyed the prior passes' order — multi-key ORDER BY with a string
+        //   key was producing wrong results (the secondary key was ignored
+        //   within equal-string groups). stable_sort preserves `perm`'s incoming
+        //   order on equal strings → correct LSD.
+        std::stable_sort(perm, perm + n,
             [data, offsets, ascending](uint32_t a, uint32_t b) {
                 int32_t sa = offsets[a], la = offsets[a + 1] - sa;
                 int32_t sb = offsets[b], lb = offsets[b + 1] - sb;

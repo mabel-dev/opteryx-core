@@ -24,18 +24,17 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         vector_hex_encode,
         vector_md5,
         vector_sha1,
+        vector_sha224,
         vector_sha256,
+        vector_sha384,
         vector_sha512,
     )
     from opteryx.expression.functions.implementations import arithmetic as number_functions
-    from opteryx.expression.functions.implementations import text as string_functions
     from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
     # Small wrapper kernels for single-argument stringification/encoding paths.
     _hash_kernel = _isingle(lambda x: hex(hash_bytes(str(x).encode()))[2:])
-    _sha224_kernel = _isingle(string_functions.get_sha224)
-    _sha384_kernel = _isingle(string_functions.get_sha384)
 
     # Parameter short-hands
     _any = ParameterSpec(name="val", type_family="any")
@@ -66,10 +65,11 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA224",
-            _sha224_kernel,
+            vector_sha224,
             _CT_VARBINARY,
             (_any,),
-            cost=634394.82,
+            engine="draken",
+            cost=7.56,
             summary="SHA-224 hash.",
         ),
         _make(
@@ -83,10 +83,11 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA384",
-            _sha384_kernel,
+            vector_sha384,
             _CT_VARBINARY,
             (_any,),
-            cost=714225.82,
+            engine="draken",
+            cost=7.47,
             summary="SHA-384 hash.",
         ),
         _make(

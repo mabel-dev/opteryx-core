@@ -154,7 +154,8 @@ def _md5_sorted(rows):
 class _Cfg:
     """Save/restore the two config knobs the SOLE engine reads, so the test is hermetic.
 
-    The generic ``_pipeline_stream`` is now the ONLY data engine (no flag, no dual
+    The M4 ``scheduler_engine`` is now the ONLY data engine (Step 7 — it hosts the
+    ``dispatch_data_pipeline`` substrate under its Event/Executor DAG; no flag, no dual
     path). The serial REFERENCE is taken by forcing ``PARALLEL_MIN_ROWS`` above the
     input so the row-floor branch drives the ORIGINAL un-cloned breaker (the serial
     truth, byte-identical to the parallel sink by the prime constraint); the parallel
@@ -432,6 +433,23 @@ _MULTI_JOIN_QUERIES = [
         "GROUP BY n.n_name ORDER BY q DESC, n.n_name LIMIT 10",
         RecombClass.HASH_REPARTITION,
     ),
+    # The real TPC-H Q3 (customer ⋈ orders ⋈ lineitem, GROUP BY + ORDER BY + LIMIT) — the
+    # canonical 3-table left-deep shape whose BUILD prelude (customer ⋈ orders) is itself a
+    # parallelisable inner join. The build-prelude parallelization probes `orders` across
+    # workers (the Amdahl-anchor fix); the result must stay byte-identical to serial,
+    # order-preserving for the ORDER BY + LIMIT.
+    (
+        "tpch_q3",
+        "SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) revenue, "
+        "o_orderdate, o_shippriority "
+        f"FROM {_C}, {_O}, {_L} "
+        "WHERE c_mktsegment = 'BUILDING' AND c_custkey = o_custkey "
+        "AND l_orderkey = o_orderkey AND o_orderdate < '1995-03-22'::DATE "
+        "AND l_shipdate > '1995-03-22'::DATE "
+        "GROUP BY l_orderkey, o_orderdate, o_shippriority "
+        "ORDER BY revenue DESC, o_orderdate LIMIT 10",
+        RecombClass.HASH_REPARTITION,
+    ),
 ]
 
 
@@ -516,7 +534,78 @@ def test_multi_join_agg_byte_identical(name, sql, expected_class):
     assert g8_fired == [(expected_class, 8, True, True)], f"{name}: DOP=8 fired {g8_fired}"
 
 
+# =============================================================================
+# Build-prelude parallelization — the TOP join's BUILD leg is itself a parallelisable
+# inner join (Q3: customer ⋈ orders feeding (customer⋈orders) ⋈ lineitem). The inner
+# join's big PROBE (orders) is parallel-probed instead of driven serially — the Amdahl
+# anchor (Q3: 29% of wall). This test proves the inner-join parallel path FIRES at DOP>1
+# (and does NOT at DOP=1 — the serial prelude, byte-identical), with the result
+# byte-identical AND order-preserving (ORDER BY + LIMIT) across serial == DOP1 == DOP8.
+# =============================================================================
+
+_BUILD_PRELUDE_Q3 = (
+    "SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) revenue, "
+    "o_orderdate, o_shippriority "
+    f"FROM {_C}, {_O}, {_L} "
+    "WHERE c_mktsegment = 'BUILDING' AND c_custkey = o_custkey "
+    "AND l_orderkey = o_orderkey AND o_orderdate < '1995-03-22'::DATE "
+    "AND l_shipdate > '1995-03-22'::DATE "
+    "GROUP BY l_orderkey, o_orderdate, o_shippriority "
+    "ORDER BY revenue DESC, o_orderdate LIMIT 10"
+)
+
+
+def test_build_prelude_inner_join_parallelizes():
+    """The build prelude's inner ``customer ⋈ orders`` join must parallel-probe at DOP>1
+    (firing ``_SharedSourceJoin._build_parallel_inner``) and stay SERIAL at DOP=1, with
+    the Q3 result byte-identical and order-preserving across serial == DOP1 == DOP8."""
+    sql = _BUILD_PRELUDE_Q3
+    inner_fired = {"count": 0}
+    orig_bpi = parallel_engine._SharedSourceJoin._build_parallel_inner
+
+    def spy_bpi(self, *args, **kwargs):
+        inner_fired["count"] += 1
+        return orig_bpi(self, *args, **kwargs)
+
+    with _Cfg() as cfg:
+        # serial reference
+        cfg.set(generic=False, workers=1, floor=10**12)
+        serial_rows = _run_rows(sql)
+        serial_sorted = _md5_sorted(serial_rows)
+        serial_order = _md5_listorder(serial_rows)
+
+        parallel_engine._SharedSourceJoin._build_parallel_inner = spy_bpi
+        try:
+            # DOP=1 → the build prelude drives serially (the inner-join parallel path must
+            # NOT fire — the prime constraint, byte-identical to serial).
+            cfg.set(generic=True, workers=1, floor=0)
+            inner_fired["count"] = 0
+            g1_rows = _run_rows(sql)
+            g1_inner = inner_fired["count"]
+
+            # DOP=8 → the inner join's PROBE parallelises (the anchor fix fires exactly
+            # once: the single multi-join build prelude).
+            cfg.set(generic=True, workers=8, floor=0)
+            inner_fired["count"] = 0
+            g8_rows = _run_rows(sql)
+            g8_inner = inner_fired["count"]
+        finally:
+            parallel_engine._SharedSourceJoin._build_parallel_inner = orig_bpi
+
+    assert serial_sorted == _md5_sorted(g1_rows) == _md5_sorted(g8_rows), "Q3 values differ"
+    assert serial_order == _md5_listorder(g1_rows) == _md5_listorder(g8_rows), (
+        "Q3 ORDER BY output order differs from serial"
+    )
+    assert g1_inner == 0, f"DOP=1 must NOT parallelise the build prelude (fired {g1_inner})"
+    assert g8_inner == 1, (
+        f"DOP=8 must parallelise the build prelude's inner join exactly once "
+        f"(fired {g8_inner})"
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover
+    test_build_prelude_inner_join_parallelizes()
+    print("OK  build_prelude_inner_join_parallelizes")
     for _name, _sql, _cls, _mw in _QUERIES:
         test_generic_pipeline_byte_identical(_name, _sql, _cls, _mw)
         print(f"OK  {_name}")

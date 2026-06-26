@@ -367,20 +367,16 @@ def humanize(arr):
 
 
 def array_contains(arr, val):
-    """Check if array contains value. Assumes Draken vectors."""
-    from draken.interop.vector_sequence import vector_from_sequence
-
-    needle = val[0] if getattr(val, "__getitem__", None) is not None else val
-    bool_list = []
-    for row in arr:
-        if row is None:
-            bool_list.append(False)
-        else:
-            try:
-                bool_list.append(needle in set(row))
-            except TypeError:
-                bool_list.append(needle in row)
-    return vector_from_sequence(bool_list)
+    """
+    ARRAY_CONTAINS is lowered to the native AnyOpEq operator — item = ANY(arr) —
+    at plan-build time (see logical_planner_builders.function). It must never
+    reach a Python kernel; this guard fails loud if the rewrite was bypassed
+    rather than silently degrading to a row-wise Python implementation.
+    """
+    raise NotImplementedError(
+        "ARRAY_CONTAINS must be lowered to `item = ANY(arr)` (AnyOpEq) during "
+        "planning; the array_contains kernel should never be invoked."
+    )
 
 
 def array_contains_any(arr, val):

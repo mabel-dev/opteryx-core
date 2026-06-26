@@ -5,6 +5,39 @@
 > This supersedes the bespoke-strategy direction in `PARALLEL_ENGINE_DESIGN.md` for
 > *how* parallelism is structured. Every claim is anchored to a `file:line`.
 
+## Status — DELIVERED (2026-06-25), with one measured negative
+
+This design is **implemented and shipped as the default engine**, and the original §5 sequence
+is resolved. What changed since authoring (knowledge + intent), recorded here so the rest of
+the doc is read in light of it:
+
+- **Steps 0–7 landed.** The five bespoke per-shape strategies are deleted; the one executor was
+  folded into `scheduler_engine.py` as one Event per segment (Step 7) and is the **sole data
+  path** — `M4_USE_SCHEDULER` defaults on, `parallel_engine.execute` is removed, `_pipeline_stream`
+  is now `dispatch_data_pipeline`. The `PipelineSink` contract + one `_run_breaker_segment`
+  skeleton cover stateless / ungrouped / grouped / distinct / inner-join→agg / multi-join,
+  including a **parallel build prelude** for multi-joins.
+- **It scales with data, as designed.** A multi-join→agg (TPC-H Q3) goes **1.30× at SF=1 →
+  1.66× at SF=10** (cores 3.0→7.7), byte-identical. The SF=1 "ceiling" was a measurement
+  artifact of small data, not a limit. The **tdoms cardinality estimator** (Ebergen) was wired
+  into build-side selection so the fact table becomes the probe — a durable *serial* win that
+  also unlocks the multi-join parallel path.
+- **Step 8 (`ORDER_MERGE` parallel sort) is a measured NEGATIVE — built, then REVERTED.**
+  Byte-identical but a **0.46× regression** on a large sort. Root cause is fundamental: the
+  serial radix sort is **DRAM-bandwidth-bound** (runs at ~1.1 cores), so slicing it across W
+  workers contends on memory bandwidth and *loses* — the W parallel local sorts alone (38.3s)
+  already exceed the whole serial sort (25.6s), so even a free merge can't win, and the k-way
+  merge adds a cache-missing serial tail. The §4.2 claim "sort is not a hard block" was **wrong
+  for this kernel** — corrected inline below. Sort stays serial.
+- **Unifying knowledge:** Opteryx's hot paths are increasingly **bandwidth-bound, not
+  CPU-bound**. Pipeline parallelism wins where there is real CPU work to spread (joins,
+  aggregation — validated scaling) and loses where the kernel just streams memory (sort — the
+  same wall as ClickBench decode). The lever there is touching *less* memory, not more threads.
+- **Out of scope by design (§6), surfaced for a separate plan:** outer joins and subquery
+  shapes. At SF=10 only 4/22 TPC-H queries fire a parallel path; the expensive serial ones
+  (Q5/Q7/Q9/Q13/Q18) need that coverage. Also open: a Q21 SF=10 binder regression (empty
+  projection, stats-driven) — unrelated to this engine.
+
 ## 0. The problem this kills
 
 `parallel_engine.py` today has **five bespoke per-shape strategies** —
@@ -82,7 +115,7 @@ differently (hash-repartition, not `merge()`). Replace it with a per-breaker
 | `SCALAR_MERGE` | `engine.merge()` (exists) | the merged engine | ungrouped aggregate |
 | `HASH_REPARTITION` | O(radix) bin hand-off | parallel per-partition | grouped agg, distinct |
 | `SHARED_SOURCE` | no-op (built once) | streaming probe | inner-equi join |
-| `ORDER_MERGE` | register sorted run | k-way merge tail | sort *(needs the merge kernel written, §4)* |
+| ~~`ORDER_MERGE`~~ | ~~register sorted run~~ | ~~k-way merge tail~~ | sort — **BUILT then REVERTED: bandwidth-bound negative (§4.2)** |
 | `NONE` | — | today's serial `_finalize` | everything un-migrated |
 
 ## 2. How every operator adopts it (easy → hard, all verified)
@@ -95,11 +128,11 @@ differently (hash-repartition, not `merge()`). Replace it with a per-breaker
 | **grouped agg** | sink | `HASH_REPARTITION` — **`_grouped_agg_route` (1181-1360) IS this contract already** | proven |
 | **distinct** | sink | `HASH_REPARTITION` — identical shuffle+combine; only `finalize` differs | easy |
 | **inner-equi join** | sink (build) + streaming (probe) | `SHARED_SOURCE` — v1 thread-local-full (Phase-1, 3.67×); build-before-probe is an Event edge | done (v1) |
-| **sort** | sink | `ORDER_MERGE` — parallel local sort + **a k-way merge tail kernel to be written (§4)** | buildable |
+| **sort** | sink | `ORDER_MERGE` — built then **reverted: measured 0.46× regression, DRAM-bandwidth-bound (§4.2)** | ✗ negative |
 
-**Net: 4 of the 5 bespoke strategies retire cleanly** (stateless, ungrouped, grouped,
-distinct); the join becomes the `SHARED_SOURCE` sink (already built, thread-local-full);
-sort becomes the `ORDER_MERGE` sink once the k-way merge tail kernel is written. The
+**Net: all 5 bespoke strategies retired** (stateless, ungrouped, grouped, distinct); the join
+became the `SHARED_SOURCE` sink (thread-local-full). Sort was built as the `ORDER_MERGE` sink
+but **reverted — a DRAM-bandwidth-bound negative (§4.2)** — so sort stays serial. The
 verification confirmed each adopts on its *existing* seam with the operator body untouched —
 this is the "seam-swap-into-clone" model, not relocating `_push_impl` onto a new contract
 object.
@@ -129,13 +162,20 @@ don't exist:
    independent pullable pipelines. Multi-segment DAG composition is real; **zero-new-plumbing
    is a myth**. Read-out-as-pullable-Source is an explicit *later, measured* change — do not
    assume it in v1.
-2. **Sort needs a k-way merge kernel WRITTEN — not a hard block.** Today `SortNode` buffers
-   all morsels then one global `morsel_sort`. The parallel shape is standard: each worker
-   sorts its own slice into a **sorted run**, then a **k-way merge tail** (loser-tree / heap
-   merge over the W runs) combines them — the merge happens *after* the sort. The merge
-   kernel is a bounded draken addition, not a research problem; it is the one prerequisite
-   for `ORDER_MERGE`. Until it lands, sort stays `NONE`/serial; once it lands, `join→agg→sort`
-   parallelizes the sort too, with only the log-fan-in final merge as a cheap partial tail.
+2. **Sort IS effectively a hard block — this was BUILT and REVERTED (corrected knowledge).**
+   The original claim here ("not a hard block; just write the k-way merge kernel") was wrong.
+   The shape *was* implemented exactly as described — each worker sorts its slice into a sorted
+   run, a heap k-way merge tail (`merge_runs.h`) combines them — byte-identical including ties.
+   But it **regressed 0.46×** on a large standalone sort (28.5s serial → 61.8s parallel) and
+   was reverted. Root cause, profiled: the serial `morsel_sort` (radix) is **DRAM-bandwidth-
+   bound**, running at ~1.1 cores — it is *already* saturating memory, not CPU. Slicing it
+   across W workers makes the W threads contend on bandwidth: the parallel local sorts **alone**
+   (38.3s) exceed the entire serial sort (25.6s), so even a zero-cost merge cannot win; the
+   k-way merge then adds a ~22s cache-missing serial tail (random-access comparator over 43M
+   rows). This is not fixable with a better merge — it needs a fundamentally different,
+   bandwidth-aware parallel sort primitive (research-level, not pursued). Sort stays serial;
+   the post-agg sort *tail* (small grouped output) was always serial and is unaffected. Same
+   wall as ClickBench decode: a bandwidth-bound kernel does not parallelize by adding threads.
 3. **No GIL ceiling — we are free-threaded.** An earlier draft (parroting standard-CPython
    logic) called DOP>1 "GIL-bound." That is WRONG for our runtime: we run 3.14t with
    `PYTHON_GIL=0`, `sys._is_gil_enabled()` is False, and `with gil:` does NOT mutually
@@ -157,9 +197,11 @@ don't exist:
 
 ## 5. Migration — strangler-fig, every step gate-green + DOP=1 byte-identical
 
-Behind `M4_USE_SCHEDULER` (`config.py:188`); `parallel_engine` stays the baseline so the two
-compare. Each step: `make q` 190 + tpch 22 + cb 43, result-identical, **DOP=1 golden
-differential** green.
+**Status: COMPLETE.** Steps 0–7 landed and shipped as the default (`M4_USE_SCHEDULER` now
+defaults on; `scheduler_engine` is the sole data path; `parallel_engine.execute` removed).
+Step 8 was built and **reverted** (negative, §4.2). Each step held the gate: `make q` 190 +
+tpch 22 + cb 43, result-identical, **DOP=1 golden differential** green. The strangler-fig
+`M4_USE_SCHEDULER` toggle existed only during migration and is now legacy.
 
 - **Step 0** — Land the `PipelineSink` contract (default `NONE`=serial) + the
   `recombination_class` property + `_pipeline_stream` skeleton. No behaviour change (every
@@ -180,9 +222,10 @@ differential** green.
   lift the `min(ceiling, 1)` DOP pin; flip `M4_USE_SCHEDULER` default on; **delete the five
   `_find_parallel_*` finders and the `execute()` cascade.**
 
-- **Step 8** — `ORDER_MERGE` sort: write the **k-way merge tail kernel** in draken (loser-tree
-  / heap merge over W sorted runs), then the sort sink = parallel local sort + that merge. Now
-  `join→agg→sort` parallelizes end-to-end (only the log-fan-in final merge is a partial tail).
+- **Step 8** — ~~`ORDER_MERGE` sort~~ — **BUILT then REVERTED (negative, §4.2).** The k-way
+  merge kernel + parallel-local-sort sink were implemented and byte-identical, but regressed
+  0.46× because the radix sort is DRAM-bandwidth-bound. Removed; sort stays serial. `join→agg`
+  parallelizes (the agg); the small post-agg sort tail runs serial, as it always did.
 
 **Kept (the proven substrate):** `identify_segments`/`Segment`, `resolve_worker_count`,
 `_clone_op`, `compile_pipeline`, `pull_one`/`push_one`, `CppThreadPool`, the
@@ -199,10 +242,18 @@ It **is** the single mechanism that makes scan/filter/project/ungrouped/grouped/
 inner-join and their combinations parallelize with no per-shape code, retiring 4-5 bespoke
 strategies into one executor + a thin contract — designed, not grown.
 
-It is **not** a magic 6× on TPC-H. The honest caps after it lands: **sort** parallelizes
-only once the **k-way merge tail kernel** is written (a bounded draken addition — until
-then sort stays serial), and cross-segment composition uses the **EMIT-into-cloned-downstream**
-model until read-out-as-Source is built. There is **no GIL ceiling** — we are free-threaded,
-so DOP>1 numbers are real today. So `join→agg` parallelizes now; `join→agg→sort` parallelizes
-end-to-end once the merge kernel lands. The deliverable is the *architecture*, measured per
-step on real data, with the prime constraint as the gate that fails it.
+It is **not** a magic 6× on TPC-H, and the measured outcome bears that out. The honest results:
+`join→agg` and multi-join parallelize and **scale with data** (Q3 1.30×@SF1 → 1.66×@SF10) —
+that's the win, and it's real (no GIL ceiling; we are free-threaded, DOP>1 numbers are genuine).
+But **sort does NOT parallelize** — it was built and reverted as a bandwidth-bound negative
+(§4.2). Cross-segment composition uses the **EMIT-into-cloned-downstream** model (read-out-as-
+Source was never needed). The deeper lesson, learned by building it: parallelism pays where
+there is CPU work to spread and **loses on bandwidth-bound kernels** (sort, decode), where the
+lever is touching less memory, not more threads.
+
+It is **also not** a parallelizer for every query. By design it covers
+scan/filter/project/ungrouped/grouped/distinct/**inner**-join and their combinations. Outer
+joins and subquery shapes are out of scope — at SF=10 only 4/22 TPC-H queries fire a parallel
+path, and the expensive serial ones (Q5/Q7/Q9/Q13/Q18) need shape coverage that is a **separate
+plan**, not this one. The deliverable here is the *architecture* (one executor + a thin
+contract, designed not grown), measured on real data, with the prime constraint as the gate.

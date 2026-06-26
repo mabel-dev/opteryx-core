@@ -212,7 +212,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         vector_contains_all,
         vector_contains_any,
     )
-    from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (
         array_contains as _of_array_contains,
@@ -239,7 +238,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         array_contains = staticmethod(_of_array_contains)
         array_contains_all = staticmethod(_of_array_contains_all)
         array_contains_any = staticmethod(_of_array_contains_any)
-        if_null = staticmethod(_of_if_null)
         null_if = staticmethod(_of_null_if)
         cosine_distance = staticmethod(_of_cosine_distance)
         cosine_similarity = staticmethod(_of_cosine_similarity)

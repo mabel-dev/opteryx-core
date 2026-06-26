@@ -653,8 +653,6 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 else:
                     element_type = _lt.VARIANT
 
-            from opteryx.types import logical_type as _lt
-
             if target_type_name == "DECIMAL":
                 _ct = _lt.DECIMAL(precision, scale)
             elif target_type_name == "ARRAY":

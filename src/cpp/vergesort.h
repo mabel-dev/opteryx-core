@@ -116,8 +116,15 @@ static inline bool vergesort_u64(
         }
 
         if (keys[perm[i + 1]] < keys[perm[i]]) {
-            // Descending run: extend and reverse in-place.
-            while (i + 1 < nn && keys[perm[i + 1]] <= keys[perm[i]])
+            // STRICTLY descending run: extend with `<` (NOT `<=`) and reverse
+            // in-place. Using `<` excludes trailing EQUAL elements from the run,
+            // so the in-place reversal never reverses the relative order of equal
+            // keys — the pre-pass stays STABLE (equal keys keep input order). This
+            // makes the whole sort a deterministic input-order-stable TOTAL order,
+            // the precondition the parallel k-way merge relies on to be
+            // byte-identical to serial (its global-index tiebreak == this input
+            // order). `<=` here would reverse ties and no merge could reproduce it.
+            while (i + 1 < nn && keys[perm[i + 1]] < keys[perm[i]])
                 ++i;
             uint32_t lo = run_start, hi = i;
             while (lo < hi) {

@@ -21,7 +21,13 @@ DT = dn.DrakenType
 
 
 def _cols(m, ncols):
-    return [m[i].to_pylist() for i in range(ncols)]
+    # COLUMN access (m[i] is ROW access per the Morsel contract). `_cxx_column`
+    # reads the i-th column from whichever representation backs the morsel — the
+    # Cxx substrate when Cxx-backed (no whole-morsel materialization), the
+    # PyObject store otherwise — so the comparison is column-data byte-identical
+    # without collapsing a Cxx-backed morsel.
+    names = m.column_names
+    return [m._cxx_column(names[i]).to_pylist() for i in range(ncols)]
 
 
 def test_dual_morsel_from_cxx_and_cxx_native_ops():
@@ -61,16 +67,22 @@ def test_dual_morsel_from_cxx_and_cxx_native_ops():
     assert sl._cxx is not None
     assert _cols(sl, 3) == _cols(ref.slice(1, 2), 3)
 
-    # First real column access materializes byte-identically and collapses to PyObject.
+    # Explicit materialization (the sole sanctioned PyObject collapse) is
+    # byte-identical and clears the Cxx carrier. Metadata (column_names) is cheap
+    # and does NOT materialize on its own.
     mat = fresh()
     assert mat.column_names == ref.column_names
+    assert mat._cxx is not None, "metadata access must not materialize"
+    mat.materialize()
     assert mat._cxx is None
-    for i in range(3):
-        assert mat[i].to_pylist() == ref[i].to_pylist()
-        assert mat[i].type == ref[i].type
+    for name in mat.column_names:
+        assert mat.column(name).to_pylist() == ref.column(name).to_pylist()
+        assert mat.column(name).type == ref.column(name).type
 
-    # column(), and the keying hash, match through a Cxx-backed morsel.
-    assert fresh().column(b"name").to_pylist() == ref.column(b"name").to_pylist()
+    # Substrate column read (_cxx_column — the converted-operator accessor that
+    # reads through a Cxx-backed morsel without materializing; `column` fails loud
+    # there), and the keying hash, match the PyObject path.
+    assert fresh()._cxx_column(b"name").to_pylist() == ref.column(b"name").to_pylist()
     assert list(fresh().hash()) == list(ref.hash())
 
 

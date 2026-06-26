@@ -83,7 +83,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             category="text",
             engine="draken",
             summary="Convert string to uppercase.",
-            cost=142.0,
+            cost=6138.97,
         ),
         _make(
             "LOWER",
@@ -94,7 +94,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             category="text",
             engine="draken",
             summary="Convert string to lowercase.",
-            cost=133.0,
+            cost=6350.00,
         ),
         FunctionDefinition(
             name="LENGTH",

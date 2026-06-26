@@ -767,7 +767,6 @@ extensions = [
             "draken/ops/kernels/cast_kernels.h",
             "draken/ops/kernels/binary_op_kernels.h",
             "draken/ops/kernels/extraction_kernels.h",
-            "draken/ops/kernels/function_kernels.h",
         ],
     ),
     # Phase 9a: C kernel registry lookup wrapper (Cython interface for bytecode builder/executor)
@@ -807,7 +806,6 @@ extensions = [
             "draken/ops/kernels/cast_kernels.h",
             "draken/ops/kernels/binary_op_kernels.h",
             "draken/ops/kernels/extraction_kernels.h",
-            "draken/ops/kernels/function_kernels.h",
         ],
     ),
     # E.24 Cython shims — real compiled extensions providing __pyx_vtable__

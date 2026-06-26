@@ -50,20 +50,6 @@ def split(arr, delimiter=",", limit=None):
     return result
 
 
-def get_sha224(item):
-    """calculate SHA224 hash of a value"""
-    import hashlib
-
-    return hashlib.sha224(str(item).encode()).hexdigest()
-
-
-def get_sha384(item):
-    """calculate SHA384 hash of a value"""
-    import hashlib
-
-    return hashlib.sha384(str(item).encode()).hexdigest()
-
-
 def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:
     """Extracts substrings from each string in the 'arr' list."""
     import itertools

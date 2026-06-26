@@ -4,12 +4,19 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Parallel execution engine — central scheduler (M4).
+Parallel execution substrate — the M4 data-pipeline machinery.
 
 The engine owns parallelism; the OPERATORS stay parallel-unaware (the founding
-principle). There is ONE data-pipeline executor, ``_pipeline_stream``: every data
-pipeline runs through it, and it routes the plan to the handler for its shape. No
-dual path, no flag, no bespoke per-shape cascade:
+principle). This module is the kept SUBSTRATE (design §5 "Kept"): the shape-router
+``dispatch_data_pipeline`` and every per-shape handler, plus ``identify_segments`` /
+``Segment`` / ``resolve_worker_count`` / ``_clone_op`` / the ``_run_breaker_segment``
+skeleton / ``_SharedSourceJoin``. There is NO ``execute`` entry here any more — the
+SOLE data executor is ``scheduler_engine.py``, which hosts this substrate under its
+Event/Executor DAG (one Event per pipeline segment; build-before-probe and
+multi-segment build ordering are ``add_dependency`` edges). There is ONE skeleton and
+ONE live executor — no dual path.
+
+``dispatch_data_pipeline`` routes the plan to the handler for its shape:
 
   * **Grouped aggregate** (``scan → stateless* → GroupedAggregateHashed``): the
     HASH_REPARTITION ``PipelineSink`` contract — each worker self-pulls + prepares its
@@ -35,7 +42,8 @@ dual path, no flag, no bespoke per-shape cascade:
 
 Any plan no strategy matches (multi-join, set ops, window, sort, limit-only) is driven
 SERIAL-INLINE here (``_serial_stream``) — the data executor owns it end-to-end; it
-never punts to a hidden fallback in another engine.
+never punts to a hidden fallback in another engine. (Multi-join + agg DOES parallelise
+via the build prelude — see ``_find_parallel_multi_join_agg``.)
 
 The grouped-agg / ungrouped-agg / distinct / join→agg shapes share ONE breaker-segment
 skeleton (``_run_breaker_segment``) + a ``PipelineSink`` adapter (in ``pipeline_sink.py``)
@@ -56,9 +64,9 @@ from typing import Tuple
 
 from opteryx import EOS as _EOS_SENTINEL
 from opteryx import config
-from opteryx.constants import ResultType
 from opteryx.managers.execution.pipeline_sink import RecombClass
 from opteryx.managers.execution.pipeline_sink import make_sink
+from opteryx.managers.execution.pipeline_sink import parallel_sink_spec_for
 from opteryx.managers.execution.pipeline_sink import recombination_class_for
 from opteryx.operators._operators import push_one
 from opteryx.operators.catalog import OperatorParallelism
@@ -70,26 +78,43 @@ from opteryx.operators.catalog import get_registry
 _MAX_WORKER_CAP = 8
 
 
+_oversubscribe_warned = False
+
+
 def resolve_worker_count(requested) -> int:
     """Resolve the effective worker count for a query.
 
-    The worker count is SOFTCODED — derived by the software from the core count,
-    ``max(1, min(cpu - 2, _MAX_WORKER_CAP))``: 2 cores reserved for the C++
-    IO/decode pool + the main orchestration thread, never above the measured
-    regression boundary. The softcoded value is used when ``requested``
-    (``config.MAX_EXECUTION_WORKERS``) is unset / ``"auto"`` / an impossible value
-    (``None`` or ``<= 0``). An explicit positive request is honoured, still clamped
-    to the softcoded cap.
+    Two cases, and ONLY the first is ever capped:
+
+    - **Unset / "auto" / impossible (``None`` or ``<= 0``):** the worker count is
+      SOFTCODED — ``max(1, min(cpu - 2, _MAX_WORKER_CAP))`` — 2 cores reserved for the
+      C++ IO/decode pool + main thread, never above the measured regression boundary.
+    - **Explicit positive request:** HONOURED EXACTLY. Never clamped, never silently
+      overridden — not to the cap, not to the physical core count. If the operator asks
+      for 128 workers, they get 128. CLAUDE.md is law here: no hidden behaviour, the user
+      is the architect, intent is obeyed not assumed. Oversubscription (request > cores)
+      is *warned* (once), never quietly reduced.
 
     Worker count is degree-of-parallelism ONLY — it never selects a code path; an
     explicit ``1`` is a single worker, not "the serial engine".
     """
     cpu = os.cpu_count() or 1
-    # Leave 2 cores for IO/decode + the main orchestration thread.
-    softcoded = max(1, min(cpu - 2, _MAX_WORKER_CAP))
     if requested is None or requested <= 0:
-        return softcoded
-    return max(1, min(requested, cpu - 2, _MAX_WORKER_CAP))
+        # Leave 2 cores for IO/decode + the main orchestration thread.
+        return max(1, min(cpu - 2, _MAX_WORKER_CAP))
+    requested = int(requested)
+    if requested > cpu:
+        global _oversubscribe_warned
+        if not _oversubscribe_warned:
+            _oversubscribe_warned = True
+            import warnings
+
+            warnings.warn(
+                f"MAX_EXECUTION_WORKERS={requested} exceeds {cpu} physical cores "
+                f"(oversubscribed). Honouring the explicit request as set.",
+                stacklevel=2,
+            )
+    return max(1, requested)
 
 
 @dataclass(frozen=True)
@@ -170,14 +195,25 @@ def identify_segments(plan) -> List[Segment]:
     return segments
 
 
-def _find_parallel_ungrouped_agg(plan):
-    """Return ``(scan_id, middle_ids, breaker_id)`` for a single-scan
-    ``scan → stateless* → ungrouped-aggregate`` pipeline, else ``None``.
+def _find_parallel_breaker_segment(plan, workers):
+    """Return ``(scan_id, middle_ids, breaker_id, recomb_class, downstream_id)`` for a
+    single-scan ``scan → stateless* → breaker`` pipeline whose breaker DECLARES a
+    parallel-sink capability (its catalog ``parallel_sink``), else ``None``.
 
-    Ungrouped agg has NO group key, so recombination is a trivial SCALAR merge
-    (sum/min/max the W partials) — no key exchange, no row copy, no keying tax.
-    This is the embarrassingly-parallel case: the parallel work is the (often
-    non-pushable, CPU-bound) filter/projection + scalar accumulate.
+    This is the capability-resolved, segment-driven path that retires the three
+    bespoke single-breaker matchers — ``_find_parallel_grouped_agg`` (HASH_REPARTITION
+    agg), ``_find_parallel_ungrouped_agg`` (SCALAR_MERGE) and ``_find_parallel_distinct``
+    (HASH_REPARTITION distinct) — with ONE walk (design §1.4 Phase B). The structural
+    gates the matchers hand-coded — single scan, every middle op STATELESS — are
+    per-operator checks along the segment here; the operator-specific eligibility
+    (a mergeable ungrouped engine, a grouped breaker with real group columns) and the
+    DOP floor (distinct only pays at ``W >= 2``) are DECLARED on the spec, so adding a
+    breaker to this path is a one-file catalog change, not a new matcher.
+
+    ``downstream_id`` is the breaker's immediate downstream node id — the distinct sink
+    pushes its deduped survivors there (its ``_downstream`` cdef pointer is not readable
+    from Python); the agg sinks ignore it. A breaker with no downstream is degenerate
+    → rejected.
     """
     registry = get_registry()
     scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
@@ -187,95 +223,30 @@ def _find_parallel_ungrouped_agg(plan):
     segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
     if segment is None or not segment.tail_is_breaker:
         return None
-    breaker = plan[segment.tail]
-    if breaker.__class__.__name__ != "UngroupedAggregateNode":
+    breaker_id = segment.tail
+    breaker = plan[breaker_id]
+    # The breaker's DECLARED sink capability — None → no generic sink → serial.
+    spec = parallel_sink_spec_for(breaker)
+    if spec is None:
         return None
-    # Require a mergeable engine and NO literal-only aggregates: literal state
-    # lives outside `_engine`, so merging only the engine would drop it (a
-    # capability boundary — literal-agg parallelism is unbuilt, not gated-off).
-    engine = getattr(breaker, "_engine", None)
-    if engine is None or not engine.is_mergeable() or breaker._has_literals:
+    # DOP floor (distinct's serial dedup is fine at W=1 — scatter+thread setup is pure
+    # overhead there; the agg sinks declare 1 and engage at any width).
+    if workers < spec.min_workers:
         return None
+    # Per-instance eligibility (mergeable ungrouped engine; grouped real key columns).
+    if spec.eligible is not None and not spec.eligible(breaker):
+        return None
+    # Every middle op between scan and breaker must be a ParallelOperator (STATELESS) —
+    # the "min over operator hints" along the segment (DuckDB §8).
     middle_ids = list(segment.nodes[1:-1])
     for nid in middle_ids:
         meta = registry.get(type(plan[nid]))
         if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
             return None
-    return scan_id, middle_ids, segment.tail
-
-
-def _find_parallel_grouped_agg(plan):
-    """Return ``(scan_id, middle_ids, breaker_id)`` for a single-scan
-    ``scan → stateless* → GroupedAggregateHashedNode`` pipeline, else ``None``.
-
-    Row-routing parallelism (M4): the producer routes each (prepared) morsel by
-    ``hash(group-key) % W`` so every occurrence of a key lands on ONE worker —
-    each worker then owns a DISJOINT key slice and keys it independently, and
-    finalize is a CONCAT, never a merge. Because each group is seen whole by one
-    worker, this parallelises HOLISTIC aggregates too (MEDIAN / COUNT(DISTINCT) /
-    PERCENTILE) — there is no ``is_mergeable`` gate, unlike the ungrouped path.
-    """
-    registry = get_registry()
-    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
-    if len(scans) != 1:
-        return None
-    scan_id = scans[0]
-    segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
-    if segment is None or not segment.tail_is_breaker:
-        return None
-    breaker = plan[segment.tail]
-    if breaker.__class__.__name__ != "GroupedAggregateHashedNode":
-        return None
-    # A grouped breaker with NO group columns is degenerate — there is no key to
-    # route on, so row-routing is inapplicable; leave it to the serial engine.
-    # (A binder quirk can produce this, e.g. GROUP BY a quoted reserved word
-    # collapsing to zero groups — a separate, pre-existing correctness bug.)
-    if not breaker.group_by_columns:
-        return None
-    middle_ids = list(segment.nodes[1:-1])
-    for nid in middle_ids:
-        meta = registry.get(type(plan[nid]))
-        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
-            return None
-    return scan_id, middle_ids, segment.tail
-
-
-def _find_parallel_distinct(plan):
-    """Return ``(scan_id, middle_ids, breaker_id, exit_id)`` for a single-scan
-    ``scan → stateless* → DistinctNode`` pipeline, else ``None``.
-
-    DISTINCT parallelises by the SAME row-routing as grouped-agg: the producer
-    routes each (already projected-to-key) morsel by ``hash(dedup-key) % W`` so
-    every copy of a value lands on ONE worker. Each worker then dedups its OWN
-    disjoint slice into a private set — no cross-worker merge, finalize is a
-    CONCAT. The dedup key is the FULL set of the distinct input's columns
-    (``_distinct_on`` is None for plain ``DISTINCT`` — upstream projection has
-    already narrowed the morsel to the selected columns), so routing on all
-    columns matches the dedup exactly.
-    """
-    registry = get_registry()
-    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
-    if len(scans) != 1:
-        return None
-    scan_id = scans[0]
-    segment = next((s for s in identify_segments(plan) if s.nodes[0] == scan_id), None)
-    if segment is None or not segment.tail_is_breaker:
-        return None
-    breaker = plan[segment.tail]
-    if breaker.__class__.__name__ != "DistinctNode":
-        return None
-    middle_ids = list(segment.nodes[1:-1])
-    for nid in middle_ids:
-        meta = registry.get(type(plan[nid]))
-        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
-            return None
-    # The deduped output is driven through the DistinctNode's real downstream
-    # (the next operator after it — Exit, or a sort/projection/limit on top),
-    # so any post-DISTINCT operators still run.
-    outs = list(plan.outgoing_edges(segment.tail))
+    outs = list(plan.outgoing_edges(breaker_id))
     if not outs:
-        return None
-    return scan_id, middle_ids, segment.tail, outs[0][1]
+        return None  # a breaker with no downstream is degenerate — reject
+    return scan_id, middle_ids, breaker_id, spec.recomb_class, outs[0][1]
 
 
 def _find_parallel_stateless(plan):
@@ -618,6 +589,136 @@ def _build_subtree_scans(plan, top_join_id, probe_scan_id):
     )
 
 
+def _scans_reachable_upstream(plan, start_id):
+    """Every scan id transitively reachable by walking the INGOING edges from
+    ``start_id`` (inclusive). Used to collect the scans on one join leg's subtree
+    without assuming how deeper joins nest."""
+    seen = set()
+    out = set()
+    stack = [start_id]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        if getattr(plan[nid], "is_scan", False):
+            out.add(nid)
+        for provider, _t, _label in plan.ingoing_edges(nid):
+            stack.append(provider)
+    return out
+
+
+@dataclass(frozen=True)
+class _BuildPreludeJoin:
+    """The build subtree's OUTERMOST inner-equi join, resolved for PARALLEL probing
+    (the build-prelude parallelization, design §4-Step6 follow-on).
+
+    The TOP join's BUILD (left) leg is itself a join (e.g. ``customer ⋈ orders`` feeding
+    ``(customer⋈orders) ⋈ lineitem``). That inner join is driven SERIALLY today inside
+    ``_SharedSourceJoin.build`` — an Amdahl anchor (Q3: 29% of wall). When the inner join
+    is a clean parallelisable inner-equi join (passes ``_is_safe_probe_join``), with its
+    OWN build leg a small dimension scan chain and its probe leg a raw fact scan, its
+    probe is parallelised exactly like the TOP join's: build the inner build leg serially,
+    PARALLEL-probe the inner probe leg, MATERIALISE the joined result, then replay it
+    serially into the TOP join's left adapter (so the TOP join builds from the fully
+    materialised intermediate — build-before-probe preserved).
+
+    ``inner_join_id`` — the inner join (the TOP join's left-leg join).
+    ``inner_build_scan_ids`` — the inner join's BUILD-side scan ids (driven serially).
+    ``inner_probe_scan_id`` — the inner join's PROBE fact scan (parallelised).
+    ``inner_probe_middle_ids`` — stateless ops between the inner probe scan and the inner
+        join (cloned per worker ahead of the inner join clone).
+    """
+
+    inner_join_id: str
+    inner_build_scan_ids: tuple
+    inner_probe_scan_id: str
+    inner_probe_middle_ids: list
+
+
+def _resolve_build_prelude_join(plan, top_join_id, probe_scan_id, registry):
+    """Resolve the TOP join's BUILD (left) leg's OUTERMOST join for PARALLEL probing, or
+    ``None`` if it cannot be parallelised cleanly (→ the build prelude stays serial).
+
+    Walk from the TOP join's LEFT provider up to the first join — the inner join feeding
+    the TOP join's build. It is parallelisable iff:
+      * it is a ``DrakenInnerJoinNode`` with empty ``_compiled_right_evals`` (the probe
+        race gate — ``_is_safe_probe_join``);
+      * its PROBE (right) leg is a clean ``scan → stateless* → join`` chain whose scan is
+        NOT the TOP join's fact probe (a distinct fact table — e.g. ``orders``);
+      * its BUILD (left) leg resolves to one-or-more scan chains, none of which is the TOP
+        join's fact probe.
+
+    One level deep only — the inner join's OWN build leg (if itself a join subtree) is
+    driven serially. Left-deep TPC-H plans (Q3/Q5/Q7/Q9) put the anchor at this single
+    level, so this captures it; deeper recursion is deliberately not attempted (correct
+    one-level beats flaky N-level — the per-worker hash rebuild is the residual cost, a
+    separate optimization)."""
+    legs = {}
+    for idx, (provider, _t, label) in enumerate(plan.ingoing_edges(top_join_id)):
+        if not label:
+            label = "left" if idx == 0 else "right"
+        legs[label] = provider
+    if "left" not in legs:
+        return None
+
+    # Walk the TOP join's LEFT leg up to the first join — that is the inner join. The
+    # left leg may carry stateless ops between the inner join and the TOP join; the build
+    # prelude drives those serially as part of the replay (they sit on the inner join's
+    # downstream chain), so we only need to find the inner join itself.
+    cur = legs["left"]
+    inner_join_id = None
+    while True:
+        node = plan[cur]
+        if getattr(node, "is_join", False):
+            inner_join_id = cur
+            break
+        meta = registry.get(type(node))
+        if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+            return None  # a breaker between the inner join and the TOP join → serial
+        ins = list(plan.ingoing_edges(cur))
+        if len(ins) != 1:
+            return None
+        cur = ins[0][0]
+
+    if not _is_safe_probe_join(plan, inner_join_id, registry):
+        return None
+
+    ilegs = {}
+    for idx, (provider, _t, label) in enumerate(plan.ingoing_edges(inner_join_id)):
+        if not label:
+            label = "left" if idx == 0 else "right"
+        ilegs[label] = provider
+    if "left" not in ilegs or "right" not in ilegs:
+        return None
+
+    inner_probe_leg = _walk_leg_to_scan(plan, ilegs["right"], inner_join_id, registry)
+    if inner_probe_leg is None:
+        # The inner join's probe (right) leg is NOT a raw fact scan — this engine
+        # parallelises only a fact-scan probe, so leave the inner join serial.
+        return None
+    inner_probe_scan_id, inner_probe_middle_ids = inner_probe_leg
+    if inner_probe_scan_id == probe_scan_id:
+        return None  # the inner probe IS the TOP fact probe — degenerate, reject
+
+    # The inner join's BUILD side = every scan reachable on the inner join's LEFT subtree
+    # (driven serially by the prelude before the inner probe fans out). Collected by a
+    # transitive walk of the ingoing edges from the inner join's left provider; the TOP
+    # probe scan must NOT appear here (it would mean the legs were mis-labelled).
+    inner_build_scan_ids = _scans_reachable_upstream(plan, ilegs["left"])
+    if not inner_build_scan_ids or probe_scan_id in inner_build_scan_ids:
+        return None
+    if inner_probe_scan_id in inner_build_scan_ids:
+        return None
+
+    return _BuildPreludeJoin(
+        inner_join_id=inner_join_id,
+        inner_build_scan_ids=inner_build_scan_ids,
+        inner_probe_scan_id=inner_probe_scan_id,
+        inner_probe_middle_ids=inner_probe_middle_ids,
+    )
+
+
 def _find_parallel_join_agg(plan):
     """Return a ``_ParallelJoinAggShape`` for a single-inner-join feeding a generic
     AGG breaker — ``[build-scan, probe-scan] → INNER JOIN → stateless* → AGG → exit`` —
@@ -810,6 +911,8 @@ class _SharedSourceJoin:
         "_plan",
         "_shape",
         "_ctx",
+        "_workers",
+        "_prelude_join",
         "left_morsel",
         "left_columns",
         "left_is_empty",
@@ -817,10 +920,15 @@ class _SharedSourceJoin:
         "load_factor",
     )
 
-    def __init__(self, plan, shape, ctx):
+    def __init__(self, plan, shape, ctx, workers=1, prelude_join=None):
         self._plan = plan
         self._shape = shape
         self._ctx = ctx
+        # The build prelude's worker count and the resolved inner join to parallelise
+        # (``_BuildPreludeJoin`` or ``None``). When ``None`` (or W<2) the prelude drives
+        # the ORIGINAL build chains serially, byte-identical to before.
+        self._workers = workers
+        self._prelude_join = prelude_join
         self.left_morsel = None
         self.left_columns = None
         self.left_is_empty = False
@@ -828,30 +936,281 @@ class _SharedSourceJoin:
         self.load_factor = None
 
     def build(self, build_chains, exit_node):
-        """Drive the BUILD side to completion serially, then capture the shared read-only
-        build state. Run ONCE, before the worker fan-out (the build-before-probe edge).
+        """Drive the BUILD side to completion, then capture the shared read-only build
+        state. Run ONCE, before the worker fan-out (the build-before-probe edge).
 
         ``build_chains`` is a list of ``(scan, chain_head)`` pairs in compiler DFS order
         (build legs before probe). For a SINGLE-build-leg join it is one pair; for a
         MULTI-JOIN subtree (Step 6) it is EVERY scan chain except the probe fact scan —
         driving them in order builds each inner join, and the inner joins' outputs flow
         through the TOP join's left adapter, so the TOP join ends with its prepared
-        ``left_morsel``/``left_hash`` exactly as the single-leg case. The TOP join (and
-        every inner join) accumulates + builds at its left-EOS, emitting NOTHING past the
-        TOP join (build EOS is absorbed there), so this yields nothing — it just builds."""
+        ``left_morsel``/``left_hash`` exactly as the single-leg case.
+
+        BUILD-PRELUDE PARALLELISATION: when ``self._prelude_join`` is set (the TOP join's
+        BUILD leg is itself a parallelisable inner-equi join) AND W>=2, the inner join's
+        big PROBE leg is parallel-probed instead of driven serially — the Amdahl anchor.
+        Otherwise the ORIGINAL serial drive runs (byte-identical to before)."""
         from opteryx.operators._operators import drive_scan
 
         j = self._plan[self._shape.join_id]
-        for build_scan, build_head in build_chains:
-            for _ in drive_scan(build_scan, build_head, exit_node, self._ctx):
-                pass
-            if self._ctx.is_terminated():
-                return
+
+        # Fast path / DOP=1 / no parallelisable inner join: drive every build chain
+        # serially, byte-identical to the original prelude (the prime constraint).
+        if self._prelude_join is None or self._workers < 2:
+            for build_scan, build_head in build_chains:
+                for _ in drive_scan(build_scan, build_head, exit_node, self._ctx):
+                    pass
+                if self._ctx.is_terminated():
+                    return
+            self._capture(j)
+            return
+
+        # PARALLEL build prelude: split the build chains into the inner join's BUILD
+        # legs, its PROBE leg, and any OTHER build chains (dimensions joined directly to
+        # the TOP join). Drive the inner build legs + other chains serially; parallel-probe
+        # the inner join; replay its materialised output into the TOP join, then drive any
+        # remaining serial build chains. If the split does not match the expectation, fall
+        # back to the serial drive (refuse to guess).
+        prelude = self._prelude_join
+        inner_build_ids = set(prelude.inner_build_scan_ids)
+        scan_obj_to_id = {
+            id(self._plan[nid]): nid
+            for nid in self._plan.nodes()
+            if getattr(self._plan[nid], "is_scan", False)
+        }
+        inner_build_chains = []
+        inner_probe_chain = None
+        other_chains = []
+        for sc, hd in build_chains:
+            sid = scan_obj_to_id.get(id(sc))
+            if sid == prelude.inner_probe_scan_id:
+                inner_probe_chain = (sc, hd)
+            elif sid in inner_build_ids:
+                inner_build_chains.append((sc, hd))
+            else:
+                other_chains.append((sc, hd))
+        if inner_probe_chain is None or len(inner_build_chains) != len(inner_build_ids):
+            # Compiler did not produce the expected legs — drive serially.
+            for build_scan, build_head in build_chains:
+                for _ in drive_scan(build_scan, build_head, exit_node, self._ctx):
+                    pass
+                if self._ctx.is_terminated():
+                    return
+            self._capture(j)
+            return
+
+        self._build_parallel_inner(
+            j, inner_build_chains, inner_probe_chain, other_chains, exit_node
+        )
+
+    def _capture(self, j):
+        """Capture the prepared read-only build state from the TOP join ``j``."""
         self.left_morsel = j.left_morsel
         self.left_columns = j.left_columns
         self.left_is_empty = j.left_is_empty
         self.columns = j.columns
         self.load_factor = j.carchar_probe_load_factor
+
+    def _build_parallel_inner(
+        self, top_join, inner_build_chains, inner_probe_chain, other_chains, exit_node
+    ):
+        """Parallel-probe the build prelude's inner join, materialise its output, replay it
+        into the TOP join, then build the TOP join.
+
+        1. Drive the inner join's BUILD legs serially → the inner join builds its hash.
+        2. PARALLEL-probe the inner join's fact scan: W workers each own a private clone of
+           the inner join (built over the shared read-only inner ``left_morsel``) and probe
+           a DISJOINT slice, ACCUMULATING the joined output into a per-worker clone of the
+           TOP join (via a ``JoinLeftAdapter`` — data morsels only, no EOS, so no build).
+        3. Replay every worker's accumulated morsels serially into the REAL TOP join's left
+           adapter, then EOS → the TOP join builds from the fully materialised intermediate
+           (build-before-probe preserved). Any ``other_chains`` (dimensions joined directly
+           to the TOP join) are driven serially first so they accumulate too."""
+        import threading
+
+        from opteryx.compiled.thread_pool import CppThreadPool
+        from opteryx.operators._operators import build_side_carchar_morsel_map
+        from opteryx.operators._operators import drive_scan
+        from opteryx.operators._operators import pull_one
+        from opteryx.operators._operators import push_one
+        from opteryx.operators import JoinLeftAdapter
+        from opteryx.operators import JoinRightAdapter
+
+        ctx = self._ctx
+        inner = self._plan[self._prelude_join.inner_join_id]
+
+        # ---- Other build chains (e.g. a dimension joined directly to the TOP join) and
+        # the inner build legs are driven serially. The inner build legs build the inner
+        # join's hash; other chains accumulate into the TOP join's left adapter. Driving
+        # other chains FIRST keeps the TOP-join accumulation order independent of the
+        # parallel replay (the TOP join combines all left morsels at its left-EOS, so order
+        # within the left side does not change the build hash).
+        for build_scan, build_head in other_chains:
+            for _ in drive_scan(build_scan, build_head, exit_node, ctx):
+                pass
+            if ctx.is_terminated():
+                return
+        for build_scan, build_head in inner_build_chains:
+            for _ in drive_scan(build_scan, build_head, exit_node, ctx):
+                pass
+            if ctx.is_terminated():
+                return
+
+        # Capture the inner join's read-only build state (post ON-eval / projection).
+        inner_left_morsel = inner.left_morsel
+        inner_left_columns = inner.left_columns
+        inner_left_is_empty = inner.left_is_empty
+        inner_columns = inner.columns
+        inner_load_factor = inner.carchar_probe_load_factor
+
+        inner_probe_scan = inner_probe_chain[0]
+
+        # Empty inner build side → the inner join yields nothing → the TOP join's left is
+        # empty. Push EOS through the TOP join's left adapter so it finalises (empty) build.
+        top_left_adapter = JoinLeftAdapter(top_join)
+        top_left_adapter.set_context(ctx)
+        if inner_left_is_empty:
+            push_one(top_left_adapter, _EOS_SENTINEL)
+            self._capture(top_join)
+            return
+
+        # ROW-FLOOR: buffer the inner probe up to PARALLEL_MIN_ROWS; if it is below the
+        # floor, the parallel fan-out (clone + per-worker hash rebuild) is pure overhead —
+        # drive the ORIGINAL wired inner probe chain serially instead. The original chain
+        # emits the inner join's output straight into the TOP join's left adapter and EOS,
+        # building the TOP join byte-identically to the fully serial prelude.
+        inner_probe_head = inner_probe_chain[1]
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = pull_one(inner_probe_scan)
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            for morsel in buffer:
+                if ctx.is_terminated():
+                    return
+                push_one(inner_probe_head, morsel)
+            if not ctx.is_terminated():
+                push_one(inner_probe_head, _EOS_SENTINEL)
+            self._capture(top_join)
+            return
+
+        workers = self._workers
+        errors = [None] * workers
+        worker_tops = [None] * workers
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+        concurrent_safe = inner_probe_scan.is_concurrent_pull_safe()
+
+        def _next_input():
+            # Buffered floor sample first, then self-pull the inner probe scan. Lockless
+            # only when the source is reentrant; otherwise serialise the whole pull.
+            if concurrent_safe:
+                with pull_lock:
+                    m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                if ctx.is_terminated():
+                    return None
+                return pull_one(inner_probe_scan)
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                return pull_one(inner_probe_scan)
+
+        def worker(index):
+            try:
+                # Private clone of the inner join over the shared READ-ONLY inner
+                # left_morsel (thread-local-full — no shared mutable probe state).
+                clone_inner = _clone_op(inner)
+                clone_inner.left_morsel = inner_left_morsel
+                clone_inner.left_columns = inner_left_columns
+                clone_inner.columns = inner_columns
+                clone_inner.left_is_empty = inner_left_is_empty
+                clone_inner.carchar_probe_load_factor = inner_load_factor
+                clone_inner.left_hash = build_side_carchar_morsel_map(
+                    inner_left_morsel,
+                    inner_left_columns,
+                    inner_load_factor,
+                    clone_inner.kernel_metrics,
+                )
+                clone_inner._build_complete = True
+                clone_inner.set_context(ctx)
+
+                # The clone's output ACCUMULATES into a per-worker TOP-join clone (data
+                # morsels only, no EOS → no build). The per-worker top clone's
+                # `left_morsels` is the worker's materialised slice.
+                worker_top = _clone_op(top_join)
+                worker_top.set_context(ctx)
+                top_adapter = JoinLeftAdapter(worker_top)
+                top_adapter.set_context(ctx)
+                clone_inner.set_downstream(top_adapter)
+
+                # Probe-side chain: [inner-probe-middle* → JoinRightAdapter(clone_inner)].
+                probe_ops = [
+                    _clone_op(self._plan[nid])
+                    for nid in self._prelude_join.inner_probe_middle_ids
+                ]
+                adapter = JoinRightAdapter(clone_inner)
+                adapter.set_context(ctx)
+                probe_chain = probe_ops + [adapter]
+                for i, op in enumerate(probe_chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(probe_chain):
+                        op.set_downstream(probe_chain[i + 1])
+                probe_head = probe_chain[0]
+
+                while True:
+                    morsel = _next_input()
+                    if morsel is None:
+                        break
+                    push_one(probe_head, morsel)
+                # Probe-side EOS flushes the inner join's downstream emit into the worker
+                # TOP clone's left adapter as a data path (the inner join's right-EOS emits
+                # EOS downstream → the TOP clone's push_left(EOS) would BUILD it). We must
+                # NOT let the worker TOP clone build — we only want its accumulated
+                # `left_morsels`. So we do NOT push EOS into the inner clone here; instead
+                # the inner clone has buffered nothing post-probe (every probe morsel emits
+                # immediately), and the accumulated `left_morsels` is complete.
+                worker_tops[index] = worker_top
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
+                errors[index] = exc
+
+        pool = CppThreadPool(workers, "m4-build-prelude")
+        try:
+            futures = [pool.submit(worker, k) for k in range(workers)]
+            for future in futures:
+                future.result()
+        finally:
+            pool.shutdown(wait=True)
+            inner_probe_scan.close_source()
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        # ---- Replay the materialised intermediate serially into the REAL TOP join, then
+        # EOS → the TOP join builds. Build-before-probe is preserved: the replay completes
+        # before the TOP join's probe (the skeleton's worker fan-out) reads its build state.
+        for worker_top in worker_tops:
+            if worker_top is None:
+                continue
+            for materialised in worker_top.left_morsels:
+                if ctx.is_terminated():
+                    return
+                push_one(top_left_adapter, materialised)
+        push_one(top_left_adapter, _EOS_SENTINEL)
+        self._capture(top_join)
 
     def prepare_worker_clone(self, cloned_join):
         """Build THIS worker's private join engine over the shared READ-ONLY
@@ -930,11 +1289,17 @@ def _serial_stream(plan):
         ctx.terminate()
 
 
-def _pipeline_stream(plan, workers, telemetry=None):
-    """The SOLE data-pipeline executor.
+def dispatch_data_pipeline(plan, workers, telemetry=None):
+    """Shape-router for a data pipeline — returns the streaming drive generator.
 
-    Every data pipeline runs through here. It detects the plan's shape and routes to
-    the engine's handler for it:
+    The shared substrate the M4 scheduler (``scheduler_engine.py``) drives. It detects
+    the plan's shape and returns the generator for the handler matching it — the
+    scheduler hosts this under its Event/Executor DAG (one Event per pipeline segment;
+    build-before-probe and multi-segment build ordering are ``add_dependency`` edges).
+    The handlers themselves (``_run_breaker_segment``, ``_join_probe_stream``,
+    ``_stateless_stream``, ``_serial_stream``) are the kept substrate — unchanged.
+
+    It detects the plan's shape and routes to the handler for it:
 
       * grouped / ungrouped / distinct aggregate → the generic ``PipelineSink``
         contract via the ONE shared breaker-segment skeleton (``_run_breaker_segment``):
@@ -950,61 +1315,31 @@ def _pipeline_stream(plan, workers, telemetry=None):
 
     Detection PRECEDENCE matters: a ``join → agg`` plan also "looks like" a grouped
     agg (the scan-walk from one leg hits the join) and like a bare join, so the
-    grouped/ungrouped/distinct finders run FIRST (they reject the two-scan join), then
-    join→agg, then bare join, then stateless. ``_serial_stream`` is the fall-through —
+    single-scan ``_find_parallel_breaker_segment`` walk runs FIRST (it rejects the
+    two-scan join), then join→agg, then bare join, then stateless. ``_serial_stream``
+    is the fall-through —
     not the "old engine", but this engine's serial path, required for correctness on
     un-parallelisable shapes. DOP=1 / below-floor still drives the ORIGINAL un-cloned
     chain inside each handler (the prime constraint).
     """
-    # Reuse the existing finders to delimit the scan→stateless*→breaker segment and
-    # classify the breaker — they already enforce the single-scan / all-stateless /
-    # mergeable-engine invariants the generic sinks require.
-    grouped = _find_parallel_grouped_agg(plan)
-    if grouped is not None:
-        scan_id, middle_ids, breaker_id = grouped
-        breaker = plan[breaker_id]
-        recomb = recombination_class_for(breaker)
-        if recomb is RecombClass.HASH_REPARTITION:
-            if telemetry is not None:
-                telemetry._reading["parallel_engaged"] = 1
-                telemetry._reading["generic_pipeline"] = 1
-            return _run_breaker_segment(
-                plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry
-            )
-
-    ungrouped = _find_parallel_ungrouped_agg(plan)
-    if ungrouped is not None:
-        scan_id, middle_ids, breaker_id = ungrouped
-        breaker = plan[breaker_id]
-        recomb = recombination_class_for(breaker)
-        if recomb is RecombClass.SCALAR_MERGE:
-            if telemetry is not None:
-                telemetry._reading["parallel_engaged"] = 1
-                telemetry._reading["generic_pipeline"] = 1
-            return _run_breaker_segment(
-                plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry
-            )
-
-    # DISTINCT is also HASH_REPARTITION (same scatter+combine as grouped agg; the
-    # finalize DEDUPES instead of aggregating — the per-class adapter map in make_sink
-    # picks `_DistinctSink`). It threads `exit_id` (the breaker's real downstream node)
-    # so the sink can push its deduped survivors there.
-    # DISTINCT row-routing only pays above one worker — the serial dedup is fine, and
-    # scatter+thread setup is pure overhead at W=1. At W<2 the sink is skipped and the
-    # plan falls to _serial_stream (the byte-identical serial dedup — the prime constraint).
-    distinct = _find_parallel_distinct(plan) if workers >= 2 else None
-    if distinct is not None:
-        scan_id, middle_ids, breaker_id, exit_id = distinct
-        breaker = plan[breaker_id]
-        recomb = recombination_class_for(breaker)
-        if recomb is RecombClass.HASH_REPARTITION:
-            if telemetry is not None:
-                telemetry._reading["parallel_engaged"] = 1
-                telemetry._reading["generic_pipeline"] = 1
-            return _run_breaker_segment(
-                plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry,
-                exit_id=exit_id,
-            )
+    # Single-scan scan→stateless*→breaker segment whose breaker DECLARES a parallel
+    # sink (grouped agg HASH_REPARTITION, ungrouped agg SCALAR_MERGE, distinct
+    # HASH_REPARTITION). ONE segment-driven, capability-resolved walk replaces the
+    # three bespoke matchers (design §1.4 Phase B): the structural gates and the
+    # per-operator eligibility/DOP-floor are resolved off the catalog spec, not
+    # re-derived per shape. The distinct sink threads ``downstream_id`` (the breaker's
+    # real downstream node) so it can push its deduped survivors there; the agg sinks
+    # ignore it and inject into the breaker itself (relying on the EOS push).
+    breaker_seg = _find_parallel_breaker_segment(plan, workers)
+    if breaker_seg is not None:
+        scan_id, middle_ids, breaker_id, recomb, downstream_id = breaker_seg
+        if telemetry is not None:
+            telemetry._reading["parallel_engaged"] = 1
+            telemetry._reading["generic_pipeline"] = 1
+        return _run_breaker_segment(
+            plan, scan_id, middle_ids, breaker_id, recomb, workers, telemetry,
+            exit_id=downstream_id,
+        )
 
     # join → agg (Step 5): a SHARED_SOURCE inner-equi join feeding a generic AGG sink.
     # The join's BUILD leg is prepared once serially; W workers each probe a disjoint
@@ -1026,13 +1361,24 @@ def _pipeline_stream(plan, workers, telemetry=None):
                 telemetry._reading["parallel_engaged"] = 1
                 telemetry._reading["generic_pipeline"] = 1
                 telemetry._reading["generic_join_agg"] = 1
+            # For the MULTI-JOIN shape, resolve whether the build prelude's OUTERMOST
+            # inner join can itself be parallel-probed (the Amdahl-anchor fix). For the
+            # single-join shape there is no build subtree, so this is None and the build
+            # leg drives serially as before.
+            prelude_join = None
+            if join_agg.build_scan_ids is not None:
+                prelude_join = _resolve_build_prelude_join(
+                    plan, join_agg.join_id, join_agg.probe_scan_id, get_registry()
+                )
             # The shared-source helper needs a ctx to drive the build leg + set the
             # cloned-join context. `_run_breaker_segment` owns the real ctx (it
             # re-compiles), so we build the `_SharedSourceJoin` against THAT ctx by
             # threading it lazily: the helper captures plan+shape now and is bound to the
             # skeleton's ctx inside `build` / `prepare_worker_clone` (it reads
             # `self._ctx`). We pass a placeholder ctx that the skeleton overwrites.
-            shared = _SharedSourceJoin(plan, join_agg, ctx=None)
+            shared = _SharedSourceJoin(
+                plan, join_agg, ctx=None, workers=workers, prelude_join=prelude_join
+            )
             source_prep = _JoinSourcePrep(
                 shared=shared,
                 join_id=join_agg.join_id,
@@ -1390,23 +1736,6 @@ def _run_breaker_segment(
         if source_prep is not None and build_scans is not None:
             for bs in build_scans:
                 bs.close_source()
-
-
-def execute(plan, head_node=None, telemetry=None):
-    """The data executor (M4).
-
-    There is ONE data-pipeline engine: ``_pipeline_stream``. Every data pipeline runs
-    through it — it detects the plan's shape and routes to the right handler (grouped /
-    ungrouped / distinct agg + join→agg through the generic ``PipelineSink`` contract;
-    bare inner join through ``_join_probe_stream``; stateless through
-    ``_stateless_stream``; everything else serial-inline through ``_serial_stream``).
-    No dual path, no flag, no bespoke per-shape cascade. The data executor owns
-    execution end-to-end — it never punts to a hidden fallback in another engine.
-    Non-pipeline special ops (EXPLAIN/INSERT/DDL) never reach here; the dispatcher in
-    ``managers/execution/__init__.py`` routes those to serial_engine.
-    """
-    workers = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
-    return _pipeline_stream(plan, workers, telemetry), ResultType.TABULAR
 
 
 class _ScatterCollectEngine:

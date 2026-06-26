@@ -11,8 +11,8 @@ docs/M4_CENTRAL_SCHEDULER_DESIGN.md.
   1. ``resolve_worker_count`` — query-scoped sizing + the cap-8 boundary.
   2. ``identify_segments`` — the pipeline-segment cut on real planned queries
      (linear-to-sink, breaker+sink, and a join as the shared tail of both legs).
-  3. The grouped-aggregate dispatch seam (``_find_parallel_grouped_agg``): which
-     shapes engage row-routing, and that the routed answer equals the serial one.
+  3. The capability-resolved dispatch seam (``_find_parallel_breaker_segment``):
+     which shapes engage row-routing, and that the routed answer equals the serial one.
 """
 
 import os
@@ -65,13 +65,28 @@ def test_resolve_worker_count_softcoded_when_auto():
     assert resolve_worker_count(1) == 1
 
 
-def test_resolve_worker_count_caps_at_8():
-    # Never exceeds the measured regression boundary, regardless of request or
-    # core count.
-    assert resolve_worker_count(1000) <= 8
+def test_resolve_worker_count_caps_only_the_auto_case():
+    # The cap-8 boundary applies ONLY to the unset / auto / impossible case
+    # (None or <= 0) — there it softcodes max(1, min(cpu-2, 8)). An EXPLICIT
+    # positive request is honoured EXACTLY (warn-then-obey, never clamped) per
+    # CLAUDE.md: the user is the architect, intent is obeyed not assumed.
     cpu = os.cpu_count() or 1
-    expected = max(1, min(1000, max(1, cpu - 2), 8))
-    assert resolve_worker_count(1000) == expected
+    softcoded = max(1, min(cpu - 2, 8))
+    # Auto path is capped at the regression boundary.
+    assert resolve_worker_count(None) == softcoded
+    assert resolve_worker_count(0) == softcoded
+    assert resolve_worker_count(-4) == softcoded
+    assert softcoded <= 8
+    # Explicit oversubscribed request → returned verbatim, with a one-shot warning.
+    import warnings
+
+    import opteryx.managers.execution.parallel_engine as pe
+
+    pe._oversubscribe_warned = False
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert resolve_worker_count(1000) == 1000
+    assert any("oversubscribed" in str(w.message) for w in caught)
 
 
 def test_resolve_worker_count_respects_request_below_cap():
@@ -150,32 +165,38 @@ def test_every_non_breaker_node_in_exactly_one_segment():
 # ── dispatch seam ────────────────────────────────────────────────────────────
 
 
-def test_find_parallel_grouped_agg_matches_supported_shape():
-    # Single-scan grouped aggregate → recognised as parallelisable.
-    from opteryx.managers.execution.parallel_engine import _find_parallel_grouped_agg
+def test_find_parallel_breaker_segment_matches_supported_shape():
+    # Single-scan grouped aggregate → recognised as parallelisable via the
+    # capability-resolved segment walk (design §1.4 Phase B).
+    from opteryx.managers.execution.parallel_engine import _find_parallel_breaker_segment
 
     plan = _plan("SELECT COUNT(*), gravity FROM $planets WHERE diameter > 1 GROUP BY gravity")
-    target = _find_parallel_grouped_agg(plan)
+    target = _find_parallel_breaker_segment(plan, workers=4)
     assert target is not None
-    scan_id, middle_ids, breaker_id = target
+    scan_id, middle_ids, breaker_id, recomb, downstream_id = target
     assert plan[scan_id].is_scan
     assert plan[breaker_id].__class__.__name__ == "GroupedAggregateHashedNode"
+    assert recomb.value == "hash_repartition"
     # Filter is a stateless middle op of the segment.
     assert any(plan[nid].name == "Filter" for nid in middle_ids)
 
 
-def test_find_parallel_grouped_agg_rejects_unsupported_shapes():
-    from opteryx.managers.execution.parallel_engine import _find_parallel_grouped_agg
+def test_find_parallel_breaker_segment_rejects_unsupported_shapes():
+    from opteryx.managers.execution.parallel_engine import _find_parallel_breaker_segment
 
-    # No aggregate breaker → not this stage's target.
-    assert _find_parallel_grouped_agg(_plan("SELECT name FROM $planets WHERE diameter > 1")) is None
-    # A join → more than one scan → deferred to Stage 2.
+    # No declared-sink breaker (linear scan→exit) → not a parallel breaker segment.
+    assert _find_parallel_breaker_segment(_plan("SELECT name FROM $planets WHERE diameter > 1"), workers=4) is None
+    # A join → more than one scan → deferred to the join shapes.
     join_sql = "SELECT p.name FROM $planets AS p INNER JOIN $planets AS s ON p.id = s.id GROUP BY p.name"
-    assert _find_parallel_grouped_agg(_plan(join_sql)) is None
+    assert _find_parallel_breaker_segment(_plan(join_sql), workers=4) is None
     # Any non-empty group key is eligible — there is no key-type gate. Both a
     # string key and a fixed-width (decimal) key route.
-    assert _find_parallel_grouped_agg(_plan("SELECT name, COUNT(*) FROM $planets GROUP BY name")) is not None
-    assert _find_parallel_grouped_agg(_plan("SELECT gravity, COUNT(*) FROM $planets GROUP BY gravity")) is not None
+    assert _find_parallel_breaker_segment(_plan("SELECT name, COUNT(*) FROM $planets GROUP BY name"), workers=4) is not None
+    assert _find_parallel_breaker_segment(_plan("SELECT gravity, COUNT(*) FROM $planets GROUP BY gravity"), workers=4) is not None
+    # DISTINCT declares min_workers=2: engages at W>=2, serial at W=1.
+    distinct_sql = "SELECT DISTINCT gravity FROM $planets"
+    assert _find_parallel_breaker_segment(_plan(distinct_sql), workers=4) is not None
+    assert _find_parallel_breaker_segment(_plan(distinct_sql), workers=1) is None
 
 
 @pytest.mark.parametrize(

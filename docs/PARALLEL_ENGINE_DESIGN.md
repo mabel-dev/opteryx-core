@@ -1,5 +1,14 @@
 # Opteryx Parallel Execution Engine — Design (Chief-Architect Ratified)
 
+> **SUPERSEDED (2026-06-25) for *how* parallelism is structured** — see
+> [`GENERIC_PIPELINE_PARALLELISM_DESIGN.md`](GENERIC_PIPELINE_PARALLELISM_DESIGN.md).
+> The five bespoke per-shape strategies this doc describes (`_grouped_agg_route`,
+> `_join_probe_stream`, `_stateless_stream`, `_distinct_stream`, `_ungrouped_agg_stream`)
+> were **retired into one executor** (the scheduler Event-DAG) and **deleted** — they no
+> longer exist in the tree. This doc is retained for its still-valid *rationale and
+> measurements*: the route-agg design, the tdoms join build-side work, and the empirical
+> `scratch.hits` numbers. For the current execution architecture, read the generic design.
+
 > Authored 2026-06-25. Reviewed adversarially (36-agent review: empirical gap-fill on the
 > full 14 GB `scratch.hits` + 7 grounded dimensions, each finding independently refuted).
 > This revision folds in every held-up finding and scopes every number to what was actually

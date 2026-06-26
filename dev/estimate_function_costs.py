@@ -1,435 +1,460 @@
 #!/usr/bin/env python3
 """
-Cost estimation script for function kernels.
+Measure per-row execution cost of scalar function kernels.
 
-This script benchmarks function kernels and estimates their execution cost
-in microseconds per million rows, which is stored in the function catalog.
+This is a developer tool (dev/ — never imported by production code). It refreshes
+the ``cost_us_per_million`` values stored in the function catalog
+(opteryx/expression/functions/registrar/*.pyx), which the optimizer's predicate
+ordering strategy reads via ``catalog.get_cost()``.
+
+METHOD — measure through the real bytecode evaluator
+----------------------------------------------------
+A function's cost is whatever it actually costs the engine to evaluate it over a
+morsel, *including* the real lowered execution path. Several functions never run
+through their ``callable_ref`` at all (CONCAT etc. are lowered to specialised
+bytecode), so calling the kernel callable directly would measure a fiction. We
+therefore measure exactly what the engine does:
+
+  1. Build a bound ``FUNC(col[, ...])`` expression node — an IDENTIFIER node per
+     ordinary argument (resolved against a column in a synthetic test morsel) and
+     a LITERAL node per ``constant_only`` argument — then resolve it through the
+     function catalog (the same path the binder uses).
+  2. ``lower()`` + ``build_bytecode()`` it once.
+  3. Time ``execute_bytecode(bc, morsel)`` over a large morsel, many iterations,
+     taking the median.
+  4. Subtract an identity-expression baseline (a bare column load + return) to
+     isolate the marginal per-row cost of the function itself.
+
+The reported number is ``cost_us_per_million`` — microseconds to apply the
+function to 1,000,000 rows — which is what the catalog stores.
+
+Failures are recorded and printed loudly, never swallowed. A kernel that cannot
+be driven (missing input shape, aggregate semantics, embedding model, ...) is
+reported as a failure with its reason and produces NO cost — a wrong-but-honest
+gap beats a fabricated number.
 
 Usage:
-    python estimate_function_costs.py [--functions FUNC1,FUNC2,...] [--output report.json]
+    python estimate_function_costs.py [--functions UPPER,LOWER] [--output costs.json]
+                                      [--sample-size 250000] [--budget 0.5]
 
-The script:
-1. Generates synthetic test data for various types
-2. Benchmarks each function kernel with different input sizes
-3. Calculates cost per million rows
-4. Exports results as JSON or updates the catalog directly
+Run from the dev/ directory (it inserts the repo root onto sys.path).
 """
 
 import argparse
 import json
 import os
+import random
+import statistics
+import string
 import sys
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
-from typing import Callable
-from typing import Dict
-from typing import List
-from typing import Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import numpy as np
-import pyarrow as pa
-from opteryx.expression.functions.catalog import get_catalog
-from opteryx.types import OrsoTypes
-
-sys.path.insert(1, os.path.join(sys.path[0], "../../../mabel/orso"))
 sys.path.insert(1, os.path.join(sys.path[0], ".."))
-sys.path.insert(1, os.path.join(sys.path[0], "../../pyiceberg-firestore-gcs"))
+
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
+from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
+from opteryx.expression import NodeType
+from opteryx.expression.evaluator import execute_bytecode
+from opteryx.expression.functions import get_catalog
+from opteryx.models import Node
+from opteryx.types.logical_type import (
+    ARRAY,
+    BOOLEAN,
+    DATE,
+    FLOAT64,
+    INT64,
+    NVARCHAR,
+    TIMESTAMP,
+    VARBINARY,
+    VARCHAR,
+    VARIANT,
+)
+from opteryx.types.schema import (
+    ConstantColumn,
+    FunctionColumn,
+    SchemaColumn,
+    mint_column_identity,
+)
+
+# Functions excluded by default: not scalar-expression kernels, or require an
+# external resource we don't want a benchmark to pull in.
+DEFAULT_EXCLUDE = {
+    "EMBED",          # pulls an embedding model
+    "_MATCH_AGAINST",  # semantic match via embeddings; volatile + model-dependent
+}
 
 
+class Unsupported(Exception):
+    """Raised when a parameter type-family can't be driven by this harness."""
 
 
 @dataclass
-class CostEstimate:
-    """Result of benchmarking a function kernel."""
+class FamilySpec:
+    """How to manufacture test data for one parameter type-family."""
 
+    dtype: str                       # vector_from_sequence dtype name
+    column_type: Any                 # ColumnType for the SchemaColumn / scoring
+    gen: Callable[[int], List[Any]]  # value generator: n -> list of element values
+    literal: Any                     # representative scalar for constant_only params
+
+
+# ---------------------------------------------------------------------------
+# Value generators (stdlib only — no numpy/pyarrow needed for these shapes).
+# ---------------------------------------------------------------------------
+def _gen_strings(n: int) -> List[str]:
+    pool = string.ascii_letters + " "
+    return ["".join(random.choices(pool, k=12)) for _ in range(n)]
+
+
+def _gen_floats(n: int) -> List[float]:
+    return [random.uniform(1.0, 1000.0) for _ in range(n)]
+
+
+def _gen_ints(n: int) -> List[int]:
+    # Small positive ints: valid as substring positions, padding widths,
+    # rounding precision, and as ordinary numeric input.
+    return [random.randint(1, 8) for _ in range(n)]
+
+
+def _gen_bools(n: int) -> List[bool]:
+    return [bool(i & 1) for i in range(n)]
+
+
+def _gen_dates(n: int) -> List[date]:
+    base = date(2020, 1, 1)
+    return [base + timedelta(days=i % 3650) for i in range(n)]
+
+
+def _gen_timestamps(n: int) -> List[datetime]:
+    base = datetime(2020, 1, 1)
+    return [base + timedelta(seconds=(i % 86400) * 7) for i in range(n)]
+
+
+def _gen_arrays(n: int) -> List[List[int]]:
+    return [[1, 2, 3] for _ in range(n)]
+
+
+def _gen_bytes(n: int) -> List[bytes]:
+    return [bytes(random.randint(0, 255) for _ in range(8)) for _ in range(n)]
+
+
+# Type-family -> how to build a column / literal for it.
+FAMILIES: Dict[str, FamilySpec] = {
+    "string": FamilySpec("VARCHAR", VARCHAR, _gen_strings, "AB"),
+    "any": FamilySpec("VARCHAR", VARCHAR, _gen_strings, "AB"),
+    "numeric": FamilySpec("DOUBLE", FLOAT64, _gen_floats, 2.0),
+    "integer": FamilySpec("INT64", INT64, _gen_ints, 2),
+    "boolean": FamilySpec("BOOLEAN", BOOLEAN, _gen_bools, True),
+    "date": FamilySpec("DATE", DATE, _gen_dates, date(2021, 6, 1)),
+    "timestamp": FamilySpec("TIMESTAMP", TIMESTAMP(), _gen_timestamps, datetime(2021, 6, 1, 12)),
+    "temporal": FamilySpec("TIMESTAMP", TIMESTAMP(), _gen_timestamps, datetime(2021, 6, 1, 12)),
+    "array": FamilySpec("ARRAY", ARRAY(VARIANT), _gen_arrays, [1, 2, 3]),
+    "binary": FamilySpec("VARBINARY", VARBINARY, _gen_bytes, b"AB"),
+}
+
+
+# Some constant_only string parameters are *semantic tokens* (a date part, a
+# truncation unit, a type name) — the generic per-family literal ("AB") is not a
+# valid value and the kernel raises. Keyed by lowercase parameter name; the value
+# is substituted for the family default when building that param's literal node.
+CONST_PARAM_TOKENS: Dict[str, Any] = {
+    "part": "day",        # EXTRACT, DATEDIFF
+    "unit": "day",        # TRUNC(date/timestamp)
+    "units": "day",       # TIME_BUCKET
+}
+
+# Non-const params whose data must satisfy a per-element shape the generic
+# per-family column violates. Keyed by lowercase parameter name -> pseudo-family
+# column key built in _build_morsel. (LPAD/RPAD `fill` must be a single char.)
+IDENT_PARAM_COLUMNS: Dict[str, str] = {
+    "fill": "_char1",
+}
+
+
+@dataclass
+class OverloadResult:
     function_name: str
-    kernel_id: str
-    engine: str
-    cost_us_per_million: float
-    sample_size: int
-    runs: int
-    min_us: float
-    max_us: float
-    avg_us: float
+    overload_id: str
+    kernel: str
+    current_cost: float
+    cost_us_per_million: Optional[float]
+    ns_per_row: Optional[float]
     success: bool
-    error_message: Optional[str] = None
+    error: Optional[str] = None
 
 
-class TestDataGenerator:
-    """Generate synthetic test data for benchmarking."""
+class CostBench:
+    """Builds a shared test morsel and benchmarks function overloads against it."""
 
-    @staticmethod
-    def generate_scalars(type_: OrsoTypes, size: int) -> List[Any]:
-        """Generate scalar values of the given type."""
-        if type_ == OrsoTypes.INTEGER:
-            return list(np.random.randint(0, 1000, size))
-        elif type_ == OrsoTypes.DOUBLE:
-            return list(np.random.uniform(0, 1000, size))
-        elif type_ == OrsoTypes.BOOLEAN:
-            return [bool(x % 2) for x in range(size)]
-        elif type_ == OrsoTypes.VARCHAR:
-            return [f"string_{i}" for i in range(size)]
-        elif type_ == OrsoTypes.DATE:
-            from datetime import datetime
-            from datetime import timedelta
-
-            base = datetime(2020, 1, 1)
-            return [(base + timedelta(days=i)).date() for i in range(size)]
-        elif type_ == OrsoTypes.TIMESTAMP:
-            from datetime import datetime
-            from datetime import timedelta
-
-            base = datetime(2020, 1, 1, 0, 0, 0)
-            return [(base + timedelta(hours=i)).replace(microsecond=0) for i in range(size)]
-        elif type_ == OrsoTypes.NULL:
-            return [None] * size
-        else:
-            # Fallback for unknown types
-            return [None] * size
-
-    @staticmethod
-    def create_arrow_array(type_: OrsoTypes, size: int) -> pa.Array:
-        """Create a PyArrow array of the given type with synthetic data."""
-        scalars = TestDataGenerator.generate_scalars(type_, size)
-
-        # Map OrsoTypes to PyArrow types
-        pa_type_map = {
-            OrsoTypes.INTEGER: pa.int64(),
-            OrsoTypes.DOUBLE: pa.float64(),
-            OrsoTypes.BOOLEAN: pa.bool_(),
-            OrsoTypes.VARCHAR: pa.string(),
-            OrsoTypes.DATE: pa.date32(),
-            OrsoTypes.TIMESTAMP: pa.timestamp("us"),
-            OrsoTypes.NULL: pa.null(),
-        }
-
-        arrow_type = pa_type_map.get(type_, pa.null())
-        try:
-            return pa.array(scalars, type=arrow_type)
-        except Exception:
-            # If conversion fails, return null array
-            return pa.array([None] * size, type=pa.null())
-
-    @staticmethod
-    def create_table(
-        columns: Dict[str, OrsoTypes],
-        size: int,
-    ) -> pa.Table:
-        """Create a PyArrow table with multiple columns."""
-        arrays = {
-            name: TestDataGenerator.create_arrow_array(type_, size)
-            for name, type_ in columns.items()
-        }
-        return pa.table(arrays)
-
-
-class FunctionBenchmark:
-    """Benchmark function kernels and estimate costs."""
-
-    def __init__(self, sample_sizes: Optional[List[int]] = None):
-        """Initialize benchmarker.
-
-        Args:
-            sample_sizes: List of sample sizes to test. Defaults to [1000, 10000, 100000, 1000000].
-        """
-        self.sample_sizes = sample_sizes or [1000, 10000, 100000, 1000000]
+    def __init__(self, sample_size: int, budget_s: float, reps: int):
+        self.n = sample_size
+        self.budget_s = budget_s
+        self.reps = reps
         self.catalog = get_catalog()
-        self.results: List[CostEstimate] = []
+        self._columns: Dict[str, Tuple[bytes, Any]] = {}  # family -> (identity, column_type)
+        self._morsel = self._build_morsel()
+        self._baseline_ns = self._measure(self._baseline_bytecode())
 
-    def benchmark_kernel(
-        self,
-        function_name: str,
-        kernel_callable: Callable,
-        kernel_id: str,
-        engine: str,
-        test_args: Optional[List[Any]] = None,
-        runs: int = 5,
-    ) -> CostEstimate:
-        """Benchmark a single kernel.
+    # -- test data -------------------------------------------------------
+    def _build_morsel(self) -> Morsel:
+        names: List[bytes] = []
+        vectors: List[Any] = []
+        # One column per concrete dtype (families that share a dtype share a column).
+        seen_dtype: Dict[str, bytes] = {}
+        for family, spec in FAMILIES.items():
+            if spec.dtype in seen_dtype:
+                self._columns[family] = (seen_dtype[spec.dtype], spec.column_type)
+                continue
+            ident = mint_column_identity("bench", family)
+            vec = vector_from_sequence(spec.gen(self.n), spec.dtype)
+            names.append(ident)
+            vectors.append(vec)
+            seen_dtype[spec.dtype] = ident
+            self._columns[family] = (ident, spec.column_type)
+        # Single-character VARCHAR column for params (LPAD/RPAD `fill`) that
+        # require exactly one character per element.
+        char_ident = mint_column_identity("bench", "_char1")
+        names.append(char_ident)
+        vectors.append(vector_from_sequence(
+            [random.choice(string.ascii_letters) for _ in range(self.n)], "VARCHAR"))
+        self._columns["_char1"] = (char_ident, VARCHAR)
+        return Morsel.from_vectors(names, vectors)
 
-        Args:
-            function_name: Name of the function
-            kernel_callable: The kernel function to benchmark
-            kernel_id: ID of the kernel
-            engine: Execution engine name
-            test_args: List of arguments to pass to the kernel
-            runs: Number of times to run each sample size
+    def _identifier_node(self, family: str) -> Node:
+        ident, column_type = self._columns[family]
+        sc = SchemaColumn(name=family, identity=ident, column_type=column_type)
+        return Node(NodeType.IDENTIFIER, schema_column=sc, value=ident)
 
-        Returns:
-            CostEstimate with benchmarking results
-        """
-        if test_args is None:
-            test_args = []
+    def _literal_node(self, family: str, param_name: Optional[str] = None) -> Node:
+        spec = FAMILIES[family]
+        value = spec.literal
+        if param_name is not None and param_name.lower() in CONST_PARAM_TOKENS:
+            value = CONST_PARAM_TOKENS[param_name.lower()]
+        # VARCHAR/binary sequence edge is bytes-only; encode str literals.
+        if isinstance(value, str):
+            value = value.encode("utf-8")
+        n = Node(NodeType.LITERAL, value=value)
+        n.type = spec.column_type
+        n.physical_type = spec.column_type.physical.value
+        n.schema_column = ConstantColumn(name="lit", column_type=spec.column_type, value=value)
+        return n
 
-        times_by_size = {size: [] for size in self.sample_sizes}
+    def _baseline_bytecode(self):
+        # Bare column load + return: the per-call VM + load/return overhead we
+        # subtract from every function so the reported cost is marginal.
+        return build_bytecode(lower(self._identifier_node("string")))
 
-        try:
-            for size in self.sample_sizes:
-                # Generate test data
-                test_data = (
-                    [
-                        TestDataGenerator.create_arrow_array(OrsoTypes.DOUBLE, size)
-                        for _ in test_args
-                    ]
-                    if test_args
-                    else [TestDataGenerator.create_arrow_array(OrsoTypes.DOUBLE, size)]
-                )
-
-                # Run benchmark
-                for _ in range(runs):
-                    start = time.perf_counter_ns()
-                    try:
-                        kernel_callable(*test_data)
-                    except Exception:
-                        # Some kernels may not work with all inputs
-                        pass
-                    elapsed_ns = time.perf_counter_ns() - start
-                    times_by_size[size].append(elapsed_ns / 1000)  # Convert to microseconds
-
-            # Calculate cost per million rows based on largest sample
-            largest_size = self.sample_sizes[-1]
-            if times_by_size[largest_size]:
-                avg_us = np.mean(times_by_size[largest_size])
-                min_us = np.min(times_by_size[largest_size])
-                max_us = np.max(times_by_size[largest_size])
-
-                # Extrapolate to 1 million rows
-                cost_us_per_million = (avg_us / largest_size) * 1_000_000
-
-                return CostEstimate(
-                    function_name=function_name,
-                    kernel_id=kernel_id,
-                    engine=engine,
-                    cost_us_per_million=cost_us_per_million,
-                    sample_size=largest_size,
-                    runs=runs,
-                    min_us=min_us,
-                    max_us=max_us,
-                    avg_us=avg_us,
-                    success=True,
-                )
+    # -- node construction ----------------------------------------------
+    def _param_nodes(self, overload) -> List[Node]:
+        nodes: List[Node] = []
+        for p in overload.parameters:
+            family = p.type_family
+            if family not in FAMILIES:
+                raise Unsupported(f"parameter type_family {family!r}")
+            if p.constant_only:
+                node = self._literal_node(family, p.name)
             else:
-                return CostEstimate(
-                    function_name=function_name,
-                    kernel_id=kernel_id,
-                    engine=engine,
-                    cost_us_per_million=0.0,
-                    sample_size=largest_size,
-                    runs=0,
-                    min_us=0.0,
-                    max_us=0.0,
-                    avg_us=0.0,
-                    success=False,
-                    error_message="No successful runs",
-                )
+                col_key = IDENT_PARAM_COLUMNS.get(p.name.lower(), family)
+                node = self._identifier_node(col_key)
+            nodes.append(node)
+            # A variadic param is exercised at its minimum arity (the single
+            # instance above). Adding a second instance over-feeds kernels whose
+            # trailing arg is really an *optional* scalar mis-tagged variadic
+            # (CEILING/FLOOR/TRUNC scale), so the dispatch rejects the call.
+        return nodes
 
-        except Exception as e:
-            return CostEstimate(
-                function_name=function_name,
-                kernel_id=kernel_id,
-                engine=engine,
-                cost_us_per_million=0.0,
-                sample_size=0,
-                runs=0,
-                min_us=0.0,
-                max_us=0.0,
-                avg_us=0.0,
-                success=False,
-                error_message=str(e),
+    def _function_bytecode(self, func_name: str, overload):
+        params = self._param_nodes(overload)
+        resolved = self.catalog.resolve(func_name, params)
+        if resolved is None:
+            raise Unsupported("catalog.resolve returned None")
+        fn = Node(NodeType.FUNCTION, value=func_name, parameters=params)
+        fn.function_ref = resolved
+        fn.schema_column = FunctionColumn(
+            name=f"{func_name.lower()}_r", column_type=resolved.inferred_return_type
+        )
+        return build_bytecode(lower(fn)), resolved
+
+    def _validate(self, result) -> None:
+        """A scalar function must yield a length-N vector. Anything else (e.g. a
+        placeholder lambda that returns a bare Python value, or a function whose
+        real work is lowered elsewhere) is reported as a failure, never timed and
+        emitted as a cost — a fabricated number is worse than an honest gap."""
+        length = getattr(result, "length", None)
+        if length != self.n:
+            raise Unsupported(
+                f"result is not a length-{self.n} vector "
+                f"(got {type(result).__name__}, length={length}); "
+                "kernel is likely a placeholder or the function is specially lowered "
+                "— measure it through full SQL instead"
             )
 
-    def benchmark_function(
-        self,
-        function_name: str,
-        runs: int = 5,
-    ) -> List[CostEstimate]:
-        """Benchmark all kernels of a function.
+    # -- timing ----------------------------------------------------------
+    def _measure(self, bc) -> float:
+        """Return median ns per execute_bytecode call (over the whole morsel)."""
+        import gc
 
-        Args:
-            function_name: Name of the function to benchmark
-            runs: Number of benchmark runs per kernel
+        morsel = self._morsel
+        for _ in range(3):
+            execute_bytecode(bc, morsel)
+        t0 = time.monotonic_ns()
+        execute_bytecode(bc, morsel)
+        one = max(time.monotonic_ns() - t0, 1)
+        iters = max(3, min(5000, int(self.budget_s * 1e9 / one)))
+        samples: List[float] = []
+        gc.disable()
+        try:
+            for _ in range(self.reps):
+                gc.collect()
+                t0 = time.monotonic_ns()
+                for _ in range(iters):
+                    execute_bytecode(bc, morsel)
+                samples.append((time.monotonic_ns() - t0) / iters)
+        finally:
+            gc.enable()
+        return statistics.median(samples)
 
-        Returns:
-            List of CostEstimate objects for each kernel
-        """
-        func_def = self.catalog.get_definition(function_name)
-        if not func_def:
-            return []
-
-        results = []
+    # -- public ----------------------------------------------------------
+    def benchmark_function(self, func_def) -> List[OverloadResult]:
+        results: List[OverloadResult] = []
         for overload in func_def.overloads:
             kernel = overload.kernel
-
-            # Try to benchmark the kernel
-            estimate = self.benchmark_kernel(
-                function_name=function_name,
-                kernel_callable=kernel.callable_ref,
-                kernel_id=kernel.id,
-                engine=str(kernel.engine),
-                runs=runs,
-            )
-            results.append(estimate)
-            self.results.append(estimate)
-
+            current = kernel.cost_us_per_million
+            kernel_name = getattr(kernel.callable_ref, "__name__", repr(kernel.callable_ref))
+            # Constant functions (NOW, PI, VERSION, ...) are defined via the _make
+            # shorthand, whose placeholder kernel is `lambda *a: None`. They are
+            # folded to a literal at bind time and have no per-row cost; executing
+            # the placeholder through BC_FUNCTION returns None and segfaults the VM.
+            # Skip them explicitly rather than risk a crash mid-sweep.
+            if getattr(kernel.callable_ref, "__qualname__", "") == "_make.<locals>.<lambda>":
+                results.append(
+                    OverloadResult(
+                        function_name=func_def.name,
+                        overload_id=overload.id,
+                        kernel=kernel_name,
+                        current_cost=current,
+                        cost_us_per_million=None,
+                        ns_per_row=None,
+                        success=False,
+                        error="skipped: constant placeholder kernel (folded at bind time; no per-row cost)",
+                    )
+                )
+                continue
+            # try/except here RECORDS and REPORTS the failure (loudly); it never
+            # swallows it to produce a fake cost.
+            try:
+                bc, _ = self._function_bytecode(func_def.name, overload)
+                self._validate(execute_bytecode(bc, self._morsel))
+                func_ns = self._measure(bc)
+                ns_per_row = (func_ns - self._baseline_ns) / self.n
+                cost = ns_per_row * 1000.0  # ns/row -> us per 1,000,000 rows
+                results.append(
+                    OverloadResult(
+                        function_name=func_def.name,
+                        overload_id=overload.id,
+                        kernel=kernel_name,
+                        current_cost=current,
+                        cost_us_per_million=round(cost, 3),
+                        ns_per_row=round(ns_per_row, 4),
+                        success=True,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — recorded + reported, not swallowed
+                results.append(
+                    OverloadResult(
+                        function_name=func_def.name,
+                        overload_id=overload.id,
+                        kernel=kernel_name,
+                        current_cost=current,
+                        cost_us_per_million=None,
+                        ns_per_row=None,
+                        success=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
         return results
 
-    def benchmark_all(
-        self,
-        exclude_functions: Optional[List[str]] = None,
-        runs: int = 5,
-    ) -> List[CostEstimate]:
-        """Benchmark all functions in the catalog.
 
-        Args:
-            exclude_functions: List of function names to skip
-            runs: Number of benchmark runs per kernel
-
-        Returns:
-            List of all CostEstimate objects
-        """
-        exclude_functions = exclude_functions or []
-
-        for func_def in self.catalog.list_functions():
-            if func_def.name in exclude_functions:
-                continue
-
-            print(f"Benchmarking {func_def.name}...", flush=True)
-            self.benchmark_function(func_def.name, runs=runs)
-
-        return self.results
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Export results as a dictionary."""
-        by_function: Dict[str, List[Dict[str, Any]]] = {}
-
-        for estimate in self.results:
-            if estimate.function_name not in by_function:
-                by_function[estimate.function_name] = []
-
-            by_function[estimate.function_name].append(
-                {
-                    "kernel_id": estimate.kernel_id,
-                    "engine": estimate.engine,
-                    "cost_us_per_million": estimate.cost_us_per_million,
-                    "sample_size": estimate.sample_size,
-                    "runs": estimate.runs,
-                    "min_us": estimate.min_us,
-                    "max_us": estimate.max_us,
-                    "avg_us": estimate.avg_us,
-                    "success": estimate.success,
-                    "error": estimate.error_message,
-                }
-            )
-
-        return {
-            "timestamp": time.time(),
-            "total_functions": len(by_function),
-            "total_kernels": len(self.results),
-            "successful": sum(1 for r in self.results if r.success),
-            "functions": by_function,
-        }
-
-    def export_json(self, path: Path) -> None:
-        """Export results to JSON file.
-
-        Args:
-            path: Output file path
-        """
-        data = self.to_dict()
-        path.write_text(json.dumps(data, indent=2))
-        print(f"Results exported to {path}")
-
-    def print_summary(self) -> None:
-        """Print a summary of benchmark results."""
-        if not self.results:
-            print("No results to summarize")
-            return
-
-        successful = [r for r in self.results if r.success]
-        failed = [r for r in self.results if not r.success]
-
-        print("\n" + "=" * 80)
-        print("COST ESTIMATION SUMMARY")
-        print("=" * 80)
-        print(f"Total kernels benchmarked: {len(self.results)}")
-        print(f"Successful: {len(successful)}")
-        print(f"Failed: {len(failed)}")
-
-        if successful:
-            print("\n" + "-" * 80)
-            print("Estimated Costs (microseconds per million rows):")
-            print("-" * 80)
-            print(f"{'Function':<20} {'Kernel ID':<20} {'Engine':<10} {'Cost (μs/M)':<15}")
-            print("-" * 80)
-
-            for estimate in sorted(successful, key=lambda e: (e.function_name, e.kernel_id)):
-                print(
-                    f"{estimate.function_name:<20} "
-                    f"{estimate.kernel_id:<20} "
-                    f"{estimate.engine:<10} "
-                    f"{estimate.cost_us_per_million:>14.2f}"
-                )
-
-        if failed:
-            print("\n" + "-" * 80)
-            print("Failed Benchmarks:")
-            print("-" * 80)
-            for estimate in failed:
-                print(f"{estimate.function_name}: {estimate.error_message}")
-
-        print("\n" + "=" * 80)
+def _selectable(func_def) -> Optional[str]:
+    """Return a skip-reason if this function can't be measured as a scalar expr."""
+    if func_def.category == "aggregate":
+        return "aggregate (evaluated by aggregate operators, not the expression VM)"
+    return None
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Estimate execution costs for function kernels")
-    parser.add_argument(
-        "--functions",
-        help="Comma-separated list of function names to benchmark (default: all)",
-        type=str,
-    )
-    parser.add_argument(
-        "--output",
-        help="Output JSON file path",
-        type=Path,
-        default=Path("function_costs.json"),
-    )
-    parser.add_argument(
-        "--runs",
-        help="Number of benchmark runs per kernel",
-        type=int,
-        default=5,
-    )
-    parser.add_argument(
-        "--sample-sizes",
-        help="Comma-separated sample sizes to test",
-        type=str,
-        default="1000,10000,100000,1000000",
-    )
-
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Measure scalar function execution costs.")
+    parser.add_argument("--functions", type=str, help="Comma-separated names (default: all).")
+    parser.add_argument("--output", type=Path, default=Path("function_costs.json"))
+    parser.add_argument("--sample-size", type=int, default=250_000)
+    parser.add_argument("--budget", type=float, default=0.5, help="Wall-clock seconds per timing.")
+    parser.add_argument("--reps", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
 
-    # Parse sample sizes
-    sample_sizes = [int(x) for x in args.sample_sizes.split(",")]
+    random.seed(args.seed)
+    bench = CostBench(args.sample_size, args.budget, args.reps)
+    catalog = bench.catalog
 
-    # Create benchmarker
-    benchmark = FunctionBenchmark(sample_sizes=sample_sizes)
-
-    # Benchmark specific functions or all
     if args.functions:
-        functions = [f.strip() for f in args.functions.split(",")]
-        for func_name in functions:
-            print(f"Benchmarking {func_name}...", flush=True)
-            benchmark.benchmark_function(func_name, runs=args.runs)
+        wanted = [f.strip().upper() for f in args.functions.split(",")]
+        func_defs = [d for d in (catalog.get_definition(n) for n in wanted) if d is not None]
     else:
-        print("Benchmarking all functions...")
-        benchmark.benchmark_all(runs=args.runs, exclude_functions=["EMBED"])
+        func_defs = catalog.list_functions(include_deprecated=True)
 
-    # Export results
-    benchmark.export_json(args.output)
-    benchmark.print_summary()
+    all_results: Dict[str, List[Dict[str, Any]]] = {}
+    skipped: List[Tuple[str, str]] = []
+    measured = 0
+    failed = 0
+
+    for func_def in sorted(func_defs, key=lambda d: d.name):
+        if func_def.name in DEFAULT_EXCLUDE:
+            skipped.append((func_def.name, "excluded by default"))
+            continue
+        reason = _selectable(func_def)
+        if reason:
+            skipped.append((func_def.name, reason))
+            continue
+
+        print(f"measuring {func_def.name} ...", flush=True)
+        results = bench.benchmark_function(func_def)
+        all_results[func_def.name] = [vars(r) for r in results]
+        for r in results:
+            if r.success:
+                measured += 1
+                print(
+                    f"  {r.overload_id:<24} {r.kernel:<26} "
+                    f"{r.current_cost:>10.2f} -> {r.cost_us_per_million:>10.2f} us/M"
+                )
+            else:
+                failed += 1
+                print(f"  FAIL {r.overload_id:<22} {r.error}")
+
+    payload = {
+        "method": "marginal per-row cost via bytecode evaluator (func - identity baseline)",
+        "timestamp": time.time(),
+        "sample_size": args.sample_size,
+        "baseline_ns_per_call": round(bench._baseline_ns, 2),
+        "measured_kernels": measured,
+        "failed_kernels": failed,
+        "functions": all_results,
+    }
+    args.output.write_text(json.dumps(payload, indent=2))
+
+    print("\n" + "=" * 72)
+    print(f"measured {measured} kernel(s), {failed} failed, {len(skipped)} function(s) skipped")
+    if skipped:
+        print("-" * 72)
+        for name, why in skipped:
+            print(f"  skip {name:<22} {why}")
+    print(f"\nwritten to {args.output}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

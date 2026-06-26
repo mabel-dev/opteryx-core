@@ -102,7 +102,39 @@ struct Pcg32 {
 // vector_levenshtein — bytewise edit distance, null TVL
 // ---------------------------------------------------------------------------
 
-// Two-row rolling DP.  O(min(len_a, len_b)) space per row pair.
+// Myers' bit-parallel edit distance (Myers 1999 / Hyyrö). Computes the exact
+// Levenshtein distance between a pattern P (length m ≤ 64, one machine word) and
+// text T (length n) in O(n) word ops — the whole pattern column is processed in
+// parallel, replacing the O(n·m) cell-by-cell DP. PEq is a caller-owned 256-entry
+// table kept zeroed across calls: we set the pattern's bits, run, then reset only
+// the touched entries so it stays clean (O(m), not O(256), per row).
+static inline int64_t lev_myers(const uint8_t* P, uint32_t m,
+                                const uint8_t* T, uint32_t n,
+                                uint64_t* PEq) {
+    for (uint32_t k = 0u; k < m; ++k) PEq[P[k]] |= (uint64_t)1 << k;
+    uint64_t VP = (m < 64u) ? (((uint64_t)1 << m) - 1u) : ~(uint64_t)0;
+    uint64_t VN = 0u;
+    const uint64_t mask = (uint64_t)1 << (m - 1u);
+    int64_t score = static_cast<int64_t>(m);
+    for (uint32_t j = 0u; j < n; ++j) {
+        const uint64_t Eq = PEq[T[j]];
+        const uint64_t Xv = Eq | VN;
+        const uint64_t Xh = (((Eq & VP) + VP) ^ VP) | Eq;
+        uint64_t Ph = VN | ~(Xh | VP);
+        uint64_t Mh = VP & Xh;
+        if (Ph & mask) ++score;
+        if (Mh & mask) --score;
+        Ph = (Ph << 1) | 1u;
+        Mh = Mh << 1;
+        VP = Mh | ~(Xv | Ph);
+        VN = Ph & Xv;
+    }
+    for (uint32_t k = 0u; k < m; ++k) PEq[P[k]] = 0u;
+    return score;
+}
+
+// Bit-parallel (Myers) for the shorter side ≤ 64 bytes; two-row rolling DP
+// fallback (O(min(len_a, len_b)) space) for the rare longer case.
 static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
     const DrakenVector* a = unwrap_str(a_obj, "vector_levenshtein");
     const DrakenVector* b = unwrap_str(b_obj, "vector_levenshtein");
@@ -125,10 +157,14 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(a->data);
     const DrakenStringArena* sb = static_cast<const DrakenStringArena*>(b->data);
 
-    // Rolling workspace: two rows, grown as needed.
+    // Rolling workspace: two rows, grown as needed (DP fallback only).
     size_t   ws_cap = 0u;
     int64_t* prev   = nullptr;
     int64_t* curr   = nullptr;
+
+    // Myers PEq table: 256 entries, zeroed. Each row sets its pattern's bits and
+    // resets them afterwards, so the table is invariant-zero between rows.
+    uint64_t PEq[256] = {0};
 
     // Validity bitmap — allocated lazily when first null row is seen.
     const uint32_t vbytes = (n + 7u) >> 3;
@@ -154,13 +190,24 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
         uint32_t la = str_length(slot_a);
         uint32_t lb = str_length(slot_b);
 
-        // Keep shorter string in lb/pb so workspace is O(min).
+        // Keep shorter string in lb/pb (Myers pattern = shorter side; DP
+        // fallback workspace is O(min)).
         if (la < lb) {
             const uint8_t* tmp_p = pa; pa = pb; pb = tmp_p;
             const uint32_t tmp_l = la; la = lb; lb = tmp_l;
         }
 
-        // Grow workspace rows if needed.
+        // Cheap exact early-outs.
+        if (lb == 0u) { out_data[i] = static_cast<int64_t>(la); continue; }
+        if (la == lb && std::memcmp(pa, pb, la) == 0) { out_data[i] = 0; continue; }
+
+        // Bit-parallel path: shorter side (pb, length lb) is the pattern.
+        if (lb <= 64u) {
+            out_data[i] = lev_myers(pb, lb, pa, la, PEq);
+            continue;
+        }
+
+        // DP fallback (shorter side > 64 bytes). Grow workspace rows if needed.
         const size_t s_len = static_cast<size_t>(lb) + 1u;
         if (s_len > ws_cap) {
             draken_free(prev); prev = nullptr;

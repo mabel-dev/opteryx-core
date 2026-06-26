@@ -60,6 +60,13 @@ static uint8_t* alloc_validity_all_valid(uint32_t n) {
     return v;
 }
 
+// Below this length the per-string indirect call into simd_to_upper/lower costs
+// more than it saves: its vectorised body only engages at >= 32 bytes, so for
+// shorter strings the call is pure dispatch + indirect-branch overhead on top of
+// a scalar tail. Fold those inline instead (one copy+transform pass, no call).
+// Longer strings keep the vectorised path, which amortises the call.
+static constexpr uint32_t SIMD_FOLD_MIN = 32u;
+
 // ---------------------------------------------------------------------------
 // impl_lowercase
 // ---------------------------------------------------------------------------
@@ -156,16 +163,26 @@ static nb::object impl_lowercase(nb::object in_obj) {
             tmp_cap = need;
         }
 
-        std::memcpy(tmp_buf, sdata, slen);
-
         if (!is_nvarchar) {
-            // VARCHAR: ASCII-only fold, no null terminator.
-            simd_to_lower(reinterpret_cast<char*>(tmp_buf), slen);
+            // VARCHAR: ASCII-only fold (non-ASCII bytes pass through unchanged,
+            // matching simd_to_lower). Short strings fold inline in a single
+            // copy+transform pass to skip the per-string simd_to_lower call.
+            if (slen < SIMD_FOLD_MIN) {
+                for (uint32_t j = 0u; j < slen; ++j) {
+                    const uint8_t c = sdata[j];
+                    tmp_buf[j] = (c >= 'A' && c <= 'Z')
+                        ? static_cast<uint8_t>(c + 32u) : c;
+                }
+            } else {
+                std::memcpy(tmp_buf, sdata, slen);
+                simd_to_lower(reinterpret_cast<char*>(tmp_buf), slen);
+            }
         } else {
             // NVARCHAR: null-terminate, fold codepoint-by-codepoint via utf8lwr.
             // utf8lwr is length-preserving (all utf8lwrcodepoint ranges map to same
             // UTF-8 byte width), so out_len == slen.
             // In C++20 utf8_int8_t is char8_t (not char), so we cast accordingly.
+            std::memcpy(tmp_buf, sdata, slen);
             tmp_buf[slen] = '\0';
             utf8lwr(reinterpret_cast<utf8_int8_t*>(tmp_buf));
         }
@@ -276,11 +293,22 @@ static nb::object impl_uppercase(nb::object in_obj) {
             draken_free(tmp_buf); tmp_buf = new_tmp; tmp_cap = need;
         }
 
-        std::memcpy(tmp_buf, sdata, slen);
-
         if (!is_nvarchar) {
-            simd_to_upper(reinterpret_cast<char*>(tmp_buf), slen);
+            // VARCHAR: ASCII-only fold (non-ASCII bytes pass through unchanged,
+            // matching simd_to_upper). Short strings fold inline in a single
+            // copy+transform pass to skip the per-string simd_to_upper call.
+            if (slen < SIMD_FOLD_MIN) {
+                for (uint32_t j = 0u; j < slen; ++j) {
+                    const uint8_t c = sdata[j];
+                    tmp_buf[j] = (c >= 'a' && c <= 'z')
+                        ? static_cast<uint8_t>(c - 32u) : c;
+                }
+            } else {
+                std::memcpy(tmp_buf, sdata, slen);
+                simd_to_upper(reinterpret_cast<char*>(tmp_buf), slen);
+            }
         } else {
+            std::memcpy(tmp_buf, sdata, slen);
             tmp_buf[slen] = '\0';
             utf8upr(reinterpret_cast<utf8_int8_t*>(tmp_buf));
         }
