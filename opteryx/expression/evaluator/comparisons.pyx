@@ -206,7 +206,70 @@ cdef _bool_compare(int op_code, left, right):
         else:
             left_nb = left  # scalar
         return BoolVector(vector_in_list(left_nb, right))
-    return left._compare_scalar(bool(right), _DRAKEN_CMP_OP[op_code])
+
+    # BOOL has NO native compare kernel — the ops table registers only the BOOL
+    # keying hash (ops/hash.h), so draken_compare_scalar / draken_compare_vector
+    # throw "unsupported type" for a DRAKEN_BOOL operand. A boolean comparison is
+    # computed here from the bit-packed mask, Kleene-correct (null in → null out).
+    #
+    # `left` is the BOOL column; `right` is the other operand. Bind-time scalar
+    # literals are materialised as CONSTANT Vectors (BC_LOAD_LIT_CONST), so a
+    # `bool_col = TRUE` predicate (e.g. NULLIF(bool_col, true) → IIF) arrives with
+    # `right` a constant BOOL Vector, NOT a Python bool — `bool(right)` on a Vector
+    # would read its truthiness (length), which is why the old path was wrong even
+    # before the missing kernel. Reduce a scalar/constant right to the bool value;
+    # a genuine BOOL column takes the vector path.
+    cdef object lnb = (<Vector>left)._nb if isinstance(left, Vector) else left
+    cdef BoolVector lcol = BoolVector(lnb)
+    cdef BoolVector ncol = lcol.not_vector()
+
+    cdef bint right_is_scalar = False
+    cdef object rscalar = None
+    if is_scalar(right):
+        rscalar = right
+        right_is_scalar = True
+    elif isinstance(right, Vector):
+        if (<Vector>right)._nb.data_length == 1:   # constant shape → a literal
+            rscalar = right[0]
+            right_is_scalar = True
+
+    if right_is_scalar:
+        if rscalar is None:
+            # A NULL bool literal: NULL OP anything = NULL (3VL) on every row.
+            return BoolVector.from_constant(False, lcol.length, is_null=True)
+        s = bool(rscalar)
+        # All-true / all-false masks that PRESERVE the column's validity (null rows
+        # stay null): (col OR NOT col) is true on every non-null row; (col AND NOT
+        # col) is false on every non-null row. (Kleene OR/AND/NOT propagate NULL.)
+        if op_code == OP_EQ:
+            return lcol if s else ncol
+        if op_code == OP_LT:        # col <  s
+            return ncol if s else lcol.and_vector(ncol)
+        if op_code == OP_LT_EQ:     # col <= s
+            return lcol.or_vector(ncol) if s else ncol
+        if op_code == OP_GT:        # col >  s
+            return lcol.and_vector(ncol) if s else lcol
+        if op_code == OP_GT_EQ:     # col >= s
+            return lcol if s else lcol.or_vector(ncol)
+        raise NotImplementedError(f"_bool_compare: unsupported op code {op_code}")
+
+    # Vector path: BOOL column vs BOOL column. EQ = NOT(a XOR b); the XOR (built
+    # from Kleene OR/AND/NOT) propagates NULL so validity = va AND vb.
+    cdef BoolVector rcol = <BoolVector>(right if isinstance(right, BoolVector) else BoolVector((<Vector>right)._nb))
+    cdef BoolVector xor = lcol.xor_vector(rcol)
+    if op_code == OP_EQ:
+        return xor.not_vector()
+    # Ordering of two boolean columns (false < true): col_a OP col_b expressed via
+    # the bit algebra. a<b ⇔ (NOT a) AND b; a>b ⇔ a AND (NOT b).
+    if op_code == OP_LT:
+        return ncol.and_vector(rcol)
+    if op_code == OP_GT:
+        return lcol.and_vector(rcol.not_vector())
+    if op_code == OP_LT_EQ:        # a <= b ⇔ NOT(a > b)
+        return lcol.and_vector(rcol.not_vector()).not_vector()
+    if op_code == OP_GT_EQ:        # a >= b ⇔ NOT(a < b)
+        return ncol.and_vector(rcol).not_vector()
+    raise NotImplementedError(f"_bool_compare: unsupported op code {op_code}")
 
 
 # ---------------------------------------------------------------------------
