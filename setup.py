@@ -705,6 +705,10 @@ if not _skip_build and not _DRAKEN_BUILD:
             ext.sources = list(ext.sources) + ["src/cpp/http_client.cpp"]
             ext.include_dirs = list(ext.include_dirs) + _curl_include_dirs
             ext.extra_link_args = list(ext.extra_link_args) + _curl_link_args
+            # Enable the HTTP/GCS code in filesystem.hpp / io_pipeline.hpp. The
+            # standalone rugo wheel (rugo/setup.py) never defines this, so its
+            # build is local-filesystem only and pulls in no libcurl.
+            ext.define_macros = list(ext.define_macros) + [("RUGO_ENABLE_HTTP", "1")]
             break
 
     # HTTP client extension - MANDATORY (only add if not cleaning)
@@ -1164,7 +1168,7 @@ extensions.append(
             ]
             + _curl_include_dirs
         ),
-        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1")],
+        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1"), ("RUGO_ENABLE_HTTP", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),

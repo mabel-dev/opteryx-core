@@ -26,9 +26,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+// Remote (HTTP/HTTPS/GCS) footer fetching is an opt-in capability gated on
+// RUGO_ENABLE_HTTP. The opteryx_core build defines it (and compiles + links
+// http_client.cpp / libcurl); the standalone rugo wheel does NOT — rugo is a
+// local-filesystem + bytes reader only. When the macro is unset, libcurl is
+// never included and remote paths fail loud (see file_size_of / read_range /
+// FetchParquetFootersMany). This keeps rugo/ source genuinely curl-free.
+#ifdef RUGO_ENABLE_HTTP
 #include "http_client.hpp"
+#endif
 
 namespace rugo {
+
+// Thrown for a remote path when this build has HTTP compiled out.
+[[noreturn]] static inline void reject_remote_path(const std::string& path) {
+    throw std::runtime_error(
+        "rugo: remote paths (gs://, http://, https://) are not supported in "
+        "this build — local filesystem only: " + path);
+}
 
 static constexpr int64_t  kParquetFooterSuffix  = 8;       // 4-byte len + 4-byte magic
 
@@ -56,16 +71,19 @@ struct ParquetFooterResult {
  * Shared HttpClient — constructed once, reused across all FetchParquetFooter calls.
  * Thread-safe: curl_easy_perform is per-handle, shared DNS/connection pool.
  */
+#ifdef RUGO_ENABLE_HTTP
 inline HttpClient& footer_http_client() {
     static HttpClient client(128, 60000);
     return client;
 }
+#endif
 
 static inline std::string gcs_to_https(const std::string& path) {
     return "https://storage.googleapis.com/" + path.substr(5);
 }
 
 static int64_t file_size_of(const std::string& path) {
+#ifdef RUGO_ENABLE_HTTP
     if (path.substr(0, 5) == "gs://") {
         std::string url = gcs_to_https(path);
         auto hdrs = footer_http_client().head(url, {});
@@ -81,6 +99,11 @@ static int64_t file_size_of(const std::string& path) {
             throw std::runtime_error("HEAD response missing Content-Length: " + path);
         return static_cast<int64_t>(std::stoull(it->second));
     }
+#else
+    if (path.substr(0, 5) == "gs://" ||
+        path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://")
+        reject_remote_path(path);
+#endif
     struct stat st{};
     if (stat(path.c_str(), &st) != 0)
         throw std::runtime_error("stat() failed: " + path);
@@ -89,6 +112,7 @@ static int64_t file_size_of(const std::string& path) {
 
 static std::vector<uint8_t> read_range(const std::string& path,
                                         int64_t offset, int64_t size) {
+#ifdef RUGO_ENABLE_HTTP
     if (path.substr(0, 5) == "gs://") {
         std::string url = gcs_to_https(path);
         std::string hdr = "bytes=" + std::to_string(offset) +
@@ -100,6 +124,11 @@ static std::vector<uint8_t> read_range(const std::string& path,
                           "-" + std::to_string(offset + size - 1);
         return footer_http_client().get(path, {{"Range", hdr}});
     }
+#else
+    if (path.substr(0, 5) == "gs://" ||
+        path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://")
+        reject_remote_path(path);
+#endif
     std::vector<uint8_t> buf(static_cast<size_t>(size));
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0)
@@ -261,6 +290,9 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
     if (remote_idx.empty())
         return results;
 
+#ifndef RUGO_ENABLE_HTTP
+    reject_remote_path(paths[remote_idx[0]]);
+#else
     std::vector<std::vector<uint8_t>> tails = footer_http_client().get_many(reqs);
 
     // Round 2: footers larger than the 64KB suffix window — fetch footer+suffix
@@ -303,6 +335,7 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
     }
 
     return results;
+#endif  // RUGO_ENABLE_HTTP
 }
 
 }  // namespace rugo

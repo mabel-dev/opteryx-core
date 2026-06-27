@@ -32,7 +32,13 @@
 #include <unordered_map>
 
 #include "BS_thread_pool.hpp"
+// Remote (HTTP/HTTPS/GCS) reads are gated on RUGO_ENABLE_HTTP — defined by the
+// opteryx_core build (which compiles + links http_client.cpp / libcurl), unset
+// by the standalone rugo wheel (local filesystem only). When unset, libcurl is
+// never included and remote paths fail loud in read_range / decode_row_group.
+#ifdef RUGO_ENABLE_HTTP
 #include "http_client.hpp"
+#endif
 #include "decode.hpp"
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
@@ -629,10 +635,20 @@ class ParquetIOPipeline {
     // Thread-local HTTP client: each BS worker thread owns its own HttpClient
     // and thus its own CURLSH connection cache. Eliminates CURL_LOCK_DATA_CONNECT
     // mutex contention when N threads simultaneously issue GCS range reads.
+#ifdef RUGO_ENABLE_HTTP
     static HttpClient& tl_http_client() {
         thread_local HttpClient client;
         return client;
     }
+#else
+    // HTTP compiled out (standalone rugo): remote paths fail loud before any
+    // client is needed (see read_range / decode_row_group).
+    [[noreturn]] static void reject_remote_path(const std::string& path) {
+        throw std::runtime_error(
+            "rugo: remote paths (gs://, http://, https://) are not supported in "
+            "this build — local filesystem only: " + path);
+    }
+#endif
 
     std::atomic<int> pending_work_{0};
     std::atomic<bool> shutdown_{false};
@@ -719,6 +735,7 @@ class ParquetIOPipeline {
         std::vector<uint8_t> bytes;
         bool is_remote = false;
 
+#ifdef RUGO_ENABLE_HTTP
         if (path.substr(0, 5) == "gs://") {
             is_remote = true;
             std::string url = gcs_to_https(path);
@@ -732,7 +749,14 @@ class ParquetIOPipeline {
                                     "-" + std::to_string(offset + size - 1);
             bytes = tl_http_client().get(path, {{"Range", range_hdr}});
 
-        } else {
+        } else
+#else
+        if (path.substr(0, 5) == "gs://" ||
+            path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
+            reject_remote_path(path);
+        } else
+#endif
+        {
             // Local file: POSIX pread
             bytes.resize(size);
             int fd = open(path.c_str(), O_RDONLY);
@@ -852,9 +876,14 @@ class ParquetIOPipeline {
         // The path is already a signed/self-authenticating URL when needed, so
         // no auth header is attached here.
         const bool remote = !is_local;
+#ifndef RUGO_ENABLE_HTTP
+        if (remote)
+            reject_remote_path(item.path);
+#endif
         std::vector<std::vector<uint8_t>> remote_buffers;
 
         try {
+#ifdef RUGO_ENABLE_HTTP
             if (remote && !item.column_stats.empty()) {
                 const std::string url = fetch_url_for(item.path);
                 std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
@@ -873,6 +902,7 @@ class ParquetIOPipeline {
                 // One fetch operation covering reqs.size() concurrent ranges.
                 record_http_fetch(batch_ns, reqs.size());
             }
+#endif
 
             for (size_t i = 0; i < item.column_stats.size(); ++i) {
                 const auto& col_stats = item.column_stats[i];
@@ -1279,7 +1309,11 @@ class ParquetIOPipeline {
     // Process-cumulative count of range requests re-issued on transient failure
     // (WP-5). Global across all pipelines/workers; not per-query.
     uint64_t http_retries() const {
+#ifdef RUGO_ENABLE_HTTP
         return HttpClient::total_retries();
+#else
+        return 0;
+#endif
     }
 };
 
