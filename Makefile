@@ -65,15 +65,11 @@ reference: check-python ## Regenerate all reference catalogs (JSON + catalog Pyt
 # regenerates `reference` (function_signatures.json embeds cost_us_per_million).
 # Override the sweep with COST_ARGS, e.g. COST_ARGS="--budget 0.3 --reps 5".
 function-costs: check-python ## Re-measure function execution costs and bake them into the catalog + reference (slow)
-	$(call print_blue,"Sweeping function execution costs (subprocess-isolated; a few minutes)...")
+	$(call print_blue,Sweeping function execution costs (subprocess-isolated; a few minutes)...)
 	@$(PYTHON) dev/sweep_function_costs.py --output dev/function_costs.json $(COST_ARGS)
-	$(call print_blue,"Writing measured costs into the registrars...")
+	$(call print_blue,Writing measured costs into the registrars...)
 	@$(PYTHON) dev/import_function_costs.py dev/function_costs.json --apply
-	$(call print_blue,"Recompiling so the catalog carries the refreshed costs...")
-	@$(MAKE) c
-	$(call print_blue,"Regenerating reference catalogs (signatures embed cost)...")
-	@$(MAKE) reference
-	$(call print_green,"Function costs refreshed and baked into the catalog + reference.")
+	$(call print_blue,Recompiling so the catalog carries the refreshed costs...)
 
 # === LINTING AND FORMATTING ===
 

@@ -148,10 +148,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             )
 
         # Schema-only read using rugo metadata extraction
+        from opteryx.connectors._rugo_schema import rugo_to_relation_schema
+
         try:
-            from rugo.converters.sql_schema import (
-                rugo_to_relation_schema,  # type: ignore[import]
-            )
             from rugo.parquet_reader import (
                 read_metadata_from_memoryview,  # type: ignore[import]
             )

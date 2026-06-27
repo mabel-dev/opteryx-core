@@ -1,32 +1,70 @@
 # Rugo
 
-Rugo is Opteryx Core's internal file engine for Parquet, JSONL, and CSV — reading **and** writing. Zero external dependencies — no PyArrow, no NumPy on any read or write path. Compiled as Cython/C++ extensions. Readers emit Draken vectors; the writer consumes Draken Morsels and emits well-formed, PyArrow-readable Parquet. Not separately installable or versioned; built as part of this repository. Depends on Draken (`../draken/README.md`).
+**A fast, dependency-free file engine for Parquet, CSV, and JSONL — reading and writing — with no PyArrow and no NumPy.**
 
-See [`_example.py`](_example.py) for a runnable read + write example.
+Rugo reads and writes columnar data files from Python without pulling in a heavy
+dependency stack. There is no PyArrow and no NumPy on any read or write path —
+the engine is compiled C++/Cython and ships its own columnar substrate
+([Draken](https://pypi.org/project/draken/)) inside the wheel. If you want to
+read a Parquet file, stream row groups with projection and predicate pushdown,
+or write Parquet/CSV/JSONL back out, and you do *not* want to install PyArrow to
+do it, rugo is for you.
 
----
+Rugo is the file engine extracted from the [Opteryx](https://opteryx.dev/) SQL
+query engine, published as a standalone wheel.
 
-## Build
+```python
+from rugo import parquet
 
-```bash
-make compile   # full rebuild
-make c         # incremental rebuild
+# stream a projected, row-group-pruned read — no PyArrow, no NumPy
+with parquet.read_parquet("planets.parquet", columns=["id", "name"], filters=[("id", ">", 4)]) as reader:
+    for morsel in reader:
+        print(morsel.column(b"name").to_pylist())
 ```
 
-Python 3.14 (free-threaded, `3.14.5t`) is used for local builds.
+---
+
+## Installation
+
+```bash
+pip install rugo
+```
+
+Pre-built wheels bundle Draken — there is nothing else to install. Rugo has
+**zero runtime dependencies**.
+
+### Requirements
+
+- Python 3.13+
+- A platform with a published wheel (Linux x86-64/aarch64, macOS arm64). For
+  other platforms, see [Building from source](#building-from-source).
 
 ---
 
-## Modules
+## Data model
 
-| Package               | Purpose                                              |
-|-----------------------|------------------------------------------------------|
-| `rugo.parquet`        | **Unified Parquet read/write facade** (recommended)  |
-| `rugo.parquet_reader` | Low-level Parquet metadata + column decoding         |
-| `rugo.parquet_writer` | Low-level Parquet writing (Morsel → bytes)           |
-| `rugo.jsonl`          | JSONL read (`read_jsonl`) + write (`write_jsonl`)    |
-| `rugo.csv`            | CSV read (`read_csv`) + write (`write_csv`)          |
-| `rugo.converters`     | Schema/format conversion helpers (Orso)              |
+Rugo speaks **Draken**, the bundled columnar substrate:
+
+- A **Vector** is a single typed column. Call `vector.to_pylist()` to get a
+  Python list of its values.
+- A **Morsel** is a batch of rows across several columns (a chunk of a table).
+  Call `morsel.column(b"name")` to get a column Vector (note the **bytes** key),
+  and `len(morsel)` for the row count.
+
+Readers return Morsels (Parquet) or a result dict whose `columns` are Vectors
+(CSV, JSONL). The writers consume a Morsel. A read → write round-trip:
+
+```python
+from rugo import parquet
+from rugo.csv import write_csv
+from rugo.jsonl import write_jsonl
+
+with parquet.read_parquet("planets.parquet") as reader:
+    for morsel in reader:                      # one Morsel per row group
+        csv_bytes   = write_csv(morsel)        # -> bytes (RFC 4180)
+        jsonl_bytes = write_jsonl(morsel)      # -> bytes (one JSON object per row)
+        pq_bytes    = parquet.write_parquet(morsel)   # -> bytes (ZSTD)
+```
 
 ---
 
@@ -42,7 +80,7 @@ Morsels, applies predicate pushdown, and writes Morsels back to bytes.
 from rugo import parquet
 
 # Schema-only metadata (footer parse, no column data). Path OR bytes.
-meta = parquet.read_metadata("testdata/planets/planets.parquet")
+meta = parquet.read_metadata("planets.parquet")
 print(meta.num_rows)                       # 9
 print([c.name for c in meta.schema_columns])
 
@@ -50,7 +88,7 @@ print([c.name for c in meta.schema_columns])
 # prune whole row groups via footer statistics (rows in surviving groups are
 # NOT filtered — apply row-level predicates downstream).
 with parquet.read_parquet(
-    "testdata/planets/planets.parquet",
+    "planets.parquet",
     columns=["id", "name"],
     filters=[("id", ">", 4)],              # ops: = == != < <= > >= in "not in"
 ) as reader:
@@ -132,15 +170,6 @@ bloom_filter_maybe_contains(path, bloom_offset, bloom_length, value)  # -> bool
 
 Evaluates a column bloom filter at the given byte offset/length for a candidate `value`. Bloom filter offsets and lengths are exposed in the per-column metadata returned by `read_metadata`.
 
-#### Telemetry
-
-| Function | Description |
-|----------|-------------|
-| `reset_telemetry()` | Reset Cython-side phase timing accumulators |
-| `get_telemetry()` | Return Cython-side timings per type, plus call/row-group/column counts |
-| `reset_cpp_telemetry()` | Reset C++-side phase timing accumulators |
-| `get_cpp_telemetry()` | Return C++-side timings: `metadata_s`, `decompress_s`, `dict_parse_s`, `prescan_s`, `page_parallel_s`, `rle_s`, `val_expand_s`, `mask_filter_s`, `validity_bmp_s`, `calls` |
-
 ### Supported decode subset
 
 | Area | Support |
@@ -148,7 +177,7 @@ Evaluates a column bloom filter at the given byte offset/length for a candidate 
 | Physical types | `int32`, `int64`, `float32`, `float64`, `boolean`, `byte_array` |
 | Compression | `UNCOMPRESSED`, `SNAPPY`, `ZSTD` |
 | Encodings | `PLAIN`, dictionary pages (`PLAIN_DICTIONARY` / `RLE_DICTIONARY`), `DELTA_BINARY_PACKED`, `DELTA_BYTE_ARRAY` |
-| Input | In-memory `bytes` / `memoryview` with column selection |
+| Input | Path, or in-memory `bytes` / `memoryview`, with column selection |
 
 ### Writing
 
@@ -187,50 +216,46 @@ dictionary-encoded *output* are not yet implemented.
 
 ### Performance
 
-Metadata reads (schema + row-group stats, no column data) are fast and comparable to PyArrow. The high-level `read_parquet()` / `rugo.parquet` path is a serial utility: it reconstructs Draken vectors from decoded columns via the native sequence constructors and materializes through Python, so it is correctness-first, not the performance path. Opteryx's production scan path (`opteryx.connectors.parquet_io`) builds vectors zero-copy off-GIL and is independent of this API. (The Draken vector-migration gaps E.28-1..3,5..9 that previously stubbed this path are fixed; only nested/array decode, E.28-4, remains.)
+Metadata reads (schema + row-group stats, no column data) are fast and
+comparable to PyArrow. The high-level `read_parquet()` path is correctness-first:
+it reconstructs Draken vectors from decoded columns and materializes through
+Python, so it is a serial utility rather than a throughput benchmark. The
+emphasis is on *reading less* — projection and row-group pruning — not on raw
+bulk scan speed.
 
 ---
 
 ## JSONL
 
-### Writing
-
-```python
-from rugo.jsonl import write_jsonl
-data = write_jsonl(morsel)   # -> bytes, one JSON object per row
-```
-
-Native (no pyarrow); value formatting in C++. Doubles use `std::to_chars`
-(shortest round-trip); dates/timestamps render ISO-8601 strings; decimals are
-JSON numbers; arrays render as JSON arrays (null list / empty list / null
-element are all distinguished); nulls are `null`.
-
 ### Quick start
 
 ```python
-from rugo.jsonl import get_jsonl_schema, read_jsonl
+from rugo.jsonl import get_jsonl_schema, read_jsonl, write_jsonl
 
 # Infer schema from sample rows
-schema = get_jsonl_schema("testdata/example.jsonl", sample_size=5)
+schema = get_jsonl_schema("example.jsonl", sample_size=5)
 # -> {"columns": [{"name": str, "type": str, "nullable": True}, ...]}
 
-# Read from file path with projection and predicate pushdown
+# Read from a file path with projection and predicate pushdown
 result = read_jsonl(
-    "testdata/example.jsonl",
+    "example.jsonl",
     columns=["id", "name"],
     predicates=[("status", "==", "active")],
 )
 if result["success"]:
     print(result["num_rows"])
-    for vec in result["columns"]:  # list[draken Vector]
+    for vec in result["columns"]:          # list of Draken Vectors
         print(vec.to_pylist())
 
 # Read from bytes input
-with open("testdata/example.jsonl", "rb") as f:
+with open("example.jsonl", "rb") as f:
     result = read_jsonl(f.read(), columns=["id"])
+
+# Write a Morsel to JSONL bytes (one JSON object per row)
+data = write_jsonl(morsel)
 ```
 
-### API: read_jsonl
+### `read_jsonl`
 
 ```python
 read_jsonl(
@@ -255,13 +280,13 @@ Return dict:
 | `success` | `bool` |
 | `column_names` | `list[str]` |
 | `num_rows` | `int` — rows passing predicates |
-| `columns` | `list[draken Vector]` |
+| `columns` | `list` of Draken Vectors |
 | `schema` | `dict[str, str]` — column name → inferred type string |
 | `error` | `str` — present only when `success` is `False` |
 
 Inferred type strings: `int64`, `double`, `boolean`, `string`, `bytes`, `object`, `null`, `array<T>`.
 
-### API: get_jsonl_schema
+### `get_jsonl_schema`
 
 ```python
 get_jsonl_schema(data, sample_size=5)
@@ -270,9 +295,16 @@ get_jsonl_schema(data, sample_size=5)
 
 Infers the schema from the first `sample_size` rows. Returns `{"columns": []}` on failure; does not raise.
 
+### Writing
+
+`write_jsonl(morsel)` returns bytes, one JSON object per row. Value formatting is
+done in C++: doubles use shortest round-trip (`std::to_chars`); dates/timestamps
+render ISO-8601 strings; decimals are JSON numbers; arrays render as JSON arrays
+(null list / empty list / null element are all distinguished); nulls are `null`.
+
 ### Performance
 
-116 MB, 1.5 M rows, 5 cols. PyArrow `read_json` multithreaded.
+116 MB, 1.5 M rows, 5 cols, versus PyArrow `read_json` (multithreaded):
 
 | Query shape | Rugo | PyArrow |
 |-------------|------|---------|
@@ -281,7 +313,9 @@ Infers the schema from the first `sample_size` rows. Returns `{"columns": []}` o
 | `SELECT col WHERE id < 150k` (~10% pass) | ~15 ms | ~53 ms |
 | `SELECT col WHERE id < 15k` (~1% pass) | ~7 ms | ~53 ms |
 
-`SELECT *` is bulk-bound — PyArrow's bulk materialiser has an edge. The analytical shapes — project + filter — are 1.2–5×+ faster; the advantage grows with selectivity and table width.
+Bulk `SELECT *` is materialiser-bound — PyArrow has an edge. The analytical
+shapes — project + filter — are 1.2–5×+ faster, and the advantage grows with
+selectivity and table width.
 
 ### Caveats
 
@@ -293,40 +327,25 @@ Infers the schema from the first `sample_size` rows. Returns `{"columns": []}` o
 
 ## CSV
 
-### Writing
-
-```python
-from rugo.csv import write_csv
-data = write_csv(morsel, delimiter=",", header=True)   # -> bytes (RFC 4180)
-```
-
-Native (no pyarrow); fields are quoted per RFC 4180 (delimiter/quote/newline →
-quoted, quotes doubled), nulls are empty fields, and ARRAY columns render as a
-(quoted) JSON array. Shares the C++ value formatter with the JSONL writer.
-
 ### Quick start
 
 ```python
-from rugo.csv import read_csv
+from rugo.csv import read_csv, write_csv
 
-# Basic read — all columns
-result = read_csv("testdata/data.csv")
-
-# Projection
-result = read_csv("testdata/data.csv", columns=["col1", "col2"])
-
-# Predicate pushdown
-result = read_csv("testdata/data.csv", columns=["name"], predicates=[("age", ">", 30)])
-
-# TSV variant
-result = read_csv("testdata/data.tsv", delimiter="\t")
+result = read_csv("data.csv")                                          # all columns
+result = read_csv("data.csv", columns=["col1", "col2"])                # projection
+result = read_csv("data.csv", columns=["name"], predicates=[("age", ">", 30)])
+result = read_csv("data.tsv", delimiter="\t")                          # TSV variant
 
 if result["success"]:
-    for vec in result["columns"]:
+    for vec in result["columns"]:          # list of Draken Vectors
         print(vec.to_pylist())
+
+# Write a Morsel to CSV bytes (RFC 4180)
+data = write_csv(morsel, delimiter=",", header=True)
 ```
 
-### API: read_csv
+### `read_csv`
 
 ```python
 read_csv(
@@ -338,8 +357,6 @@ read_csv(
     use_threads=True,   # parallel scan
 )
 ```
-
-Parameter table:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -357,15 +374,23 @@ Return dict:
 | `success` | `bool` |
 | `column_names` | `list[str]` |
 | `num_rows` | `int` — rows passing predicates |
-| `columns` | `list[draken Vector]` |
+| `columns` | `list` of Draken Vectors |
 
 Type inference cascade per field: `int64` → `float64` → `VARCHAR` → `null` (empty field).
 
+### Writing
+
+`write_csv(morsel, delimiter=",", header=True)` returns RFC 4180 bytes: fields are
+quoted when they contain the delimiter/quote/newline (quotes doubled), nulls are
+empty fields, and ARRAY columns render as a (quoted) JSON array. The CSV and
+JSONL writers share the same C++ value formatter.
+
 ### Performance
 
-Measured against `pyarrow.csv.read_csv`. The expensive step is typed column build; rugo makes it survivor-only, which matters only when there is something to skip.
+Measured against `pyarrow.csv.read_csv`. The expensive step is typed column
+build; rugo makes it survivor-only, which pays off when there is something to skip.
 
-**Narrow file — 3 cols, 1 M rows, 12.6 MB** (minimal projection benefit):
+**Narrow file — 3 cols, 1 M rows, 12.6 MB:**
 
 | Query shape | Rugo | PyArrow |
 |-------------|------|---------|
@@ -374,7 +399,7 @@ Measured against `pyarrow.csv.read_csv`. The expensive step is typed column buil
 | `WHERE id > P90 (~10% pass)` | ~6 ms | ~4 ms |
 | `WHERE id > P99 (~1% pass)` | ~5 ms | ~3 ms |
 
-**Wide file — 50 cols, 200 k rows, 55 MB** (projection and predicate advantage visible):
+**Wide file — 50 cols, 200 k rows, 55 MB:**
 
 | Query shape | Rugo | PyArrow |
 |-------------|------|---------|
@@ -384,49 +409,44 @@ Measured against `pyarrow.csv.read_csv`. The expensive step is typed column buil
 | `SELECT * WHERE score > P99 (~1% pass)` | ~10 ms | ~23 ms |
 | `SELECT 2 cols WHERE score > P90` | ~8 ms | ~27 ms |
 
-On narrow files PyArrow is faster across the board. On wide files with filtering, rugo is 2–3×+ faster. The crossover is driven by how many columns can be skipped and how many rows are eliminated before typed column build.
+On narrow files PyArrow is faster across the board. On wide files with filtering,
+rugo is 2–3×+ faster — the crossover is driven by how many columns can be skipped
+and how many rows are eliminated before the typed column build.
 
 ### Known limitations
 
-- Field length is capped at 65,535 bytes (`uint16_t` index); fields exceeding this limit are silently truncated.
-- Type inference is speculative from sampled values; there is no schema override parameter — inferred types may be wrong on heterogeneous columns.
+- Field length is capped at 65,535 bytes (`uint16_t` index); longer fields are silently truncated.
+- Type inference is speculative from sampled values; there is no schema-override parameter — inferred types may be wrong on heterogeneous columns.
 - Predicate operator set is fixed: `==`, `!=`, `<`, `<=`, `>`, `>=`.
 
 ---
 
-## Converters
+## Design notes
 
-```python
-from rugo.parquet_reader import read_metadata
-from rugo.converters import rugo_to_orso_schema
-
-meta   = read_metadata("data.parquet")
-schema = rugo_to_orso_schema(meta, schema_name="my_table")  # -> Orso RelationSchema
-```
-
----
-
-## Source layout
-
-```
-rugo/
-├── __init__.py
-├── parquet_reader.pxd          # Cython declarations for the parquet extension
-├── jsonl/                      # import package for the compiled JSONL extension
-├── csv/                        # import package for the compiled CSV extension
-├── converters/                 # schema/format conversion helpers (Orso)
-└── src/
-    ├── parquet/                # metadata, decode, compression, bloom filters, vendored zstd/lz4
-    ├── jsonl/                  # C++/Cython JSONL reader
-    ├── csv/                    # C++/Cython CSV reader
-    └── parquet_spec/           # vendored Apache Parquet format specification
-```
+- **No PyArrow, no NumPy.** Every read and write path is pure C++/Cython and
+  Draken-native. Output Parquet is still standard and PyArrow-readable.
+- **Fail loud.** `can_decode(...)` is a quick compatibility signal, not a
+  guarantee; on partial decode failure a selected column may be returned as
+  `None` — check, don't assume success.
+- **Read less.** The advantage over bulk readers comes from projection and
+  predicate/row-group pruning, not raw scan throughput.
 
 ---
 
-## Notes
+## Building from source
 
-- Rugo is internal engine infrastructure. Prefer `opteryx.session()` unless working on scan, metadata, or I/O internals.
-- `can_decode(...)` is a quick compatibility signal, not a guarantee that every selected column will decode successfully.
-- On partial decode failure, a selected column may be returned as `None` — fail loud, do not assume success.
-- The read path is pure C++/Cython and Draken-native; no PyArrow or NumPy is involved.
+End users should `pip install rugo` and use the published wheels. To build from
+the [opteryx-core](https://github.com/mabel-dev/opteryx) source tree (rugo is
+developed there alongside Draken and the Opteryx engine):
+
+```bash
+python rugo/setup.py bdist_wheel    # build the standalone rugo wheel (from repo root)
+```
+
+For in-place development of the whole tree, use the repository's `make compile`.
+
+---
+
+## License
+
+Apache-2.0. Rugo is part of the [Opteryx](https://opteryx.dev/) project.

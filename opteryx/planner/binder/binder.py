@@ -65,7 +65,11 @@ _AGGREGATE_RESULT_INTEGER = frozenset(
     {"COUNT", "COUNT_DISTINCT", "DISTINCT", "APPROX_COUNT_DISTINCT"}
 )
 _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
-_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE"})
+# MEDIAN always returns DOUBLE — the runtime is MedianFloat64Aggregate (column) and
+# float(value) (literal), and non-numeric inputs are rejected outright. Typing it as
+# DOUBLE (not input-passthrough) keeps the binder honest with the runtime, the same
+# way AVG is forced to DOUBLE below.
+_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "MEDIAN"})
 
 
 def _operand_column_type(operand):

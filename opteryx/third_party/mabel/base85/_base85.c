@@ -100,7 +100,7 @@ void* b85tobin_len(void* dest, const char* src, size_t len) {
         uint32_t acc = 0;
         for (int j = 0; j < 5; j++) {
             uint8_t c = B85_DECODE_LUT[(uint8_t)src[i + j]];
-            if (c == 255) return output;
+            if (c == 255) return NULL;  // malformed input — caller fails loud
             acc = acc * 85 + c;
         }
 
@@ -123,7 +123,7 @@ void* b85tobin_len(void* dest, const char* src, size_t len) {
         uint32_t acc = 0;
         for (int j = 0; j < 5; j++) {
             uint8_t c = B85_DECODE_LUT[chunk[j]];
-            if (c == 255) return output;
+            if (c == 255) return NULL;  // malformed input — caller fails loud
             acc = acc * 85 + c;
         }
 

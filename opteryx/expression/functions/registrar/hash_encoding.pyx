@@ -51,7 +51,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_any,),
             engine="draken",
-            cost=8.44,
+            cost=70856.38,
             summary="MD5 hash.",
         ),
         _make(
@@ -60,7 +60,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_any,),
             engine="draken",
-            cost=5.10,
+            cost=31113.37,
             summary="SHA-1 hash.",
         ),
         _make(
@@ -69,7 +69,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_any,),
             engine="draken",
-            cost=7.56,
+            cost=38132.87,
             summary="SHA-224 hash.",
         ),
         _make(
@@ -78,7 +78,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_any,),
             engine="draken",
-            cost=7.56,
+            cost=32147.72,
             summary="SHA-256 hash.",
         ),
         _make(
@@ -87,7 +87,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_any,),
             engine="draken",
-            cost=7.47,
+            cost=89807.05,
             summary="SHA-384 hash.",
         ),
         _make(
@@ -96,7 +96,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_any,),
             engine="draken",
-            cost=7.47,
+            cost=91033.24,
             summary="SHA-512 hash.",
         ),
         # RANDOM and NORMAL need explicit FunctionDefinition to include both arities
@@ -131,7 +131,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                         id="zero_arg",
                         callable_ref=number_functions.random_number,
                         null_policy="compress",
-                        cost_us_per_million=85541.62,
+                        cost_us_per_million=2824.05,
                     ),
                 ),
             ),
@@ -167,7 +167,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                         id="zero_arg",
                         callable_ref=number_functions.random_normal,
                         null_policy="compress",
-                        cost_us_per_million=86571.94,
+                        cost_us_per_million=7397.25,
                     ),
                 ),
             ),
@@ -189,7 +189,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             (_b,),
             engine="draken",
             summary="Base64 encode.",
-            cost=3.40,
+            cost=6998.99,
         ),
         _make(
             "BASE64_DECODE",
@@ -207,7 +207,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             (_b,),
             engine="draken",
             summary="Base85 encode.",
-            cost=3.60,
+            cost=8774.93,
         ),
         _make(
             "BASE85_DECODE",
@@ -216,7 +216,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             (_b,),
             engine="draken",
             summary="Base85 decode.",
-            cost=2.85,
+            cost=9180.68,
         ),
         _make(
             "HEX_ENCODE",
@@ -224,7 +224,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             _CT_VARBINARY,
             (_b,),
             summary="Hex encode.",
-            cost=539725.99,
+            cost=9353.05,
         ),
         _make(
             "HEX_DECODE", vector_hex_decode, _CT_VARBINARY, (_b,), summary="Hex decode.", cost=3.87

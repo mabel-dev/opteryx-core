@@ -16,6 +16,11 @@
 
 #if defined(__riscv) && defined(__riscv_vector)
 #include <riscv_vector.h>
+// Forward declarations: the RVV kernels are defined lower in this file (after
+// the AVX2/NEON variants), but the runtime dispatch tables that reference them
+// appear above those definitions.
+static void simd_to_upper_rvv(char* data, size_t length);
+static void simd_to_lower_rvv(char* data, size_t length);
 #endif
 
 // SIMD-accelerated ASCII case conversion
@@ -288,8 +293,9 @@ static void simd_to_upper_rvv(char* data, size_t length) {
         vuint8m4_t chunk  = __riscv_vle8_v_u8m4((const uint8_t*)(data + i), vl);
         vuint8m4_t offset = __riscv_vsub_vx_u8m4(chunk, (uint8_t)LOWER_A, vl);
         vbool2_t is_lower = __riscv_vmsleu_vx_u8m4_b2(offset, 25, vl);
-        // Merge: where is_lower true → chunk-CASE_DIFF, else → chunk (maskedoff)
-        vuint8m4_t result = __riscv_vsub_vx_u8m4_m(is_lower, chunk, chunk, (uint8_t)CASE_DIFF, vl);
+        // Merge: where is_lower true → chunk-CASE_DIFF, else → chunk (maskedoff).
+        // _mu = mask-undisturbed: (mask, maskedoff, vs2, rs1, vl).
+        vuint8m4_t result = __riscv_vsub_vx_u8m4_mu(is_lower, chunk, chunk, (uint8_t)CASE_DIFF, vl);
         __riscv_vse8_v_u8m4((uint8_t*)(data + i), result, vl);
         i += vl;
     }
@@ -302,7 +308,7 @@ static void simd_to_lower_rvv(char* data, size_t length) {
         vuint8m4_t chunk  = __riscv_vle8_v_u8m4((const uint8_t*)(data + i), vl);
         vuint8m4_t offset = __riscv_vsub_vx_u8m4(chunk, (uint8_t)UPPER_A, vl);
         vbool2_t is_upper = __riscv_vmsleu_vx_u8m4_b2(offset, 25, vl);
-        vuint8m4_t result = __riscv_vadd_vx_u8m4_m(is_upper, chunk, chunk, (uint8_t)CASE_DIFF, vl);
+        vuint8m4_t result = __riscv_vadd_vx_u8m4_mu(is_upper, chunk, chunk, (uint8_t)CASE_DIFF, vl);
         __riscv_vse8_v_u8m4((uint8_t*)(data + i), result, vl);
         i += vl;
     }
@@ -317,7 +323,7 @@ static bool simd_equals_ci_rvv(const char* a, const char* b, size_t length) {
         // Lowercase ca: detect uppercase letters (offset = ca - 'A' ≤ 25), add CASE_DIFF
         vuint8m4_t off = __riscv_vsub_vx_u8m4(ca, (uint8_t)UPPER_A, vl);
         vbool2_t is_up = __riscv_vmsleu_vx_u8m4_b2(off, 25, vl);
-        vuint8m4_t conv = __riscv_vadd_vx_u8m4_m(is_up, ca, ca, (uint8_t)CASE_DIFF, vl);
+        vuint8m4_t conv = __riscv_vadd_vx_u8m4_mu(is_up, ca, ca, (uint8_t)CASE_DIFF, vl);
         // Count mismatches; any non-zero means unequal → early exit
         vbool2_t bad = __riscv_vmsne_vv_u8m4_b2(conv, cb, vl);
         if (__riscv_vcpop_m_b2(bad, vl) != 0) return false;

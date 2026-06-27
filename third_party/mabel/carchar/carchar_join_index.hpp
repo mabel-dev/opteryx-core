@@ -40,6 +40,27 @@ class CarcharJoinIndex {
         }
     };
 
+    // Caller-owned probe scratch + cache (Phase D — thread-safe shared probe).
+    //
+    // The index's own `mutable` probe members (probe_cache_, grouped scratch, active
+    // pointers) make `probe_join_indices()` NON-reentrant: two threads probing the SAME
+    // sealed index would race on them. That is exactly why each parallel probe worker
+    // rebuilds a private hash today. Hoisting all per-probe working state into a
+    // caller-owned ``ProbeScratch`` makes the index DATA (index_, row_lists_, row_counts_)
+    // strictly read-only during probe, so ONE built index can be probed concurrently by
+    // N workers — each owning its own ProbeScratch. The persistent probe cache survives
+    // across calls ON THE SAME scratch (a worker keeps its cache hot across its morsels).
+    struct ProbeScratch {
+        ProbeCache probe_cache;
+        std::vector<std::uint64_t> grouped_probe_keys;
+        std::vector<std::int64_t> grouped_probe_rows;
+        std::vector<std::size_t> probe_group_counts;
+        std::vector<std::size_t> probe_group_offsets;
+        std::vector<std::size_t> write_offsets;
+        const std::uint64_t* active_probe_keys = nullptr;
+        const std::int64_t* active_probe_rows = nullptr;
+    };
+
     std::size_t size() const noexcept { return index_.size(); }
     std::size_t capacity() const noexcept { return index_.capacity(); }
     void reserve(std::size_t expected_entries) {
@@ -250,6 +271,33 @@ class CarcharJoinIndex {
         return out;
     }
 
+    // Thread-safe overload (Phase D): all per-probe working state lives in the
+    // caller-owned ``scratch``; the index data is read-only, so N threads may call this
+    // CONCURRENTLY on the SAME index, each with its own scratch. Byte-identical results
+    // to the no-scratch overload (same grouping, same persistent-cache semantics — the
+    // cache just lives on the scratch instead of the index).
+    std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>> probe_join_indices(
+        const std::uint64_t* keys,
+        const std::int64_t* probe_rows,
+        std::size_t length,
+        ProbeScratch& scratch
+    ) const {
+        std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>> out;
+        if (keys == nullptr || probe_rows == nullptr || length == 0) {
+            return out;
+        }
+
+        const std::uint64_t total_matches =
+            prepare_materialized_probe_batch(keys, probe_rows, length, scratch);
+        out.first.reserve(static_cast<std::size_t>(total_matches));
+        out.second.reserve(static_cast<std::size_t>(total_matches));
+        materialize_probe_matches(
+            scratch.active_probe_keys, scratch.active_probe_rows, length, out.first, out.second
+        );
+
+        return out;
+    }
+
     CarcharStats stats() const {
         auto stats = index_.stats();
         stats.bytes_estimate += row_lists_.size() * (8U * 2U + 24U + 4U);
@@ -304,6 +352,69 @@ class CarcharJoinIndex {
         active_probe_keys_ = grouped_probe_keys_.data();
         active_probe_rows_ = grouped_probe_rows_.data();
         return probe_row_count_sum_linear(active_probe_keys_, length);
+    }
+
+    // --- Phase D: scratch-owned variants (thread-safe; mirror the mutable-member ones).
+    std::uint64_t probe_row_count_sum_linear(
+        const std::uint64_t* keys, std::size_t length, ProbeScratch& scratch
+    ) const {
+        std::uint64_t total = 0;
+        std::int64_t payload_ref = -1;
+        for (std::size_t i = 0; i < length; ++i) {
+            const std::uint64_t key = keys[i];
+            std::uint32_t count = 0;
+            if (scratch.probe_cache.lookup(key, count)) {
+                total += static_cast<std::uint64_t>(count);
+                continue;
+            }
+            if (index_.lookup_fast(key, payload_ref)) {
+                count = row_counts_[static_cast<std::size_t>(payload_ref)];
+            }
+            scratch.probe_cache.update(key, count);
+            total += static_cast<std::uint64_t>(count);
+        }
+        return total;
+    }
+
+    std::uint64_t prepare_materialized_probe_batch(
+        const std::uint64_t* keys,
+        const std::int64_t* probe_rows,
+        std::size_t length,
+        ProbeScratch& scratch
+    ) const {
+        scratch.active_probe_keys = keys;
+        scratch.active_probe_rows = probe_rows;
+        if (!should_group_probe_batch(length)) {
+            return probe_row_count_sum_linear(keys, length, scratch);
+        }
+
+        const std::size_t group_count = index_.probe_group_count();
+        scratch.grouped_probe_keys.resize(length);
+        scratch.grouped_probe_rows.resize(length);
+        scratch.probe_group_counts.assign(group_count, 0U);
+        scratch.probe_group_offsets.assign(group_count, 0U);
+
+        for (std::size_t i = 0; i < length; ++i) {
+            ++scratch.probe_group_counts[index_.probe_group_index(keys[i])];
+        }
+
+        std::size_t running = 0;
+        for (std::size_t group_index = 0; group_index < group_count; ++group_index) {
+            scratch.probe_group_offsets[group_index] = running;
+            running += scratch.probe_group_counts[group_index];
+        }
+
+        scratch.write_offsets = scratch.probe_group_offsets;
+        for (std::size_t i = 0; i < length; ++i) {
+            const std::size_t group_index = index_.probe_group_index(keys[i]);
+            const std::size_t output_index = scratch.write_offsets[group_index]++;
+            scratch.grouped_probe_keys[output_index] = keys[i];
+            scratch.grouped_probe_rows[output_index] = probe_rows[i];
+        }
+
+        scratch.active_probe_keys = scratch.grouped_probe_keys.data();
+        scratch.active_probe_rows = scratch.grouped_probe_rows.data();
+        return probe_row_count_sum_linear(scratch.active_probe_keys, length, scratch);
     }
 
     void materialize_probe_matches(

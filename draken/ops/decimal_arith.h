@@ -128,12 +128,7 @@ static inline VecResult widen_i64_to_dec128(const DrakenVector& v) {
 
 // Safely multiply v by 10, writing result to out. Returns false on int128 overflow.
 static inline bool i128_mul10(__int128 v, __int128& out) {
-    // INT128_MAX ≈ 1.7e38; overflow when |v| > INT128_MAX / 10 ≈ 1.7e37.
-    // Compute limit as a constant __int128 expression.
-    static const __int128 LIMIT =
-        ((__int128)9223372036854775807LL << 63) | (__int128)0x7FFFFFFFFFFFFFFFuLL;
-    // More precisely: INT128_MAX = 2^127 - 1.  LIMIT = INT128_MAX / 10.
-    // We compute: if |v| > LIMIT, return false.
+    // INT128_MAX = 2^127 - 1 ≈ 1.7e38; overflow when |v| > INT128_MAX / 10 ≈ 1.7e37.
     const __int128 limit = ((__int128)1 << 126) / 5; // approx 2^126/5 ≈ 1.70e37
     if (v > limit || v < -limit) return false;
     out = v * 10;

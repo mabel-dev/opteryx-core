@@ -44,12 +44,32 @@ from opteryx.utils import random_string
 # Condition-tree helpers
 # ---------------------------------------------------------------------------
 
+def _is_exists_or_in_subquery(node) -> bool:
+    """EXISTS and IN-subquery wrap a SUBQUERY node but are not scalar subqueries —
+    they are owned by ExistsSubqueryToJoinStrategy / InSubqueryToJoinStrategy."""
+    if node.node_type == NodeType.UNARY_OPERATOR and node.value == "Exists":
+        return True
+    if node.node_type == NodeType.COMPARISON_OPERATOR and node.value == "InSubQuery":
+        return True
+    return False
+
+
 def _has_scalar_subquery(condition) -> bool:
-    """True if the condition tree contains a NodeType.SUBQUERY expression node."""
+    """True if the condition tree contains a *scalar* subquery — a NodeType.SUBQUERY
+    used directly as a value (e.g. `col = (SELECT ...)`).
+
+    EXISTS / IN subqueries also embed a SUBQUERY node, but those are not scalar and
+    are rewritten by their own strategies earlier in the fixed-point loop.  Descending
+    into them would mis-classify a still-unrewritten EXISTS/IN — for example the
+    surviving sibling of a multi-EXISTS filter, which is rewritten one per pass — as
+    an unsupported scalar subquery and raise prematurely.
+    """
     if condition is None:
         return False
     if condition.node_type == NodeType.SUBQUERY:
         return True
+    if _is_exists_or_in_subquery(condition):
+        return False
     for child_attr in ("left", "right", "centre"):
         child = getattr(condition, child_attr, None)
         if child is not None and _has_scalar_subquery(child):

@@ -40,7 +40,7 @@ This is the lens for everything below. Most of the speed gaps are downstream of
 | # | Opportunity | Class | Leverage | Bounded? | Parts already exist? |
 |---|-------------|-------|----------|----------|----------------------|
 | 1 | Universal parallel sink contract (retire shape matchers) | Speed | **Highest** | Large | Scheduler + sink contract + segment cutter all exist; resolution & per-segment drive are the gap (§1) |
-| 2 | Runtime filters (build → probe sideways info passing) | Speed | High | **Small** | Build + scan-prune both exist |
+| 2 | Runtime filters (build → probe sideways info passing) | Speed | High | **Small** | Runtime twin of `correlated_filters.py`; NOT a plan change — a fail-open, semantic-no-op prune; both ends exist (§2) |
 | 3 | Fold decode into the one scheduler (thread budget) | Speed | High | Medium | Two uncoordinated CPU pools; decode is **per-scan** (N×16); reserved-unwired flag exists; fix is mostly native (§3) |
 | 4 | Parallel partition-aligned join build | Speed | High | Medium | Serial build today |
 | 5 | Spilling + memory budget | Robustness | Cliff-removal | Large | None |
@@ -333,26 +333,162 @@ sink as the first *new* operator the contract carries that no matcher ever did.
 
 ---
 
-## 2. Runtime filters (sideways information passing) — *best first proof point*
+# 2. Runtime join filters — sideways information passing (DETAILED DESIGN)
 
-**Gap.** Filter propagation across joins happens only at *plan* time
-([`correlated_filters.py`](../opteryx/planner/optimizer/strategies/correlated_filters.py)).
-There is zero runtime adaptivity; [`adaptive_join_statistics.md`](adaptive_join_statistics.md)
-is design-only.
+The smallest of the three detailed items, and the best first proof point: both ends
+already exist, and the change is mostly native. It is also the one that most *sounds*
+like dangerous runtime adaptivity — so this design leads with why it is not.
 
-**DuckDB mechanism.** During the hash-join build it tracks **min/max of the build-side
-key** and pushes those bounds as a table filter into the probe-side scan, which skips
-row groups via zone maps. DuckDB's own worked example: ~10×, ~40% of a 100M-row probe
-eliminated.
+## 2.0 "Are we changing the plan mid-execution?" — No.
 
-**Why this is the smallest win.** Both ends already exist:
-- the join already materializes the build side;
-- the scan already does min/max and bloom row-group pruning
-  ([`bloom_filter_read_pruning`], [`in_list_rowgroup_pruning`] in memory).
+This is the load-bearing reassurance. A runtime join filter is **not** adaptive
+re-planning. Three properties hold it to that:
 
-The work is the *wire between them*: emit a min/max (or small bloom) from the build,
-hand it sideways into the probe scan's existing prune path. Bounded, high payoff,
-classic on selective star-schema / TPC-H joins.
+1. **The plan is immutable.** Same operators, same join, same scans, same Event-DAG
+   edges. Nothing is added, removed, reordered, or re-planned at runtime. The only
+   "runtime" thing is a *value* — the min/max of the build-side join key.
+
+2. **It rides an existing channel, at construction time.** The probe scan opens *after*
+   the build completes — build-before-probe is not just a dependency edge, the probe
+   needs the hash table, and the gap-#3 shared-pool revert confirmed the two scans do not
+   even overlap in execution. So the runtime min/max is handed to the probe scan as **one
+   more predicate in the same `predicates=` list** that plan-time
+   [`correlated_filters.py`](../opteryx/planner/optimizer/strategies/correlated_filters.py)
+   and predicate-pushdown already feed (`open_ipc_source(..., predicates=...)`,
+   `pool_reader.pyx`). We *construct* the probe scan with a data-derived predicate; we
+   never mutate a scan that is already reading.
+
+3. **It is a semantic no-op on the result.** The filter can *only* skip reading row groups
+   whose own min/max prove no key falls in `[build_min, build_max]`. The join still applies
+   the real equi-condition to every row that **is** read. It cannot add or drop a single
+   output row. The worst failure mode is **read more than necessary** — fail-open, never a
+   wrong answer.
+
+In one line: a *constant in a predicate, computed one step earlier than usual, fed through
+a tested channel, gating a tested pruning path, incapable of changing the answer.* It is
+the runtime twin of `correlated_filters.py`, which already does exactly this at plan time.
+
+## 2.1 What already exists (reuse, don't invent)
+
+| Piece | Where | Reuse |
+|---|---|---|
+| Predicate tuple `(col, op, value)` | `extract_predicate_stats`, `predicates.py` | the filter's wire format |
+| Row-group min/max prune | `_can_prune_rowgroup` / `row_group_may_satisfy`, `predicates.py` | the consumer — synthesise `GtEq`/`LtEq` and feed it |
+| Bloom prune (Eq / InList) | `_bloom_excludes`, `pool_reader.pyx` | the Phase-2 IN-list variant |
+| Predicate channel into scan | `open_ipc_source(..., predicates=...)`, `pool_reader.pyx`; extracted at `parquet_read.pyx` | the injection point |
+| Plan-time range push (the twin) | `correlated_filters.py` — `_range_conditions` builds `GtEq/LtEq` Nodes, appends to `scan.predicates` (inner / nested-loop only) | copy its eligibility + predicate construction verbatim |
+| Range object | `ColumnRange(lower_bound, upper_bound)`, `statistics.py` | carry the runtime bounds |
+| Null-safe column min/max | draken `Vector.min()` / `.max()` (skips nulls), `_vector_shim.pyx` | compute the bounds from `left_morsel` |
+
+**MISSING (the whole of this item):** computing the join-key min/max at build, and the
+wire that injects it into the probe scan. Everything it connects to is built and tested.
+
+## 2.2 DuckDB's mechanism (cited)
+
+DuckDB's hash join tracks **min/max of the build-side join key** during the build and, at
+`Finalize`, populates a **dynamic table filter** on the probe-side scan, which then skips
+row groups via zone maps (the 2024-11-14 "optimizers" post; reference §9). Their worked
+example: ~10×, ~40% of a 100M-row probe eliminated. Crucially, the *plan* (operators,
+pipelines) is unchanged — only a filter **slot** is filled at runtime. Same posture as §2.0.
+
+## 2.3 The mechanism in Opteryx
+
+Three points, all on the already-serial build→probe boundary:
+
+- **Compute (at build capture).** When `_SharedSourceJoin._capture` /
+  `_join_probe_stream` capture the build state (`left_morsel`, `left_columns`) at left-EOS
+  (`parallel_engine.py`), call draken `.min()/.max()` on the join-key column(s). These are
+  in memory already; the cost is one pass over the (small) build key. Wrap as a
+  `ColumnRange`.
+- **Inject (before probe scan-open).** Append `GtEq(lower)` / `LtEq(upper)` predicates —
+  built by reusing `correlated_filters._range_conditions` — to the probe scan operator's
+  predicate list, via a new explicit method `probe_scan.add_runtime_predicate(conditions)`.
+  This runs after build, single-threaded, **before** the probe scan's first pull (so before
+  `extract_predicate_stats` / `open_ipc_source` fire). The method **asserts the scan has not
+  started** and fails loud otherwise — no silent no-op (CLAUDE.md §9).
+- **Consume (unchanged).** The probe scan's existing footer walk
+  (`row_group_may_satisfy`, `pool_reader.pyx`) prunes row groups using the synthesised
+  predicates exactly as it does plan-time ones. Parallel probe workers (gap-#1 Phase D-1
+  shared probe) then consume the **already-pruned** row-group set — the prune happens once
+  at open, single-threaded, before any worker pulls. No per-worker filter logic.
+
+**Timing guarantee.** The probe cannot start before the build completes (it needs the hash
+table). So the filter is always ready before the probe reads anything — it travels on the
+same ordering the hash table already rides. There is no new synchronisation primitive and
+no race.
+
+## 2.4 The correctness obligations (where the nervousness is legitimate)
+
+These are the places a bug *could* drop a row, so each is an explicit invariant:
+
+1. **Inner equi-join only.** The skip predicate `[build_min, build_max]` is a *necessary
+   condition for a match* — sound for inner/nested-loop, **unsound for outer/semi/anti**
+   (a non-matching probe row is still emitted, or determines the result). Reuse
+   `correlated_filters.py`'s exact eligibility (`node.type in ("inner", "nested loop")`,
+   its line 142 + the soundness note at its lines 23-24). Anything else: no filter.
+2. **NULL exclusion.** Build NULL keys match nothing in an inner join, so the range is over
+   *non-null* build keys — draken `.min()/.max()` already skip nulls. Skipping a probe row
+   group wholly outside `[min,max]` is sound regardless of probe nulls (it has no matchable
+   keys). Consistent with [[inner_join_null_key_p0_bug]] / [[wp13_single_col_key_kprobe]].
+3. **Comparator parity.** The bounds must compare to the probe's zone-map stats under the
+   *same* ordering the storage layer uses (German strings, dict encoding, float NaN/-0.0).
+   We do **not** write a new comparator — we hand `(col, "GtEq"/"LtEq", value)` to
+   `row_group_may_satisfy`, which already owns the typed comparison. So parity is inherited,
+   not re-implemented.
+4. **Multi-column keys.** Push per-key-column ranges independently; a row group is skippable
+   if **any** key column's range excludes it (for an AND of equi-conditions, every key must
+   be in range to match — so a single out-of-range column proves no match). Same shape
+   `correlated_filters` already produces per equi-pair.
+5. **Inject-before-open, fail loud.** `add_runtime_predicate` must run before the scan
+   starts; if the scan already opened, it raises — never silently drops the filter. No
+   "gate to where it works" (CLAUDE.md §13; [[feedback_no_gating_as_an_answer]]).
+
+If all five hold, the filter is provably incapable of changing the answer — the property in
+§2.0(3) is a theorem, not a hope.
+
+## 2.5 The design — phased
+
+- **Phase 1 — single-column int/temporal key min/max.** The narrowest, highest-value slice:
+  TPC-H / star-schema fact-on-probe joins ([[tdoms_join_buildside_wiring]] — Q3/Q5/Q7/Q9
+  already put the fact table on the probe). Compute `.min()/.max()` on the build key,
+  inject `GtEq/LtEq`, reuse `row_group_may_satisfy`. End to end on existing parts.
+- **Phase 2 — small-build IN-list / bloom.** When the build has few distinct keys, an exact
+  set beats a range. Build a probe-side bloom or IN-list and route it through the existing
+  `_bloom_excludes` (Eq/InList) and the phase-2 dict-decode-skip path
+  ([[dict_aware_int_filter]]). This catches the case a wide `[min,max]` range fails to prune
+  (dense key domain, few actual values).
+- **Phase 3 — strings, multi-column, nested-loop.** Extend to string keys (comparator parity
+  via the storage stats) and multi-column ranges; widen eligibility to nested-loop inner
+  joins.
+
+## 2.6 Native vs orchestration
+
+| Step | Surface | Native? |
+|---|---|---|
+| min/max compute | draken `Vector.min()/.max()` | **Yes** (native, exists) |
+| range/predicate build | reuse `correlated_filters._range_conditions` | No (planner Python; tiny) |
+| inject into probe scan | `add_runtime_predicate` on the scan operator | Cython (scan op) |
+| row-group prune | `row_group_may_satisfy` / `_bloom_excludes` | **Yes** (exists) |
+
+Small surface, mostly native, no new kernels. The "wire" is the only new code.
+
+## 2.7 Invariants
+
+- **Semantic no-op:** cannot add or drop an output row (§2.0(3), guaranteed by §2.4).
+- **Fail-open:** a missing / late / conservative filter reads *more* data, never fewer rows.
+- **Fail-loud on misuse:** injecting after scan-open raises; no silent skip.
+- **Inner-equi only; NULL-excluded; comparator inherited** (§2.4).
+- **§11 vector contract** untouched — this prunes *which row groups are read*, never how a
+  vector is interpreted.
+
+## 2.8 Sequencing and proof
+
+Land Phase 1 against TPC-H Q3/Q5/Q7/Q9 (fact-on-probe). **Proof metric is row-groups-pruned
+and probe bytes decoded, not wall-clock alone** — and the decode-bytes number ties straight
+back to #3: a runtime-pruned probe scan decodes less, *relieving* the very budget #3
+addresses. Verify byte-identical results vs the filter-off path on the full regression
+([[clickbench_result_verification]]) — the semantic-no-op property must be demonstrated, not
+asserted.
 
 ---
 

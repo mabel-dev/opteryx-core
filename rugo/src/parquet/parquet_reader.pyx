@@ -40,7 +40,6 @@ import os
 import struct
 import time as _time
 
-import opteryx.config as _opteryx_config
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
 # ---------------------------------------------------------------------------

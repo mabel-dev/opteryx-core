@@ -17,9 +17,23 @@ clause and becomes the JOIN ON condition.  The subquery's projection is replaced
 the inner-side correlation key column(s) so the FilterJoinNode can build its hash set
 over the correct values.
 
+Null-safe equality correlation (Tableau):
+  Tableau emits the correlation as an explicit null-safe equality —
+
+      (outer.k = inner.k) OR (outer.k IS NULL AND inner.k IS NULL)
+
+  This is recognised and collapsed to the plain `outer.k = inner.k` correlation
+  (see `_match_null_safe_eq_correlation`).  The `IS NULL AND IS NULL` branch is
+  dropped: it only changes the answer when the inner key itself contains NULLs,
+  and the engine's join model excludes NULL keys throughout (Eq, not
+  IS NOT DISTINCT FROM — see window_to_join). Collapsing here keeps us consistent
+  with that engine-wide convention. True null-safe matching would require a
+  null-safe semi-join, which the engine does not have.
+
 NOT rewritten:
   - Uncorrelated EXISTS (no equality predicate linking outer to inner table).
-  - EXISTS with OR-branched correlation predicates.
+  - EXISTS with OR-branched correlation predicates other than the null-safe
+    equality shape above.
   - Multiple EXISTS subqueries are handled one-at-a-time by the fixed-point rewriter loop.
 
 NULL semantics:
@@ -97,29 +111,116 @@ def _extract_exists_node(condition):
 # Subquery plan helpers
 # ---------------------------------------------------------------------------
 
+def _add_relation_name(node, relations: set) -> None:
+    """Record the name by which a Scan/Subquery node is visible to column refs."""
+    relation = getattr(node, "relation", None)
+    alias = getattr(node, "alias", None)
+    if alias and alias != relation:
+        # Explicit alias — only the alias is visible to column references
+        relations.add(alias)
+    elif relation:
+        relations.add(relation)
+    elif alias:
+        relations.add(alias)
+
+
 def _get_inner_relations(subquery_plan: LogicalPlan) -> set:
     """
-    Collect the names by which inner tables are referenced in the subquery plan.
+    Collect the names by which inner tables are referenced AT the subquery's own
+    FROM level — the names visible to its correlation predicate.
+
+    A derived table (Subquery node) is its own scope: only its alias is visible,
+    and the Scans nested beneath it are NOT — descending into them would surface a
+    base table whose name may collide with the outer query (Tableau emits exactly
+    this: `EXISTS (SELECT 1 FROM (SELECT ... FROM T) t0 WHERE outer.k = t0.k)` where
+    the inner base scan reuses the outer relation's name).  So walk from the exit
+    toward the sources, stopping at Subquery boundaries.
 
     When a table has an explicit alias (e.g. FROM T AS t), only the alias is
-    visible to column references — the base relation name is not.  Using both
-    would incorrectly classify outer-query columns whose source happens to match
-    the inner table's base name as inner columns.
+    visible to column references — the base relation name is not.
     """
     relations = set()
-    for _, node in subquery_plan.nodes(True):
-        if node.node_type != LogicalPlanStepType.Scan:
+    visited = set()
+    stack = list(subquery_plan.get_exit_points())
+    while stack:
+        nid = stack.pop()
+        if nid in visited:
             continue
-        relation = getattr(node, "relation", None)
-        alias = getattr(node, "alias", None)
-        if alias and alias != relation:
-            # Explicit alias — only the alias is visible to column references
-            relations.add(alias)
-        elif relation:
-            relations.add(relation)
-        elif alias:
-            relations.add(alias)
+        visited.add(nid)
+        node = subquery_plan[nid]
+        if node.node_type == LogicalPlanStepType.Scan:
+            _add_relation_name(node, relations)
+            continue
+        if node.node_type == LogicalPlanStepType.Subquery:
+            # Derived table — opaque boundary; its alias is the visible relation.
+            _add_relation_name(node, relations)
+            continue
+        for edge in subquery_plan.ingoing_edges(nid):
+            stack.append(edge[0])
     return relations
+
+
+def _unwrap_nested(node):
+    """Strip transparent NESTED (parenthesis) wrappers; the plan rewriter runs on
+    the unbound plan, before NESTED nodes are collapsed by the optimizer."""
+    while node is not None and node.node_type == NodeType.NESTED:
+        node = getattr(node, "centre", None)
+    return node
+
+
+def _column_key(node):
+    """Identity of a column reference for comparing the equality and IS NULL operands."""
+    if node is None:
+        return None
+    return (
+        getattr(node, "source", None),
+        getattr(node, "source_column", None) or getattr(node, "value", None),
+    )
+
+
+def _is_isnull(node) -> bool:
+    return (
+        node is not None
+        and node.node_type == NodeType.UNARY_OPERATOR
+        and getattr(node, "value", None) == "IsNull"
+    )
+
+
+def _match_null_safe_eq_correlation(node, inner_relations: set):
+    """
+    Recognise Tableau's null-safe equality correlation —
+
+        (outer.k = inner.k) OR (outer.k IS NULL AND inner.k IS NULL)
+
+    Returns the underlying equi-correlation node (outer.k = inner.k) when `node`
+    matches this exact shape over the same two columns, else None.  The IS NULL
+    branch is dropped (see module docstring).
+    """
+    node = _unwrap_nested(node)
+    if node is None or node.node_type != NodeType.OR:
+        return None
+
+    left = _unwrap_nested(getattr(node, "left", None))
+    right = _unwrap_nested(getattr(node, "right", None))
+
+    # The equi-correlation may be on either side of the OR.
+    for eq_branch, null_branch in ((left, right), (right, left)):
+        if eq_branch is None or not _is_equi_correlation(eq_branch, inner_relations):
+            continue
+        if null_branch is None or null_branch.node_type != NodeType.AND:
+            continue
+        n_left = _unwrap_nested(getattr(null_branch, "left", None))
+        n_right = _unwrap_nested(getattr(null_branch, "right", None))
+        if not (_is_isnull(n_left) and _is_isnull(n_right)):
+            continue
+        # The two IS NULL operands must be the same two columns as the equality,
+        # otherwise this is some other OR we must not collapse.
+        eq_cols = {_column_key(eq_branch.left), _column_key(eq_branch.right)}
+        null_cols = {_column_key(n_left.centre), _column_key(n_right.centre)}
+        if None not in eq_cols and eq_cols == null_cols:
+            return eq_branch
+
+    return None
 
 
 def _split_filter_condition(condition, inner_relations: set):
@@ -132,8 +233,16 @@ def _split_filter_condition(condition, inner_relations: set):
     if condition is None:
         return [], None
 
+    condition = _unwrap_nested(condition)
+    if condition is None:
+        return [], None
+
     if _is_equi_correlation(condition, inner_relations):
         return [condition], None
+
+    null_safe_eq = _match_null_safe_eq_correlation(condition, inner_relations)
+    if null_safe_eq is not None:
+        return [null_safe_eq], None
 
     if condition.node_type == NodeType.AND:
         l_corr, l_rem = _split_filter_condition(
@@ -224,30 +333,63 @@ class ExistsSubqueryToJoinStrategy(PlanRewriteStrategy):
                     "Uncorrelated EXISTS is not supported."
                 )
 
-            # --- Identify inner (subquery-side) columns from correlation predicates ---
+            # --- Identify inner (subquery-side) columns and ON-condition orientation ---
+            # This MUST run before rename_relations() below: renaming the inner scans
+            # rewrites pred.left/right.source, which would break the inner-vs-outer test
+            # (`left_src in inner_relations`) and flip the join keys.  Capture the outer
+            # column and the inner key name now; source_column is not renamed, and the
+            # inner_cols Node refs are intentionally rewritten by rename so the subquery
+            # projection follows the renamed scan.
             inner_cols = []
+            on_spec = []  # (outer_col, inner_col_name) per correlation predicate
             for pred in correlation_preds:
                 left_src = getattr(getattr(pred, "left", None), "source", None)
                 if left_src in inner_relations:
-                    inner_cols.append(pred.left)
+                    inner_col, outer_col = pred.left, pred.right
                 else:
-                    inner_cols.append(pred.right)
+                    inner_col, outer_col = pred.right, pred.left
+                inner_cols.append(inner_col)
+                on_spec.append(
+                    (
+                        outer_col,
+                        getattr(inner_col, "source_column", None)
+                        or getattr(inner_col, "value", None),
+                    )
+                )
 
-            # Replace the subquery projection with the inner correlation columns so
-            # the hash set is built over the join key, not a literal.
-            for _, proj_node in subquery_plan.nodes(True):
-                if proj_node.node_type == LogicalPlanStepType.Project:
-                    proj_node.columns = inner_cols
-                    break
+            # Replace the subquery's TOP (exit) projection — the `SELECT 1` — with the
+            # inner correlation columns so the hash set is built over the join key, not a
+            # literal.  This must target the EXIT Project specifically: a derived-table
+            # subquery (SELECT 1 FROM (SELECT ...) t0 WHERE ...) also has an inner Project
+            # below the t0 boundary, and overwriting that one would emit `t0.col` at a
+            # scope where t0 is not visible (UnexpectedDatasetReferenceError).
+            top_nid = subquery_plan.get_exit_points()[0]
+            exit_node = subquery_plan[top_nid]
+            if exit_node.node_type != LogicalPlanStepType.Project:
+                raise UnsupportedSyntaxError(
+                    "EXISTS subquery does not expose a projection to rewrite; "
+                    "unexpected subquery shape."
+                )
+            exit_node.columns = inner_cols
 
             subquery_alias = f"$exists-{random_string(6)}"
 
             # --- Wrap the subquery plan in a Subquery node (same as IN subquery) ------
-            top_nid = subquery_plan.get_exit_points()[0]
 
             subquery_wrapper = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
             subquery_wrapper.alias = subquery_alias
             subquery_wrapper.columns = inner_cols
+
+            # Give the subquery's own scans fresh aliases before merging them into the
+            # outer plan.  Tableau reuses the outer relation's name inside the subquery
+            # (FROM Medicare1_2 in both scopes); without renaming, the merged plan holds
+            # two scans with the same alias and the binder raises AmbiguousDatasetError.
+            # This mirrors the view/CTE expansion path. Only Scan aliases are remapped —
+            # the correlation columns reference the derived-table alias (a Subquery node),
+            # which is left untouched, so inner_cols / the ON condition stay valid.
+            from opteryx.planner.binder import rename_relations
+
+            rename_relations(subquery_plan)
 
             plan += subquery_plan
 
@@ -256,21 +398,9 @@ class ExistsSubqueryToJoinStrategy(PlanRewriteStrategy):
             plan.add_edge(top_nid, subquery_wrapper_nid)
 
             # --- Build the ON condition: outer.col = $exists-xxx.col per predicate ----
+            # Orientation was captured in on_spec before rename_relations ran.
             on_parts = []
-            for pred in correlation_preds:
-                left_src = getattr(getattr(pred, "left", None), "source", None)
-                if left_src in inner_relations:
-                    outer_col = pred.right
-                    inner_col = pred.left
-                else:
-                    outer_col = pred.left
-                    inner_col = pred.right
-
-                inner_col_name = (
-                    getattr(inner_col, "source_column", None)
-                    or getattr(inner_col, "value", None)
-                )
-
+            for outer_col, inner_col_name in on_spec:
                 eq = Node(
                     node_type=NodeType.COMPARISON_OPERATOR,
                     value="Eq",

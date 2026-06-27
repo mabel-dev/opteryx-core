@@ -25,6 +25,7 @@
 #include <nanobind/nanobind.h>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 #if defined(__aarch64__)
 #include <arm_neon.h>  // NEON-vectorized digest→hex (bytes_to_hex_lc)
@@ -323,7 +324,8 @@ static void do_sha512(const uint8_t* data, uint32_t len, unsigned char* out) {
 static nb::object vhex_apply(
     nb::object obj,
     size_t   (*max_out_fn)(size_t),
-    void*    (*codec_fn)(void*, const void*, size_t))
+    void*    (*codec_fn)(void*, const void*, size_t),
+    const char* codec_name)
 {
     const DrakenVector*      dv    = unwrap_string_vec(obj);
     const DrakenStringArena* in_sa = static_cast<const DrakenStringArena*>(dv->data);
@@ -388,7 +390,14 @@ static nb::object vhex_apply(
             if (!tmp_buf) throw std::bad_alloc();
         }
 
-        void*          end        = codec_fn(tmp_buf, in_data, in_len);
+        void* end = codec_fn(tmp_buf, in_data, in_len);
+        // b16tobin returns NULL on malformed input (odd length / non-hex byte).
+        // Fail loud — pointer math on NULL underflows actual_len and segfaults.
+        if (end == nullptr) {
+            draken_free(tmp_buf);
+            throw nb::value_error(
+                (std::string(codec_name) + ": malformed input string").c_str());
+        }
         const uint32_t actual_len = static_cast<uint32_t>(
             static_cast<uint8_t*>(end) - tmp_buf);
 
@@ -432,7 +441,7 @@ void register_vector_hash_codec(nb::module_ &m) {
 
     m.def("vector_hex_encode",
         [](nb::object v) -> nb::object {
-            return vhex_apply(v, b16_encoded_size_wrap, b16_encode_adapter);
+            return vhex_apply(v, b16_encoded_size_wrap, b16_encode_adapter, "HEX_ENCODE");
         },
         nb::arg("v"),
         "HEX_ENCODE(v): element-wise base16 (hex) encoding of a DRAKEN_VARCHAR Vector. "
@@ -440,7 +449,7 @@ void register_vector_hash_codec(nb::module_ &m) {
 
     m.def("vector_hex_decode",
         [](nb::object v) -> nb::object {
-            return vhex_apply(v, b16_decoded_size_wrap, b16_decode_adapter);
+            return vhex_apply(v, b16_decoded_size_wrap, b16_decode_adapter, "HEX_DECODE");
         },
         nb::arg("v"),
         "HEX_DECODE(v): element-wise base16 decoding of a DRAKEN_VARCHAR Vector. "

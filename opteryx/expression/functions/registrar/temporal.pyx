@@ -33,7 +33,7 @@ def get_builtin_temporal_functions() -> list:
             _CT_INT64,
             (_part, _date, ParameterSpec(name="end", type_family="temporal")),
             aliases=("DATE_DIFF",),
-            cost=0.88,
+            cost=2705.21,
             summary="Difference between two dates in the specified unit.",
         ),
         _make(
@@ -45,7 +45,7 @@ def get_builtin_temporal_functions() -> list:
                 ParameterSpec(name="time2", type_family="temporal"),
             ),
             aliases=("TIME_DIFF",),
-            cost=0.68,
+            cost=2831.10,
             summary="Difference between two times.",
         ),
         _make(
@@ -53,7 +53,7 @@ def get_builtin_temporal_functions() -> list:
             date_functions.date_format,
             _CT_VARCHAR,
             (_date, ParameterSpec(name="pattern", type_family="string", constant_only=True)),
-            cost=0.85,
+            cost=31651.72,
             summary="Format date/timestamp as string.",
         ),
         _make(
@@ -70,7 +70,7 @@ def get_builtin_temporal_functions() -> list:
             _CT_INT64,
             (_date,),
             aliases=("TO_UNIXTIME",),
-            cost=8.84,
+            cost=521.87,
             summary="Convert TIMESTAMP to Unix epoch seconds.",
         ),
     ]

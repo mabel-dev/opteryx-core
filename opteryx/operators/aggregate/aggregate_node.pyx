@@ -258,15 +258,22 @@ cdef class _ResultSpec:
     typed `_LiteralAggState` accumulator updated per morsel.
 
     `kind`: 0 = engine column, 1 = literal accumulator.
+
+    For literal specs (kind=1), `dtype` is the output column's physical
+    `DrakenType` so the finalized scalar is built as the correct vector type
+    (e.g. AVG(2) finalizes to a Python float, which the default int64 builder
+    cannot cast). Unused for engine specs, which already return typed vectors.
     """
     cdef int                kind
     cdef bytes              output_name
     cdef _LiteralAggState   state
+    cdef object             dtype
 
-    def __cinit__(self, int kind, bytes output_name, _LiteralAggState state):
+    def __cinit__(self, int kind, bytes output_name, _LiteralAggState state, object dtype):
         self.kind = kind
         self.output_name = output_name
         self.state = state
+        self.dtype = dtype
 
 
 def _build_engine_aggregate(aggregate):
@@ -276,6 +283,17 @@ def _build_engine_aggregate(aggregate):
     output_name = _column_bytes(aggregate.schema_column.identity)
     parameter_name = _parameter_identity(parameter)
     parameter_type = _parameter_type(parameter)
+
+    # A direct-literal aggregate input (e.g. MIN(1), AVG(2)) is materialized at
+    # bind time with a `$const_` schema-column identity, so `_parameter_identity`
+    # now returns a name. The ungrouped path never materializes that constant
+    # column into the morsel — literal inputs are handled exactly by the typed
+    # `_LiteralAggState` accumulator. Drop the engine column name so the branches
+    # below route to `_make_literal_state` instead of building an engine
+    # aggregate that reads a column that was never appended. (COUNT handles its
+    # literal/`*` cases explicitly above this, before consulting parameter_name.)
+    if parameter is not None and parameter.node_type == NodeType.LITERAL:
+        parameter_name = None
 
     if aggregate_type == "COUNT":
         if parameter is not None and parameter.node_type == NodeType.WILDCARD:
@@ -436,6 +454,7 @@ cdef class UngroupedAggregateNode(BasePlanNode):
         cdef bytes ident_bytes
         cdef _LiteralAggState lit_state
         cdef _ResultSpec rspec
+        cdef object output_dtype
 
         for aggregate in self.aggregates:
             ident_bytes = _column_bytes(aggregate.schema_column.identity)
@@ -447,15 +466,18 @@ cdef class UngroupedAggregateNode(BasePlanNode):
 
             if avg_spec is not None:
                 self._engine.add_avg_finalizer(avg_spec[1], avg_spec[2], avg_spec[3])
-                rspec = _ResultSpec(0, ident_bytes, None)
+                rspec = _ResultSpec(0, ident_bytes, None, None)
                 self._result_specs.append(rspec)
             elif literal_spec is not None:
                 lit_state = literal_spec
-                rspec = _ResultSpec(1, ident_bytes, lit_state)
+                # Physical type of the aggregate's output column — the literal
+                # scalar is built as this vector type at finalize.
+                output_dtype = aggregate.schema_column.column_type.physical
+                rspec = _ResultSpec(1, ident_bytes, lit_state, output_dtype)
                 self._result_specs.append(rspec)
                 self._literal_specs.append(rspec)
             else:
-                rspec = _ResultSpec(0, ident_bytes, None)
+                rspec = _ResultSpec(0, ident_bytes, None, None)
                 self._result_specs.append(rspec)
 
         self._has_literals = len(self._literal_specs) > 0
@@ -513,7 +535,7 @@ cdef class UngroupedAggregateNode(BasePlanNode):
             if spec.kind == 0:
                 vectors.append(engine_result.column(spec.output_name))
             else:
-                vectors.append(vector_from_sequence([spec.state.finalize()]))
+                vectors.append(vector_from_sequence([spec.state.finalize()], spec.dtype))
 
         return Morsel.from_vectors(names, vectors)
 

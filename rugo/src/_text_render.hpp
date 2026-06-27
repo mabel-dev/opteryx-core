@@ -146,14 +146,14 @@ static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *chil
   c.cunit = cunit; c.cscale = cscale; c.delim = delim;
   c.free_data = nullptr; c.free_sel = nullptr;
   VecResult vr;
-  bool cast = false, quoted = false;
+  bool quoted = false;
   switch (dv->type) {
   case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
-    vr = draken_cast_integer_to_string(nullptr, dv); cast = true; break;
+    vr = draken_cast_integer_to_string(nullptr, dv); break;
   case DRAKEN_BOOL:
-    vr = draken_cast_bool_to_string(nullptr, dv); cast = true; break;
+    vr = draken_cast_bool_to_string(nullptr, dv); break;
   case DRAKEN_DATE32:
-    vr = draken_cast_date_to_string(nullptr, dv); cast = true; quoted = true; break;
+    vr = draken_cast_date_to_string(nullptr, dv); quoted = true; break;
   case DRAKEN_TIMESTAMP64:
     // RFC 3339 (T + Z) — draken's cast text is a non-compliant display format.
     c.emit = csv ? ec_timestamp : ej_timestamp; return;

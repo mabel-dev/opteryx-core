@@ -1,0 +1,111 @@
+name: Release rugo to PyPI
+
+# Releasing rugo is a SEPARATE decision from releasing opteryx_core. This runs
+# only for tags prefixed `rugo-` (e.g. `rugo-0.2.0`); opteryx's release.yaml
+# triggers on GitHub Releases + `ci-*` tags, so a `rugo-*` tag push never fires
+# it. (Caveat: a GitHub *Release* with a rugo- tag also emits `release:
+# published`, which WOULD fire release.yaml unless that workflow is guarded —
+# prefer a plain tag push for rugo, or add the guard. See the conversation.)
+#
+# Unlike opteryx_core (3.14 / x86-64 only), rugo targets a broad matrix:
+#   Python  : 3.11, 3.12, 3.13, 3.14 (GIL) + 3.13t, 3.14t (free-threaded)
+#   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64 + x86-64
+on:
+  push:
+    tags:
+      - 'rugo-*'
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        arch: [x86_64, aarch64]
+        pybuild: ["3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up QEMU (aarch64 emulation)
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Make build script executable
+        run: chmod +x dev/build-rugo-wheels.sh
+
+      - name: Build rugo wheels (manylinux ${{ matrix.arch }}, py ${{ matrix.pybuild }})
+        run: |
+          set -euo pipefail
+          IMAGE="quay.io/pypa/manylinux2014_${{ matrix.arch }}"
+          PLATFLAG=""
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then PLATFLAG="--platform linux/arm64"; fi
+          docker run --rm $PLATFLAG \
+            -e PLAT="manylinux2014_${{ matrix.arch }}" \
+            -e PYTHON_VERSION=${{ matrix.pybuild }} \
+            -v "$(pwd)":/io \
+            --workdir /io \
+            "$IMAGE" \
+            /io/dev/build-rugo-wheels.sh
+
+      - name: Archive wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: rugo-linux-${{ matrix.arch }}-${{ matrix.pybuild }}
+          path: dist/*manylinux*.whl
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        # macos-14 = Apple Silicon (arm64); macos-13 = Intel (x86_64).
+        os: [macos-14, macos-13]
+        pybuild: ["3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up Python ${{ matrix.pybuild }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.pybuild }}
+          allow-prereleases: true
+
+      - name: Make build script executable
+        run: chmod +x dev/build-rugo-wheels-macos.sh
+
+      - name: Build rugo wheel (${{ matrix.os }}, py ${{ matrix.pybuild }})
+        env:
+          # Deployment target: 11.0 for arm64 (macos-14), 10.13 for x86_64 (macos-13).
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.os == 'macos-14' && '11.0' || '10.13' }}
+        run: ./dev/build-rugo-wheels-macos.sh
+
+      - name: Archive wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: rugo-macos-${{ matrix.os }}-${{ matrix.pybuild }}
+          path: dist/delocated/*.whl
+
+  upload:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all rugo wheels
+        uses: actions/download-artifact@v4.1.7
+        with:
+          path: dist-staging
+
+      - name: Stage wheels into dist/
+        run: |
+          mkdir -p dist
+          find dist-staging -name '*.whl' -exec mv -v {} dist/ \;
+          echo "=== wheels to publish ===" && ls -lh dist/
+
+      - name: Publish rugo 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Distinct token, scoped to the `rugo` PyPI project (not opteryx_core).
+          password: ${{ secrets.RUGO_PYPI_API_TOKEN }}

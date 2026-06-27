@@ -4,9 +4,15 @@
 #include <cstdint>
 #include <atomic>
 #include <cstring>
+#include <algorithm>  // std::min (RVV path; pulled in transitively elsewhere on x86/ARM)
 
 #include "simd_dispatch.h"
 #include "cpu_features.h"
+
+// File-local scale constant, hoisted above the first use. The RVV kernels are
+// defined near the top of this file (before the scalar/AVX/NEON definitions),
+// so this must precede them; the scalar/SIMD date32 helpers below also use it.
+static const int64_t DATE32_SCALE = 86400000000LL;  // days -> microseconds
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -82,13 +88,13 @@ inline uint64x2_t mullo_u64(uint64x2_t a, uint64x2_t b) {
 static void simd_mix_hash_rvv(uint64_t* dest, const uint64_t* values, std::size_t count) {
     std::size_t i = 0;
     while (i < count) {
-        std::size_t vl   = vsetvl_e64m1(count - i);
-        vuint64m1_t d    = vle64_v_u64m1(dest   + i, vl);
-        vuint64m1_t v    = vle64_v_u64m1(values + i, vl);
-        vuint64m1_t mix  = vxor_vv_u64m1(d, v, vl);
-        vuint64m1_t prod = vadd_vx_u64m1(vmul_vx_u64m1(mix, MIX_HASH_CONSTANT, vl), 1, vl);
-        vuint64m1_t res  = vxor_vv_u64m1(prod, vsrl_vx_u64m1(prod, 32, vl), vl);
-        vse64_v_u64m1(dest + i, res, vl);
+        std::size_t vl   = __riscv_vsetvl_e64m1(count - i);
+        vuint64m1_t d    = __riscv_vle64_v_u64m1(dest   + i, vl);
+        vuint64m1_t v    = __riscv_vle64_v_u64m1(values + i, vl);
+        vuint64m1_t mix  = __riscv_vxor_vv_u64m1(d, v, vl);
+        vuint64m1_t prod = __riscv_vadd_vx_u64m1(__riscv_vmul_vx_u64m1(mix, MIX_HASH_CONSTANT, vl), 1, vl);
+        vuint64m1_t res  = __riscv_vxor_vv_u64m1(prod, __riscv_vsrl_vx_u64m1(prod, 32, vl), vl);
+        __riscv_vse64_v_u64m1(dest + i, res, vl);
         i += vl;
     }
 }
@@ -96,11 +102,11 @@ static void simd_mix_hash_rvv(uint64_t* dest, const uint64_t* values, std::size_
 static void simd_hash_i64_rvv(const uint64_t* src, uint64_t* dst, std::size_t count) {
     std::size_t i = 0;
     while (i < count) {
-        std::size_t vl   = vsetvl_e64m1(count - i);
-        vuint64m1_t v    = vle64_v_u64m1(src + i, vl);
-        vuint64m1_t prod = vadd_vx_u64m1(vmul_vx_u64m1(v, MIX_HASH_CONSTANT, vl), 1, vl);
-        vuint64m1_t res  = vxor_vv_u64m1(prod, vsrl_vx_u64m1(prod, 32, vl), vl);
-        vse64_v_u64m1(dst + i, res, vl);
+        std::size_t vl   = __riscv_vsetvl_e64m1(count - i);
+        vuint64m1_t v    = __riscv_vle64_v_u64m1(src + i, vl);
+        vuint64m1_t prod = __riscv_vadd_vx_u64m1(__riscv_vmul_vx_u64m1(v, MIX_HASH_CONSTANT, vl), 1, vl);
+        vuint64m1_t res  = __riscv_vxor_vv_u64m1(prod, __riscv_vsrl_vx_u64m1(prod, 32, vl), vl);
+        __riscv_vse64_v_u64m1(dst + i, res, vl);
         i += vl;
     }
 }
@@ -109,11 +115,11 @@ static void simd_scale_date32_rvv(const int32_t* src, int64_t* dest, std::size_t
     std::size_t i = 0;
     while (i < count) {
         // vsetvl_e64m1 and vsetvl_e32mf2 yield the same vl (VLEN_bytes/8).
-        std::size_t vl      = vsetvl_e64m1(count - i);
-        vint32mf2_t narrow  = vle32_v_i32mf2(src + i, vl);
-        vint64m1_t  widened = vsext_vf2_i64m1(narrow, vl);
-        vint64m1_t  scaled  = vmul_vx_i64m1(widened, static_cast<int64_t>(DATE32_SCALE), vl);
-        vse64_v_i64m1(dest + i, scaled, vl);
+        std::size_t vl      = __riscv_vsetvl_e64m1(count - i);
+        vint32mf2_t narrow  = __riscv_vle32_v_i32mf2(src + i, vl);
+        vint64m1_t  widened = __riscv_vsext_vf2_i64m1(narrow, vl);
+        vint64m1_t  scaled  = __riscv_vmul_vx_i64m1(widened, static_cast<int64_t>(DATE32_SCALE), vl);
+        __riscv_vse64_v_i64m1(dest + i, scaled, vl);
         i += vl;
     }
 }
@@ -479,7 +485,7 @@ void simd_mix_hash_from_dict_rvv_tpl(
     while (i < count) {
         const std::size_t batch =
             Nullable ? std::min(count - i, RVV_MAX_VL_E64M1) : (count - i);
-        std::size_t vl = vsetvl_e64m1(batch);
+        std::size_t vl = __riscv_vsetvl_e64m1(batch);
 
         vuint64m1_t val_vec;
 
@@ -492,32 +498,32 @@ void simd_mix_hash_from_dict_rvv_tpl(
                            ? dict_lookup[codes[i + k]]
                            : NULL_HASH;
             }
-            val_vec = vle64_v_u64m1(v, vl);
+            val_vec = __riscv_vle64_v_u64m1(v, vl);
         } else {
             // Fully vectorized: widen codes to byte offsets, indexed gather.
             vuint64m1_t offsets;
             if constexpr (std::is_same_v<CodeT, uint8_t>) {
                 // u8 → u64: vzext_vf8 (LMUL u8mf8 → u64m1, same vl)
-                offsets = vsll_vx_u64m1(
-                    vzext_vf8_u64m1(vle8_v_u8mf8(codes + i, vl), vl), 3, vl);
+                offsets = __riscv_vsll_vx_u64m1(
+                    __riscv_vzext_vf8_u64m1(__riscv_vle8_v_u8mf8(codes + i, vl), vl), 3, vl);
             } else if constexpr (std::is_same_v<CodeT, uint16_t>) {
                 // u16 → u64: vzext_vf4 (LMUL u16mf4 → u64m1, same vl)
-                offsets = vsll_vx_u64m1(
-                    vzext_vf4_u64m1(vle16_v_u16mf4(codes + i, vl), vl), 3, vl);
+                offsets = __riscv_vsll_vx_u64m1(
+                    __riscv_vzext_vf4_u64m1(__riscv_vle16_v_u16mf4(codes + i, vl), vl), 3, vl);
             } else {
                 // u32 → u64: vzext_vf2 (LMUL u32mf2 → u64m1, same vl)
-                offsets = vsll_vx_u64m1(
-                    vzext_vf2_u64m1(vle32_v_u32mf2(codes + i, vl), vl), 3, vl);
+                offsets = __riscv_vsll_vx_u64m1(
+                    __riscv_vzext_vf2_u64m1(__riscv_vle32_v_u32mf2(codes + i, vl), vl), 3, vl);
             }
             // Byte-indexed gather: dict_lookup[code] = *(dict_lookup + offset)
-            val_vec = vloxei64_v_u64m1(dict_lookup, offsets, vl);
+            val_vec = __riscv_vloxei64_v_u64m1(dict_lookup, offsets, vl);
         }
 
-        vuint64m1_t d    = vle64_v_u64m1(dest + i, vl);
-        vuint64m1_t mix  = vxor_vv_u64m1(d, val_vec, vl);
-        vuint64m1_t prod = vadd_vx_u64m1(vmul_vx_u64m1(mix, MIX_HASH_CONSTANT, vl), 1, vl);
-        vuint64m1_t res  = vxor_vv_u64m1(prod, vsrl_vx_u64m1(prod, 32, vl), vl);
-        vse64_v_u64m1(dest + i, res, vl);
+        vuint64m1_t d    = __riscv_vle64_v_u64m1(dest + i, vl);
+        vuint64m1_t mix  = __riscv_vxor_vv_u64m1(d, val_vec, vl);
+        vuint64m1_t prod = __riscv_vadd_vx_u64m1(__riscv_vmul_vx_u64m1(mix, MIX_HASH_CONSTANT, vl), 1, vl);
+        vuint64m1_t res  = __riscv_vxor_vv_u64m1(prod, __riscv_vsrl_vx_u64m1(prod, 32, vl), vl);
+        __riscv_vse64_v_u64m1(dest + i, res, vl);
         i += vl;
     }
 }
@@ -622,9 +628,8 @@ void simd_mix_hash_from_dict_nullable_cw4(uint64_t* dest, const uint64_t* dict_l
 
 // ---------------------------------------------------------------------------
 // simd_scale_date32: multiply int32 day values by 86400000000 -> int64 µs
+// (DATE32_SCALE is defined near the top of the file, above the RVV kernels.)
 // ---------------------------------------------------------------------------
-
-static const int64_t DATE32_SCALE = 86400000000LL;
 
 static void simd_scale_date32_scalar(const int32_t* src, int64_t* dest, std::size_t count) {
     for (std::size_t i = 0; i < count; ++i) {

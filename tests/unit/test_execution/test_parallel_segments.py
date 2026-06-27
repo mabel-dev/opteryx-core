@@ -236,5 +236,69 @@ def test_parallel_grouped_agg_equals_serial(monkeypatch, sql):
     assert _run(1, 10_000_000) == _run(4, 0)
 
 
+# ── Phase C: per-segment Event-DAG for linear multi-breaker chains ────────────
+
+
+def test_find_linear_multibreaker_chain_detects_and_orders():
+    # GROUP BY → DISTINCT is a single-scan 2-breaker linear chain → detected, and the
+    # segments come back in dataflow order (agg producer, distinct producer, sink).
+    from opteryx.managers.execution.parallel_engine import _find_linear_multibreaker_chain
+
+    sql = "SELECT DISTINCT c FROM (SELECT gravity, COUNT(*) c FROM $planets GROUP BY gravity) AS t"
+    chain = _find_linear_multibreaker_chain(_plan(sql), workers=4)
+    assert chain is not None
+    # Two producer (breaker) segments + a terminal sink segment, in dataflow order.
+    assert [s.tail_is_breaker for s in chain] == [True, True, False]
+
+
+def test_find_linear_multibreaker_chain_rejections():
+    from opteryx.managers.execution.parallel_engine import _find_linear_multibreaker_chain
+
+    # Single breaker → not a multi-breaker chain (today's path already parallelises it).
+    assert _find_linear_multibreaker_chain(_plan("SELECT gravity, COUNT(*) c FROM $planets GROUP BY gravity"), workers=4) is None
+    # GROUP BY … ORDER BY: the Sort breaker declares NO parallel sink → whole chain
+    # bails to today's terminal drive (agg parallel + serial sort tail).
+    assert _find_linear_multibreaker_chain(_plan("SELECT gravity, COUNT(*) c FROM $planets GROUP BY gravity ORDER BY c"), workers=4) is None
+    # A breaker that is parallel-INELIGIBLE (constant group key) bails the whole chain.
+    const_key = "SELECT DISTINCT c FROM (SELECT 1 g, COUNT(*) c FROM $planets GROUP BY 1) AS t"
+    assert _find_linear_multibreaker_chain(_plan(const_key), workers=4) is None
+    # Distinct below its DOP floor (W=1) → bail (no parallelism to gain).
+    chain_sql = "SELECT DISTINCT c FROM (SELECT gravity, COUNT(*) c FROM $planets GROUP BY gravity) AS t"
+    assert _find_linear_multibreaker_chain(_plan(chain_sql), workers=1) is None
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # GROUP BY → DISTINCT (the canonical 2-breaker chain).
+        "SELECT DISTINCT c FROM (SELECT status s, COUNT(*) c FROM testdata.astronauts GROUP BY status) AS t ORDER BY c",
+        # DISTINCT → GROUP BY (breakers in the other order).
+        "SELECT g2, COUNT(*) n FROM (SELECT DISTINCT gravity g2 FROM $planets) AS t GROUP BY g2 ORDER BY g2",
+        # GROUP BY → GROUP BY (agg → agg).
+        "SELECT g, SUM(c) n FROM (SELECT gravity g, COUNT(*) c FROM $planets GROUP BY gravity) AS t GROUP BY g ORDER BY g",
+        # Empty inner result through a 2-breaker chain.
+        "SELECT DISTINCT c FROM (SELECT gravity, COUNT(*) c FROM $planets WHERE gravity > 9999 GROUP BY gravity) AS t ORDER BY c",
+    ],
+)
+def test_multibreaker_chain_equals_serial(monkeypatch, sql):
+    # The real gate: a multi-breaker chain driven per-segment (DOP=4, Phase C engaged)
+    # is byte-identical to the serial row-floor path (DOP=1, floor above the input).
+    import opteryx
+
+    def _run(workers, floor):
+        monkeypatch.setattr(opteryx.config, "MAX_EXECUTION_WORKERS", workers)
+        monkeypatch.setattr(opteryx.config, "PARALLEL_MIN_ROWS", floor)
+        rows = []
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            if morsel is None:
+                continue
+            names = list(morsel.column_names)
+            cols = [morsel.column(n).to_pylist() for n in names]
+            rows.extend(tuple(c[i] for c in cols) for i in range(morsel.num_rows))
+        return rows
+
+    assert _run(1, 10_000_000) == _run(4, 0)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

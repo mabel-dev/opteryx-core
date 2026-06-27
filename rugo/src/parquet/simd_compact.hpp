@@ -35,7 +35,6 @@ static inline void compact_int32_scalar(
     size_t count,
     std::vector<int32_t>& output)
 {
-    size_t old_sz = output.size();
     for (size_t i = 0; i < count; ++i) {
         if (mask[i]) {
             output.push_back(src[i]);

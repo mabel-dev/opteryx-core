@@ -79,6 +79,62 @@ class CarcharJoinEngine {
     std::size_t partition_bits() const noexcept { return partition_bits_; }
     std::size_t partition_count() const noexcept { return partition_count_; }
 
+    // ---- Parallel partition-aligned build (Phase D increment 2) -------------------
+    // The build splits into THREE phases that mirror the HASH_REPARTITION agg sink:
+    //   1. SCATTER (per worker, parallel): route each build (hash,row) into one of
+    //      ``partition_count`` thread-local buffers by ``partition_index_for(hash)``.
+    //      Because the partition is a function of the key, every row of a given key —
+    //      across ALL workers — lands in the SAME partition (disjoint key slices).
+    //   2. COMBINE (O(partition_count)): concatenate buffer p across workers.
+    //   3. BUILD (per partition, parallel): ``build_partition`` constructs partition p's
+    //      sealed table from its combined buffer. Partitions are INDEPENDENT, so R tasks
+    //      build R partitions concurrently — no shared mutation, no cross-partition merge
+    //      (that is the "move, don't rehash" property: the hash build is parallel across
+    //      partitions instead of serial over the whole build side).
+    // ``finalize_parallel_build`` marks the engine sealed once every partition is built.
+    //
+    // The caller owns the scatter (it already has the key hashes); this engine exposes
+    // the partition function and the per-partition build so the build is parallel.
+
+    std::size_t partition_index_for(std::uint64_t key) const noexcept {
+        return partition_for_key(key);
+    }
+
+    // Build partition ``p`` from a buffer of (hash, row_id) pairs that ALL belong to
+    // partition p (the caller pre-scattered by ``partition_index_for``). Inserts them
+    // into the partition's index and builds its sealed probe table. Returns the number
+    // of UNIQUE keys added (the caller sums these into the global key count). Thread-safe
+    // across DISTINCT p: each call touches only ``partitions_[p]`` / ``sealed_partitions_[p]``.
+    std::size_t build_partition(
+        std::size_t p, const std::uint64_t* hashes, const std::int64_t* rows, std::size_t len
+    ) {
+        if (sealed_) {
+            throw std::runtime_error("cannot build_partition on a sealed CarcharJoinEngine");
+        }
+        auto& part = partitions_[p];
+        if (len != 0 && hashes != nullptr && rows != nullptr) {
+            part.reserve(part.size() + len);
+            for (std::size_t i = 0; i < len; ++i) {
+                part.insert_row(hashes[i], rows[i]);
+            }
+        }
+        const std::size_t unique = part.size();
+        if (partition_count_ == 1U) {
+            part.tighten(probe_load_factor_);
+        } else {
+            sealed_partitions_[p].build_from(part.items(), part, probe_load_factor_);
+        }
+        return unique;
+    }
+
+    // Mark the engine sealed after all partitions have been built in parallel. The unique
+    // key total is supplied by the caller (sum of ``build_partition`` returns), since the
+    // parallel per-partition builds cannot safely share the ``size_`` counter.
+    void finalize_parallel_build(std::size_t total_unique_keys) noexcept {
+        size_ = total_unique_keys;
+        sealed_ = true;
+    }
+
     void reserve(std::size_t expected_entries) {
         if (sealed_) {
             throw std::runtime_error("cannot reserve sealed CarcharJoinEngine");
@@ -304,6 +360,22 @@ class CarcharJoinEngine {
         }
 
         return out;
+    }
+
+    // Thread-safe overload (Phase D): probe ONE built engine concurrently from N threads,
+    // each owning its own ``scratch``. ``noexcept`` so the Cython caller can invoke it with
+    // the GIL RELEASED (an ``except +`` boundary would re-require the GIL). FLAT-ONLY: the
+    // only shape Opteryx builds today is partition_bits=0 (partition_count_ == 1); the
+    // DrakenCarcharJoinMap wrapper hard-codes it. The radix-partitioned engine's concurrent
+    // probe lands with the parallel-build increment, which will add a multi-partition path
+    // here. (No throw — a noexcept body must not; flat is the invariant, enforced at build.)
+    std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>> probe_join_indices_shared(
+        const std::uint64_t* keys,
+        const std::int64_t* probe_rows,
+        std::size_t length,
+        CarcharJoinIndex::ProbeScratch& scratch
+    ) const noexcept {
+        return partitions_[0].probe_join_indices(keys, probe_rows, length, scratch);
     }
 
     CarcharStats stats() const {

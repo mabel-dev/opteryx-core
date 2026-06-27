@@ -447,6 +447,11 @@ cdef class DrakenInnerJoinNode(JoinNode):
 # ---------------------------------------------------------------------------
 
 cdef extern from "carchar.hpp" namespace "opteryx::carchar":
+    cdef cppclass CarcharJoinIndex:
+        # Caller-owned probe scratch + cache (Phase D — thread-safe shared probe).
+        # Each probe thread owns one; the built engine is read-only during probe.
+        cppclass ProbeScratch:
+            ProbeScratch() except +
     cdef cppclass CarcharJoinEngine:
         CarcharJoinEngine(
             size_t expected_entries,
@@ -464,6 +469,16 @@ cdef extern from "carchar.hpp" namespace "opteryx::carchar":
             const int64_t* probe_rows,
             size_t length
         ) except +
+        # Thread-safe overload: N threads may probe ONE built engine concurrently,
+        # each with its own ProbeScratch (the engine data stays read-only). Used by
+        # the GIL-released parallel probe so workers share ONE built table instead of
+        # each rebuilding a private hash.
+        pair[vector[int64_t], vector[int64_t]] probe_join_indices_shared(
+            const uint64_t* keys,
+            const int64_t* probe_rows,
+            size_t length,
+            CarcharJoinIndex.ProbeScratch& scratch
+        ) noexcept nogil
 
 
 # WP-13 — single-column shaped-key probe. The compressed (dict/constant) fast
@@ -816,8 +831,14 @@ cdef object _probe_dense_validity(
         return None
 
     bloom_start = perf_counter_ns()
-    matches = left_hash_table.engine.probe_join_indices(
-        &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size())
+    # GIL-released, thread-safe probe: a stack-local ProbeScratch makes this reentrant,
+    # so N parallel workers may probe ONE shared built engine concurrently (read-only)
+    # without each rebuilding a private hash. Read the engine ptr under the GIL first.
+    cdef CarcharJoinEngine* _eng = left_hash_table.engine
+    cdef CarcharJoinIndex.ProbeScratch _scratch
+    with nogil:
+        matches = _eng.probe_join_indices_shared(
+            &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size(), _scratch)
     t_after_probe = perf_counter_ns()
     metrics.probe_time_ns = t_after_probe - bloom_start
     metrics.result_rows = <Py_ssize_t>matches.first.size()
@@ -922,8 +943,11 @@ cdef object _probe_compressed_scatter(
         return None
 
     bloom_start = perf_counter_ns()
-    matches = left_hash_table.engine.probe_join_indices(
-        &uniq_hashes[0], &uniq_codeids[0], <size_t>uniq_hashes.size())
+    cdef CarcharJoinEngine* _eng_c = left_hash_table.engine
+    cdef CarcharJoinIndex.ProbeScratch _scratch_c
+    with nogil:
+        matches = _eng_c.probe_join_indices_shared(
+            &uniq_hashes[0], &uniq_codeids[0], <size_t>uniq_hashes.size(), _scratch_c)
     t_after_probe = perf_counter_ns()
     metrics.probe_time_ns = t_after_probe - bloom_start
 
@@ -1001,8 +1025,11 @@ cdef object _probe_multicol_legacy(
         metrics.align_time_ns = 0
         return None
 
-    matches = left_hash_table.engine.probe_join_indices(
-        &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size())
+    cdef CarcharJoinEngine* _eng_m = left_hash_table.engine
+    cdef CarcharJoinIndex.ProbeScratch _scratch_m
+    with nogil:
+        matches = _eng_m.probe_join_indices_shared(
+            &probe_hashes[0], &probe_rows[0], <size_t>probe_rows.size(), _scratch_m)
     t_after_probe = perf_counter_ns()
     metrics.probe_time_ns = t_after_probe - bloom_end
     metrics.result_rows = <Py_ssize_t>matches.first.size()

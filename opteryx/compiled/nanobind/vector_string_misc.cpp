@@ -167,7 +167,6 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
     uint64_t PEq[256] = {0};
 
     // Validity bitmap — allocated lazily when first null row is seen.
-    const uint32_t vbytes = (n + 7u) >> 3;
     uint8_t* validity = nullptr;
     bool     any_null = false;
 
@@ -268,10 +267,17 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
 //   POSITION('' IN 'foobar')     → 1   (empty needle always found at 1)
 //   null input                   → null output (null TVL)
 //
-// Bytewise BMH.  For NVARCHAR inputs, result is byte-position not
+// Bytewise substring search. For NVARCHAR inputs, result is byte-position not
 // codepoint-position (codepoint-aware variant is deferred).
+//
+// Two strategies, picked per call: a memchr-anchored scan (SIMD first-byte
+// search + memcmp verify) avoids the 256-entry skip table, which is pure
+// overhead when the needle is short or there are few candidate positions
+// (e.g. equal-length needle/haystack — exactly one position to test).
+// Boyer-Moore-Horspool's skip table only pays off for a longer needle scanning
+// a much longer haystack, so it's reserved for that case.
 
-static int64_t bmh_position(
+static int64_t substring_position(
     const uint8_t* hay, uint32_t hay_len,
     const uint8_t* ndl, uint32_t ndl_len)
 {
@@ -285,7 +291,25 @@ static int64_t bmh_position(
             static_cast<const uint8_t*>(p) - hay) + 1 : 0;
     }
 
-    // Boyer-Moore-Horspool skip table.
+    // memchr-anchored scan: short needle, or few candidate start positions.
+    if (ndl_len < 8u || (hay_len - ndl_len) < 16u) {
+        const uint8_t  first = ndl[0];
+        const uint8_t* p     = hay;
+        uint32_t       span  = hay_len - ndl_len + 1u;  // # of valid start offsets
+        while (span > 0u) {
+            const uint8_t* hit = static_cast<const uint8_t*>(
+                std::memchr(p, static_cast<int>(first), span));
+            if (!hit) return 0;
+            if (std::memcmp(hit, ndl, ndl_len) == 0)
+                return static_cast<int64_t>(hit - hay) + 1;
+            const uint32_t adv = static_cast<uint32_t>(hit - p) + 1u;
+            p    = hit + 1u;
+            span -= adv;
+        }
+        return 0;
+    }
+
+    // Boyer-Moore-Horspool skip table (longer needle in a much longer haystack).
     uint32_t skip[256];
     for (int k = 0; k < 256; ++k) skip[k] = ndl_len;
     for (uint32_t k = 0u; k < ndl_len - 1u; ++k)
@@ -320,7 +344,6 @@ static nb::object impl_position(nb::object hay_obj, nb::object ndl_obj) {
     const DrakenStringArena* sh = static_cast<const DrakenStringArena*>(hay->data);
     const DrakenStringArena* sn = static_cast<const DrakenStringArena*>(ndl->data);
 
-    const uint32_t vbytes = (n + 7u) >> 3;
     uint8_t* validity = nullptr;
     bool     any_null = false;
 
@@ -336,7 +359,7 @@ static nb::object impl_position(nb::object hay_obj, nb::object ndl_obj) {
         // Uniform access via selection — works for dense, dict, and constant.
         const DrakenStringSlot* hs = &sh->slots[hay->selection[i]];
         const DrakenStringSlot* ns = &sn->slots[ndl->selection[i]];
-        out_data[i] = bmh_position(
+        out_data[i] = substring_position(
             str_data(hs, sh->arena), str_length(hs),
             str_data(ns, sn->arena), str_length(ns));
     }

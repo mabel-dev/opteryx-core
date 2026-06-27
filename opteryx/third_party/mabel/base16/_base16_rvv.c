@@ -25,18 +25,21 @@ char* bintob16_rvv(char* restrict dest, const void* restrict src, size_t size) {
     uint8_t*       out = (uint8_t*)dest;
 
     while (size >= 16) {
-        size_t vl = vsetvl_e8m1(size);
+        size_t vl = __riscv_vsetvl_e8m1(size);
 
-        vuint8m1_t v  = vle8_v_u8m1(in, vl);
-        vuint8m1_t hi = vsrl_vx_u8m1(v, 4, vl);           /* high nibble: 0..15 */
-        vuint8m1_t lo = vand_vx_u8m1(v, 0x0F, vl);        /* low  nibble: 0..15 */
+        vuint8m1_t v  = __riscv_vle8_v_u8m1(in, vl);
+        vuint8m1_t hi = __riscv_vsrl_vx_u8m1(v, 4, vl);           /* high nibble: 0..15 */
+        vuint8m1_t lo = __riscv_vand_vx_u8m1(v, 0x0F, vl);        /* low  nibble: 0..15 */
 
         /* Gather ASCII hex digit for each nibble from the 16-entry LUT. */
-        vuint8m1_t hi_ascii = vloxei8_v_u8m1((const uint8_t*)B16_ENCODE_LUT, hi, vl);
-        vuint8m1_t lo_ascii = vloxei8_v_u8m1((const uint8_t*)B16_ENCODE_LUT, lo, vl);
+        vuint8m1_t hi_ascii = __riscv_vloxei8_v_u8m1((const uint8_t*)B16_ENCODE_LUT, hi, vl);
+        vuint8m1_t lo_ascii = __riscv_vloxei8_v_u8m1((const uint8_t*)B16_ENCODE_LUT, lo, vl);
 
         /* Interleaved store: out[2i] = hi_ascii[i], out[2i+1] = lo_ascii[i] */
-        vsseg2e8_v_u8m1(out, hi_ascii, lo_ascii, vl);
+        vuint8m1x2_t outv = __riscv_vundefined_u8m1x2();
+        outv = __riscv_vset_v_u8m1_u8m1x2(outv, 0, hi_ascii);
+        outv = __riscv_vset_v_u8m1_u8m1x2(outv, 1, lo_ascii);
+        __riscv_vsseg2e8_v_u8m1x2(out, outv, vl);
 
         in   += vl;
         out  += 2 * vl;
@@ -55,28 +58,30 @@ void* b16tobin_rvv(void* restrict dest, const char* restrict src, size_t len) {
     const uint8_t* in  = (const uint8_t*)src;
 
     while (len >= 32) {
-        size_t vl = vsetvl_e8m1(len / 2);
+        size_t vl = __riscv_vsetvl_e8m1(len / 2);
 
         /* Deinterleaved load: c0[i]=in[2i] (high char), c1[i]=in[2i+1] (low char) */
-        vuint8m1_t c0, c1;
-        vlseg2e8_v_u8m1(&c0, &c1, in, vl);
+        vuint8m1x2_t pair = __riscv_vlseg2e8_v_u8m1x2(in, vl);
+        vuint8m1_t c0 = __riscv_vget_v_u8m1x2_u8m1(pair, 0);
+        vuint8m1_t c1 = __riscv_vget_v_u8m1x2_u8m1(pair, 1);
 
         /* Decode each char to its nibble via the 256-entry LUT (invalid -> 255). */
-        vuint8m1_t n_hi = vloxei8_v_u8m1(B16_DECODE_LUT, c0, vl);
-        vuint8m1_t n_lo = vloxei8_v_u8m1(B16_DECODE_LUT, c1, vl);
+        vuint8m1_t n_hi = __riscv_vloxei8_v_u8m1(B16_DECODE_LUT, c0, vl);
+        vuint8m1_t n_lo = __riscv_vloxei8_v_u8m1(B16_DECODE_LUT, c1, vl);
 
         /*
          * Validity check: any nibble >= 16 means an invalid or non-hex char.
-         * vredmaxu reduces to the maximum value across both vectors.
+         * Invalid chars decode to 255 (>127), so UNSIGNED max/reduction is
+         * required — a signed max would treat 255 as -1 and miss it.
          */
-        vuint8m1_t combined = vmax_vv_u8m1(n_hi, n_lo, vl);
-        vuint8m1_t init     = vmv_s_x_u8m1(0, vl);
-        vuint8m1_t max_vec  = vredmaxu_vs_u8m1(combined, init, vl);
-        if (vmv_x_s_u8m1(max_vec) >= 16) return NULL;
+        vuint8m1_t combined = __riscv_vmaxu_vv_u8m1(n_hi, n_lo, vl);
+        vuint8m1_t init     = __riscv_vmv_s_x_u8m1(0, vl);
+        vuint8m1_t max_vec  = __riscv_vredmaxu_vs_u8m1_u8m1(combined, init, vl);
+        if (__riscv_vmv_x_s_u8m1_u8(max_vec) >= 16) return NULL;
 
         /* Pack: high nibble into bits [7:4], low nibble into bits [3:0]. */
-        vuint8m1_t packed = vor_vv_u8m1(vsll_vx_u8m1(n_hi, 4, vl), n_lo, vl);
-        vse8_v_u8m1(out, packed, vl);
+        vuint8m1_t packed = __riscv_vor_vv_u8m1(__riscv_vsll_vx_u8m1(n_hi, 4, vl), n_lo, vl);
+        __riscv_vse8_v_u8m1(out, packed, vl);
 
         in  += 2 * vl;
         out += vl;

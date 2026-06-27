@@ -53,8 +53,24 @@ def extract_evaluations(aggregates):
         if len(aggregators) == 0:
             evaluatable_nodes.append(node)
 
-    literal_count = len([n for n in evaluatable_nodes if n.node_type == NodeType.LITERAL])
-    if 0 < literal_count < len(evaluatable_nodes):
-        evaluatable_nodes = [n for n in evaluatable_nodes if n.node_type != NodeType.LITERAL]
+    # A literal that is the DIRECT input of an aggregator (e.g. MIN(1)) must be
+    # materialised so its collector has a column to read. A literal that only
+    # appears nested inside another evaluatable input (e.g. the 0 in SUM(x + 0))
+    # is computed as part of that parent expression, so a separate constant column
+    # would be redundant — drop those. Stripping ALL literals would leave a
+    # direct-input literal collector with no column (CxxMorsel: column not found)
+    # whenever it shares the aggregate with a column-input aggregate.
+    direct_input_ids = {
+        id(aggregator.parameters[0])
+        for aggregator in get_all_nodes_of_type(
+            aggregates, select_nodes=(NodeType.AGGREGATOR,)
+        )
+        if aggregator.parameters
+    }
+    evaluatable_nodes = [
+        node
+        for node in evaluatable_nodes
+        if node.node_type != NodeType.LITERAL or id(node) in direct_input_ids
+    ]
 
     return evaluatable_nodes

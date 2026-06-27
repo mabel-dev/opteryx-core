@@ -167,6 +167,15 @@ class Executor:
             return
         event.finish_task()
 
+    def stash_error(self, exc):
+        """Stash the first error from any task (idempotent — keeps the first). Phase C
+        producer tasks call this SYNCHRONOUSLY before unblocking the consumer, so the
+        consumer sees the error after the ``_DONE`` it is woken with (the future
+        callback ``_task_done`` would otherwise set it only after the task unwinds)."""
+        with self.lock:
+            if self._error is None:
+                self._error = exc
+
     def event_completed(self):
         with self.lock:
             self._completed_events += 1
@@ -232,6 +241,97 @@ def _build_segment_dag(executor, plan, segments, drive_task):
             continue
         terminal.add_dependency(ev)
     return terminal
+
+
+def _build_multibreaker_chain_dag(
+    executor, plan, chain, dop, telemetry, out_queue, gen_box
+):
+    """Phase C Event-DAG for a single-scan LINEAR MULTI-BREAKER chain.
+
+    Each PRODUCER segment (every breaker segment, in dataflow order) gets a real drive
+    Event that materialises its breaker's recombined output into a buffer; the next
+    segment's Event DEPENDS on it (``add_dependency``) and is re-sourced from that
+    buffer. The TERMINAL sink segment streams the last buffer to the hand-off queue.
+
+    So every breaker parallelises on its own DOP (the agg AND the distinct, not just the
+    first), and agg-before-readout / breaker-before-breaker ordering is genuine Event
+    dependency — not the single terminal drive's EMIT-into-cloned-downstream tail.
+    """
+    from opteryx.managers.execution.parallel_engine import _drive_passthrough_segment
+    from opteryx.managers.execution.parallel_engine import _drive_segment
+    from opteryx.managers.execution.pipeline_sink import recombination_class_for
+
+    producers = [s for s in chain if s.tail_is_breaker]
+    terminal_seg = chain[-1]
+    # One materialisation buffer per producer; producer i reads buf[i-1], writes buf[i].
+    # Linear deps serialise the segment drives, so the buffers race-free.
+    bufs = [[] for _ in producers]
+
+    def _producer_task(i):
+        seg = producers[i]
+        if i == 0:
+            source = ("scan", seg.nodes[0])
+            middle = list(seg.nodes[1:-1])
+        else:
+            source = ("buffer", bufs[i - 1])
+            middle = list(seg.nodes[:-1])  # buffer-sourced: nodes[0] is the first middle
+        breaker_id = seg.nodes[-1]
+        recomb = recombination_class_for(plan[breaker_id])
+
+        def task():
+            try:
+                for _ in _drive_segment(
+                    plan, source, middle, breaker_id, recomb, dop, telemetry,
+                    collect_into=bufs[i],
+                ):
+                    pass
+            except BaseException:  # noqa: BLE001 — unblock the consumer, then surface
+                # The producer never feeds the hand-off queue (it materialises), so on
+                # failure the terminal Event never runs and the consumer would block on
+                # `out_queue.get()` forever. Stash + wake it.
+                import sys
+
+                executor.stash_error(sys.exc_info()[1])
+                out_queue.put(_DONE)
+                raise
+
+        return task
+
+    def _terminal_task():
+        last_buf = bufs[-1] if producers else []
+        if terminal_seg.tail_is_breaker:
+            # Degenerate: the chain ends in a breaker with no sink segment — stream it.
+            breaker_id = terminal_seg.nodes[-1]
+            recomb = recombination_class_for(plan[breaker_id])
+            outs = list(plan.outgoing_edges(breaker_id))
+            downstream_id = outs[0][1] if outs else None
+            gen = _drive_segment(
+                plan, ("buffer", last_buf), list(terminal_seg.nodes[:-1]),
+                breaker_id, recomb, dop, telemetry, downstream_id=downstream_id,
+            )
+        else:
+            # The sink segment (e.g. a bare Exit, or stateless* → Exit): passthrough the
+            # last materialised buffer through its head to the Exit.
+            gen = _drive_passthrough_segment(plan, last_buf, terminal_seg.nodes[0])
+        gen_box.append(gen)
+        try:
+            for morsel in gen:
+                out_queue.put(morsel)
+        finally:
+            out_queue.put(_DONE)
+
+    prod_events = []
+    for i in range(len(producers)):
+        ev = executor.add_event(
+            f"chain.producer[{i}]", lambda i=i: [_producer_task(i)]
+        )
+        if i > 0:
+            ev.add_dependency(prod_events[i - 1])
+        prod_events.append(ev)
+    term_ev = executor.add_event("chain.terminal", lambda: [_terminal_task()])
+    if prod_events:
+        term_ev.add_dependency(prod_events[-1])
+    return term_ev
 
 
 def _drive_pipeline(plan, workers, telemetry, out_queue, gen_box):
@@ -309,7 +409,28 @@ def execute(plan, head_node=None, telemetry=None):
     def drive_task():
         return _drive_pipeline(plan, dop, telemetry, out_queue, gen_box)
 
-    _build_segment_dag(executor, plan, segments, drive_task)
+    # Phase C: a single-scan LINEAR MULTI-BREAKER chain (e.g. GROUP BY → DISTINCT) is
+    # driven per-segment — each breaker parallelises on its own DOP via materialise +
+    # re-source Event edges. Engaged only at DOP >= 2 (at DOP=1 the single terminal
+    # drive is byte-identical serial — the prime constraint). Every other plan stays on
+    # the proven single terminal drive.
+    chain = None
+    if dop >= 2:
+        from opteryx.managers.execution.parallel_engine import (
+            _find_linear_multibreaker_chain,
+        )
+
+        chain = _find_linear_multibreaker_chain(plan, dop)
+
+    if chain is not None:
+        if telemetry is not None:
+            telemetry._reading["scheduler_multibreaker_chain"] = 1
+            telemetry._reading["scheduler_chain_segments"] = len(chain)
+        _build_multibreaker_chain_dag(
+            executor, plan, chain, dop, telemetry, out_queue, gen_box
+        )
+    else:
+        _build_segment_dag(executor, plan, segments, drive_task)
 
     def generator():
         try:

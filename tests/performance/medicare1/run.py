@@ -78,13 +78,18 @@ def rewrite_query(sql: str) -> str:
     2. Remove ALL double quotes from the SQL
     3. Rewrite table names and FROM clauses to add dataset prefixes
     """
-    # Step 1: Handle problematic aliases - replace colons with underscores
-    # Pattern: "identifier:with:colons" -> identifier_with_colons
-    def fix_colon_identifiers(match):
-        content = match.group(1)
-        return content.replace(':', '_')
+    # Step 1: Handle problematic Tableau aliases inside double quotes by replacing
+    # the offending characters with underscores:
+    #   "avg:Calc:ok"   -> avg_Calc_ok      (colons)
+    #   "$__alias__0"    -> ___alias__0      (dollar — DuckDB reads a bare $name as a
+    #                                         bind parameter; sanitising keeps both
+    #                                         engines parsing the SAME identifier)
+    # Done before quote-stripping so the replacement is identical wherever the alias
+    # is defined or referenced, keeping Opteryx and DuckDB queries comparable.
+    def fix_problem_identifiers(match):
+        return match.group(1).replace(':', '_').replace('$', '_')
 
-    sql = re.sub(r'"([^"]*:[^"]*)"', fix_colon_identifiers, sql)
+    sql = re.sub(r'"([^"]*[:$][^"]*)"', fix_problem_identifiers, sql)
 
     # Step 2: Remove ALL remaining double quotes (Opteryx parser limitation)
     sql = sql.replace('"', '')

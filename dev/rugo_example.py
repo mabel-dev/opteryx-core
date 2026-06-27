@@ -2,7 +2,7 @@
 rugo — reading and writing examples for all three formats (Parquet, CSV, JSONL).
 
 Run from the repo root (after `make c`):
-    PYTHON_GIL=0 PYENV_VERSION=3.14.5t pyenv exec python rugo/_example.py
+    PYTHON_GIL=0 PYENV_VERSION=3.14.5t pyenv exec python dev/rugo_example.py
 """
 
 import os

@@ -57,7 +57,14 @@ cdef class ProjectionNode(BasePlanNode):
         """
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
-        projection = parameters["projection"] + parameters.get("order_by_columns", [])
+        # Both `projection` and `order_by_columns` may arrive as None (not just
+        # absent): the optimizer treats a node's column lists as "iterable or None"
+        # (projection_pushdown.py), and the physical planner forwards a None
+        # `order_by_columns` verbatim. This fires e.g. on COUNT(*) over a subquery,
+        # where pushdown leaves the inner Project with no ORDER BY columns. Normalise
+        # both to empty lists — None means "no columns here", never a passthrough.
+        proj = parameters["projection"] or []
+        projection = proj + (parameters.get("order_by_columns") or [])
 
         self.projection = []
         for column in projection:
@@ -71,7 +78,7 @@ cdef class ProjectionNode(BasePlanNode):
             if column.node_type == NodeType.LITERAL
         }
 
-        self.columns = parameters["projection"]
+        self.columns = proj
 
     @property
     def config(self):  # pragma: no cover

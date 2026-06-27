@@ -261,7 +261,6 @@ static nb::object impl_date_part(nb::object v_obj, const char* part_str) {
     g.v = copy_validity(dv);
 
     const int64_t tps = ta_ticks_per_second(unit_code);
-    const int64_t tpd = ta_ticks_per_day(unit_code);
 
     for (uint32_t i = 0u; i < n; ++i) {
         if (row_is_null(dv, i)) { out[i] = 0; continue; }

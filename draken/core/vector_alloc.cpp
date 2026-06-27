@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <exception>  // std::terminate (not pulled in transitively by libstdc++)
 #include <mutex>
 
 #ifdef __cplusplus

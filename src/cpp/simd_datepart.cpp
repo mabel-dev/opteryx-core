@@ -306,12 +306,12 @@ static constexpr std::size_t RVV_DATEPART_MAX_VL = 256;
         const uint64_t _M = (uint64_t)(mod_);                                 \
         std::size_t _i = 0;                                                    \
         while (_i < n) {                                                       \
-            std::size_t _vl = vsetvl_e64m1(n - _i);                           \
-            vuint64m1_t _v  = vle64_v_u64m1(                                  \
+            std::size_t _vl = __riscv_vsetvl_e64m1(n - _i);                           \
+            vuint64m1_t _v  = __riscv_vle64_v_u64m1(                                  \
                 reinterpret_cast<const uint64_t*>(src + _i), _vl);            \
-            vuint64m1_t _q  = vdivu_vx_u64m1(_v, _D, _vl);                   \
-            vuint64m1_t _r  = vremu_vx_u64m1(_q, _M, _vl);                   \
-            vse64_v_u64m1(                                                     \
+            vuint64m1_t _q  = __riscv_vdivu_vx_u64m1(_v, _D, _vl);                   \
+            vuint64m1_t _r  = __riscv_vremu_vx_u64m1(_q, _M, _vl);                   \
+            __riscv_vse64_v_u64m1(                                                     \
                 reinterpret_cast<uint64_t*>(dst + _i), _r, _vl);              \
             _i += _vl;                                                         \
         }                                                                      \
@@ -324,18 +324,18 @@ static constexpr std::size_t RVV_DATEPART_MAX_VL = 256;
         int32_t _dbuf[RVV_DATEPART_MAX_VL];                                    \
         std::size_t _i = 0;                                                    \
         while (_i < n) {                                                       \
-            std::size_t _vl = vsetvl_e64m1(n - _i);                           \
-            vint64m1_t _v   = vle64_v_i64m1(src + _i, _vl);                   \
-            vint64m1_t _q   = vdiv_vx_i64m1(_v, _U, _vl);                     \
+            std::size_t _vl = __riscv_vsetvl_e64m1(n - _i);                           \
+            vint64m1_t _v   = __riscv_vle64_v_i64m1(src + _i, _vl);                   \
+            vint64m1_t _q   = __riscv_vdiv_vx_i64m1(_v, _U, _vl);                     \
             /* rem = v - q * U */                                               \
-            vint64m1_t _rem = vsub_vv_i64m1(_v,                               \
-                                vmul_vx_i64m1(_q, _U, _vl), _vl);             \
+            vint64m1_t _rem = __riscv_vsub_vv_i64m1(_v,                               \
+                                __riscv_vmul_vx_i64m1(_q, _U, _vl), _vl);             \
             /* floor correction: shift rem right 63 gives -1 if rem<0 else 0 */ \
-            vint64m1_t _adj = vsra_vx_i64m1(_rem, 63, _vl);                   \
-            vint64m1_t _d64 = vadd_vv_i64m1(_q, _adj, _vl);                   \
+            vint64m1_t _adj = __riscv_vsra_vx_i64m1(_rem, 63, _vl);                   \
+            vint64m1_t _d64 = __riscv_vadd_vv_i64m1(_q, _adj, _vl);                   \
             /* narrow i64 → i32 (days fit in int32 for ±4000-year range) */    \
-            vint32mf2_t _d32 = vnsra_wx_i32mf2(_d64, 0, _vl);                 \
-            vse32_v_i32mf2(_dbuf, _d32, _vl);                                  \
+            vint32mf2_t _d32 = __riscv_vnsra_wx_i32mf2(_d64, 0, _vl);                 \
+            __riscv_vse32_v_i32mf2(_dbuf, _d32, _vl);                                  \
             for (std::size_t _k = 0; _k < _vl; ++_k)                          \
                 dst[_i + _k] = (fn_)(_dbuf[_k]);                              \
             _i += _vl;                                                         \

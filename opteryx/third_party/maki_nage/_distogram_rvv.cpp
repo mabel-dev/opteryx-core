@@ -9,11 +9,11 @@ int64_t distogram_sum_i64_rvv(const int64_t* values, int64_t length) {
     const size_t n = static_cast<size_t>(length);
 
     while (i < n) {
-        size_t vl = vsetvl_e64m1(n - i);
-        vint64m1_t v = vle64_v_i64m1(values + i, vl);
-        vint64m1_t zero = vmv_v_x_i64m1(0, vl);
-        vint64m1_t reduced = vredsum_vs_i64m1_i64m1(v, zero, vl);
-        total += vmv_x_s_i64m1_i64(reduced);
+        size_t vl = __riscv_vsetvl_e64m1(n - i);
+        vint64m1_t v = __riscv_vle64_v_i64m1(values + i, vl);
+        vint64m1_t zero = __riscv_vmv_v_x_i64m1(0, vl);
+        vint64m1_t reduced = __riscv_vredsum_vs_i64m1_i64m1(v, zero, vl);
+        total += __riscv_vmv_x_s_i64m1_i64(reduced);
         i += vl;
     }
 

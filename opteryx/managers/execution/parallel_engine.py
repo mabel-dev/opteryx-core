@@ -918,6 +918,7 @@ class _SharedSourceJoin:
         "left_is_empty",
         "columns",
         "load_factor",
+        "built_hash",
     )
 
     def __init__(self, plan, shape, ctx, workers=1, prelude_join=None):
@@ -934,6 +935,7 @@ class _SharedSourceJoin:
         self.left_is_empty = False
         self.columns = None
         self.load_factor = None
+        self.built_hash = None
 
     def build(self, build_chains, exit_node):
         """Drive the BUILD side to completion, then capture the shared read-only build
@@ -1004,12 +1006,14 @@ class _SharedSourceJoin:
         )
 
     def _capture(self, j):
-        """Capture the prepared read-only build state from the TOP join ``j``."""
+        """Capture the prepared read-only build state from the TOP join ``j`` —
+        including the BUILT probe table (``left_hash``) the worker clones SHARE."""
         self.left_morsel = j.left_morsel
         self.left_columns = j.left_columns
         self.left_is_empty = j.left_is_empty
         self.columns = j.columns
         self.load_factor = j.carchar_probe_load_factor
+        self.built_hash = j.left_hash
 
     def _build_parallel_inner(
         self, top_join, inner_build_chains, inner_probe_chain, other_chains, exit_node
@@ -1213,22 +1217,17 @@ class _SharedSourceJoin:
         self._capture(top_join)
 
     def prepare_worker_clone(self, cloned_join):
-        """Build THIS worker's private join engine over the shared READ-ONLY
-        ``left_morsel`` (no shared mutable probe state — thread-local-full). Mirrors
-        ``_join_probe_stream``'s per-worker setup exactly."""
-        from opteryx.operators._operators import build_side_carchar_morsel_map
-
+        """Set up THIS worker's join clone to SHARE the ONE built probe table read-only
+        (Phase D). The Carchar probe is now reentrant (each kernel call owns a
+        thread-local ProbeScratch, the table data is const), so workers no longer each
+        rebuild a private hash — the build runs once and every worker probes the same
+        sealed engine concurrently."""
         cloned_join.left_morsel = self.left_morsel
         cloned_join.left_columns = self.left_columns
         cloned_join.columns = self.columns
         cloned_join.left_is_empty = self.left_is_empty
         cloned_join.carchar_probe_load_factor = self.load_factor
-        cloned_join.left_hash = build_side_carchar_morsel_map(
-            self.left_morsel,
-            self.left_columns,
-            self.load_factor,
-            cloned_join.kernel_metrics,
-        )
+        cloned_join.left_hash = self.built_hash
         cloned_join._build_complete = True
         cloned_join.set_context(self._ctx)
 
@@ -1783,6 +1782,384 @@ class _ScatterCollectEngine:
             bins[k].append(Morsel.from_cxx(sub[k]))
 
 
+# =================================================================================
+# Phase C — per-segment materialising drive for LINEAR MULTI-BREAKER chains.
+#
+# A single-scan plan whose breakers form a straight chain (e.g. GROUP BY → DISTINCT,
+# GROUP BY → GROUP BY) parallelises ONLY its first breaker today: the rest run serial
+# in the first breaker's EOS tail. Phase C drives EACH segment independently and
+# MATERIALISES its breaker's recombined output into a buffer; the consuming segment is
+# re-sourced from that buffer (the cross-segment dependency the scheduler's Event-DAG
+# expresses), so every breaker parallelises on its own DOP.
+#
+# This is gated to single-scan linear chains where EVERY breaker declares a parallel
+# sink (so `GROUP BY … ORDER BY`, whose Sort declares none, stays on today's terminal
+# drive — agg parallel + serial sort tail — unchanged). `_run_breaker_segment` (the
+# join/agg/distinct skeleton) is LEFT UNTOUCHED; `_drive_segment` is a focused
+# per-segment driver (no joins — a linear chain is single-scan by construction).
+# =================================================================================
+
+
+def _make_collect_sink(out, properties, ctx):
+    """Build a materialisation sink for a PRODUCER segment (Phase C). Wired as a
+    breaker's downstream so the breaker's recombined output is CAPTURED into ``out``
+    instead of streamed onward; the consuming segment is re-sourced from ``out``.
+    Swallows EOS.
+
+    A pure-Python ``BasePlanNode`` subclass — the breaker's typed ``emit`` pushes the
+    C++ carrier into it, the base ``_dispatch_push`` re-acquires the GIL and calls this
+    overridden ``_push_impl`` (the sanctioned Python-class-subclass seam). Light init
+    mirrors the join adapters (a wiring node, not a catalogued operator). Built via a
+    factory so the Cython base is imported lazily, not at module top."""
+    from collections import defaultdict
+
+    from opteryx.operators._operators import BasePlanNode
+    from opteryx.utils import random_string
+
+    class _CollectSinkImpl(BasePlanNode):
+        def __init__(self):
+            self.identity = random_string()
+            self.parameters = {}
+            self.columns = []
+            self.readings = defaultdict(int)
+            self._time_stat_key = "time_collect_sink"
+            self.properties = properties
+            self.is_scan = False
+            self.is_join = False
+            self.is_stateless = True
+            self.is_not_explained = True
+            self._empty_morsel_cache = None
+            self._out = out
+
+        @property
+        def name(self):
+            return "CollectSink"
+
+        def _push_impl(self, morsel):
+            if morsel is _EOS_SENTINEL:
+                return
+            self._out.append(morsel)
+
+    node = _CollectSinkImpl()
+    node.set_context(ctx)
+    return node
+
+
+def _drive_segment(
+    plan,
+    source,
+    middle_ids,
+    breaker_id,
+    recomb,
+    workers,
+    telemetry,
+    *,
+    downstream_id=None,
+    collect_into=None,
+):
+    """Drive ONE pipeline segment ``source → stateless* → breaker`` in parallel via the
+    ``PipelineSink`` contract — the focused per-segment driver the Phase C Event-DAG
+    calls. ``source`` is ``('scan', scan_id)`` or ``('buffer', morsel_list)``.
+
+    Output mode:
+      * ``collect_into`` is a list → PRODUCER segment: the breaker's recombined output
+        is materialised into it (the consuming segment is re-sourced from it). The
+        generator yields nothing.
+      * ``collect_into`` is None → TERMINAL segment: the breaker emits to its real
+        downstream and the exit's pending morsels are yielded (streaming drive).
+
+    The W=1 / below-floor path drives the ORIGINAL un-cloned breaker (the prime
+    constraint — byte-identical to serial). No joins / ``source_prep``: a linear
+    multi-breaker chain is single-scan by construction."""
+    import threading
+
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import pull_one
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    breaker = plan[breaker_id]
+
+    # ---- source abstraction: scan pull, or a thread-safe buffer iterator ----------
+    src_kind, src_val = source
+    if src_kind == "scan":
+        scan = plan[src_val]
+        concurrent_safe = scan.is_concurrent_pull_safe()
+
+        def _raw_pull():
+            return pull_one(scan)
+
+        def _close():
+            scan.close_source()
+
+    else:  # buffer — already materialised in memory; a locked list iterator is reentrant
+        scan = None
+        _buf_lock = threading.Lock()
+        _buf_it = iter(src_val)
+        concurrent_safe = True
+
+        def _raw_pull():
+            with _buf_lock:
+                return next(_buf_it, None)
+
+        def _close():
+            return None
+
+    # ---- collect mode: redirect the breaker's output into a materialisation sink ----
+    collector = None
+    if collect_into is not None:
+        collector = _make_collect_sink(collect_into, breaker.properties, ctx)
+        # Agg breakers emit via their downstream (floor + sink finalize); the distinct
+        # breaker emits via the sink's `downstream` param. Redirecting the breaker's
+        # downstream covers both the floor path and the agg-sink emit; the distinct sink
+        # gets the collector through `make_sink(downstream=...)` below.
+        breaker.set_downstream(collector)
+
+    def _drain():
+        # Collect mode yields nothing (output goes to the collector); terminal mode
+        # yields the exit's pending morsels.
+        if collect_into is not None or exit_node is None:
+            return
+        while exit_node.has_pending():
+            yield exit_node.pop_pending()
+
+    radix = 1
+    while radix < workers:
+        radix <<= 1
+
+    head = plan[middle_ids[0]] if middle_ids else breaker
+
+    pool = None
+    try:
+        # ---- row-floor: tiny inputs run serially through the ORIGINAL breaker ------
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = _raw_pull()
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            for morsel in buffer:
+                if ctx.is_terminated():
+                    break
+                push_one(head, morsel)
+                yield from _drain()
+            if not ctx.is_terminated():
+                push_one(head, _EOS_SENTINEL)
+                yield from _drain()
+            return
+
+        def _readout_pool_factory():
+            return CppThreadPool(max(1, min(radix, workers)), "phasec-readout")
+
+        # In collect mode the distinct sink pushes survivors to `downstream` = the
+        # collector; the agg sinks ignore it (they emit via the breaker, already
+        # redirected). In stream mode `downstream_id` is the breaker's real downstream
+        # (used by the distinct sink), else None.
+        if collect_into is not None:
+            downstream = collector
+        else:
+            downstream = plan[downstream_id] if downstream_id is not None else None
+
+        sink = make_sink(
+            breaker,
+            recomb,
+            radix=radix,
+            pool_factory=_readout_pool_factory,
+            ctx=ctx,
+            downstream=downstream,
+            telemetry=telemetry,
+        )
+        if sink is None:
+            raise RuntimeError(f"_drive_segment: no sink adapter for {recomb!r}")
+
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+
+        def next_input():
+            if concurrent_safe:
+                with pull_lock:
+                    m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                if ctx.is_terminated():
+                    return None
+                return _raw_pull()
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                return _raw_pull()
+
+        local_states = [None] * workers
+        local_rows = [0] * workers
+        errors = [None] * workers
+
+        def worker(index):
+            try:
+                clone = sink.make_local_sink_state(index)
+                chain = [_clone_op(plan[nid]) for nid in middle_ids]
+                chain.append(clone)
+                for i, op in enumerate(chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(chain):
+                        op.set_downstream(chain[i + 1])
+                chain_head = chain[0]
+                count = 0
+                while True:
+                    morsel = next_input()
+                    if morsel is None:
+                        break
+                    push_one(chain_head, morsel)
+                    count += morsel.num_rows
+                local_states[index] = clone
+                local_rows[index] = count
+            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
+                errors[index] = exc
+
+        pool = CppThreadPool(workers, "phasec-segment")
+        futures = [pool.submit(worker, k) for k in range(workers)]
+        for future in futures:
+            future.result()
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        locals_ = [
+            (local_states[k], local_rows[k])
+            for k in range(workers)
+            if local_states[k] is not None
+        ]
+        sink.combine(locals_)
+
+        for m in sink.finalize_source():
+            if ctx.is_terminated():
+                return
+            yield m
+        if ctx.is_terminated():
+            return
+        push_one(sink.eos_target(), _EOS_SENTINEL)
+        yield from _drain()
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+        ctx.terminate()
+        _close()
+
+
+def _drive_passthrough_segment(plan, source_buffer, head_id):
+    """Drive a no-breaker TERMINAL segment (e.g. a bare ``Exit``, or
+    ``stateless* → Exit``) from a materialised buffer, serially. The terminal segment
+    of a multi-breaker chain operates on already-recombined (small) data, so a serial
+    push through its head to the exit is correct and cheap. Yields the exit's morsels."""
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    head = plan[head_id]
+
+    def _drain():
+        if exit_node is None:
+            return
+        while exit_node.has_pending():
+            yield exit_node.pop_pending()
+
+    try:
+        for morsel in source_buffer:
+            if ctx.is_terminated():
+                break
+            push_one(head, morsel)
+            yield from _drain()
+        if not ctx.is_terminated():
+            push_one(head, _EOS_SENTINEL)
+            yield from _drain()
+    finally:
+        ctx.terminate()
+
+
+def _find_linear_multibreaker_chain(plan, workers):
+    """Return the segments of a single-scan LINEAR MULTI-BREAKER chain in DATAFLOW
+    order (source-first), else ``None`` (design §1.4 Phase C).
+
+    Eligible iff: exactly one scan; the plan's segments form a straight chain (each
+    segment's source is fed by the previous segment's breaker); at least TWO breaker
+    segments; every middle op STATELESS; and EVERY breaker is PARALLEL-DRIVABLE under
+    the SAME per-breaker gate ``_find_parallel_breaker_segment`` applies — a declared
+    sink, ``workers >= min_workers``, and ``eligible(breaker)``. If ANY breaker is
+    ineligible (a constant-key grouped agg, a non-mergeable ungrouped agg, a Sort with
+    no sink, distinct below its DOP floor) the WHOLE chain bails to today's terminal
+    drive (which still parallelises the first eligible breaker + serial tail — no loss).
+    Returns the ordered ``Segment`` list (producers first, terminal last), or ``None``."""
+    registry = get_registry()
+    scans = [nid for nid in plan.nodes() if getattr(plan[nid], "is_scan", False)]
+    if len(scans) != 1:
+        return None
+    segments = identify_segments(plan)
+    breaker_segs = [s for s in segments if s.tail_is_breaker]
+    if len(breaker_segs) < 2:
+        return None  # single breaker → today's path already parallelises it
+
+    # Order the segments by dataflow: a segment depends on the segment whose breaker
+    # feeds its source head. Build provider→segment links from plan edges.
+    tail_to_seg = {s.tail: s for s in segments}
+    # For each segment, find its predecessor segment (the breaker feeding its head).
+    def _predecessor(seg):
+        head = seg.nodes[0]
+        for provider, _t, _l in plan.ingoing_edges(head):
+            if provider in tail_to_seg and _is_breaker(plan, provider, registry):
+                return tail_to_seg[provider]
+        return None
+
+    # Every breaker must be PARALLEL-DRIVABLE under the SAME gate the single-breaker
+    # dispatcher uses (declared sink + DOP floor + per-instance eligibility), AND every
+    # middle op STATELESS — else the per-segment scatter would engage an ineligible
+    # breaker (e.g. a constant-key agg → `cxx_scatter: no key columns`). Bail the whole
+    # chain if any segment fails; today's terminal drive handles it correctly.
+    for s in breaker_segs:
+        spec = parallel_sink_spec_for(plan[s.tail])
+        if spec is None or workers < spec.min_workers:
+            return None
+        if spec.eligible is not None and not spec.eligible(plan[s.tail]):
+            return None
+        for nid in s.nodes[1:-1]:
+            meta = registry.get(type(plan[nid]))
+            if meta is None or meta.parallelism != OperatorParallelism.STATELESS:
+                return None
+
+    # Walk from the source segment (the one whose head is the scan) following
+    # successors. The chain is linear iff every breaker segment has exactly one
+    # successor and the walk visits every segment once.
+    source_seg = next((s for s in segments if s.nodes[0] == scans[0]), None)
+    if source_seg is None:
+        return None
+    ordered = []
+    seen = set()
+    cur = source_seg
+    while cur is not None:
+        if id(cur) in seen:
+            return None  # cycle / non-linear — bail
+        seen.add(id(cur))
+        ordered.append(cur)
+        # The successor segment is the one whose predecessor is `cur` (cur's breaker
+        # feeds its head). A linear chain has at most one such successor.
+        succs = [s for s in segments if _predecessor(s) is cur]
+        if len(succs) > 1:
+            return None  # fan-out — not a linear chain
+        cur = succs[0] if succs else None
+
+    if len(ordered) != len(segments):
+        return None  # some segment not on the linear spine — bail
+    return ordered
+
+
 def _stateless_stream(plan, scan_id, op_ids, exit_id, workers, telemetry=None):
     """Parallel SELECTION/PROJECTION (no aggregate). Filter and projection are
     per-morsel INDEPENDENT transforms — there is NO recombination/merge and no
@@ -1922,7 +2299,6 @@ def _join_probe_stream(plan, shape, workers, telemetry=None):
 
     from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.managers.execution.pipeline_compiler import compile_pipeline
-    from opteryx.operators._operators import build_side_carchar_morsel_map
     from opteryx.operators._operators import drive_scan
     from opteryx.operators._operators import pull_one
     from opteryx.operators import JoinRightAdapter
@@ -1969,6 +2345,11 @@ def _join_probe_stream(plan, shape, workers, telemetry=None):
         left_is_empty = j.left_is_empty
         columns = j.columns
         load_factor = j.carchar_probe_load_factor
+        # Phase D: the ONE built probe table, SHARED read-only across all workers. The
+        # Carchar probe is now reentrant (each worker owns a thread-local ProbeScratch,
+        # the table data is const), so workers no longer each rebuild a private hash —
+        # the build runs once and every worker probes the same sealed engine.
+        shared_left_hash = j.left_hash
 
         # Empty build side: an inner join yields nothing. Push EOS through the
         # original wired probe chain once so the join's EOS path (telemetry flush +
@@ -2033,17 +2414,17 @@ def _join_probe_stream(plan, shape, workers, telemetry=None):
                 return pull_one(probe_scan)
 
         def worker(index):
-            # Each worker owns a fresh, private join clone + its own engine built
-            # over the shared READ-ONLY left_morsel. No worker touches `j`.
+            # Each worker owns a fresh, private join clone but SHARES the one built
+            # probe table read-only (Phase D). No per-worker hash rebuild: the table is
+            # immutable during probe and the probe scratch is thread-local, so N workers
+            # probe the same sealed engine concurrently. No worker mutates `j`.
             clone_join = _clone_op(j)
             clone_join.left_morsel = left_morsel
             clone_join.left_columns = left_columns
             clone_join.columns = columns
             clone_join.left_is_empty = left_is_empty
             clone_join.carchar_probe_load_factor = load_factor
-            clone_join.left_hash = build_side_carchar_morsel_map(
-                left_morsel, left_columns, load_factor, clone_join.kernel_metrics
-            )
+            clone_join.left_hash = shared_left_hash
             clone_join._build_complete = True
             clone_join.set_context(ctx)
 

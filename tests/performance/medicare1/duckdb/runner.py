@@ -47,15 +47,19 @@ def _rewrite_query(sql: str) -> str:
 
     DuckDB will have views registered for Medicare1_1 and Medicare1_2.
     We just need to:
-    1. Replace Tableau aliases with colons (invalid in SQL)
+    1. Sanitise Tableau aliases containing ':' or '$' (invalid / parameter-like in SQL)
     2. Remove all double quotes (which may confuse DuckDB with the views)
-    """
-    # Step 1: Handle problematic aliases - replace colons with underscores
-    def fix_colon_identifiers(match):
-        content = match.group(1)
-        return content.replace(':', '_')
 
-    sql = re.sub(r'"([^"]*:[^"]*)"', fix_colon_identifiers, sql)
+    Must mirror tests/performance/medicare1/run.py::rewrite_query step 1 exactly so
+    both engines run the same identifiers.
+    """
+    # Step 1: Handle problematic aliases inside double quotes — replace ':' and '$'
+    # with underscores. DuckDB parses a bare `$__alias__0` (after quote-stripping) as a
+    # bind parameter and errors; sanitising the alias keeps it a plain identifier.
+    def fix_problem_identifiers(match):
+        return match.group(1).replace(':', '_').replace('$', '_')
+
+    sql = re.sub(r'"([^"]*[:$][^"]*)"', fix_problem_identifiers, sql)
 
     # Step 2: Remove all double quotes - DuckDB will resolve table names against views
     sql = sql.replace('"', '')

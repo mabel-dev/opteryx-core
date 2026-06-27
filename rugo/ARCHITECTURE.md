@@ -40,7 +40,6 @@ Internal architecture reference for the Parquet, JSONL, and CSV readers.
 | `decode_column.cpp` | Per-column-chunk decode coordinator |
 | `decode_encodings.{hpp,cpp}` | PLAIN, RLE_DICTIONARY, DELTA_BINARY_PACKED, DELTA_BYTE_ARRAY |
 | `decode_page.{hpp,cpp}` | DATA_PAGE (V1) framing and repetition/definition levels |
-| `page_value_decoder.{hpp,cpp}` | Typed value materialisation from page buffers |
 | `compression.{hpp,cpp}` | UNCOMPRESSED / SNAPPY / ZSTD decompression |
 | `bloom_filter.{hpp,cpp}` | Bloom filter probe for row-group skip |
 | `vendor/` | Vendored zstd and lz4 |

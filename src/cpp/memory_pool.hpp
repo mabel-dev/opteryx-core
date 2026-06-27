@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 #include <string>
 #include <stdexcept>
 #include <algorithm>

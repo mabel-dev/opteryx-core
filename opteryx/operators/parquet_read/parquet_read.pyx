@@ -1431,7 +1431,7 @@ cdef class ParquetReadNode(ReaderNode):
             # no pass-2 work. Count pre-filter rows and record the skip.
             if vectors is None:
                 self._total_rows_before_filter += pulled[6]
-                self.record_pass1_skipped()
+                self.scan_readings.record_pass1_skipped()
                 continue
             n = len(vectors)
             row_group = {self._lm_pass1_names_bytes[i]: vectors[i] for i in range(n)}

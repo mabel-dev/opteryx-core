@@ -26,6 +26,7 @@
 #include <nanobind/nanobind.h>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 #include "core/buffers.h"
 #include "core/string_slot.h"
@@ -48,8 +49,12 @@ namespace nb = nanobind;
 static const DrakenVector* unwrap_string(nb::object obj) {
     const DrakenVector* dv = draken_vector_unwrap(obj.ptr());
     if (!dv) throw nb::python_error();  // TypeError already set
-    if (dv->type != DRAKEN_VARCHAR)
-        throw nb::type_error("expected DRAKEN_VARCHAR Vector");
+    // Codecs operate on raw bytes — accept the whole string family (matching
+    // the hex codec): VARCHAR/NVARCHAR text and the VARBINARY produced by the
+    // *_ENCODE counterparts.
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR &&
+        dv->type != DRAKEN_VARBINARY)
+        throw nb::type_error("expected a string-family Vector (VARCHAR/NVARCHAR/VARBINARY)");
     return dv;
 }
 
@@ -82,7 +87,8 @@ static inline bool row_is_null(const DrakenVector* dv, uint32_t i) noexcept {
 static nb::object codec_apply(
     nb::object obj,
     size_t   (*max_out_fn)(size_t),
-    void*    (*encode_fn)(void*, const void*, size_t))
+    void*    (*encode_fn)(void*, const void*, size_t),
+    const char* codec_name)
 {
     const DrakenVector*      dv    = unwrap_string(obj);
     const DrakenStringArena* in_sa = static_cast<const DrakenStringArena*>(dv->data);
@@ -168,7 +174,14 @@ static nb::object codec_apply(
         }
 
         // Run codec.
-        void*          end        = encode_fn(tmp_buf, in_data, in_len);
+        void* end = encode_fn(tmp_buf, in_data, in_len);
+        // Decoders return NULL on malformed input (bad chars / wrong length).
+        // Fail loud — pointer math on NULL underflows actual_len and segfaults.
+        if (end == nullptr) {
+            draken_free(tmp_buf);
+            throw nb::value_error(
+                (std::string(codec_name) + ": malformed input string").c_str());
+        }
         const uint32_t actual_len = static_cast<uint32_t>(
             static_cast<uint8_t*>(end) - tmp_buf);
 
@@ -241,7 +254,7 @@ void register_vector_codec(nb::module_ &m) {
 
     m.def("vector_base64_encode",
         [](nb::object v) -> nb::object {
-            return codec_apply(v, b64_encoded_size_wrap, b64_encode_adapter);
+            return codec_apply(v, b64_encoded_size_wrap, b64_encode_adapter, "BASE64_ENCODE");
         },
         nb::arg("v"),
         "BASE64(v): element-wise base64 encoding of a DRAKEN_VARCHAR Vector. "
@@ -249,15 +262,15 @@ void register_vector_codec(nb::module_ &m) {
 
     m.def("vector_base64_decode",
         [](nb::object v) -> nb::object {
-            return codec_apply(v, b64_decoded_size_wrap, b64_decode_adapter);
+            return codec_apply(v, b64_decoded_size_wrap, b64_decode_adapter, "BASE64_DECODE");
         },
         nb::arg("v"),
         "UNBASE64(v): element-wise base64 decoding of a DRAKEN_VARCHAR Vector. "
-        "Null rows propagate as null. Invalid base64 input → empty string (mabel behaviour).");
+        "Null rows propagate as null. Malformed base64 input raises ValueError.");
 
     m.def("vector_base85_encode",
         [](nb::object v) -> nb::object {
-            return codec_apply(v, b85_encoded_size_wrap, b85_encode_adapter);
+            return codec_apply(v, b85_encoded_size_wrap, b85_encode_adapter, "BASE85_ENCODE");
         },
         nb::arg("v"),
         "BASE85(v): element-wise base85 (Mercurial alphabet) encoding of a DRAKEN_VARCHAR Vector. "
@@ -265,9 +278,9 @@ void register_vector_codec(nb::module_ &m) {
 
     m.def("vector_base85_decode",
         [](nb::object v) -> nb::object {
-            return codec_apply(v, b85_decoded_size_wrap, b85_decode_adapter);
+            return codec_apply(v, b85_decoded_size_wrap, b85_decode_adapter, "BASE85_DECODE");
         },
         nb::arg("v"),
         "UNBASE85(v): element-wise base85 decoding of a DRAKEN_VARCHAR Vector. "
-        "Null rows propagate as null.");
+        "Null rows propagate as null. Malformed base85 input raises ValueError.");
 }
