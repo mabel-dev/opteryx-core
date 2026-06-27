@@ -22,7 +22,6 @@ from typing import Optional
 
 import pytest
 
-sys.path.insert(1, os.path.join(sys.path[0], "../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx

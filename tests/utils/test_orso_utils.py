@@ -1,11 +1,11 @@
-"""Unit tests for inlined orso utilities."""
+"""Unit tests for inlined utilities (random_string, caches)."""
 
 import threading
 import time
 
 import pytest
 
-from opteryx.utils._orso_utils import (
+from opteryx.utils import (
     lru_cache_with_expiry,
     random_int,
     random_string,

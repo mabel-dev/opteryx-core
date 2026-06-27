@@ -8,25 +8,21 @@ from opteryx.models import Node, QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.planner.optimizer.strategies.predicate_ordering import order_predicates
-from opteryx.types import OrsoTypes
-from opteryx.types.schema import ConstantColumn, FlatColumn
+from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
+from opteryx.types.schema import ConstantColumn, SchemaColumn
 
 
-def _literal(value_type, value, *, element_type=None):
+def _literal(value_type, value):
     return Node(
         NodeType.LITERAL,
         type=value_type,
         value=value,
-        element_type=element_type,
-        schema_column=ConstantColumn(
-            name="literal", type=value_type, value=value, element_type=element_type
-        ),
+        schema_column=ConstantColumn(name="literal", column_type=value_type, value=value),
     )
 
 
 def _identifier(name, value_type):
-    column = FlatColumn(name=name, type=value_type)
-    column.identity = name
+    column = SchemaColumn(name=name, column_type=value_type, identity=name)
     return Node(NodeType.IDENTIFIER, schema_column=column)
 
 
@@ -41,15 +37,15 @@ def test_constant_folding_folds_constant_map_access_expression():
     expr = Node(
         NodeType.BINARY_OPERATOR,
         value="MapAccess",
-        left=_literal(OrsoTypes.ARRAY, [10, 20, 30], element_type=OrsoTypes.INTEGER),
-        right=_literal(OrsoTypes.INTEGER, 1),
-        schema_column=ConstantColumn(name="result", type=OrsoTypes.INTEGER),
+        left=_literal(ARRAY(INT64), [10, 20, 30]),
+        right=_literal(INT64, 1),
+        schema_column=ConstantColumn(name="result", column_type=INT64),
     )
 
     folded = fold_constants(expr, telemetry)
 
     assert folded.node_type == NodeType.LITERAL
-    assert folded.type == OrsoTypes.INTEGER
+    assert folded.type == INT64
     assert folded.value == 20
 
 
@@ -59,27 +55,27 @@ def test_predicate_ordering_treats_nested_function_map_access_as_complex():
     cheap_condition = Node(
         NodeType.COMPARISON_OPERATOR,
         value="Eq",
-        left=_identifier("id", OrsoTypes.INTEGER),
-        right=_literal(OrsoTypes.INTEGER, 1),
+        left=_identifier("id", INT64),
+        right=_literal(INT64, 1),
     )
 
     split_fn = Node(
         NodeType.FUNCTION,
         value="SPLIT",
-        parameters=[_identifier("name", OrsoTypes.VARCHAR), _literal(OrsoTypes.VARCHAR, " ")],
+        parameters=[_identifier("name", VARCHAR), _literal(VARCHAR, " ")],
     )
     map_access = Node(
         NodeType.BINARY_OPERATOR,
         value="MapAccess",
         left=split_fn,
-        right=_literal(OrsoTypes.INTEGER, 0),
-        schema_column=ConstantColumn(name="first_part", type=OrsoTypes.VARCHAR),
+        right=_literal(INT64, 0),
+        schema_column=ConstantColumn(name="first_part", column_type=VARCHAR),
     )
     complex_condition = Node(
         NodeType.COMPARISON_OPERATOR,
         value="Eq",
         left=map_access,
-        right=_literal(OrsoTypes.VARCHAR, "Neil"),
+        right=_literal(VARCHAR, "Neil"),
     )
 
     ordered = order_predicates(

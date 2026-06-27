@@ -33,7 +33,6 @@ from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(1, str(HERE.parents[3] / "orso"))
 sys.path.insert(1, str(HERE.parents[2]))
 
 import opteryx  # noqa: E402

@@ -5,7 +5,7 @@
 from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
-from opteryx.types import OrsoTypes
+from opteryx.types.logical_type import VARCHAR
 
 
 class _Aggregate:
@@ -41,7 +41,7 @@ class _SchemaColumn:
 
 
 class _ExprNode:
-    def __init__(self, node_type, identity, value=None, parameters=None, value_type=OrsoTypes.VARCHAR):
+    def __init__(self, node_type, identity, value=None, parameters=None, value_type=VARCHAR):
         self.node_type = node_type
         self.schema_column = _SchemaColumn(identity)
         self.value = value

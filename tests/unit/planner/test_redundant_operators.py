@@ -21,8 +21,8 @@ from opteryx.planner.optimizer.strategies.redundant_operators import (
     RedundantOperationsStrategy,
 )
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
-from opteryx.types import OrsoTypes
-from opteryx.types.schema import FlatColumn
+from opteryx.types.logical_type import INT64
+from opteryx.types.schema import SchemaColumn
 from tests.helpers import execute_and_get_rowcount
 
 
@@ -34,9 +34,8 @@ def _physical_node_types(sql: str):
 
 
 def _column(name):
-    """Build an IDENTIFIER Node with a FlatColumn whose identity is its name."""
-    schema_column = FlatColumn(name=name, type=OrsoTypes.INTEGER)
-    schema_column.identity = name
+    """Build an IDENTIFIER Node with a SchemaColumn whose identity is its name."""
+    schema_column = SchemaColumn(name=name, column_type=INT64, identity=name)
     return Node(NodeType.IDENTIFIER, schema_column=schema_column)
 
 

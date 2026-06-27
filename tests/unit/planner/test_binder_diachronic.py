@@ -4,15 +4,24 @@ from opteryx.connectors.capabilities import Diachronic
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import BinderVisitor
-from opteryx.types import OrsoTypes
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.logical_type import INT64
+from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 
 
 class FakeConnector(Diachronic):
     __mode__ = "FAKE"
 
     def get_dataset_schema(self):
-        return RelationSchema(name="fake", columns=[FlatColumn(name="id", type=OrsoTypes.INTEGER)])
+        return RelationSchema(
+            name="fake",
+            columns=[
+                SchemaColumn(
+                    name="id",
+                    column_type=INT64,
+                    identity=mint_column_identity("fake", "id"),
+                )
+            ],
+        )
 
 
 def test_binder_sets_diachronic_dates():

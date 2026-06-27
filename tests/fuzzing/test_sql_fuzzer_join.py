@@ -17,17 +17,17 @@ import pytest
 
 from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 from opteryx.models import QueryTelemetry
-from opteryx.types import OrsoTypes
+from opteryx.types import LogicalCategory
 from opteryx.utils import random_int, random_string
 from opteryx.utils.formatter import format_sql
 
 
 def random_value(t):
-    if t == OrsoTypes.VARCHAR:
+    if t == LogicalCategory.VARCHAR:
         return f"'{random_string(4)}'"
-    if t == OrsoTypes.BLOB:
+    if t == LogicalCategory.VARBINARY:
         return f"b'{random_string(8)}'"
-    if t in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+    if t in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP):
         # Use a fixed reference date to ensure reproducibility
         reference_date = datetime.datetime(2024, 1, 1, 0, 0, 0)
         if random.random() < 0.5:
@@ -40,26 +40,27 @@ def random_value(t):
 
 def generate_condition(table, columns):
     where_column = columns[random.choice(range(len(columns)))]
-    while where_column.type in (OrsoTypes.ARRAY, OrsoTypes.STRUCT):
+    # STRUCT has no LogicalCategory member; ARRAY is the only complex type to exclude.
+    while where_column.category in (LogicalCategory.ARRAY,):
         where_column = columns[random.choice(range(len(columns)))]
     if random.random() < 0.1:
         where_operator = random.choice(["IS", "IS NOT"])
-        if where_column.type == OrsoTypes.BOOLEAN:
+        if where_column.category == LogicalCategory.BOOLEAN:
             where_value = random.choice(["TRUE", "FALSE", "NULL"])
         else:
             where_value = "NULL"
-    elif where_column.type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB) and random.random() < 0.5:
+    elif where_column.category in (LogicalCategory.VARCHAR, LogicalCategory.VARBINARY) and random.random() < 0.5:
         where_operator = random.choice(
             ["LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE", "RLIKE", "NOT RLIKE"]
         )
         where_value = (
-            random_value(where_column.type).replace("1", "%").replace("A", "%").replace("6", "_")
+            random_value(where_column.category).replace("1", "%").replace("A", "%").replace("6", "_")
         )
     elif random.random() < 0.8:
         where_operator = random.choice(["==", "<>", "=", "!=", "<", "<=", ">", ">="])
-        where_value = f"{str(random_value(where_column.type))}"
+        where_value = f"{str(random_value(where_column.category))}"
     else:
-        return f"{table}.{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}"
+        return f"{table}.{where_column.name} BETWEEN {str(random_value(where_column.category))} AND {str(random_value(where_column.category))}"
     return f"{table}.{where_column.name} {where_operator} {where_value}"
 
 
@@ -89,9 +90,8 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
 
         left_column = columns1[random.choice(range(len(columns1)))]
         right_column = columns2[random.choice(range(len(columns2)))]
-        while left_column.type != right_column.type or left_column.type in (
-            OrsoTypes.ARRAY,
-            OrsoTypes.STRUCT,
+        while left_column.category != right_column.category or left_column.category in (
+            LogicalCategory.ARRAY,
         ):
             left_column = columns1[random.choice(range(len(columns1)))]
             right_column = columns2[random.choice(range(len(columns2)))]

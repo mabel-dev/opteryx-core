@@ -1,13 +1,14 @@
 name: Release to PyPI
 
 on:
-  release:
-    types: [published]
-    branches:
-      - 'main'
   push:
     tags:
-      - 'ci-*'
+      # Releasing opteryx_core is prefix-scoped so it can never be triggered by a
+      # rugo release (rugo uses `rugo-*` tags — see release-rugo.yaml). Previously
+      # this ran on every `release: published`, so a `rugo-` GitHub Release fired
+      # it too; tag-prefix triggers make the two release decisions independent.
+      - 'opteryx-*'   # release opteryx_core to PyPI
+      - 'ci-*'        # CI / dry-run builds
 
 jobs:
   build-manylinux:

@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <new>        // std::bad_alloc (not transitively provided by <stdexcept> on all libc++)
 #include <stdexcept>
 #include "core/buffers.h"
 #include "core/alloc.h"

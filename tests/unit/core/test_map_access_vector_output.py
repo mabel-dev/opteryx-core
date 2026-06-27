@@ -9,12 +9,12 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 from draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType, evaluate_and_append
 from opteryx.models import Node
-from opteryx.types import OrsoTypes
+from opteryx.types.logical_type import INT64, VARCHAR
 import opteryx
 
 
 def _schema(identity: str, value_type):
-    return SimpleNamespace(identity=identity, type=value_type, name=identity)
+    return SimpleNamespace(identity=identity, column_type=value_type, name=identity)
 
 
 def test_map_access_string_projection_returns_draken_vector():
@@ -23,19 +23,19 @@ def test_map_access_string_projection_returns_draken_vector():
     user_name = Node(
         NodeType.IDENTIFIER,
         value="user_name",
-        schema_column=_schema("user_name", OrsoTypes.VARCHAR),
+        schema_column=_schema("user_name", VARCHAR),
     )
     zero = Node(
         NodeType.LITERAL,
         value=0,
-        schema_column=_schema("zero", OrsoTypes.INTEGER),
+        schema_column=_schema("zero", INT64),
     )
     first_char = Node(
         NodeType.EXTRACTION_OPERATOR,
         value="MapAccess",
         left=user_name,
         right=zero,
-        schema_column=_schema("a", OrsoTypes.VARCHAR),
+        schema_column=_schema("a", VARCHAR),
     )
 
     out = evaluate_and_append([first_char], morsel)

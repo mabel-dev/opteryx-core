@@ -3,8 +3,9 @@
 
 import pytest
 
-from opteryx.types import OrsoTypes
-from opteryx.types.schema import ColumnDisposition, ConstantColumn, FlatColumn, RelationSchema
+from opteryx.types import LogicalCategory
+from opteryx.types.logical_type import ARRAY, DECIMAL, FLOAT64, INT64, VARCHAR
+from opteryx.types.schema import ColumnDisposition, ConstantColumn, RelationSchema, SchemaColumn
 
 
 class TestColumnDisposition:
@@ -17,80 +18,76 @@ class TestColumnDisposition:
         assert ColumnDisposition.INDEXED == "INDEXED"
 
 
-class TestFlatColumn:
-    """Test FlatColumn dataclass."""
+class TestSchemaColumn:
+    """Test SchemaColumn dataclass."""
 
     def test_create_basic_column(self):
-        """Test creating a basic FlatColumn."""
-        col = FlatColumn(name="test_col", type=OrsoTypes.VARCHAR, identity="test_col")
+        """Test creating a basic SchemaColumn."""
+        col = SchemaColumn(name="test_col", column_type=VARCHAR, identity="test_col")
         assert col.name == "test_col"
-        assert col.type == OrsoTypes.VARCHAR
-        assert col.identity == "test_col"
+        assert col.category == LogicalCategory.VARCHAR
+        assert col.identity == b"test_col"
         assert col.nullable is True
         assert col.default is None
 
     def test_create_column_with_metadata(self):
-        """Test creating FlatColumn with additional metadata."""
-        col = FlatColumn(
+        """Test creating SchemaColumn with additional metadata."""
+        col = SchemaColumn(
             name="age",
-            type=OrsoTypes.INTEGER,
+            column_type=INT64,
             identity="age",
             nullable=False,
             description="User age",
             disposition=ColumnDisposition.INDEXED,
         )
         assert col.name == "age"
-        assert col.type == OrsoTypes.INTEGER
+        assert col.category == LogicalCategory.INTEGER
         assert col.nullable is False
         assert col.description == "User age"
         assert col.disposition == ColumnDisposition.INDEXED
 
     def test_column_str(self):
         """Test string representation of column."""
-        col = FlatColumn(name="test_col", type=OrsoTypes.VARCHAR, identity="test_col")
+        col = SchemaColumn(name="test_col", column_type=VARCHAR, identity="test_col")
         assert str(col) == "test_col:VARCHAR"
 
     def test_column_repr(self):
         """Test repr of column."""
-        col = FlatColumn(name="test_col", type=OrsoTypes.VARCHAR, identity="test_col")
+        col = SchemaColumn(name="test_col", column_type=VARCHAR, identity="test_col")
         repr_str = repr(col)
-        assert "FlatColumn" in repr_str
+        assert "SchemaColumn" in repr_str
         assert "test_col" in repr_str
 
     def test_column_all_names_without_aliases(self):
         """Test all_names property without aliases."""
-        col = FlatColumn(name="col1", type=OrsoTypes.INTEGER, identity="col1")
+        col = SchemaColumn(name="col1", column_type=INT64, identity="col1")
         assert col.all_names == ["col1"]
 
     def test_column_all_names_with_aliases(self):
         """Test all_names property with aliases."""
-        col = FlatColumn(
-            name="col1", type=OrsoTypes.INTEGER, identity="col1", aliases=["col_one", "column_1"]
+        col = SchemaColumn(
+            name="col1", column_type=INT64, identity="col1", aliases=["col_one", "column_1"]
         )
         assert col.all_names == ["col1", "col_one", "column_1"]
 
     def test_column_with_complex_type(self):
         """Test column with complex type (e.g., ARRAY with element type)."""
-        col = FlatColumn(
-            name="tags", type=OrsoTypes.ARRAY, identity="tags", element_type=OrsoTypes.VARCHAR
-        )
-        assert col.type == OrsoTypes.ARRAY
-        assert col.element_type == OrsoTypes.VARCHAR
+        col = SchemaColumn(name="tags", column_type=ARRAY(VARCHAR), identity="tags")
+        assert col.category == LogicalCategory.ARRAY
+        assert col.column_type.element == VARCHAR
 
     def test_column_with_decimal_precision_scale(self):
         """Test column with DECIMAL precision and scale."""
-        col = FlatColumn(
-            name="price", type=OrsoTypes.DECIMAL, identity="price", precision=10, scale=2
-        )
-        assert col.type == OrsoTypes.DECIMAL
-        assert col.precision == 10
-        assert col.scale == 2
+        col = SchemaColumn(name="price", column_type=DECIMAL(10, 2), identity="price")
+        assert col.category == LogicalCategory.DECIMAL
+        assert col.column_type.logical.precision == 10
+        assert col.column_type.logical.scale == 2
 
     def test_column_to_dict(self):
         """Test converting column to dictionary."""
-        col = FlatColumn(
+        col = SchemaColumn(
             name="test_col",
-            type=OrsoTypes.VARCHAR,
+            column_type=VARCHAR,
             identity="test_col",
             nullable=False,
             description="Test column",
@@ -110,26 +107,26 @@ class TestFlatColumn:
             "identity": "test_col",
             "nullable": False,
         }
-        col = FlatColumn.from_dict(col_dict)
+        col = SchemaColumn.from_dict(col_dict)
         assert col.name == "test_col"
-        assert col.type == OrsoTypes.VARCHAR
-        assert col.identity == "test_col"
+        assert col.category == LogicalCategory.VARCHAR
+        assert col.identity == b"test_col"
         assert col.nullable is False
 
     def test_column_roundtrip(self):
         """Test to_dict/from_dict roundtrip."""
-        original = FlatColumn(
+        original = SchemaColumn(
             name="col1",
-            type=OrsoTypes.DOUBLE,
+            column_type=FLOAT64,
             identity="col1",
             nullable=True,
             description="Test",
             aliases=["c1"],
         )
         col_dict = original.to_dict()
-        restored = FlatColumn.from_dict(col_dict)
+        restored = SchemaColumn.from_dict(col_dict)
         assert restored.name == original.name
-        assert restored.type == original.type
+        assert restored.column_type == original.column_type
         assert restored.identity == original.identity
         assert restored.nullable == original.nullable
         assert restored.description == original.description
@@ -141,21 +138,21 @@ class TestConstantColumn:
 
     def test_create_constant_column(self):
         """Test creating a ConstantColumn."""
-        col = ConstantColumn(name="const_42", type=OrsoTypes.INTEGER, identity="const_42", value=42)
+        col = ConstantColumn(name="const_42", column_type=INT64, identity="const_42", value=42)
         assert col.name == "const_42"
-        assert col.type == OrsoTypes.INTEGER
+        assert col.category == LogicalCategory.INTEGER
         assert col.value == 42
 
     def test_constant_column_str(self):
         """Test string representation of constant column."""
-        col = ConstantColumn(name="const_42", type=OrsoTypes.INTEGER, identity="const_42", value=42)
+        col = ConstantColumn(name="const_42", column_type=INT64, identity="const_42", value=42)
         assert str(col) == "const_42=42"
 
-    def test_constant_column_inherits_from_flatcolumn(self):
-        """Test that ConstantColumn inherits FlatColumn properties."""
+    def test_constant_column_inherits_from_schemacolumn(self):
+        """Test that ConstantColumn inherits SchemaColumn properties."""
         col = ConstantColumn(
             name="const_val",
-            type=OrsoTypes.VARCHAR,
+            column_type=VARCHAR,
             identity="const_val",
             value="hello",
             nullable=False,
@@ -177,8 +174,8 @@ class TestRelationSchema:
 
     def test_create_schema_with_columns(self):
         """Test creating a schema with columns."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         schema = RelationSchema(name="users", columns=[col1, col2])
         assert schema.name == "users"
         assert schema.num_columns == 2
@@ -186,32 +183,32 @@ class TestRelationSchema:
 
     def test_schema_str(self):
         """Test string representation of schema."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         schema = RelationSchema(name="users", columns=[col1, col2])
         schema_str = str(schema)
         assert "users" in schema_str
-        assert "id:INTEGER" in schema_str
+        assert "id:INT64" in schema_str
         assert "name:VARCHAR" in schema_str
 
     def test_schema_column_lookup(self):
         """Test column lookup by name."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         found_col = schema.column("id")
         assert found_col is not None
         assert found_col.name == "id"
-        assert found_col.type == OrsoTypes.INTEGER
+        assert found_col.category == LogicalCategory.INTEGER
 
         not_found = schema.column("missing")
         assert not_found is None
 
     def test_schema_column_lookup_with_aliases(self):
         """Test column lookup including aliases."""
-        col = FlatColumn(
-            name="user_id", type=OrsoTypes.INTEGER, identity="user_id", aliases=["uid", "id"]
+        col = SchemaColumn(
+            name="user_id", column_type=INT64, identity="user_id", aliases=["uid", "id"]
         )
         schema = RelationSchema(name="users", columns=[col])
 
@@ -230,8 +227,8 @@ class TestRelationSchema:
 
     def test_schema_pop_column(self):
         """Test removing a column."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         assert schema.num_columns == 2
@@ -246,8 +243,8 @@ class TestRelationSchema:
 
     def test_schema_all_column_names_with_aliases(self):
         """Test all_column_names including aliases."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id", aliases=["user_id"])
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id", aliases=["user_id"])
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         all_names = schema.all_column_names
@@ -258,10 +255,10 @@ class TestRelationSchema:
 
     def test_schema_validate_duplicate_names(self):
         """Test schema validation detects duplicate column names."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(
             name="id",  # Duplicate name
-            type=OrsoTypes.VARCHAR,
+            column_type=VARCHAR,
             identity="id2",
         )
         schema = RelationSchema(name="users", columns=[col1, col2])
@@ -271,15 +268,15 @@ class TestRelationSchema:
 
     def test_schema_validate_valid(self):
         """Test schema validation passes for valid schema."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         assert schema.validate() is True
 
     def test_schema_to_dict(self):
         """Test converting schema to dictionary."""
-        col = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
+        col = SchemaColumn(name="id", column_type=INT64, identity="id")
         schema = RelationSchema(name="users", columns=[col], primary_key="id")
         schema_dict = schema.to_dict()
 
@@ -307,8 +304,8 @@ class TestRelationSchema:
 
     def test_schema_json_roundtrip(self):
         """Test to_json/from_json roundtrip."""
-        col1 = FlatColumn(name="id", type=OrsoTypes.INTEGER, identity="id")
-        col2 = FlatColumn(name="name", type=OrsoTypes.VARCHAR, identity="name")
+        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
+        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
         original = RelationSchema(name="users", columns=[col1, col2], primary_key="id")
 
         json_str = original.to_json()
@@ -321,8 +318,8 @@ class TestRelationSchema:
         assert restored.primary_key == original.primary_key
 
     def test_schema_find_column_alias(self):
-        """Test find_column method (orso compatibility)."""
-        col = FlatColumn(name="user_id", type=OrsoTypes.INTEGER, identity="user_id")
+        """Test find_column method (API compatibility)."""
+        col = SchemaColumn(name="user_id", column_type=INT64, identity="user_id")
         schema = RelationSchema(name="users", columns=[col])
 
         found = schema.find_column("user_id")

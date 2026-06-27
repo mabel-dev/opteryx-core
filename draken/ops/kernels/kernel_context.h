@@ -36,7 +36,7 @@ struct cast_decimal_ctx {
  * Stores the target element type for array cast.
  */
 struct cast_array_ctx {
-    int element_type;  // OrsoType enum value
+    int element_type;  // DrakenType enum value
 };
 
 /**

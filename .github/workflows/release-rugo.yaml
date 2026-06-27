@@ -1,15 +1,14 @@
 name: Release rugo to PyPI
 
 # Releasing rugo is a SEPARATE decision from releasing opteryx_core. This runs
-# only for tags prefixed `rugo-` (e.g. `rugo-0.2.0`); opteryx's release.yaml
-# triggers on GitHub Releases + `ci-*` tags, so a `rugo-*` tag push never fires
-# it. (Caveat: a GitHub *Release* with a rugo- tag also emits `release:
-# published`, which WOULD fire release.yaml unless that workflow is guarded —
-# prefer a plain tag push for rugo, or add the guard. See the conversation.)
+# only for tags prefixed `rugo-` (e.g. `rugo-0.2.0`). opteryx_core's release.yaml
+# is prefix-scoped to `opteryx-*` tags, so the two are mutually exclusive — a
+# `rugo-*` tag (or a rugo- GitHub Release) never fires the opteryx pipeline, and
+# vice versa.
 #
 # Unlike opteryx_core (3.14 / x86-64 only), rugo targets a broad matrix:
 #   Python  : 3.11, 3.12, 3.13, 3.14 (GIL) + 3.13t, 3.14t (free-threaded)
-#   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64 + x86-64
+#   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
 on:
   push:
     tags:
@@ -60,8 +59,9 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        # macos-14 = Apple Silicon (arm64); macos-13 = Intel (x86_64).
-        os: [macos-14, macos-13]
+        # macos-14 = Apple Silicon (arm64) only. macos-13 (Intel x86_64) was
+        # dropped — rugo publishes macOS arm64 wheels, not Intel.
+        os: [macos-14]
         pybuild: ["3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -79,8 +79,8 @@ jobs:
 
       - name: Build rugo wheel (${{ matrix.os }}, py ${{ matrix.pybuild }})
         env:
-          # Deployment target: 11.0 for arm64 (macos-14), 10.13 for x86_64 (macos-13).
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.os == 'macos-14' && '11.0' || '10.13' }}
+          # arm64 (macos-14) deployment target.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: ./dev/build-rugo-wheels-macos.sh
 
       - name: Archive wheels

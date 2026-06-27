@@ -20,18 +20,18 @@ import pytest
 
 import opteryx
 from opteryx.managers import virtual_datasets
-from opteryx.types import OrsoTypes
+from opteryx.types import LogicalCategory
 from opteryx.utils import random_string
 from opteryx.utils.formatter import format_sql
 from tests.helpers import execute_and_get_shape
 
 
 def random_value(t):
-    if t == OrsoTypes.VARCHAR:
+    if t == LogicalCategory.VARCHAR:
         return f"'{random_string(4)}'"
-    if t == OrsoTypes.BLOB:
+    if t == LogicalCategory.VARBINARY:
         return f"b'{random_string(8)}'"
-    if t in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+    if t in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP):
         # Use a fixed reference date to ensure reproducibility
         reference_date = datetime.datetime(2024, 1, 1, 0, 0, 0)
         if random.random() < 0.5:
@@ -44,26 +44,27 @@ def random_value(t):
 
 def generate_condition(columns):
     where_column = columns[random.choice(range(len(columns)))]
-    while where_column.type in (OrsoTypes.ARRAY, OrsoTypes.STRUCT):
+    # STRUCT has no LogicalCategory member; ARRAY is the only complex type to exclude.
+    while where_column.category in (LogicalCategory.ARRAY,):
         where_column = columns[random.choice(range(len(columns)))]
     if random.random() < 0.1:
         where_operator = random.choice(["IS", "IS NOT"])
-        if where_column.type == OrsoTypes.BOOLEAN:
+        if where_column.category == LogicalCategory.BOOLEAN:
             where_value = random.choice(["TRUE", "FALSE", "NULL"])
         else:
             where_value = "NULL"
-    elif where_column.type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB) and random.random() < 0.5:
+    elif where_column.category in (LogicalCategory.VARCHAR, LogicalCategory.VARBINARY) and random.random() < 0.5:
         where_operator = random.choice(
             ["LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE", "RLIKE", "NOT RLIKE"]
         )
         where_value = (
-            random_value(where_column.type).replace("1", "%").replace("A", "%").replace("6", "_")
+            random_value(where_column.category).replace("1", "%").replace("A", "%").replace("6", "_")
         )
     elif random.random() < 0.8:
         where_operator = random.choice(["==", "<>", "=", "!=", "<", "<=", ">", ">="])
-        where_value = f"{str(random_value(where_column.type))}"
+        where_value = f"{str(random_value(where_column.category))}"
     else:
-        return f"{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}"
+        return f"{where_column.name} BETWEEN {str(random_value(where_column.category))} AND {str(random_value(where_column.category))}"
     return f"{where_column.name} {where_operator} {where_value}"
 
 
@@ -82,23 +83,21 @@ def generate_random_sql_select(columns, table):
         distinct = "DISTINCT " if random.random() < 0.1 else ""
         agg_func = random.choice(["MIN", "MAX", "SUM", "AVG", "COUNT", "COUNT_DISTINCT"])
         agg_column = columns[random.choice(range(len(columns)))]
-        while agg_func in ("SUM", "AVG") and agg_column.type in (
-            OrsoTypes.ARRAY,
-            OrsoTypes.STRUCT,
-            OrsoTypes.VARCHAR,
-            OrsoTypes.BLOB,
-            OrsoTypes.TIMESTAMP,
-            OrsoTypes.DATE,
+        while agg_func in ("SUM", "AVG") and agg_column.category in (
+            LogicalCategory.ARRAY,
+            LogicalCategory.VARCHAR,
+            LogicalCategory.VARBINARY,
+            LogicalCategory.TIMESTAMP,
+            LogicalCategory.DATE,
         ):
             agg_column = columns[random.choice(range(len(columns)))]
-        while agg_func in ("MIN", "MAX", "COUNT_DISTINCT", "COUNT") and agg_column.type in (
-            OrsoTypes.ARRAY,
-            OrsoTypes.STRUCT,
+        while agg_func in ("MIN", "MAX", "COUNT_DISTINCT", "COUNT") and agg_column.category in (
+            LogicalCategory.ARRAY,
         ):
             agg_column = columns[random.choice(range(len(columns)))]
         select_clause = "SELECT " + distinct + agg_func + "(" + agg_column.name + ")"
 
-        column_list = [c for c in column_list if c.type not in (OrsoTypes.ARRAY, OrsoTypes.STRUCT)]
+        column_list = [c for c in column_list if c.category not in (LogicalCategory.ARRAY,)]
     elif random.random() < 0.8:
         select_clause = "SELECT " + ", ".join(c.name for c in column_list)
     elif random.random() < 0.5:
@@ -126,7 +125,7 @@ def generate_random_sql_select(columns, table):
     # Add ORDER BY clause with 60% chance
     if not agg_column and not is_count_star and random.random() < 0.6:
         order_column = columns[random.choice(range(len(columns)))]
-        if order_column.type not in (OrsoTypes.ARRAY, OrsoTypes.STRUCT):
+        if order_column.category not in (LogicalCategory.ARRAY,):
             order_direction = random.choice(["ASC", "DESC", ""])
             select_clause = select_clause + " ORDER BY " + order_column.name + " " + order_direction
     if random.random() < 0.2:

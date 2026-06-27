@@ -2,7 +2,8 @@ import pytest
 
 from opteryx.connectors.opteryx_connector import OpteryxConnector
 from opteryx.connectors.opteryx_connector import OpteryxTable
-from opteryx.types import OrsoTypes
+from opteryx.types import LogicalCategory
+from opteryx.types.logical_type import VARCHAR
 from opteryx.types.schema import RelationSchema
 
 
@@ -94,7 +95,9 @@ def test_normalize_external_schema_to_internal_relationschema():
     assert isinstance(schema, RelationSchema)
     assert schema.name == "public.github.events"
     assert [c.name for c in schema.columns] == ["id", "tags", "payload"]
-    assert schema.columns[0].type == OrsoTypes.INTEGER
-    assert schema.columns[1].type == OrsoTypes.ARRAY
-    assert schema.columns[1].element_type == OrsoTypes.VARCHAR
-    assert schema.columns[2].type == OrsoTypes.JSONB
+    assert schema.columns[0].category == LogicalCategory.INTEGER
+    assert schema.columns[1].category == LogicalCategory.ARRAY
+    assert schema.columns[1].column_type.element == VARCHAR
+    # JSONB resolves to NVARCHAR under the current type vocabulary
+    # (_SQL_NAME_ALIASES["JSONB"] -> NVARCHAR; there is no JSONB physical type).
+    assert schema.columns[2].category == LogicalCategory.NVARCHAR

@@ -486,7 +486,7 @@ cdef class Morsel:
             s = s.ljust(width)
             if not colorize:
                 return s
-            # Type-based colouring matching Orso's palette.
+            # Type-based colouring for the terminal palette.
             # bool must come before int (bool is a subclass of int).
             import datetime as _dt
             import decimal as _dec
@@ -593,7 +593,7 @@ cdef class Morsel:
         """Render the morsel as a table string.
 
         colorize=False  plain text (default; same as __str__).
-        colorize=True   ANSI colour codes matching Orso's terminal palette.
+        colorize=True   ANSI colour codes for the terminal palette.
         """
         return self._render_table(colorize)
 

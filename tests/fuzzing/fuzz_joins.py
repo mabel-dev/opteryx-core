@@ -17,7 +17,7 @@ import time
 import pytest
 
 from opteryx.models import QueryTelemetry
-from opteryx.types import OrsoTypes
+from opteryx.types import LogicalCategory
 from opteryx.utils import random_int, random_string
 from opteryx.utils.formatter import format_sql
 from tests.helpers import (
@@ -29,11 +29,11 @@ from tests.helpers import (
 
 
 def random_value(t):
-    if t == OrsoTypes.VARCHAR:
+    if t == LogicalCategory.VARCHAR:
         return f"'{random_string(4)}'"
-    if t == OrsoTypes.BLOB:
+    if t == LogicalCategory.VARBINARY:
         return f"b'{random_string(8)}'"
-    if t in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+    if t in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP):
         # Use a fixed reference date to ensure reproducibility
         reference_date = datetime.datetime(2024, 1, 1, 0, 0, 0)
         if random.random() < 0.5:
@@ -46,26 +46,27 @@ def random_value(t):
 
 def generate_condition(table, columns):
     where_column = columns[random.choice(range(len(columns)))]
-    while where_column.type in (OrsoTypes.ARRAY, OrsoTypes.STRUCT):
+    # STRUCT has no LogicalCategory member; ARRAY is the only complex type to exclude.
+    while where_column.category in (LogicalCategory.ARRAY,):
         where_column = columns[random.choice(range(len(columns)))]
     if random.random() < 0.1:
         where_operator = random.choice(["IS", "IS NOT"])
-        if where_column.type == OrsoTypes.BOOLEAN:
+        if where_column.category == LogicalCategory.BOOLEAN:
             where_value = random.choice(["TRUE", "FALSE", "NULL"])
         else:
             where_value = "NULL"
-    elif where_column.type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB) and random.random() < 0.5:
+    elif where_column.category in (LogicalCategory.VARCHAR, LogicalCategory.VARBINARY) and random.random() < 0.5:
         where_operator = random.choice(
             ["LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE", "RLIKE", "NOT RLIKE"]
         )
         where_value = (
-            random_value(where_column.type).replace("1", "%").replace("A", "%").replace("6", "_")
+            random_value(where_column.category).replace("1", "%").replace("A", "%").replace("6", "_")
         )
     elif random.random() < 0.8:
         where_operator = random.choice(["==", "<>", "=", "!=", "<", "<=", ">", ">="])
-        where_value = f"{str(random_value(where_column.type))}"
+        where_value = f"{str(random_value(where_column.category))}"
     else:
-        return f"{table}.{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}"
+        return f"{table}.{where_column.name} BETWEEN {str(random_value(where_column.category))} AND {str(random_value(where_column.category))}"
     return f"{table}.{where_column.name} {where_operator} {where_value}"
 
 
@@ -100,17 +101,15 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
         while attempts < 5:
             left_column = columns1[random.choice(range(len(columns1)))]
             right_column = columns2[random.choice(range(len(columns2)))]
-            if left_column.type == right_column.type and left_column.type not in (
-                OrsoTypes.ARRAY,
-                OrsoTypes.STRUCT,
+            if left_column.category == right_column.category and left_column.category not in (
+                LogicalCategory.ARRAY,
             ):
                 break
             attempts += 1
 
         # If we couldn't find matching types after 5 attempts, skip this join condition
-        if left_column.type != right_column.type or left_column.type in (
-            OrsoTypes.ARRAY,
-            OrsoTypes.STRUCT,
+        if left_column.category != right_column.category or left_column.category in (
+            LogicalCategory.ARRAY,
         ):
             return None  # Signal that this table pair doesn't work
 
@@ -166,65 +165,65 @@ import pyarrow.parquet as pq
 # Hardcoded schema from Parquet files - extracted once at setup time
 TESTDATA_SCHEMAS = {
     "testdata.planets": [
-        ("id", OrsoTypes.INTEGER),
-        ("name", OrsoTypes.VARCHAR),
-        ("mass", OrsoTypes.DOUBLE),
-        ("diameter", OrsoTypes.DOUBLE),
-        ("density", OrsoTypes.DOUBLE),
-        ("gravity", OrsoTypes.DOUBLE),
-        ("escapeVelocity", OrsoTypes.DOUBLE),
-        ("rotationPeriod", OrsoTypes.DOUBLE),
-        ("lengthOfDay", OrsoTypes.DOUBLE),
-        ("distanceFromSun", OrsoTypes.DOUBLE),
-        ("perihelion", OrsoTypes.DOUBLE),
-        ("aphelion", OrsoTypes.DOUBLE),
-        ("orbitalPeriod", OrsoTypes.DOUBLE),
-        ("orbitalVelocity", OrsoTypes.DOUBLE),
-        ("orbitalInclination", OrsoTypes.DOUBLE),
-        ("orbitalEccentricity", OrsoTypes.DOUBLE),
-        ("obliquityToOrbit", OrsoTypes.DOUBLE),
-        ("meanTemperature", OrsoTypes.DOUBLE),
-        ("surfacePressure", OrsoTypes.DOUBLE),
-        ("numberOfMoons", OrsoTypes.INTEGER),
+        ("id", LogicalCategory.INTEGER),
+        ("name", LogicalCategory.VARCHAR),
+        ("mass", LogicalCategory.FLOAT),
+        ("diameter", LogicalCategory.FLOAT),
+        ("density", LogicalCategory.FLOAT),
+        ("gravity", LogicalCategory.FLOAT),
+        ("escapeVelocity", LogicalCategory.FLOAT),
+        ("rotationPeriod", LogicalCategory.FLOAT),
+        ("lengthOfDay", LogicalCategory.FLOAT),
+        ("distanceFromSun", LogicalCategory.FLOAT),
+        ("perihelion", LogicalCategory.FLOAT),
+        ("aphelion", LogicalCategory.FLOAT),
+        ("orbitalPeriod", LogicalCategory.FLOAT),
+        ("orbitalVelocity", LogicalCategory.FLOAT),
+        ("orbitalInclination", LogicalCategory.FLOAT),
+        ("orbitalEccentricity", LogicalCategory.FLOAT),
+        ("obliquityToOrbit", LogicalCategory.FLOAT),
+        ("meanTemperature", LogicalCategory.FLOAT),
+        ("surfacePressure", LogicalCategory.FLOAT),
+        ("numberOfMoons", LogicalCategory.INTEGER),
     ],
     "testdata.satellites": [
-        ("id", OrsoTypes.INTEGER),
-        ("planetId", OrsoTypes.INTEGER),
-        ("name", OrsoTypes.VARCHAR),
-        ("gm", OrsoTypes.DOUBLE),
-        ("radius", OrsoTypes.DOUBLE),
-        ("density", OrsoTypes.DOUBLE),
-        ("magnitude", OrsoTypes.DOUBLE),
-        ("albedo", OrsoTypes.DOUBLE),
+        ("id", LogicalCategory.INTEGER),
+        ("planetId", LogicalCategory.INTEGER),
+        ("name", LogicalCategory.VARCHAR),
+        ("gm", LogicalCategory.FLOAT),
+        ("radius", LogicalCategory.FLOAT),
+        ("density", LogicalCategory.FLOAT),
+        ("magnitude", LogicalCategory.FLOAT),
+        ("albedo", LogicalCategory.FLOAT),
     ],
     "testdata.missions": [
-        ("Company", OrsoTypes.VARCHAR),
-        ("Location", OrsoTypes.VARCHAR),
-        ("Price", OrsoTypes.DOUBLE),
-        ("Lauched_at", OrsoTypes.TIMESTAMP),
-        ("Rocket", OrsoTypes.VARCHAR),
-        ("Rocket_Status", OrsoTypes.VARCHAR),
-        ("Mission", OrsoTypes.VARCHAR),
-        ("Mission_Status", OrsoTypes.VARCHAR),
+        ("Company", LogicalCategory.VARCHAR),
+        ("Location", LogicalCategory.VARCHAR),
+        ("Price", LogicalCategory.FLOAT),
+        ("Lauched_at", LogicalCategory.TIMESTAMP),
+        ("Rocket", LogicalCategory.VARCHAR),
+        ("Rocket_Status", LogicalCategory.VARCHAR),
+        ("Mission", LogicalCategory.VARCHAR),
+        ("Mission_Status", LogicalCategory.VARCHAR),
     ],
     "testdata.astronauts": [
-        ("name", OrsoTypes.VARCHAR),
-        ("year", OrsoTypes.INTEGER),
-        ("group", OrsoTypes.DOUBLE),
-        ("status", OrsoTypes.VARCHAR),
-        ("birth_date", OrsoTypes.DATE),
-        ("birth_place", OrsoTypes.VARCHAR),
-        ("gender", OrsoTypes.VARCHAR),
-        ("undergraduate_major", OrsoTypes.VARCHAR),
-        ("graduate_major", OrsoTypes.VARCHAR),
-        ("military_rank", OrsoTypes.VARCHAR),
-        ("military_branch", OrsoTypes.VARCHAR),
-        ("space_flights", OrsoTypes.INTEGER),
-        ("space_flight_hours", OrsoTypes.INTEGER),
-        ("space_walks", OrsoTypes.INTEGER),
-        ("space_walks_hours", OrsoTypes.DOUBLE),
-        ("death_date", OrsoTypes.DATE),
-        ("death_mission", OrsoTypes.VARCHAR),
+        ("name", LogicalCategory.VARCHAR),
+        ("year", LogicalCategory.INTEGER),
+        ("group", LogicalCategory.FLOAT),
+        ("status", LogicalCategory.VARCHAR),
+        ("birth_date", LogicalCategory.DATE),
+        ("birth_place", LogicalCategory.VARCHAR),
+        ("gender", LogicalCategory.VARCHAR),
+        ("undergraduate_major", LogicalCategory.VARCHAR),
+        ("graduate_major", LogicalCategory.VARCHAR),
+        ("military_rank", LogicalCategory.VARCHAR),
+        ("military_branch", LogicalCategory.VARCHAR),
+        ("space_flights", LogicalCategory.INTEGER),
+        ("space_flight_hours", LogicalCategory.INTEGER),
+        ("space_walks", LogicalCategory.INTEGER),
+        ("space_walks_hours", LogicalCategory.FLOAT),
+        ("death_date", LogicalCategory.DATE),
+        ("death_mission", LogicalCategory.VARCHAR),
     ],
 }
 
@@ -235,12 +234,15 @@ def _get_testdata_schema(table_path):
         columns = []
 
         class Column:
-            def __init__(self, name, type_):
+            def __init__(self, name, category):
                 self.name = name
-                self.type = type_
+                # `.category` mirrors SchemaColumn.category (a LogicalCategory),
+                # so both this hardcoded path and the virtual_datasets fallback
+                # expose the same attribute to the generators.
+                self.category = category
 
-        for col_name, col_type in TESTDATA_SCHEMAS[table_path]:
-            columns.append(Column(col_name, col_type))
+        for col_name, col_category in TESTDATA_SCHEMAS[table_path]:
+            columns.append(Column(col_name, col_category))
         return table_path, columns
     return None, []
 

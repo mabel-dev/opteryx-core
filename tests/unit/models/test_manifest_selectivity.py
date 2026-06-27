@@ -19,8 +19,8 @@ from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
-from opteryx.types import OrsoTypes
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.logical_type import INT64
+from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,10 @@ from opteryx.types.schema import FlatColumn, RelationSchema
 def _schema(*names: str) -> RelationSchema:
     return RelationSchema(
         name="t",
-        columns=[FlatColumn(name=n, type=OrsoTypes.INTEGER) for n in names],
+        columns=[
+            SchemaColumn(name=n, column_type=INT64, identity=mint_column_identity("t", n))
+            for n in names
+        ],
     )
 
 

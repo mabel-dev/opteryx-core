@@ -11,7 +11,7 @@ from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import get_catalog
-from opteryx.types import OrsoTypes
+from opteryx.types.logical_type import serialize_column_type
 
 _TYPE_LABELS = {
     "any": "any",
@@ -22,20 +22,6 @@ _TYPE_LABELS = {
     "numeric_vector": "vector",
     "string": "varchar",
     "temporal": "temporal",
-}
-
-_ORSO_TYPE_LABELS = {
-    OrsoTypes.ARRAY: "array",
-    OrsoTypes.BLOB: "blob",
-    OrsoTypes.BOOLEAN: "boolean",
-    OrsoTypes.DATE: "date",
-    OrsoTypes.DOUBLE: "double",
-    OrsoTypes.INTEGER: "integer",
-    OrsoTypes.NULL: "null",
-    OrsoTypes.TIME: "time",
-    OrsoTypes.TIMESTAMP: "timestamp",
-    OrsoTypes.VECTOR: "vector",
-    OrsoTypes.VARCHAR: "varchar",
 }
 
 _DOCUMENTATION_CATEGORIES = OrderedDict(
@@ -509,10 +495,11 @@ def _normalise_sentence(text: str) -> str:
     return text
 
 
-def _orso_type_label(type_: OrsoTypes | None) -> str:
-    if type_ is None:
+def _type_label(column_type) -> str:
+    """Canonical Draken type name for a ColumnType (lowercased), or "unknown"."""
+    if column_type is None:
         return "unknown"
-    return _ORSO_TYPE_LABELS.get(type_, str(type_).lower())
+    return serialize_column_type(column_type).lower()
 
 
 def _documentation_category(
@@ -659,7 +646,7 @@ def _return_metadata(function: FunctionDefinition, overload: FunctionOverload) -
 
     return_spec = overload.return_spec
     if return_spec.mode == "fixed":
-        type_label = _orso_type_label(return_spec.fixed_type)
+        type_label = _type_label(return_spec.fixed_type)
         if type_label == "boolean":
             return (
                 type_label,

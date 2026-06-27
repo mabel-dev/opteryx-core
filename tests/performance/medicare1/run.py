@@ -34,7 +34,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PERF_DIR = HERE.parent  # tests/performance
-sys.path.insert(1, str(HERE.parents[3] / "orso"))
 sys.path.insert(1, str(HERE.parents[2]))
 sys.path.insert(1, str(PERF_DIR))
 

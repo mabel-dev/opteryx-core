@@ -14,8 +14,8 @@ import pytest
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ConcurrentModificationError
 from opteryx.models.file_entry import FileEntry
-from opteryx.types.schema import FlatColumn, RelationSchema
-from opteryx.types import OrsoTypes
+from opteryx.types.logical_type import INT64, TIMESTAMP, VARCHAR
+from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 
 
 @pytest.fixture
@@ -30,9 +30,24 @@ def simple_schema():
     return RelationSchema(
         name="events",
         columns=[
-            FlatColumn(name="id", type=OrsoTypes.INTEGER, nullable=False),
-            FlatColumn(name="name", type=OrsoTypes.VARCHAR, nullable=True),
-            FlatColumn(name="timestamp", type=OrsoTypes.TIMESTAMP, nullable=False),
+            SchemaColumn(
+                name="id",
+                column_type=INT64,
+                identity=mint_column_identity("events", "id"),
+                nullable=False,
+            ),
+            SchemaColumn(
+                name="name",
+                column_type=VARCHAR,
+                identity=mint_column_identity("events", "name"),
+                nullable=True,
+            ),
+            SchemaColumn(
+                name="timestamp",
+                column_type=TIMESTAMP(),
+                identity=mint_column_identity("events", "timestamp"),
+                nullable=False,
+            ),
         ],
     )
 

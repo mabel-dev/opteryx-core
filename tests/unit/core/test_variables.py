@@ -4,7 +4,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
-from opteryx.types import OrsoTypes
+from opteryx.types.logical_type import VARCHAR
 
 from opteryx.exceptions import PermissionsError
 from opteryx.models import Node
@@ -18,17 +18,17 @@ def test_variables_permissions():
     # we shouldn't be able to change the licence
     with pytest.raises(PermissionsError):
         SystemVariables["license"] = Node(
-            node_type="VARIABLE", type=OrsoTypes.VARCHAR, value="system"
+            node_type="VARIABLE", type=VARCHAR, value="system"
         )
     with pytest.raises(PermissionsError):
         connection_vars["license"] = Node(
-            node_type="VARIABLE", type=OrsoTypes.VARCHAR, value="system"
+            node_type="VARIABLE", type=VARCHAR, value="system"
         )
 
     # we shouldn't be able to set the user
     with pytest.raises(PermissionsError):
         connection_vars["external_user"] = Node(
-            node_type="VARIABLE", type=OrsoTypes.VARCHAR, value="user"
+            node_type="VARIABLE", type=VARCHAR, value="user"
         )
 
 
