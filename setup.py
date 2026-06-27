@@ -263,11 +263,8 @@ extensions = [
         "opteryx.third_party.mabel.base16",
         sources=[
             "opteryx/third_party/mabel/base16/base16.pyx",
+            # Unity build — _base16.c #includes the dispatch + per-arch SIMD sources.
             "opteryx/third_party/mabel/base16/_base16.c",
-            "opteryx/third_party/mabel/base16/_base16_dispatch.c",
-            "opteryx/third_party/mabel/base16/_base16_neon.c",
-            "opteryx/third_party/mabel/base16/_base16_avx2.c",
-            "opteryx/third_party/mabel/base16/_base16_rvv.c",
         ],
         include_dirs=include_dirs + ["opteryx/third_party/mabel"],
         extra_compile_args=C_FLAGS + ["-std=c99"],
@@ -878,18 +875,16 @@ _vectors_extra_sources = [
     "opteryx/third_party/mabel/base64/_base64_avx2.c",
     "opteryx/third_party/mabel/base64/_base64_rvv.c",
     "opteryx/third_party/mabel/base85/_base85.c",
-    # vector_hash_codec — vendored crypto digests + mabel base16 (dispatch + per-arch
-    # SIMD TUs, mirroring base64; each SIMD source self-guards so all variants link
-    # on every platform — b16tobin_len/bintob16 live in _base16_dispatch.c)
+    # vector_hash_codec — vendored crypto digests + mabel base16 (unity build:
+    # _base16.c #includes the dispatch + per-arch SIMD sources, which self-guard so
+    # all variants compile on every platform — b16tobin_len/bintob16 come in via
+    # _base16_dispatch.c). Only _base16.c is listed; listing the per-arch files
+    # again would double-compile and duplicate symbols.
     "third_party/crypto/md5.cpp",
     "third_party/crypto/sha1.cpp",
     "third_party/crypto/sha2.cpp",
     "third_party/crypto/sha512.cpp",
     "opteryx/third_party/mabel/base16/_base16.c",
-    "opteryx/third_party/mabel/base16/_base16_dispatch.c",
-    "opteryx/third_party/mabel/base16/_base16_neon.c",
-    "opteryx/third_party/mabel/base16/_base16_avx2.c",
-    "opteryx/third_party/mabel/base16/_base16_rvv.c",
     # vector_json — yyjson (compiled as C11 by build_extension's .c handling)
     "third_party/yyjson/src/yyjson.c",
     # vector_string_case — SIMD string ops (+ cpu_features dep)

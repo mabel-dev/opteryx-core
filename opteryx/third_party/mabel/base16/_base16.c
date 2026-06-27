@@ -63,9 +63,16 @@ void* b16tobin_scalar(void* restrict dest, const char* restrict src, size_t len)
     return out;
 }
 
-// Auto-dispatch and the NEON/AVX2/RVV implementations are compiled as separate
-// translation units (see setup.py / build_common.py), mirroring base64. Each
-// SIMD source self-guards on its target architecture and provides a
-// scalar-forwarding stub otherwise, so all variants link on every platform.
-// Consumers that compile _base16.c must also compile the dispatch + per-arch
-// sources (b16tobin_len/bintob16 live in _base16_dispatch.c).
+// Unity build: pull the auto-dispatch and SIMD implementations into this single
+// translation unit. Each SIMD source self-guards on its target architecture and
+// forwards to the scalar path otherwise, so all variants compile on every
+// platform. Because b16tobin_len/bintob16 (in _base16_dispatch.c) are now
+// compiled here, every consumer only needs _base16.c on its source list — the
+// per-arch files must NOT also be listed separately (that double-compiles and
+// duplicates symbols).
+#include "_base16_dispatch.c"
+#include "_base16_avx2.c"
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
+#include "_base16_neon.c"
+#endif
+#include "_base16_rvv.c"
