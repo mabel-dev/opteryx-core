@@ -544,6 +544,8 @@ cdef class FilterJoinNode(JoinNode):
             return
 
         morsel = self._apply_join_key_casts(morsel, is_left=False)
+        if morsel.num_rows == 0:
+            return  # empty build morsel contributes nothing (mirrors push_left)
         start = time.monotonic_ns()
 
         # On first right morsel: decide hash vs perfect-hash path
