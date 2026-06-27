@@ -4,6 +4,7 @@
 // loud error sentinel (no silent fallback) until its sub-stage lands; the live
 // binop path is unchanged (this is not yet wired into the executor).
 
+#include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "ops/kernels/binop_kernels.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx

@@ -30,6 +30,7 @@
 #include <system_error>
 #include <vector>
 
+#include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "fast_float.h"
 #include "ryu.h"
 #include "core/buffers.h"

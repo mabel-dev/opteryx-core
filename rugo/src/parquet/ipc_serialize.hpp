@@ -150,13 +150,17 @@ static void serialize_rle_int_as_int64(ByteSink& out,
     write_u32(out, data_len);
     uint8_t* raw = out.advance(data_len);
     if (raw) {
-        int64_t* dst = reinterpret_cast<int64_t*>(raw);
+        // `raw` points at the current ByteSink offset (after a tag byte + u32
+        // headers), so it is NOT 8-byte aligned. A typed `int64_t*` store would
+        // fault on architectures that trap unaligned access (RISC-V); memcpy is
+        // unaligned-safe and compiles to the same store on x86/ARM.
         size_t off = 0;
         const size_t n_runs = col.rle_run_lengths.size();
         for (size_t r = 0; r < n_runs; ++r) {
             const int64_t v = col.rle_int64_values[r];
             const int32_t cnt = col.rle_run_lengths[r];
-            for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
+            for (int32_t j = 0; j < cnt; ++j)
+                std::memcpy(raw + (off + j) * sizeof(int64_t), &v, sizeof(int64_t));
             off += static_cast<size_t>(cnt);
         }
     }
@@ -172,13 +176,15 @@ static void serialize_rle_float_as_float64(ByteSink& out,
     write_u32(out, data_len);
     uint8_t* raw = out.advance(data_len);
     if (raw) {
-        double* dst = reinterpret_cast<double*>(raw);
+        // Unaligned-safe store (see serialize_rle_int_as_int64): `raw` is not
+        // 8-byte aligned, so a typed `double*` store would fault on RISC-V.
         size_t off = 0;
         const size_t n_runs = col.rle_run_lengths.size();
         for (size_t r = 0; r < n_runs; ++r) {
             const double v = col.rle_float64_values[r];
             const int32_t cnt = col.rle_run_lengths[r];
-            for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
+            for (int32_t j = 0; j < cnt; ++j)
+                std::memcpy(raw + (off + j) * sizeof(double), &v, sizeof(double));
             off += static_cast<size_t>(cnt);
         }
     }

@@ -32,6 +32,7 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"

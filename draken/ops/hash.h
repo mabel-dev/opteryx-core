@@ -27,6 +27,7 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "buffers.h"              // DrakenVector, DrakenType, DRAKEN_INT64 …
 #include "simd_hash.h"            // simd_hash_i64, NULL_HASH, MIX_HASH_CONSTANT
 #include "ops/vec_result.h"       // VecResult — owned vector from op kernels

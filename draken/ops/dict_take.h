@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "ops/vec_result.h"

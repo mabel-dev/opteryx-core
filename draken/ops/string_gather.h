@@ -48,6 +48,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "core/alloc.h"
 #include "core/buffers.h"
 #include "core/string_slot.h"
