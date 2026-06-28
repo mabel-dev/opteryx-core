@@ -24,6 +24,58 @@ with parquet.read_parquet("planets.parquet", columns=["id", "name"], filters=[("
 
 ---
 
+## Why rugo over PyArrow?
+
+PyArrow is excellent. It is also **124 MB installed**, takes **137 ms to import**
+on a cold process, and drags the entire Arrow C++ runtime into your environment
+whether you use 5% of it or 100%. In a serverless or containerised deployment,
+you pay for every millisecond of cold-start time and every megabyte of memory and
+image size. Rugo is built for those environments.
+
+| | rugo | PyArrow |
+|---|---|---|
+| Wheel size | **2.9 MB** | ~23 MB |
+| Installed footprint | **7.7 MB** | 124 MB |
+| Runtime dependencies | **zero** | Arrow C++ runtime |
+| Cold import time | **2.6 ms** | 137 ms |
+| Schema read (footer only) | **0.02 ms** | 0.05 ms |
+| Memory at import | **134 KB** | 260 KB |
+
+*Measured on Python 3.14t, Apple M-series. Import times on a cold process (first load off disk).*
+
+**In real terms:**
+
+- **AWS Lambda / GCP Cloud Functions** bill by the millisecond. A 137 ms PyArrow
+  import adds cost to every cold start. With rugo that's 2.6 ms — over 50×
+  faster. Functions that cold-start frequently can see that overhead add up
+  directly on the invoice.
+
+- **Container image size** affects pull time, horizontal scale-out speed, and
+  storage costs. At 16× smaller, rugo shrinks the image meaningfully — and keeps
+  you well clear of AWS Lambda's 250 MB unzipped layer limit (PyArrow alone is
+  halfway there).
+
+- **Memory** is billed per GB-second in serverless. Rugo imports at 134 KB;
+  PyArrow at 260 KB — before either has read a single byte of data. At scale,
+  that headroom matters.
+
+- **Schema inspection** (reading the Parquet footer to check row counts and
+  column types without decoding any column data) is 2.5× faster with rugo. If
+  your workload metadata-scans many files before deciding what to read, this
+  compounds.
+
+**Where PyArrow is faster:** bulk full-table decoding. PyArrow's Arrow C++ engine
+is highly optimised for throughput on wide reads and benefits from a mature
+decade-long optimisation effort. Rugo uses a lock-free multithreaded decode
+pipeline (GIL-free worker threads) but its primary design goal is *reading less*
+— projection and row-group pruning — rather than maximising raw scan throughput.
+If you are streaming entire large tables into memory as fast as possible, PyArrow
+is the right tool. If you are running in a constrained cloud environment, routing
+selective queries, or simply do not want 124 MB of Arrow C++ in your dependency
+tree, rugo is the right tool.
+
+---
+
 ## Installation
 
 ```bash
@@ -35,7 +87,7 @@ Pre-built wheels bundle Draken — there is nothing else to install. Rugo has
 
 ### Requirements
 
-- Python 3.13+
+- Python 3.11+
 - A platform with a published wheel (Linux x86-64/aarch64, macOS arm64). For
   other platforms, see [Building from source](#building-from-source).
 
