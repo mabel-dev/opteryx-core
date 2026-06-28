@@ -1,5 +1,9 @@
 # Rugo
 
+[![PyPI](https://img.shields.io/pypi/v/rugo)](https://pypi.org/project/rugo/)
+[![Python](https://img.shields.io/pypi/pyversions/rugo)](https://pypi.org/project/rugo/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/mabel-dev/opteryx-core/blob/main/LICENSE)
+
 **A fast, dependency-free file engine for Parquet, CSV, and JSONL — reading and writing — with no PyArrow and no NumPy.**
 
 Rugo reads and writes columnar data files from Python without pulling in a heavy

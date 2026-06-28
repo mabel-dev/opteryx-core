@@ -76,6 +76,27 @@ cdef class DistinctNode(BasePlanNode):
         w._scatter_engine = None
         return w
 
+    cpdef readout_partition(self, list chunks, PipelineContext ctx):
+        """Operator-owned per-partition DEDUP read-out (HASH_REPARTITION recombination):
+        dedup ONE global hash partition's chunks in place against a PRIVATE carchar set
+        (``hash(key) % radix`` co-locates every copy of a value in one partition, so the
+        partitions are disjoint key slices — no cross-worker merge), returning
+        ``(survivor_chunks, row_count)`` for the sink to push downstream. The operator
+        owns its recombination; the native read-out fan-out (``native_readout_fanout``)
+        drives partitions in parallel. Mirrors the serial dedup kernel exactly."""
+        cdef object hash_set = _CarcharSetWrapper()
+        cdef list out = []
+        cdef Morsel chunk
+        cdef long long count = 0
+        for chunk in chunks:
+            if ctx.is_terminated():
+                break
+            _distinct(chunk, hash_set, columns=self._distinct_on)
+            if chunk.num_rows > 0:
+                out.append(chunk)
+            count += chunk.num_rows
+        return out, count
+
     @property
     def config(self):  # pragma: no cover
         return ""

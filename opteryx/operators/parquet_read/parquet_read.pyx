@@ -857,6 +857,48 @@ cdef class ParquetReadNode(ReaderNode):
         self._record_morsel_emitted(result_morsel)
         return result_morsel
 
+    cdef shared_ptr[CxxMorsel] _commit_morsel_cxx(self, shared_ptr[CxxMorsel] cxm, object path):
+        """S-B.2: the cxm-native twin of `_commit_morsel` for the single-pass path —
+        row-group accounting, file-seen, LIMIT decrement + slice (`cxx_slice_c`), and
+        the telemetry mirror, all on the C++ carrier with NO Python Morsel. `nbytes`
+        matches Morsel.nbytes' estimate (rows × cols × 8)."""
+        cdef int64_t num_rows = cxm.get().num_rows()
+        cdef int64_t num_cols = cxm.get().num_columns()
+        cdef int64_t files_seen
+        self.scan_readings.record_row_group_complete(num_rows)
+        self._mark_file_seen(path)
+        if not self._records_unlimited:
+            if self._records_to_read < num_rows:
+                cxm = shared_ptr[CxxMorsel](
+                    cxx_slice_c(cxm.get(), 0, <uint32_t>self._records_to_read))
+                num_rows = self._records_to_read
+                self._records_to_read = 0
+            else:
+                self._records_to_read -= num_rows
+        files_seen = len(self._parquet_files_seen)
+        self.scan_readings.record_morsel_yielded(num_rows, num_rows * num_cols * 8, files_seen)
+        self.telemetry.blobs_read = files_seen
+        self.telemetry.rows_read += num_rows
+        return cxm
+
+    cdef shared_ptr[CxxMorsel] _single_pass_finish_cxx(self):
+        """cxm-native twin of `_single_pass_finish`: emit one empty CxxMorsel if the
+        scan produced nothing, else NULL (end-of-stream). Caller holds `_scan_mtx`."""
+        cdef shared_ptr[CxxMorsel] out
+        if not self._emitted_any and not self._empty_guard_done:
+            self._empty_guard_done = True
+            self._emitted_any = True
+            self.readings["empty_datasets"] += 1
+            out = cxx_morsel_from_vectors_sp([], [])
+        return out
+
+    cdef shared_ptr[CxxMorsel] _finish_locked_cxx(self):
+        cdef shared_ptr[CxxMorsel] out
+        self._scan_mtx.lock()
+        out = self._single_pass_finish_cxx()
+        self._scan_mtx.unlock()
+        return out
+
     cdef inline bint _limit_exhausted(self):
         """True once a finite LIMIT has been fully satisfied — the caller's
         signal to stop pulling. Always False for unlimited scans."""
@@ -978,7 +1020,9 @@ cdef class ParquetReadNode(ReaderNode):
             self._ensure_scan_started()
         self._scan_mtx.unlock()
         if self._scan_mode == _SCAN_SINGLE:
-            py = self._single_pass_next()
+            # S-B.2: the single-pass path returns the C++ carrier directly — no
+            # Python Morsel, no encode.
+            return self._single_pass_next()
         elif self._scan_mode == _SCAN_LATMAT:
             py = self._latmat_next()
         else:
@@ -1294,30 +1338,31 @@ cdef class ParquetReadNode(ReaderNode):
             else:  # kind == 3
                 vectors[i] = _int64_to_timestamp(v_nb, op[1])
 
-    cdef Morsel _single_pass_next(self):
+    cdef shared_ptr[CxxMorsel] _single_pass_next(self):
         """Pull and assemble the next single-pass morsel directly from the native
-        IpcRowGroupSource — no generator, no intermediate row_group dict, no
-        ScanRowGroup. Direct (numeric/decimal) columns reach the morsel with zero
-        per-morsel Python beyond the necessary Vector objects.
+        IpcRowGroupSource as the C++ carrier (`shared_ptr[CxxMorsel]`) — no
+        intermediate Python Morsel on the normal projected-column path (S-B.2). The
+        cxm is built (`cxx_morsel_from_vectors_sp`), filtered (`_cxx_apply_predicate`),
+        and selected (`cxx_select_sp`) on the substrate; only the COUNT(*) filter-only
+        read (rare) routes through the Morsel path. Returns a NULL shared_ptr on
+        exhaustion (after one empty morsel if nothing was produced).
 
-        Thread-safe: the pull (IpcRowGroupSource) and the morsel assembly
-        (coerce / from_vectors / predicate / select) run on thread-local data with
-        no lock; only the per-scan accounting + _commit_morsel run under
-        `_scan_mtx`, which holds no GIL-releasing call. Returns None on exhaustion
-        (after one empty morsel if nothing was produced)."""
+        Thread-safe: the pull + cxm assembly run on thread-local data with no lock;
+        only the per-scan accounting + `_commit_morsel_cxx` run under `_scan_mtx`."""
         cdef tuple pulled
         cdef list vectors
         cdef object path
-        cdef Morsel result_morsel, emit_morsel
+        cdef shared_ptr[CxxMorsel] result_cxm, emit_cxm
         cdef bint has_identity
         cdef int64_t rows_before_filter, rows_after_filter, surviving_rows
         cdef int64_t bytes_fetched, read_ns, decode_ns
+        cdef Morsel count_star
         while True:
             if self._limit_exhausted():
-                return self._finish_locked()
+                return self._finish_locked_cxx()
             pulled = self._ipc_source.next_vectors()
             if pulled is None:
-                return self._finish_locked()
+                return self._finish_locked_cxx()
             vectors = pulled[0]
             bytes_fetched = pulled[1]
             read_ns = pulled[2]
@@ -1335,50 +1380,47 @@ cdef class ParquetReadNode(ReaderNode):
                 self._scan_mtx.unlock()
                 continue
 
-            # ── Thread-local assembly (no lock) ──────────────────────────────
+            # ── Thread-local cxm assembly (no lock) ──────────────────────────
             if self._sp_needs_coerce:
                 self._coerce_vectors(vectors)
             has_identity = bool(self._sp_identity_names)
-            emit_morsel = None
+            emit_cxm.reset()
             rows_before_filter = 0
             rows_after_filter = 0
             if has_identity:
                 # Positional pairing: vectors order == column_names == identity order.
-                # The scan emits a Cxx-backed morsel (the C++-first substrate); columns
-                # materialize lazily for any operator not yet reading the CxxMorsel.
-                result_morsel = Morsel.from_cxx_vectors(self._sp_identity_names, vectors)
-                rows_before_filter = result_morsel.num_rows
+                result_cxm = cxx_morsel_from_vectors_sp(vectors, self._sp_identity_names)
+                rows_before_filter = result_cxm.get().num_rows()
                 rows_after_filter = rows_before_filter
                 if self._compiled_predicate is not None:
-                    result_morsel, rows_before_filter, rows_after_filter = (
-                        self._apply_predicates_to_morsel(result_morsel)
-                    )
+                    result_cxm = self._cxx_apply_predicate(result_cxm)
+                    rows_after_filter = result_cxm.get().num_rows()
                 if self._sp_output_identity_order:
-                    emit_morsel = result_morsel.select(self._sp_output_identity_order)
+                    emit_cxm = cxx_select_sp(result_cxm, self._sp_output_identity_order)
                 else:
-                    # No output columns (e.g. COUNT(*) with a filter-only read).
-                    surviving_rows = result_morsel.num_rows
+                    # No output columns (e.g. COUNT(*) with a filter-only read) — rare;
+                    # the bool-constant column routes through the Morsel encode.
+                    surviving_rows = result_cxm.get().num_rows()
                     if surviving_rows > 0:
-                        emit_morsel = Morsel.from_vectors(
+                        count_star = Morsel.from_vectors(
                             [b'*'],
                             [_draken_native_parquet.vector_from_bool_constant(True, <uint32_t>surviving_rows)],
                         )
+                        emit_cxm = morsel_to_cxx(count_star)
 
             # ── Shared commit (under _scan_mtx; no GIL-releasing call inside) ──
             self._scan_mtx.lock()
-            # Telemetry: the cpp-pipeline ScanRowGroup populated only these three
-            # fields; the rest of merge_row_group_metadata added 0. Apply directly.
             self.bytes_in += bytes_fetched
             self.scan_readings.time_parquet_read_ranges_ns += read_ns
             self.scan_readings.time_parquet_decode_columns_ns += decode_ns
             if has_identity:
                 self._total_rows_before_filter += rows_before_filter
                 self._total_rows_after_filter += rows_after_filter
-            if emit_morsel is not None:
-                emit_morsel = self._commit_morsel(emit_morsel, path)
+            if emit_cxm.get() != NULL:
+                emit_cxm = self._commit_morsel_cxx(emit_cxm, path)
                 self._emitted_any = True
                 self._scan_mtx.unlock()
-                return emit_morsel
+                return emit_cxm
             self._scan_mtx.unlock()
             # No emit (no projected identities, or COUNT(*) with 0 survivors) — loop.
 

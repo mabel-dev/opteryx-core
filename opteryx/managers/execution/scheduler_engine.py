@@ -71,11 +71,14 @@ def _count_scans(plan) -> int:
 
 
 def _native_serial_execute(plan, telemetry=None):
-    """Native single-scan serial drive (slice 3, option B). Pushes the scan's
-    morsels through the compiled chain on a pool thread, the terminal Exit's output
-    flowing straight into a ``MorselQueue``; the consumer generator drains it. No
-    ``queue.Queue``, no ``Executor``/``threading``, no Python drive generator —
-    byte-identical to the serial path at DOP=1.
+    """Native serial drive (slice 3, option B). Drives every scan's chain through
+    ``drive_scan_to_sink`` on ONE pool thread in DFS scan order (build legs before
+    probe — the order ``compile_pipeline`` wires the push topology), the terminal
+    Exit's output flowing straight into a ``MorselQueue``; the consumer generator
+    drains it. Build legs drive with ``finish=False`` (they reach no Exit and must
+    not signal end-of-data); a single ``sink.finish()`` after the last chain marks
+    graceful end. No ``queue.Queue``, no ``Executor``/``threading``, no Python drive
+    generator — this is the native replacement for ``_serial_stream``.
     """
     from opteryx.compiled.morsel_queue import MQ_FINISHED
     from opteryx.compiled.morsel_queue import PyMorselQueue
@@ -84,7 +87,6 @@ def _native_serial_execute(plan, telemetry=None):
     from opteryx.operators._operators import drive_scan_to_sink
 
     chains, exit_node, ctx = compile_pipeline(plan)
-    scan, chain_head = chains[0]
     sink = PyMorselQueue(_QUEUE_DEPTH)
     err_box: list = []
     pool = CppThreadPool(1, "m4-serial")
@@ -94,7 +96,13 @@ def _native_serial_execute(plan, telemetry=None):
         # otherwise wait on `sink.get()` forever); the error is re-raised on the
         # consumer thread after the sentinel.
         try:
-            drive_scan_to_sink(scan, chain_head, exit_node, ctx, sink)
+            for scan, chain_head in chains:
+                if ctx.is_terminated():
+                    break
+                # Only the terminal chain feeds the Exit/sink; build legs drive to
+                # EOS (building their join/breaker state) and must NOT finish the sink.
+                drive_scan_to_sink(scan, chain_head, exit_node, ctx, sink, finish=False)
+            sink.finish()
         except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
             err_box.append(exc)
             sink.finish()
@@ -632,7 +640,14 @@ def execute(plan, head_node=None, telemetry=None):
             telemetry._reading["scheduler_chain_segments"] = len(chain)
         return _native_chain_execute(plan, chain, dop, telemetry)
 
-    # Everything else (breaker agg/distinct → CONCURRENT _run_breaker_segment;
-    # multi-scan serial → _serial_stream) runs its kept handler natively into a
-    # `MorselQueue`. The handler still owns its own worker fan-out.
+    # Genuinely SERIAL plans (no parallel strategy covers them — multi-join, sort,
+    # window, set-ops, limit-only, subqueries) drive natively, multi-chain, straight
+    # into a `MorselQueue` via `_native_serial_execute` (the native replacement for
+    # `_serial_stream` — no Python drive generator, no dispatch pump). CONCURRENT
+    # breaker shapes (agg/distinct, join→agg) keep their worker fan-out via the
+    # `_run_breaker_segment` handler pumped by `_native_generic_execute`.
+    from opteryx.managers.execution.parallel_engine import _pipeline_is_serial
+
+    if _pipeline_is_serial(plan, dop):
+        return _native_serial_execute(plan, telemetry)
     return _native_generic_execute(plan, dop, telemetry)

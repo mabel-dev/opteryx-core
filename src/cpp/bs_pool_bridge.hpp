@@ -255,6 +255,31 @@ public:
     }
 
     /**
+     * Submit a NATIVE task: a C function pointer + opaque arg, run on a pool
+     * worker with NO Python callable and NO Future. The bridge touches no Python
+     * state here — the task body owns its own GIL policy (in free-threaded 3.14t
+     * there is no global lock to contend). The caller owns synchronisation:
+     * submit N tasks, then `wait_native()` (or `shutdown`) to barrier. This is the
+     * native-worker-drive path — the per-morsel drive runs without a Python
+     * callable bouncing through `ResultContainer`/`TaskWrapper`.
+     */
+    void submit_native(void (*fn)(void*), void* arg) {
+        pool_->detach_task([fn, arg]() { fn(arg); });
+    }
+
+    /**
+     * Block until all queued tasks complete WITHOUT tearing the pool down (unlike
+     * `shutdown`), so the pool can be reused for a second native fan-out (e.g. the
+     * HASH_REPARTITION read-out after the accumulate pass). In 3.14t no GIL is
+     * held here.
+     */
+    void wait_native() {
+        if (pool_) {
+            pool_->wait();
+        }
+    }
+
+    /**
      * Wait for all queued tasks to complete, then destroy the pool.
      * Release the GIL while waiting so worker threads can finish.
      */

@@ -32,6 +32,13 @@ def _max_workers_for(sql, workers=4):
         seen.append(int(w))
         return real_pool(w, name)
 
+    # `_operators` cimports CppThreadPool as a TYPE (for the native fan-out's typed
+    # pool param + cdef submit_native); that bind resolves at _operators init by
+    # looking up the type in the thread_pool module. Trigger the normal execution
+    # import chain NOW (same module-load order a real query uses), so _operators binds
+    # the real class before we shadow it with a tracking function below.
+    from opteryx.managers.execution import execute  # noqa: F401
+
     old_floor = config.PARALLEL_MIN_ROWS
     old_workers = config.MAX_EXECUTION_WORKERS
     config.PARALLEL_MIN_ROWS = 0           # any data fans out

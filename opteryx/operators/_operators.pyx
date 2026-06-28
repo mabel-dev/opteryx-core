@@ -16,7 +16,9 @@
 
 from libcpp.memory cimport shared_ptr
 from draken.morsels.morsel cimport Morsel, morsel_to_cxx, cxx_to_morsel
+from draken.morsels.morsel cimport cxx_morsel_from_vectors_sp, cxx_select_sp
 from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos, cxx_morsel_delete
+from draken.morsels.cxx_morsel cimport cxx_slice_c
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector, mix_hash
 from draken.core.buffers cimport (
@@ -36,6 +38,8 @@ import draken.draken_native as _draken_native
 from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
+from cpython.ref cimport PyObject
+from opteryx.compiled.thread_pool cimport CppThreadPool, native_task_fn
 
 
 # -----------------------------------------------------------------------------
@@ -936,7 +940,7 @@ def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineCo
 
 
 def drive_scan_to_sink(BasePlanNode scan, BasePlanNode chain_head, exit_node,
-                       PipelineContext ctx, object sink):
+                       PipelineContext ctx, object sink, bint finish=True):
     """Native push drive to a MorselQueue sink — slice 3, option B. The push-loop
     twin of ``drive_scan``: same typed `next_morsel`/`push`/pending-drain hot path,
     but it PUSHES each output morsel into ``sink`` (a PyMorselQueue) instead of
@@ -989,7 +993,8 @@ def drive_scan_to_sink(BasePlanNode scan, BasePlanNode chain_head, exit_node,
                     out = exit_node.pop_pending()
                     if not sink.put(out):
                         return
-            sink.finish()
+            if finish:
+                sink.finish()
             return
 
         # Normal exhaustion: flush the chain with EOS so breakers emit their finals.
@@ -1006,7 +1011,8 @@ def drive_scan_to_sink(BasePlanNode scan, BasePlanNode chain_head, exit_node,
                 out = exit_node.pop_pending()
                 if not sink.put(out):
                     return
-        sink.finish()
+        if finish:
+            sink.finish()
     finally:
         scan.close_source()
 
@@ -1083,6 +1089,136 @@ def accumulate_worker_drive(BasePlanNode head, object next_input, PipelineContex
         push_one_to_sink(head, None, morsel, None)
         count += morsel.num_rows
     return count
+
+
+cdef struct _AccArg:
+    PyObject* head      # worker k's pre-cloned chain head (borrowed)
+    PyObject* source    # the shared self-pull source callable (borrowed)
+    PyObject* ctx       # the PipelineContext (borrowed)
+    PyObject* counts    # shared result list[int]  (borrowed)
+    PyObject* errors    # shared result list[exc]  (borrowed)
+    int index
+
+
+cdef void _acc_worker_run(_AccArg* a) noexcept with gil:
+    """GIL-held body of the native worker task — holds the Python locals a nogil
+    function cannot. Drives one pre-cloned breaker chain via the native ACCUMULATE
+    loop (whose per-morsel push releases the GIL again), recording the row count or
+    any exception into the shared result lists by index."""
+    cdef object exc
+    cdef long long count
+    try:
+        count = accumulate_worker_drive(
+            <BasePlanNode>(<object>a.head),
+            <object>a.source,
+            <PipelineContext>(<object>a.ctx),
+        )
+        (<object>a.counts)[a.index] = count
+    except BaseException as exc:
+        (<object>a.errors)[a.index] = exc
+
+
+cdef void _acc_worker_task(void* arg) noexcept nogil:
+    """Native task entry (matches ``native_task_fn``) submitted to
+    ``CppThreadPool.submit_native`` — no Python worker closure, no Future. Casts the
+    opaque arg and hands to the GIL-held body."""
+    _acc_worker_run(<_AccArg*>arg)
+
+
+def native_accumulate_fanout(CppThreadPool pool, list heads, object source,
+                             PipelineContext ctx, list counts, list errors):
+    """Native W-way ACCUMULATE fan-out: submit one NATIVE task per pre-cloned worker
+    chain to ``pool`` (no Python worker closure, no Future), then barrier on
+    ``wait_native``. ``heads[k]`` is worker k's chain head; ``source`` is the shared
+    self-pull callable every worker drains disjointly. Row counts land in ``counts[k]``
+    and exceptions in ``errors[k]`` — pre-sized length-W lists the caller owns, whose
+    elements stay alive across the blocking wait. The native replacement for the
+    breaker skeleton's ``[pool.submit(worker, k) for k in range(W)]`` loop + barrier.
+
+    The per-worker ``_AccArg`` structs hold BORROWED PyObject pointers into the caller's
+    live lists; the blocking ``wait_native`` guarantees every task has finished reading
+    them before the array is freed, so no refcount churn is needed."""
+    cdef Py_ssize_t W = len(heads)
+    cdef _AccArg* args = <_AccArg*>malloc(W * sizeof(_AccArg))
+    if args == NULL:
+        raise MemoryError()
+    cdef Py_ssize_t k
+    try:
+        for k in range(W):
+            args[k].head = <PyObject*>heads[k]
+            args[k].source = <PyObject*>source
+            args[k].ctx = <PyObject*>ctx
+            args[k].counts = <PyObject*>counts
+            args[k].errors = <PyObject*>errors
+            args[k].index = <int>k
+            pool.submit_native(_acc_worker_task, &args[k])
+        with nogil:
+            pool.wait_native()
+    finally:
+        free(args)
+
+
+cdef struct _ReadoutArg:
+    PyObject* breaker   # the ORIGINAL breaker (owns readout_partition) (borrowed)
+    PyObject* chunks    # this partition's raw scattered chunk list (borrowed)
+    PyObject* ctx       # the PipelineContext (borrowed)
+    PyObject* engines   # shared result list[engine] (borrowed)
+    PyObject* counts    # shared result list[int]    (borrowed)
+    PyObject* errors    # shared result list[exc]    (borrowed)
+    int index
+
+
+cdef void _readout_run(_ReadoutArg* a) noexcept with gil:
+    """GIL-held body of the native READ-OUT task: call the breaker's operator-owned
+    ``readout_partition`` for one global hash partition (key its chunks into a fresh
+    engine), recording ``(engine, row_count)`` or any exception by index. The breaker
+    is reached via the PyObject seam (its concrete type varies — grouped agg / distinct
+    both expose ``readout_partition``)."""
+    cdef object exc, result
+    try:
+        result = (<object>a.breaker).readout_partition(
+            <object>a.chunks, <PipelineContext>(<object>a.ctx)
+        )
+        (<object>a.engines)[a.index] = result[0]
+        (<object>a.counts)[a.index] = result[1]
+    except BaseException as exc:
+        (<object>a.errors)[a.index] = exc
+
+
+cdef void _readout_task(void* arg) noexcept nogil:
+    """Native task entry (matches ``native_task_fn``) for the READ-OUT fan-out."""
+    _readout_run(<_ReadoutArg*>arg)
+
+
+def native_readout_fanout(CppThreadPool pool, breaker, list chunk_lists,
+                          PipelineContext ctx, list engines, list counts, list errors):
+    """Native per-partition READ-OUT fan-out (HASH_REPARTITION recombination): submit
+    one NATIVE task per global hash partition to ``pool`` (no Python worker closure, no
+    Future), each calling ``breaker.readout_partition(chunk_lists[p], ctx)`` to key that
+    partition into a fresh engine, then barrier on ``wait_native``. Engines land in
+    ``engines[p]``, row counts in ``counts[p]``, faults in ``errors[p]`` (pre-sized
+    length-R lists the caller owns). The native replacement for the read-out pool's
+    ``[rpool.submit(readout_worker, p) ...]`` loop. Borrowed PyObject pointers are kept
+    alive by the caller's live lists across the blocking wait."""
+    cdef Py_ssize_t R = len(chunk_lists)
+    cdef _ReadoutArg* args = <_ReadoutArg*>malloc(R * sizeof(_ReadoutArg))
+    if args == NULL:
+        raise MemoryError()
+    cdef Py_ssize_t p
+    try:
+        for p in range(R):
+            args[p].breaker = <PyObject*>breaker
+            args[p].chunks = <PyObject*>chunk_lists[p]
+            args[p].ctx = <PyObject*>ctx
+            args[p].engines = <PyObject*>engines
+            args[p].counts = <PyObject*>counts
+            args[p].errors = <PyObject*>errors
+            args[p].index = <int>p
+            pool.submit_native(_readout_task, &args[p])
+        with nogil:
+            pool.wait_native()
+    finally:
+        free(args)
 
 
 cpdef BasePlanNode spawn_worker(BasePlanNode op):

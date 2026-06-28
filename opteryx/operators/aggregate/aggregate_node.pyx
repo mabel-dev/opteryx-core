@@ -560,6 +560,30 @@ cdef class UngroupedAggregateNode(BasePlanNode):
 
         return Morsel.from_vectors(names, vectors)
 
+    cpdef void recombine_scalar_merge(self, list locals_) except *:
+        """Operator-owned SCALAR_MERGE recombination (the ``PipelineSink`` is a thin
+        orchestrator; the operator owns how its W per-worker partials fold together).
+        Scalar-merge every populated per-worker clone's engine into the first populated
+        one, then adopt it as THIS breaker's engine, so the EOS-driven
+        ``_finalize_morsel`` emits the merged global aggregate. ``locals_`` is the
+        skeleton's ``[(clone, ingested_rows)]``; a clone with ``rows <= 0`` ingested
+        nothing and carries no partial. No populated clone ⇒ this breaker's own (empty)
+        engine stays in place and the empty-aggregate row still emits (byte-identical
+        to serial)."""
+        cdef UngroupedAggregateNode base = None
+        cdef UngroupedAggregateNode clone
+        cdef tuple pair
+        for pair in locals_:
+            if <Py_ssize_t>pair[1] <= 0:
+                continue
+            clone = <UngroupedAggregateNode>pair[0]
+            if base is None:
+                base = clone
+            else:
+                base._engine.merge(clone._engine)
+        if base is not None:
+            self._engine = base._engine
+
     cpdef void _push_impl(self, Morsel morsel) except *:
         cdef int select_state
         cdef Py_ssize_t num_rows

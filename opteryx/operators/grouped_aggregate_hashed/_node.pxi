@@ -144,6 +144,25 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
         w._build_engine()
         return w
 
+    cpdef readout_partition(self, list chunks, PipelineContext ctx):
+        """Operator-owned per-partition READ-OUT (HASH_REPARTITION recombination): key
+        ONE global hash partition's raw scattered chunks into a FRESH engine (a
+        ``make_worker`` clone's GroupHashEngine), returning ``(engine, row_count)`` for
+        the sink to inject into ``_parallel_engines``. This is the per-partition body
+        the native read-out fan-out (``native_accumulate_fanout``'s read-out twin,
+        ``native_readout_fanout``) runs in parallel across partitions — the operator
+        owns its recombination; the sink just orchestrates."""
+        cdef GroupedAggregateHashedNode clone = <GroupedAggregateHashedNode>self.make_worker()
+        cdef GroupHashEngine engine = <GroupHashEngine>clone._engine
+        cdef Morsel chunk
+        cdef long long count = 0
+        for chunk in chunks:
+            if ctx.is_terminated():
+                break
+            engine.ingest(chunk)
+            count += chunk.num_rows
+        return engine, count
+
     @property
     def config(self):  # pragma: no cover
         from opteryx.expression import format_expression

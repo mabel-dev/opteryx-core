@@ -24,20 +24,10 @@ cdef extern from "Python.h":
     void _raw_decref "Py_DECREF"(PyObject* op)
 
 
-cdef extern from "bs_pool_bridge.hpp":
-    cdef cppclass BSThreadPoolBridge:
-        BSThreadPoolBridge(int max_workers, const string& name) except +
-        PyObject* submit(PyObject* callable, PyObject* args, PyObject* kwargs)
-        void shutdown(bint wait) nogil
-        int max_workers()
-
-
+# BSThreadPoolBridge + the CppThreadPool cdef class (attributes + native method
+# signatures) are declared in thread_pool.pxd so native execution code can cimport
+# and submit native tasks. This module supplies the method bodies.
 cdef class CppThreadPool:
-    cdef BSThreadPoolBridge* _pool
-    cdef str _name
-    cdef int _max_workers
-    cdef bint _shut_down
-
     def __cinit__(self, int max_workers, str name="cpp-pool"):
         cdef bytes _name_bytes = name.encode("utf-8")
         cdef string _cname = _name_bytes
@@ -73,6 +63,17 @@ cdef class CppThreadPool:
             self._shut_down = True
             with nogil:
                 self._pool.shutdown(wait)
+
+    cdef void submit_native(self, native_task_fn fn, void* arg) noexcept nogil:
+        """Submit a NATIVE worker task (no Python callable, no Future). Cython-only
+        seam for the native worker-drive — the caller submits N tasks then barriers
+        with ``wait_native``. No GIL is taken by the dispatch itself."""
+        self._pool.submit_native(fn, arg)
+
+    cdef void wait_native(self) noexcept nogil:
+        """Block until all native tasks submitted so far complete, WITHOUT tearing
+        the pool down (reusable for a second native fan-out)."""
+        self._pool.wait_native()
 
     def __enter__(self):
         return self

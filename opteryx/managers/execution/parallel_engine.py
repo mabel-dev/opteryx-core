@@ -69,6 +69,7 @@ from opteryx.managers.execution.pipeline_sink import make_sink
 from opteryx.managers.execution.pipeline_sink import parallel_sink_spec_for
 from opteryx.managers.execution.pipeline_sink import recombination_class_for
 from opteryx.operators._operators import accumulate_worker_drive
+from opteryx.operators._operators import native_accumulate_fanout
 from opteryx.operators._operators import push_one
 from opteryx.operators.catalog import OperatorParallelism
 from opteryx.operators.catalog import get_registry
@@ -1293,6 +1294,27 @@ def _serial_stream(plan):
         ctx.terminate()
 
 
+def _pipeline_is_serial(plan, workers):
+    """True iff no parallel strategy covers this pipeline — i.e. the point at which
+    ``dispatch_data_pipeline`` falls through to the serial drive (multi-join, sort,
+    window, set-ops, limit-only, subqueries…).
+
+    SINGLE source of the serial/breaker split, shared by the scheduler gate (which
+    routes serial plans to the native ``_native_serial_execute`` drive instead of
+    pumping ``_serial_stream``) and by ``dispatch_data_pipeline`` below — whose
+    ``_run_breaker_segment`` returns are *exactly* the not-serial cases. The two MUST
+    stay in lockstep: a breaker mis-classified as serial loses its concurrent
+    fan-out (the concurrency guard fails loud on that)."""
+    if _find_parallel_breaker_segment(plan, workers) is not None:
+        return False
+    join_agg = _find_parallel_join_agg(plan) or _find_parallel_multi_join_agg(plan)
+    if join_agg is not None:
+        recomb = recombination_class_for(plan[join_agg.breaker_id])
+        if recomb in (RecombClass.HASH_REPARTITION, RecombClass.SCALAR_MERGE):
+            return False
+    return True
+
+
 def dispatch_data_pipeline(plan, workers, telemetry=None):
     """Shape-router for a data pipeline — returns the streaming drive generator.
 
@@ -1407,12 +1429,17 @@ def dispatch_data_pipeline(plan, workers, telemetry=None):
     # which intercept them before dispatch — so they never reach here. The old
     # ``_join_probe_stream`` / ``_stateless_stream`` handlers were removed.
 
-    # No parallel strategy handles this shape (multi-join, sort, window, set-ops,
-    # limit-only, subqueries, bare/projection-only scans) — serial-inline (the data
-    # executor still owns it end-to-end; this is not a punt to another engine).
-    if telemetry is not None:
-        telemetry._reading["parallel_engaged"] = 0
-    return _serial_stream(plan)
+    # Unreachable in correct operation: the scheduler gate (`_pipeline_is_serial`)
+    # routes every serial plan to the native `_native_serial_execute` drive BEFORE
+    # `_native_generic_execute` calls dispatch, so dispatch only ever sees a parallel
+    # breaker shape. Reaching here means `_pipeline_is_serial` and this router have
+    # drifted out of lockstep — fail loud rather than silently serialize, which would
+    # mask the gate bug as "green but fake".
+    raise RuntimeError(
+        "dispatch_data_pipeline reached its serial fallback: a plan the scheduler "
+        "gate classified non-serial matched no breaker shape here — "
+        "_pipeline_is_serial and dispatch_data_pipeline have drifted out of lockstep."
+    )
 
 
 def _run_breaker_segment(
@@ -1636,54 +1663,60 @@ def _run_breaker_segment(
         local_states = [None] * workers
         local_rows = [0] * workers
         errors = [None] * workers
+        worker_heads = [None] * workers
 
-        def worker(index):
-            try:
-                clone = sink.make_local_sink_state(index)
-                # Wire [middle clones → clone-breaker]; the clone is the local sink
-                # (its seam IS the accumulator). The breaker clone has no downstream —
-                # the worker only ingests (never EOS), so it never emits.
-                chain = [_clone_op(plan[nid]) for nid in middle_ids]
-                chain.append(clone)
-                for i, op in enumerate(chain):
+        def _build_worker_chain(index):
+            # Coarse per-worker SETUP (PyObject clone + wire) — runs serially below;
+            # the per-morsel ACCUMULATE drive is then fanned out NATIVELY (no Python
+            # worker closure, no Future) via native_accumulate_fanout.
+            clone = sink.make_local_sink_state(index)
+            # [middle clones → clone-breaker]; the clone is the local sink (its seam IS
+            # the accumulator). The breaker clone has no downstream — the worker only
+            # ingests (never EOS), so it never emits.
+            chain = [_clone_op(plan[nid]) for nid in middle_ids]
+            chain.append(clone)
+            for i, op in enumerate(chain):
+                op.set_context(ctx)
+                if i + 1 < len(chain):
+                    op.set_downstream(chain[i + 1])
+            chain_head = chain[0]
+
+            # join→agg: prepend the join's per-worker prefix
+            # [probe-middle* → JoinRightAdapter → cloned_join] ahead of the
+            # agg-middle chain. The cloned join gets its OWN private engine over the
+            # shared READ-ONLY left_morsel (zero shared mutable probe state). The
+            # join's output flows into `chain_head` (agg-middle* → local sink).
+            if source_prep is not None:
+                from opteryx.operators import JoinRightAdapter
+
+                cloned_join = _clone_op(plan[source_prep.join_id])
+                source_prep.shared.prepare_worker_clone(cloned_join)
+                cloned_join.set_downstream(chain_head)
+                probe_ops = [
+                    _clone_op(plan[nid]) for nid in source_prep.probe_middle_ids
+                ]
+                adapter = JoinRightAdapter(cloned_join)
+                adapter.set_context(ctx)
+                probe_chain = probe_ops + [adapter]
+                for i, op in enumerate(probe_chain):
                     op.set_context(ctx)
-                    if i + 1 < len(chain):
-                        op.set_downstream(chain[i + 1])
-                chain_head = chain[0]
+                    if i + 1 < len(probe_chain):
+                        op.set_downstream(probe_chain[i + 1])
+                chain_head = probe_chain[0]
+            return clone, chain_head
 
-                # join→agg: prepend the join's per-worker prefix
-                # [probe-middle* → JoinRightAdapter → cloned_join] ahead of the
-                # agg-middle chain. The cloned join gets its OWN private engine over the
-                # shared READ-ONLY left_morsel (zero shared mutable probe state). The
-                # join's output flows into `chain_head` (agg-middle* → local sink).
-                if source_prep is not None:
-                    from opteryx.operators import JoinRightAdapter
-
-                    cloned_join = _clone_op(plan[source_prep.join_id])
-                    source_prep.shared.prepare_worker_clone(cloned_join)
-                    cloned_join.set_downstream(chain_head)
-                    probe_ops = [
-                        _clone_op(plan[nid]) for nid in source_prep.probe_middle_ids
-                    ]
-                    adapter = JoinRightAdapter(cloned_join)
-                    adapter.set_context(ctx)
-                    probe_chain = probe_ops + [adapter]
-                    for i, op in enumerate(probe_chain):
-                        op.set_context(ctx)
-                        if i + 1 < len(probe_chain):
-                            op.set_downstream(probe_chain[i + 1])
-                    chain_head = probe_chain[0]
-
-                count = accumulate_worker_drive(chain_head, next_input, ctx)
-                local_states[index] = clone
-                local_rows[index] = count
-            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
-                errors[index] = exc
+        # Build the W worker chains serially (clone is coarse PyObject setup), then
+        # drive them all natively. A clone failure here is a setup bug — raise loud
+        # rather than collect it into errors[] (only per-morsel drive faults go there).
+        for index in range(workers):
+            local_states[index], worker_heads[index] = _build_worker_chain(index)
 
         pool = CppThreadPool(workers, "m4-generic-sink")
-        futures = [pool.submit(worker, k) for k in range(workers)]
-        for future in futures:
-            future.result()
+        # ---- 3b. NATIVE W-way ACCUMULATE fan-out — no Python worker closure, no
+        #          Future. Each worker drains the shared self-pull `next_input`
+        #          disjointly and accumulates into its local sink; counts land in
+        #          local_rows[k], faults in errors[k].
+        native_accumulate_fanout(pool, worker_heads, next_input, ctx, local_rows, errors)
         # ---- 4. errors barrier; combine ------------------------------------------
         for exc in errors:
             if exc is not None:
@@ -1989,27 +2022,24 @@ def _drive_segment(
         local_states = [None] * workers
         local_rows = [0] * workers
         errors = [None] * workers
+        worker_heads = [None] * workers
 
-        def worker(index):
-            try:
-                clone = sink.make_local_sink_state(index)
-                chain = [_clone_op(plan[nid]) for nid in middle_ids]
-                chain.append(clone)
-                for i, op in enumerate(chain):
-                    op.set_context(ctx)
-                    if i + 1 < len(chain):
-                        op.set_downstream(chain[i + 1])
-                chain_head = chain[0]
-                count = accumulate_worker_drive(chain_head, next_input, ctx)
-                local_states[index] = clone
-                local_rows[index] = count
-            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
-                errors[index] = exc
+        # Serial pre-clone (coarse PyObject setup), then native ACCUMULATE fan-out —
+        # no Python worker closure, no Future (a linear chain is single-scan, no join
+        # prelude). Same native drive as _run_breaker_segment.
+        for index in range(workers):
+            clone = sink.make_local_sink_state(index)
+            chain = [_clone_op(plan[nid]) for nid in middle_ids]
+            chain.append(clone)
+            for i, op in enumerate(chain):
+                op.set_context(ctx)
+                if i + 1 < len(chain):
+                    op.set_downstream(chain[i + 1])
+            local_states[index] = clone
+            worker_heads[index] = chain[0]
 
         pool = CppThreadPool(workers, "phasec-segment")
-        futures = [pool.submit(worker, k) for k in range(workers)]
-        for future in futures:
-            future.result()
+        native_accumulate_fanout(pool, worker_heads, next_input, ctx, local_rows, errors)
         for exc in errors:
             if exc is not None:
                 raise exc

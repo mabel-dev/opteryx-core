@@ -140,17 +140,20 @@ class _ScalarMergeSink(PipelineSink):
     """SCALAR_MERGE adapter for the UNGROUPED aggregate breaker.
 
     The ungrouped recombination: each worker aggregates its own morsels into a
-    private cloned engine; the W
-    engines scalar-merge (sum/min/max the partials) into the first populated one;
-    the ORIGINAL breaker's ``_engine`` is set to that merged engine and its EOS
-    path emits the single merged row downstream.
+    private cloned engine; the W engines scalar-merge (sum/min/max the partials) into
+    the first populated one and the result becomes the ORIGINAL breaker's engine, so
+    its EOS path emits the single merged row downstream.
+
+    Recombination LOGIC is OPERATOR-OWNED: the merge+inject lives in the breaker's
+    native ``recombine_scalar_merge`` (``cpdef``, engine types local). This adapter is
+    the thin orchestrator — clone per worker, delegate combine, no read-out (the EOS
+    push through the original breaker emits the merged row).
     """
 
-    __slots__ = ("_breaker", "_base_engine")
+    __slots__ = ("_breaker",)
 
     def __init__(self, breaker):
         self._breaker = breaker
-        self._base_engine = None
 
     def recombination_class(self) -> RecombClass:
         return RecombClass.SCALAR_MERGE
@@ -162,27 +165,13 @@ class _ScalarMergeSink(PipelineSink):
         return _clone_op(self._breaker)
 
     def combine(self, locals_):
-        # Scalar-merge the W clones' engines into the first populated one. `locals_`
-        # is the list of (clone, ingested_rows) pairs the skeleton collected; only
-        # clones that ingested rows carry state worth merging (the `populated` filter).
-        populated = [clone for (clone, rows) in locals_ if rows > 0]
-        if not populated:
-            # No worker ingested anything; the original breaker's own (empty) engine
-            # stays in place and finalize emits the empty-aggregate row.
-            self._base_engine = None
-            return
-        base = populated[0]._engine
-        for clone in populated[1:]:
-            base.merge(clone._engine)
-        self._base_engine = base
+        # Operator-owned: fold the W per-worker partials into THIS breaker's engine
+        # (merge + inject), so the EOS-driven _finalize emits the merged global row.
+        self._breaker.recombine_scalar_merge(locals_)
 
     def finalize_source(self):
-        # Inject the merged engine into the ORIGINAL breaker, then yield nothing —
-        # the read-out is the breaker's own EOS-driven _finalize (the skeleton pushes
-        # EOS through the original breaker). When no worker ingested rows we leave the
-        # original engine untouched so the empty-result row still emits.
-        if self._base_engine is not None:
-            self._breaker._engine = self._base_engine
+        # Nothing to read out — the merged engine is already injected (combine), and
+        # the skeleton's EOS push through the ORIGINAL breaker emits the merged row.
         return iter(())
 
 
@@ -249,12 +238,14 @@ class _HashRepartitionSink(PipelineSink):
         self._global_bins = global_bins
 
     def finalize_source(self):
-        # PARALLEL per-partition read-out: ≤radix workers each aggregate one global
-        # partition into a fresh engine. The
-        # populated partition engines are injected into the ORIGINAL breaker's
-        # _parallel_engines; the skeleton's EOS push through the original then drives
-        # _finalize (concat, no merge) downstream → exit.
+        # NATIVE per-partition read-out fan-out: ≤radix native tasks each key one
+        # global partition into a fresh engine via the operator-owned
+        # ``readout_partition`` (no Python worker closure, no Future). The populated
+        # partition engines are injected into the ORIGINAL breaker's _parallel_engines;
+        # the skeleton's EOS push through the original then drives _finalize (concat,
+        # no merge) downstream → exit.
         from opteryx.managers.execution.parallel_engine import _clone_op
+        from opteryx.operators._operators import native_readout_fanout
 
         radix = self._radix
         global_bins = self._global_bins
@@ -264,25 +255,11 @@ class _HashRepartitionSink(PipelineSink):
         part_rows = [0] * radix
         rerr = [None] * radix
 
-        def readout_worker(p):
-            try:
-                engine = _clone_op(self._breaker)._engine
-                count = 0
-                for chunk in global_bins[p]:
-                    if ctx.is_terminated():
-                        break
-                    engine.ingest(chunk)
-                    count += chunk.num_rows
-                part_engines[p] = engine
-                part_rows[p] = count
-            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
-                rerr[p] = exc
-
         rpool = self._pool_factory()
         try:
-            rfutures = [rpool.submit(readout_worker, p) for p in range(radix)]
-            for future in rfutures:
-                future.result()
+            native_readout_fanout(
+                rpool, self._breaker, global_bins, ctx, part_engines, part_rows, rerr
+            )
         finally:
             rpool.shutdown(wait=True)
         for exc in rerr:
@@ -479,44 +456,26 @@ class _DistinctSink(PipelineSink):
         # co-locates every copy of a value in ONE partition, so the per-partition
         # carchar sets are disjoint key slices — NO cross-worker merge.
         from opteryx.managers.execution.parallel_engine import push_one
-        from opteryx.compiled.morsel_ops.distinct import distinct as _distinct_op
-        from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+        from opteryx.operators._operators import native_readout_fanout
 
         radix = self._radix
         global_bins = self._global_bins
         ctx = self._ctx
-        distinct_on = self._distinct_on
 
         part_out = [None] * radix
         part_rows = [0] * radix
         rerr = [None] * radix
 
-        def dedup_worker(p):
-            try:
-                hash_set = CarcharSetWrapper()
-                out = []
-                count = 0
-                for chunk in global_bins[p]:
-                    if ctx.is_terminated():
-                        break
-                    # In-place dedup against this partition's private set (mutates the
-                    # chunk to its NEW-survivor rows). Identical to serial's dedup
-                    # kernel — result set is order-independent of phash/parvi, which
-                    # the md5 gate sorts away.
-                    _distinct_op(chunk, hash_set, columns=distinct_on)
-                    if chunk.num_rows > 0:
-                        out.append(chunk)
-                    count += chunk.num_rows
-                part_out[p] = out
-                part_rows[p] = count
-            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
-                rerr[p] = exc
-
+        # NATIVE per-partition DEDUP read-out fan-out — no Python worker closure, no
+        # Future. Each partition dedups into a private carchar set via the operator-owned
+        # readout_partition; survivor-chunk lists land in part_out[p], counts in
+        # part_rows[p]. native_readout_fanout is generic on result[0]/result[1] — here
+        # result[0] is the survivor list (an engine for the agg sink).
         rpool = self._pool_factory()
         try:
-            rfutures = [rpool.submit(dedup_worker, p) for p in range(radix)]
-            for future in rfutures:
-                future.result()
+            native_readout_fanout(
+                rpool, self._breaker, global_bins, ctx, part_out, part_rows, rerr
+            )
         finally:
             rpool.shutdown(wait=True)
         for exc in rerr:
