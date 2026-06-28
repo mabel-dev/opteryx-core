@@ -801,6 +801,88 @@ def _native_generic_execute(plan, dop, telemetry=None):
     return generator(), ResultType.TABULAR
 
 
+def _native_chain_execute(plan, chain, dop, telemetry=None):
+    """Native drive for a single-scan LINEAR MULTI-BREAKER chain (e.g. GROUP BY →
+    DISTINCT) — the last shape that used the Executor DAG. The chain is linear:
+    producer segments materialise into buffers in order, then the terminal segment
+    streams. Linear deps mean it drives SEQUENTIALLY (no DAG): each producer runs to
+    completion before the next, the terminal streams into a ``MorselQueue``. No
+    ``Executor``, no ``queue.Queue``."""
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+    from opteryx.compiled.morsel_queue import PyMorselQueue
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.parallel_engine import _drive_passthrough_segment
+    from opteryx.managers.execution.parallel_engine import _drive_segment
+    from opteryx.managers.execution.pipeline_sink import recombination_class_for
+
+    producers = [s for s in chain if s.tail_is_breaker]
+    terminal_seg = chain[-1]
+    bufs = [[] for _ in producers]  # producer i reads bufs[i-1], writes bufs[i]
+    sink = PyMorselQueue(max(64, dop * 8))
+    err_box: list = []
+    gen_box: list = []
+    pool = CppThreadPool(1, "m4-chain")
+
+    def task():
+        try:
+            # Producers in dataflow order (linear deps → sequential, race-free bufs).
+            for i in range(len(producers)):
+                seg = producers[i]
+                if i == 0:
+                    source = ("scan", seg.nodes[0])
+                    middle = list(seg.nodes[1:-1])
+                else:
+                    source = ("buffer", bufs[i - 1])
+                    middle = list(seg.nodes[:-1])
+                breaker_id = seg.nodes[-1]
+                recomb = recombination_class_for(plan[breaker_id])
+                for _ in _drive_segment(
+                    plan, source, middle, breaker_id, recomb, dop, telemetry,
+                    collect_into=bufs[i],
+                ):
+                    pass
+
+            # Terminal segment → sink.
+            last_buf = bufs[-1] if producers else []
+            if terminal_seg.tail_is_breaker:
+                breaker_id = terminal_seg.nodes[-1]
+                recomb = recombination_class_for(plan[breaker_id])
+                outs = list(plan.outgoing_edges(breaker_id))
+                downstream_id = outs[0][1] if outs else None
+                gen = _drive_segment(
+                    plan, ("buffer", last_buf), list(terminal_seg.nodes[:-1]),
+                    breaker_id, recomb, dop, telemetry, downstream_id=downstream_id,
+                )
+            else:
+                gen = _drive_passthrough_segment(plan, last_buf, terminal_seg.nodes[0])
+            gen_box.append(gen)
+            for morsel in gen:
+                if not sink.put(morsel):
+                    break
+        except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
+            err_box.append(exc)
+        finally:
+            sink.finish()
+
+    def generator():
+        pool.submit(task)
+        try:
+            while True:
+                item = sink.get()
+                if item is None or item is MQ_FINISHED:
+                    break
+                yield item
+        finally:
+            sink.close()
+            pool.shutdown(wait=True)
+            for g in gen_box:
+                g.close()
+            if err_box:
+                raise err_box[0]
+
+    return generator(), ResultType.TABULAR
+
+
 def execute(plan, head_node=None, telemetry=None):
     """Drive ``plan`` through the M4 Event-DAG scheduler — THE data executor.
 
@@ -857,26 +939,10 @@ def execute(plan, head_node=None, telemetry=None):
 
         chain = _find_linear_multibreaker_chain(plan, dop)
 
-    if chain is None:
-        return _native_generic_execute(plan, dop, telemetry)
+    if chain is not None:
+        if telemetry is not None:
+            telemetry._reading["scheduler_multibreaker_chain"] = 1
+            telemetry._reading["scheduler_chain_segments"] = len(chain)
+        return _native_chain_execute(plan, chain, dop, telemetry)
 
-    # ---- multi-breaker chain: the one remaining Executor-driven path ----
-    out_queue: "queue.Queue" = queue.Queue(maxsize=_QUEUE_DEPTH)
-    gen_box: list = []
-    pool = CppThreadPool(1, "m4-scheduler")
-    executor = Executor(pool, telemetry)
-    if telemetry is not None:
-        telemetry._reading["scheduler_multibreaker_chain"] = 1
-        telemetry._reading["scheduler_chain_segments"] = len(chain)
-    _build_multibreaker_chain_dag(
-        executor, plan, chain, dop, telemetry, out_queue, gen_box
-    )
-
-    def generator():
-        try:
-            executor.start()
-            yield from _stream(executor, out_queue, gen_box)
-        finally:
-            pool.shutdown(wait=True)
-
-    return generator(), ResultType.TABULAR
+    return _native_generic_execute(plan, dop, telemetry)

@@ -20,16 +20,43 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        arch: [x86_64, aarch64]
-        pybuild: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
-    runs-on: ubuntu-latest
+        include:
+          # x86_64: native runner
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.11"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.12"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.13"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.14"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.14t"
+          # aarch64: native ARM runner — no QEMU needed
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.11"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.12"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.13"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.14"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.14t"
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7
-
-      - name: Set up QEMU (aarch64 emulation)
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
 
       - name: Make build script executable
         run: chmod +x dev/build-rugo-wheels.sh
@@ -37,15 +64,12 @@ jobs:
       - name: Build rugo wheels (manylinux ${{ matrix.arch }}, py ${{ matrix.pybuild }})
         run: |
           set -euo pipefail
-          IMAGE="quay.io/pypa/manylinux2014_${{ matrix.arch }}"
-          PLATFLAG=""
-          if [ "${{ matrix.arch }}" = "aarch64" ]; then PLATFLAG="--platform linux/arm64"; fi
-          docker run --rm $PLATFLAG \
+          docker run --rm \
             -e PLAT="manylinux2014_${{ matrix.arch }}" \
             -e PYTHON_VERSION=${{ matrix.pybuild }} \
             -v "$(pwd)":/io \
             --workdir /io \
-            "$IMAGE" \
+            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
             /io/dev/build-rugo-wheels.sh
 
       - name: Archive wheels
