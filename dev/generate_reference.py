@@ -32,13 +32,15 @@ def main() -> None:
     from reference.type_catalog import write_type_catalog
     from reference.unary_ops_catalog import write_unary_ops_catalog
 
-    write_function_signatures()
-    write_aggregate_catalog()
-    write_clauses_catalog()
-    write_joins_catalog()
-    write_operator_catalog()
-    write_type_catalog()
-    write_unary_ops_catalog()
+    ref = _repo_root / "reference"
+
+    write_function_signatures(ref / "function_signatures.json")
+    write_aggregate_catalog(ref / "aggregates.json")
+    write_clauses_catalog(ref / "clauses.json")
+    write_joins_catalog(ref / "joins.json")
+    write_operator_catalog(ref / "operators.json")
+    write_type_catalog(ref / "types.json")
+    write_unary_ops_catalog(ref / "unary_ops.json")
 
     print("All catalogs regenerated.")
 

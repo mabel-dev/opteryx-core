@@ -223,6 +223,22 @@ cdef class FilterNode(BasePlanNode):
     cdef list _flt_keep_buffers        # keep the name bytes alive for the ptrs
     cdef public unsigned long long nogil_filter_morsels   # telemetry: nogil-path count
 
+    def __cinit__(self, *args, **kwargs):
+        # Owned-pointer + resolve-state init at ALLOCATION (runs for both __init__
+        # construction and `make_worker`'s `__new__`). Without this, a worker built
+        # via `__new__` (which skips __init__) would carry garbage in the malloc'd
+        # keep-buffers and `__dealloc__` would free() garbage. The first-push caches
+        # (`_flt_col_idx`/`_flt_lit_dv`) are gated by `_flt_resolved`, so they are
+        # never read before being written.
+        self._flt_keep_ptrs = NULL
+        self._flt_keep_lens = NULL
+        self._flt_keep_n = 0
+        self._flt_keep_buffers = None
+        self._flt_resolved = False
+        self._flt_has_post = False
+        self._flt_nogil_ok = False
+        self.nogil_filter_morsels = 0
+
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.filter = parameters.get("filter")
@@ -270,6 +286,27 @@ cdef class FilterNode(BasePlanNode):
             free(self._flt_keep_ptrs)
         if self._flt_keep_lens != NULL:
             free(self._flt_keep_lens)
+
+    cdef BasePlanNode make_worker(self):
+        # SPEC: the compiled predicate (`_compiled_filter`) + its derived metadata,
+        # shared by reference — the bytecode lower+build is NOT redone (the pattern-1
+        # win). STATE: the first-push caches stay per-worker; `__cinit__` already
+        # NULLed the keep-buffers and cleared `_flt_resolved`, so each worker
+        # re-resolves them on its first push exactly as `_clone_op` did via __init__.
+        # The tentative nogil eligibility is recomputed from the shared compiled
+        # filter (cheap), byte-identical to __init__.
+        cdef FilterNode w = FilterNode.__new__(FilterNode)
+        self._copy_worker_base(w)
+        w.filter = self.filter
+        w.post_filter_columns = self.post_filter_columns
+        w.function_evaluations = self.function_evaluations
+        w._const_replacements = self._const_replacements
+        w._compiled_filter = self._compiled_filter
+        if w._compiled_filter is not None and not w._const_replacements:
+            w._flt_nogil_ok = True
+            w._flt_instrs = w._compiled_filter.instrs
+            w._flt_count = w._compiled_filter.count
+        return w
 
     cdef void _flt_resolve_keep(self, const CxxMorsel* m):
         """GIL: resolve the post-filter keep-columns ONCE from the morsel schema

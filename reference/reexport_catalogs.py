@@ -7,17 +7,16 @@ import sys
 from pathlib import Path
 
 if __package__ in {None, ""}:
-    sys.path.insert(1, str(Path(__file__).resolve().parents[2]))
-    from opteryx.expression.functions.signatures import write_function_signatures
-    from opteryx.reference.aggregate_catalog import write_aggregate_catalog
-    from opteryx.reference.clauses_catalog import write_clauses_catalog
-    from opteryx.reference.joins_catalog import write_joins_catalog
-    from opteryx.reference.operator_catalog import write_operator_catalog
-    from opteryx.reference.type_catalog import write_type_catalog
-    from opteryx.reference.unary_ops_catalog import write_unary_ops_catalog
+    sys.path.insert(1, str(Path(__file__).resolve().parents[1]))
+    from reference.signatures import write_function_signatures
+    from reference.aggregate_catalog import write_aggregate_catalog
+    from reference.clauses_catalog import write_clauses_catalog
+    from reference.joins_catalog import write_joins_catalog
+    from reference.operator_catalog import write_operator_catalog
+    from reference.type_catalog import write_type_catalog
+    from reference.unary_ops_catalog import write_unary_ops_catalog
 else:
-    from opteryx.expression.functions.signatures import write_function_signatures
-
+    from .signatures import write_function_signatures
     from .aggregate_catalog import write_aggregate_catalog
     from .clauses_catalog import write_clauses_catalog
     from .joins_catalog import write_joins_catalog
@@ -30,13 +29,13 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
     root = Path(base_path) if base_path is not None else Path(__file__).resolve().parents[2]
 
     output_paths = {
-        "aggregates": root / "opteryx/reference/aggregates.json",
-        "clauses": root / "opteryx/reference/clauses.json",
-        "joins": root / "opteryx/reference/joins.json",
-        "operators": root / "opteryx/reference/operators.json",
-        "unary_ops": root / "opteryx/reference/unary_ops.json",
-        "types": root / "opteryx/reference/types.json",
-        "functions": root / "opteryx/expression/functions/function_signatures.json",
+        "aggregates": root / "reference/aggregates.json",
+        "clauses": root / "reference/clauses.json",
+        "joins": root / "reference/joins.json",
+        "operators": root / "reference/operators.json",
+        "unary_ops": root / "reference/unary_ops.json",
+        "types": root / "reference/types.json",
+        "functions": root / "reference/function_signatures.json",
     }
 
     for output_path in output_paths.values():

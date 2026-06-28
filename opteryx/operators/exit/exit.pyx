@@ -80,6 +80,18 @@ cdef class ExitNode(BasePlanNode):
         self.final_columns = list(final_columns)
         self.final_names = final_names
 
+    cdef BasePlanNode make_worker(self):
+        # SPEC: final_columns/final_names (the validated output identities + names —
+        # the ambiguous-name check ran once at __init__, not re-run per worker).
+        # STATE: fresh _pending deque + at_least_one flag.
+        cdef ExitNode w = ExitNode.__new__(ExitNode)
+        self._copy_worker_base(w)
+        w.final_columns = self.final_columns
+        w.final_names = self.final_names
+        w.at_least_one = False
+        w._pending = deque()
+        return w
+
     @property
     def config(self):  # pragma: no cover
         return None

@@ -61,6 +61,21 @@ cdef class DistinctNode(BasePlanNode):
         self._use_phash = False
         self._scatter_engine = None
 
+    cdef BasePlanNode make_worker(self):
+        # SPEC: _distinct_on (dedup column identities) + _set_variant. STATE: fresh
+        # dedup set + the variant-shadow flags (_promoted/_use_phash shadow the
+        # read-only _set_variant per worker) + scatter seam.
+        cdef DistinctNode w = DistinctNode.__new__(DistinctNode)
+        self._copy_worker_base(w)
+        w._distinct_on = self._distinct_on
+        w._set_variant = self._set_variant
+        w._hash_set = None
+        w.at_least_one_yielded = False
+        w._promoted = False
+        w._use_phash = False
+        w._scatter_engine = None
+        return w
+
     @property
     def config(self):  # pragma: no cover
         return ""

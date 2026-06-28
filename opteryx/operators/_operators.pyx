@@ -282,6 +282,67 @@ cdef class BasePlanNode:
             self.is_stateless = bool(_meta.is_stateless)
             self.is_not_explained = bool(_meta.is_not_explained)
 
+    # ---- Worker spec/state contract (native scheduler rewrite, slice 2a) ---------
+    # The fan-out replacement for `_clone_op`. Each operator's fields split into
+    # SPEC (built once, immutable after `resolve_schema`, shared read-only across
+    # worker threads) and STATE (per-worker, mutable during push). See
+    # docs/NATIVE_SCHEDULER_REWRITE_DESIGN.md §9.3.
+
+    cdef void resolve_schema(self, object input_schema) except *:
+        """Bind-time hook: freeze any first-push-resolved SPEC (column indices,
+        types, key-kinds) against the known input schema. Default: no-op — operators
+        with lazy first-morsel resolution override this. Called once before
+        execution; after it, SPEC is frozen."""
+        pass
+
+    cdef bint is_partition_parallel(self):
+        """False for operators whose STATE carries global semantics that cannot be
+        data-partitioned per worker (window running-counters, global DISTINCT, union
+        schema/leg-count). The scheduler runs those serial/merge-only and never calls
+        `make_worker` on them. Default: True."""
+        return True
+
+    cdef BasePlanNode make_worker(self):
+        """Return a worker instance with fresh STATE that borrows this operator's
+        SPEC by reference. Replaces `_clone_op`. Default: the interim reflection
+        clone (re-runs `__init__`, recompiles) — operators migrated to the contract
+        override to share SPEC with no recompile. Never returns `self` (that would
+        share mutable STATE — a lost-update race in free-threaded builds)."""
+        return <BasePlanNode>type(self)(properties=self.properties, **self.parameters)
+
+    cdef void _copy_worker_base(self, BasePlanNode w) except *:
+        """Helper for `make_worker` overrides: copy BasePlanNode SPEC into `w` by
+        reference and initialise its base STATE fresh. `w` must be freshly allocated
+        via `Cls.__new__(Cls)` (so `__cinit__` has zeroed the pointer/trace infra).
+        The override then assigns its OWN spec (by reference) and fresh state."""
+        from collections import defaultdict
+        from opteryx.utils import random_string
+        from opteryx.models import QueryTelemetry
+        # SPEC — shared read-only across workers.
+        w.properties = self.properties
+        w.parameters = self.parameters
+        w.columns = self.columns
+        w._time_stat_key = self._time_stat_key
+        w.is_scan = self.is_scan
+        w.is_join = self.is_join
+        w.is_stateless = self.is_stateless
+        w.is_not_explained = self.is_not_explained
+        w.manifest = self.manifest
+        w.uuid = self.uuid
+        # STATE — fresh per worker (matches __init__; clone stats are not merged
+        # back today, so a fresh telemetry/readings is byte-identical to _clone_op).
+        w.telemetry = QueryTelemetry(self.properties.query_id)
+        w.identity = random_string()
+        w.readings = defaultdict(int)
+        w.execution_time = 0
+        w.downstream_time = 0
+        w.calls = 0
+        w.records_in = 0
+        w.records_out = 0
+        w.bytes_in = 0
+        w.bytes_out = 0
+        w._empty_morsel_cache = None
+
     # ---- Properties (overridable by subclasses; cdef class supports @property) ----
     @property
     def config(self) -> str:
@@ -883,6 +944,23 @@ cdef inline shared_ptr[CxxMorsel] _carrier_from_py(object morsel):
     elif morsel is not None:
         cxm = morsel_to_cxx(<Morsel>morsel)
     return cxm
+
+
+cpdef BasePlanNode spawn_worker(BasePlanNode op):
+    """Python-callable edge over the cdef `make_worker` contract — the fan-out
+    replacement for `_clone_op`. Used by the (still-Python) scheduler at worker
+    fan-out; once the scheduler is native it calls `make_worker` directly."""
+    return op.make_worker()
+
+
+cpdef bint operator_is_partition_parallel(BasePlanNode op):
+    """Python-callable edge over the cdef `is_partition_parallel` marker."""
+    return op.is_partition_parallel()
+
+
+cpdef void operator_resolve_schema(BasePlanNode op, object input_schema) except *:
+    """Python-callable edge over the cdef `resolve_schema` bind-time hook."""
+    op.resolve_schema(input_schema)
 
 
 cpdef void push_one(BasePlanNode head, object morsel) except *:

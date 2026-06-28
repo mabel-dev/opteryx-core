@@ -46,6 +46,17 @@ cdef class SortNode(BasePlanNode):
         eval_nodes = [col for col, _ in self.order_by if col.node_type != NodeType.IDENTIFIER]
         self._compiled_evals = compile_eval_nodes(eval_nodes)
 
+    cdef BasePlanNode make_worker(self):
+        # SPEC: order_by + compiled evals — read-only at run time, shared by
+        # reference (no recompile). STATE: a fresh `_morsels` accumulator (and the
+        # base `readings`/counters via `_copy_worker_base`).
+        cdef SortNode w = SortNode.__new__(SortNode)
+        self._copy_worker_base(w)
+        w.order_by = self.order_by
+        w._compiled_evals = self._compiled_evals
+        w._morsels = []
+        return w
+
     @property
     def config(self):  # pragma: no cover
         return ", ".join(

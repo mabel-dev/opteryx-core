@@ -80,6 +80,17 @@ cdef class ProjectionNode(BasePlanNode):
 
         self.columns = proj
 
+    cdef BasePlanNode make_worker(self):
+        # SPEC: projection identities + compiled evals + literal set — all read-only
+        # at run time, shared by reference (no recompile). STATE: only the base
+        # `readings`/counters, freshly initialised by `_copy_worker_base`.
+        cdef ProjectionNode w = ProjectionNode.__new__(ProjectionNode)
+        self._copy_worker_base(w)
+        w.projection = self.projection
+        w._compiled_evals = self._compiled_evals
+        w._literal_identities = self._literal_identities
+        return w
+
     @property
     def config(self):  # pragma: no cover
         from opteryx.expression import format_expression

@@ -681,6 +681,14 @@ extensions = [
         extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
         language="c++",
     ),
+    # MorselQueue (moodycamel MPMC + LightweightSemaphore; carries shared_ptr[CxxMorsel])
+    Extension(
+        name="opteryx.compiled.morsel_queue",
+        sources=["opteryx/compiled/morsel_queue.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+        language="c++",
+    ),
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
 ]
 

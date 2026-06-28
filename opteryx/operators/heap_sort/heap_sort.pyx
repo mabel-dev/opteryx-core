@@ -708,6 +708,23 @@ cdef class HeapSortNode(BasePlanNode):
         eval_nodes = [col for col, _ in self.order_by if col.node_type != NodeType.IDENTIFIER]
         self._compiled_evals = compile_eval_nodes(eval_nodes)
 
+    cdef BasePlanNode make_worker(self):
+        # SPEC: order_by + limit + topk flag + mapped_order + uniform direction +
+        # compiled evals — all derived once and read-only at run time, shared by
+        # reference (no recompile, no re-derivation). STATE: fresh top-N chunk buffer
+        # + the deterministic type-name memo cache (re-memoised per worker).
+        cdef HeapSortNode w = HeapSortNode.__new__(HeapSortNode)
+        self._copy_worker_base(w)
+        w.order_by = self.order_by
+        w.limit = self.limit
+        w.vector_topk_candidate = self.vector_topk_candidate
+        w.mapped_order = self.mapped_order
+        w._uniform_direction = self._uniform_direction
+        w._compiled_evals = self._compiled_evals
+        w._compress_cache = {}
+        w._chunk_buffer = []
+        return w
+
     def _is_exact_compressible_vector(self, vector) -> bool:
         name = vector.__class__.__name__
         result = self._compress_cache.get(name)

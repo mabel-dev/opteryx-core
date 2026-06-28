@@ -65,8 +65,12 @@ carrier is the C++ `shared_ptr[CxxMorsel]`, period.
 - **Carrier ownership is C++ shared ownership.** Enqueue moves a `shared_ptr`
   in; dequeue moves it out. No `Py_INCREF`. No shim crossing the queue. When the
   last `shared_ptr` drops, the `CxxMorsel` frees deterministically.
-- **Bounded depth** (`_QUEUE_DEPTH`, default 8) → backpressure (blocking
-  enqueue/dequeue). Matches the serial streaming memory profile.
+- **Bounded depth** (`_QUEUE_DEPTH`, default 8) → backpressure. moodycamel's MPMC
+  `BlockingConcurrentQueue` blocks the *consumer* when empty but is natively
+  *unbounded* on enqueue; producer-side bounding is a `LightweightSemaphore`
+  initialised to `_QUEUE_DEPTH` (acquire-before-enqueue, release-after-dequeue) —
+  the standard moodycamel bounded idiom. Matches the serial streaming memory
+  profile.
 - **Drain-at-close.** On early consumer abandonment (LIMIT), `close()` drops all
   queued `shared_ptr`s (freeing their morsels) and wakes a blocked producer.
   Mirrors `MorselRef`'s drain-on-destruct discipline.
@@ -141,11 +145,16 @@ No `import threading`, no `import queue` survives in the execution package.
 
 ## 9. Staging (each slice independently compiles + passes `make q`)
 
-1. **`MorselQueue`** on vendored moodycamel SPSC, carrying `shared_ptr[CxxMorsel]`,
-   drain-on-close. Unit-tested in isolation. No scheduler wiring yet.
-2. **Worker plan-distribution** (§9.1) — replace `_clone_op`'s Python fork. Shape
-   **pending architect decision** (spec/worker-state split, not a native deep-copy
-   clone). Cross-operator change, parity-tested before anything depends on it.
+1. **`MorselQueue`** — ✅ **DONE.** `src/cpp/morsel_queue.hpp` (moodycamel MPMC
+   `BlockingConcurrentQueue` + `LightweightSemaphore` bound) carrying
+   `shared_ptr[CxxMorsel]`, drain-on-close; `opteryx/compiled/morsel_queue.pyx`
+   wrapper (`nogil` `_put_cxx`/`_get_cxx`, Python test edge). Isolation tests in
+   `tests/unit/test_execution/test_morsel_queue.py`. `concurrentqueue.h`/
+   `blockingconcurrentqueue.h`/`lightweightsemaphore.h` vendored (v1.0.4); dead
+   `pyobject_queue.*` deleted. `make q` 190/190. No scheduler wiring yet.
+2. **Worker plan-distribution** (§9.1) — replace `_clone_op`'s Python fork with the
+   spec/worker-state split. Opens with an operator spec/state audit (join path is
+   the model). Cross-operator change, parity-tested before anything depends on it.
 3. **`cdef class Executor`/`Event`/`Segment`** + native sync, driving the
    **existing** single terminal pipeline through the `nogil` `push` surface
    (replaces `scheduler_engine.py`). Single-segment plans first.
@@ -182,10 +191,132 @@ Stateless ops (filter/project) holding no per-morsel mutable state may share a
 single instance across workers; only breakers (agg, sort, distinct, join build)
 need per-worker state — an optimisation to confirm, not assume.
 
-**OPEN before slice 2 is designed:** (a) confirm keep-strategy / kill-mechanism-
-via-spec-state-split; (b) whether to first audit how cleanly each operator family
-separates immutable spec from mutable state, and report before committing the
-slice-2 design.
+**DECIDED:** keep the strategy, kill the mechanism, replace with the spec/worker-
+state split above. Slice 2 opens with an audit of how cleanly each operator family
+already separates immutable spec from mutable state (the join path is the model);
+that audit shapes the per-operator work, it does not reopen the decision.
+
+### 9.2 Audit findings (2026-06-27) — the split is uneven; resequence slice 2
+
+Audited every cloned data-pipeline operator. Verdicts:
+
+- **CLEAN** (spec already on its own fields; only waste is `__init__` recomputing
+  it): projection, exit, null_reader, function_dataset, distinct, sort,
+  cross_join, non_equi_join.
+- **MODERATE** (a specific refactor): filter, read, aggregate_node, heap_sort,
+  hashed_inner_join, outer_join, nested_loop_join, asof_join, union.
+- **ENTANGLED** (spec & state fused, or no per-worker model at all): parquet_read,
+  ALL ungrouped aggregates, grouped_aggregate_hashed, filter_join, unnest_join,
+  window/row_number.
+
+Four cross-cutting patterns drive the work:
+
+1. **Immutable compiled programs recompiled per worker** — `_compiled_evals`
+   (sort, heap_sort, filter, projection, joins) and compiled predicates are built
+   in `__init__` but are read-only at run time. **Hoisting these into shared spec
+   is the highest-value, lowest-risk first move** and covers most of the CLEAN set.
+2. **Lazy first-morsel resolution** — column indices, types, key-kinds, keep-buffers
+   are resolved on the FIRST push against the data schema, not in `__init__` (filter
+   `_flt_*`, parquet_read `_sp_*`, grouped-agg collector binding, union `schema`).
+   So "spec" is NOT fully derivable from the plan node alone — it needs the input
+   schema. **Lever: resolve these at BIND time** (the input schema is known then)
+   into the spec, instead of per-worker first-push. Otherwise they stay per-worker.
+3. **Aggregates fuse config with accumulator in one `cdef class`** — every
+   `UngroupedAggregate` subclass welds `column_name`/`alias`/`result_type` to its
+   running totals; grouped collectors weld type/column config to state buffers.
+   This is the largest, genuinely-new refactor: split each into a spec object +
+   an accumulator. `merge()`/`merge_from` precedent helps; COUNT(DISTINCT)/MEDIAN
+   are non-mergeable. The frozen `AggregationSpec` dataclass is the seed.
+4. **Global-semantics streaming state that CANNOT be data-partitioned** —
+   window/row_number `_counts` (running per-partition sequence), unnest_join
+   `hash_set` (global DISTINCT), union `schema`+leg-counter. These are not
+   join-shaped; partitioning them per worker changes the *answer*. **They must be
+   marked serial/merge-only, never driven through the partition-parallel worker
+   model.** `_clone_op` already silently splits some of these — a latent bug the
+   split must make explicit.
+
+Joins (the exemplar) are the *best* case for the build/probe shape:
+hashed_inner_join already runs a read-only shared `CarcharJoinEngine` with
+stack-local `ProbeScratch` for concurrent probe; cross_join/non_equi are clean.
+Caveats to fix: per-instance telemetry (`kernel_metrics`/`join_readings`) is not
+per-worker (lost-update race if shared); outer_join shares a build only for LEFT
+outer (RIGHT/FULL rebuild inside the probe); **filter_join mutates its shared
+`right_hash_set` from inside the probe** (unguarded PerfectHash→Carchar fallback)
+— that must move to build time before the set can be shared.
+
+**Resequenced slice 2:**
+- **2a** — ✅ **DONE.** Contract on `BasePlanNode` (§9.3): `resolve_schema`
+  (bind-time hook, default no-op), `make_worker` (default = reflection fallback;
+  overridden by projection/sort to share SPEC by reference, no recompile),
+  `is_partition_parallel` (default True), `_copy_worker_base` helper; cpdef edges
+  `spawn_worker`/`operator_is_partition_parallel`/`operator_resolve_schema`;
+  `_clone_op` routed through `spawn_worker`. Proven: ProjectionNode via real
+  scheduler fan-out (SPEC shared, STATE fresh, 53.9M rows correct), SortNode via
+  direct plan capture. `make q` 190/190.
+- **2b** — ✅ **DONE.** `make_worker` overrides on filter, exit, distinct, heap_sort
+  (sharing compiled predicate / evals / spec by reference, fresh STATE). Filter
+  gained a `__cinit__` NULLing its owned malloc buffers so `__new__`-built workers
+  are dealloc-safe. exit/distinct/heap_sort verified by direct capture (SPEC shared,
+  STATE fresh); filter spawns clean + parallel(4)-vs-serial(1) byte-identical on a
+  60M-row fan-out (sha match, 2.4M rows). `make q` 190/190. (Pattern-2 bind-time
+  `resolve_schema` for filter's first-push caches deferred — kept as per-worker
+  STATE for now, byte-identical; bind-time migration is its own focused step.)
+- **2c** — aggregates spec/accumulator split (pattern 3) — the bulk of the work.
+- **2d** — joins: per-worker telemetry; fix filter_join probe-time mutation;
+  unify outer-join build sharing.
+- **2e** — mark the global-semantics operators (pattern 4) serial/merge-only and
+  make `_clone_op`'s silent splitting an explicit, asserted constraint
+  (**confirmed in-scope here, not deferred**).
+
+### 9.3 Slice 2a — the spec/state contract on `BasePlanNode` (DRAFT, for ratification)
+
+Replace `_clone_op(op) = type(op)(**op.parameters)` with three `cdef` surfaces on
+`BasePlanNode`, overridden per operator:
+
+1. **Field discipline (declaration, not code).** Each operator's `cdef` fields are
+   partitioned into SPEC (built once, immutable after bind, shared read-only across
+   worker threads) and STATE (per-worker, mutable during push). Documented per
+   class; the two methods below encode it.
+
+2. **`cdef void resolve_schema(self, input_schema) except *`** — the bind-time hook
+   (pattern 2). Called once during physical-plan build, when the input schema is
+   known, BEFORE execution. Populates the SPEC's resolved fields (column indices,
+   types, key-kinds, keep-buffer shapes) that today resolve on first push. After
+   this, SPEC is frozen; no first-push resolution remains. Default: no-op.
+
+3. **`cdef BasePlanNode make_worker(self)`** — replaces `_clone_op`. ALWAYS returns
+   a **fresh-STATE** worker instance that **borrows the SPEC by reference** (shares
+   the already-compiled programs / resolved caches, and read-only-after-build
+   artifacts like the inner-join engine — no `__init__`, no recompile; that is the
+   pattern-1 win). Cost is one `cdef` alloc + a few reference assignments. It does
+   NOT `return self` — that would share mutable STATE (including the `readings`
+   telemetry counters) across worker threads, a lost-update race in free-threaded
+   3.14t. STATE — including `readings` — is per-worker; the scheduler sums each
+   worker's `readings` at EOS. That fixed-size counter reduction is NOT the
+   per-row/per-group data merge the partition strategy exists to avoid; it is O(
+   workers × counters), off the data path. No shared mutable state anywhere.
+
+4. **`cdef bint is_partition_parallel(self)`** — pattern 4 marker. Operators with
+   global-semantics streaming state (window/row_number `_counts`, unnest_join
+   global DISTINCT, union schema+leg-counter) return **False**: the scheduler runs
+   them serial/merge-only and MUST NOT call `make_worker` for fan-out. `make_worker`
+   on a non-partition-parallel operator **asserts** — turning `_clone_op`'s current
+   silent mis-split into a loud failure. Default: True.
+
+Note: SPEC is the only thing shared across worker threads, and it is read-only
+after `resolve_schema`. STATE (buffers, accumulators, `readings`) is per-worker by
+construction. There is no shared mutable state, hence no lock/atomic on the worker
+fan-out — the only synchronisation is the `MorselQueue` hand-off.
+
+Scheduler use: at plan build it calls `resolve_schema` on every operator (SPEC
+frozen); at fan-out it calls `make_worker` per worker for partition-parallel
+operators, and routes the rest to the serial/merge drive. No `type(op)(**dict)`
+reflection, no per-worker recompile, no Python `__init__` on the execution path.
+
+Proof-of-contract: land 2a + apply it to `projection` (CLEAN, compiled-evals SPEC,
+STATE = only `readings`) and `sort` (CLEAN, compiled-evals SPEC + STATE `_morsels`
++ `readings`) before rolling to the rest — both prove the share-SPEC / fresh-STATE
+split and the per-worker `readings` reduction. DOP=1 byte-identical throughout.
 
 DOP=1 must stay byte-identical to the serial path at every slice (the prime
 constraint). No flags, no shadow path, no fallback (§ contract).
@@ -196,9 +327,15 @@ constraint). No flags, no shadow path, no fallback (§ contract).
   (MPMC, architect-approved), carrying `shared_ptr[CxxMorsel]` only — no
   `PyObject*` on any native queue. The dead, unreferenced `pyobject_queue.*`
   (PyObject-on-queue hack) is **deleted** (§4.2).
-- **Q2 — OPEN.** Strategy (partition + private state + concat) is kept; the Python
-  fork mechanism (`_clone_op`) is killed and replaced by a **spec/worker-state
-  split**, not a native deep-copy clone (§9.1). Awaiting architect confirmation +
-  decision on the operator spec/state audit.
+- **Q2 — RESOLVED.** Strategy (partition + private state + concat) is kept; the
+  Python fork mechanism (`_clone_op`) is killed and replaced by a **spec/worker-
+  state split**, not a native deep-copy clone (§9.1). Slice 2 opens with the
+  operator spec/state audit (shapes the work, not the decision).
 - **Q3 — RESOLVED.** `identify_segments` stays planning-phase; may be pythonic
   Cython or pure Python (planning-phase latitude).
+- **P2 (audit) — RESOLVED.** Lazy first-morsel resolution moves to BIND time via
+  `resolve_schema` (§9.3), into shared SPEC — not per-worker state.
+- **P4 (audit) — RESOLVED.** Global-semantics operators (window/unnest/union) stay
+  serial/merge-only; `is_partition_parallel()=False` + `make_worker` asserts.
+  Fixing `_clone_op`'s silent mis-split is in scope in 2e, not deferred.
+- **2a contract (§9.3) — PENDING ratification** before base-class code.

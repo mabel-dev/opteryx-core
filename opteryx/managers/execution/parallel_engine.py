@@ -1248,10 +1248,14 @@ class _JoinSourcePrep:
 
 
 def _clone_op(op):
-    """A fresh, independent instance of a push operator — re-running __init__
-    rebuilds its private state (compiled bytecode, a clean aggregate engine).
-    BasePlanNode stores the original construction args, so this reproduces it."""
-    return type(op)(properties=op.properties, **op.parameters)
+    """A fresh-STATE worker that borrows the operator's SPEC (native scheduler
+    rewrite, slice 2a). Routes through the `make_worker` contract on BasePlanNode:
+    migrated operators (projection, sort) share their compiled SPEC by reference
+    with no recompile; un-migrated operators fall back to the default reflection
+    clone (re-running __init__). See docs/NATIVE_SCHEDULER_REWRITE_DESIGN.md §9.3."""
+    from opteryx.operators._operators import spawn_worker
+
+    return spawn_worker(op)
 
 
 def _build_clone_chain(plan, middle_ids, breaker, ctx):
