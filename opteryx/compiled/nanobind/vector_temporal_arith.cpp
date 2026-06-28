@@ -202,8 +202,9 @@ static int parse_diff_kind(const char* part) {
 // ---------------------------------------------------------------------------
 
 static void validate_date_format(const char* fmt) {
-    // All standard POSIX/C99 strftime single-character specifiers.
-    static const char* known = "YymdHIMSpjAaBbZenwtuVUWcxXFTRzGgklPqr";
+    // MySQL DATE_FORMAT specifiers (superset of the POSIX tokens we expose).
+    // %i = minutes (MySQL); the rest are POSIX/C99 aliases with MySQL semantics.
+    static const char* known = "YymdHIMSpjAaBbZenwtuVUWcxXFTRzGgklPqri";
     for (const char* p = fmt; *p; ++p) {
         if (*p != '%') continue;
         ++p;
@@ -338,11 +339,30 @@ static nb::object impl_date_diff(nb::object start_obj, nb::object end_obj,
     const DrakenVector* ds = draken_vector_unwrap(start_obj.ptr());
     const DrakenVector* de = draken_vector_unwrap(end_obj.ptr());
     if (!ds || !de) throw nb::python_error();
-    if (ds->type != DRAKEN_TIMESTAMP64) {
-        throw nb::type_error("vector_date_diff: start must be DRAKEN_TIMESTAMP64");
+
+    // DRAKEN_NULL means all rows are null regardless of cast type — return all-null INT64.
+    if (ds->type == DRAKEN_NULL || de->type == DRAKEN_NULL) {
+        const uint32_t n = (ds->type == DRAKEN_NULL) ? de->length : ds->length;
+        const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
+        int64_t* out = static_cast<int64_t*>(draken_malloc(data_sz));
+        if (!out) throw std::bad_alloc();
+        std::memset(out, 0, data_sz);
+        const uint32_t bm     = (n + 7u) >> 3;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        const size_t   vbytes = padded > 0u ? padded : 8u;
+        uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) { draken_free(out); throw std::bad_alloc(); }
+        std::memset(validity, 0x00u, vbytes);
+        PyObject* result = draken_vector_own_raw(out, validity, n, DRAKEN_INT64);
+        if (!result) throw nb::python_error();
+        return nb::steal<nb::object>(result);
     }
-    if (de->type != DRAKEN_TIMESTAMP64) {
-        throw nb::type_error("vector_date_diff: end must be DRAKEN_TIMESTAMP64");
+
+    if (ds->type != DRAKEN_TIMESTAMP64 && ds->type != DRAKEN_DATE32) {
+        throw nb::type_error("vector_date_diff: start must be DRAKEN_TIMESTAMP64 or DRAKEN_DATE32");
+    }
+    if (de->type != DRAKEN_TIMESTAMP64 && de->type != DRAKEN_DATE32) {
+        throw nb::type_error("vector_date_diff: end must be DRAKEN_TIMESTAMP64 or DRAKEN_DATE32");
     }
     if (ds->length != de->length) {
         PyErr_Format(PyExc_ValueError,
@@ -350,8 +370,11 @@ static nb::object impl_date_diff(nb::object start_obj, nb::object end_obj,
         throw nb::python_error();
     }
 
-    const int      ucs = get_ts_unit_code(start_obj);
-    const int      uce = get_ts_unit_code(end_obj);
+    // DATE32 is days-since-epoch (int32_t); treat as microseconds (unit_code 2) by scaling.
+    const bool s_is_date = (ds->type == DRAKEN_DATE32);
+    const bool e_is_date = (de->type == DRAKEN_DATE32);
+    const int  ucs = s_is_date ? 2 : get_ts_unit_code(start_obj);
+    const int  uce = e_is_date ? 2 : get_ts_unit_code(end_obj);
     const uint32_t n   = ds->length;
 
     const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
@@ -382,8 +405,9 @@ static nb::object impl_date_diff(nb::object start_obj, nb::object end_obj,
     }
 
     // Gather start/end values into flat arrays for the batch kernel.
-    const int64_t* s_data = static_cast<const int64_t*>(ds->data);
-    const int64_t* e_data = static_cast<const int64_t*>(de->data);
+    // DATE32 stores int32_t days; scale to microseconds so date_diff_batch
+    // sees homogeneous us values (unit_code 2) for both DATE32 and TIMESTAMP64.
+    static constexpr int64_t US_PER_DAY_DIFF = 86400000000LL;
 
     const size_t flat_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
     int64_t* s_flat = static_cast<int64_t*>(draken_malloc(flat_sz));
@@ -393,9 +417,23 @@ static nb::object impl_date_diff(nb::object start_obj, nb::object end_obj,
     struct FlatGuard { int64_t* s; int64_t* e;
         ~FlatGuard() { if (s) draken_free(s); if (e) draken_free(e); } } fg{s_flat, e_flat};
 
-    for (uint32_t i = 0u; i < n; ++i) {
-        s_flat[i] = row_is_null(ds, i) ? 0 : s_data[ds->selection[i]];
-        e_flat[i] = row_is_null(de, i) ? 0 : e_data[de->selection[i]];
+    if (s_is_date) {
+        const int32_t* s_data = static_cast<const int32_t*>(ds->data);
+        for (uint32_t i = 0u; i < n; ++i)
+            s_flat[i] = row_is_null(ds, i) ? 0 : static_cast<int64_t>(s_data[ds->selection[i]]) * US_PER_DAY_DIFF;
+    } else {
+        const int64_t* s_data = static_cast<const int64_t*>(ds->data);
+        for (uint32_t i = 0u; i < n; ++i)
+            s_flat[i] = row_is_null(ds, i) ? 0 : s_data[ds->selection[i]];
+    }
+    if (e_is_date) {
+        const int32_t* e_data = static_cast<const int32_t*>(de->data);
+        for (uint32_t i = 0u; i < n; ++i)
+            e_flat[i] = row_is_null(de, i) ? 0 : static_cast<int64_t>(e_data[de->selection[i]]) * US_PER_DAY_DIFF;
+    } else {
+        const int64_t* e_data = static_cast<const int64_t*>(de->data);
+        for (uint32_t i = 0u; i < n; ++i)
+            e_flat[i] = row_is_null(de, i) ? 0 : e_data[de->selection[i]];
     }
 
     date_diff_batch(s_flat, e_flat, n, ucs, uce, diff_kind, out);
@@ -570,6 +608,16 @@ static void df_iso_week(int64_t days, int wday, int* iso_year, int* iso_week) {
     *iso_week = static_cast<int>((thu - ta_ymd_to_days(y, 1, 1)) / 7) + 1;
 }
 
+// MySQL %X: year for the week where Sunday is the first day (mode 2).
+// The week year is determined by which calendar year contains the Wednesday
+// of the Sunday-start week (day 3 of 0=Sun…6=Sat), mirroring how ISO uses
+// Thursday for Monday-start weeks.
+static int df_sunday_week_year(int64_t days, int wday) {
+    const int64_t wed = days + 3 - static_cast<int64_t>(wday);
+    int y, m, d; ta_days_to_ymd(wed, &y, &m, &d);
+    return y;
+}
+
 // Emit one specifier; returns the advanced write pointer.
 static char* df_emit_spec(char* p, char c, const DfFields& f) {
     switch (c) {
@@ -582,7 +630,8 @@ static char* df_emit_spec(char* p, char c, const DfFields& f) {
         case 'k': return df_put2sp(p, f.hour);
         case 'I': return df_put2(p, ((f.hour + 11) % 12) + 1);
         case 'l': return df_put2sp(p, ((f.hour + 11) % 12) + 1);
-        case 'M': return df_put2(p, f.minute);
+        case 'M': return df_puts(p, DF_MON_FULL[f.month - 1]);   // MySQL: month name
+        case 'i': return df_put2(p, f.minute);                   // MySQL: minutes 00-59
         case 'S': return df_put2(p, f.second);
         case 'p': return df_puts(p, f.hour < 12 ? "AM" : "PM");
         case 'P': return df_puts(p, f.hour < 12 ? "am" : "pm");
@@ -592,12 +641,12 @@ static char* df_emit_spec(char* p, char c, const DfFields& f) {
         case 'b': return df_puts(p, DF_MON_ABBR[f.month - 1]);
         case 'B': return df_puts(p, DF_MON_FULL[f.month - 1]);
         case 'w': *p++ = static_cast<char>('0' + f.wday); return p;
-        case 'u': *p++ = static_cast<char>('0' + (f.wday == 0 ? 7 : f.wday)); return p;
+        case 'u': return df_put2(p, (f.yday0 - (f.wday + 6) % 7 + 7) / 7); // MySQL: week 00-53, Monday-first
         case 'q': *p++ = static_cast<char>('0' + (f.month - 1) / 3 + 1); return p;
         case 'Z': return df_puts(p, "GMT");
         case 'z': return df_puts(p, "+0000");
         case 'U': return df_put2(p, (f.yday0 - f.wday + 7) / 7);
-        case 'W': return df_put2(p, (f.yday0 - ((f.wday + 6) % 7) + 7) / 7);
+        case 'W': return df_puts(p, DF_WDAY_FULL[f.wday]);        // MySQL: weekday name
         case 'V': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);
                     return df_put2(p, iw); }
         case 'G': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);
@@ -617,19 +666,14 @@ static char* df_emit_spec(char* p, char c, const DfFields& f) {
                   p = df_put2(p, f.minute); *p++ = ':';
                   p = df_put2(p, f.second); *p++ = ' ';
                   return df_puts(p, f.hour < 12 ? "AM" : "PM");
-        case 'x': p = df_put2(p, f.month); *p++ = '/';
-                  p = df_put2(p, f.day); *p++ = '/';
-                  return df_put2(p, ((f.year % 100) + 100) % 100);
-        case 'X': p = df_put2(p, f.hour); *p++ = ':';
-                  p = df_put2(p, f.minute); *p++ = ':';
-                  return df_put2(p, f.second);
-        case 'c': p = df_puts(p, DF_WDAY_ABBR[f.wday]); *p++ = ' ';
-                  p = df_puts(p, DF_MON_ABBR[f.month - 1]); *p++ = ' ';
-                  p = df_put2sp(p, f.day); *p++ = ' ';
-                  p = df_put2(p, f.hour); *p++ = ':';
-                  p = df_put2(p, f.minute); *p++ = ':';
-                  p = df_put2(p, f.second); *p++ = ' ';
-                  return df_put_year(p, f.year, 4);
+        case 'x': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);  // MySQL: year for Monday-first week (= %G)
+                    return df_put_year(p, iy, 4); }
+        case 'X': return df_put_year(p, df_sunday_week_year(f.days, f.wday), 4); // MySQL: year for Sunday-first week
+        case 'c': {                                                       // MySQL: month number 0-12 (no zero-pad)
+                    const int mo = f.month;
+                    if (mo >= 10) *p++ = static_cast<char>('0' + mo / 10);
+                    *p++ = static_cast<char>('0' + mo % 10);
+                    return p; }
         default:  *p++ = c; return p;   // unreachable after validation
     }
 }
@@ -637,16 +681,15 @@ static char* df_emit_spec(char* p, char c, const DfFields& f) {
 // Worst-case bytes a single specifier can emit (used to size the row buffer).
 static uint32_t df_spec_max_width(char c) {
     switch (c) {
-        case 'Y': case 'G': return 12;     // sign + large year
-        case 'A': case 'B': return 9;      // "Wednesday" / "September"
-        case 'c': return 36;
+        case 'Y': case 'G': case 'X': case 'x': return 12;  // sign + large year
+        case 'A': case 'B': case 'M': case 'W': return 9;   // "Wednesday" / "September"
         case 'F': return 20;       // year(≤12) + "-MM-DD"
         case 'r': return 12;
-        case 'x': case 'X': case 'T': return 10;
+        case 'T': return 10;
         case 'z': return 5;
         case 'a': case 'b': case 'Z': case 'j': return 3;
         case 'R': return 5;
-        case 'w': case 'u': case 'q': return 1;
+        case 'c': case 'w': case 'q': return 2;  // %c = month num 1-12, %w/%q = 1 digit (2 is safe)
         default:  return 2;                // numeric 2-wide fields
     }
 }

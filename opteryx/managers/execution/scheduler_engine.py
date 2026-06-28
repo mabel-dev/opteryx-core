@@ -378,6 +378,429 @@ def _stream(executor, out_queue, gen_box):
         raise executor.error
 
 
+def _count_scans(plan) -> int:
+    return sum(1 for nid in plan.nodes() if getattr(plan[nid], "is_scan", False))
+
+
+def _native_serial_execute(plan, telemetry=None):
+    """Native single-scan serial drive (slice 3, option B). Pushes the scan's
+    morsels through the compiled chain on a pool thread, the terminal Exit's output
+    flowing straight into a ``MorselQueue``; the consumer generator drains it. No
+    ``queue.Queue``, no ``Executor``/``threading``, no Python drive generator —
+    byte-identical to the serial path at DOP=1.
+    """
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+    from opteryx.compiled.morsel_queue import PyMorselQueue
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import drive_scan_to_sink
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    scan, chain_head = chains[0]
+    sink = PyMorselQueue(_QUEUE_DEPTH)
+    err_box: list = []
+    pool = CppThreadPool(1, "m4-serial")
+
+    def task():
+        # On any failure, stash and `finish()` so the consumer unblocks (it would
+        # otherwise wait on `sink.get()` forever); the error is re-raised on the
+        # consumer thread after the sentinel.
+        try:
+            drive_scan_to_sink(scan, chain_head, exit_node, ctx, sink)
+        except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
+            err_box.append(exc)
+            sink.finish()
+
+    def generator():
+        pool.submit(task)
+        try:
+            while True:
+                item = sink.get()
+                if item is None or item is MQ_FINISHED:
+                    break
+                yield item
+        finally:
+            # Early abandon (LIMIT at the cursor): drop the remainder and unblock the
+            # producer's backpressured put, then let the chain's finally run.
+            sink.close()
+            ctx.terminate()
+            pool.shutdown(wait=True)
+            if err_box:
+                raise err_box[0]
+
+    return generator(), ResultType.TABULAR
+
+
+def _native_stateless_execute(plan, scan_id, op_ids, exit_id, workers, telemetry=None):
+    """Native parallel STATELESS drive (slice 4): ``scan → stateless* → exit``, the
+    CONCAT (no-merge) shape. Row-floor serial fallback, else W workers each pushing
+    their cloned chain's output into a shared ``MorselQueue`` via the native
+    ``stateless_worker_drive``. Replaces ``_stateless_stream``'s ``queue.Queue``
+    fan-out + per-morsel ``push_one`` + the outer ``Executor``/``queue.Queue`` with
+    a native push + queue. The shared-scan pull keeps a ``threading.Lock`` (it
+    guards a Python buffer iterator) until the scan pull itself goes nogil.
+    """
+    import threading
+
+    from opteryx import EOS as _EOS_SENTINEL
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+    from opteryx.compiled.morsel_queue import PyMorselQueue
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import pull_one
+    from opteryx.operators._operators import push_one
+    from opteryx.operators._operators import push_one_to_sink
+    from opteryx.operators._operators import spawn_worker
+    from opteryx.operators._operators import stateless_worker_drive
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    scan = plan[scan_id]
+    # Bounded fan-out (the old out_q was unbounded): generous depth so workers rarely
+    # block; the consumer drains steadily. Bounded only to cap memory.
+    sink = PyMorselQueue(max(64, workers * 8))
+
+    def generator():
+        pool = None
+        errors = [None] * workers
+        try:
+            # Row-floor: tiny inputs run serially through the ORIGINAL chain (this
+            # path yields directly — no sink, no pool).
+            buffer = []
+            buffered_rows = 0
+            exhausted = False
+            while buffered_rows < config.PARALLEL_MIN_ROWS:
+                morsel = pull_one(scan)
+                if morsel is None:
+                    exhausted = True
+                    break
+                buffer.append(morsel)
+                buffered_rows += morsel.num_rows
+
+            if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+                head = plan[op_ids[0]]
+                for morsel in buffer:
+                    if ctx.is_terminated():
+                        break
+                    push_one(head, morsel)
+                    while exit_node.has_pending():
+                        yield exit_node.pop_pending()
+                if not ctx.is_terminated():
+                    push_one(head, _EOS_SENTINEL)
+                    while exit_node.has_pending():
+                        yield exit_node.pop_pending()
+                return
+
+            # Parallel: W workers push their cloned chain output into the sink.
+            buf_iter = iter(buffer)
+            pull_lock = threading.Lock()
+
+            def next_input():
+                with pull_lock:
+                    if ctx.is_terminated():
+                        return None
+                    buffered = next(buf_iter, None)
+                    if buffered is not None:
+                        return buffered
+                    return pull_one(scan)
+
+            def worker(index):
+                ops = [spawn_worker(plan[nid]) for nid in op_ids]
+                exit_clone = spawn_worker(plan[exit_id])
+                chain = ops + [exit_clone]
+                for i, op in enumerate(chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(chain):
+                        op.set_downstream(chain[i + 1])
+                head = chain[0]
+                try:
+                    stateless_worker_drive(head, exit_clone, next_input, ctx, sink)
+                except BaseException as exc:  # noqa: BLE001 — surfaced on main thread
+                    errors[index] = exc
+                finally:
+                    sink.finish()  # this worker done (consumer counts W finishes)
+
+            pool = CppThreadPool(workers, "m4-stateless")
+            for k in range(workers):
+                pool.submit(worker, k)
+
+            done = 0
+            yielded = False
+            while done < workers:
+                item = sink.get()
+                if item is MQ_FINISHED:
+                    done += 1
+                    continue
+                if item is None:  # consumer abandoned (we closed the sink)
+                    break
+                yielded = True
+                yield item
+
+            for exc in errors:
+                if exc is not None:
+                    raise exc
+
+            # Empty result still needs the schema morsel the original Exit emits on EOS.
+            if not yielded and not ctx.is_terminated():
+                push_one(exit_node, _EOS_SENTINEL)
+                while exit_node.has_pending():
+                    yield exit_node.pop_pending()
+        finally:
+            # close() FIRST so any worker blocked on the bounded put unwinds before
+            # we wait for the pool (else shutdown(wait=True) would deadlock).
+            sink.close()
+            if pool is not None:
+                pool.shutdown(wait=True)
+            ctx.terminate()
+            scan.close_source()
+
+    return generator(), ResultType.TABULAR
+
+
+def _native_join_execute(plan, shape, workers, telemetry=None):
+    """Native parallel INNER-EQUI-JOIN probe (slice 4): build once serially, then W
+    workers probe DISJOINT slices of the probe scan through a private join clone
+    (sharing the one read-only built ``left_hash``), streaming matches into a shared
+    ``MorselQueue``. Replaces ``_join_probe_stream``'s ``queue.Queue`` fan-out +
+    per-morsel ``push_one`` + outer ``Executor``/``queue.Queue`` with the native push
+    + queue. Probe workers DO push EOS (the cloned join flushes its EOS path)."""
+    import threading
+
+    from opteryx import EOS as _EOS_SENTINEL
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+    from opteryx.compiled.morsel_queue import PyMorselQueue
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators import JoinRightAdapter
+    from opteryx.operators._operators import drive_scan
+    from opteryx.operators._operators import pull_one
+    from opteryx.operators._operators import push_one
+    from opteryx.operators._operators import push_one_to_sink
+    from opteryx.operators._operators import spawn_worker
+    from opteryx.operators._operators import stateless_worker_drive
+
+    chains, exit_node, ctx = compile_pipeline(plan)
+    build_scan = plan[shape.build_scan_id]
+    probe_scan = plan[shape.probe_scan_id]
+    j = plan[shape.join_id]
+
+    build_head = probe_head = None
+    for scan, head in chains:
+        if scan is build_scan:
+            build_head = head
+        elif scan is probe_scan:
+            probe_head = head
+    if build_head is None or probe_head is None:
+        from opteryx.managers.execution.parallel_engine import _serial_stream
+
+        ctx.terminate()
+        return _wrap_serial(_serial_stream(plan))
+
+    sink = PyMorselQueue(max(64, workers * 8))
+
+    def _drain_exit():
+        while exit_node is not None and exit_node.has_pending():
+            yield exit_node.pop_pending()
+
+    def generator():
+        pool = None
+        errors = [None] * workers
+        try:
+            # ---- serial build prelude (build-before-probe): builds left_hash on j ----
+            for _ in drive_scan(build_scan, build_head, exit_node, ctx):
+                pass
+            if ctx.is_terminated():
+                return
+
+            left_morsel = j.left_morsel
+            left_columns = j.left_columns
+            left_is_empty = j.left_is_empty
+            columns = j.columns
+            load_factor = j.carchar_probe_load_factor
+            shared_left_hash = j.left_hash
+
+            if left_is_empty:  # inner join, empty build → empty result (schema morsel)
+                push_one(probe_head, _EOS_SENTINEL)
+                yield from _drain_exit()
+                return
+
+            # ---- row-floor: tiny probe runs serially through the original chain ----
+            buffer = []
+            buffered_rows = 0
+            exhausted = False
+            while buffered_rows < config.PARALLEL_MIN_ROWS:
+                morsel = pull_one(probe_scan)
+                if morsel is None:
+                    exhausted = True
+                    break
+                buffer.append(morsel)
+                buffered_rows += morsel.num_rows
+
+            if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+                for morsel in buffer:
+                    if ctx.is_terminated():
+                        break
+                    push_one(probe_head, morsel)
+                    yield from _drain_exit()
+                if not ctx.is_terminated():
+                    push_one(probe_head, _EOS_SENTINEL)
+                    yield from _drain_exit()
+                return
+
+            # ---- parallel probe ----
+            buf_iter = iter(buffer)
+            pull_lock = threading.Lock()
+            concurrent_safe = probe_scan.is_concurrent_pull_safe()
+
+            def next_input():
+                if concurrent_safe:
+                    with pull_lock:
+                        m = next(buf_iter, None)
+                    if m is not None:
+                        return m
+                    if ctx.is_terminated():
+                        return None
+                    return pull_one(probe_scan)
+                with pull_lock:
+                    if ctx.is_terminated():
+                        return None
+                    m = next(buf_iter, None)
+                    if m is not None:
+                        return m
+                    return pull_one(probe_scan)
+
+            def worker(index):
+                try:
+                    clone_join = spawn_worker(j)
+                    clone_join.left_morsel = left_morsel
+                    clone_join.left_columns = left_columns
+                    clone_join.columns = columns
+                    clone_join.left_is_empty = left_is_empty
+                    clone_join.carchar_probe_load_factor = load_factor
+                    clone_join.left_hash = shared_left_hash
+                    clone_join._build_complete = True
+                    clone_join.set_context(ctx)
+
+                    tail = [spawn_worker(plan[nid]) for nid in shape.downstream_ids]
+                    exit_clone = spawn_worker(plan[shape.exit_id])
+                    tail = tail + [exit_clone]
+                    for i, op in enumerate(tail):
+                        op.set_context(ctx)
+                        if i + 1 < len(tail):
+                            op.set_downstream(tail[i + 1])
+                    clone_join.set_downstream(tail[0])
+
+                    probe_ops = [spawn_worker(plan[nid]) for nid in shape.probe_middle_ids]
+                    adapter = JoinRightAdapter(clone_join)
+                    adapter.set_context(ctx)
+                    probe_chain = probe_ops + [adapter]
+                    for i, op in enumerate(probe_chain):
+                        op.set_context(ctx)
+                        if i + 1 < len(probe_chain):
+                            op.set_downstream(probe_chain[i + 1])
+                    probe_head_clone = probe_chain[0]
+
+                    stateless_worker_drive(probe_head_clone, exit_clone, next_input, ctx, sink)
+                    if not ctx.is_terminated():
+                        push_one_to_sink(probe_head_clone, exit_clone, _EOS_SENTINEL, sink)
+                except BaseException as exc:  # noqa: BLE001 — surfaced on main thread
+                    errors[index] = exc
+                finally:
+                    sink.finish()
+
+            pool = CppThreadPool(workers, "m4-join-probe")
+            for k in range(workers):
+                pool.submit(worker, k)
+
+            done = 0
+            yielded = False
+            while done < workers:
+                item = sink.get()
+                if item is MQ_FINISHED:
+                    done += 1
+                    continue
+                if item is None:
+                    break
+                yielded = True
+                yield item
+
+            for exc in errors:
+                if exc is not None:
+                    raise exc
+
+            if not yielded and not ctx.is_terminated():
+                push_one(probe_head, _EOS_SENTINEL)
+                yield from _drain_exit()
+        finally:
+            sink.close()
+            if pool is not None:
+                pool.shutdown(wait=True)
+            ctx.terminate()
+            build_scan.close_source()
+            probe_scan.close_source()
+
+    return generator(), ResultType.TABULAR
+
+
+def _wrap_serial(gen):
+    """Adapt a bare morsel generator to the (generator, ResultType) contract."""
+
+    def g():
+        yield from gen
+
+    return g(), ResultType.TABULAR
+
+
+def _native_generic_execute(plan, dop, telemetry=None):
+    """Native single-terminal drive for every NON-CHAIN plan (slice 4). When a plan
+    is not a multi-breaker chain its drive is ONE terminal task, so the ``Executor``
+    DAG (one real task + a no-op producer dependency) is pure overhead. Here that
+    task runs on a ``CppThreadPool`` straight into a ``MorselQueue`` — no ``Executor``,
+    no ``queue.Queue``. The per-shape handler (``dispatch_data_pipeline`` → breaker /
+    serial / …) yields morsels; the driver pumps them into the sink, the consumer
+    drains. (The fully-native push shapes — single-scan serial, stateless, join —
+    are handled by their own paths before reaching here; this catches the breaker
+    agg/distinct and any other non-chain shape.)"""
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+    from opteryx.compiled.morsel_queue import PyMorselQueue
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.parallel_engine import dispatch_data_pipeline
+
+    sink = PyMorselQueue(max(64, dop * 8))
+    err_box: list = []
+    gen_box: list = []
+    pool = CppThreadPool(1, "m4-segment")
+
+    def task():
+        try:
+            gen = dispatch_data_pipeline(plan, dop, telemetry)
+            gen_box.append(gen)
+            for m in gen:
+                if not sink.put(m):
+                    break  # consumer abandoned (LIMIT / early close)
+        except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
+            err_box.append(exc)
+        finally:
+            sink.finish()
+
+    def generator():
+        pool.submit(task)
+        try:
+            while True:
+                item = sink.get()
+                if item is None or item is MQ_FINISHED:
+                    break
+                yield item
+        finally:
+            sink.close()  # unblock a producer blocked on the bounded put
+            pool.shutdown(wait=True)  # task no longer touches the handler generator
+            for g in gen_box:
+                g.close()  # run the handler's finally (ctx terminate, source close)
+            if err_box:
+                raise err_box[0]
+
+    return generator(), ResultType.TABULAR
+
+
 def execute(plan, head_node=None, telemetry=None):
     """Drive ``plan`` through the M4 Event-DAG scheduler — THE data executor.
 
@@ -397,23 +820,35 @@ def execute(plan, head_node=None, telemetry=None):
         telemetry._reading["scheduler_pipelines"] = _count_pipelines(segments)
         telemetry._reading["scheduler_dop"] = dop
 
-    out_queue: "queue.Queue" = queue.Queue(maxsize=_QUEUE_DEPTH)
-    gen_box: list = []
+    # Slice 3 (native scheduler, option B): a single-scan plan at DOP=1 — the
+    # byte-identical-serial prime constraint — runs the NATIVE push drive
+    # (`drive_scan_to_sink`) straight into a `MorselQueue`. No Python `queue.Queue`,
+    # no `Executor`/`threading`, no Python drive generator. The DOP>=2 parallel
+    # handlers stay on the existing path until slice 4.
+    if dop == 1 and len(segments) == 1 and _count_scans(plan) == 1:
+        return _native_serial_execute(plan, telemetry)
 
-    # The scheduler's own pool runs the ONE terminal drive task (the per-shape handlers
-    # spawn their OWN worker pools at the resolved DOP for the fan-out). min 1 so the pool
-    # is always valid.
-    pool = CppThreadPool(1, "m4-scheduler")
-    executor = Executor(pool, telemetry)
+    # Native parallel shapes (no queue.Queue / Executor for these).
+    if dop >= 2:
+        from opteryx.managers.execution.parallel_engine import _find_parallel_join
+        from opteryx.managers.execution.parallel_engine import _find_parallel_stateless
 
-    def drive_task():
-        return _drive_pipeline(plan, dop, telemetry, out_queue, gen_box)
+        stateless = _find_parallel_stateless(plan)
+        if stateless is not None:
+            scan_id, op_ids, exit_id = stateless
+            return _native_stateless_execute(
+                plan, scan_id, op_ids, exit_id, dop, telemetry
+            )
 
-    # Phase C: a single-scan LINEAR MULTI-BREAKER chain (e.g. GROUP BY → DISTINCT) is
-    # driven per-segment — each breaker parallelises on its own DOP via materialise +
-    # re-source Event edges. Engaged only at DOP >= 2 (at DOP=1 the single terminal
-    # drive is byte-identical serial — the prime constraint). Every other plan stays on
-    # the proven single terminal drive.
+        join_shape = _find_parallel_join(plan)
+        if join_shape is not None:
+            return _native_join_execute(plan, join_shape, dop, telemetry)
+
+    # A single-scan LINEAR MULTI-BREAKER chain (e.g. GROUP BY → DISTINCT) is the ONE
+    # remaining plan shape whose drive is genuinely multi-task (each breaker
+    # parallelises on its own DOP via materialise + re-source Event edges) — it keeps
+    # the Executor DAG. EVERY OTHER plan has a single terminal drive, so the Executor
+    # is pure overhead: it runs natively into a MorselQueue (no Executor/queue.Queue).
     chain = None
     if dop >= 2:
         from opteryx.managers.execution.parallel_engine import (
@@ -422,15 +857,20 @@ def execute(plan, head_node=None, telemetry=None):
 
         chain = _find_linear_multibreaker_chain(plan, dop)
 
-    if chain is not None:
-        if telemetry is not None:
-            telemetry._reading["scheduler_multibreaker_chain"] = 1
-            telemetry._reading["scheduler_chain_segments"] = len(chain)
-        _build_multibreaker_chain_dag(
-            executor, plan, chain, dop, telemetry, out_queue, gen_box
-        )
-    else:
-        _build_segment_dag(executor, plan, segments, drive_task)
+    if chain is None:
+        return _native_generic_execute(plan, dop, telemetry)
+
+    # ---- multi-breaker chain: the one remaining Executor-driven path ----
+    out_queue: "queue.Queue" = queue.Queue(maxsize=_QUEUE_DEPTH)
+    gen_box: list = []
+    pool = CppThreadPool(1, "m4-scheduler")
+    executor = Executor(pool, telemetry)
+    if telemetry is not None:
+        telemetry._reading["scheduler_multibreaker_chain"] = 1
+        telemetry._reading["scheduler_chain_segments"] = len(chain)
+    _build_multibreaker_chain_dag(
+        executor, plan, chain, dop, telemetry, out_queue, gen_box
+    )
 
     def generator():
         try:

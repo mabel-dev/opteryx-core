@@ -75,6 +75,12 @@ cdef class WindowNode(BasePlanNode):
     cdef public list _morsels             # buffered input (blocking path)
     cdef unordered_map[uint64_t, int64_t] _counts   # streaming path: partition hash -> count
 
+    cdef bint is_partition_parallel(self):
+        # Streaming ROW_NUMBER/window keeps a single GLOBAL running counter per
+        # partition (`_counts`); splitting the input across workers would split the
+        # sequence and change the answer. Serial/merge-only — never fanned out.
+        return False
+
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 

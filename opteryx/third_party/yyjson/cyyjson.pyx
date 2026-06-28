@@ -188,6 +188,20 @@ cdef class YYVal:
         result._doc = self._doc
         return result
 
+    def object_keys(self):
+        """Return a list of key strings for a JSON object via the C iterator."""
+        cdef yyjson_obj_iter it
+        cdef yyjson_val* key
+        cdef list keys = []
+        if not yyjson_is_obj(self._val):
+            raise TypeError("object_keys called on non-object JSON value")
+        it = yyjson_obj_iter_with(self._val)
+        key = yyjson_obj_iter_next(&it)
+        while key != NULL:
+            keys.append(_decode_str(yyjson_get_str(key), yyjson_get_len(key)))
+            key = yyjson_obj_iter_next(&it)
+        return keys
+
     # JSON Pointer
     def at_pointer(self, str pointer):
         cdef bytes bptr
@@ -202,6 +216,20 @@ cdef class YYVal:
         result._val = val
         result._doc = self._doc
         return result
+
+    def has_pointer(self, str pointer):
+        """Return True if the JSON Pointer resolves to any value (including null)."""
+        cdef bytes bptr
+        if pointer.startswith('$.'):
+            bptr = self._jsonptr_from_dot(pointer).encode()
+        else:
+            bptr = pointer.encode()
+        return yyjson_doc_ptr_get(self._doc._doc, <const char*>bptr) != NULL
+
+    def has_key(self, str key):
+        """Return True if the object contains `key` at the top level."""
+        cdef bytes bkey = key.encode()
+        return yyjson_obj_get(self._val, <const char*>bkey) != NULL
 
     cdef str _jsonptr_from_dot(self, str dot_path):
         if dot_path.startswith('$.'):
@@ -260,8 +288,19 @@ cdef class YYDoc:
     def __getitem__(self, key):
         return self.root[key]
 
+    def __contains__(self, str key):
+        cdef bytes bkey = key.encode()
+        return yyjson_obj_get(self._root, <const char*>bkey) != NULL
+
     def at_pointer(self, str pointer):
         return self.root.at_pointer(pointer)
+
+    def has_pointer(self, str pointer):
+        return self.root.has_pointer(pointer)
+
+    def has_key(self, str key):
+        cdef bytes bkey = key.encode()
+        return yyjson_obj_get(self._root, <const char*>bkey) != NULL
 
     def dumps(self, int pretty=0, int indent=2):
         cdef unsigned int flags = 1 if pretty else 0

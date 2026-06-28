@@ -1,86 +1,109 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
 """JSON and array vector operations.
 
-Cython migration of the former json_ops.py. Called from comparisons.pyx
-for the @>, @?, AtArrow and AtQuestion operators on ArrayVector /
-StringVector-of-JSON columns.
+Called from comparisons.pyx for the @>, @?, AtArrow and AtQuestion operators
+on ArrayVector / StringVector-of-JSON columns.
+
+Strings are read directly from the Draken string arena — no Python objects
+are materialised on the hot path.
 """
+
+from libc.stdint cimport uint8_t, uint32_t
+from libc.stddef cimport size_t
+
+from draken.core.buffers cimport (
+    DrakenVector, DrakenStringArena, DrakenStringSlot,
+    str_data, str_length,
+)
+from draken.vectors.vector cimport Vector
+
+from opteryx.third_party.yyjson.cyyjson cimport (
+    yyjson_doc, yyjson_val, yyjson_read_err,
+    yyjson_read_opts, yyjson_doc_free,
+    yyjson_doc_get_root,
+    yyjson_doc_ptr_getn,
+    yyjson_obj_get,
+)
 
 from opteryx.compiled.nanobind.vectors import (
     vector_contains_all,
     vector_contains_any,
 )
-from opteryx.third_party import yyjson
-
-from draken.draken_native import vector_from_sequence
 from draken.draken_native import vector_from_bool_sequence
 from draken.vectors.bool_vector import BoolVector
+
+
+cdef inline bint _bitmap_is_valid(const uint8_t* bitmap, Py_ssize_t i) noexcept nogil:
+    return (bitmap[i >> 3] >> (i & 7)) & 1
 
 
 cpdef _json_at_question(left, right):
     """Check whether each JSON document in `left` contains the path `right`.
 
-    Returns a Draken vector parallel to `left`; entries are True/False where
-    the doc was non-null, and None where the doc was null.
-
-    `right` is the path literal. It may arrive as a str, bytes, or a constant
-    Vector (the executor materialises scalar literals as constant vectors); all
-    are coerced to a single path string here.
+    Returns a BoolVector parallel to `left`.
     """
-    cdef Py_ssize_t n = len(left)
+    cdef Vector vec = <Vector>left
+    cdef DrakenVector* dv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>dv.data
+    cdef DrakenStringSlot* slots = arena.slots
+    cdef uint8_t* arena_base = arena.arena
+    cdef const uint32_t* sel = dv.selection
+    cdef uint8_t* nulls = dv.validity
+    cdef Py_ssize_t n = dv.length
     cdef Py_ssize_t i
-    cdef list result
-    cdef str json_pointer
-    cdef str right_path
 
-    # Coerce the path operand to a scalar str.
+    # Coerce the path operand to a C bytes buffer once.
+    cdef str right_path
     if isinstance(right, str):
         right_path = right
     elif isinstance(right, (bytes, bytearray)):
         right_path = bytes(right).decode("utf-8")
     else:
-        # Vector / sequence carrying the constant literal — take row 0.
         scalar = right[0] if len(right) else None
         if scalar is None:
             raise ValueError("@? requires a non-null path literal")
         right_path = scalar.decode("utf-8") if isinstance(scalar, (bytes, bytearray)) else str(scalar)
-    right = right_path
 
-    parser = yyjson.Parser()
-
-    # Normalise the path to an RFC-6901 JSON Pointer once. Accepts a bare key
-    # ("a"), dotted path ("a.b[0]"), JSONPath ("$.a.b"), or an existing pointer
-    # ("/a/b"). at_pointer() returns the value for a present path (even when the
-    # value is JSON null) and None for a missing path — so existence is
-    # `at_pointer(ptr) is not None`.
+    # Normalise to a JSON Pointer (RFC 6901).
     cdef str pp = right_path
     if pp.startswith("$"):
         pp = pp[1:]
-    if pp.startswith("/"):
-        json_pointer = pp
-    else:
+    if not pp.startswith("/"):
         pp = pp.lstrip(".")
-        json_pointer = "/" + pp.replace(".", "/").replace("[", "/").replace("]", "")
+        pp = "/" + pp.replace(".", "/").replace("[", "/").replace("]", "")
+    cdef bytes ptr_bytes = pp.encode("utf-8")
+    cdef const char* ptr_c = ptr_bytes
+    cdef size_t ptr_len = len(ptr_bytes)
 
-    result = [None] * n
+    cdef list result = [None] * n
+    cdef yyjson_doc* doc
+    cdef yyjson_read_err err
+    cdef const char* row_ptr
+    cdef size_t row_len
+
     for i in range(n):
-        doc = left[i]
-        if doc is None:
+        if nulls != NULL and not _bitmap_is_valid(nulls, i):
             result[i] = None
             continue
-        try:
-            result[i] = parser.parse(doc).at_pointer(json_pointer) is not None
-        except Exception:
-            # Malformed path/doc → treat as "does not contain".
+        row_ptr = <const char*>str_data(&slots[sel[i]], arena_base)
+        row_len = str_length(&slots[sel[i]])
+        doc = yyjson_read_opts(<char*>row_ptr, row_len, 0, NULL, &err)
+        if doc == NULL:
             result[i] = False
+            continue
+        result[i] = yyjson_doc_ptr_getn(doc, ptr_c, ptr_len) != NULL
+        yyjson_doc_free(doc)
 
-    # Must be a BOOL vector AND a Cython Vector wrapper: the comparison executor
-    # casts the result to `Vector` and calls `.unified()`, so a raw nanobind
-    # vector (what vector_from_bool_sequence returns) would crash. Wrap it.
     return BoolVector(vector_from_bool_sequence(result))
 
 
 cdef set _encode_items(right):
-    """Coerce a Python iterable of items into a set of byte/native values."""
     if right is None:
         return set()
     cdef set out = set()

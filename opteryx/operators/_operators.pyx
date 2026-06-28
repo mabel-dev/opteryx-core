@@ -935,6 +935,82 @@ def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineCo
         scan.close_source()
 
 
+def drive_scan_to_sink(BasePlanNode scan, BasePlanNode chain_head, exit_node,
+                       PipelineContext ctx, object sink):
+    """Native push drive to a MorselQueue sink — slice 3, option B. The push-loop
+    twin of ``drive_scan``: same typed `next_morsel`/`push`/pending-drain hot path,
+    but it PUSHES each output morsel into ``sink`` (a PyMorselQueue) instead of
+    `yield`ing, so there is NO Python generator on the drive path.
+
+    `sink.put(morsel)` converts to the C++ carrier and releases the GIL during the
+    backpressure-blocked enqueue, so the consumer thread can dequeue; a False return
+    means the consumer ABANDONED (LIMIT at the cursor / early close) → stop. On
+    normal exhaustion the chain is flushed with EOS (so agg/sort emit their finals)
+    and `sink.finish()` signals graceful end-of-data. `scan.close_source()` runs on
+    every exit path (exhaustion, abandon, error)."""
+    cdef ErrCtx err
+    cdef object _exc, out
+    cdef shared_ptr[CxxMorsel] cxm
+    cdef bint has_exit = exit_node is not None
+    cdef timespec ns_start, ns_end
+
+    try:
+        while True:
+            clock_gettime(CLOCK_MONOTONIC, &ns_start)
+            cxm = scan.next_morsel()
+            clock_gettime(CLOCK_MONOTONIC, &ns_end)
+            scan.execution_time += (
+                (<uint64_t>(ns_end.tv_sec - ns_start.tv_sec)) * <uint64_t>1000000000
+                + <uint64_t>(ns_end.tv_nsec - ns_start.tv_nsec)
+            )
+            scan.calls += 1
+            if cxm.get() == NULL:
+                break
+            if ctx.is_terminated():
+                break
+            err.code = 0
+            err.msg = NULL
+            with nogil:
+                chain_head.push(cxm, &err)
+            if err.code != 0:
+                _exc = chain_head._take_exc()
+                raise _exc if _exc is not None else RuntimeError("pipeline push failed")
+            if has_exit:
+                while exit_node.has_pending():
+                    out = exit_node.pop_pending()
+                    if not sink.put(out):
+                        return  # consumer abandoned (LIMIT / early close)
+            if ctx.is_terminated():
+                break
+
+        if ctx.is_terminated():
+            if has_exit:
+                while exit_node.has_pending():
+                    out = exit_node.pop_pending()
+                    if not sink.put(out):
+                        return
+            sink.finish()
+            return
+
+        # Normal exhaustion: flush the chain with EOS so breakers emit their finals.
+        cxm = shared_ptr[CxxMorsel](cxx_morsel_new_eos())
+        err.code = 0
+        err.msg = NULL
+        with nogil:
+            chain_head.push(cxm, &err)
+        if err.code != 0:
+            _exc = chain_head._take_exc()
+            raise _exc if _exc is not None else RuntimeError("pipeline push failed")
+        if has_exit:
+            while exit_node.has_pending():
+                out = exit_node.pop_pending()
+                if not sink.put(out):
+                    return
+        sink.finish()
+    finally:
+        scan.close_source()
+
+
 cdef inline shared_ptr[CxxMorsel] _carrier_from_py(object morsel):
     """Encode a Python Morsel / EOS sentinel as the C++ carrier. A NULL
     shared_ptr means `morsel was None` (nothing to push)."""
@@ -946,10 +1022,87 @@ cdef inline shared_ptr[CxxMorsel] _carrier_from_py(object morsel):
     return cxm
 
 
+def push_one_to_sink(BasePlanNode head, exit_node, object morsel, object sink):
+    """Push one Morsel (or the EOS sentinel) through the chain ``head`` `nogil`, then
+    drain ``exit_node``'s pending output into ``sink`` (a PyMorselQueue). Returns
+    False if the consumer abandoned the sink (LIMIT / early close), else True. The
+    native push replacement for the per-morsel ``push_one`` + ``out_q.put`` shim."""
+    cdef ErrCtx err
+    cdef object out, _exc
+    cdef shared_ptr[CxxMorsel] cxm = _carrier_from_py(morsel)
+    if cxm.get() == NULL:
+        return True
+    err.code = 0
+    err.msg = NULL
+    with nogil:
+        head.push(cxm, &err)
+    if err.code != 0:
+        _exc = head._take_exc()
+        raise _exc if _exc is not None else RuntimeError("pipeline push failed")
+    if exit_node is not None:
+        while exit_node.has_pending():
+            out = exit_node.pop_pending()
+            if not sink.put(out):
+                return False
+    return True
+
+
+def stateless_worker_drive(BasePlanNode head, exit_node, object next_input,
+                           PipelineContext ctx, object sink):
+    """Native per-worker push loop for the parallel STATELESS shape (slice 4). Pulls
+    via ``next_input()`` (shared scan + row-floor buffer under a lock), pushes each
+    morsel `nogil` through the chain, drains the Exit clone's pending into ``sink``.
+    No EOS push — byte-identical to the current ``_stateless_stream`` worker, whose
+    Exit clones never see EOS (the empty-result schema morsel is emitted once by the
+    original Exit). Returns on consumer abandonment."""
+    cdef object morsel
+    while True:
+        morsel = next_input()
+        if morsel is None:
+            break
+        if ctx.is_terminated():
+            break
+        if not push_one_to_sink(head, exit_node, morsel, sink):
+            return
+
+
+def accumulate_worker_drive(BasePlanNode head, object next_input, PipelineContext ctx):
+    """Native per-worker ACCUMULATE loop for barrier breakers (agg / distinct / GROUP
+    BY). Pulls via ``next_input()`` and pushes each morsel `nogil` through a chain
+    whose tail is a breaker clone that ACCUMULATES into its private engine (no emit,
+    no downstream) — so there is no sink and no drain. Returns the total row count
+    pushed (the worker's ``local_rows``). The native replacement for the breaker
+    worker's per-morsel ``push_one``."""
+    cdef object morsel
+    cdef long long count = 0
+    while True:
+        morsel = next_input()
+        if morsel is None:
+            break
+        # exit_node=None / sink=None → push only, the breaker accumulates internally.
+        push_one_to_sink(head, None, morsel, None)
+        count += morsel.num_rows
+    return count
+
+
 cpdef BasePlanNode spawn_worker(BasePlanNode op):
     """Python-callable edge over the cdef `make_worker` contract — the fan-out
     replacement for `_clone_op`. Used by the (still-Python) scheduler at worker
-    fan-out; once the scheduler is native it calls `make_worker` directly."""
+    fan-out; once the scheduler is native it calls `make_worker` directly.
+
+    Backstop for the partition-parallel contract: an operator whose STATE carries
+    global semantics that CANNOT be data-partitioned per worker (a running window
+    counter, a global DISTINCT set, a union schema/leg-count) declares
+    `is_partition_parallel() == False`. Cloning one across workers would change the
+    ANSWER — so fanning it out is a scheduler bug. Fail loud here rather than
+    silently mis-split (the old `_clone_op` did the latter)."""
+    if not op.is_partition_parallel():
+        from opteryx.exceptions import InvalidInternalStateError
+        raise InvalidInternalStateError(
+            f"{type(op).__name__} carries global-semantics state and cannot be "
+            f"data-partitioned across workers; the scheduler must run it "
+            f"serial/merge-only, never fan it out."
+        )
     return op.make_worker()
 
 

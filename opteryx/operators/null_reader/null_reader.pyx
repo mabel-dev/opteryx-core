@@ -38,12 +38,15 @@ from opteryx.types.schema import RelationSchema
 logger = logging.getLogger(__name__)
 
 
-class NullReaderNode(BasePlanNode):  # pragma: no cover
+cdef class NullReaderNode(BasePlanNode):  # pragma: no cover
     """
     Returns an empty table with the correct schema.
 
     Used when contradictory predicates make the result empty.
     """
+    # `columns` is a BasePlanNode field; only the scan-specific extras here.
+    cdef public object relations
+    cdef public object schema
 
     def __init__(self, properties, **parameters):
         """Initialize NullReaderNode."""

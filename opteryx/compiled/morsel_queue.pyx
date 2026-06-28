@@ -34,6 +34,14 @@ cdef extern from "morsel_queue.hpp" nogil:
         size_t size_approx()
 
 
+# Returned by PyMorselQueue.get() when the producer has gracefully FINISHED (all
+# data drained, no more coming) — distinct from None, which means the consumer
+# ABANDONED the queue (close() dropped the remainder). The in-band sentinel is a
+# null shared_ptr, enqueued after the last data morsel, so it can never overtake or
+# drop real data the way close() does.
+MQ_FINISHED = object()
+
+
 cdef class PyMorselQueue:
     """Python-callable edge over MorselQueue — TEST/boundary use only.
 
@@ -61,6 +69,14 @@ cdef class PyMorselQueue:
     cdef cbool _get_cxx(self, shared_ptr[CxxMorsel]& out) noexcept nogil:
         return self._q.get(out)
 
+    cdef cbool _finish_cxx(self) noexcept nogil:
+        # Graceful end-of-data: enqueue a null shared_ptr sentinel AFTER the last
+        # data morsel. Unlike close(), this drops nothing — the consumer drains all
+        # real morsels, then dequeues the sentinel and stops. Single producer only
+        # (the terminal drive), so the sentinel is strictly last in its stream.
+        cdef shared_ptr[CxxMorsel] sentinel  # default-constructed: NULL
+        return self._q.put(sentinel)
+
     # ---- Python test edge -------------------------------------------------------
 
     def put(self, Morsel m):
@@ -71,14 +87,25 @@ cdef class PyMorselQueue:
             ok = self._q.put(cxm)
         return bool(ok)
 
+    def finish(self):
+        """Signal graceful end-of-data (producer side). Returns False if the queue
+        was abandoned (closed) first."""
+        cdef cbool ok
+        with nogil:
+            ok = self._finish_cxx()
+        return bool(ok)
+
     def get(self):
-        """Dequeue one Morsel, or None once the queue is closed and drained."""
+        """Dequeue one item: a Morsel (data), `MQ_FINISHED` (producer finished, all
+        data drained), or None (consumer abandoned via close(), remainder dropped)."""
         cdef shared_ptr[CxxMorsel] out
         cdef cbool ok
         with nogil:
             ok = self._q.get(out)
         if not ok:
-            return None
+            return None                  # abandoned + drained
+        if out.get() == NULL:
+            return MQ_FINISHED           # graceful finish sentinel
         return cxx_to_morsel(out)
 
     def close(self):

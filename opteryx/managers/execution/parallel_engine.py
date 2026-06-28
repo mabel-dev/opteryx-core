@@ -68,6 +68,7 @@ from opteryx.managers.execution.pipeline_sink import RecombClass
 from opteryx.managers.execution.pipeline_sink import make_sink
 from opteryx.managers.execution.pipeline_sink import parallel_sink_spec_for
 from opteryx.managers.execution.pipeline_sink import recombination_class_for
+from opteryx.operators._operators import accumulate_worker_drive
 from opteryx.operators._operators import push_one
 from opteryx.operators.catalog import OperatorParallelism
 from opteryx.operators.catalog import get_registry
@@ -1684,13 +1685,7 @@ def _run_breaker_segment(
                             op.set_downstream(probe_chain[i + 1])
                     chain_head = probe_chain[0]
 
-                count = 0
-                while True:
-                    morsel = next_input()
-                    if morsel is None:
-                        break
-                    push_one(chain_head, morsel)
-                    count += morsel.num_rows
+                count = accumulate_worker_drive(chain_head, next_input, ctx)
                 local_states[index] = clone
                 local_rows[index] = count
             except BaseException as exc:  # noqa: BLE001 — surface on the main thread
@@ -2016,13 +2011,7 @@ def _drive_segment(
                     if i + 1 < len(chain):
                         op.set_downstream(chain[i + 1])
                 chain_head = chain[0]
-                count = 0
-                while True:
-                    morsel = next_input()
-                    if morsel is None:
-                        break
-                    push_one(chain_head, morsel)
-                    count += morsel.num_rows
+                count = accumulate_worker_drive(chain_head, next_input, ctx)
                 local_states[index] = clone
                 local_rows[index] = count
             except BaseException as exc:  # noqa: BLE001 — surface on the main thread

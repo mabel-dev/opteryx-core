@@ -1050,7 +1050,7 @@ def create_node_relation(relation: dict):
             raise NotImplementedError(relation["relation"]["Derived"])
 
     elif relation["relation"]["Table"]["args"]:
-        # If we have args, we're a function dataset (like FAKE or UNNEST)
+        # If we have args, we're a function dataset (like UNNEST)
         function = relation["relation"]["Table"]
         function_name = relation_name.upper()
 

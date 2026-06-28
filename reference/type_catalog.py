@@ -24,7 +24,7 @@ _SQL_ALIASES: dict[str, list[str]] = {
     "float": ["double"],
     "varchar": ["string", "text"],
     "varbinary": ["blob", "bytes"],
-    "nvarchar": ["jsonb", "struct"],
+    "nvarchar": [],
     "boolean": ["bool"],
 }
 
@@ -120,7 +120,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             "multiplication gives `p1+p2` precision and `s1+s2` scale."
         ),
         "limitations": [
-            "SUM and AVG do not support DECIMAL columns — cast to FLOAT first: `SUM(col::FLOAT)`.",
+            "SUM, AVG, and MEDIAN do not support DECIMAL columns — cast to FLOAT first: `SUM(col::FLOAT)`.",
             "DECIMAL columns from Parquet files are read correctly but aggregate functions reject them.",
         ],
     },
@@ -141,7 +141,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             {"expr": "date_col - other_date",          "result": "INTERVAL",  "desc": "Difference between two dates"},
         ],
         "limitations": [
-            "You cannot cast an integer to DATE directly. Use a function like `DATE_FROM_UNIX_EPOCH(n)` instead.",
+            "You cannot cast an integer to DATE directly. To convert a Unix epoch value, cast to TIMESTAMP first then to DATE: `FROM_UNIXTIME(n)::DATE`.",
             "Only YYYY-MM-DD string format is accepted. Formats like MM/DD/YYYY or DD-MM-YYYY will fail.",
         ],
     },
@@ -258,6 +258,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "notes": "Supports `LIKE`, `ILIKE`, and `RLIKE` pattern matching. String functions that operate on character positions (e.g. SUBSTRING) count Unicode code points, not bytes.",
         "limitations": [
             "Casting from VARBINARY will fail if the bytes are not valid UTF-8.",
+            "There is no structured STRUCT or JSONB type. JSON data lands as NVARCHAR — use `->` and `->>` to navigate it.",
         ],
     },
     "varbinary": {
@@ -312,7 +313,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             {"type": "from ARRAY<FLOAT>", "example": "float_array_col::VECTOR(384)", "note": "Quantizes each element to FP16"},
         ],
         "comparable_with": [],
-        "notes": "Similarity search uses dedicated functions such as `APPROX_COSINE_DISTANCE(a, b)`. Standard comparison operators are not supported on VECTOR.",
+        "notes": "Similarity search uses dedicated functions such as `COSINE_DISTANCE(a, b)` and `COSINE_SIMILARITY(a, b)`. Standard comparison operators are not supported on VECTOR.",
         "limitations": [
             "Vector columns cannot be used with standard comparison operators (=, <, >, etc.).",
             "The dimension count must match between vectors in any operation.",

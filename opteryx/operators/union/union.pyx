@@ -29,6 +29,12 @@ cdef class UnionNode(BasePlanNode):
     cdef public list column_ids
     cdef public list schema
 
+    cdef bint is_partition_parallel(self):
+        # Union captures the output schema from the FIRST morsel and counts input
+        # leg closes — both assume a single instance coordinating all legs; cloning
+        # across workers would desync them. Serial/merge-only — never fanned out.
+        return False
+
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.columns = parameters.get("columns", [])

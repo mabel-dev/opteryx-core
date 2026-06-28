@@ -85,10 +85,10 @@
                     "GREATEST",
                     "LEAST"
                 ],
-                "return_type": "boolean",
+                "return_type": "BOOLEAN",
                 "returns": {
-                    "type": "boolean",
-                    "documentation": "Returns `true` or `false` based on whether the function's condition is satisfied."
+                    "type": "BOOLEAN",
+                    "documentation": "Returns the computed result as `BOOLEAN`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -152,10 +152,10 @@
                     "GREATEST",
                     "LEAST"
                 ],
-                "return_type": "boolean",
+                "return_type": "BOOLEAN",
                 "returns": {
-                    "type": "boolean",
-                    "documentation": "Returns `true` or `false` based on whether the function's condition is satisfied."
+                    "type": "BOOLEAN",
+                    "documentation": "Returns the computed result as `BOOLEAN`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -219,10 +219,10 @@
                     "GREATEST",
                     "LEAST"
                 ],
-                "return_type": "boolean",
+                "return_type": "BOOLEAN",
                 "returns": {
-                    "type": "boolean",
-                    "documentation": "Returns `true` or `false` based on whether the function's condition is satisfied."
+                    "type": "BOOLEAN",
+                    "documentation": "Returns the computed result as `BOOLEAN`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -286,10 +286,10 @@
                     "HASH",
                     "MD5"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -344,10 +344,10 @@
                     "HASH",
                     "MD5"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -402,10 +402,10 @@
                     "HASH",
                     "MD5"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -460,10 +460,10 @@
                     "HASH",
                     "MD5"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -520,10 +520,10 @@
                     "ABS",
                     "SIGN"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -655,10 +655,10 @@
                     "LENGTH",
                     "UPPER"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -731,10 +731,10 @@
                     "LENGTH",
                     "UPPER"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -807,10 +807,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -852,10 +852,10 @@
                     "COSINE_SIMILARITY",
                     "EMBED"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -898,10 +898,10 @@
                     "COSINE_SIMILARITY",
                     "EMBED"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -962,10 +962,10 @@
                     "COSINE_DISTANCE",
                     "EMBED"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -1008,10 +1008,10 @@
                     "COSINE_DISTANCE",
                     "EMBED"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -1075,10 +1075,10 @@
                     "DATE",
                     "EXTRACT"
                 ],
-                "return_type": "date",
+                "return_type": "DATE",
                 "returns": {
-                    "type": "date",
-                    "documentation": "Returns the computed result as `date`."
+                    "type": "DATE",
+                    "documentation": "Returns the computed result as `DATE`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1124,10 +1124,10 @@
                     "DATE",
                     "EXTRACT"
                 ],
-                "return_type": "time",
+                "return_type": "TIME",
                 "returns": {
-                    "type": "time",
-                    "documentation": "Returns the computed result as `time`."
+                    "type": "TIME",
+                    "documentation": "Returns the computed result as `TIME`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1175,10 +1175,10 @@
                     "DATE",
                     "EXTRACT"
                 ],
-                "return_type": "timestamp",
+                "return_type": "TIMESTAMP",
                 "returns": {
-                    "type": "timestamp",
-                    "documentation": "Returns the computed result as `timestamp`."
+                    "type": "TIMESTAMP",
+                    "documentation": "Returns the computed result as `TIMESTAMP`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1224,10 +1224,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1274,10 +1274,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -1350,10 +1350,10 @@
                     "TODAY",
                     "DATE"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -1417,10 +1417,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1639,10 +1639,10 @@
                     "ABS",
                     "SIGN"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -1707,10 +1707,10 @@
                     "TODAY",
                     "DATE"
                 ],
-                "return_type": "timestamp",
+                "return_type": "TIMESTAMP",
                 "returns": {
-                    "type": "timestamp",
-                    "documentation": "Returns the computed result as `timestamp`."
+                    "type": "TIMESTAMP",
+                    "documentation": "Returns the computed result as `TIMESTAMP`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -1823,10 +1823,10 @@
                     "SHA256",
                     "SHA384"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -1881,10 +1881,10 @@
                     "SHA224",
                     "SHA256"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -1939,10 +1939,10 @@
                     "SHA224",
                     "SHA256"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -1997,10 +1997,10 @@
                     "VARBINARY",
                     "INTEGER"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -2267,10 +2267,10 @@
                     "TITLECASE",
                     "TRIM"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -2319,10 +2319,10 @@
                 "category": "Struct/JSON Functions",
                 "documentation": "Extract keys from JSON object.",
                 "related_functions": [],
-                "return_type": "array<variant>",
+                "return_type": "ARRAY<VARIANT>",
                 "returns": {
-                    "type": "array<variant>",
-                    "documentation": "Returns the computed result as `array<variant>`."
+                    "type": "ARRAY<VARIANT>",
+                    "documentation": "Returns the computed result as `ARRAY<VARIANT>`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -2435,10 +2435,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -2505,10 +2505,10 @@
                     "INITCAP",
                     "TRIM"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -2545,10 +2545,10 @@
                     "INITCAP",
                     "TRIM"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -2603,10 +2603,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -2670,10 +2670,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -2739,10 +2739,10 @@
                     "TITLECASE",
                     "TRIM"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -2797,10 +2797,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -2931,10 +2931,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "boolean",
+                "return_type": "BOOLEAN",
                 "returns": {
-                    "type": "boolean",
-                    "documentation": "Returns `true` or `false` based on whether the function's condition is satisfied."
+                    "type": "BOOLEAN",
+                    "documentation": "Returns the computed result as `BOOLEAN`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -2999,10 +2999,10 @@
                     "SHA256",
                     "SHA384"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3057,10 +3057,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3098,10 +3098,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -3216,10 +3216,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3274,10 +3274,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -3322,10 +3322,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -3370,10 +3370,10 @@
                     "LENGTH",
                     "UPPER"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -3438,10 +3438,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -3507,10 +3507,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3548,10 +3548,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -3597,10 +3597,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3658,10 +3658,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -3734,10 +3734,10 @@
                     "LENGTH",
                     "UPPER"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -3810,10 +3810,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3868,10 +3868,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -3935,10 +3935,10 @@
                     "ABS",
                     "SIGN"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -3976,10 +3976,10 @@
                     "ABS",
                     "SIGN"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -4044,10 +4044,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -4178,10 +4178,10 @@
                     "SHA256",
                     "SHA384"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4236,10 +4236,10 @@
                     "SHA256",
                     "SHA384"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4294,10 +4294,10 @@
                     "SHA224",
                     "SHA384"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4352,10 +4352,10 @@
                     "SHA224",
                     "SHA256"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4410,10 +4410,10 @@
                     "SHA224",
                     "SHA256"
                 ],
-                "return_type": "varbinary",
+                "return_type": "VARBINARY",
                 "returns": {
-                    "type": "varbinary",
-                    "documentation": "Returns the computed result as `varbinary`."
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4468,10 +4468,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4584,10 +4584,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4642,10 +4642,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "array<variant>",
+                "return_type": "ARRAY<VARIANT>",
                 "returns": {
-                    "type": "array<variant>",
-                    "documentation": "Returns the computed result as `array<variant>`."
+                    "type": "ARRAY<VARIANT>",
+                    "documentation": "Returns the computed result as `ARRAY<VARIANT>`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -4691,10 +4691,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "array<variant>",
+                "return_type": "ARRAY<VARIANT>",
                 "returns": {
-                    "type": "array<variant>",
-                    "documentation": "Returns the computed result as `array<variant>`."
+                    "type": "ARRAY<VARIANT>",
+                    "documentation": "Returns the computed result as `ARRAY<VARIANT>`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -4767,10 +4767,10 @@
                     "ROUND",
                     "TRUNC"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -4827,10 +4827,10 @@
                     "LENGTH",
                     "UPPER"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -4877,10 +4877,10 @@
                     "LENGTH",
                     "UPPER"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -4956,10 +4956,10 @@
                     "TODAY",
                     "DATE"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -5023,10 +5023,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "timestamp",
+                "return_type": "TIMESTAMP",
                 "returns": {
-                    "type": "timestamp",
-                    "documentation": "Returns the computed result as `timestamp`."
+                    "type": "TIMESTAMP",
+                    "documentation": "Returns the computed result as `TIMESTAMP`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -5102,10 +5102,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -5162,10 +5162,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -5281,10 +5281,10 @@
                     "ABS",
                     "SIGN"
                 ],
-                "return_type": "float64",
+                "return_type": "FLOAT",
                 "returns": {
-                    "type": "float64",
-                    "documentation": "Returns the computed result as `float64`."
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -5322,19 +5322,19 @@
             {
                 "id": "TRUNC_date",
                 "label": "TRUNC(value, unit)",
-                "category": "Numeric Functions",
-                "documentation": "Truncates a numeric value toward zero at the requested scale.",
+                "category": "Date & Time Functions",
+                "documentation": "Truncates a temporal value to the start of the specified unit.",
                 "related_functions": [
-                    "ROUND",
-                    "CEILING",
-                    "FLOOR",
-                    "ABS",
-                    "SIGN"
+                    "EXTRACT",
+                    "TIME_BUCKET",
+                    "DATEDIFF",
+                    "CURRENT_DATE",
+                    "CURRENT_TIME"
                 ],
-                "return_type": "timestamp",
+                "return_type": "TIMESTAMP",
                 "returns": {
-                    "type": "timestamp",
-                    "documentation": "Returns the computed result as `timestamp`."
+                    "type": "TIMESTAMP",
+                    "documentation": "Returns the computed result as `TIMESTAMP`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -5350,7 +5350,7 @@
                 "parameters": [
                     {
                         "label": "value",
-                        "type": "date",
+                        "type": "temporal",
                         "documentation": "Date, time, or timestamp value to truncate.",
                         "optional": false,
                         "variadic": false,
@@ -5367,24 +5367,24 @@
                         "null_handling": "strict"
                     }
                 ],
-                "notes": "Truncation is performed toward zero rather than toward negative infinity."
+                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
             },
             {
                 "id": "TRUNC_timestamp",
                 "label": "TRUNC(value, unit)",
-                "category": "Numeric Functions",
-                "documentation": "Truncates a numeric value toward zero at the requested scale.",
+                "category": "Date & Time Functions",
+                "documentation": "Truncates a temporal value to the start of the specified unit.",
                 "related_functions": [
-                    "ROUND",
-                    "CEILING",
-                    "FLOOR",
-                    "ABS",
-                    "SIGN"
+                    "EXTRACT",
+                    "TIME_BUCKET",
+                    "DATEDIFF",
+                    "CURRENT_DATE",
+                    "CURRENT_TIME"
                 ],
-                "return_type": "timestamp",
+                "return_type": "TIMESTAMP",
                 "returns": {
-                    "type": "timestamp",
-                    "documentation": "Returns the computed result as `timestamp`."
+                    "type": "TIMESTAMP",
+                    "documentation": "Returns the computed result as `TIMESTAMP`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -5400,7 +5400,7 @@
                 "parameters": [
                     {
                         "label": "value",
-                        "type": "timestamp",
+                        "type": "temporal",
                         "documentation": "Date, time, or timestamp value to truncate.",
                         "optional": false,
                         "variadic": false,
@@ -5417,7 +5417,7 @@
                         "null_handling": "strict"
                     }
                 ],
-                "notes": "Truncation is performed toward zero rather than toward negative infinity."
+                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
             }
         ]
     },
@@ -5451,10 +5451,10 @@
                     "TODAY",
                     "DATE"
                 ],
-                "return_type": "int64",
+                "return_type": "INTEGER",
                 "returns": {
-                    "type": "int64",
-                    "documentation": "Returns the computed result as `int64`."
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -5511,10 +5511,10 @@
                     "TITLECASE",
                     "TRIM"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -5569,10 +5569,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -5611,10 +5611,10 @@
                 "category": "Misc",
                 "documentation": "Current UTC timestamp.",
                 "related_functions": [],
-                "return_type": "timestamp",
+                "return_type": "TIMESTAMP",
                 "returns": {
-                    "type": "timestamp",
-                    "documentation": "Returns the computed result as `timestamp`."
+                    "type": "TIMESTAMP",
+                    "documentation": "Returns the computed result as `TIMESTAMP`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -5659,10 +5659,10 @@
                     "NULLIF",
                     "IIF"
                 ],
-                "return_type": "varchar",
+                "return_type": "VARCHAR",
                 "returns": {
-                    "type": "varchar",
-                    "documentation": "Returns the computed result as `varchar`."
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 0,

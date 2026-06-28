@@ -92,6 +92,8 @@ jobs:
   upload:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     steps:
       - name: Download all rugo wheels
         uses: actions/download-artifact@v4.1.7

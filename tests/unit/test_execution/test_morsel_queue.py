@@ -35,6 +35,41 @@ def _tag_of(m: Morsel) -> int:
     return m._cxx_column(m.column_names[0]).to_pylist()[0]
 
 
+def test_finish_drains_all_then_signals():
+    """finish() is graceful: every queued morsel is delivered BEFORE the FINISHED
+    sentinel — no data loss (contrast close(), which drops the remainder)."""
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+
+    q = PyMorselQueue(8)
+    for i in range(5):
+        assert q.put(_morsel(i)) is True
+    assert q.finish() is True
+    got = []
+    while True:
+        item = q.get()
+        if item is MQ_FINISHED:
+            break
+        assert item is not None, "must not abandon — finish() drops nothing"
+        got.append(_tag_of(item))
+    assert got == [0, 1, 2, 3, 4]
+
+
+def test_finish_vs_close_distinct():
+    """close() abandons (get -> None, remainder dropped); finish() is graceful."""
+    from opteryx.compiled.morsel_queue import MQ_FINISHED
+
+    qa = PyMorselQueue(8)
+    qa.put(_morsel(1))
+    qa.close()
+    assert qa.get() is None                      # abandoned: dropped + None
+
+    qf = PyMorselQueue(8)
+    qf.put(_morsel(1))
+    qf.finish()
+    assert _tag_of(qf.get()) == 1                # delivered first
+    assert qf.get() is MQ_FINISHED               # then the sentinel
+
+
 def test_fifo_round_trip():
     """put then get returns morsels in order, value-identical."""
     q = PyMorselQueue(8)
@@ -135,6 +170,8 @@ def test_concurrent_producers_single_consumer():
 
 if __name__ == "__main__":  # pragma: no cover
     test_fifo_round_trip()
+    test_finish_drains_all_then_signals()
+    test_finish_vs_close_distinct()
     test_capacity_reported()
     test_bounded_backpressure_blocks_producer()
     test_close_unblocks_producer_and_returns_false()

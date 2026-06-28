@@ -29,12 +29,18 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         vector_sha384,
         vector_sha512,
     )
+    from draken.interop.vector_sequence import vector_from_sequence
+    import draken.draken_native as _draken_native_he
+    from draken.vectors.vector import Vector as _Vector
     from opteryx.expression.functions.implementations import arithmetic as number_functions
-    from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
-    # Small wrapper kernels for single-argument stringification/encoding paths.
-    _hash_kernel = _isingle(lambda x: hex(hash_bytes(str(x).encode()))[2:])
+    def _hash_kernel(array):
+        result = [
+            hex(hash_bytes(str(x).encode()))[2:].encode() if x is not None else None
+            for x in array
+        ]
+        return _Vector(vector_from_sequence(result, dtype=_draken_native_he.DrakenType.VARBINARY))
 
     # Parameter short-hands
     _any = ParameterSpec(name="val", type_family="any")

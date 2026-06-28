@@ -32,10 +32,27 @@ class AggregationSpec:
 CHUNK_SIZE = 65536
 
 
-class GroupedAggregateHashedNode(BasePlanNode):
+cdef class GroupedAggregateHashedNode(BasePlanNode):
+    # SPEC (immutable after __init__, shared read-only across workers):
+    cdef public list groups
+    cdef public list aggregates
+    cdef public list all_identifiers
+    cdef public object evaluatable_nodes
+    cdef public bint _needs_expression_eval
+    cdef public list group_by_columns
+    cdef public list _aggregation_specs
+    cdef public bint _implicit_count_added
+    cdef public list _required_columns
+    cdef public object _having_condition
+    cdef public bint _use_parvi
+    # STATE (per-worker): _engine may hold a GroupHashEngine or, after the parallel
+    # sink wraps it, a _ScatterCollectEngine — hence `object`. _parallel_engines is
+    # a tuple of disjoint per-worker engines (injected by the sink) or None.
+    cdef public object _engine
+    cdef public object _parallel_engines
 
     def __init__(self, properties: QueryProperties, **parameters):
-        super().__init__(properties=properties, **parameters)
+        BasePlanNode.__init__(self, properties=properties, **parameters)
 
         self.groups = list(parameters["groups"])
         self.aggregates = list(parameters["aggregates"])
@@ -79,25 +96,53 @@ class GroupedAggregateHashedNode(BasePlanNode):
         else:
             self._implicit_count_added = False
 
-        collectors, _key_kinds_placeholder = create_collectors(
-            self._aggregation_specs, self.group_by_columns
-        )
         variant = parameters.get("group_map_variant", "carchar")
-        use_parvi = variant == "parvi"
-        self._engine = GroupHashEngine(self.group_by_columns, collectors, True, use_parvi)
+        self._use_parvi = (variant == "parvi")
 
         # Required columns for morsel.select() before ingestion
         self._required_columns = self._build_required_columns()
 
         self._having_condition = parameters.get("having_condition")
 
-        # Parallel row-routing recombination (M4). When the parallel engine has
-        # keyed the input across W DISJOINT per-worker engines (each owning a
-        # disjoint key slice), it injects them here; _finalize then concatenates
-        # their outputs — no merge, because no key is shared. None ⇒ ordinary
-        # single-engine serial finalize. Mirrors the ungrouped path's engine
-        # injection, generalised from one merged engine to N disjoint engines.
+        # Build the per-worker mutable STATE (the hash engine).
+        self._build_engine()
+
+    cdef void _build_engine(self) except *:
+        """Build the mutable per-worker STATE — the group-hash engine and its
+        collectors — from the immutable SPEC. Called by __init__ and by make_worker
+        so a worker gets a FRESH engine while sharing the parsed aggregation specs +
+        group columns by reference. _parallel_engines (injected by the parallel sink
+        when the input is keyed across W disjoint per-worker engines; _finalize then
+        CONCATENATES their outputs — no merge, no shared key) starts None."""
+        collectors, _key_kinds_placeholder = create_collectors(
+            self._aggregation_specs, self.group_by_columns
+        )
+        self._engine = GroupHashEngine(
+            self.group_by_columns, collectors, True, self._use_parvi
+        )
         self._parallel_engines = None
+
+    cdef BasePlanNode make_worker(self):
+        # SPEC shared by reference (parsed group/aggregate exprs, aggregation specs,
+        # required columns, having condition — no re-parse). STATE rebuilt fresh via
+        # the typed factory: each worker owns a disjoint-slice hash engine.
+        cdef GroupedAggregateHashedNode w = GroupedAggregateHashedNode.__new__(
+            GroupedAggregateHashedNode
+        )
+        self._copy_worker_base(w)
+        w.groups = self.groups
+        w.aggregates = self.aggregates
+        w.all_identifiers = self.all_identifiers
+        w.evaluatable_nodes = self.evaluatable_nodes
+        w._needs_expression_eval = self._needs_expression_eval
+        w.group_by_columns = self.group_by_columns
+        w._aggregation_specs = self._aggregation_specs
+        w._implicit_count_added = self._implicit_count_added
+        w._required_columns = self._required_columns
+        w._having_condition = self._having_condition
+        w._use_parvi = self._use_parvi
+        w._build_engine()
+        return w
 
     @property
     def config(self):  # pragma: no cover
@@ -271,7 +316,7 @@ class GroupedAggregateHashedNode(BasePlanNode):
         mask = execute_bytecode(bc, morsel)
         return morsel.filter_mask(mask)
 
-    def _push_impl(self, morsel):
+    cpdef void _push_impl(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
             for chunk in self._finalize():
                 self.emit(chunk)

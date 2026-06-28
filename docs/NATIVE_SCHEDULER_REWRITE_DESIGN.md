@@ -143,6 +143,109 @@ No `import threading`, no `import queue` survives in the execution package.
   the closed queue on next `put` and unwind, running operator `finally` (ctx
   terminate, source close).
 
+## 8.1 Slice 3 — native terminal hand-off (DRAFT, for ratification)
+
+Traced the live single-segment path. Today: `scheduler_engine.execute` runs one
+terminal `Event` on a `CppThreadPool`; the task is `_drive_pipeline`, a Python
+generator (`dispatch_data_pipeline` → `drive_scan`) that `yield`s **Python `Morsel`**
+(from `exit_node.pop_pending()`); morsels cross a Python `queue.Queue` to `_stream`;
+`threading.Lock`/`Event` guard the `Executor`. So three Python things on the path:
+the `queue.Queue` hand-off, the `threading` sync, and the Python drive generator.
+
+**Foundation landed:** `MorselQueue.finish()` (graceful, in-band null sentinel →
+`MQ_FINISHED`, drops nothing) vs `close()` (abandon, drop) — the end-of-data
+semantics the hand-off needs. Using `close()` as "done" would lose unconsumed
+morsels; `finish()` is the correct signal.
+
+**The crux:** the terminal `Exit` emits Python `Morsel` via a `_pending` deque
+drained by a Python generator. A native hand-off needs `Exit` to emit
+`shared_ptr[CxxMorsel]` into a sink. Two ways:
+
+- **(A) Queue-swap only** — keep the Python drive generator + `Executor`; just
+  replace `queue.Queue` with `MorselQueue`, converting `Morsel`↔`cxm` at the
+  boundary (`morsel_to_cxx`/`cxx_to_morsel`). Removes `queue.Queue` only. Adds a
+  per-output-morsel round-trip (cheap for Cxx-backed, but a representation-change
+  risk for PyObject-backed). Keeps `threading` and the Python drive. **Lateral —
+  not recommended.**
+- **(B) Native terminal sink + drive** — give `Exit` a `cdef` sink seam; the drive
+  becomes a native loop (`scan.next_morsel` → `head.push` → `Exit` emits `cxm` into
+  the `MorselQueue` sink), `finish()` on EOS, `close()` on early abandon. Removes
+  `queue.Queue` AND the Python drive generator AND (for a single segment, which has
+  no dependency edges) the `Executor`/`threading` entirely. The `cxm` round-trip
+  collapses to one cheap `morsel_to_cxx` at `Exit.select`'s output. **Recommended.**
+
+Scope for (B): single-segment plans first (no breaker chain, no build-before-probe).
+Multi-segment keeps the Python `Executor` until slice 4. DOP=1 byte-identical.
+
+**DECIDED: B.** First increment ✅ **DONE** — the DOP=1 single-scan path (the
+byte-identical-serial prime constraint): `drive_scan_to_sink` (`_operators.pyx`) is
+the push-loop twin of `drive_scan` — pushes the scan through the chain `nogil` and
+emits the terminal Exit's output into a `MorselQueue` (`sink.put` releases the GIL
+on the backpressured enqueue; False = consumer abandoned; `finish()` on EOS).
+`scheduler_engine._native_serial_execute` runs it on a `CppThreadPool` with a
+consumer generator draining the queue — **no `queue.Queue`, no `Executor`, no
+`threading`, no Python drive generator** for this path. Verified: `make q` 190/190
+at default DOP (dormant) AND at `MAX_EXECUTION_WORKERS=1` (every single-scan plan
+through the native drive); LIMIT early-close returns exactly N with no hang;
+backpressure over 2.4M rows; parallel-vs-serial sha-identical. Bonus: 0.74s vs 5.36s
+on the suite (no pool/Executor spin-up for the serial path).
+
+**Slice 4 — parallel handlers to native (the production bulk). STATELESS DONE.**
+`_native_stateless_execute` (scheduler_engine) replaces `_stateless_stream` for the
+`scan → stateless* → exit` CONCAT shape (the most common parallel shape — filter/
+projection at scale). W workers each push their cloned chain's output into a shared
+`MorselQueue` via `stateless_worker_drive` (`_operators.pyx`, native per-morsel push,
+no EOS — matches the old worker). **Removed for this shape: the `queue.Queue` fan-out,
+the per-morsel `push_one` shim, AND the outer `Executor`/`queue.Queue`.** Still Python:
+the `next_input` pull coordination (one `threading.Lock` guarding a Python buffer
+iterator — until the scan pull goes nogil) + the row-floor serial fallback (tiny
+inputs). Verified: `make q` 190/190 at default DOP=8 (path live across the suite);
+native-parallel(8)-vs-serial multiset sha-identical on 2.4M rows.
+
+**JOIN PROBE DONE.** `_native_join_execute` replaces `_join_probe_stream` for the
+parallel inner-equi-join shape: serial build prelude (builds `left_hash` on the
+join), then W workers each probe a disjoint slice through a private join clone
+(sharing the one read-only `left_hash`), streaming matches into a shared
+`MorselQueue`. Reuses `stateless_worker_drive` + a final `push_one_to_sink(EOS)`
+(the cloned join needs EOS to flush its path — the one difference from stateless).
+Removed for this shape: `queue.Queue` fan-out, per-morsel `push_one`, outer
+`Executor`/`queue.Queue`. Verified: `make q` 190/190 (serial-fallback at small data);
+native-parallel(8)-vs-serial multiset sha-identical (30209 rows). The join clone
+still uses the default reflection `make_worker` (inner-join `make_worker` deferred,
+slice 2d) + the parallel engine's external build-state injection — unchanged.
+
+**BREAKER ACCUMULATE DONE (per-morsel hot path).** The breaker (agg/distinct/GROUP
+BY) is BARRIER-based — workers accumulate into per-worker engines → barrier →
+`PipelineSink.combine` → finalize read-out — so the streaming-sink model doesn't fit
+its accumulate phase. But the accumulate is the per-morsel hot path, and it's now
+native: `accumulate_worker_drive` (`_operators.pyx`, native `nogil` push, no sink —
+the breaker accumulates internally) replaces the worker's per-morsel `push_one` in
+BOTH `_run_breaker_segment` and `_drive_segment` (the multi-breaker producer).
+Verified: `make q` 190/190; big parallel GROUP BY (DOP=8) byte-identical to serial.
+
+**EXECUTOR BYPASSED FOR ALL NON-CHAIN PLANS.** A breaker plan's drive is still a
+single terminal task (the producer segment is a no-op dependency), so the `Executor`
+DAG was pure overhead for it too. `execute()` now routes EVERY non-chain plan
+through `_native_generic_execute`: the per-shape handler (`dispatch_data_pipeline` →
+breaker / serial / …) runs on a `CppThreadPool` straight into a `MorselQueue`, the
+consumer drains — no `Executor`, no `queue.Queue`. Verified by path-instrumentation:
+GROUP BY and ungrouped agg now hit `native_generic`; the multi-breaker chain (GROUP
+BY → DISTINCT) still hits the `Executor`. `make q` 190/190; big GROUP BY byte-
+identical parallel-vs-serial.
+
+**The `Executor`/`queue.Queue`/`Event` DAG is now used by ONE shape only — the
+multi-breaker chain.** It's a linear sequence (producer segments materialise →
+terminal streams), so it can be driven sequentially into a `MorselQueue` without the
+DAG. Converting it is the last step before slice 5 can DELETE `Executor`/`Event`/
+`_build_segment_dag`/`_drive_pipeline`/`_stream`/`queue.Queue`/`threading` from
+`scheduler_engine.py`.
+
+**Still Python below the Executor (the substrate, next layer down):** the per-shape
+handler generators (`_run_breaker_segment`, `_serial_stream`) that `_native_generic_
+execute` pumps; `PipelineSink.combine`/`finalize_source`; the pull-coordination
+`threading.Lock` in each handler; and the morsels are still Python `Morsel` objects
+converted to `cxm` at the sink boundary (cxm-end-to-end is the deeper item).
+
 ## 9. Staging (each slice independently compiles + passes `make q`)
 
 1. **`MorselQueue`** — ✅ **DONE.** `src/cpp/morsel_queue.hpp` (moodycamel MPMC
@@ -261,12 +364,52 @@ outer (RIGHT/FULL rebuild inside the probe); **filter_join mutates its shared
   60M-row fan-out (sha match, 2.4M rows). `make q` 190/190. (Pattern-2 bind-time
   `resolve_schema` for filter's first-push caches deferred — kept as per-worker
   STATE for now, byte-identical; bind-time migration is its own focused step.)
-- **2c** — aggregates spec/accumulator split (pattern 3) — the bulk of the work.
-- **2d** — joins: per-worker telemetry; fix filter_join probe-time mutation;
-  unify outer-join build sharing.
-- **2e** — mark the global-semantics operators (pattern 4) serial/merge-only and
-  make `_clone_op`'s silent splitting an explicit, asserted constraint
-  (**confirmed in-scope here, not deferred**).
+- **2c** — aggregates. **Ungrouped: ✅ DONE.** `UngroupedAggregateNode.make_worker`
+  shares parsed aggregates + compiled evals + identifier caches by reference;
+  STATE (engine accumulators + literal states) rebuilt fresh via an extracted
+  `_build_accumulators` factory. Parallel(4)-vs-serial(1) byte-identical on a 60M-row
+  SUM/COUNT/AVG/MIN/MAX query; `make q` 190/190. Scope note: did NOT do the full
+  per-class config/accumulator teardown (~15 classes) — the expensive shared work
+  is the eval compile + parse, already shared at node level; per-aggregate config
+  rebuild is nanosecond-cheap, so the teardown is high-risk for ~0 metric gain.
+  **Grouped: ✅ DONE.** Architect chose full consistency: the data engine has no
+  Python operators. `GroupedAggregateHashedNode` CONVERTED from plain `class` to
+  `cdef class` (12 fields declared; `_engine`/`_parallel_engines` are `object` —
+  the parallel sink wraps `_engine` in a `_ScatterCollectEngine`). `make_worker`
+  shares parsed SPEC by reference; STATE rebuilt via an extracted `_build_engine`
+  factory. Serial-vs-parallel byte-identical (COUNT/SUM/AVG over 60M rows);
+  `make q` 190/190. **Trap caught:** a `cdef class` overriding a `cpdef` base method
+  with a bare `def` does NOT update the C vtable — `_push_impl` silently ran the
+  base and produced empty output; fixed by declaring the override `cpdef`. (Plain
+  classes don't hit this — their cpdef override falls back to Python lookup.)
+  Boundary: special ops (EXPLAIN/SET/SHOW/INSERT/DDL) STAY Python — they run on the
+  serial engine, outside the relational/data engine, so Python is correct there.
+  Data-engine consistency: ✅ COMPLETE. `FunctionDatasetNode` + `NullReaderNode`
+  converted to `cdef class` (relation sources; not cloned, so no make_worker — just
+  native). Every relational operator is now a `cdef class`; the only Python operators
+  left are the special ops on the serial engine (correct). `make q` 190/190;
+  VALUES/GENERATE_SERIES/UNNEST/FILTER(FALSE) all correct.
+- **2d** — joins. **Re-scoped after tracing the parallel path, mostly DEFERRED.**
+  `_find_parallel_join` parallelizes ONLY `DrakenInnerJoinNode` — outer/cross/nlj/
+  non_equi/asof/filter/semi/anti are rejected by class and run serial. Consequences:
+  (1) the filter_join probe-time `right_hash_set` mutation is a LATENT race (filter_
+  join is never fanned out) — documented as a constraint, NOT fixed (no live path);
+  (2) only the inner join is cloned, and its `make_worker` is the worst risk/value
+  in slice 2 — two `__init__` levels to replicate, 7 fields the parallel engine
+  injects post-clone, build-mutated param-derived lists (byte-identical landmines),
+  and for the parallel shape `_compiled_right_evals` is required-empty + left evals
+  trivial, so the recompile saved ≈0. The default reflection clone already works.
+  **Deferred to slices 3–5**, where the native scheduler makes the worker-construction
+  requirement concrete (and may redesign the external-injection mechanism). Per-worker
+  telemetry is a non-issue: the default clone already gives fresh `kernel_metrics`/
+  `join_readings` via `__init__`.
+- **2e** — ✅ **DONE.** `is_partition_parallel()` overridden to `False` on the three
+  global-semantics operators — `WindowNode` (`_counts` running counter),
+  `UnnestJoinNode` (global DISTINCT `hash_set`), `UnionNode` (first-morsel schema +
+  leg counter). `spawn_worker` now asserts `is_partition_parallel()` and raises
+  `InvalidInternalStateError` if the scheduler ever tries to fan one out — turning
+  `_clone_op`'s old silent mis-split into a loud failure. `make q` 190/190; the three
+  run serial (assert dormant), verified unbroken.
 
 ### 9.3 Slice 2a — the spec/state contract on `BasePlanNode` (DRAFT, for ratification)
 

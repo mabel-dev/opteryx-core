@@ -36,8 +36,11 @@ def split(arr, delimiter=",", limit=None):
 
     if len(delimiter) == 1 and limit is None:
         from opteryx.compiled.nanobind.vectors import vector_split
+        from draken.vectors.vector import Vector as _ShimVector
 
-        return vector_split(arr, ord(delimiter))
+        nb_arr = getattr(arr, "_nb", arr)
+        result = vector_split(nb_arr, ord(delimiter))
+        return _ShimVector(result)
 
     # Python fallback for multi-character split (Draken vector_split only supports single-char)
     result = []

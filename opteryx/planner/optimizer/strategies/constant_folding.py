@@ -324,6 +324,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # drop the type. Leave the runtime expression in place to preserve it.
         and _root_cat != LC.NVARCHAR
         and _root_cat != LC.VARIANT
+        and _root_cat != LC.ARRAY
     ):
         table = no_table_data.read()
         bc = build_bytecode(lower(root))

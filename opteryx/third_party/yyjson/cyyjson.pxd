@@ -78,13 +78,13 @@ cdef extern from "yyjson.h":
 
     # Array/Object get
     yyjson_val* yyjson_arr_get(yyjson_val* arr, size_t idx)
-    yyjson_val* yyjson_obj_get(yyjson_val* obj, bytes key)
+    yyjson_val* yyjson_obj_get(yyjson_val* obj, const char* key)
 
     # JSON Pointer
-    yyjson_val* yyjson_doc_ptr_get(yyjson_doc* doc, bytes ptr)
-    yyjson_val* yyjson_doc_ptr_getn(yyjson_doc* doc, bytes ptr, size_t len)
-    yyjson_val* yyjson_ptr_get(yyjson_val* val, bytes ptr)
-    yyjson_val* yyjson_ptr_getn(yyjson_val* val, bytes ptr, size_t len)
+    yyjson_val* yyjson_doc_ptr_get(yyjson_doc* doc, const char* ptr)
+    yyjson_val* yyjson_doc_ptr_getn(yyjson_doc* doc, const char* ptr, size_t len)
+    yyjson_val* yyjson_ptr_get(yyjson_val* val, const char* ptr)
+    yyjson_val* yyjson_ptr_getn(yyjson_val* val, const char* ptr, size_t len)
 
     # Write functions
     char* yyjson_write(const yyjson_doc* doc, yyjson_write_flag flags, size_t* len)

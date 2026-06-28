@@ -432,23 +432,29 @@ cdef class UngroupedAggregateNode(BasePlanNode):
             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))
         ]
         self.all_identifiers = list(dict.fromkeys(all_identifiers))
+
+        # Hot-path early-out flags (SPEC — derived once from the parsed aggregates).
+        self._no_eval = (len(self._compiled_evals) == 0)
+        self._all_identifiers_bytes = [
+            _column_bytes(i) for i in self.all_identifiers
+        ]
+
+        # Build the per-worker mutable STATE (engine + result specs).
+        self._build_accumulators()
+
+    cdef void _build_accumulators(self) except *:
+        """Build the mutable per-worker STATE — the aggregate engine and the typed
+        result/literal specs (each carrying its own `_LiteralAggState` accumulator) —
+        from the immutable SPEC (`self.aggregates`). Called by `__init__` and by
+        `make_worker`, so a worker gets FRESH accumulators while sharing the parsed
+        aggregates + compiled evals by reference (no re-parse, no recompile)."""
         self._engine = UngroupedAggregateEngine()
         # Typed parallel arrays for the per-morsel hot path
         self._result_specs = []          # list[_ResultSpec], registration order
         self._literal_specs = []         # list[_ResultSpec] of kind=1 only
         self._engine_aggregate_count = 0
         self._finalized = False
-
-        # Hot-path early-out flags
-        self._no_eval = (len(self._compiled_evals) == 0)
-        self._all_identifiers_bytes = [
-            _column_bytes(i) for i in self.all_identifiers
-        ]
-        # Whether `chunk.select(...)` is required. Resolved on first ingest by
-        # comparing the morsel's column set against `self.all_identifiers`; if
-        # all required columns are already present and there are no extra ones
-        # we don't need to make a fresh morsel. Until then we conservatively
-        # do the select.
+        # `chunk.select(...)` need, resolved on first ingest (per worker).
         self._select_state = 0  # 0 = unknown, 1 = needed, 2 = unneeded
 
         cdef bytes ident_bytes
@@ -481,6 +487,21 @@ cdef class UngroupedAggregateNode(BasePlanNode):
                 self._result_specs.append(rspec)
 
         self._has_literals = len(self._literal_specs) > 0
+
+    cdef BasePlanNode make_worker(self):
+        # SPEC shared by reference (parsed aggregates + compiled evals + identifier
+        # caches — no re-parse, no recompile). STATE rebuilt fresh via the typed
+        # factory: each worker owns its own engine accumulators and literal states,
+        # so partition-parallel accumulation never shares mutable state.
+        cdef UngroupedAggregateNode w = UngroupedAggregateNode.__new__(UngroupedAggregateNode)
+        self._copy_worker_base(w)
+        w.aggregates = self.aggregates
+        w._compiled_evals = self._compiled_evals
+        w.all_identifiers = self.all_identifiers
+        w._no_eval = self._no_eval
+        w._all_identifiers_bytes = self._all_identifiers_bytes
+        w._build_accumulators()
+        return w
 
     @property
     def config(self):  # pragma: no cover

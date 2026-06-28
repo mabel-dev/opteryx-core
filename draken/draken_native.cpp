@@ -4341,6 +4341,124 @@ static VectorOwner make_array_take(const VectorOwner& v,
 }
 
 // ---------------------------------------------------------------------------
+// D.14: array extreme — GREATEST/LEAST over each row of a DRAKEN_ARRAY vector.
+//
+// For each logical row i:
+//   - walk child[offsets[sel[i]] : offsets[sel[i]+1]]
+//   - skip null child elements (NaN treated as smallest, matching nanmax/nanmin)
+//   - track the child index of the running max (want_max=true) or min
+//   - output[i] = child[best_idx]   when at least one valid element exists
+//                 null               when row is null or all child elements are null
+//
+// Uses take_child for the gather step so type-specific buffer management is
+// handled identically to array element subscript. String comparison uses
+// str_compare (string_slot.h) for lexicographic order on raw bytes.
+// ---------------------------------------------------------------------------
+static VectorOwner make_array_greatest(const VectorOwner& v, bool want_max) {
+    if (v.vec.type != DRAKEN_ARRAY)
+        throw std::invalid_argument("vector_array_greatest: expected DRAKEN_ARRAY");
+    if (!v.child_owner)
+        throw std::invalid_argument("vector_array_greatest: DRAKEN_ARRAY has no child");
+
+    const int32_t*     offsets = static_cast<const int32_t*>(v.vec.data);
+    const uint32_t*    sel     = v.vec.selection;
+    const uint32_t     n       = v.vec.length;
+    const VectorOwner& child   = *v.child_owner;
+    const DrakenType   ctype   = child.vec.type;
+
+    std::vector<int32_t> cidx(n, 0);
+
+    const uint32_t bm     = (n + 7u) / 8u;
+    const uint32_t padded = ((bm + 7u) & ~7u);
+    const size_t   vbytes = padded > 0u ? padded : 8u;
+    std::vector<uint8_t> local_validity(vbytes, 0xFFu);
+    bool any_invalid = false;
+
+    const bool is_str   = is_varchar_family(ctype);
+    const bool is_float = is_float_type(ctype);
+    const bool is_int   = !is_str && !is_float && ctype != DRAKEN_BOOL;
+
+    // String arena pointer (only valid when is_str).
+    const DrakenStringArena* sa =
+        is_str ? static_cast<const DrakenStringArena*>(child.vec.data) : nullptr;
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!row_is_valid(v.vec, i)) {
+            local_validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+            any_invalid = true;
+            continue;
+        }
+
+        const uint32_t sel_i = sel[i];
+        const int32_t  start = offsets[sel_i];
+        const int32_t  end   = offsets[sel_i + 1u];
+
+        int32_t best = -1;
+
+        for (int32_t j = start; j < end; ++j) {
+            const uint32_t uj = static_cast<uint32_t>(j);
+            if (!row_is_valid(child.vec, uj)) continue;
+
+            if (best < 0) { best = j; continue; }
+
+            bool j_wins;
+            if (is_int) {
+                const int64_t jv = row_narrow_int(child.vec, uj);
+                const int64_t bv = row_narrow_int(child.vec, static_cast<uint32_t>(best));
+                j_wins = want_max ? (jv > bv) : (jv < bv);
+            } else if (is_float) {
+                const double jv = row_float(child.vec, uj);
+                const double bv = row_float(child.vec, static_cast<uint32_t>(best));
+                // NaN compares as smallest (consistent with nanmax/nanmin semantics).
+                // jv != jv → jv is NaN → never wins; bv != bv → bv is NaN → always loses.
+                if (jv != jv) { j_wins = false; }
+                else if (bv != bv) { j_wins = true; }
+                else { j_wins = want_max ? (jv > bv) : (jv < bv); }
+            } else if (is_str) {
+                const DrakenStringSlot* slots = sa->slots;
+                const uint8_t*          arena = sa->arena;
+                const uint32_t sj = child.vec.selection[uj];
+                const uint32_t sb = child.vec.selection[static_cast<uint32_t>(best)];
+                const int c = str_compare(&slots[sj], arena, &slots[sb], arena);
+                j_wins = want_max ? (c > 0) : (c < 0);
+            } else {
+                // DRAKEN_BOOL
+                const bool jv = row_bool(child.vec, uj);
+                const bool bv = row_bool(child.vec, static_cast<uint32_t>(best));
+                j_wins = want_max ? (jv && !bv) : (!jv && bv);
+            }
+
+            if (j_wins) best = j;
+        }
+
+        if (best < 0) {
+            local_validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+            any_invalid = true;
+        } else {
+            cidx[i] = best;
+        }
+    }
+
+    VectorOwner result = take_child(child, cidx);
+
+    if (any_invalid) {
+        if (result.vec.validity == nullptr) {
+            uint8_t* dst = static_cast<uint8_t*>(draken_malloc(vbytes));
+            if (!dst) throw std::bad_alloc();
+            std::memcpy(dst, local_validity.data(), vbytes);
+            result.validity_buf.reset(dst);
+            result.vec.validity = dst;
+        } else {
+            uint8_t* dst = result.vec.validity;
+            for (uint32_t i = 0u; i < bm; ++i)
+                dst[i] &= local_validity[i];
+        }
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // D.13: array element subscript — vec[index] per logical row.
 //
 // For each logical row i of a DRAKEN_ARRAY vector:
@@ -8255,6 +8373,37 @@ NB_MODULE(draken_native, m) {
         "[] elements become valid empty sublists (distinct from null).\n"
         "Parent owns child; RAII destructor frees the entire nested subtree.\n"
         "Unsupported ops: hash, compare, between, in_list, sum/min/max, arithmetic.");
+
+    // -------------------------------------------------------------------------
+    // vector_array_greatest / vector_array_least — per-row max/min over ARRAY.
+    //
+    // Returns a dense Vector of the child element type (same shape as subscript).
+    // Null parent rows and rows where all child elements are null produce null.
+    // NaN child elements are treated as smallest (consistent with nanmax/nanmin).
+    // -------------------------------------------------------------------------
+    m.def("vector_array_greatest",
+        [](nb::object vec_obj) -> nb::object {
+            if (!nb::isinstance<VectorOwner>(nb::handle(vec_obj)))
+                throw nb::type_error("vector_array_greatest: expected draken_native.Vector");
+            const VectorOwner& v = *nb::inst_ptr<VectorOwner>(nb::handle(vec_obj));
+            return nb::cast(make_array_greatest(v, /*want_max=*/true));
+        },
+        nb::arg("vec"),
+        "Per-row maximum over a DRAKEN_ARRAY Vector. Returns a scalar Vector of\n"
+        "the child element type. Null rows and all-null sublists produce null.\n"
+        "NaN elements are treated as smallest (nanmax semantics).");
+
+    m.def("vector_array_least",
+        [](nb::object vec_obj) -> nb::object {
+            if (!nb::isinstance<VectorOwner>(nb::handle(vec_obj)))
+                throw nb::type_error("vector_array_least: expected draken_native.Vector");
+            const VectorOwner& v = *nb::inst_ptr<VectorOwner>(nb::handle(vec_obj));
+            return nb::cast(make_array_greatest(v, /*want_max=*/false));
+        },
+        nb::arg("vec"),
+        "Per-row minimum over a DRAKEN_ARRAY Vector. Returns a scalar Vector of\n"
+        "the child element type. Null rows and all-null sublists produce null.\n"
+        "NaN elements are treated as smallest (nanmin semantics).");
 
     // -------------------------------------------------------------------------
     // vector_array_map_access — native array-element subscript.

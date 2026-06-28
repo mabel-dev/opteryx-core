@@ -324,13 +324,13 @@ def embed(arr):
 
 def jsonb_object_keys(arr):
     """Extract the keys from an array of JSON objects or JSON strings/bytes."""
+    from draken.interop.vector_sequence import vector_from_sequence
+
     if len(arr) == 0:
-        return []
+        return vector_from_sequence([], "ARRAY")
 
     arr = arr.to_pylist()
     result = []
-    if len(arr) == 0:
-        return result
 
     first_elem = arr[0]
     if isinstance(first_elem, dict):
@@ -339,11 +339,11 @@ def jsonb_object_keys(arr):
     elif isinstance(first_elem, (str, bytes)):
         parser = yyjson.Parser()
         for row in arr:
-            result.append([str(key) for key in parser.parse(row).keys()])
+            result.append(parser.parse(row).root.object_keys())
     else:
         raise ValueError("Unsupported dtype for array elements. Expected dict, str, or bytes.")
 
-    return result
+    return vector_from_sequence(result, "ARRAY")
 
 
 def humanize(arr):

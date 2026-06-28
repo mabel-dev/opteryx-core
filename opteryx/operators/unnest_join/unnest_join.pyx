@@ -289,6 +289,12 @@ cdef class UnnestJoinNode(BasePlanNode):
     cdef public bint _single_column
     cdef public CarcharSetWrapper hash_set
 
+    cdef bint is_partition_parallel(self):
+        # `hash_set` accumulates a GLOBAL DISTINCT across all morsels; per-worker
+        # partitioning would dedup only within each worker's slice and change the
+        # answer. Serial/merge-only — never fanned out.
+        return False
+
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 

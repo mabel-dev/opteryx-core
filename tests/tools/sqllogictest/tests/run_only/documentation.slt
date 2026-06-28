@@ -62,12 +62,6 @@ SELECT * FROM generate_series(-5, 5, 5) AS series
 statement error InvalidFunctionParameterError
 SELECT * FROM generate_series('2020-01-01', '2025-12-31', '1y') AS series
 
-statement error UnsupportedSyntaxError
-SELECT * FROM FAKE(3, 2) AS temp
-
-statement error UnsupportedSyntaxError
-SELECT * FROM FAKE(3, (NAME, INTEGER, VARCHAR)) AS temp(user, age, password)
-
 
 # engine configuration
 statement ok

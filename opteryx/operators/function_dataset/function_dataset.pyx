@@ -182,7 +182,11 @@ DATASET_FUNCTIONS = {
 }
 
 
-class FunctionDatasetNode(ReaderNode):
+cdef class FunctionDatasetNode(ReaderNode):
+    # `alias` is a ReaderNode field; `columns`/`parameters` are BasePlanNode fields.
+    cdef public object function
+    cdef public object args
+
     def __init__(self, properties: QueryProperties, **parameters):
         """
         The Blob Reader Node is responsible for reading the relevant blobs

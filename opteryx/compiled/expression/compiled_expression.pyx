@@ -141,6 +141,8 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         return Vector(_draken_native.vector_reinterpret_as_date32(int_vec))
     if isinstance(value, _datetime.datetime):
         return Vector(_draken_native.vector_timestamp_from_constant(value, 1))
+    if isinstance(value, _datetime.time):
+        return Vector(_draken_native.vector_time64_from_constant(value, 1))
     raise IncorrectTypeError(
         f"_materialise_constant_literal: cannot materialise constant for literal "
         f"{value!r} (type {type(value).__name__})"

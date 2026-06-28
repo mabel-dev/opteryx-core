@@ -481,7 +481,7 @@ def _parameter_type_label(parameter: ParameterSpec) -> str:
 def _parameter_export_type_label(
     function: FunctionDefinition, overload: FunctionOverload, parameter: ParameterSpec
 ) -> str:
-    if function.name == "TRUNC" and overload.id == "TRUNC_temporal" and parameter.name == "value":
+    if function.name == "TRUNC" and overload.id in ("TRUNC_date", "TRUNC_timestamp") and parameter.name == "value":
         return "temporal"
     return _parameter_type_label(parameter)
 
@@ -495,18 +495,30 @@ def _normalise_sentence(text: str) -> str:
     return text
 
 
+_DRAKEN_TO_SQL: dict[str, str] = {
+    "int8": "INTEGER", "int16": "INTEGER", "int32": "INTEGER", "int64": "INTEGER",
+    "float32": "FLOAT", "float64": "FLOAT",
+    "bool": "BOOLEAN",
+    "varchar": "VARCHAR", "nvarchar": "NVARCHAR", "varbinary": "VARBINARY",
+    "date32": "DATE", "timestamp64": "TIMESTAMP", "time32": "TIME", "time64": "TIME",
+    "decimal": "DECIMAL", "decimal128": "DECIMAL",
+    "boolean": "BOOLEAN",
+}
+
+
 def _type_label(column_type) -> str:
-    """Canonical Draken type name for a ColumnType (lowercased), or "unknown"."""
+    """User-facing SQL type name for a ColumnType, or 'unknown'."""
     if column_type is None:
         return "unknown"
-    return serialize_column_type(column_type).lower()
+    raw = serialize_column_type(column_type).lower()
+    return _DRAKEN_TO_SQL.get(raw, raw.upper() if raw != "unknown" else raw)
 
 
 def _documentation_category(
     function: FunctionDefinition, display_name: str, overload: FunctionOverload
 ) -> str:
     if function.name == "TRUNC":
-        if overload.id == "TRUNC_temporal":
+        if overload.id in ("TRUNC_date", "TRUNC_timestamp"):
             return "Date & Time Functions"
         return "Numeric Functions"
 
@@ -677,7 +689,7 @@ def _function_documentation(
     del category_label  # category is exposed separately in the exported structure
 
     if function.name == "TRUNC":
-        if overload.id == "TRUNC_temporal":
+        if overload.id in ("TRUNC_date", "TRUNC_timestamp"):
             return "Truncates a temporal value to the start of the specified unit."
         return "Truncates a numeric value toward zero at the requested scale."
 
@@ -792,7 +804,7 @@ def _related_functions(
         related.append(name)
 
     if function.name == "TRUNC":
-        if overload.id == "TRUNC_temporal":
+        if overload.id in ("TRUNC_date", "TRUNC_timestamp"):
             hint_names = ("EXTRACT", "TIME_BUCKET", "DATEDIFF")
         else:
             hint_names = ("ROUND", "CEILING", "FLOOR")
@@ -859,7 +871,7 @@ def _export_overload(
 
     notes = _FUNCTION_NOTES.get(function.name)
     if function.name == "TRUNC":
-        if overload.id == "TRUNC_temporal":
+        if overload.id in ("TRUNC_date", "TRUNC_timestamp"):
             notes = "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
         else:
             notes = "Truncation is performed toward zero rather than toward negative infinity."
