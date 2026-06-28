@@ -233,12 +233,19 @@ GROUP BY and ungrouped agg now hit `native_generic`; the multi-breaker chain (GR
 BY → DISTINCT) still hits the `Executor`. `make q` 190/190; big GROUP BY byte-
 identical parallel-vs-serial.
 
-**The `Executor`/`queue.Queue`/`Event` DAG is now used by ONE shape only — the
-multi-breaker chain.** It's a linear sequence (producer segments materialise →
-terminal streams), so it can be driven sequentially into a `MorselQueue` without the
-DAG. Converting it is the last step before slice 5 can DELETE `Executor`/`Event`/
-`_build_segment_dag`/`_drive_pipeline`/`_stream`/`queue.Queue`/`threading` from
-`scheduler_engine.py`.
+**SLICE 5 DONE — the `Executor` is DELETED.** The multi-breaker chain (the last DAG
+user) is now `_native_chain_execute`: a linear sequence (producers materialise →
+terminal streams) driven sequentially into a `MorselQueue`, no DAG. With nothing left
+using it, `Executor`/`Event`/`_build_segment_dag`/`_build_multibreaker_chain_dag`/
+`_drive_pipeline`/`_stream`/`_DONE` and the `import queue`/`import threading` were
+**deleted** from `scheduler_engine.py`. Verified: no dangling refs anywhere; module-
+level `Executor`/`Event`/`queue.Queue`/`threading` grep = 0; `make q` 190/190; chain
++ GROUP BY byte-identical. **No Python `Executor`/`Event` DAG and no `queue.Queue`
+hand-off remain — every plan runs a native drive into a `MorselQueue`.**
+
+**Dead code exposed (follow-up cleanup):** the native gates handle stateless/join
+before dispatch, so the OLD `_stateless_stream` / `_join_probe_stream` in
+`parallel_engine.py` (and their dispatch branches) are now unreachable — prune them.
 
 **Still Python below the Executor (the substrate, next layer down):** the per-shape
 handler generators (`_run_breaker_segment`, `_serial_stream`) that `_native_generic_

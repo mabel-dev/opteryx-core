@@ -8,41 +8,33 @@
 # limitations under the License.
 
 """
-M4 scheduler — THE data-pipeline executor (Step 7, generic pipeline parallelism).
+Scheduler — routes each data pipeline to a NATIVE drive into a ``MorselQueue``.
 
-This is the SOLE data executor. Every data pipeline (SELECT and friends) runs through
-here; the dispatcher (``managers/execution/__init__.py``) routes only the non-pipeline
-special ops (EXPLAIN / SET / SHOW / INSERT / DDL) to ``serial_engine``.
+Every data pipeline (SELECT and friends) runs through here; the dispatcher
+(``managers/execution/__init__.py``) routes only the non-pipeline special ops
+(EXPLAIN / SET / SHOW / INSERT / DDL) to ``serial_engine``.
 
-The fold (design §5 Step 7): the per-shape drive machinery — ``dispatch_data_pipeline``
-and its handlers (``_run_breaker_segment``, ``_join_probe_stream``, ``_stateless_stream``,
-``_serial_stream``), the ``_SharedSourceJoin`` build prelude — lives in
-``parallel_engine.py`` as the kept SUBSTRATE (design §5 "Kept"). This module HOSTS that
-substrate under the Event/Executor DAG:
+There is no Python ``Executor``/``Event`` DAG and no ``queue.Queue`` hand-off any
+more (native scheduler rewrite). ``execute`` resolves DOP, then dispatches by plan
+shape to a native drive — each runs its work on a ``CppThreadPool`` and streams
+morsels through a native ``MorselQueue`` to the consumer:
 
-  * ``identify_segments`` cuts the physical plan into pipeline segments — the scheduler's
-    unit of work. Each ``Segment`` becomes ONE ``Event`` in the DAG.
-  * Breaker ordering and build-before-probe become ``Event.add_dependency`` edges: a
-    segment whose output feeds a breaker (or a join's build leg) is a dependency of the
-    segment that consumes it, so the consuming Event only schedules once its producers
-    finish. Multi-segment build subtrees (multi-join) wire every build segment ahead of
-    the probe/terminal segment.
-  * The TERMINAL segment (the one whose tail is the plan sink) hosts the streaming drive:
-    its Event task pulls the kept skeleton's generator and hands each morsel across a
-    bounded queue to the consumer. The non-terminal segment Events are the dependency
-    nodes that express ordering; the actual cross-segment composition is the
-    EMIT-into-cloned-downstream model (§4.1) the skeleton already performs — a breaker
-    EMITs into its cloned downstream on EOS, it is not re-sourced — so the terminal drive
-    runs the whole composed pipeline once, byte-identically to serial at DOP=1.
+  * single-scan @ DOP=1 → ``_native_serial_execute`` (``drive_scan_to_sink``)
+  * parallel stateless (``scan → stateless* → exit``) → ``_native_stateless_execute``
+  * parallel inner-equi join → ``_native_join_execute``
+  * multi-breaker chain (GROUP BY → DISTINCT) → ``_native_chain_execute`` (sequential)
+  * everything else → ``_native_generic_execute`` (pumps the kept per-shape handler
+    in ``parallel_engine.py`` — ``_run_breaker_segment`` / ``_serial_stream`` — into
+    the ``MorselQueue``)
 
-DOP is the real ``resolve_worker_count`` (the ``min(ceiling, 1)`` Stage-0 pin is lifted).
-Worker count is degree-of-parallelism only — it never selects a code path; W=1 / below the
-row-floor drives the ORIGINAL un-cloned breaker (the prime constraint, byte-identical to
-serial — design §3).
+The per-shape drive machinery still lives in ``parallel_engine.py`` as the SUBSTRATE
+(its worker push loops are native — ``drive_scan_to_sink`` / ``stateless_worker_drive``
+/ ``accumulate_worker_drive``); this module owns the dispatch + the native hand-off.
+DOP is the real ``resolve_worker_count``; worker count is degree-of-parallelism only —
+it never selects a code path. DOP=1 stays byte-identical to serial (the prime
+constraint).
 """
 
-import queue
-import threading
 from typing import List
 
 from opteryx import config
@@ -52,8 +44,6 @@ from opteryx.managers.execution.parallel_engine import dispatch_data_pipeline
 from opteryx.managers.execution.parallel_engine import identify_segments
 from opteryx.managers.execution.parallel_engine import resolve_worker_count
 
-# Sentinel pushed onto the hand-off queue when the drive task finishes (or dies).
-_DONE = object()
 # Bounded hand-off depth: backpressure so the worker cannot run unboundedly ahead
 # of the consumer (matching the streaming memory profile of the serial path).
 _QUEUE_DEPTH = 8
@@ -74,308 +64,6 @@ def resolve_dop(plan, segments: List[Segment], requested) -> int:
     drive of the ORIGINAL breaker, the prime constraint).
     """
     return resolve_worker_count(requested)
-
-
-class Event:
-    """A node in the scheduling DAG and a batch of tasks, gated by two counters
-    (DuckDB §6): upstream ``dependencies`` (runnable when all deps finish) and
-    downstream ``tasks`` (complete when all tasks finish). Carried forward verbatim
-    from the prototype (scratch/ddb_proto/scheduler.py) — proven shape.
-    """
-
-    def __init__(self, executor, name, schedule_tasks):
-        self.executor = executor
-        self.name = name
-        self._schedule_tasks = schedule_tasks  # () -> [callable]
-        self.total_deps = 0
-        self.finished_deps = 0
-        self.total_tasks = 0
-        self.finished_tasks = 0
-        self.parents = []
-
-    def add_dependency(self, dep):
-        self.total_deps += 1
-        dep.parents.append(self)
-
-    def maybe_schedule(self):
-        if self.finished_deps == self.total_deps:
-            self.schedule()
-
-    def complete_dependency(self):
-        with self.executor.lock:
-            self.finished_deps += 1
-            ready = self.finished_deps == self.total_deps
-        if ready:
-            self.schedule()
-
-    def schedule(self):
-        tasks = self._schedule_tasks()
-        with self.executor.lock:
-            self.total_tasks = len(tasks)
-            empty = self.total_tasks == 0
-        if empty:
-            self.finish()
-        else:
-            for task in tasks:
-                self.executor.submit(self, task)
-
-    def finish_task(self):
-        with self.executor.lock:
-            self.finished_tasks += 1
-            done = self.finished_tasks == self.total_tasks
-        if done:
-            self.finish()
-
-    def finish(self):
-        self.executor.event_completed()
-        for parent in self.parents:
-            parent.complete_dependency()
-
-
-class Executor:
-    """Per-query orchestrator: build events, wire deps, run the DAG to quiet on a
-    CppThreadPool. The first error from any task is stashed and re-raised on the
-    main thread; results stream out-of-band via the hand-off queue, not here.
-    """
-
-    def __init__(self, pool, telemetry=None):
-        self.pool = pool
-        self.lock = threading.Lock()
-        self._all_done = threading.Event()
-        self._error = None
-        self._total_events = 0
-        self._completed_events = 0
-        self._events = []
-
-    def add_event(self, name, schedule_tasks):
-        ev = Event(self, name, schedule_tasks)
-        self._events.append(ev)
-        self._total_events += 1
-        return ev
-
-    def submit(self, event, task):
-        future = self.pool.submit(task)
-        future.add_done_callback(lambda f, e=event: self._task_done(e, f))
-
-    def _task_done(self, event, future):
-        exc = future.exception()
-        if exc is not None:
-            with self.lock:
-                if self._error is None:
-                    self._error = exc
-            self._all_done.set()
-            return
-        event.finish_task()
-
-    def stash_error(self, exc):
-        """Stash the first error from any task (idempotent — keeps the first). Phase C
-        producer tasks call this SYNCHRONOUSLY before unblocking the consumer, so the
-        consumer sees the error after the ``_DONE`` it is woken with (the future
-        callback ``_task_done`` would otherwise set it only after the task unwinds)."""
-        with self.lock:
-            if self._error is None:
-                self._error = exc
-
-    def event_completed(self):
-        with self.lock:
-            self._completed_events += 1
-            done = self._completed_events == self._total_events
-        if done:
-            self._all_done.set()
-
-    def start(self):
-        for ev in self._events:
-            if ev.total_deps == 0:
-                ev.maybe_schedule()
-
-    @property
-    def error(self):
-        return self._error
-
-
-def _build_segment_dag(executor, plan, segments, drive_task):
-    """Build one ``Event`` per pipeline ``Segment`` and wire the dependency edges.
-
-    Each ``Segment`` from ``identify_segments`` is one Event. The dependency edges
-    encode the dataflow ordering the design names: a segment whose tail feeds a breaker
-    (or whose output is a join's build/probe input) is a DEPENDENCY of the segment that
-    consumes it — so build-before-probe and breaker ordering fall out of
-    ``add_dependency`` rather than inline sequencing. The TERMINAL segment (whose tail
-    is the plan sink, ``not tail_is_breaker``) hosts the streaming drive: its Event task
-    is ``drive_task``; all other (producer) segment Events are dependency nodes (no-op
-    tasks — the actual cross-segment composition is the skeleton's
-    EMIT-into-cloned-downstream model, §4.1, performed inside the terminal drive).
-
-    Returns the terminal Event (the one that produces output). When the plan has a
-    single segment (the common single-scan agg/stateless case) that segment IS the
-    terminal one and there are no dependency edges.
-    """
-    # Map each segment to an Event. Producer segments (tail is a breaker, i.e. they feed
-    # a downstream segment) get a no-op task; the terminal segment gets the real drive.
-    seg_event = {}
-    terminal = None
-    for idx, seg in enumerate(segments):
-        if seg.tail_is_breaker:
-            ev = executor.add_event(f"segment[{idx}]:producer", lambda: [])
-        else:
-            ev = executor.add_event(
-                f"segment[{idx}]:terminal", lambda dt=drive_task: [dt]
-            )
-            terminal = ev
-        seg_event[seg.tail] = (seg, ev)
-
-    if terminal is None:
-        # Degenerate: no sink-tailed segment (every segment ends at a breaker). The
-        # last segment in dataflow order is the producer of record; promote it to the
-        # terminal drive so the pipeline still produces output.
-        seg, _old = list(seg_event.values())[-1]
-        terminal = executor.add_event("segment:terminal", lambda: [drive_task])
-
-    # Wire dependency edges: a producer segment (tail = breaker) is a dependency of the
-    # segment(s) downstream of that breaker. The push topology is single-output, so the
-    # breaker's outgoing edge identifies the consuming segment's source. Every producer
-    # segment is also, transitively, a dependency of the terminal drive — so the terminal
-    # Event only schedules once all producers have completed (build-before-probe).
-    for seg, ev in seg_event.values():
-        if ev is terminal:
-            continue
-        terminal.add_dependency(ev)
-    return terminal
-
-
-def _build_multibreaker_chain_dag(
-    executor, plan, chain, dop, telemetry, out_queue, gen_box
-):
-    """Phase C Event-DAG for a single-scan LINEAR MULTI-BREAKER chain.
-
-    Each PRODUCER segment (every breaker segment, in dataflow order) gets a real drive
-    Event that materialises its breaker's recombined output into a buffer; the next
-    segment's Event DEPENDS on it (``add_dependency``) and is re-sourced from that
-    buffer. The TERMINAL sink segment streams the last buffer to the hand-off queue.
-
-    So every breaker parallelises on its own DOP (the agg AND the distinct, not just the
-    first), and agg-before-readout / breaker-before-breaker ordering is genuine Event
-    dependency — not the single terminal drive's EMIT-into-cloned-downstream tail.
-    """
-    from opteryx.managers.execution.parallel_engine import _drive_passthrough_segment
-    from opteryx.managers.execution.parallel_engine import _drive_segment
-    from opteryx.managers.execution.pipeline_sink import recombination_class_for
-
-    producers = [s for s in chain if s.tail_is_breaker]
-    terminal_seg = chain[-1]
-    # One materialisation buffer per producer; producer i reads buf[i-1], writes buf[i].
-    # Linear deps serialise the segment drives, so the buffers race-free.
-    bufs = [[] for _ in producers]
-
-    def _producer_task(i):
-        seg = producers[i]
-        if i == 0:
-            source = ("scan", seg.nodes[0])
-            middle = list(seg.nodes[1:-1])
-        else:
-            source = ("buffer", bufs[i - 1])
-            middle = list(seg.nodes[:-1])  # buffer-sourced: nodes[0] is the first middle
-        breaker_id = seg.nodes[-1]
-        recomb = recombination_class_for(plan[breaker_id])
-
-        def task():
-            try:
-                for _ in _drive_segment(
-                    plan, source, middle, breaker_id, recomb, dop, telemetry,
-                    collect_into=bufs[i],
-                ):
-                    pass
-            except BaseException:  # noqa: BLE001 — unblock the consumer, then surface
-                # The producer never feeds the hand-off queue (it materialises), so on
-                # failure the terminal Event never runs and the consumer would block on
-                # `out_queue.get()` forever. Stash + wake it.
-                import sys
-
-                executor.stash_error(sys.exc_info()[1])
-                out_queue.put(_DONE)
-                raise
-
-        return task
-
-    def _terminal_task():
-        last_buf = bufs[-1] if producers else []
-        if terminal_seg.tail_is_breaker:
-            # Degenerate: the chain ends in a breaker with no sink segment — stream it.
-            breaker_id = terminal_seg.nodes[-1]
-            recomb = recombination_class_for(plan[breaker_id])
-            outs = list(plan.outgoing_edges(breaker_id))
-            downstream_id = outs[0][1] if outs else None
-            gen = _drive_segment(
-                plan, ("buffer", last_buf), list(terminal_seg.nodes[:-1]),
-                breaker_id, recomb, dop, telemetry, downstream_id=downstream_id,
-            )
-        else:
-            # The sink segment (e.g. a bare Exit, or stateless* → Exit): passthrough the
-            # last materialised buffer through its head to the Exit.
-            gen = _drive_passthrough_segment(plan, last_buf, terminal_seg.nodes[0])
-        gen_box.append(gen)
-        try:
-            for morsel in gen:
-                out_queue.put(morsel)
-        finally:
-            out_queue.put(_DONE)
-
-    prod_events = []
-    for i in range(len(producers)):
-        ev = executor.add_event(
-            f"chain.producer[{i}]", lambda i=i: [_producer_task(i)]
-        )
-        if i > 0:
-            ev.add_dependency(prod_events[i - 1])
-        prod_events.append(ev)
-    term_ev = executor.add_event("chain.terminal", lambda: [_terminal_task()])
-    if prod_events:
-        term_ev.add_dependency(prod_events[-1])
-    return term_ev
-
-
-def _drive_pipeline(plan, workers, telemetry, out_queue, gen_box):
-    """The terminal segment's task: pull the kept skeleton's drive generator (the shape
-    router ``dispatch_data_pipeline``) and stream each morsel onto ``out_queue``. Runs on
-    a pool thread. The generator is published into ``gen_box`` so the consumer can close
-    it on early abandonment. Always terminates with a ``_DONE`` sentinel, exception or not.
-    """
-    gen = dispatch_data_pipeline(plan, workers, telemetry)
-    gen_box.append(gen)
-    try:
-        for morsel in gen:
-            out_queue.put(morsel)  # blocks on backpressure (bounded queue)
-    finally:
-        out_queue.put(_DONE)
-
-
-def _stream(executor, out_queue, gen_box):
-    """Consume the hand-off queue and yield morsels until the drive task signals
-    ``_DONE``; then re-raise any stashed task error. On early consumer close, close the
-    drive generator so its ``finally`` (ctx terminate / source close) runs and the worker
-    stops at the next morsel.
-    """
-    try:
-        while True:
-            item = out_queue.get()
-            if item is _DONE:
-                break
-            yield item
-    finally:
-        # Unblock the worker if the consumer abandoned us mid-stream (e.g. LIMIT): close
-        # the drive generator (runs its finally: ctx terminate, source close) and drain
-        # any in-flight morsel so its put() returns.
-        for gen in gen_box:
-            gen.close()
-        while True:
-            try:
-                item = out_queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is _DONE:
-                break
-    if executor.error is not None:
-        raise executor.error
 
 
 def _count_scans(plan) -> int:
@@ -902,15 +590,16 @@ def execute(plan, head_node=None, telemetry=None):
         telemetry._reading["scheduler_pipelines"] = _count_pipelines(segments)
         telemetry._reading["scheduler_dop"] = dop
 
-    # Slice 3 (native scheduler, option B): a single-scan plan at DOP=1 — the
-    # byte-identical-serial prime constraint — runs the NATIVE push drive
-    # (`drive_scan_to_sink`) straight into a `MorselQueue`. No Python `queue.Queue`,
-    # no `Executor`/`threading`, no Python drive generator. The DOP>=2 parallel
-    # handlers stay on the existing path until slice 4.
+    # A single-SEGMENT single-scan plan at DOP=1 (no breaker — breakers cut segments)
+    # is the byte-identical-serial prime constraint: the native push drive
+    # `drive_scan_to_sink` straight into a `MorselQueue`. (A single-scan GROUP BY /
+    # agg / DISTINCT is MULTI-segment and must reach the CONCURRENT breaker handler —
+    # it is NOT caught here.)
     if dop == 1 and len(segments) == 1 and _count_scans(plan) == 1:
         return _native_serial_execute(plan, telemetry)
 
-    # Native parallel shapes (no queue.Queue / Executor for these).
+    # Native PARALLEL shapes first (so a single scan still parallelises): stateless
+    # (scan → stateless* → exit) and inner-equi join run their own native drives.
     if dop >= 2:
         from opteryx.managers.execution.parallel_engine import _find_parallel_join
         from opteryx.managers.execution.parallel_engine import _find_parallel_stateless
@@ -926,11 +615,9 @@ def execute(plan, head_node=None, telemetry=None):
         if join_shape is not None:
             return _native_join_execute(plan, join_shape, dop, telemetry)
 
-    # A single-scan LINEAR MULTI-BREAKER chain (e.g. GROUP BY → DISTINCT) is the ONE
-    # remaining plan shape whose drive is genuinely multi-task (each breaker
-    # parallelises on its own DOP via materialise + re-source Event edges) — it keeps
-    # the Executor DAG. EVERY OTHER plan has a single terminal drive, so the Executor
-    # is pure overhead: it runs natively into a MorselQueue (no Executor/queue.Queue).
+    # A single-scan LINEAR MULTI-BREAKER chain (GROUP BY → DISTINCT) is the one shape
+    # whose drive is genuinely multi-task (each breaker on its own DOP). Detected
+    # BEFORE the single-scan serial gate so a chain still parallelises per-breaker.
     chain = None
     if dop >= 2:
         from opteryx.managers.execution.parallel_engine import (
@@ -945,4 +632,7 @@ def execute(plan, head_node=None, telemetry=None):
             telemetry._reading["scheduler_chain_segments"] = len(chain)
         return _native_chain_execute(plan, chain, dop, telemetry)
 
+    # Everything else (breaker agg/distinct → CONCURRENT _run_breaker_segment;
+    # multi-scan serial → _serial_stream) runs its kept handler natively into a
+    # `MorselQueue`. The handler still owns its own worker fan-out.
     return _native_generic_execute(plan, dop, telemetry)

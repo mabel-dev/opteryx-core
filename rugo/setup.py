@@ -117,7 +117,7 @@ setup(
             "freethreading_compatible": FREE_THREADED_BUILD,
         },
     ),
-    package_data={"": ["*.pyx", "*.pxd", "*.h"]},
+    package_data={},
     cmdclass={"build_ext": build_ext},
     # Isolate rugo's build artifacts from opteryx_core's shared ./build dir.
     # bdist_wheel archives <build_base>/lib/*, and the shared build/lib is

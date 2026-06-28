@@ -433,6 +433,17 @@ and how many rows are eliminated before the typed column build.
 
 ---
 
+## Example notebook
+
+[`space_missions.ipynb`](https://github.com/mabel-dev/opteryx-core/blob/main/rugo/space_missions.ipynb) walks through a complete workflow on a real dataset:
+
+- Download a Parquet file and inspect its schema with `read_metadata`
+- Filter launches by company with row-group pruning and row-level predicate
+- Aggregate total spend per company across streaming morsels
+- Write filtered results to JSONL and read them back
+
+---
+
 ## Building from source
 
 End users should `pip install rugo` and use the published wheels. To build from

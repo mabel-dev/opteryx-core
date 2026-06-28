@@ -67,6 +67,7 @@ jobs:
           docker run --rm \
             -e PLAT="manylinux2014_${{ matrix.arch }}" \
             -e PYTHON_VERSION=${{ matrix.pybuild }} \
+            -e OPTERYX_ENABLE_LTO=1 \
             -v "$(pwd)":/io \
             --workdir /io \
             "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
@@ -103,8 +104,8 @@ jobs:
 
       - name: Build rugo wheel (${{ matrix.os }}, py ${{ matrix.pybuild }})
         env:
-          # arm64 (macos-14) deployment target.
           MACOSX_DEPLOYMENT_TARGET: "11.0"
+          OPTERYX_ENABLE_LTO: "1"
         run: ./dev/build-rugo-wheels-macos.sh
 
       - name: Archive wheels

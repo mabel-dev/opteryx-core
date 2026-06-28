@@ -67,6 +67,20 @@ cdef class Vector:
     def __len__(self):
         return self._nb.length
 
+    def __repr__(self):
+        cdef int n = self._nb.length
+        cdef list vals = self._nb.to_pylist()
+        cdef str type_name = str(self._nb.type).split(".")[-1]
+        if n <= 10:
+            return f"Vector<{type_name}>[{', '.join(repr(v) for v in vals)}]"
+        preview = vals[:5]
+        tail = vals[n - 2:]
+        return (
+            f"Vector<{type_name}>[{', '.join(repr(v) for v in preview)}, "
+            f"... ({n - 7} more) ..., "
+            f"{', '.join(repr(v) for v in tail)}]"
+        )
+
     def __getitem__(self, int idx):
         return self._nb[idx]
 
