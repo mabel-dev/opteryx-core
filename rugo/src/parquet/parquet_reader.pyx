@@ -121,6 +121,10 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 # Type widening C wrappers (Tier 2C SIMD acceleration)
+cdef extern from "../../src/cpp/disk_io.h" nogil:
+    int read_all_mmap(const char* path, uint8_t** dst, size_t* out_len)
+    int unmap_memory_c(unsigned char* addr, size_t size)
+
 cdef extern from "type_widening_wrappers.hpp":
     void rugo_widen_int32_to_int64(const int32_t* src, int64_t* dst, size_t count) nogil
     void rugo_widen_float32_to_float64(const float* src, double* dst, size_t count) nogil
@@ -1234,45 +1238,10 @@ cdef Vector _make_array_vector(
     return Vector(_dn.vector_array_from_sequence(out, el_type, D))
 
 
-def read_parquet(data, column_names=None, row_group_mask=None):
-    """Read parquet data from memory with optional column selection.
-
-    RUGO STANDALONE READER ENDPOINT (see module banner). This is the public,
-    Python-facing library entry point — used for catalog/manifest reads and
-    tests. It FLATTENS dict-encoded columns to Python values by design. It is
-    NOT how the opteryx query engine scans data: that is the native pipeline in
-    opteryx/connectors/parquet_io/pool_reader.pyx (iter_row_groups_ipc), which
-    preserves dictionary shape end-to-end.
-
-    Designed for serial use; Opteryx achieves parallelism by running
-    multiple read_parquet calls concurrently across different files.
-
-    Args:
-        data: bytes, bytearray, or memoryview containing parquet data
-        column_names: list of column names to read, or None to read all columns
-        row_group_mask: optional iterable of truthy/falsy values, one per row
-            group; a falsy entry skips decoding that row group entirely
-            (predicate pushdown — see rugo.parquet.read_parquet's filters=).
-            None decodes every row group.
-
-    Returns:
-        list of Morsels (one per row group), or None if reading failed. Row
-        groups skipped by the mask contribute no Morsel.
-    """
-    cdef const uint8_t[::1] mem_view
-    cdef size_t size
+cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_group_mask):
+    """Shared decode core: takes a raw C pointer and decodes into Morsels."""
     cdef vector[string] cpp_column_names
     cdef vector[uint8_t] cpp_mask
-
-    if isinstance(data, (bytes, bytearray)):
-        mem_view = memoryview(data).cast('B')
-    elif isinstance(data, memoryview):
-        mem_view = data.cast('B')
-    else:
-        raise TypeError("data must be bytes, bytearray, or memoryview")
-
-    size = mem_view.shape[0]
-
     cdef parquet_reader.DecodedTable result
     cdef parquet_reader.FileStats fs
 
@@ -1287,11 +1256,11 @@ def read_parquet(data, column_names=None, row_group_mask=None):
     _t0 = _time.perf_counter()
     if column_names is None and row_group_mask is None:
         with nogil:
-            result = parquet_reader.ReadParquet(&mem_view[0], size)
+            result = parquet_reader.ReadParquet(buf, size)
     else:
         if column_names is None:
             # Mask given without explicit projection: decode all columns.
-            fs = parquet_reader.ReadParquetMetadataFromBuffer(&mem_view[0], size)
+            fs = parquet_reader.ReadParquetMetadataFromBuffer(buf, size)
             if fs.row_groups.size() > 0:
                 for col in fs.row_groups[0].columns:
                     cpp_column_names.push_back(col.name)
@@ -1300,11 +1269,11 @@ def read_parquet(data, column_names=None, row_group_mask=None):
                 cpp_column_names.push_back(str(name).encode("utf-8"))
         if row_group_mask is None:
             with nogil:
-                result = parquet_reader.ReadParquet(&mem_view[0], size, cpp_column_names)
+                result = parquet_reader.ReadParquet(buf, size, cpp_column_names)
         else:
             with nogil:
                 result = parquet_reader.ReadParquet(
-                    &mem_view[0], size, cpp_column_names, cpp_mask)
+                    buf, size, cpp_column_names, cpp_mask)
     _t1 = _time.perf_counter()
     _TEL["cpp_decode_s"] += _t1 - _t0
     _TEL["calls"] += 1
@@ -1426,6 +1395,39 @@ def read_parquet(data, column_names=None, row_group_mask=None):
     return all_morsels
 
 
+def read_parquet(data, column_names=None, row_group_mask=None):
+    """Read parquet data from memory with optional column selection.
+
+    RUGO STANDALONE READER ENDPOINT (see module banner). This is the public,
+    Python-facing library entry point — used for catalog/manifest reads and
+    tests. It FLATTENS dict-encoded columns to Python values by design. It is
+    NOT how the opteryx query engine scans data: that is the native pipeline in
+    opteryx/connectors/parquet_io/pool_reader.pyx (iter_row_groups_ipc), which
+    preserves dictionary shape end-to-end.
+
+    Args:
+        data: bytes, bytearray, or memoryview containing parquet data
+        column_names: list of column names to read, or None to read all columns
+        row_group_mask: optional iterable of truthy/falsy values, one per row
+            group; a falsy entry skips decoding that row group entirely.
+            None decodes every row group.
+
+    Returns:
+        list of Morsels (one per row group), or None if reading failed.
+    """
+    cdef const uint8_t[::1] mem_view
+
+    if isinstance(data, (bytes, bytearray)):
+        mem_view = memoryview(data).cast('B')
+    elif isinstance(data, memoryview):
+        mem_view = data.cast('B')
+    else:
+        raise TypeError("data must be bytes, bytearray, or memoryview")
+
+    return _decode_from_buffer(&mem_view[0], <size_t>mem_view.shape[0],
+                               column_names, row_group_mask)
+
+
 # ---------------------------------------------------------------------------
 # Codec / encoding string → integer maps (Parquet Thrift enum values)
 # Used by decode_column_from_chunk to convert read_metadata dict output back
@@ -1452,6 +1454,35 @@ _ENCODING_INT = {
     'DELTA_BYTE_ARRAY':  7,
     'RLE_DICTIONARY':    8,
 }
+
+
+def read_parquet_from_path(str path, column_names=None, row_group_mask=None):
+    """Read a Parquet file from disk via mmap — no Python bytes materialisation.
+
+    The file is mapped into the process address space and the C++ decoder reads
+    directly from the mapped pages.  The mapping is released as soon as decoding
+    completes.  All other semantics match read_parquet().
+    """
+    cdef bytes path_bytes = path.encode("utf-8")
+    cdef const char* c_path = path_bytes
+    cdef uint8_t* mapped_ptr = NULL
+    cdef size_t mapped_len = 0
+    cdef int rc
+    cdef const uint8_t[::1] mem_view
+
+    with nogil:
+        rc = read_all_mmap(c_path, &mapped_ptr, &mapped_len)
+    if rc != 0:
+        raise OSError(-rc, f"read_all_mmap failed for {path!r}")
+
+    try:
+        # Wrap the mmap'd region as a Cython contiguous typed memoryview.
+        # This is a zero-copy view — no Python bytes object is created.
+        mem_view = <const uint8_t[:mapped_len:1]>mapped_ptr
+        return _decode_from_buffer(&mem_view[0], mapped_len, column_names, row_group_mask)
+    finally:
+        with nogil:
+            unmap_memory_c(mapped_ptr, mapped_len)
 
 
 def decode_column_from_chunk_to_python(chunk_bytes, col_stats):

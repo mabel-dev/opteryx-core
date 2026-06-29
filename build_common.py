@@ -642,6 +642,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet/compression.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
                     "src/cpp/cpu_features.cpp",
+                    "src/cpp/disk_io.cpp",
                     "draken/core/vector_alloc.cpp",
                 ]
                 + get_parquet_vendor_sources()

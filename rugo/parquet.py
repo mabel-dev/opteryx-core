@@ -61,7 +61,8 @@ _EXCLUDE = {
 
 
 def _to_bytes(source: Source) -> bytes:
-    """Read a filename to bytes, or pass an in-memory buffer through."""
+    """Read a filename to bytes, or pass an in-memory buffer through.
+    Only used for the row-group stats / filter path — not the decode path."""
     if isinstance(source, str):
         with open(source, "rb") as f:
             return f.read()
@@ -101,11 +102,13 @@ class _ParquetReader:
     """Context-managed, streaming reader over row-group Morsels.
 
     Decode is performed lazily when iteration begins (on __iter__/__enter__
-    body entry), not at construction.
+    body entry), not at construction.  When source is a file path the decode
+    uses mmap — the file is never materialised into a Python bytes object.
     """
 
     def __init__(self, source: Source, columns, filters):
-        self._data = _to_bytes(source)
+        self._path = source if isinstance(source, str) else None
+        self._data = None if self._path else _to_bytes(source)
         self._columns = list(columns) if columns is not None else None
         self._filters = list(filters) if filters else None
 
@@ -116,10 +119,22 @@ class _ParquetReader:
         return False
 
     def __iter__(self):
-        mask = _row_group_mask(self._data, self._filters) if self._filters else None
-        morsels = _reader.read_parquet(
-            self._data, column_names=self._columns, row_group_mask=mask
-        )
+        if self._path is not None:
+            # File path: row-group stats still need the footer bytes for filter
+            # pruning; read_metadata already goes native end-to-end.
+            if self._filters:
+                data = _to_bytes(self._path)
+                mask = _row_group_mask(data, self._filters)
+            else:
+                mask = None
+            morsels = _reader.read_parquet_from_path(
+                self._path, column_names=self._columns, row_group_mask=mask
+            )
+        else:
+            mask = _row_group_mask(self._data, self._filters) if self._filters else None
+            morsels = _reader.read_parquet(
+                self._data, column_names=self._columns, row_group_mask=mask
+            )
         return iter(morsels or [])
 
 
