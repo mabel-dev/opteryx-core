@@ -63,9 +63,9 @@ static inline void bloom_query_packed(
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
         const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
-        if (((bit_array[a >> 6] >> (a & 63u)) & 1u) &
-            ((bit_array[b >> 6] >> (b & 63u)) & 1u))
-            result[i >> 3] |= uint8_t(1) << (i & 7u);
+        const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
+        const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
+        result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
     }
 }
 
@@ -101,9 +101,49 @@ static inline void bloom_query_packed(
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
         const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
-        if (((bit_array[a >> 6] >> (a & 63u)) & 1u) &
-            ((bit_array[b >> 6] >> (b & 63u)) & 1u))
-            result[i >> 3] |= uint8_t(1) << (i & 7u);
+        const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
+        const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
+        result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
+    }
+}
+
+#elif defined(__riscv_vector)
+#include <riscv_vector.h>
+
+static inline void bloom_query_packed(
+    const uint64_t* __restrict__ bit_array,
+    const uint64_t* __restrict__ hashes,
+    const size_t n,
+    const uint64_t bit_mask,
+    uint8_t* __restrict__ result
+) noexcept {
+    static const uint8_t BIT_WEIGHTS_ARR[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+    const vuint8m1_t BIT_WEIGHTS = __riscv_vle8_v_u8m1(BIT_WEIGHTS_ARR, 8);
+    const vuint8m1_t V_ZERO      = __riscv_vmv_v_x_u8m1(0, 8);
+
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint8_t hits[8];
+        for (int j = 0; j < 8; ++j) {
+            const uint64_t h = hashes[i + j];
+            const uint64_t a = h & bit_mask;
+            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+            hits[j] = (uint8_t)(
+                ((bit_array[a >> 6] >> (a & 63u)) & 1u) &
+                ((bit_array[b >> 6] >> (b & 63u)) & 1u)
+            );
+        }
+        // hits[j] is 0 or 1; multiply by bit weight, reduce-sum → packed byte.
+        vuint8m1_t v = __riscv_vmul_vv_u8m1(__riscv_vle8_v_u8m1(hits, 8), BIT_WEIGHTS, 8);
+        result[i >> 3] = __riscv_vmv_x_s_u8m1_u8(__riscv_vredsum_vs_u8m1_u8m1(v, V_ZERO, 8));
+    }
+    for (; i < n; ++i) {
+        const uint64_t h = hashes[i];
+        const uint64_t a = h & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
+        const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
+        result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
     }
 }
 
@@ -120,9 +160,9 @@ static inline void bloom_query_packed(
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
         const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
-        if (((bit_array[a >> 6] >> (a & 63u)) & 1u) &
-            ((bit_array[b >> 6] >> (b & 63u)) & 1u))
-            result[i >> 3] |= uint8_t(1) << (i & 7u);
+        const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
+        const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
+        result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
     }
 }
 #endif

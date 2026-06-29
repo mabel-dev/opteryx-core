@@ -1613,150 +1613,89 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         // writes into dict_indices (or *_values), so materialize the rle_*
         // accumulation into the same dense form before continuing.
         if (rle_path && !result.rle_run_lengths.empty()) {
+          // A mid-chunk switch to a PLAIN/DELTA page is the writer's verdict that
+          // the column is too high-cardinality to dictionary-encode: standard
+          // Parquet dictionary fallback is one-way per column chunk (all dict pages
+          // precede all PLAIN pages). Honour that decision rather than re-deriving
+          // it at read time — materialise the dict-encoded prefix decoded so far to
+          // dense values, abandon the dictionary, and let the PLAIN branch below
+          // append straight to the dense *_values buffers for the rest of the
+          // chunk. We never re-intern a PLAIN page into a dictionary on read; the
+          // page encoding already carries the write-time decision.
+          //
+          // This is the rle_path (max_definition_level == 0, non-nullable), so the
+          // dense buffers are row-aligned with no null scatter and the serializer
+          // takes the dense path once dict state is cleared. The nullable
+          // (dict_codes_array) path is intentionally untouched: abandoning a packed
+          // code array would require a def-level-aware gather back to dense.
           if (byte_array_dict_mode && !result.rle_str_lens.empty()) {
-            if (unified_dict_map.empty()) {
-              SeedDictionaryMapFromArena(
-                  unified_dict_map,
-                  result.string_dict_arena,
-                  result.string_dict_offsets,
-                  result.string_dict_lens);
-            }
+            result.string_values.reserve(result.string_values.size() +
+                                         result.rle_total_length);
             const size_t n_runs = result.rle_run_lengths.size();
-            result.dict_indices.reserve(result.dict_indices.size() +
-                                        result.rle_total_length);
             for (size_t r = 0; r < n_runs; ++r) {
               const uint32_t off = result.rle_str_offsets[r];
               const int32_t  len = result.rle_str_lens[r];
               const int32_t  cnt = result.rle_run_lengths[r];
-              const int32_t code = InternByteArrayToDictionary(
-                  reinterpret_cast<const char*>(result.rle_str_arena.data() + off),
-                  len,
-                  unified_dict_map,
-                  result.string_dict_arena,
-                  result.string_dict_offsets,
-                  result.string_dict_lens);
-              for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+              const char* sp = reinterpret_cast<const char*>(
+                  result.rle_str_arena.data() + off);
+              for (int32_t j = 0; j < cnt; ++j)
+                result.string_values.emplace_back(sp, static_cast<size_t>(len));
             }
             result.rle_str_arena.clear();
             result.rle_str_offsets.clear();
             result.rle_str_lens.clear();
-          } else if (int64_dict_mode && !result.rle_int64_values.empty() &&
-                     result.rle_total_length > 0 &&
-                     (static_cast<double>(result.dict_int64_values.size()) /
-                      static_cast<double>(result.rle_total_length)) >= 0.8) {
-            // WP-1: int64 dict worth-it gate (non-nullable path only; mirrors the
-            // byte_array gate below). The dictionary has spilled to PLAIN and is
-            // no longer paying for itself (savings < 20%): interning every PLAIN
-            // value into an unordered_map dominates decode time on high-cardinality
-            // columns. Materialise the RLE runs decoded so far to dense int64
-            // values, abandon the dictionary, and let the PLAIN branch below append
-            // straight to int64_values for the rest of the chunk.
-            //
-            // This branch is the rle_path (max_definition_level == 0, non-nullable),
-            // so int64_values is row-aligned with no null scatter needed, and the
-            // serializer takes the dense int64 path once dict state is cleared.
-            // The nullable (dict_codes_array) path is intentionally NOT gated here:
-            // abandoning a packed code array would require a def-level-aware gather
-            // back to dense, which is out of scope for this change.
-            //
-            // Standard Parquet dictionary fallback is one-way per column chunk (all
-            // dict pages precede all PLAIN pages), so no dict page follows this flip
-            // — the same assumption the byte_array gate relies on.
-            result.int64_values.reserve(result.int64_values.size() +
-                                        result.rle_total_length);
-            const size_t n_runs = result.rle_run_lengths.size();
-            for (size_t r = 0; r < n_runs; ++r) {
-              const int64_t val = result.rle_int64_values[r];
-              const int32_t cnt = result.rle_run_lengths[r];
-              for (int32_t j = 0; j < cnt; ++j) result.int64_values.push_back(val);
-            }
-            result.rle_int64_values.clear();
-            result.dict_int64_values.clear();
-            int64_dict_mode = false;
+            result.string_dict_arena.clear();
+            result.string_dict_offsets.clear();
+            result.string_dict_lens.clear();
+            byte_array_dict_mode = false;
           } else if ((int32_dict_mode || int64_dict_mode) &&
                      !result.rle_int64_values.empty()) {
-            const bool is_i32 = int32_dict_mode;
-            if (is_i32) {
-              if (int32_dict_map.empty()) {
-                SeedPrimitiveDictionaryMap(int32_dict_map, result.dict_int32_values);
-              }
-            } else {
-              if (int64_dict_map.empty()) {
-                SeedPrimitiveDictionaryMap(int64_dict_map, result.dict_int64_values);
-              }
-            }
             const size_t n_runs = result.rle_run_lengths.size();
-            result.dict_indices.reserve(result.dict_indices.size() +
-                                        result.rle_total_length);
-            for (size_t r = 0; r < n_runs; ++r) {
-              const int64_t val = result.rle_int64_values[r];
-              const int32_t cnt = result.rle_run_lengths[r];
-              int32_t code;
-              if (is_i32) {
-                code = InternPrimitiveToDictionary(
-                    static_cast<int32_t>(val), int32_dict_map,
-                    result.dict_int32_values);
-              } else {
-                code = InternPrimitiveToDictionary(
-                    val, int64_dict_map, result.dict_int64_values);
+            if (int32_dict_mode) {
+              result.int32_values.reserve(result.int32_values.size() +
+                                          result.rle_total_length);
+              for (size_t r = 0; r < n_runs; ++r) {
+                const int32_t val = static_cast<int32_t>(result.rle_int64_values[r]);
+                const int32_t cnt = result.rle_run_lengths[r];
+                for (int32_t j = 0; j < cnt; ++j) result.int32_values.push_back(val);
               }
-              for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+              result.dict_int32_values.clear();
+              int32_dict_mode = false;
+            } else {
+              result.int64_values.reserve(result.int64_values.size() +
+                                          result.rle_total_length);
+              for (size_t r = 0; r < n_runs; ++r) {
+                const int64_t val = result.rle_int64_values[r];
+                const int32_t cnt = result.rle_run_lengths[r];
+                for (int32_t j = 0; j < cnt; ++j) result.int64_values.push_back(val);
+              }
+              result.dict_int64_values.clear();
+              int64_dict_mode = false;
             }
             result.rle_int64_values.clear();
           } else if ((float32_dict_mode || float64_dict_mode) &&
                      !result.rle_float64_values.empty()) {
-            // float32_dict_map / float64_dict_map are keyed by the float's
-            // raw bit pattern (so NaNs, +0/-0 are interned per-bits-pattern,
-            // matching the manual PLAIN-path code further down).
-            if (float32_dict_mode) {
-              if (float32_dict_map.empty()) {
-                float32_dict_map.reserve(result.dict_float32_values.size() * 2 + 1);
-                for (size_t i = 0; i < result.dict_float32_values.size(); ++i) {
-                  float32_dict_map.emplace(
-                      Float32Bits(result.dict_float32_values[i]),
-                      static_cast<int32_t>(i));
-                }
-              }
-            } else {
-              if (float64_dict_map.empty()) {
-                float64_dict_map.reserve(result.dict_float64_values.size() * 2 + 1);
-                for (size_t i = 0; i < result.dict_float64_values.size(); ++i) {
-                  float64_dict_map.emplace(
-                      Float64Bits(result.dict_float64_values[i]),
-                      static_cast<int32_t>(i));
-                }
-              }
-            }
             const size_t n_runs = result.rle_run_lengths.size();
-            result.dict_indices.reserve(result.dict_indices.size() +
-                                        result.rle_total_length);
-            for (size_t r = 0; r < n_runs; ++r) {
-              const double  val = result.rle_float64_values[r];
-              const int32_t cnt = result.rle_run_lengths[r];
-              int32_t code;
-              if (float32_dict_mode) {
-                const float fv = static_cast<float>(val);
-                const uint32_t key = Float32Bits(fv);
-                auto it = float32_dict_map.find(key);
-                if (it != float32_dict_map.end()) {
-                  code = it->second;
-                } else {
-                  code = static_cast<int32_t>(result.dict_float32_values.size());
-                  result.dict_float32_values.push_back(fv);
-                  float32_dict_map.emplace(key, code);
-                }
-              } else {
-                const uint64_t key = Float64Bits(val);
-                auto it = float64_dict_map.find(key);
-                if (it != float64_dict_map.end()) {
-                  code = it->second;
-                } else {
-                  code = static_cast<int32_t>(result.dict_float64_values.size());
-                  result.dict_float64_values.push_back(val);
-                  float64_dict_map.emplace(key, code);
-                }
+            if (float32_dict_mode) {
+              result.float32_values.reserve(result.float32_values.size() +
+                                            result.rle_total_length);
+              for (size_t r = 0; r < n_runs; ++r) {
+                const float val = static_cast<float>(result.rle_float64_values[r]);
+                const int32_t cnt = result.rle_run_lengths[r];
+                for (int32_t j = 0; j < cnt; ++j) result.float32_values.push_back(val);
               }
-              for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+              result.dict_float32_values.clear();
+              float32_dict_mode = false;
+            } else {
+              result.float64_values.reserve(result.float64_values.size() +
+                                            result.rle_total_length);
+              for (size_t r = 0; r < n_runs; ++r) {
+                const double  val = result.rle_float64_values[r];
+                const int32_t cnt = result.rle_run_lengths[r];
+                for (int32_t j = 0; j < cnt; ++j) result.float64_values.push_back(val);
+              }
+              result.dict_float64_values.clear();
+              float64_dict_mode = false;
             }
             result.rle_float64_values.clear();
           }
@@ -1954,77 +1893,43 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           //              plain values into the unified dictionary and keep dict mode.
           //              Otherwise materialise the already-decoded dict rows to
           //              string_values and switch to dense for all remaining pages.
+          // A PLAIN/DELTA page after dict pages is the writer's high-cardinality
+          // verdict — honour it rather than re-deriving it at read time:
+          // materialise any dict rows decoded so far to dense strings, drop the
+          // dictionary, and decode this and every later page dense. We never
+          // intern a PLAIN page into a dictionary on read.
           if (byte_array_dict_mode) {
-            const size_t dict_size_now = result.string_dict_lens.size();
-            const size_t rows_so_far   = result.dict_indices.size();
-            const bool worth_interning =
-                rows_so_far == 0 ||
-                (static_cast<double>(dict_size_now) / static_cast<double>(rows_so_far)) < 0.8;
-            if (!worth_interning) {
-              // Savings < 20%: materialise dict rows decoded so far to dense strings,
-              // clear dict state and switch to plain mode for all remaining pages.
-              result.string_values.reserve(result.dict_indices.size());
-              for (int32_t code : result.dict_indices) {
-                if (code >= 0 && code < (int32_t)result.string_dict_lens.size()) {
-                  const uint32_t off = result.string_dict_offsets[code];
-                  const int32_t  len = result.string_dict_lens[code];
-                  result.string_values.emplace_back(
-                      reinterpret_cast<const char*>(result.string_dict_arena.data()) + off,
-                      static_cast<size_t>(len));
-                }
+            result.string_values.reserve(result.string_values.size() +
+                                         result.dict_indices.size());
+            for (int32_t code : result.dict_indices) {
+              if (code >= 0 && code < (int32_t)result.string_dict_lens.size()) {
+                const uint32_t off = result.string_dict_offsets[code];
+                const int32_t  len = result.string_dict_lens[code];
+                result.string_values.emplace_back(
+                    reinterpret_cast<const char*>(result.string_dict_arena.data()) + off,
+                    static_cast<size_t>(len));
               }
-              result.dict_indices.clear();
-              result.string_dict_arena.clear();
-              result.string_dict_offsets.clear();
-              result.string_dict_lens.clear();
-              byte_array_dict_mode = false;
-            } else if (unified_dict_map.empty()) {
-              SeedDictionaryMapFromArena(
-                  unified_dict_map,
-                  result.string_dict_arena,
-                  result.string_dict_offsets,
-                  result.string_dict_lens);
             }
+            result.dict_indices.clear();
+            result.string_dict_arena.clear();
+            result.string_dict_offsets.clear();
+            result.string_dict_lens.clear();
+            byte_array_dict_mode = false;
           }
           if (page_encoding == 6) {
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
                                                     present_count, page_strs);
             if (decoded != present_count) return result;
-            if (byte_array_dict_mode) {
-              result.dict_indices.reserve(result.dict_indices.size() + page_strs.size());
-              for (const auto& value : page_strs) {
-                int32_t code = InternByteArrayToDictionary(
-                    value.data(),
-                    static_cast<int32_t>(value.size()),
-                    unified_dict_map,
-                    result.string_dict_arena,
-                    result.string_dict_offsets,
-                    result.string_dict_lens);
-                result.dict_indices.push_back(code);
-              }
-            } else {
-              result.string_values.insert(result.string_values.end(),
-                                           page_strs.begin(), page_strs.end());
-            }
+            result.string_values.insert(result.string_values.end(),
+                                         page_strs.begin(), page_strs.end());
           } else {
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
               if (data_ptr + length > data_end) break;
-              if (byte_array_dict_mode) {
-                int32_t code = InternByteArrayToDictionary(
-                    reinterpret_cast<const char*>(data_ptr),
-                    length,
-                    unified_dict_map,
-                    result.string_dict_arena,
-                    result.string_dict_offsets,
-                    result.string_dict_lens);
-                result.dict_indices.push_back(code);
-              } else {
-                result.string_values.emplace_back(
-                    reinterpret_cast<const char *>(data_ptr), length);
-              }
+              result.string_values.emplace_back(
+                  reinterpret_cast<const char *>(data_ptr), length);
               data_ptr += length;
             }
           }

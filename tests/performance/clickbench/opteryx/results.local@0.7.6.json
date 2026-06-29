@@ -58,7 +58,7 @@ make clickbench (49.09 seconds) <- best ever (25-JUN)
 0.26.8 (251.24 seconds)
 
 make tpch - (4602.2ms) (26-JUN)
-make medicare1 - (4498.4ms) (27-JUN)
+make medicare1 - (4397.1ms) (29-JUN)
 
 make job - (60948.0ms) (43 fails) (27-JUN)
 make h2o - (431.3s) (2 fails) (25-JUN)

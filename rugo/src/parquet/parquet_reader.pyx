@@ -674,7 +674,8 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                     out[i] = col.dict_int64_values[col.dict_indices[vi]]
                 vi += 1
         return out
-    if not from_int32 and col.rle_run_lengths.size() > 0:
+    if col.rle_run_lengths.size() > 0:
+        # rle_int64_values holds resolved values for both int64 and int32 (rle_path)
         for r in range(col.rle_run_lengths.size()):
             cnt = col.rle_run_lengths[r]
             for j in range(cnt):
@@ -720,7 +721,8 @@ cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                     out[i] = col.dict_float64_values[col.dict_indices[vi]]
                 vi += 1
         return out
-    if not from_float32 and col.rle_run_lengths.size() > 0:
+    if col.rle_run_lengths.size() > 0:
+        # rle_float64_values holds resolved values for both float64 and float32 (rle_path)
         for r in range(col.rle_run_lengths.size()):
             cnt = col.rle_run_lengths[r]
             for j in range(cnt):
