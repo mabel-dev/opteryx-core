@@ -15,7 +15,7 @@ import struct
 from typing import Dict, Optional, Tuple
 
 from draken.morsels.morsel import Morsel
-from rugo.parquet_writer import write_parquet_with_bounds
+from rugo.parquet import write_parquet_with_bounds
 
 from opteryx.models.file_entry import FileEntry
 from opteryx.utils import random_string

@@ -85,7 +85,7 @@ cdef extern from "core/draken_bridge.h":
         void* data, uint32_t data_length,
         uint32_t* codes, uint32_t length, uint8_t* validity)
 
-from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
+from rugo.parquet import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport TestBloomFilter
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString

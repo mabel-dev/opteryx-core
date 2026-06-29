@@ -75,4 +75,5 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
     vector[uint8_t] WriteParquet(const vector[ColumnInput]& cols,
                                  size_t num_rows, int codec,
                                  int zstd_level,
-                                 vector[ColumnStats]* out_stats) except +
+                                 vector[ColumnStats]* out_stats,
+                                 size_t max_rows_per_rg) except +

@@ -15,9 +15,9 @@ rugo.jsonl — unified read/write facade for JSONL.
 
 from typing import Optional, Sequence, Tuple, Union
 
-from ._jsonl_reader import get_jsonl_schema as _get_schema
-from ._jsonl_reader import read_jsonl as _read_jsonl
-from ._jsonl_writer import write_jsonl as _write_jsonl
+from rugo.rugo_native import get_jsonl_schema as _get_schema
+from rugo.rugo_native import read_jsonl as _read_jsonl
+from rugo.rugo_native import write_jsonl as _write_jsonl
 
 __all__ = ["read_jsonl", "read_metadata", "write_jsonl"]
 

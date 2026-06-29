@@ -15,8 +15,8 @@ rugo.csv — unified read/write facade for CSV/TSV.
 
 from typing import Optional, Sequence, Tuple, Union
 
-from ._csv_reader import read_csv as _read_csv
-from ._csv_writer import write_csv as _write_csv
+from rugo.rugo_native import read_csv as _read_csv
+from rugo.rugo_native import write_csv as _write_csv
 
 __all__ = ["read_csv", "read_metadata", "write_csv"]
 

@@ -1,16 +1,15 @@
 """
 04_write_parquet.py — Write a Parquet file and round-trip it.
 
-Run from any directory:
-    python rugo/examples/04_write_parquet.py
+To run, execute:
+    python 04_write_parquet.py
 """
 import os, tempfile
 
 from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
-from rugo.parquet_writer import write_parquet
-from rugo.parquet_reader import read_parquet, read_metadata
+from rugo.parquet import read_metadata, read_parquet, write_parquet
 
 # ── Build a Morsel from Python lists ─────────────────────────────────────────
 names  = vector_from_sequence(["Mercury", "Venus", "Earth", "Mars", "Jupiter"], DrakenType.VARCHAR)
@@ -40,12 +39,12 @@ try:
 
     # ── Round-trip read ───────────────────────────────────────────────────────
     print()
-    morsels = read_parquet(parquet_bytes)
-    m = morsels[0]
-    for col_name in m.column_names:
-        vec = m.column(col_name)
-        label = col_name.decode() if isinstance(col_name, bytes) else col_name
-        print(f"{label}: {vec.to_pylist()}")
+    with read_parquet(parquet_bytes) as reader:
+        for morsel in reader:
+            for col_name in morsel.column_names:
+                vec = morsel.column(col_name)
+                label = col_name.decode() if isinstance(col_name, bytes) else col_name
+                print(f"{label}: {vec.to_pylist()}")
 
 finally:
     os.unlink(path)

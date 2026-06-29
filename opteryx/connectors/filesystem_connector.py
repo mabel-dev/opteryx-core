@@ -151,7 +151,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         from opteryx.connectors._rugo_schema import rugo_to_relation_schema
 
         try:
-            from rugo.parquet_reader import (
+            from rugo.parquet import (
                 read_metadata_from_memoryview,  # type: ignore[import]
             )
         except ImportError as e:

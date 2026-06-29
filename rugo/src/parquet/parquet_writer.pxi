@@ -1,4 +1,4 @@
-# cython: language_level=3
+
 # distutils: language = c++
 #
 # Python/Cython edge for the rugo parquet writer.
@@ -100,7 +100,7 @@ cdef inline string _to_std_string(object name):
 
 def write_parquet(Morsel morsel not None, str compression="zstd",
                   bloom_filters=True, bint dictionary=True,
-                  Py_ssize_t max_rows_per_row_group=262144):
+                  Py_ssize_t max_rows_per_row_group=500000):
     """Serialize a Morsel to a parquet file (bytes).
 
     compression: "zstd" (default) or "none". Anything else raises ValueError.
@@ -128,7 +128,7 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
 
 def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
                               bloom_filters=True, bint dictionary=True,
-                              Py_ssize_t max_rows_per_row_group=262144):
+                              Py_ssize_t max_rows_per_row_group=500000):
     """Like write_parquet, but also returns per-column min/max bounds.
 
     Returns (data_bytes, bounds) where bounds is {col_index: (min, max)} of
@@ -141,7 +141,7 @@ def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
 
 
 cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filters,
-             bint use_dict=True, Py_ssize_t max_rows_per_row_group=262144):
+             bint use_dict=True, Py_ssize_t max_rows_per_row_group=500000):
     cdef int codec
     # Resolve the bloom-filter request: all-eligible / none / a name set.
     cdef bint bloom_all = (bloom_filters is True)

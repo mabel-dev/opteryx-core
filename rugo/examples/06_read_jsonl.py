@@ -1,13 +1,10 @@
 """
 06_read_jsonl.py — Read JSONL with rugo: schema inference, projection, predicates.
 
-Run from any directory:
-    python rugo/examples/06_read_jsonl.py
-
+To run, execute:
+    python 06_read_jsonl.py
 """
-import os
-
-from rugo.jsonl import read_jsonl, get_jsonl_schema
+from rugo.jsonl import read_jsonl, read_metadata
 
 data = (
     b'{"id": 1, "name": "Alice", "score": 9.5, "active": true}\n'
@@ -17,28 +14,29 @@ data = (
 )
 
 # ── Schema inference ──────────────────────────────────────────────────────────
-schema = get_jsonl_schema(data)
+meta = read_metadata(data)
 print("inferred schema:")
-for col in schema["columns"]:
+for col in meta.schema_columns:
     print(f"  {col['name']:10s}  {col['type']:10s}  nullable={col['nullable']}")
 
 # ── Read all columns ──────────────────────────────────────────────────────────
-result = read_jsonl(data)
-assert result["success"]
-print(f"\n{result['num_rows']} rows, columns: {result['column_names']}")
-for name, vec in zip(result["column_names"], result["columns"]):
-    print(f"  {name}: {vec.to_pylist()}")
+with read_jsonl(data) as reader:
+    for morsel in reader:
+        print(f"\n{morsel.num_rows} rows:")
+        for name in morsel.column_names:
+            vec = morsel.column(name)
+            print(f"  {name.decode()}: {vec.to_pylist()}")
 
 # ── Column projection ─────────────────────────────────────────────────────────
-result = read_jsonl(data, columns=["name", "score"])
-assert result["success"]
-print("\nprojection [name, score]:")
-for name, vec in zip(result["column_names"], result["columns"]):
-    print(f"  {name}: {vec.to_pylist()}")
+with read_jsonl(data, columns=["name", "score"]) as reader:
+    for morsel in reader:
+        print("\nprojection [name, score]:")
+        for name in morsel.column_names:
+            vec = morsel.column(name)
+            print(f"  {name.decode()}: {vec.to_pylist()}")
 
 # ── Predicate pushdown ────────────────────────────────────────────────────────
-# Predicate column (score) need not appear in the projection list.
-result = read_jsonl(data, columns=["name"], predicates=[("score", ">", 8.0)])
-assert result["success"]
-print("\nname WHERE score > 8.0:")
-print(f"  {result['columns'][0].to_pylist()}")
+with read_jsonl(data, columns=["name"], predicates=[("score", ">", 8.0)]) as reader:
+    for morsel in reader:
+        vec = morsel.column(b"name")
+        print(f"\nname WHERE score > 8.0:\n  {vec.to_pylist()}")

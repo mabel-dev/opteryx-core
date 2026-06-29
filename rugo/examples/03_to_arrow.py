@@ -3,13 +3,13 @@
 
 Requires: pip install pyarrow
 
-Run from any directory:
+To run, execute:
     python 03_to_arrow.py
 """
 import os, urllib.request
 
 import pyarrow as pa
-from rugo.parquet_reader import read_parquet
+from rugo.parquet import read_parquet
 
 _URL  = "https://raw.githubusercontent.com/mabel-dev/opteryx-core/main/testdata/astronauts/astronauts.parquet"
 _FILE = "astronauts.parquet"
@@ -18,18 +18,13 @@ if not os.path.exists(_FILE):
     print(f"downloading {_URL} ...")
     urllib.request.urlretrieve(_URL, _FILE)
 
-with open(_FILE, "rb") as f:
-    data = f.read()
-
-morsels = read_parquet(data, column_names=["name", "space_flights", "space_flight_hours"])
-morsel = morsels[0]
+with read_parquet(_FILE, columns=["name", "space_flights", "space_flight_hours"]) as reader:
+    morsel = next(iter(reader))
 
 # ── Vector.to_arrow() ─────────────────────────────────────────────────────────
-# Dense numeric and string types go through the C++ Arrow C Data Interface exporter
-# (draken/interop/draken_to_arrow.h) — no Python object boxing per value.
-names_vec    = morsel.column("name")
-flights_vec  = morsel.column("space_flights")
-hours_vec    = morsel.column("space_flight_hours")
+names_vec   = morsel.column("name")
+flights_vec = morsel.column("space_flights")
+hours_vec   = morsel.column("space_flight_hours")
 
 names_arrow   = names_vec.to_arrow()
 flights_arrow = flights_vec.to_arrow()

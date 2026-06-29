@@ -628,12 +628,15 @@ def draken_rugo_extensions(parquet_created_by):
         ),
         # E.24 Cython shims — real compiled extensions providing __pyx_vtable__
         *shim_extensions,
-        # File format readers / writers
+        # Single consolidated rugo extension — all six readers/writers in one .so.
+        # Eliminates cross-.so symbol lookup for draken bridge functions
+        # (draken_vector_own_raw, draken_vector_own_string, etc.).
         Extension(
-            "rugo.parquet_reader",
+            "rugo.rugo_native",
             sources=(
                 [
-                    "rugo/src/parquet/parquet_reader.pyx",
+                    "rugo/src/rugo_native.pyx",
+                    # parquet reader C++ sources
                     "rugo/src/parquet/metadata.cpp",
                     "rugo/src/parquet/decode_encodings.cpp",
                     "rugo/src/parquet/decode_page.cpp",
@@ -644,93 +647,47 @@ def draken_rugo_extensions(parquet_created_by):
                     "src/cpp/cpu_features.cpp",
                     "src/cpp/disk_io.cpp",
                     "draken/core/vector_alloc.cpp",
+                    # jsonl reader C++ sources
+                    "rugo/src/jsonl/core/structural_scan.cpp",
+                    "rugo/src/jsonl/core/interpreter.cpp",
+                    "rugo/src/jsonl/core/value_parser.cpp",
+                    "rugo/src/jsonl/core/field_span.cpp",
+                    "rugo/src/jsonl/core/jsonl_reader.cpp",
+                    "rugo/src/jsonl/core/column_builder.cpp",
+                    "src/cpp/simd_env.cpp",
+                    "src/cpp/simd_search.cpp",
+                    # csv reader C++ sources
+                    "rugo/src/csv/core/csv_scan.cpp",
+                    "rugo/src/csv/core/csv_row_map.cpp",
+                    "rugo/src/csv/core/csv_column_builder.cpp",
                 ]
                 + get_parquet_vendor_sources()
-            ),
-            include_dirs=(
-                include_dirs
-                + [
-                    "third_party/snappy",
-                    "rugo/src/parquet/vendor/zstd",
-                    "rugo/src/parquet/vendor/zstd/common",
-                    "rugo/src/parquet/vendor/zstd/decompress",
-                ]
-            ),
-            define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1")],
-            language="c++",
-            extra_compile_args=CPP_FLAGS,
-            extra_link_args=parquet_link_args + LD_EXTRA,
-        ),
-        # Parquet writer — header-only C++ core (_parquet_writer.hpp /
-        # _thrift_writer.hpp); reads draken vectors and emits PyArrow-readable
-        # parquet. No vendored sources: it only reads (str_data/str_length are
-        # static-inline headers) and constructs no vectors.
-        Extension(
-            "rugo.parquet_writer",
-            sources=(
-                ["rugo/src/parquet/parquet_writer.pyx"]
-                + get_zstd_vendor_sources()  # common + decompress (shared common syms)
                 + get_zstd_compress_sources()
+                + [s for s in get_text_writer_cast_sources()
+                   if s not in {
+                       "draken/core/vector_alloc.cpp",
+                       "src/cpp/cpu_features.cpp",
+                       "src/cpp/simd_env.cpp",
+                       "src/cpp/simd_search.cpp",
+                   }]
             ),
             include_dirs=(
                 include_dirs
                 + [
+                    "rugo/src",
+                    "rugo/src/parquet",
+                    "rugo/src/jsonl/core",
+                    "rugo/src/csv/core",
+                    "third_party/snappy",
                     "rugo/src/parquet/vendor/zstd",
                     "rugo/src/parquet/vendor/zstd/common",
                     "rugo/src/parquet/vendor/zstd/decompress",
                     "rugo/src/parquet/vendor/zstd/compress",
                 ]
             ),
-            define_macros=[
-                ("HAVE_ZSTD", "1"),
-                ("ZSTD_STATIC_LINKING_ONLY", "1"),
-                # parquet `created_by` footer label — differs per wheel.
-                ("RUGO_PARQUET_CREATED_BY", '"%s"' % parquet_created_by),
-            ],
-            language="c++",
-            extra_compile_args=CPP_FLAGS,
-            extra_link_args=LD_EXTRA,
-        ),
-        # JSONL writer — Morsel -> JSONL bytes. C++ formatting (_value_format.hpp /
-        # _text_render.hpp); int/bool/date/timestamp use draken's batch cast-to-
-        # string kernels, float uses std::to_chars.
-        Extension(
-            "rugo.jsonl._jsonl_writer",
-            sources=["rugo/src/jsonl/_jsonl_writer.pyx"] + get_text_writer_cast_sources(),
-            include_dirs=include_dirs + ["rugo/src"],
-            depends=["rugo/src/_value_format.hpp", "rugo/src/_text_render.hpp"],
-            language="c++",
-            extra_compile_args=CPP_FLAGS,
-            extra_link_args=LD_EXTRA,
-        ),
-        # CSV writer — Morsel -> CSV bytes (RFC 4180). Same C++ formatting core.
-        Extension(
-            "rugo.csv._csv_writer",
-            sources=["rugo/src/csv/_csv_writer.pyx"] + get_text_writer_cast_sources(),
-            include_dirs=include_dirs + ["rugo/src"],
-            depends=["rugo/src/_value_format.hpp", "rugo/src/_text_render.hpp"],
-            language="c++",
-            extra_compile_args=CPP_FLAGS,
-            extra_link_args=LD_EXTRA,
-        ),
-        Extension(
-            "rugo.jsonl._jsonl_reader",
-            sources=[
-                "rugo/src/jsonl/_jsonl_reader.pyx",
-                "rugo/src/jsonl/core/structural_scan.cpp",
-                "rugo/src/jsonl/core/interpreter.cpp",
-                "rugo/src/jsonl/core/value_parser.cpp",
-                "rugo/src/jsonl/core/field_span.cpp",
-                "rugo/src/jsonl/core/jsonl_reader.cpp",
-                "rugo/src/jsonl/core/column_builder.cpp",
-                "src/cpp/simd_env.cpp",
-                "src/cpp/cpu_features.cpp",
-                "src/cpp/simd_search.cpp",
-                "draken/core/vector_alloc.cpp",
-            ],
-            # Headers in `depends` so editing one forces the extension to recompile.
-            # (Without this, header-only changes leave stale .o files behind.)
             depends=[
+                "rugo/src/_value_format.hpp",
+                "rugo/src/_text_render.hpp",
                 "rugo/src/jsonl/core/markers.hpp",
                 "rugo/src/jsonl/core/parse_context.hpp",
                 "rugo/src/jsonl/core/structural_scan.hpp",
@@ -740,41 +697,24 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/jsonl/core/jsonl_reader.hpp",
                 "rugo/src/jsonl/core/column_builder.hpp",
                 "rugo/src/jsonl/core/fast_parsers.hpp",
-                "draken/core/draken_bridge.h",
-                "draken/core/string_slot.h",
-                "draken/core/alloc.h",
-                "draken/core/buffers.h",
-            ],
-            include_dirs=include_dirs + ["rugo/src/jsonl/core"],
-            language="c++",
-            extra_compile_args=CPP_FLAGS,
-        ),
-        Extension(
-            "rugo.csv._csv_reader",
-            sources=[
-                "rugo/src/csv/_csv_reader.pyx",
-                "rugo/src/csv/core/csv_scan.cpp",
-                "rugo/src/csv/core/csv_row_map.cpp",
-                "rugo/src/csv/core/csv_column_builder.cpp",
-                "draken/core/vector_alloc.cpp",
-            ],
-            depends=[
                 "rugo/src/csv/core/csv_parse_context.hpp",
                 "rugo/src/csv/core/csv_scan.hpp",
                 "rugo/src/csv/core/csv_row_map.hpp",
                 "rugo/src/csv/core/csv_column_builder.hpp",
-                "rugo/src/jsonl/core/fast_parsers.hpp",
                 "draken/core/draken_bridge.h",
                 "draken/core/string_slot.h",
                 "draken/core/alloc.h",
                 "draken/core/buffers.h",
             ],
-            include_dirs=include_dirs
-            + [
-                "rugo/src/csv/core",
-                "rugo/src/jsonl/core",  # fast_parsers.hpp
+            define_macros=[
+                ("HAVE_SNAPPY", "1"),
+                ("HAVE_ZSTD", "1"),
+                ("ZSTD_STATIC_LINKING_ONLY", "1"),
+                ("HAVE_CONFIG_H", "1"),
+                ("RUGO_PARQUET_CREATED_BY", '"%s"' % parquet_created_by),
             ],
             language="c++",
             extra_compile_args=CPP_FLAGS,
+            extra_link_args=parquet_link_args + LD_EXTRA,
         ),
     ]

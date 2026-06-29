@@ -11,6 +11,8 @@ writers consume Draken Morsels — the bundled ``draken`` columnar substrate.
             ...
 """
 
+import draken  # load draken_native.so before rugo_native.so resolves its symbols
+
 from rugo.__version__ import __version__
 
 __all__ = ["__version__"]

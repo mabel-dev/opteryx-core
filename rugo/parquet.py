@@ -37,15 +37,22 @@ surviving morsels.
 import struct
 from typing import List, Optional, Sequence, Tuple, Union
 
-from rugo import parquet_reader as _reader
-from rugo import parquet_writer as _writer
+from rugo import rugo_native as _native
 
 __all__ = [
     "read_parquet",
     "read_metadata",
+    "read_metadata_from_memoryview",
     "write_parquet",
     "write_parquet_with_bounds",
+    "decode_value",
+    "_make_scan_row_group",
 ]
+
+# Re-export internals used by opteryx's parquet connector
+from rugo.rugo_native import read_metadata_from_memoryview
+from rugo.rugo_native import decode_value
+from rugo.rugo_native import _make_scan_row_group
 
 Source = Union[str, bytes, bytearray, memoryview]
 Predicate = Tuple[str, str, object]
@@ -108,7 +115,7 @@ def _row_group_mask(data: bytes, path: Optional[str], predicates: Sequence[Predi
       - Bloom filter probing for == and 'in' on file-backed sources.
     A row group is pruned when ANY predicate proves it cannot match.
     """
-    row_groups = _reader.read_rowgroup_stats(data)
+    row_groups = _native.read_rowgroup_stats(data)
     mask: List[int] = [1] * len(row_groups)
     for rg_idx, rg in enumerate(row_groups):
         if mask[rg_idx] == 0:
@@ -125,8 +132,8 @@ def _row_group_mask(data: bytes, path: Optional[str], predicates: Sequence[Predi
             if col_stats["min"] is not None and col_stats["max"] is not None:
                 pt = col_stats["physical_type"].encode("utf-8")
                 lt = col_stats["logical_type"].encode("utf-8")
-                mn = _reader.decode_value(pt, lt, col_stats["min"], True)
-                mx = _reader.decode_value(pt, lt, col_stats["max"], True)
+                mn = _native.decode_value(pt, lt, col_stats["min"], True)
+                mx = _native.decode_value(pt, lt, col_stats["max"], True)
                 try:
                     if excl(value, mn, mx):
                         mask[rg_idx] = 0
@@ -147,7 +154,7 @@ def _row_group_mask(data: bytes, path: Optional[str], predicates: Sequence[Predi
                             any_maybe = True  # can't encode → can't prune
                             break
                         try:
-                            if _reader.bloom_filter_maybe_contains(
+                            if _native.bloom_filter_maybe_contains(
                                 path, bloom_offset, bloom_length, encoded
                             ):
                                 any_maybe = True
@@ -223,13 +230,13 @@ class _ParquetReader:
                 mask = _row_group_mask(data, self._path, self._predicates)
             else:
                 mask = None
-            morsels = _reader.read_parquet_from_path(
+            morsels = _native.read_parquet_from_path(
                 self._path, column_names=self._columns, row_group_mask=mask
             )
         else:
             mask = (_row_group_mask(self._data, None, self._predicates)
                     if self._predicates else None)
-            morsels = _reader.read_parquet(
+            morsels = _native.read_parquet(
                 self._data, column_names=self._columns, row_group_mask=mask
             )
 
@@ -265,22 +272,31 @@ def read_parquet(
 def read_metadata(source: Source):
     """Return ParquetMetadata (num_rows, schema_columns) for a file or buffer."""
     if isinstance(source, str):
-        return _reader.read_metadata(source)
-    return _reader.read_metadata_from_bytes(_to_bytes(source))
+        return _native.read_metadata(source)
+    return _native.read_metadata_from_bytes(_to_bytes(source))
 
 
-def write_parquet(morsel, compression: str = "zstd", bloom_filters=True) -> bytes:
+def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
+                  max_rows_per_row_group: int = 262144) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
     bloom_filters: True (all equality-friendly columns), False, or an iterable
         of column names. Split-block bloom filters; floats/bools are excluded.
+    max_rows_per_row_group: maximum rows per row group (default 2^18 = 262144).
+        Pass 0 to write a single row group regardless of size.
     """
-    return _writer.write_parquet(morsel, compression=compression,
-                                 bloom_filters=bloom_filters)
+    return _native.write_parquet(morsel, compression=compression,
+                                 bloom_filters=bloom_filters,
+                                 max_rows_per_row_group=max_rows_per_row_group)
 
 
-def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=True):
-    """Like write_parquet but also returns {col_index: (min, max)} bounds."""
-    return _writer.write_parquet_with_bounds(morsel, compression=compression,
-                                             bloom_filters=bloom_filters)
+def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=True,
+                              max_rows_per_row_group: int = 262144):
+    """Like write_parquet but also returns {col_index: (min, max)} bounds.
+
+    Note: bounds are only populated for single-row-group files.
+    """
+    return _native.write_parquet_with_bounds(morsel, compression=compression,
+                                             bloom_filters=bloom_filters,
+                                             max_rows_per_row_group=max_rows_per_row_group)
