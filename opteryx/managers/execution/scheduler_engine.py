@@ -143,6 +143,7 @@ def _native_stateless_execute(plan, scan_id, op_ids, exit_id, workers, telemetry
     from opteryx.compiled.morsel_queue import PyMorselQueue
     from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.operators._operators import native_stateless_fanout
     from opteryx.operators._operators import pull_one
     from opteryx.operators._operators import push_one
     from opteryx.operators._operators import push_one_to_sink
@@ -199,7 +200,14 @@ def _native_stateless_execute(plan, scan_id, op_ids, exit_id, workers, telemetry
                         return buffered
                     return pull_one(scan)
 
-            def worker(index):
+            # Serial pre-clone of each worker's [op-clones → exit-clone] chain (coarse
+            # PyObject setup), then a native STREAMING fan-out — no Python worker
+            # closure, no Future. Each worker drives into the SHARED sink concurrently
+            # while the consumer below drains; the handle keeps the native per-worker arg
+            # array alive until the consumer has seen all W sink-finishes.
+            heads = []
+            exits = []
+            for _k in range(workers):
                 ops = [spawn_worker(plan[nid]) for nid in op_ids]
                 exit_clone = spawn_worker(plan[exit_id])
                 chain = ops + [exit_clone]
@@ -207,17 +215,13 @@ def _native_stateless_execute(plan, scan_id, op_ids, exit_id, workers, telemetry
                     op.set_context(ctx)
                     if i + 1 < len(chain):
                         op.set_downstream(chain[i + 1])
-                head = chain[0]
-                try:
-                    stateless_worker_drive(head, exit_clone, next_input, ctx, sink)
-                except BaseException as exc:  # noqa: BLE001 — surfaced on main thread
-                    errors[index] = exc
-                finally:
-                    sink.finish()  # this worker done (consumer counts W finishes)
+                heads.append(chain[0])
+                exits.append(exit_clone)
 
             pool = CppThreadPool(workers, "m4-stateless")
-            for k in range(workers):
-                pool.submit(worker, k)
+            _fanout_handle = native_stateless_fanout(
+                pool, heads, exits, next_input, ctx, sink, errors
+            )
 
             done = 0
             yielded = False
@@ -268,6 +272,7 @@ def _native_join_execute(plan, shape, workers, telemetry=None):
     from opteryx.managers.execution.pipeline_compiler import compile_pipeline
     from opteryx.operators import JoinRightAdapter
     from opteryx.operators._operators import drive_scan
+    from opteryx.operators._operators import native_stateless_fanout
     from opteryx.operators._operators import pull_one
     from opteryx.operators._operators import push_one
     from opteryx.operators._operators import push_one_to_sink
@@ -364,48 +369,48 @@ def _native_join_execute(plan, shape, workers, telemetry=None):
                         return m
                     return pull_one(probe_scan)
 
-            def worker(index):
-                try:
-                    clone_join = spawn_worker(j)
-                    clone_join.left_morsel = left_morsel
-                    clone_join.left_columns = left_columns
-                    clone_join.columns = columns
-                    clone_join.left_is_empty = left_is_empty
-                    clone_join.carchar_probe_load_factor = load_factor
-                    clone_join.left_hash = shared_left_hash
-                    clone_join._build_complete = True
-                    clone_join.set_context(ctx)
+            # Serial pre-clone of each worker's join-probe chain (PRIVATE build state +
+            # [probe-middle* → JoinRightAdapter(clone_join) → tail → exit]), then a native
+            # STREAMING fan-out with an EOS flush — no Python worker closure, no Future.
+            # The EOS (passed to native_stateless_fanout) makes each worker emit the
+            # join's buffered probe results after draining its input.
+            heads = []
+            exits = []
+            for _k in range(workers):
+                clone_join = spawn_worker(j)
+                clone_join.left_morsel = left_morsel
+                clone_join.left_columns = left_columns
+                clone_join.columns = columns
+                clone_join.left_is_empty = left_is_empty
+                clone_join.carchar_probe_load_factor = load_factor
+                clone_join.left_hash = shared_left_hash
+                clone_join._build_complete = True
+                clone_join.set_context(ctx)
 
-                    tail = [spawn_worker(plan[nid]) for nid in shape.downstream_ids]
-                    exit_clone = spawn_worker(plan[shape.exit_id])
-                    tail = tail + [exit_clone]
-                    for i, op in enumerate(tail):
-                        op.set_context(ctx)
-                        if i + 1 < len(tail):
-                            op.set_downstream(tail[i + 1])
-                    clone_join.set_downstream(tail[0])
+                tail = [spawn_worker(plan[nid]) for nid in shape.downstream_ids]
+                exit_clone = spawn_worker(plan[shape.exit_id])
+                tail = tail + [exit_clone]
+                for i, op in enumerate(tail):
+                    op.set_context(ctx)
+                    if i + 1 < len(tail):
+                        op.set_downstream(tail[i + 1])
+                clone_join.set_downstream(tail[0])
 
-                    probe_ops = [spawn_worker(plan[nid]) for nid in shape.probe_middle_ids]
-                    adapter = JoinRightAdapter(clone_join)
-                    adapter.set_context(ctx)
-                    probe_chain = probe_ops + [adapter]
-                    for i, op in enumerate(probe_chain):
-                        op.set_context(ctx)
-                        if i + 1 < len(probe_chain):
-                            op.set_downstream(probe_chain[i + 1])
-                    probe_head_clone = probe_chain[0]
-
-                    stateless_worker_drive(probe_head_clone, exit_clone, next_input, ctx, sink)
-                    if not ctx.is_terminated():
-                        push_one_to_sink(probe_head_clone, exit_clone, _EOS_SENTINEL, sink)
-                except BaseException as exc:  # noqa: BLE001 — surfaced on main thread
-                    errors[index] = exc
-                finally:
-                    sink.finish()
+                probe_ops = [spawn_worker(plan[nid]) for nid in shape.probe_middle_ids]
+                adapter = JoinRightAdapter(clone_join)
+                adapter.set_context(ctx)
+                probe_chain = probe_ops + [adapter]
+                for i, op in enumerate(probe_chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(probe_chain):
+                        op.set_downstream(probe_chain[i + 1])
+                heads.append(probe_chain[0])
+                exits.append(exit_clone)
 
             pool = CppThreadPool(workers, "m4-join-probe")
-            for k in range(workers):
-                pool.submit(worker, k)
+            _fanout_handle = native_stateless_fanout(
+                pool, heads, exits, next_input, ctx, sink, errors, eos=_EOS_SENTINEL
+            )
 
             done = 0
             yielded = False

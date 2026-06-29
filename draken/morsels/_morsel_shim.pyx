@@ -347,6 +347,50 @@ cdef class Morsel:
     def column_types(self):
         return [self._get_column(i).type for i in range(self._num_columns())]
 
+    @property
+    def schema(self):
+        """Return {column_name_str: DrakenType} for each column."""
+        names = self.column_names
+        types = self.column_types
+        return {
+            (n.decode("utf-8") if isinstance(n, bytes) else n): t
+            for n, t in zip(names, types)
+        }
+
+    def __iter__(self):
+        """Iterate rows as named tuples. Field names are the column names."""
+        import collections
+        names = self.column_names
+        str_names = [
+            (n.decode("utf-8") if isinstance(n, bytes) else n)
+            for n in names
+        ]
+        # Sanitise: namedtuple field names must be valid identifiers
+        safe = [n.replace(".", "_").replace(" ", "_") or f"col{i}"
+                for i, n in enumerate(str_names)]
+        Row = collections.namedtuple("Row", safe)
+        columns = [self._get_column(i).to_pylist() for i in range(self._num_columns())]
+        for row_idx in range(self.num_rows):
+            yield Row(*[col[row_idx] for col in columns])
+
+    def to_arrow(self):
+        """Return a pyarrow.Table. Requires pyarrow (not a rugo dependency)."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            raise ImportError("to_arrow() requires pyarrow: pip install pyarrow")
+        self._ensure_pyobject()
+        names = self.column_names
+        str_names = [
+            (n.decode("utf-8") if isinstance(n, bytes) else n)
+            for n in names
+        ]
+        arrays = [
+            self._get_column(i).to_arrow()
+            for i in range(self._num_columns())
+        ]
+        return pa.table(dict(zip(str_names, arrays)))
+
     def hash(self, col_names=None, columns=None):
         # Returns uint64_t[::1] row hashes for the given columns via the C++ path.
         # col_names: list of column names (str or bytes), or None for all columns.

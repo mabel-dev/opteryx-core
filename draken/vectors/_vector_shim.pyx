@@ -25,6 +25,20 @@ cdef extern from *:
     """static inline void _vec_shim_decref(PyObject* op) { Py_DECREF(op); }"""
     void _vec_shim_decref(PyObject* op)
 
+# Arrow C Data Interface export — defined in draken/interop/draken_to_arrow.h.
+# Fills ArrowArray + ArrowSchema from a DrakenVector; returns true on success.
+# Caller passes &arr and &schema to pa.Array._import_from_c().
+cdef extern from "interop/draken_to_arrow.h" nogil:
+    ctypedef struct ArrowArray:
+        pass
+    ctypedef struct ArrowSchema:
+        pass
+    bint draken_export_to_arrow(
+        const DrakenVector* dv,
+        ArrowArray*         out_array,
+        ArrowSchema*        out_schema,
+    )
+
 
 cdef class Vector:
     def __cinit__(self, object nb_vector=None):
@@ -181,6 +195,28 @@ cdef class Vector:
 
     def to_pylist(self):
         return self._nb.to_pylist()
+
+    def to_arrow(self):
+        """Convert this Vector to a pyarrow.Array via the Arrow C Data Interface.
+
+        Dense numeric/bool/string/interval types are translated in C++ without
+        going through Python object boxing.  Dict, constant, TIME, DECIMAL128,
+        and ARRAY fall back to to_pylist().
+        """
+        try:
+            import pyarrow as pa
+        except ImportError:
+            raise ImportError("to_arrow() requires pyarrow: pip install pyarrow")
+        cdef const DrakenVector* dv = self._dv
+        if dv == NULL:
+            return pa.array([], type=pa.null())
+        cdef ArrowArray  arr
+        cdef ArrowSchema schema
+        if draken_export_to_arrow(dv, &arr, &schema):
+            return pa.Array._import_from_c(<size_t>&arr, <size_t>&schema)
+        # Fallback: types not supported by the C++ exporter (dict, constant,
+        # TIME32/64, DECIMAL128, ARRAY).
+        return pa.array(self._nb.to_pylist())
 
     def materialize(self):
         from draken.vectors.vector import Vector as _V

@@ -1133,69 +1133,64 @@ class _SharedSourceJoin:
                     return m
                 return pull_one(inner_probe_scan)
 
-        def worker(index):
-            try:
-                # Private clone of the inner join over the shared READ-ONLY inner
-                # left_morsel (thread-local-full — no shared mutable probe state).
-                clone_inner = _clone_op(inner)
-                clone_inner.left_morsel = inner_left_morsel
-                clone_inner.left_columns = inner_left_columns
-                clone_inner.columns = inner_columns
-                clone_inner.left_is_empty = inner_left_is_empty
-                clone_inner.carchar_probe_load_factor = inner_load_factor
-                clone_inner.left_hash = build_side_carchar_morsel_map(
-                    inner_left_morsel,
-                    inner_left_columns,
-                    inner_load_factor,
-                    clone_inner.kernel_metrics,
-                )
-                clone_inner._build_complete = True
-                clone_inner.set_context(ctx)
+        # Serial pre-clone of each worker's probe chain (coarse PyObject setup with
+        # PRIVATE inner-join build state), then a native ACCUMULATE fan-out — no Python
+        # worker closure, no Future. The drive pushes NO EOS (see below), so it matches
+        # the original manual push loop exactly.
+        worker_heads = [None] * workers
+        for index in range(workers):
+            # Private clone of the inner join over the shared READ-ONLY inner
+            # left_morsel (thread-local-full — no shared mutable probe state).
+            clone_inner = _clone_op(inner)
+            clone_inner.left_morsel = inner_left_morsel
+            clone_inner.left_columns = inner_left_columns
+            clone_inner.columns = inner_columns
+            clone_inner.left_is_empty = inner_left_is_empty
+            clone_inner.carchar_probe_load_factor = inner_load_factor
+            clone_inner.left_hash = build_side_carchar_morsel_map(
+                inner_left_morsel,
+                inner_left_columns,
+                inner_load_factor,
+                clone_inner.kernel_metrics,
+            )
+            clone_inner._build_complete = True
+            clone_inner.set_context(ctx)
 
-                # The clone's output ACCUMULATES into a per-worker TOP-join clone (data
-                # morsels only, no EOS → no build). The per-worker top clone's
-                # `left_morsels` is the worker's materialised slice.
-                worker_top = _clone_op(top_join)
-                worker_top.set_context(ctx)
-                top_adapter = JoinLeftAdapter(worker_top)
-                top_adapter.set_context(ctx)
-                clone_inner.set_downstream(top_adapter)
+            # The clone's output ACCUMULATES into a per-worker TOP-join clone (data
+            # morsels only, no EOS → no build). The per-worker top clone's
+            # `left_morsels` is the worker's materialised slice.
+            worker_top = _clone_op(top_join)
+            worker_top.set_context(ctx)
+            top_adapter = JoinLeftAdapter(worker_top)
+            top_adapter.set_context(ctx)
+            clone_inner.set_downstream(top_adapter)
 
-                # Probe-side chain: [inner-probe-middle* → JoinRightAdapter(clone_inner)].
-                probe_ops = [
-                    _clone_op(self._plan[nid])
-                    for nid in self._prelude_join.inner_probe_middle_ids
-                ]
-                adapter = JoinRightAdapter(clone_inner)
-                adapter.set_context(ctx)
-                probe_chain = probe_ops + [adapter]
-                for i, op in enumerate(probe_chain):
-                    op.set_context(ctx)
-                    if i + 1 < len(probe_chain):
-                        op.set_downstream(probe_chain[i + 1])
-                probe_head = probe_chain[0]
+            # Probe-side chain: [inner-probe-middle* → JoinRightAdapter(clone_inner)].
+            probe_ops = [
+                _clone_op(self._plan[nid])
+                for nid in self._prelude_join.inner_probe_middle_ids
+            ]
+            adapter = JoinRightAdapter(clone_inner)
+            adapter.set_context(ctx)
+            probe_chain = probe_ops + [adapter]
+            for i, op in enumerate(probe_chain):
+                op.set_context(ctx)
+                if i + 1 < len(probe_chain):
+                    op.set_downstream(probe_chain[i + 1])
+            worker_tops[index] = worker_top
+            worker_heads[index] = probe_chain[0]
 
-                while True:
-                    morsel = _next_input()
-                    if morsel is None:
-                        break
-                    push_one(probe_head, morsel)
-                # Probe-side EOS flushes the inner join's downstream emit into the worker
-                # TOP clone's left adapter as a data path (the inner join's right-EOS emits
-                # EOS downstream → the TOP clone's push_left(EOS) would BUILD it). We must
-                # NOT let the worker TOP clone build — we only want its accumulated
-                # `left_morsels`. So we do NOT push EOS into the inner clone here; instead
-                # the inner clone has buffered nothing post-probe (every probe morsel emits
-                # immediately), and the accumulated `left_morsels` is complete.
-                worker_tops[index] = worker_top
-            except BaseException as exc:  # noqa: BLE001 — surface on the main thread
-                errors[index] = exc
-
+        # The native ACCUMULATE drive pushes NO EOS through the chain (accumulate_worker_
+        # drive pulls until exhaustion and stops). This is REQUIRED: pushing probe-side
+        # EOS would flow the inner join's downstream EOS into the worker TOP clone's left
+        # adapter as push_left(EOS) → the TOP clone would BUILD. We only want its
+        # accumulated `left_morsels`; every probe morsel emits immediately so the
+        # accumulated slice is already complete.
         pool = CppThreadPool(workers, "m4-build-prelude")
         try:
-            futures = [pool.submit(worker, k) for k in range(workers)]
-            for future in futures:
-                future.result()
+            native_accumulate_fanout(
+                pool, worker_heads, _next_input, ctx, [0] * workers, errors
+            )
         finally:
             pool.shutdown(wait=True)
             inner_probe_scan.close_source()

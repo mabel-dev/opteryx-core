@@ -1221,6 +1221,93 @@ def native_readout_fanout(CppThreadPool pool, breaker, list chunk_lists,
         free(args)
 
 
+cdef struct _StatelessArg:
+    PyObject* head      # worker k's pre-cloned chain head (borrowed)
+    PyObject* exit      # worker k's exit clone (borrowed)
+    PyObject* source    # the shared self-pull source callable (borrowed)
+    PyObject* ctx       # the PipelineContext (borrowed)
+    PyObject* sink      # the SHARED PyMorselQueue (borrowed)
+    PyObject* errors    # shared result list[exc] (borrowed)
+    PyObject* eos       # EOS sentinel to flush after the drive, or NULL (borrowed)
+    int index
+
+
+cdef class NativeFanoutHandle:
+    """Keeps a STREAMING fan-out's per-worker arg array alive while the workers run
+    asynchronously (they read the borrowed pointers after the fan-out returns). The
+    caller holds this handle until it has drained every worker's sink-finish, then drops
+    it — ``__dealloc__`` frees the array. Streaming fan-outs cannot block to free the
+    array themselves (the consumer must drain concurrently or backpressure deadlocks)."""
+    cdef void* _args
+
+    def __cinit__(self):
+        self._args = NULL
+
+    def __dealloc__(self):
+        if self._args != NULL:
+            free(self._args)
+            self._args = NULL
+
+
+cdef void _stateless_run(_StatelessArg* a) noexcept with gil:
+    """GIL-held body of the native STREAMING stateless/join task: drive [head → exit]
+    into the SHARED sink, then (join shape) flush a terminal EOS through the chain so the
+    join emits its buffered probe results. Records any fault by index, then finishes the
+    sink once (the consumer counts W finishes)."""
+    cdef object exc
+    try:
+        stateless_worker_drive(
+            <BasePlanNode>(<object>a.head), <object>a.exit, <object>a.source,
+            <PipelineContext>(<object>a.ctx), <object>a.sink,
+        )
+        if a.eos != NULL and not (<PipelineContext>(<object>a.ctx)).is_terminated():
+            push_one_to_sink(
+                <BasePlanNode>(<object>a.head), <object>a.exit,
+                <object>a.eos, <object>a.sink,
+            )
+    except BaseException as exc:
+        (<object>a.errors)[a.index] = exc
+    finally:
+        (<object>a.sink).finish()
+
+
+cdef void _stateless_task(void* arg) noexcept nogil:
+    """Native task entry (matches ``native_task_fn``) for the streaming stateless fan-out."""
+    _stateless_run(<_StatelessArg*>arg)
+
+
+def native_stateless_fanout(CppThreadPool pool, list heads, list exits, object source,
+                            PipelineContext ctx, object sink, list errors, object eos=None):
+    """Native STREAMING stateless/join fan-out: submit W native worker tasks that each
+    drive ``[head → exit]`` into the SHARED ``sink`` — WITHOUT blocking (the caller drains
+    the sink concurrently; blocking here would deadlock on backpressure). When ``eos`` is
+    not None (the JOIN shape) each worker flushes that EOS sentinel through its chain
+    after the drive so the join emits its buffered probe results. Returns a
+    ``NativeFanoutHandle`` the caller MUST hold until it has drained all W sink finishes,
+    then drop — it owns the per-worker arg array (borrowed PyObject pointers into the
+    caller's live ``heads``/``exits``/``errors`` lists). Each worker finishes the sink
+    once. The native replacement for the stateless/join ``pool.submit(worker, k)`` loop."""
+    cdef Py_ssize_t W = len(heads)
+    cdef _StatelessArg* args = <_StatelessArg*>malloc(W * sizeof(_StatelessArg))
+    if args == NULL:
+        raise MemoryError()
+    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
+    handle._args = <void*>args
+    cdef PyObject* eos_ptr = (<PyObject*>eos) if eos is not None else NULL
+    cdef Py_ssize_t k
+    for k in range(W):
+        args[k].head = <PyObject*>heads[k]
+        args[k].exit = <PyObject*>exits[k]
+        args[k].source = <PyObject*>source
+        args[k].ctx = <PyObject*>ctx
+        args[k].sink = <PyObject*>sink
+        args[k].errors = <PyObject*>errors
+        args[k].eos = eos_ptr
+        args[k].index = <int>k
+        pool.submit_native(_stateless_task, &args[k])
+    return handle
+
+
 cpdef BasePlanNode spawn_worker(BasePlanNode op):
     """Python-callable edge over the cdef `make_worker` contract — the fan-out
     replacement for `_clone_op`. Used by the (still-Python) scheduler at worker
