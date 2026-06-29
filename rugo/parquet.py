@@ -10,14 +10,15 @@ A thin, dependency-free wrapper over the native reader/writer extensions
 (`rugo.parquet_reader`, `rugo.parquet_writer`). It gives reading and writing a
 single, symmetric surface that accepts either a filename or an in-memory
 buffer, supports streaming iteration over row-group Morsels, and applies
-predicate pushdown at the row-group level.
+predicate pushdown at the row-group level followed by row-level filtering on
+surviving morsels.
 
     from rugo import parquet
 
-    # read (streaming, projected, with row-group pruning)
+    # read (streaming, projected, with row-group pruning + row-level filtering)
     with parquet.read_parquet("planets.parquet",
                               columns=["id", "name"],
-                              filters=[("id", ">", 4)]) as reader:
+                              predicates=[("id", ">", 4)]) as reader:
         for morsel in reader:
             ...
 
@@ -26,12 +27,15 @@ predicate pushdown at the row-group level.
     with open("out.parquet", "wb") as f:
         f.write(data)
 
-`filters` perform ROW-GROUP elimination only (via footer statistics): a row
-group that cannot contain a matching row is never decoded. Rows within a
-surviving row group are NOT filtered — apply row-level predicates downstream.
+`predicates` are applied in two stages:
+  1. ROW-GROUP elimination via footer min/max statistics, and bloom filter
+     probing for equality predicates on file-backed sources.
+  2. ROW-LEVEL filtering on each surviving morsel — only rows that satisfy
+     all predicates are included in the yielded Morsel.
 """
 
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+import struct
+from typing import List, Optional, Sequence, Tuple, Union
 
 from rugo import parquet_reader as _reader
 from rugo import parquet_writer as _writer
@@ -44,25 +48,33 @@ __all__ = [
 ]
 
 Source = Union[str, bytes, bytearray, memoryview]
-Filter = Tuple[str, str, object]
+Predicate = Tuple[str, str, object]
 
 # op -> predicate that returns True when a row group [mn, mx] CANNOT match.
 _EXCLUDE = {
-    "=": lambda v, mn, mx: v < mn or v > mx,
-    "==": lambda v, mn, mx: v < mn or v > mx,
-    "!=": lambda v, mn, mx: mn == mx == v,
-    ">": lambda v, mn, mx: mx <= v,
-    ">=": lambda v, mn, mx: mx < v,
-    "<": lambda v, mn, mx: mn >= v,
-    "<=": lambda v, mn, mx: mn > v,
-    "in": lambda v, mn, mx: not any(mn <= x <= mx for x in v),
+    "=":      lambda v, mn, mx: v < mn or v > mx,
+    "==":     lambda v, mn, mx: v < mn or v > mx,
+    "!=":     lambda v, mn, mx: mn == mx == v,
+    ">":      lambda v, mn, mx: mx <= v,
+    ">=":     lambda v, mn, mx: mx < v,
+    "<":      lambda v, mn, mx: mn >= v,
+    "<=":     lambda v, mn, mx: mn > v,
+    "in":     lambda v, mn, mx: not any(mn <= x <= mx for x in v),
     "not in": lambda v, mn, mx: mn == mx and mn in v,
+}
+
+# Row-level comparison: returns a Python callable (value, row_value) -> bool
+_ROW_OP_CODE = {
+    "=":  0, "==": 0,
+    "!=": 1,
+    ">":  2,
+    ">=": 3,
+    "<":  4,
+    "<=": 5,
 }
 
 
 def _to_bytes(source: Source) -> bytes:
-    """Read a filename to bytes, or pass an in-memory buffer through.
-    Only used for the row-group stats / filter path — not the decode path."""
     if isinstance(source, str):
         with open(source, "rb") as f:
             return f.read()
@@ -71,46 +83,132 @@ def _to_bytes(source: Source) -> bytes:
     raise TypeError("source must be a filename (str) or bytes/bytearray/memoryview")
 
 
-def _row_group_mask(data: bytes, filters: Sequence[Filter]) -> List[int]:
-    """1 = keep, 0 = prune. A row group is pruned when ANY filter proves it
-    cannot contain a matching row (AND semantics across filters)."""
+def _bloom_plain_encode(value) -> Optional[bytes]:
+    """Encode a scalar value to its Parquet PLAIN bytes for bloom filter probing.
+    Returns None if the type is not encodable (bloom probe is skipped)."""
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, int):
+        try:
+            return struct.pack("<q", value)   # int64 little-endian
+        except struct.error:
+            return None
+    if isinstance(value, float):
+        return struct.pack("<d", value)       # float64 little-endian
+    return None
+
+
+def _row_group_mask(data: bytes, path: Optional[str], predicates: Sequence[Predicate]) -> List[int]:
+    """1 = keep, 0 = prune.
+
+    Two pruning stages:
+      - Min/max statistics (all operators).
+      - Bloom filter probing for == and 'in' on file-backed sources.
+    A row group is pruned when ANY predicate proves it cannot match.
+    """
     row_groups = _reader.read_rowgroup_stats(data)
     mask: List[int] = [1] * len(row_groups)
     for rg_idx, rg in enumerate(row_groups):
+        if mask[rg_idx] == 0:
+            continue
         by_name = {c["name"]: c for c in rg["columns"]}
-        for col, op, value in filters:
+        for col, op, value in predicates:
             excl = _EXCLUDE.get(op)
             if excl is None:
-                raise ValueError(f"unsupported filter operator: {op!r}")
+                raise ValueError(f"unsupported predicate operator: {op!r}")
             col_stats = by_name.get(col)
-            if col_stats is None or col_stats["min"] is None or col_stats["max"] is None:
-                continue  # no stats -> cannot prune on this filter
-            pt = col_stats["physical_type"].encode("utf-8")
-            lt = col_stats["logical_type"].encode("utf-8")
-            mn = _reader.decode_value(pt, lt, col_stats["min"], True)
-            mx = _reader.decode_value(pt, lt, col_stats["max"], True)
-            try:
-                if excl(value, mn, mx):
-                    mask[rg_idx] = 0
-                    break
-            except TypeError:
-                continue  # type mismatch -> don't prune
+            if col_stats is None:
+                continue
+            # Min/max pruning
+            if col_stats["min"] is not None and col_stats["max"] is not None:
+                pt = col_stats["physical_type"].encode("utf-8")
+                lt = col_stats["logical_type"].encode("utf-8")
+                mn = _reader.decode_value(pt, lt, col_stats["min"], True)
+                mx = _reader.decode_value(pt, lt, col_stats["max"], True)
+                try:
+                    if excl(value, mn, mx):
+                        mask[rg_idx] = 0
+                        break
+                except TypeError:
+                    pass  # type mismatch — don't prune
+            # Bloom filter pruning (equality only, file-backed)
+            if mask[rg_idx] and path is not None and op in ("=", "==", "in"):
+                bloom_offset = col_stats.get("bloom_offset")
+                bloom_length = col_stats.get("bloom_length")
+                if bloom_offset is not None:
+                    candidates = value if op == "in" else [value]
+                    # Prune only if NONE of the candidates could be present
+                    any_maybe = False
+                    for candidate in candidates:
+                        encoded = _bloom_plain_encode(candidate)
+                        if encoded is None:
+                            any_maybe = True  # can't encode → can't prune
+                            break
+                        try:
+                            if _reader.bloom_filter_maybe_contains(
+                                path, bloom_offset, bloom_length, encoded
+                            ):
+                                any_maybe = True
+                                break
+                        except Exception:
+                            any_maybe = True
+                            break
+                    if not any_maybe:
+                        mask[rg_idx] = 0
     return mask
+
+
+def _row_filter(morsel, predicates: Sequence[Predicate]):
+    """Apply row-level predicates to a Morsel via native compare_scalar + bool_and.
+
+    Each predicate produces a DRAKEN_BOOL vector via Vector._compare_scalar()
+    (which calls into the C++ compare kernel — no Python loop over rows).
+    Multi-predicate masks are reduced with bool_and(), also native.
+    Columns absent from the morsel are skipped (fail-open).
+    """
+    from draken.vectors import Vector
+
+    col_names = list(morsel.column_names)
+    mask = None
+
+    for col, op, value in predicates:
+        op_code = _ROW_OP_CODE.get(op)
+        if op_code is None:
+            raise ValueError(f"unsupported predicate operator: {op!r}")
+        col_bytes = col.encode() if isinstance(col, str) else col
+        if col_bytes not in col_names:
+            continue
+
+        # compare_scalar expects bytes for string columns
+        scalar = value.encode() if isinstance(value, str) else value
+        vec = morsel.column(col_bytes)
+        pred_mask = vec._compare_scalar(scalar, op_code)
+
+        if mask is None:
+            mask = pred_mask
+        else:
+            mask = Vector(mask._nb.bool_and(pred_mask._nb))
+
+    if mask is None:
+        return morsel
+    return morsel.filter_mask(mask)
 
 
 class _ParquetReader:
     """Context-managed, streaming reader over row-group Morsels.
 
-    Decode is performed lazily when iteration begins (on __iter__/__enter__
-    body entry), not at construction.  When source is a file path the decode
-    uses mmap — the file is never materialised into a Python bytes object.
+    Decode is performed lazily on iteration. For file sources, row groups are
+    pruned by footer statistics and bloom filters before decoding. Each
+    surviving morsel is then filtered at the row level.
     """
 
-    def __init__(self, source: Source, columns, filters):
+    def __init__(self, source: Source, columns, predicates):
         self._path = source if isinstance(source, str) else None
         self._data = None if self._path else _to_bytes(source)
         self._columns = list(columns) if columns is not None else None
-        self._filters = list(filters) if filters else None
+        self._predicates = list(predicates) if predicates else None
 
     def __enter__(self) -> "_ParquetReader":
         return self
@@ -120,41 +218,48 @@ class _ParquetReader:
 
     def __iter__(self):
         if self._path is not None:
-            # File path: row-group stats still need the footer bytes for filter
-            # pruning; read_metadata already goes native end-to-end.
-            if self._filters:
+            if self._predicates:
                 data = _to_bytes(self._path)
-                mask = _row_group_mask(data, self._filters)
+                mask = _row_group_mask(data, self._path, self._predicates)
             else:
                 mask = None
             morsels = _reader.read_parquet_from_path(
                 self._path, column_names=self._columns, row_group_mask=mask
             )
         else:
-            mask = _row_group_mask(self._data, self._filters) if self._filters else None
+            mask = (_row_group_mask(self._data, None, self._predicates)
+                    if self._predicates else None)
             morsels = _reader.read_parquet(
                 self._data, column_names=self._columns, row_group_mask=mask
             )
-        return iter(morsels or [])
+
+        for morsel in (morsels or []):
+            if self._predicates:
+                morsel = _row_filter(morsel, self._predicates)
+            if morsel is not None:
+                yield morsel
 
 
 def read_parquet(
     source: Source,
     columns: Optional[Sequence[str]] = None,
-    filters: Optional[Sequence[Filter]] = None,
+    predicates: Optional[Sequence[Predicate]] = None,
 ) -> _ParquetReader:
-    """Open a parquet file or buffer for streaming reads.
+    """Open a Parquet file or buffer for streaming reads.
 
     Args:
         source: filename (str) OR bytes/bytearray/memoryview of the whole file.
         columns: column names to project, or None for all.
-        filters: list of (column, op, value) for ROW-GROUP pruning via footer
-            stats. Ops: =, ==, !=, <, <=, >, >=, in, not in. Pruning is coarse
-            (whole row groups); rows in surviving groups are not filtered.
+        predicates: list of (column, op, value) tuples.
+            Stage 1 — ROW-GROUP pruning via footer min/max statistics and bloom
+            filters (equality ops on file sources). Coarse: whole row groups.
+            Stage 2 — ROW-LEVEL filtering on each surviving morsel. Exact.
+            Ops: =, ==, !=, <, <=, >, >=, in, not in.
 
-    Returns a context manager that yields one Morsel per (surviving) row group.
+    Returns a context manager that yields one filtered Morsel per surviving
+    row group (row groups that produce zero rows after filtering are skipped).
     """
-    return _ParquetReader(source, columns, filters)
+    return _ParquetReader(source, columns, predicates)
 
 
 def read_metadata(source: Source):
@@ -165,7 +270,7 @@ def read_metadata(source: Source):
 
 
 def write_parquet(morsel, compression: str = "zstd", bloom_filters=True) -> bytes:
-    """Serialize a Morsel to parquet bytes.
+    """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
     bloom_filters: True (all equality-friendly columns), False, or an iterable
