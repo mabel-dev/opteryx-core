@@ -1,14 +1,11 @@
 """
 05_read_csv.py — Read CSV with rugo: projection, predicate pushdown, TSV, nulls.
 
-Run from the repo root:
+Run from any directory:
     python rugo/examples/05_read_csv.py
 
-Note: requires rugo built as part of opteryx-core (the draken extension must be
-importable on sys.path so the CSV reader can resolve its symbols).
 """
-import os, sys
-sys.path.insert(0, os.path.join(sys.path[0], "..", ".."))
+import os
 
 from rugo.csv import read_csv
 

@@ -1,15 +1,21 @@
 """
 01_read_parquet.py — Read a Parquet file with rugo.
 
-Run from the repo root:
-    python rugo/examples/01_read_parquet.py
+Run from any directory:
+    python 01_read_parquet.py
 """
-import os, sys
-sys.path.insert(0, os.path.join(sys.path[0], "..", ".."))
+import os, urllib.request
 
 from rugo.parquet_reader import read_metadata, read_parquet
 
-PARQUET_FILE = "testdata/astronauts/astronauts.parquet"
+_URL  = "https://raw.githubusercontent.com/mabel-dev/opteryx-core/main/testdata/astronauts/astronauts.parquet"
+_FILE = "astronauts.parquet"
+
+if not os.path.exists(_FILE):
+    print(f"downloading {_URL} ...")
+    urllib.request.urlretrieve(_URL, _FILE)
+
+PARQUET_FILE = _FILE
 
 # ── Schema (footer only — no column data read) ────────────────────────────────
 meta = read_metadata(PARQUET_FILE)

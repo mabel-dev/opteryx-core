@@ -1,11 +1,13 @@
 # Rugo Examples
 
-Runnable examples covering the core rugo API.  All scripts assume they are run
-from the **repo root** (`opteryx-core/`) so the `rugo/` and `testdata/`
-directories are reachable.
+Runnable examples covering the core rugo API.  Each script can be run from
+any directory — examples that need real data download
+`astronauts.parquet` from GitHub on first run and cache it next to the script.
 
 ```sh
 python rugo/examples/01_read_parquet.py
+# or from inside the examples/ directory:
+python 01_read_parquet.py
 ```
 
 ---

@@ -1,11 +1,10 @@
 """
 04_write_parquet.py — Write a Parquet file and round-trip it.
 
-Run from the repo root:
+Run from any directory:
     python rugo/examples/04_write_parquet.py
 """
-import os, sys, tempfile
-sys.path.insert(0, os.path.join(sys.path[0], "..", ".."))
+import os, tempfile
 
 from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence

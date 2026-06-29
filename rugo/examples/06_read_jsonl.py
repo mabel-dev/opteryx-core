@@ -1,14 +1,11 @@
 """
 06_read_jsonl.py — Read JSONL with rugo: schema inference, projection, predicates.
 
-Run from the repo root:
+Run from any directory:
     python rugo/examples/06_read_jsonl.py
 
-Note: requires rugo built as part of opteryx-core (the draken extension must be
-importable on sys.path so the JSONL reader can resolve its symbols).
 """
-import os, sys
-sys.path.insert(0, os.path.join(sys.path[0], "..", ".."))
+import os
 
 from rugo.jsonl import read_jsonl, get_jsonl_schema
 

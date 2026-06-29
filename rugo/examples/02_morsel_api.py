@@ -1,15 +1,21 @@
 """
 02_morsel_api.py — Morsel schema accessor, row iterator, column access.
 
-Run from the repo root:
-    python rugo/examples/02_morsel_api.py
+Run from any directory:
+    python 02_morsel_api.py
 """
-import os, sys
-sys.path.insert(0, os.path.join(sys.path[0], "..", ".."))
+import os, urllib.request
 
 from rugo.parquet_reader import read_parquet
 
-with open("testdata/astronauts/astronauts.parquet", "rb") as f:
+_URL  = "https://raw.githubusercontent.com/mabel-dev/opteryx-core/main/testdata/astronauts/astronauts.parquet"
+_FILE = "astronauts.parquet"
+
+if not os.path.exists(_FILE):
+    print(f"downloading {_URL} ...")
+    urllib.request.urlretrieve(_URL, _FILE)
+
+with open(_FILE, "rb") as f:
     data = f.read()
 
 morsels = read_parquet(data, column_names=["name", "space_flights", "space_flight_hours"])
