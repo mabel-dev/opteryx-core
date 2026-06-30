@@ -302,41 +302,28 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 except Exception:
                     pass
 
-                min_values = None
-                max_values = None
-                null_value_counts = None
-                stats_by_name = None
+                column_stats = None
 
                 try:
                     from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
 
-                    record_count, footer_size, col_stats = fetch_column_stats(
+                    record_count, footer_size, column_stats = fetch_column_stats(
                         blob_name, file_size=file_size or -1
                     )
                     if file_size == 0:
                         file_size = footer_size
 
-                    min_values, max_values, null_value_counts, stats_by_name = self._extract_column_stats_compact(
-                        col_stats, schema
-                    )
+                    column_stats.bind_schema([col.name for col in schema.columns])
                 except Exception:
                     record_count = 0
-
-                # Sidecar KMV sketches (offline-populated). Missing/malformed
-                # sidecars are silently ignored; production data has no sidecars
-                # yet and the planner already handles min_k_hashes=None.
-                min_k_hashes = self._load_sidecar_min_k_hashes(blob_name, schema)
+                    column_stats = None
 
                 entry = FileEntry(
                     file_path=blob_name,
                     file_format=file_format,
                     record_count=record_count,
                     file_size_in_bytes=file_size,
-                    min_values=min_values,
-                    max_values=max_values,
-                    null_value_counts=null_value_counts,
-                    min_k_hashes=min_k_hashes,
-                    stats_by_name=stats_by_name,
+                    column_stats=column_stats,
                 )
                 file_entries.append(entry)
 
@@ -348,114 +335,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         manifest = Manifest(file_entries, schema)
         return schema, manifest
 
-    def _extract_column_stats_compact(self, col_stats: dict, schema: RelationSchema) -> tuple:
-        """Extract planning statistics from the compact {name: (min, max, null_count)} dict
-        returned by fetch_column_stats. Already aggregated across row groups by C++.
-
-        Returns (min_values, max_values, null_value_counts, stats_by_name) where
-        stats_by_name is {col_name: (min, max)} keyed by name.  The positional
-        min_values/max_values lists are indexed by schema column order at *creation*
-        time, which drifts from manifest.schema after projection pushdown.  Always
-        use stats_by_name for range lookups — it is stable across plan rewrites.
-        """
-        num_columns = len(schema.columns)
-        min_values = [None] * num_columns
-        max_values = [None] * num_columns
-        null_counts = {}
-        stats_by_name = {}
-
-        for i, col in enumerate(schema.columns):
-            entry = col_stats.get(col.name)
-            if entry is None:
-                continue
-            min_val, max_val, null_count = entry
-            min_values[i] = min_val
-            max_values[i] = max_val
-            if min_val is not None and max_val is not None:
-                stats_by_name[col.name] = (min_val, max_val)
-            if null_count is not None:
-                null_counts[i] = null_count
-
-        null_value_counts = null_counts if null_counts else None
-        return (
-            min_values if any(v is not None for v in min_values) else None,
-            max_values if any(v is not None for v in max_values) else None,
-            null_value_counts,
-            stats_by_name if stats_by_name else None,
-        )
-
-    def _extract_column_stats(self, footer_meta: dict, schema: RelationSchema) -> tuple:
-        """
-        Extract min/max column statistics and null counts from parquet footer metadata.
-
-        Returns tuple of (min_values, max_values, null_value_counts):
-        - min_values, max_values: lists indexed by field position
-        - null_value_counts: dict mapping field_id -> total null count, or None
-          if any row group is missing null_count for any column (partial data
-          would silently corrupt aggregate answers).
-        """
-        if not footer_meta or not footer_meta.get("row_groups"):
-            return None, None, None
-
-        num_columns = len(schema.columns)
-        min_values = [None] * num_columns
-        max_values = [None] * num_columns
-        null_counts = {i: 0 for i in range(num_columns)}
-        null_counts_complete = {i: True for i in range(num_columns)}
-
-        col_name_to_field_id = {col.name: i for i, col in enumerate(schema.columns)}
-
-        for rg in footer_meta.get("row_groups", []):
-            seen_fields = set()
-            for col_meta in rg.get("columns", []):
-                field_id = col_name_to_field_id.get(col_meta.get("name", ""))
-                if field_id is None:
-                    continue
-                seen_fields.add(field_id)
-
-                min_val = col_meta.get("min")
-                max_val = col_meta.get("max")
-
-                if min_val is not None:
-                    if min_values[field_id] is None:
-                        min_values[field_id] = min_val
-                    else:
-                        try:
-                            if min_val < min_values[field_id]:
-                                min_values[field_id] = min_val
-                        except TypeError:
-                            pass
-
-                if max_val is not None:
-                    if max_values[field_id] is None:
-                        max_values[field_id] = max_val
-                    else:
-                        try:
-                            if max_val > max_values[field_id]:
-                                max_values[field_id] = max_val
-                        except TypeError:
-                            pass
-
-                nc = col_meta.get("null_count")
-                if nc is None:
-                    null_counts_complete[field_id] = False
-                else:
-                    null_counts[field_id] += nc
-
-            # Any column missing from this row group is incomplete
-            for fid in range(num_columns):
-                if fid not in seen_fields:
-                    null_counts_complete[fid] = False
-
-        null_value_counts = {
-            fid: null_counts[fid] for fid in range(num_columns) if null_counts_complete[fid]
-        }
-        if not null_value_counts:
-            null_value_counts = None
-
-        return (min_values if any(v is not None for v in min_values) else None,
-                max_values if any(v is not None for v in max_values) else None,
-                null_value_counts)
 
     def _load_sidecar_min_k_hashes(self, blob_name: str, schema: RelationSchema):
         """Load the optional ``<blob_name>.stats.json`` sidecar.

@@ -84,31 +84,18 @@ def _native_serial_execute(plan, telemetry=None):
     from opteryx.compiled.morsel_queue import PyMorselQueue
     from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.managers.execution.pipeline_compiler import compile_pipeline
-    from opteryx.operators._operators import drive_scan_to_sink
+    from opteryx.operators._operators import native_serial_drive
 
     chains, exit_node, ctx = compile_pipeline(plan)
     sink = PyMorselQueue(_QUEUE_DEPTH)
     err_box: list = []
     pool = CppThreadPool(1, "m4-serial")
 
-    def task():
-        # On any failure, stash and `finish()` so the consumer unblocks (it would
-        # otherwise wait on `sink.get()` forever); the error is re-raised on the
-        # consumer thread after the sentinel.
-        try:
-            for scan, chain_head in chains:
-                if ctx.is_terminated():
-                    break
-                # Only the terminal chain feeds the Exit/sink; build legs drive to
-                # EOS (building their join/breaker state) and must NOT finish the sink.
-                drive_scan_to_sink(scan, chain_head, exit_node, ctx, sink, finish=False)
-            sink.finish()
-        except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
-            err_box.append(exc)
-            sink.finish()
-
     def generator():
-        pool.submit(task)
+        # NATIVE producer: one native task drives the compiled chains into `sink`
+        # (no Python task() closure, no Future). The handle keeps the native arg array
+        # alive until the consumer below has drained the finish.
+        _handle = native_serial_drive(pool, chains, exit_node, ctx, sink, err_box)
         try:
             while True:
                 item = sink.get()
@@ -468,20 +455,17 @@ def _native_generic_execute(plan, dop, telemetry=None):
 
     sink = PyMorselQueue(max(64, dop * 8))
     err_box: list = []
-    gen_box: list = []
     pool = CppThreadPool(1, "m4-segment")
 
     def task():
+        # PUSH-based (Level 1): the breaker skeleton drives straight into `sink` and
+        # `finish()`es it on every exit (incl. its own teardown finally). No generator
+        # coroutine, no pump loop, no gen_box.close().
         try:
-            gen = dispatch_data_pipeline(plan, dop, telemetry)
-            gen_box.append(gen)
-            for m in gen:
-                if not sink.put(m):
-                    break  # consumer abandoned (LIMIT / early close)
+            dispatch_data_pipeline(plan, dop, telemetry, out_q=sink)
         except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
             err_box.append(exc)
-        finally:
-            sink.finish()
+            sink.finish()  # defensive: a fault BEFORE the skeleton's finally must unblock
 
     def generator():
         pool.submit(task)
@@ -493,9 +477,7 @@ def _native_generic_execute(plan, dop, telemetry=None):
                 yield item
         finally:
             sink.close()  # unblock a producer blocked on the bounded put
-            pool.shutdown(wait=True)  # task no longer touches the handler generator
-            for g in gen_box:
-                g.close()  # run the handler's finally (ctx terminate, source close)
+            pool.shutdown(wait=True)  # joins the task → the skeleton's teardown ran
             if err_box:
                 raise err_box[0]
 
@@ -521,7 +503,6 @@ def _native_chain_execute(plan, chain, dop, telemetry=None):
     bufs = [[] for _ in producers]  # producer i reads bufs[i-1], writes bufs[i]
     sink = PyMorselQueue(max(64, dop * 8))
     err_box: list = []
-    gen_box: list = []
     pool = CppThreadPool(1, "m4-chain")
 
     def task():
@@ -537,33 +518,32 @@ def _native_chain_execute(plan, chain, dop, telemetry=None):
                     middle = list(seg.nodes[:-1])
                 breaker_id = seg.nodes[-1]
                 recomb = recombination_class_for(plan[breaker_id])
-                for _ in _drive_segment(
+                # PUSH-based: producer captures into bufs[i] via collect_into (no out_q,
+                # no generator). Drive it to completion.
+                _drive_segment(
                     plan, source, middle, breaker_id, recomb, dop, telemetry,
                     collect_into=bufs[i],
-                ):
-                    pass
+                )
 
-            # Terminal segment → sink.
+            # Terminal segment → drives straight into `sink` (push-based) and finishes it.
             last_buf = bufs[-1] if producers else []
             if terminal_seg.tail_is_breaker:
                 breaker_id = terminal_seg.nodes[-1]
                 recomb = recombination_class_for(plan[breaker_id])
                 outs = list(plan.outgoing_edges(breaker_id))
                 downstream_id = outs[0][1] if outs else None
-                gen = _drive_segment(
+                _drive_segment(
                     plan, ("buffer", last_buf), list(terminal_seg.nodes[:-1]),
                     breaker_id, recomb, dop, telemetry, downstream_id=downstream_id,
+                    out_q=sink,
                 )
             else:
-                gen = _drive_passthrough_segment(plan, last_buf, terminal_seg.nodes[0])
-            gen_box.append(gen)
-            for morsel in gen:
-                if not sink.put(morsel):
-                    break
+                _drive_passthrough_segment(
+                    plan, last_buf, terminal_seg.nodes[0], out_q=sink
+                )
         except BaseException as exc:  # noqa: BLE001 — surfaced on the consumer thread
             err_box.append(exc)
-        finally:
-            sink.finish()
+            sink.finish()  # defensive: the terminal finishes sink, but a producer fault must too
 
     def generator():
         pool.submit(task)
@@ -575,9 +555,7 @@ def _native_chain_execute(plan, chain, dop, telemetry=None):
                 yield item
         finally:
             sink.close()
-            pool.shutdown(wait=True)
-            for g in gen_box:
-                g.close()
+            pool.shutdown(wait=True)  # joins the task → each segment's teardown ran
             if err_box:
                 raise err_box[0]
 

@@ -38,7 +38,8 @@ cdef extern from "<mutex>" namespace "std" nogil:
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
-from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
+from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache, ParquetParsedFooterCache
+from opteryx.compiled.structures.column_stats cimport FileColumnStats, file_column_stats_from_agg
 
 # WP-6b direct path: wrap worker-built Draken buffers into Vectors (consumer-side,
 # GIL held). DirectKind 1=int64 2=float32 3=float64 4=bool 5=decimal128.
@@ -94,6 +95,12 @@ from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchP
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
 _FOOTER_PREFETCH = 65536
+
+# Process-global cache for parsed Parquet FileStats (~64 MB, 512 entries).
+# Avoids repeated Thrift deserialization when the same files are scanned
+# across queries. Keyed by canonical file path (never signed URLs).
+# Typed so Cython dispatches cdef methods (try_get / put_fs) statically.
+cdef ParquetParsedFooterCache _PARSED_FOOTER_CACHE = ParquetParsedFooterCache()
 
 
 cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i):
@@ -580,10 +587,12 @@ cpdef dict fetch_column_chunk_info(
     cdef size_t rg_count, col_count, col_i
     cdef str col_name
 
-    envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
-    buf_ptr = <const uint8_t*>envelope
-    buf_size = <size_t>len(envelope)
-    fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+    if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+        envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
+        buf_ptr = <const uint8_t*>envelope
+        buf_size = <size_t>len(envelope)
+        fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+        _PARSED_FOOTER_CACHE.put_fs(path, fs)
 
     rg_count = fs.row_groups.size()
     if rg_idx < 0 or <size_t>rg_idx >= rg_count:
@@ -632,11 +641,11 @@ cpdef tuple fetch_column_stats(
 ):
     """Fast planning-phase stats: aggregate column min/max/null_count in C++.
 
-    Returns (num_rows, footer_bytes, col_stats_dict) where:
-      col_stats_dict = {name: (min_val, max_val, null_count_or_None)}
+    Returns (num_rows, footer_bytes, FileColumnStats) where FileColumnStats
+    holds decoded values lazily — nothing is decoded until get_min/get_max
+    is called.
 
-    Pass file_size=-1 to auto-detect via stat()/HEAD. Binary min/max
-    aggregation runs in C++; decode_value is called once per column.
+    Pass file_size=-1 to auto-detect via stat()/HEAD.
     """
     cdef bytes envelope
     cdef int64_t footer_bytes
@@ -644,27 +653,18 @@ cpdef tuple fetch_column_stats(
     cdef size_t buf_size
     cdef FileStats fs
     cdef vector[AggColumnStat] agg_stats
-    cdef str col_name, log_type
-    cdef bint prefer_text
 
-    envelope, footer_bytes = _read_footer_payload(path, file_size, footer_bytes_cache)
-
-    buf_ptr = <const uint8_t*>envelope
-    buf_size = <size_t>len(envelope)
-    fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+    if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+        envelope, footer_bytes = _read_footer_payload(path, file_size, footer_bytes_cache)
+        buf_ptr = <const uint8_t*>envelope
+        buf_size = <size_t>len(envelope)
+        fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+        _PARSED_FOOTER_CACHE.put_fs(path, fs)
+    else:
+        footer_bytes = 0
     agg_stats = AggregateColumnStats(fs)
 
-    cdef dict col_stats = {}
-    for agg in agg_stats:
-        col_name = agg.name.decode("utf-8")
-        log_type = agg.logical_type.decode("utf-8") if agg.logical_type.size() > 0 else ""
-        prefer_text = log_type == "json" or log_type.startswith("array<")
-        min_val = _decode_value_c(agg.physical_type, agg.logical_type, agg.min_bytes, prefer_text) if agg.has_min else None
-        max_val = _decode_value_c(agg.physical_type, agg.logical_type, agg.max_bytes, prefer_text) if agg.has_max else None
-        null_count = agg.null_count if agg.null_count_complete else None
-        col_stats[col_name] = (min_val, max_val, null_count)
-
-    return fs.num_rows, footer_bytes, col_stats
+    return fs.num_rows, footer_bytes, file_column_stats_from_agg(agg_stats)
 
 
 cdef inline bint _is_local_path(str path):
@@ -1156,6 +1156,8 @@ cpdef IpcRowGroupSource open_ipc_source(
                 or fetch_url.startswith("http://")
                 or fetch_url.startswith("https://")):
             continue
+        if _PARSED_FOOTER_CACHE.try_get(path, &src.footer_map[0][path.encode('utf-8')]):
+            continue
         if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
             continue
         batch_orig.append(path)
@@ -1172,6 +1174,7 @@ cpdef IpcRowGroupSource open_ipc_source(
             src.footer_map[0][batch_orig[bi].encode('utf-8')] = ReadParquetMetadataFromBuffer(
                 footer_buf_ptr, footer_buf_size
             )
+            _PARSED_FOOTER_CACHE.put_fs(batch_orig[bi], src.footer_map[0][batch_orig[bi].encode('utf-8')])
 
     for path in paths:
         if prefetched_footers and path in prefetched_footers:
@@ -1183,16 +1186,18 @@ cpdef IpcRowGroupSource open_ipc_source(
         else:
             path_bytes_cpp = path.encode('utf-8')
             if src.footer_map[0].count(path_bytes_cpp) == 0:
-                envelope, _ = _read_footer_payload(
-                    orig_to_cpp.get(path, path),
-                    file_sizes.get(path, -1) if file_sizes else -1,
-                    footer_bytes_cache,
-                )
-                footer_buf_ptr = <const uint8_t*>envelope
-                footer_buf_size = len(envelope)
-                src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                    footer_buf_ptr, footer_buf_size
-                )
+                if not _PARSED_FOOTER_CACHE.try_get(path, &src.footer_map[0][path_bytes_cpp]):
+                    envelope, _ = _read_footer_payload(
+                        orig_to_cpp.get(path, path),
+                        file_sizes.get(path, -1) if file_sizes else -1,
+                        footer_bytes_cache,
+                    )
+                    footer_buf_ptr = <const uint8_t*>envelope
+                    footer_buf_size = len(envelope)
+                    src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                        footer_buf_ptr, footer_buf_size
+                    )
+                    _PARSED_FOOTER_CACHE.put_fs(path, src.footer_map[0][path_bytes_cpp])
             # Local file path for bloom probing (None for remote — the C++
             # bloom probe opens the file via ifstream and can't read URLs).
             cpp_path_str = orig_to_cpp.get(path, path)
@@ -1308,16 +1313,18 @@ cpdef IpcRowGroupSource open_pass2_source(
         masks.append(bytes(mask_bytes))
         path_bytes_cpp = path.encode('utf-8')
         if src.footer_map[0].count(path_bytes_cpp) == 0:
-            envelope, _ = _read_footer_payload(
-                orig_to_cpp.get(path, path),
-                file_sizes.get(path, -1) if file_sizes else -1,
-                footer_bytes_cache,
-            )
-            footer_buf_ptr = <const uint8_t*>envelope
-            footer_buf_size = len(envelope)
-            src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                footer_buf_ptr, footer_buf_size
-            )
+            if not _PARSED_FOOTER_CACHE.try_get(path, &src.footer_map[0][path_bytes_cpp]):
+                envelope, _ = _read_footer_payload(
+                    orig_to_cpp.get(path, path),
+                    file_sizes.get(path, -1) if file_sizes else -1,
+                    footer_bytes_cache,
+                )
+                footer_buf_ptr = <const uint8_t*>envelope
+                footer_buf_size = len(envelope)
+                src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                    footer_buf_ptr, footer_buf_size
+                )
+                _PARSED_FOOTER_CACHE.put_fs(path, src.footer_map[0][path_bytes_cpp])
     src.work_items = wi
     src.masks = masks
     src.n_items = len(wi)

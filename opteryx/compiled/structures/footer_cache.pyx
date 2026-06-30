@@ -9,21 +9,27 @@
 # cython: optimize.unpack_method_calls=True
 
 """
-LRU cache for raw Parquet footer bytes using MemoryPool storage.
+LRU caches for Parquet footer data.
 
-Files are immutable, so we cache raw footer envelope bytes to avoid repeated
-GCS fetches. The cache uses a fixed 16MB MemoryPool with LRU eviction.
+ParquetFooterBytesCache  — raw footer envelope bytes (16 MB MemoryPool).
+                           Avoids repeated network/disk fetches.
 
-Key: file path (str)
-Value: raw footer envelope bytes (stored in MemoryPool, accessed via ref_id)
+ParquetParsedFooterCache — parsed FileStats structs (≈64 MB, 512 entries).
+                           Avoids repeated Thrift deserialization.
+
+Both caches are keyed by the canonical file path (not signed URLs).
+Files are immutable, so cached entries never go stale.
 """
 
 import threading
-from typing import Optional
 from libc.stdint cimport int64_t, uint8_t
+from libcpp.unordered_map cimport unordered_map
+from libcpp.string cimport string
+from cython.operator cimport dereference as deref
 
 from opteryx.compiled.structures.lru_k cimport LRU_K
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
+from rugo.parquet_reader cimport FileStats
 
 
 cdef class ParquetFooterBytesCache:
@@ -153,6 +159,77 @@ cdef class ParquetFooterBytesCache:
             "pool_used": pool_stats["used_size"],
             "pool_free": pool_stats["free_size"],
             "pool_size": pool_stats["total_size"],
+            "lru_hits": lru_stats[0],
+            "lru_misses": lru_stats[1],
+        }
+
+
+cdef class ParquetParsedFooterCache:
+    """LRU cache for parsed Parquet FileStats structs.
+
+    Caches the result of Thrift deserialization so repeated reads of the same
+    file skip parsing entirely. Holds up to max_entries (default 512) parsed
+    footers — approximately 64 MB assuming ~128 KB per FileStats.
+
+    Files are immutable; cached entries never go stale.
+
+    Thread-safe. Process-global singleton (_PARSED_FOOTER_CACHE in pool_reader).
+    All methods that touch the C++ unordered_map run under _lock.
+
+    try_get / put_fs are cdef (Cython-only) because FileStats is a C++ struct.
+    """
+
+    def __cinit__(self, int max_entries=512):
+        self.lru = LRU_K(k=1, max_memory=0, max_size=0)
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+
+    cdef bint try_get(self, str path, FileStats* out):
+        """Return True and fill *out if path is cached, else return False."""
+        cdef string key = path.encode('utf-8')
+        cdef unordered_map[string, FileStats].iterator it
+        with self._lock:
+            it = self._map.find(key)
+            if it == self._map.end():
+                return False
+            out[0] = deref(it).second
+            self.lru.get(key)
+            return True
+
+    cdef void put_fs(self, str path, const FileStats& fs):
+        """Store a parsed FileStats under path, evicting LRU entries if full."""
+        cdef string key = path.encode('utf-8')
+        cdef bytes evict_key
+        with self._lock:
+            # Already cached — refresh LRU position.
+            if self._map.count(key):
+                self._map[key] = fs
+                self.lru.get(key)
+                return
+            # Evict until under the entry cap.
+            while <int>self._map.size() >= self._max_entries:
+                evict_key_obj, _ = self.lru.evict(False)
+                if evict_key_obj is None:
+                    return
+                evict_key = <bytes>evict_key_obj
+                self._map.erase(<string>evict_key)
+            self._map[key] = fs
+            self.lru.set(key, b'', True)
+
+    cpdef void clear(self):
+        """Evict all cached entries."""
+        with self._lock:
+            self._map.clear()
+            self.lru.clear(False)
+
+    cpdef dict stats(self):
+        """Return cache statistics."""
+        with self._lock:
+            lru_stats = self.lru.stats
+            count = self._map.size()
+        return {
+            "cached_paths": count,
+            "max_entries": self._max_entries,
             "lru_hits": lru_stats[0],
             "lru_misses": lru_stats[1],
         }

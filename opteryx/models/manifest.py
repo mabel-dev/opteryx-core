@@ -227,7 +227,11 @@ class Manifest:
             RelationStatistics,
         )
         total_rows = self.get_record_count()
-        has_null_counts = any(f.null_value_counts for f in self.files)
+        has_null_counts = any(
+            (f.column_stats is not None and f.column_stats.has_any_null_counts())
+            or bool(f.null_value_counts)
+            for f in self.files
+        )
         columns: dict = {}
         for col in self.schema.columns:
             col_name = getattr(col, "name", None)
@@ -365,9 +369,17 @@ class Manifest:
 
         total = 0
         for file in self.files:
-            if not file.null_value_counts or field_id not in file.null_value_counts:
+            if file.column_stats is not None:
+                nc = file.column_stats.get_null_count(field_id)
+                if nc is None:
+                    return None
+                total += nc
+            elif file.null_value_counts:
+                if field_id not in file.null_value_counts:
+                    return None
+                total += file.null_value_counts[field_id]
+            else:
                 return None
-            total += file.null_value_counts[field_id]
         return total
 
     def estimate_null_fraction(self, column) -> Optional[float]:
@@ -383,7 +395,11 @@ class Manifest:
 
         null_count = 0
         for file in self.files:
-            if file.null_value_counts and field_id in file.null_value_counts:
+            if file.column_stats is not None:
+                nc = file.column_stats.get_null_count(field_id)
+                if nc is not None:
+                    null_count += nc
+            elif file.null_value_counts and field_id in file.null_value_counts:
                 null_count += file.null_value_counts[field_id]
 
         return null_count / total_rows if total_rows > 0 else 0.0

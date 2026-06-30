@@ -577,6 +577,14 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # Lazy per-file column statistics (wraps vector[AggColumnStat])
+    Extension(
+        "opteryx.compiled.structures.column_stats",
+        sources=["opteryx/compiled/structures/column_stats.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # C-backed integer buffer used across joins and other kernels
     Extension(
         "opteryx.compiled.structures.buffers",

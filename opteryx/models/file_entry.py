@@ -41,11 +41,11 @@ class FileEntry:
     # raw min/max lists (for direct access if needed)
     min_values: Optional[List] = None
     max_values: Optional[List] = None
-    # Name-keyed stats: {col_name: (min, max)}.  Populated by the filesystem
-    # connector from the compact stats dict.  Use this for range lookups instead
-    # of the positional min_values/max_values lists, which are indexed by the
-    # full schema at creation time and break after projection pushdown.
-    stats_by_name: Optional[Dict[str, tuple]] = None
+    # Lazy typed column stats from Parquet footer (FileColumnStats Cython object).
+    # Populated by the filesystem connector; None for catalog/datafile path.
+    # Access via column_stats.get_min(field_id) etc — no Python dicts created
+    # until a consumer actually asks for a value.
+    column_stats: Optional[object] = None
     # Per-column uncompressed sizes (aligned with schema field order)
     column_uncompressed_sizes_in_bytes: Optional[List[int]] = None
 
@@ -155,7 +155,8 @@ class FileEntry:
             "min_values": self.min_values,
             "max_values": self.max_values,
             "has_bounds": self.lower_bounds is not None or self.upper_bounds is not None,
-            "has_null_counts": self.null_value_counts is not None,
+            "has_null_counts": self.null_value_counts is not None or (self.column_stats is not None and self.column_stats.has_any_null_counts()),
+            "has_column_stats": self.column_stats is not None and self.column_stats.has_stats(),
             "has_k_hashes": self.min_k_hashes is not None,
             "has_histograms": self.histogram_counts is not None,
         }

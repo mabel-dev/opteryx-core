@@ -243,7 +243,11 @@ def _scan_stats(
     columns: dict = {}
     has_null_counts = (
         manifest is not None
-        and any(f.null_value_counts for f in (getattr(manifest, "files", None) or []))
+        and any(
+            (f.column_stats is not None and f.column_stats.has_any_null_counts())
+            or bool(f.null_value_counts)
+            for f in (getattr(manifest, "files", None) or [])
+        )
     )
     if schema is not None:
         for col in schema.columns:

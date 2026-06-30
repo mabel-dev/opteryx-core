@@ -179,8 +179,8 @@ if __name__ == "__main__":  # pragma: no cover
         ratio_str = f"[{ratio:.2f}x]"
 
         # Color codes based on ratio thresholds
-        if ratio < 1.0:
-            # Deep green: faster than DuckDB
+        if ratio <= 1.02:
+            # Deep green: faster or parity than DuckDB
             return f"\033[1;38;2;34;197;94m{ratio_str}\033[0m"  # Pure bright green
         elif ratio <= 3.0:
             # Light green: within 300%

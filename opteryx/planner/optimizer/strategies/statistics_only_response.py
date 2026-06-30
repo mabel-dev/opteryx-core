@@ -451,18 +451,19 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
     max_val = None
 
     for file_entry in manifest.files:
-        # Try using min_values/max_values lists first (already deserialized)
-        if file_entry.min_values and field_id < len(file_entry.min_values):
+        if file_entry.column_stats is not None:
+            file_min = file_entry.column_stats.get_min(field_id)
+            file_max = file_entry.column_stats.get_max(field_id)
+        elif file_entry.min_values and field_id < len(file_entry.min_values):
             file_min = file_entry.min_values[field_id]
-            if file_min is not None:
-                if min_val is None or file_min < min_val:
-                    min_val = file_min
+            file_max = file_entry.max_values[field_id] if file_entry.max_values and field_id < len(file_entry.max_values) else None
+        else:
+            continue
 
-        if file_entry.max_values and field_id < len(file_entry.max_values):
-            file_max = file_entry.max_values[field_id]
-            if file_max is not None:
-                if max_val is None or file_max > max_val:
-                    max_val = file_max
+        if file_min is not None and (min_val is None or file_min < min_val):
+            min_val = file_min
+        if file_max is not None and (max_val is None or file_max > max_val):
+            max_val = file_max
 
     if operation == "MIN":
         return min_val

@@ -1308,6 +1308,291 @@ def native_stateless_fanout(CppThreadPool pool, list heads, list exits, object s
     return handle
 
 
+cdef struct _SerialArg:
+    PyObject* chains    # list of (scan, chain_head) tuples, DFS order (borrowed)
+    PyObject* exit      # the terminal Exit node, or None (borrowed)
+    PyObject* ctx       # the PipelineContext (borrowed)
+    PyObject* out_q     # the output PyMorselQueue (borrowed)
+    PyObject* errors    # shared result list[exc] (borrowed)
+
+
+cdef void _serial_run(_SerialArg* a) noexcept with gil:
+    """GIL-held body of the native SERIAL producer task: drive every scan's chain in
+    DFS order via ``drive_scan_to_sink`` (build legs ``finish=False``, the terminal
+    chain feeds the Exit → out_q), then finish out_q. A fault is stashed by the caller's
+    error list; out_q is finished on every exit so the consumer unblocks."""
+    cdef object exc, item
+    cdef list chains = <list>(<object>a.chains)
+    cdef object out_q = <object>a.out_q
+    cdef object exit_node = <object>a.exit
+    cdef PipelineContext ctx = <PipelineContext>(<object>a.ctx)
+    try:
+        for item in chains:
+            if ctx.is_terminated():
+                break
+            drive_scan_to_sink(
+                <BasePlanNode>item[0], <BasePlanNode>item[1], exit_node, ctx, out_q, False
+            )
+        out_q.finish()
+    except BaseException as exc:
+        (<list>(<object>a.errors)).append(exc)
+        out_q.finish()
+
+
+cdef void _serial_task(void* arg) noexcept nogil:
+    """Native task entry (matches ``native_task_fn``) for the serial producer drive."""
+    _serial_run(<_SerialArg*>arg)
+
+
+def native_serial_drive(CppThreadPool pool, list chains, exit_node,
+                        PipelineContext ctx, object out_q, list errors):
+    """Native SERIAL producer drive: submit ONE native task that drives the compiled
+    multi-chain pipeline into ``out_q`` (no Python ``task()`` closure, no Future). The
+    consumer drains ``out_q`` concurrently, so this is NON-blocking and returns a
+    ``NativeFanoutHandle`` the caller holds until it has drained the finish (the handle
+    owns the arg struct of borrowed pointers into the caller's live ``chains``/``errors``
+    and ``ctx``/``out_q``). The native replacement for ``_native_serial_execute``'s
+    Python producer closure."""
+    cdef _SerialArg* a = <_SerialArg*>malloc(sizeof(_SerialArg))
+    if a == NULL:
+        raise MemoryError()
+    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
+    handle._args = <void*>a
+    a.chains = <PyObject*>chains
+    a.exit = <PyObject*>exit_node
+    a.ctx = <PyObject*>ctx
+    a.out_q = <PyObject*>out_q
+    a.errors = <PyObject*>errors
+    pool.submit_native(_serial_task, a)
+    return handle
+
+
+def run_breaker_segment(plan, scan_id, middle_ids, breaker_id, recomb_class,
+                        int workers, telemetry=None, exit_id=None, source_prep=None,
+                        out_q=None):
+    """COMPILED breaker-segment drive (moved out of parallel_engine.py — execution runs
+    in compiled code). PUSH-based: drives results into ``out_q`` and ``finish()``es it on
+    every exit. Typed where the types are LOCAL (ctx, the per-worker counters/lists, the
+    radix); ``plan`` / the ``sink`` adapter / ``source_prep`` are the PLANNER seams held as
+    ``object`` — the boundary crossed once. The per-morsel work is the already-native
+    ``native_accumulate_fanout`` / ``push_one`` / operator-owned recombination."""
+    import threading
+
+    from opteryx import config
+    from opteryx import EOS as _EOS_SENTINEL
+    from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
+    from opteryx.managers.execution.pipeline_sink import make_sink
+    from opteryx.managers.execution.pipeline_sink import RecombClass
+
+    cdef PipelineContext ctx
+    cdef list chains
+    cdef object exit_node, scan, breaker, head, sink, downstream, source, shape
+    cdef object probe_head, build_chains, build_scans, morsel, m, exc, clone
+    cdef Py_ssize_t radix = 1, index, k, buffered_rows
+    cdef bint exhausted, concurrent_safe
+    cdef list buffer, local_states, local_rows, errors, worker_heads, locals_
+
+    # ---- 1. compile ---------------------------------------------------------------
+    chains, exit_node, ctx = compile_pipeline(plan)
+    scan = plan[scan_id]
+    breaker = plan[breaker_id]
+    head = plan[middle_ids[0]] if middle_ids else breaker
+
+    probe_head = None
+    build_chains = None
+    build_scans = None
+    if source_prep is not None:
+        source_prep.shared._ctx = ctx
+        scan = plan[source_prep.probe_scan_id]
+        shape = source_prep.shared._shape
+        if shape.build_scan_ids is not None:
+            build_ids = set(shape.build_scan_ids)
+        else:
+            build_ids = {shape.build_scan_id}
+        scan_obj_to_id = {
+            id(plan[nid]): nid
+            for nid in plan.nodes()
+            if getattr(plan[nid], "is_scan", False)
+        }
+        build_chains = []
+        build_scans = []
+        for sc, hd in chains:
+            if sc is scan:
+                probe_head = hd
+            elif scan_obj_to_id.get(id(sc)) in build_ids:
+                build_chains.append((sc, hd))
+                build_scans.append(sc)
+        head = probe_head
+        if probe_head is None or len(build_chains) != len(build_ids):
+            # Compiler did not produce the expected legs — refuse to guess, run serial.
+            from opteryx.managers.execution.parallel_engine import _serial_stream
+            ctx.terminate()
+            for m in _serial_stream(plan):
+                if not out_q.put(m):
+                    break
+            out_q.finish()
+            return
+
+    def _drain():
+        # Drain the Exit's pending output into out_q; False if the consumer abandoned.
+        if exit_node is None:
+            return True
+        while exit_node.has_pending():
+            if not out_q.put(exit_node.pop_pending()):
+                return False
+        return True
+
+    while radix < workers:
+        radix <<= 1
+
+    pool = None
+    try:
+        # ---- 1b. join→agg: drive the BUILD side ONCE, serially -------------------
+        if source_prep is not None:
+            source_prep.shared.build(build_chains, exit_node)
+            if ctx.is_terminated():
+                return
+            if source_prep.shared.left_is_empty:
+                push_one(<BasePlanNode>head, _EOS_SENTINEL)
+                _drain()
+                return
+
+        # ---- 2. row-floor: tiny inputs run serially through the ORIGINAL breaker --
+        buffer = []
+        buffered_rows = 0
+        exhausted = False
+        while buffered_rows < config.PARALLEL_MIN_ROWS:
+            morsel = pull_one(<BasePlanNode>scan)
+            if morsel is None:
+                exhausted = True
+                break
+            buffer.append(morsel)
+            buffered_rows += morsel.num_rows
+
+        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
+            for morsel in buffer:
+                if ctx.is_terminated():
+                    break
+                push_one(<BasePlanNode>head, morsel)
+                if not _drain():
+                    return
+            if not ctx.is_terminated():
+                push_one(<BasePlanNode>head, _EOS_SENTINEL)
+                _drain()
+            return
+
+        def _readout_pool_factory():
+            return CppThreadPool(max(1, min(radix, workers)), "m4-generic-readout")
+
+        downstream = plan[exit_id] if exit_id is not None else None
+        sink = make_sink(
+            breaker, recomb_class, radix=radix, pool_factory=_readout_pool_factory,
+            ctx=ctx, downstream=downstream, telemetry=telemetry,
+        )
+        if sink is None:
+            raise RuntimeError(
+                f"run_breaker_segment: no sink adapter for {recomb_class!r}"
+            )
+
+        if telemetry is not None:
+            telemetry._reading["generic_pipeline_workers"] = workers
+            if recomb_class is RecombClass.HASH_REPARTITION:
+                telemetry._reading["generic_pipeline_radix"] = radix
+
+        # ---- 3. W self-pull workers ----------------------------------------------
+        buf_iter = iter(buffer)
+        pull_lock = threading.Lock()
+        concurrent_safe = scan.is_concurrent_pull_safe()
+
+        def next_input():
+            if concurrent_safe:
+                with pull_lock:
+                    m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                if ctx.is_terminated():
+                    return None
+                return pull_one(<BasePlanNode>scan)
+            with pull_lock:
+                if ctx.is_terminated():
+                    return None
+                m = next(buf_iter, None)
+                if m is not None:
+                    return m
+                return pull_one(<BasePlanNode>scan)
+
+        local_states = [None] * workers
+        local_rows = [0] * workers
+        errors = [None] * workers
+        worker_heads = [None] * workers
+
+        def _build_worker_chain(index):
+            clone = sink.make_local_sink_state(index)
+            chain = [spawn_worker(plan[nid]) for nid in middle_ids]
+            chain.append(clone)
+            for i, op in enumerate(chain):
+                op.set_context(ctx)
+                if i + 1 < len(chain):
+                    op.set_downstream(chain[i + 1])
+            chain_head = chain[0]
+            if source_prep is not None:
+                from opteryx.operators import JoinRightAdapter
+                cloned_join = spawn_worker(plan[source_prep.join_id])
+                source_prep.shared.prepare_worker_clone(cloned_join)
+                cloned_join.set_downstream(chain_head)
+                probe_ops = [spawn_worker(plan[nid]) for nid in source_prep.probe_middle_ids]
+                adapter = JoinRightAdapter(cloned_join)
+                adapter.set_context(ctx)
+                probe_chain = probe_ops + [adapter]
+                for i, op in enumerate(probe_chain):
+                    op.set_context(ctx)
+                    if i + 1 < len(probe_chain):
+                        op.set_downstream(probe_chain[i + 1])
+                chain_head = probe_chain[0]
+            return clone, chain_head
+
+        for index in range(workers):
+            local_states[index], worker_heads[index] = _build_worker_chain(index)
+
+        pool = CppThreadPool(workers, "m4-generic-sink")
+        native_accumulate_fanout(pool, worker_heads, next_input, ctx, local_rows, errors)
+        # ---- 4. errors barrier; combine ------------------------------------------
+        for exc in errors:
+            if exc is not None:
+                raise exc
+        if ctx.is_terminated():
+            return
+
+        locals_ = [
+            (local_states[k], local_rows[k])
+            for k in range(workers)
+            if local_states[k] is not None
+        ]
+        sink.combine(locals_)
+
+        # ---- 5. finalize read-out, then EOS through the sink's eos_target ---------
+        for m in sink.finalize_source():
+            if ctx.is_terminated():
+                return
+            if not out_q.put(m):
+                return
+        if ctx.is_terminated():
+            return
+        push_one(<BasePlanNode>sink.eos_target(), _EOS_SENTINEL)
+        _drain()
+    finally:
+        # ---- 6. teardown: finish out_q on every exit so the consumer unblocks -----
+        out_q.finish()
+        if pool is not None:
+            pool.shutdown(wait=True)
+        ctx.terminate()
+        scan.close_source()
+        if source_prep is not None and build_scans is not None:
+            for bs in build_scans:
+                bs.close_source()
+
+
 cpdef BasePlanNode spawn_worker(BasePlanNode op):
     """Python-callable edge over the cdef `make_worker` contract — the fan-out
     replacement for `_clone_op`. Used by the (still-Python) scheduler at worker
