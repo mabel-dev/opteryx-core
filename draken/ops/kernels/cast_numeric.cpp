@@ -1,6 +1,7 @@
 #include "ops/kernels/cast_kernels.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/result_helpers.h"
+#include "ops/kernels/kernel_context.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <cmath>          // std::isfinite / std::isnan
 #include <vector>         // single-pass format staging (avoid double ryu)
+#include <stdexcept>      // ARRAY->VARCHAR fail-loud element-type guard
 
 /**
  * Cast kernels: numeric / boolean conversions (Phase 9c).
@@ -437,4 +439,196 @@ VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* v) {
     });
 }
 
+
+// FLOAT → DECIMAL (both tiers; SQL half-away-from-zero rounding at the target
+// scale). ctx = binary_op_ctx: result_scale + result_precision (p>18 → int128
+// tier). DENSE output (uniform selection gather — see the date32 cast lesson).
+VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_FLOAT64 && v->type != DRAKEN_FLOAT32)
+            return draken_error_sentinel_fmt("cast float->decimal: expected FLOAT, got %d", v->type);
+        if (!ctx) return draken_error_sentinel("cast float->decimal: missing ctx (scale)");
+        const auto* c = static_cast<const binary_op_ctx*>(ctx);
+        const int scale = c->result_scale;
+        const bool wide = c->result_precision > 18;
+        double mult = 1.0;
+        for (int i = 0; i < scale; ++i) mult *= 10.0;
+        const uint32_t n = v->length;
+        const size_t es = wide ? 16u : 8u;
+        uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < n; ++j) {
+            uint32_t phys = v->selection[j];
+            double d = (v->type == DRAKEN_FLOAT32)
+                ? static_cast<double>(static_cast<const float*>(v->data)[phys])
+                : static_cast<const double*>(v->data)[phys];
+            double scaled = d * mult;
+            // half away from zero
+            double rounded = scaled >= 0.0 ? std::floor(scaled + 0.5) : std::ceil(scaled - 0.5);
+            if (wide) {
+                __int128 w = static_cast<__int128>(rounded);
+                std::memcpy(out + static_cast<size_t>(j) * 16u, &w, 16u);
+            } else {
+                int64_t w = static_cast<int64_t>(rounded);
+                std::memcpy(out + static_cast<size_t>(j) * 8u, &w, 8u);
+            }
+        }
+        VecResult r;
+        r.data = out;
+        r.type = wide ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+        r.validity_embedded = 0u;
+        r.dec_precision = c->result_precision;
+        r.dec_scale = static_cast<uint8_t>(scale);
+        r.length = n; r.data_length = n;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.validity = kernel_copy_validity(v);
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    });
+}
+
 }  // extern "C"
+
+// ---- ARRAY → VARCHAR ---------------------------------------------------------------
+// Renders each list row as a bracketed literal: ['Apollo 11', 'Apollo 12'].
+// String elements are single-quoted with backslash escaping of ' and \; NULL
+// elements render as null; a NULL row is a NULL output (validity preserved).
+//
+// TWO-vector signature: an ARRAY DrakenVector's data is the int32 offsets
+// buffer (offsets[j] .. offsets[j+1] bound physical row j's element range);
+// the ELEMENTS live in the child vector, which is owned by the VectorOwner —
+// not reachable from the parent DrakenVector*. The VM resolves the child at
+// morsel time (BC_C_NATIVE_CHILD) and passes both explicitly. This is NOT a
+// cast_fn_t and is never dispatched through the one-vector cast table.
+
+static void array_elem_append(std::vector<char>& out, const DrakenVector* child,
+                              uint32_t e, char* tmp) {
+    // NULL element
+    if (child->validity != nullptr
+            && ((child->validity[e >> 3] >> (e & 7)) & 1u) == 0u) {
+        const char knull[] = {'n', 'u', 'l', 'l'};
+        out.insert(out.end(), knull, knull + 4);
+        return;
+    }
+    const uint32_t phys = child->selection[e];
+    switch (child->type) {
+        case DRAKEN_VARCHAR:
+        case DRAKEN_NVARCHAR:
+        case DRAKEN_VARBINARY: {
+            const DrakenStringArena* sa =
+                static_cast<const DrakenStringArena*>(child->data);
+            const DrakenStringSlot* slot = &sa->slots[phys];
+            const uint8_t* p = str_data(slot, sa->arena);
+            const uint32_t len = str_length(slot);
+            out.push_back('\'');
+            for (uint32_t b = 0; b < len; ++b) {
+                const char c = static_cast<char>(p[b]);
+                if (c == '\'' || c == '\\') out.push_back('\\');
+                out.push_back(c);
+            }
+            out.push_back('\'');
+            return;
+        }
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64: {
+            const int64_t val = load_int_signed(child->data, phys, child->type);
+            const int len = i64_to_ascii(val, tmp);
+            out.insert(out.end(), tmp, tmp + len);
+            return;
+        }
+        case DRAKEN_FLOAT64:
+        case DRAKEN_FLOAT32: {
+            const double d = (child->type == DRAKEN_FLOAT64)
+                ? static_cast<const double*>(child->data)[phys]
+                : static_cast<double>(static_cast<const float*>(child->data)[phys]);
+            const size_t len = ryu_format_double(tmp, d, 6u);
+            out.insert(out.end(), tmp, tmp + len);
+            return;
+        }
+        case DRAKEN_BOOL: {
+            const bool b =
+                ((static_cast<const uint8_t*>(child->data)[phys >> 3]
+                  >> (phys & 7)) & 1u) != 0u;
+            if (b) out.insert(out.end(), kBoolTrue, kBoolTrue + 4);
+            else out.insert(out.end(), kBoolFalse, kBoolFalse + 5);
+            return;
+        }
+        default:
+            throw std::runtime_error(
+                "ARRAY->VARCHAR: unsupported element type — fail loud, never a "
+                "silent wrong rendering");
+    }
+}
+
+static VecResult array_to_varchar_core(const DrakenVector* parent,
+                                       const DrakenVector* child) {
+    if (!parent || !child)
+        return draken_error_sentinel("ARRAY->VARCHAR: null input vector");
+    if (parent->type != DRAKEN_ARRAY)
+        return draken_error_sentinel_fmt(
+            "ARRAY->VARCHAR: expected ARRAY parent, got %d", parent->type);
+    const uint32_t k = parent->data_length;   // physical rows (offsets pairs)
+    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
+
+    // Pass 1: render every physical row into one staging buffer.
+    std::vector<char> stage;
+    stage.reserve(static_cast<size_t>(k) * 24u);
+    std::vector<uint32_t> rlen(k > 0u ? k : 1u, 0u);
+    char tmp[40];
+    size_t total_extern = 0u;
+    for (uint32_t j = 0u; j < k; ++j) {
+        const size_t before = stage.size();
+        stage.push_back('[');
+        const int32_t start = offsets[j];
+        const int32_t end = offsets[j + 1];
+        for (int32_t e = start; e < end; ++e) {
+            if (e > start) {
+                stage.push_back(',');
+                stage.push_back(' ');
+            }
+            array_elem_append(stage, child, static_cast<uint32_t>(e), tmp);
+        }
+        stage.push_back(']');
+        const size_t len = stage.size() - before;
+        rlen[j] = static_cast<uint32_t>(len);
+        if (len > STR_INLINE_MAX) total_extern += len;
+    }
+
+    // Pass 2: build the canonical consolidated string block.
+    DrakenStringSlot* slots;
+    uint8_t* arena;
+    uint8_t* vunused;
+    uint8_t* block = vecresult_string_block_alloc(k, total_extern, 0,
+                                                  &slots, &arena, &vunused);
+    if (!block) return draken_error_sentinel("Allocation failed");
+    (void)vunused;
+    const char* sbase = stage.data();
+    size_t soff = 0u;
+    size_t arena_used = 0u;
+    for (uint32_t j = 0u; j < k; ++j) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(sbase + soff);
+        const uint32_t len = rlen[j];
+        soff += len;
+        if (len > STR_INLINE_MAX) {
+            std::memcpy(arena + arena_used, bytes, len);
+            draken_build_string_slot(&slots[j], bytes, len,
+                                     static_cast<uint32_t>(arena_used));
+            arena_used += len;
+        } else {
+            draken_build_string_slot(&slots[j], bytes, len, 0u);
+        }
+    }
+    // Non-ASCII child bytes (NVARCHAR) make the rendering UTF-8.
+    const DrakenType out_t =
+        (child->type == DRAKEN_NVARCHAR) ? DRAKEN_NVARCHAR : DRAKEN_VARCHAR;
+    VecResult r = vecresult_from_string_block(block, k, total_extern, 0, out_t);
+    kernel_preserve_shape(r, parent);
+    return r;
+}
+
+VecResult draken_cast_array_to_varchar(void* ctx, const DrakenVector* parent,
+                                       const DrakenVector* child) {
+    (void)ctx;
+    DRAKEN_KERNEL_TRY({ return array_to_varchar_core(parent, child); });
+}

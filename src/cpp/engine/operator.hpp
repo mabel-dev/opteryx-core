@@ -12,6 +12,7 @@
 // of rows amortise it); the per-ROW hot path lives inside execute()/sink() as static,
 // vectorised kernel calls.
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -75,6 +76,10 @@ struct Pipeline {
     Source*                source = nullptr;
     std::vector<Operator*> operators;
     Sink*                  sink   = nullptr;
+    // Optional early-termination signal (LIMIT quota filled): workers stop claiming
+    // new morsels when set. Checked between morsels only — never mid-push, so no
+    // partial results. nullptr = no early termination possible.
+    std::atomic<bool>*     halt   = nullptr;
 };
 
 }  // namespace opteryx::engine

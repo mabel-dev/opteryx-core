@@ -23,6 +23,12 @@ cdef extern from "bs_pool_bridge.hpp":
         void shutdown(bint wait) nogil
         int max_workers()
 
+    # ONE detached OS thread, not a pool task — for a coordinator that itself
+    # submits further native tasks to a *shared* BSThreadPoolBridge and blocks
+    # on wait_native(). See bs_pool_bridge.hpp for why that must not run AS a
+    # task on the same pool it recurses into.
+    void spawn_detached_native_task(native_task_fn fn, void* arg) nogil
+
 
 cdef class CppThreadPool:
     cdef BSThreadPoolBridge* _pool

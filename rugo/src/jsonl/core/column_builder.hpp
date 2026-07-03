@@ -111,11 +111,4 @@ std::vector<ParsedColumn> parse_all_columns(
 // the GIL. Returns a NEW reference, or NULL with an exception set on failure.
 PyObject* wrap_column(ParsedColumn& pc);
 
-// Append src's rows onto dest (same column, the next chunk of a multi-chunk scan):
-// concatenates the string bytes (rebasing offsets), appends lengths, and bit-appends
-// the null bitmap (chunk boundaries are not byte-aligned). After merging every chunk,
-// one build_typed_vector call decides the column type over all rows. dest keeps the
-// first chunk's inferred_type hint; the typed-build ladder re-validates regardless.
-void merge_string_column(StringColumnResult& dest, StringColumnResult& src);
-
 }  // namespace rugo::_jsonl

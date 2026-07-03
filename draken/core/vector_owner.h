@@ -36,6 +36,14 @@ using OwnedBuffer = std::unique_ptr<T, DrakenFree>;
 //   validity_buf — owns vec.validity (null bitmap or empty → nullptr if all-valid)
 //   codes_buf    — owns vec.selection for dict-encoded vectors (nullptr for
 //                  identity/zero selections which point at shared globals)
+//   arena_buf    — owns the long-string byte arena for DRAKEN_VARCHAR/
+//                  NVARCHAR/VARBINARY vectors whose slots are not all inline
+//                  (nullptr when every slot is inline, or for non-string
+//                  types). Slots point into this arena via a byte OFFSET
+//                  (str_data(slot, arena_buf.get())), never an absolute
+//                  pointer — see draken/core/string_slot.h. This field is
+//                  purely additive (default nullptr): every existing
+//                  consumer that never sets it keeps working unchanged.
 //   logical_type — BORROWED pointer into the global LogicalType registry.
 //                  Non-null for parameterized physical types (TIMESTAMP64, etc.).
 //                  nullptr for simple scalar types (INT64, FLOAT64, BOOL, …).
@@ -52,15 +60,18 @@ struct VectorOwner {
     OwnedBuffer<void>    data_buf;
     OwnedBuffer<uint8_t> validity_buf;
     OwnedBuffer<void>    codes_buf;   // non-null only for dict shapes
+    OwnedBuffer<uint8_t> arena_buf;   // non-null only for non-inline VARCHAR/NVARCHAR/VARBINARY
     const LogicalType*   logical_type = nullptr;  // borrowed; registry-interned
     std::unique_ptr<VectorOwner> child_owner;     // non-null only for DRAKEN_ARRAY
 
     VectorOwner(DrakenVector v,
                 OwnedBuffer<void>    d,
                 OwnedBuffer<uint8_t> val,
-                OwnedBuffer<void>    codes = OwnedBuffer<void>(nullptr)) noexcept
+                OwnedBuffer<void>    codes = OwnedBuffer<void>(nullptr),
+                OwnedBuffer<uint8_t> arena = OwnedBuffer<uint8_t>(nullptr)) noexcept
         : vec(v), data_buf(std::move(d)), validity_buf(std::move(val)),
-          codes_buf(std::move(codes)), logical_type(nullptr), child_owner(nullptr) {}
+          codes_buf(std::move(codes)), arena_buf(std::move(arena)),
+          logical_type(nullptr), child_owner(nullptr) {}
 
     VectorOwner(const VectorOwner&)            = delete;
     VectorOwner& operator=(const VectorOwner&) = delete;

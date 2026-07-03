@@ -60,7 +60,7 @@ def _special_op_types():
 def is_special_op(node) -> bool:
     """True for a non-pipeline special operation (EXPLAIN / INSERT / SET / SHOW /
     DDL). These run on ``serial_engine.execute``; every data pipeline (SELECT and
-    friends) runs on the data executor (``parallel_engine``). The dispatcher uses
+    friends) runs on the native engine (``compiler.execute_native``). The dispatcher uses
     this to triage — serial_engine is NOT a fallback for data pipelines."""
     return isinstance(node, _special_op_types())
 
@@ -111,11 +111,10 @@ def execute(
     # data-pipeline head (Exit — i.e. SELECT and friends) reaching here means the
     # data executor punted to a hidden serial fallback. We refuse to paper over
     # that (CLAUDE.md §1/§9: no fallbacks, no hidden behaviour, fail fast). The
-    # data executor (parallel_engine) owns ALL data-pipeline execution — parallel
-    # where it can, serial-driven inline where it cannot.
+    # native engine (compiler.execute_native) owns ALL data-pipeline execution.
     raise InvalidInternalStateError(
         f"serial_engine received a data-pipeline head ({type(head_node).__name__}); "
-        "SELECT/data plans must run on the data executor (parallel_engine), not here."
+        "SELECT/data plans must run on the native engine, not here."
     )
 
 
@@ -283,6 +282,31 @@ def explain(
             connector = "└─ " if index == len(opt_items) - 1 else "├─ "
             tree_col.append(connector + label)
             details_col.append(f"applied {count}×" if count > 1 else "applied")
+            rows_col.append(0)
+            time_col.append(0.0)
+            self_col.append(0.0)
+
+    # ── REWRITE TRACE: ordered strategies that changed plan structure ────────
+    # Grade-A structural trace (see QueryTelemetry.add_plan_rewrite): the
+    # sequence of plan-rewriter/optimizer strategies whose node or edge counts
+    # moved, in application order. Expression-only rewrites appear under
+    # OPTIMIZATIONS above, not here.
+    trace = getattr(telemetry, "optimizer_trace", None) or []
+    shape_changes = [entry for entry in trace if entry.get("changed")]
+    if shape_changes:
+        tree_col.append("REWRITE TRACE")
+        details_col.append("")
+        rows_col.append(0)
+        time_col.append(0.0)
+        self_col.append(0.0)
+        for index, entry in enumerate(shape_changes):
+            connector = "└─ " if index == len(shape_changes) - 1 else "├─ "
+            node_before, node_after = entry["nodes"]
+            edge_before, edge_after = entry["edges"]
+            tree_col.append(connector + entry["strategy"])
+            details_col.append(
+                f"nodes {node_before}→{node_after}, edges {edge_before}→{edge_after}"
+            )
             rows_col.append(0)
             time_col.append(0.0)
             self_col.append(0.0)

@@ -14,7 +14,10 @@ struct PageHeader {
   int32_t uncompressed_page_size = 0;
   int32_t compressed_page_size   = 0;
   int32_t num_values             = 0;
-  int32_t encoding               = 0;  // PLAIN=0, DELTA_BINARY_PACKED=4, …
+  // Parquet Encoding enum: PLAIN=0, PLAIN_DICTIONARY=2, RLE=3,
+  // BIT_PACKED=4 (deprecated), DELTA_BINARY_PACKED=5, DELTA_LENGTH_BYTE_ARRAY=6,
+  // DELTA_BYTE_ARRAY=7, RLE_DICTIONARY=8, BYTE_STREAM_SPLIT=9.
+  int32_t encoding               = 0;
   bool dictionary_is_sorted      = false;
 };
 

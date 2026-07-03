@@ -48,7 +48,29 @@ cpdef str _format_interval(value):
     return " ".join(parts)
 
 
-def format_expression(root, qualify=False):
+def format_expression(root, qualify=False, cache=None):
+    """Render an expression tree as a SQL-like string.
+
+    ``cache`` is an optional ``id(node) -> str`` memo threaded through the
+    recursion. Contract: entries are only valid while the tree is unmutated
+    and for a single ``qualify`` setting. The binder supplies a fresh cache
+    per root bind (where every subtree is rendered pristine, top-down) to
+    collapse its O(n²) per-node memo-key renders to O(n); other callers
+    should omit it.
+    """
+    if cache is None:
+        return _format_expression_inner(root, qualify, None)
+    key = id(root)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    result = _format_expression_inner(root, qualify, cache)
+    if type(result) is str:
+        cache[key] = result
+    return result
+
+
+def _format_expression_inner(root, qualify, cache):
     # Lazy: opteryx.expression imports format_expression at module load,
     # and opteryx.expression.operator_catalog imports from .expression — a
     # cycle that's only safe to break at first call.
@@ -66,7 +88,7 @@ def format_expression(root, qualify=False):
         )
 
     if type(root) is list:
-        return [format_expression(item, qualify_b) for item in root]
+        return [format_expression(item, qualify_b, cache) for item in root]
 
     node_type = root.node_type
     cdef dict _map
@@ -93,11 +115,11 @@ def format_expression(root, qualify=False):
 
     if node_type == NodeType.CASE:
         parts = "".join(
-            f"WHEN {format_expression(c, qualify_b)} THEN {format_expression(v, qualify_b)} "
+            f"WHEN {format_expression(c, qualify_b, cache)} THEN {format_expression(v, qualify_b, cache)} "
             for c, v in zip(root.conditions or [], root.results or [])
         )
         else_part = (
-            f"ELSE {format_expression(root.else_result, qualify_b)} "
+            f"ELSE {format_expression(root.else_result, qualify_b, cache)} "
             if root.else_result is not None
             else ""
         )
@@ -119,15 +141,15 @@ def format_expression(root, qualify=False):
                     f"{root.parameters[0].current_name}{order}{limit})"
                 )
             params = ",".join(
-                [format_expression(e, qualify_b) for e in root.parameters]
+                [format_expression(e, qualify_b, cache) for e in root.parameters]
             )
             return f"{root.value.upper()}({distinct}{params}{order})"
         if node_type == NodeType.CAST:
-            source_expr = format_expression(root.left, qualify_b)
+            source_expr = format_expression(root.left, qualify_b, cache)
             target_type = root.value
             if root.parameters:
                 params = ",".join(
-                    [format_expression(p, qualify_b) for p in root.parameters]
+                    [format_expression(p, qualify_b, cache) for p in root.parameters]
                 )
                 return f"{source_expr}::{target_type}({params})"
             return f"{source_expr}::{target_type}"
@@ -138,19 +160,19 @@ def format_expression(root, qualify=False):
         if node_type == NodeType.BINARY_OPERATOR:
             token = (get_operator_token(root.value) or root.value).upper()
             return (
-                f"{format_expression(root.left, qualify_b)} {token} "
-                f"{format_expression(root.right, qualify_b)}"
+                f"{format_expression(root.left, qualify_b, cache)} {token} "
+                f"{format_expression(root.right, qualify_b, cache)}"
             )
         if node_type == NodeType.EXTRACTION_OPERATOR:
             if root.value == "MapAccess":
                 return (
-                    f"{format_expression(root.left, qualify_b)}"
-                    f"[{format_expression(root.right, qualify_b)}]"
+                    f"{format_expression(root.left, qualify_b, cache)}"
+                    f"[{format_expression(root.right, qualify_b, cache)}]"
                 )
             token = (get_operator_token(root.value) or root.value).upper()
             return (
-                f"{format_expression(root.left, qualify_b)} {token} "
-                f"{format_expression(root.right, qualify_b)}"
+                f"{format_expression(root.left, qualify_b, cache)} {token} "
+                f"{format_expression(root.right, qualify_b, cache)}"
             )
         if node_type == NodeType.EXPRESSION_LIST:
             return f"<EXPRESSIONS {random_string(4)}>"
@@ -158,8 +180,8 @@ def format_expression(root, qualify=False):
     if node_type == NodeType.COMPARISON_OPERATOR:
         token = (get_operator_token(root.value) or root.value).upper()
         return (
-            f"{format_expression(root.left, qualify_b)} {token} "
-            f"{format_expression(root.right, qualify_b)}"
+            f"{format_expression(root.left, qualify_b, cache)} {token} "
+            f"{format_expression(root.right, qualify_b, cache)}"
         )
     if node_type == NodeType.UNARY_OPERATOR:
         _map = {
@@ -170,10 +192,10 @@ def format_expression(root, qualify=False):
             "BitwiseNot": "~%s",
         }
         return _map.get(root.value, root.value + "(%s)").replace(
-            "%s", format_expression(root.centre, qualify_b)
+            "%s", format_expression(root.centre, qualify_b, cache)
         )
     if node_type == NodeType.NOT:
-        return f"NOT {format_expression(root.centre, qualify_b)}"
+        return f"NOT {format_expression(root.centre, qualify_b, cache)}"
     if node_type == NodeType.AND or node_type == NodeType.OR or node_type == NodeType.XOR:
         _map = {
             NodeType.AND: "AND",
@@ -181,27 +203,27 @@ def format_expression(root, qualify=False):
             NodeType.XOR: "XOR",
         }
         return (
-            f"({format_expression(root.left, qualify_b)} "
-            f"{_map[node_type]} {format_expression(root.right, qualify_b)})"
+            f"({format_expression(root.left, qualify_b, cache)} "
+            f"{_map[node_type]} {format_expression(root.right, qualify_b, cache)})"
         )
     if node_type == NodeType.NESTED:
-        return f"({format_expression(root.centre, qualify_b)})"
+        return f"({format_expression(root.centre, qualify_b, cache)})"
     if node_type == NodeType.IDENTIFIER:
         if qualify_b and root.source:
             return root.qualified_name
         return root.current_name
     if node_type == NodeType.DNF:
         return " AND ".join(
-            [format_expression(e, qualify_b) for e in root.parameters]
+            [format_expression(e, qualify_b, cache) for e in root.parameters]
         )
     if node_type == NodeType.CNF:
         return " OR ".join(
-            [format_expression(e, qualify_b) for e in root.parameters]
+            [format_expression(e, qualify_b, cache) for e in root.parameters]
         )
     if node_type == NodeType.BETWEEN:
-        col = format_expression(root.left, qualify_b)
-        lower = format_expression(root.right, qualify_b)
-        upper = format_expression(root.centre, qualify_b)
+        col = format_expression(root.left, qualify_b, cache)
+        lower = format_expression(root.right, qualify_b, cache)
+        upper = format_expression(root.centre, qualify_b, cache)
         lower_inclusive, upper_inclusive = root.value
         if lower_inclusive and upper_inclusive:
             return f"{col} BETWEEN {lower} AND {upper}"

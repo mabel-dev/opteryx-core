@@ -135,13 +135,13 @@ update: ## Update all dependencies
 test: ## Run full test suite with compiled extensions
 	@$(PIP) install --upgrade pytest pytest-xdist
 	@clear || true
-	@MANUAL_TEST=1 $(PYTEST) -n auto --color=yes
+	@MANUAL_TEST=1 VALIDATE_OPTIMIZER_PLANS=1 $(PYTEST) -n auto --color=yes
 
 
 
 q:
 	@clear || true
-	@$(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
+	@VALIDATE_OPTIMIZER_PLANS=1 $(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
 
 dt: ## Run draken unit tests
 	$(call print_blue,"Running draken unit tests...")

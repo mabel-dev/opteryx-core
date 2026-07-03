@@ -74,6 +74,9 @@ jobs:
           MINIO_END_POINT: "s3.eu-west-2.amazonaws.com"
           GCP_PROJECT_ID: mabeldev
           OPTERYX_DEBUG: 1
+          # WP-3 guardrail: run the plan invariant checker after every optimizer
+          # strategy so plan corruption is localised to the strategy that caused it.
+          VALIDATE_OPTIMIZER_PLANS: 1
           MAX_LOCAL_BUFFER_CAPACITY: 100
           DATA_CATALOG_CONNECTION: '${{ secrets.DATA_CATALOG_CONNECTION }}'
           DATA_CATALOG_STORAGE: '${{ secrets.DATA_CATALOG_STORAGE }}'

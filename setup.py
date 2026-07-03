@@ -503,12 +503,20 @@ extensions = [
                 "opteryx.expression.functions.registrar.__init__",
                 "opteryx/expression/functions/registrar/__init__.pyx",
             ),
-            (
-                "opteryx.expression.operations.__init__",
-                "opteryx/expression/operations/__init__.pyx",
-            ),
         )
     ],
+    # operations/__init__ includes special_ops.pyx which cimports yyjson at C level.
+    # On Linux (RTLD_LOCAL), cyyjson.so symbols are not visible to other extensions,
+    # so yyjson.c must be compiled directly into this extension.
+    Extension(
+        "opteryx.expression.operations.__init__",
+        sources=[
+            "opteryx/expression/operations/__init__.pyx",
+            "third_party/yyjson/src/yyjson.c",
+        ],
+        include_dirs=include_dirs + ["third_party/yyjson/src"],
+        extra_compile_args=C_FLAGS,
+    ),
     # functions/catalog.pyx is textually included by functions/__init__.pyx;
     # registrar/* and implementations/* are similarly consolidated into their
     # package __init__ files. No per-leaf Extensions needed for any of them.
@@ -622,13 +630,29 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
     ),
-    # All operator plan nodes — single consolidated .so
+    # All operator plan nodes — single consolidated .so.
+    # bs_pool_submit_native / bs_pool_wait_native (src/cpp/bs_pool_bridge_c.h) are
+    # implemented in thread_pool.so and resolved at import time (thread_pool is
+    # loaded RTLD_GLOBAL in opteryx/compiled/__init__.py before this extension is
+    # imported) — same cross-.so bridge pattern as draken_vector_unwrap above.
     Extension(
         "opteryx.operators._operators",
         sources=[
             "opteryx/operators/_operators.pyx",
             "src/cpp/hllpp.cpp",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
+            # Native (zero-Python) engine's pool-path decimal decoder
+            # (src/cpp/engine/native_decimal_pool_decode.hpp) calls straight
+            # into opteryx::MemoryPool / deserialize_fixed_column — same
+            # CPP_FLAGS as every other extension compiling these two .cpp
+            # files (opteryx.compiled.structures.memory_pool,
+            # opteryx.compiled.structures.column_deserializer), so the
+            # per-.so copies stay layout-identical (unlike the BS::thread_pool
+            # cross-.so ABI mismatch this codebase hit previously, which was
+            # caused by differing -std=/feature-macro flags, not by multiple
+            # compiled copies per se).
+            "src/cpp/ipc_deserialize.cpp",
+            "src/cpp/memory_pool.cpp",
         ],
         include_dirs=include_dirs
         + [
@@ -636,7 +660,8 @@ extensions = [
         ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
+        extra_link_args=LD_EXTRA
+        + (["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]),
         depends=[
             "third_party/mabel/parvi/parvi.hpp",
             "third_party/mabel/carchar/carchar_index.hpp",
@@ -681,10 +706,12 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # Thread pool (BS::thread_pool via BSThreadPoolBridge)
+    # Thread pool (BS::thread_pool via BSThreadPoolBridge). thread_pool_bridge.cpp
+    # is the ONE compiled home of bs_pool_bridge_c.h's cross-.so entry points —
+    # see that header for why they must live only here.
     Extension(
         name="opteryx.compiled.thread_pool",
-        sources=["opteryx/compiled/thread_pool.pyx"],
+        sources=["opteryx/compiled/thread_pool.pyx", "opteryx/compiled/thread_pool_bridge.cpp"],
         include_dirs=include_dirs,
         extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
         language="c++",

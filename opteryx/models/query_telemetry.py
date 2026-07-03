@@ -13,6 +13,7 @@ class _QueryTelemetry:
         self._reading: dict = defaultdict(int)
         self._reading["messages"] = []
         self._reading["operations"] = {}
+        self._reading["optimizer_trace"] = []
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
@@ -37,6 +38,24 @@ class _QueryTelemetry:
     def add_message(self, message: str):
         """collect warnings"""
         self._reading["messages"].append(message)
+
+    def add_plan_rewrite(self, phase: str, strategy: str, before: tuple, after: tuple):
+        """Record a plan-shape fingerprint change from one strategy application.
+
+        Grade-A structural trace. ``before``/``after`` are ``(node_count,
+        edge_count)`` snapshots taken around a single strategy run. Structural
+        rewrites (node/edge add, remove, reshape) are visible here; expression-only
+        rewrites that leave the graph shape unchanged do not move these counts and
+        are surfaced by the per-strategy ``optimization_*`` counters instead."""
+        self._reading["optimizer_trace"].append(
+            {
+                "phase": phase,
+                "strategy": strategy,
+                "nodes": [before[0], after[0]],
+                "edges": [before[1], after[1]],
+                "changed": before != after,
+            }
+        )
 
     def as_dict(self):
         """

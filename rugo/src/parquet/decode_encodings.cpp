@@ -448,6 +448,12 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
   const uint8_t *ptr = data;
   const uint8_t *end = data + data_size;
 
+  // Reused across every bit-packed segment in this call — resize() only grows
+  // the underlying allocation on the first (largest-so-far) segment; later
+  // segments that are smaller or equal reuse the existing buffer with no
+  // realloc, avoiding a fresh heap allocation per segment.
+  std::vector<int32_t> scratch;
+
   int32_t decoded = 0;
   while (decoded < num_values && ptr < end) {
     uint32_t header = 0;
@@ -468,8 +474,7 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
       if (ptr + bytes_needed > end) break;
 
       const int32_t to_decode = std::min(values_in_run, num_values - decoded);
-      // Decode into a local scratch vector (O(segment_size), not O(column_size)).
-      std::vector<int32_t> scratch;
+      // Decode into the shared scratch buffer (O(segment_size), not O(column_size)).
       scratch.resize(to_decode);
       {
         const int32_t full_groups = to_decode / 8;

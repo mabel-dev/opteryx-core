@@ -43,6 +43,9 @@ typedef VecResult (*kernel_fn_t)(void* ctx, const DrakenVector* const* args, uin
  * Caller owns the returned context struct (if non-NULL) for the lifetime of bytecode execution.
  */
 bool kernel_registry_lookup(const char* name, kernel_fn_t* out_fn, void** out_ctx);
+// Runtime registration for kernels compiled in OTHER modules (e.g. the bespoke
+// DFA runner in opteryx's vector_ops) - called once at that module's import.
+void kernel_registry_register(const char* name, kernel_fn_t fn);
 
 /**
  * Allocate context struct for parameterized kernels.

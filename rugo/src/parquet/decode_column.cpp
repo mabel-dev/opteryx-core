@@ -794,8 +794,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     StringInternTable unified_dict_map;
     PrimitiveDictHashMap<int32_t> int32_dict_map;
     PrimitiveDictHashMap<int64_t> int64_dict_map;
-    std::unordered_map<uint32_t, int32_t> float32_dict_map;
-    std::unordered_map<uint64_t, int32_t> float64_dict_map;
+    // Keyed by IEEE-754 bit pattern (Float32Bits/Float64Bits), not by float
+    // value, so NaN payloads and -0.0/0.0 intern to distinct dictionary
+    // entries exactly as they did through std::unordered_map.
+    PrimitiveDictHashMap<uint32_t> float32_dict_map;
+    PrimitiveDictHashMap<uint64_t> float64_dict_map;
 
     // ── RLE skip-dense path gate ────────────────────────────────────────────
     // For non-nullable dict columns (max_definition_level == 0) we bypass the
@@ -995,14 +998,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
               if (col_type == "int32") {
                 int32_t* dst = xint32 ? (xint32 + off) : (ivec_i32 + off);
-                if (ptask.encoding == 4) {  // DELTA
-                  std::vector<int32_t> tmp;
-                  if (DecodeDeltaBinaryPacked(dp, ds, nv, tmp) != nv) {
+                if (ptask.encoding == 5) {  // DELTA
+                  if (DecodeDeltaBinaryPacked(dp, ds, nv, dst) != nv) {
                     any_error.store(true, std::memory_order_relaxed);
                     if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
                     return;
                   }
-                  std::copy(tmp.begin(), tmp.end(), dst);
                 } else {
                   int32_t safe = std::min(nv, (int32_t)((dend - dp) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -1013,14 +1014,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 }
               } else if (col_type == "int64") {
                 int64_t* dst = xint64 ? (xint64 + off) : (ivec_i64 + off);
-                if (ptask.encoding == 4) {  // DELTA
-                  std::vector<int64_t> tmp;
-                  if (DecodeDeltaBinaryPacked(dp, ds, nv, tmp) != nv) {
+                if (ptask.encoding == 5) {  // DELTA
+                  if (DecodeDeltaBinaryPacked(dp, ds, nv, dst) != nv) {
                     any_error.store(true, std::memory_order_relaxed);
                     if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
                     return;
                   }
-                  std::copy(tmp.begin(), tmp.end(), dst);
                 } else {
                   int32_t safe = std::min(nv, (int32_t)((dend - dp) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -1712,7 +1711,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
             std::vector<int32_t> _pd_codes;
             _pd_codes.reserve(present_count);
-            if (page_encoding == 4) {
+            if (page_encoding == 5) {
               std::vector<int32_t> page_ints;
               int32_t decoded =
                   DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
@@ -1728,12 +1727,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
             place_plain_dict_codes(_pd_codes);
           } else if (result.ext_int32) {
-            if (page_encoding == 4) {
-              std::vector<int32_t> page_ints;
-              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
+            if (page_encoding == 5) {
+              int32_t decoded = DecodeDeltaBinaryPacked(
+                  data_ptr, data_size, present_count, result.ext_int32 + result.ext_written);
               if (decoded != present_count) return result;
-              std::copy(page_ints.begin(), page_ints.end(), result.ext_int32 + result.ext_written);
-              result.ext_written += (int32_t)page_ints.size();
+              result.ext_written += decoded;
             } else {
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -1748,13 +1746,19 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               result.ext_written += safe_count;
             }
           } else {
-            if (page_encoding == 4) {
-              std::vector<int32_t> page_ints;
-              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
-                                                         present_count, page_ints);
-              if (decoded != present_count) return result;
-              result.int32_values.insert(result.int32_values.end(),
-                                          page_ints.begin(), page_ints.end());
+            if (page_encoding == 5) {
+              // int32_values is pre-reserved to the column's total row count
+              // (see the pre-loop reserve above), so this resize never
+              // reallocates in the success path — decode straight into the
+              // grown tail instead of a temp vector + insert().
+              size_t old_sz = result.int32_values.size();
+              result.int32_values.resize(old_sz + present_count);
+              int32_t decoded = DecodeDeltaBinaryPacked(
+                  data_ptr, data_size, present_count, result.int32_values.data() + old_sz);
+              if (decoded != present_count) {
+                result.int32_values.resize(old_sz);
+                return result;
+              }
             } else {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
               // LE bulk copy: on-disk int32 LE layout matches in-memory layout.
@@ -1778,7 +1782,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
             std::vector<int32_t> _pd_codes;
             _pd_codes.reserve(present_count);
-            if (page_encoding == 4) {
+            if (page_encoding == 5) {
               std::vector<int64_t> page_ints;
               int32_t decoded =
                   DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
@@ -1802,12 +1806,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
             place_plain_dict_codes(_pd_codes);
           } else if (result.ext_int64) {
-            if (page_encoding == 4) {
-              std::vector<int64_t> page_ints;
-              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
+            if (page_encoding == 5) {
+              int32_t decoded = DecodeDeltaBinaryPacked(
+                  data_ptr, data_size, present_count, result.ext_int64 + result.ext_written);
               if (decoded != present_count) return result;
-              std::copy(page_ints.begin(), page_ints.end(), result.ext_int64 + result.ext_written);
-              result.ext_written += (int32_t)page_ints.size();
+              result.ext_written += decoded;
             } else if (flba_byte_width > 0) {
               int32_t safe_count = std::min(
                   present_count,
@@ -1833,13 +1836,19 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               result.ext_written += safe_count;
             }
           } else {
-            if (page_encoding == 4) {
-              std::vector<int64_t> page_ints;
-              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
-                                                         present_count, page_ints);
-              if (decoded != present_count) return result;
-              result.int64_values.insert(result.int64_values.end(),
-                                          page_ints.begin(), page_ints.end());
+            if (page_encoding == 5) {
+              // int64_values is pre-reserved to the column's total row count
+              // (see the pre-loop reserve above), so this resize never
+              // reallocates in the success path — decode straight into the
+              // grown tail instead of a temp vector + insert().
+              size_t old_sz = result.int64_values.size();
+              result.int64_values.resize(old_sz + present_count);
+              int32_t decoded = DecodeDeltaBinaryPacked(
+                  data_ptr, data_size, present_count, result.int64_values.data() + old_sz);
+              if (decoded != present_count) {
+                result.int64_values.resize(old_sz);
+                return result;
+              }
             } else if (flba_byte_width > 0) {
               int32_t safe_count = std::min(
                   present_count,
@@ -1916,7 +1925,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             result.string_dict_lens.clear();
             byte_array_dict_mode = false;
           }
-          if (page_encoding == 6) {
+          if (page_encoding == 7) {
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
                                                     present_count, page_strs);
@@ -1955,9 +1964,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         } else if (result.type == "float32") {
           if (float32_dict_mode) {
             if (float32_dict_map.empty()) {
-              float32_dict_map.reserve(result.dict_float32_values.size() * 2 + 1);
+              // Seed from dict_float32_values (float) keyed by bit pattern (uint32_t) —
+              // can't reuse the generic SeedPrimitiveDictionaryMap since the dict-values
+              // vector element type (float) differs from the map's key type (uint32_t).
+              float32_dict_map.reserve(result.dict_float32_values.size());
               for (size_t i = 0; i < result.dict_float32_values.size(); ++i) {
-                float32_dict_map.emplace(Float32Bits(result.dict_float32_values[i]), static_cast<int32_t>(i));
+                float32_dict_map.put(Float32Bits(result.dict_float32_values[i]), static_cast<int32_t>(i));
               }
             }
             std::vector<int32_t> _pd_codes;
@@ -1966,14 +1978,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               float value = ReadFloat32(data_ptr);
               data_ptr += 4;
               uint32_t key = Float32Bits(value);
-              auto it = float32_dict_map.find(key);
-              int32_t code;
-              if (it == float32_dict_map.end()) {
+              int32_t code = float32_dict_map.find(key);
+              if (code < 0) {
                 code = static_cast<int32_t>(result.dict_float32_values.size());
-                float32_dict_map.emplace(key, code);
+                float32_dict_map.put(key, code);
                 result.dict_float32_values.push_back(value);
-              } else {
-                code = it->second;
               }
               _pd_codes.push_back(code);
             }
@@ -2007,9 +2016,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         } else if (result.type == "float64") {
           if (float64_dict_mode) {
             if (float64_dict_map.empty()) {
-              float64_dict_map.reserve(result.dict_float64_values.size() * 2 + 1);
+              // See the float32 branch above: manual seed loop because dict_float64_values
+              // (double) and the map's key type (uint64_t bit pattern) differ.
+              float64_dict_map.reserve(result.dict_float64_values.size());
               for (size_t i = 0; i < result.dict_float64_values.size(); ++i) {
-                float64_dict_map.emplace(Float64Bits(result.dict_float64_values[i]), static_cast<int32_t>(i));
+                float64_dict_map.put(Float64Bits(result.dict_float64_values[i]), static_cast<int32_t>(i));
               }
             }
             std::vector<int32_t> _pd_codes;
@@ -2018,14 +2029,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               double value = ReadFloat64(data_ptr);
               data_ptr += 8;
               uint64_t key = Float64Bits(value);
-              auto it = float64_dict_map.find(key);
-              int32_t code;
-              if (it == float64_dict_map.end()) {
+              int32_t code = float64_dict_map.find(key);
+              if (code < 0) {
                 code = static_cast<int32_t>(result.dict_float64_values.size());
-                float64_dict_map.emplace(key, code);
+                float64_dict_map.put(key, code);
                 result.dict_float64_values.push_back(value);
-              } else {
-                code = it->second;
               }
               _pd_codes.push_back(code);
             }

@@ -202,6 +202,28 @@ cdef extern from "core/draken_bridge.h":
 cdef extern from "core/buffers.h" nogil:
     int draken_is_compressed(const DrakenVector* v)
 
+# c-native BC_FUNCTION kernel plumbing (Phase 9a-fn shape) — lets _DFA_EXTRACT
+# dispatch straight from the nogil DV VM, same ABI as draken/ops/kernels/*.
+cdef extern from "ops/vec_result.h":
+    ctypedef struct VecResult:
+        void*             data
+        uint8_t*          validity
+        const uint32_t*   selection
+        bint              owns_selection
+        uint32_t          data_length
+        uint32_t          length
+        DrakenType        type
+        uint8_t           flags
+        uint8_t           validity_embedded
+
+cdef extern from "ops/kernels/error_handling.h" nogil:
+    VecResult draken_error_sentinel(const char* error_message)
+
+cdef extern from "ops/kernels/result_helpers.h" nogil:
+    VecResult vecresult_from_string_buffers(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint8_t* validity, uint32_t length, DrakenType type)
+
 
 cdef enum DfaOpType:
     DFA_OP_CONSUME_LITERAL = 1
@@ -238,13 +260,13 @@ cdef struct DfaProgramBuilder:
     int op_count
 
 
-cdef inline uint8_t _read_u8(const char** p) noexcept:
+cdef inline uint8_t _read_u8(const char** p) noexcept nogil:
     cdef uint8_t value = (<const uint8_t*>p[0])[0]
     p[0] += 1
     return value
 
 
-cdef inline uint32_t _read_u32(const char** p) noexcept:
+cdef inline uint32_t _read_u32(const char** p) noexcept nogil:
     cdef const uint8_t* src = <const uint8_t*>p[0]
     cdef uint32_t value = (
         <uint32_t>src[0]
@@ -256,11 +278,15 @@ cdef inline uint32_t _read_u32(const char** p) noexcept:
     return value
 
 
-cdef inline void _decode_procedure(
+cdef inline bint _decode_procedure(
     const char* program_ptr,
     Py_ssize_t program_len,
     DfaProcedure* proc,
-) except *:
+) noexcept nogil:
+    """Parse a compiled DFA program blob. Returns False (never raises) on any
+    malformed input — nogil so the c-native BC_FUNCTION kernel below can decode
+    the (per-morsel constant) program without touching the GIL. The sole GIL-side
+    caller (vector_dfa_extract) raises ValueError itself on a False return."""
     cdef const char* p = program_ptr
     cdef const char* end = program_ptr + program_len
     cdef uint8_t version
@@ -270,19 +296,19 @@ cdef inline void _decode_procedure(
     cdef int i
 
     if program_ptr == NULL or program_len < 2:
-        raise ValueError("vector_dfa_extract: compiled program blob is invalid")
+        return False
 
     version = _read_u8(&p)
     if version != 1:
-        raise ValueError("vector_dfa_extract: unsupported compiled program version")
+        return False
 
     op_count = _read_u8(&p)
     if op_count == 0 or op_count > 8:
-        raise ValueError("vector_dfa_extract: compiled program op count is invalid")
+        return False
 
     for i in range(op_count):
         if p >= end:
-            raise ValueError("vector_dfa_extract: compiled program truncated")
+            return False
 
         op_type = _read_u8(&p)
         proc.ops[i].op_type = op_type
@@ -294,12 +320,12 @@ cdef inline void _decode_procedure(
 
         if op_type == DFA_OP_CONSUME_LITERAL or op_type == DFA_OP_CONSUME_OPTIONAL_LITERAL:
             if end - p < 4:
-                raise ValueError("vector_dfa_extract: compiled literal header truncated")
+                return False
             literal_len = _read_u32(&p)
             if literal_len == 0:
-                raise ValueError("vector_dfa_extract: compiled literal length is invalid")
+                return False
             if end - p < literal_len:
-                raise ValueError("vector_dfa_extract: compiled literal payload truncated")
+                return False
             proc.ops[i].literal = p
             proc.ops[i].literal_len = <Py_ssize_t>literal_len
             # Precompute the packed/mask register form for short literals once,
@@ -314,19 +340,20 @@ cdef inline void _decode_procedure(
 
         elif op_type == DFA_OP_CAPTURE_UNTIL_CHAR:
             if p >= end:
-                raise ValueError("vector_dfa_extract: compiled capture target missing")
+                return False
             proc.ops[i].target_char = <char>_read_u8(&p)
 
         elif op_type == DFA_OP_CONSUME_TO_END or op_type == DFA_OP_RETURN_CAPTURE:
             pass
 
         else:
-            raise ValueError("vector_dfa_extract: compiled program contains unsupported opcode")
+            return False
 
     if p != end:
-        raise ValueError("vector_dfa_extract: compiled program has trailing bytes")
+        return False
 
     proc.op_count = op_count
+    return True
 
 
 cdef inline void _write_u8(char** p, uint8_t value) noexcept:
@@ -1018,6 +1045,153 @@ cdef object _vector_dfa_extract_compressed(
     )
 
 
+# ---------------------------------------------------------------------------
+# c-native BC_FUNCTION kernel — draken__dfa_extract(strings, compiled_program)
+# ---------------------------------------------------------------------------
+# The generic NT_FUNCTION lowering (compiled_expression.pyx) resolves
+# "draken_" + func_val.lower() for ANY function name with no special-casing
+# needed; for _DFA_EXTRACT that's "draken__dfa_extract" (double underscore).
+# Both call arguments are pushed as usual — args[1] is the optimizer's
+# compiled-program VARBINARY CONSTANT literal (same shape every row), decoded
+# ONCE per kernel call (not per row) via the nogil _decode_procedure above.
+# Uses the uniform data[selection[i]] read (buffers.h contract) for BOTH
+# operands, so it's correct for any shape (dense/dict/constant) of the string
+# input — no shape-specific dispatch (the existing dict "compressed" fast path
+# above stays Python/GIL-only; this kernel does not call it).
+cdef VecResult _dfa_extract_kernel(
+    void* ctx, const DrakenVector* const* args, uint32_t nargs,
+) noexcept nogil:
+    if nargs != 2:
+        return draken_error_sentinel("draken__dfa_extract: expected 2 arguments")
+    cdef const DrakenVector* v = args[0]
+    cdef const DrakenVector* pv = args[1]
+    if pv.length == 0:
+        return draken_error_sentinel("draken__dfa_extract: missing compiled program")
+
+    cdef const DrakenStringArena* p_arena = <const DrakenStringArena*>pv.data
+    cdef const DrakenStringSlot* p_slot = &p_arena.slots[pv.selection[0]]
+    cdef const char* program_ptr = <const char*>str_data(p_slot, p_arena.arena)
+    cdef Py_ssize_t program_len = <Py_ssize_t>str_length(p_slot)
+
+    cdef DfaProcedure proc
+    if not _decode_procedure(program_ptr, program_len, &proc):
+        return draken_error_sentinel("draken__dfa_extract: compiled program blob is invalid")
+
+    cdef const DrakenStringArena* src_arena = <const DrakenStringArena*>v.data
+    cdef const uint32_t* sel = v.selection
+    cdef const uint8_t* nulls = v.validity
+    cdef Py_ssize_t n = <Py_ssize_t>v.length
+
+    cdef Py_ssize_t i
+    cdef const char* out_ptr = NULL
+    cdef Py_ssize_t out_len = 0
+    cdef Py_ssize_t total_bytes = 0
+    cdef Py_ssize_t row_len = 0
+    cdef const char* row_ptr = NULL
+    cdef Py_ssize_t null_bytes = 0
+    cdef const DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
+
+    cdef size_t cache_n = <size_t>(n if n > 0 else 1)
+    cdef const char** cap_ptrs = <const char**>malloc(cache_n * sizeof(const char*))
+    cdef int32_t* cap_lens = <int32_t*>malloc(cache_n * sizeof(int32_t))
+    if cap_ptrs == NULL or cap_lens == NULL:
+        free(cap_ptrs)
+        free(cap_lens)
+        return draken_error_sentinel("draken__dfa_extract: cache allocation failed")
+
+    for i in range(n):
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+            cap_ptrs[i] = NULL
+            cap_lens[i] = 0
+            continue
+
+        slot = &src_arena.slots[sel[i]]
+        slen = str_length(slot)
+        sdata = str_data(slot, src_arena.arena)
+        row_ptr = <const char*>sdata
+        row_len = <Py_ssize_t>slen
+
+        if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
+            cap_ptrs[i] = out_ptr
+            cap_lens[i] = <int32_t>out_len
+            if out_len > STR_INLINE_MAX:
+                total_bytes += out_len
+        else:
+            cap_ptrs[i] = row_ptr
+            cap_lens[i] = <int32_t>(-row_len - 1)
+            if row_len > STR_INLINE_MAX:
+                total_bytes += row_len
+
+    cdef size_t slots_sz = <size_t>n * sizeof(DrakenStringSlot) if n > 0 else sizeof(DrakenStringSlot)
+    cdef size_t arena_sz = <size_t>total_bytes if total_bytes > 0 else 1
+    cdef DrakenStringSlot* out_slots = <DrakenStringSlot*>draken_malloc(slots_sz)
+    cdef uint8_t* out_arena = <uint8_t*>draken_malloc(arena_sz)
+    cdef uint8_t* out_null = NULL
+
+    if out_slots == NULL or out_arena == NULL:
+        free(cap_ptrs)
+        free(cap_lens)
+        draken_free(out_slots)
+        draken_free(out_arena)
+        return draken_error_sentinel("draken__dfa_extract: output allocation failed")
+
+    if nulls != NULL:
+        null_bytes = (n + 7) >> 3
+        out_null = <uint8_t*>draken_malloc(<size_t>null_bytes if null_bytes > 0 else 1)
+        if out_null == NULL:
+            free(cap_ptrs)
+            free(cap_lens)
+            draken_free(out_slots)
+            draken_free(out_arena)
+            return draken_error_sentinel("draken__dfa_extract: validity allocation failed")
+        memcpy(out_null, nulls, <size_t>null_bytes)
+
+    cdef const char* cached_ptr
+    cdef int32_t cached_len
+    cdef uint32_t copy_len
+    cdef size_t arena_used = 0
+    cdef const DrakenStringSlot* psrc
+
+    for i in range(n):
+        cached_ptr = cap_ptrs[i]
+        cached_len = cap_lens[i]
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+            memset(&out_slots[i], 0, sizeof(DrakenStringSlot))
+            continue
+        if cached_len >= 0:
+            copy_len = <uint32_t>cached_len
+            if copy_len > <uint32_t>STR_INLINE_MAX:
+                memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+                draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
+                arena_used += <size_t>copy_len
+            else:
+                draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, 0)
+        else:
+            psrc = &src_arena.slots[sel[i]]
+            if str_is_inline(psrc):
+                str_clone_with_offset(&out_slots[i], psrc, 0)
+            else:
+                copy_len = <uint32_t>(-cached_len - 1)
+                memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+                str_clone_with_offset(&out_slots[i], psrc, <uint32_t>arena_used)
+                arena_used += <size_t>copy_len
+
+    free(cap_ptrs)
+    free(cap_lens)
+
+    return vecresult_from_string_buffers(
+        out_slots, out_arena, arena_used, out_null, <uint32_t>n, DRAKEN_VARCHAR)
+
+
+# Register with the C-ABI kernel registry at import time (this module is
+# textually included into vector_ops.pyx, which the function registrar
+# imports before any bind-time resolution can run — see text.pyx:363).
+from draken.ops.kernels._kernel_registry import register_kernel as _register_dfa_kernel
+_register_dfa_kernel("draken__dfa_extract", <unsigned long long><size_t>&_dfa_extract_kernel)
+
+
 cpdef object vector_dfa_extract(
     Vector data,
     Vector compiled_program,
@@ -1033,7 +1207,8 @@ cpdef object vector_dfa_extract(
     cdef DfaProcedure proc
 
     _extract_const_slice(compiled_program, &program_ptr, &program_len)
-    _decode_procedure(program_ptr, program_len, &proc)
+    if not _decode_procedure(program_ptr, program_len, &proc):
+        raise ValueError("vector_dfa_extract: compiled program blob is invalid")
 
     cdef DrakenVector* uv = data.unified()
     cdef DrakenStringArena* src_arena = <DrakenStringArena*>uv.data

@@ -121,6 +121,7 @@ class OptimizerVisitor:
         Initialize the OptimizerVisitor with a list of optimization strategies.
         Each strategy encapsulates a specific optimization rule.
         """
+        self.telemetry = telemetry
         self.strategies = [
             ConstantFoldingStrategy(telemetry),
             StatisticsOnlyResponseStrategy(telemetry),
@@ -222,7 +223,14 @@ class OptimizerVisitor:
                     and getattr(current_plan, "statistics_are_stale", True)
                 ):
                     current_plan = refresh_statistics(current_plan)
+                before = (len(current_plan), len(current_plan.edges()))
                 current_plan = self.traverse(current_plan, strategy)
+                self.telemetry.add_plan_rewrite(
+                    "optimizer",
+                    strategy.__class__.__name__,
+                    before,
+                    (len(current_plan), len(current_plan.edges())),
+                )
                 if VALIDATE_OPTIMIZER_PLANS:
                     # Debug guardrail (WP-3): localise plan corruption to the
                     # strategy that produced it. Off by default; zero cost then.

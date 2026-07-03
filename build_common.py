@@ -550,7 +550,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/binary_op_other.cpp",
                 "draken/ops/kernels/binary_op_temporal.cpp",
                 "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
-                # Function kernels deferred to Phase 9f; they require nanobind wrappers not yet ported to extern "C"
+                "draken/ops/kernels/function_kernels.cpp",  # Phase 9a-fn: scalar function kernels (C ABI)
                 # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
@@ -604,7 +604,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/binary_op_other.cpp",
                 "draken/ops/kernels/binary_op_temporal.cpp",
                 "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
-                # Function kernels deferred to Phase 9f
+                "draken/ops/kernels/function_kernels.cpp",  # Phase 9a-fn: scalar function kernels (C ABI)
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
                 "src/cpp/cpu_features.cpp",

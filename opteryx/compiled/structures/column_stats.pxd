@@ -13,7 +13,7 @@ cdef class FileColumnStats:
     cdef dict _min_cache                    # {int field_id: decoded Python value}
     cdef dict _max_cache                    # {int field_id: decoded Python value}
 
-    cdef void bind_schema(self, list column_names)
+    cpdef void bind_schema(self, list column_names)
     cdef object _decode(self, int stat_idx, bint want_min)
     cpdef object get_min(self, int field_id)
     cpdef object get_max(self, int field_id)

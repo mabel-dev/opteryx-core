@@ -90,6 +90,11 @@ extern "C" DrakenVector* draken_compare_dv(
         switch (left->type) {
             case DRAKEN_INT64:
             case DRAKEN_TIMESTAMP64:
+            case DRAKEN_DECIMAL:
+                // DECIMAL (int64 unscaled) ordering == int64 ordering PROVIDED both
+                // operands share one scale — which the binder guarantees for every
+                // compare it emits (comparison literals are materialized at the
+                // column's own scale; cross-scale columns are cast upstream).
                 // TIMESTAMP64 is int64 storage; ordering on the unscaled
                 // microseconds-since-epoch value is identical to int64
                 // ordering. Same kernel.

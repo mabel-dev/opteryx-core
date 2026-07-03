@@ -27,7 +27,15 @@ inline bool parse_bool_wrapper(const uint8_t* buffer, uint32_t start, uint32_t e
     return parse_bool(buffer, start, end, out);
 }
 
-// Compare value with a predicate value (as string) using comparison op
+// Parse pred.value as int64/float64 ONCE and cache the result on the Predicate
+// (pred_int/pred_float/pred_parsed_int/pred_parsed_float). Call once per predicate
+// before the per-record evaluation loop — evaluate_predicate() reads the cached
+// fields instead of re-parsing pred.value on every call.
+void prepare_predicate(Predicate& pred);
+
+// Compare value with a predicate value (as string) using comparison op. pred must have
+// been passed through prepare_predicate() first (its numeric cache is read, not computed
+// here).
 bool evaluate_predicate(
     const uint8_t* buffer,
     const FieldSpan& value_span,

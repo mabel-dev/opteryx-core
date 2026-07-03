@@ -152,6 +152,20 @@ cdef enum BCInstrFlag:
     # owner) → safe for the whole-bytecode nogil DV* path. Set at bind time where
     # the result type is known. Cleared = string result (stays GIL).
     BC_C_NATIVE_FIXED = 0x2000
+    # Result is a canonical-consolidated-block STRING (result_helpers.h): the nogil
+    # VM folds it into the frame arena directly — no Python wrap needed.
+    BC_C_NATIVE_STRING = 0x4000
+    # Result is a descriptor-carrying fixed type (DECIMAL p<=18 / TIMESTAMP64):
+    # the nogil VM folds the RAW values; the descriptor is re-attached at the
+    # plan-known boundary (engine ExprProject). NOT admitted by is_all_c_native
+    # (the old GIL paths have no re-attachment point) — engine-only.
+    BC_C_NATIVE_DESC = 0x8000
+    # ARRAY->VARCHAR: kernel takes TWO vectors (parent + the owner-held child
+    # element vector, resolved per morsel from the CxxMorsel). Engine-only —
+    # the GIL Morsel VM and the Python-Morsel nogil path have no child access,
+    # so is_all_c_native excludes it; bytecode_ops_all_c_native (engine) admits
+    # it via the STRING bit it always rides with.
+    BC_C_NATIVE_CHILD = 0x10000
 
 
 ctypedef struct BytecodeInstr:

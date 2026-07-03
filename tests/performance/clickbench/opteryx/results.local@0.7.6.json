@@ -1,7 +1,7 @@
 Running ClickBench on Python 3.14.5  (GIL enabled: False)
 ================================================================================
 CLICKBENCH WARM PERFORMANCE BENCHMARK
-Version: 0.8.7
+Version: 0.9.0
 Iterations per query: 2
 Dataset: FULL_SPLIT (scratch.hits)
 Baseline: DuckDB on Justins-MacBook-Pro.local (arm) (comparing to warm2 times)
@@ -54,13 +54,13 @@ Q42/41          39.73ms        39.73ms              -     39.73ms       39.73ms 
 Q43/42          40.26ms        40.48ms              -     40.37ms       40.26ms       40.48ms  [3.66x]
 --- ✅ done
 
-make clickbench (45.91 seconds) <- best ever on rugo parquet files [256K rg] (30-JUN)
+make clickbench (42.68 seconds) <- best ever on rugo parquet files [256K rg] (03-JUL)
 
 (251.24 seconds) <- 0.26.8
 (49.09 seconds) <- best on clickbench parquet files (25-JUN)
 
 make tpch - (4602.2ms) (26-JUN)
-make medicare1 - (4397.1ms) (29-JUN)
+make medicare1 - (4356.9ms) (30-JUN)
 
 make job - (60948.0ms) (43 fails) (27-JUN)
 make h2o - (431.3s) (2 fails) (25-JUN)

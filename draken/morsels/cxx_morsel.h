@@ -61,3 +61,16 @@ struct CxxMorsel {
     }
     size_t num_columns() const noexcept { return columns.size(); }
 };
+
+// ARRAY child access for the expression VM: an ARRAY column's elements live in
+// the VectorOwner's child_owner subtree, not in the 40-byte parent view. The
+// VM's BC_C_NATIVE_CHILD cast path resolves the child per morsel through this
+// accessor (the .pxd intentionally hides `own` from Cython). nullptr when the
+// column is out of range, unowned, or has no child.
+static inline const DrakenVector* cxx_column_child_vec(const CxxMorsel* m,
+                                                       uint32_t idx) noexcept {
+    if (m == nullptr || idx >= m->columns.size()) return nullptr;
+    const CxxColumn& c = m->columns[idx];
+    if (!c.own || !c.own->child_owner) return nullptr;
+    return &c.own->child_owner->vec;
+}

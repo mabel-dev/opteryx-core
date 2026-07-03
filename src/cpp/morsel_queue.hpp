@@ -24,6 +24,26 @@
 // FIFO; the per-shape fan-out has N producers whose morsels are order-independent
 // (concatenated downstream). Result ordering (ORDER BY) is an operator concern,
 // never the queue's — do not assume a global order across producers here.
+//
+// finish() / graceful end-of-data: NOT an in-band sentinel. An in-band NULL-morsel
+// sentinel (the original design) is enqueued via the SAME per-calling-thread
+// sub-queue mechanism as data — if `finish()` is called from a DIFFERENT thread
+// than the one(s) that wrote the data (e.g. a driver thread calling finish() after
+// joining worker threads that did the writing), moodycamel's cross-producer
+// ordering gives NO guarantee the sentinel is dequeued after all real data — found
+// as a genuine, reproducible row-loss bug under slow-consumer backpressure (real
+// production diagnosis, not a synthetic concern). FIX: finish() increments an
+// out-of-band atomic counter; get() only ever reports a finish event when the
+// queue is GENUINELY data-empty (size_approx()==0) at the moment of the check —
+// never competing with real data sitting in a different producer's sub-queue. This
+// is safe because finish() must only be called once its producer's writes are
+// PROVABLY complete (e.g. after std::thread::join()) — by the time finish() runs,
+// that producer can never enqueue again, so there's no race between "did I miss a
+// concurrent write" the way the size_approx() "approximate" caveat would otherwise
+// suggest. Supports BOTH single-producer-finishes-once and N-producers-each-
+// finish-independently callers (each finish() call yields exactly one FINISHED
+// event from get(), order of finish() calls is not guaranteed — matches the
+// existing "N producers' morsels are order-independent" contract above).
 
 #include <atomic>
 #include <cstddef>
@@ -56,18 +76,41 @@ class MorselQueue {
         return true;
     }
 
-    // Consumer. Blocks until a morsel is available; returns false once the queue
-    // is closed AND drained. On success releases the producer slot the morsel held.
-    bool get(std::shared_ptr<CxxMorsel>& out) noexcept {
+    enum class Status { DATA, FINISHED, ABANDONED };
+
+    // Consumer. Blocks until a morsel is available, a finish() event is reported
+    // (queue genuinely data-empty, see the finish()/Status doc above), or the queue
+    // is closed-and-drained (ABANDONED). On DATA, releases the producer slot the
+    // morsel held.
+    Status get(std::shared_ptr<CxxMorsel>& out) noexcept {
         for (;;) {
             if (q_.wait_dequeue_timed(out, kWaitUs)) {
                 slots_.signal();
-                return true;
+                return Status::DATA;
             }
             if (closed_.load(std::memory_order_acquire) && q_.size_approx() == 0) {
-                return false;
+                return Status::ABANDONED;
+            }
+            long long seen = finish_count_.load(std::memory_order_acquire);
+            if (seen > 0 && q_.size_approx() == 0) {
+                // CAS-claim one signal (single-consumer by design; defensive against
+                // a future multi-consumer caller racing for the same signal).
+                long long expected = seen;
+                if (finish_count_.compare_exchange_strong(
+                        expected, seen - 1, std::memory_order_acq_rel)) {
+                    return Status::FINISHED;
+                }
+                // lost the CAS — another get() claimed it; loop and re-check.
             }
         }
+    }
+
+    // Signal ONE producer's graceful completion. Safe to call once (single
+    // producer) or N times (N independent producers, each finishing on its own
+    // thread) — see the class-level doc for why this is safe regardless of which
+    // thread wrote the data.
+    void finish() noexcept {
+        finish_count_.fetch_add(1, std::memory_order_acq_rel);
     }
 
     // Idempotent. Marks closed, drops every queued morsel (freeing it via its
@@ -86,13 +129,14 @@ class MorselQueue {
     std::size_t size_approx() const noexcept { return q_.size_approx(); }
 
   private:
-    // Poll granularity for observing close() out of a blocking wait. Morsels are
-    // coarse (thousands of rows), so a 1 ms close-latency ceiling is immaterial to
-    // throughput and avoids sentinel bookkeeping.
+    // Poll granularity for observing close()/finish() out of a blocking wait.
+    // Morsels are coarse (thousands of rows), so a 1 ms latency ceiling is
+    // immaterial to throughput.
     static constexpr std::int64_t kWaitUs = 1000;
 
     moodycamel::BlockingConcurrentQueue<std::shared_ptr<CxxMorsel>> q_;
     moodycamel::LightweightSemaphore slots_;
     std::atomic<bool> closed_{false};
+    std::atomic<long long> finish_count_{0};
     std::size_t capacity_;
 };

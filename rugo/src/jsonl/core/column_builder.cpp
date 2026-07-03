@@ -168,14 +168,65 @@ StringColumnResult extract_column(
     const size_t bitmap_bytes = (num_rows + 7) >> 3;
     result.null_bitmap.assign(bitmap_bytes, 0xFF);
 
-    // Infer type from first non-null value
+    // Resolve each row to its FieldSpan (or nullptr if the key is absent); infer the
+    // column's type from the first non-null value and detect column-scoped escapes in the
+    // SAME pass (one combined key-matching walk, same total cost as the old resolve pass —
+    // the old code's separate infer-loop duplicated this key-matching work in its own pass).
+    // Value emission is a second, cheap pointer-chase pass below, once do_unescape is known.
+    //
+    // Column-scoped escape detection: a column only pays the copy+unescape cost if one of
+    // ITS OWN values contains a backslash. `may_have_escapes` is a cheap whole-buffer
+    // pre-check (computed once by the caller) that short-circuits this to zero cost when the
+    // file has no backslashes anywhere; when it does, this narrows the penalty from "every
+    // string column in the file" down to "columns that actually need unescaping" (e.g. a
+    // nested text field with a backslash no longer taxes sibling scalar columns).
+    std::vector<const FieldSpan*> resolved(num_rows, nullptr);
+
+    // First-byte fast reject (mirrors WantedColumn's `first` field in interpreter.hpp):
+    // key_width already gates out most non-matching fields, but same-length different-
+    // content keys (common in wide/hetero-order records) still paid a full memcmp call.
+    // Checking the first byte first turns most of those into a single byte compare.
+    const uint8_t col_first = col_len ? static_cast<uint8_t>(column_name[0]) : 0;
+
+    auto candidates = predictor.get_candidates(column_name);
+    uint16_t last_seen = candidates.empty() ? 0xFFFF : candidates[0];
+    bool inferred = false;
+    bool col_has_escape = false;
+
     for (size_t row = 0; row < num_rows; ++row) {
         const auto& record = records[row];
-        for (const auto& f : record) {
-            if (f.key_width == col_len &&
+        const FieldSpan* found = nullptr;
+
+        // Fast path: try predicted ordinal first
+        if (last_seen != 0xFFFF && last_seen < record.size()) {
+            const auto& f = record[last_seen];
+            if (f.key_width == col_len && buffer[f.key_start] == col_first &&
                 std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                if (!is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
-                    uint8_t vt = f.type;
+                found = &f;
+            }
+        }
+
+        // Slow path: linear scan (fallback if prediction missed)
+        if (found == nullptr) {
+            for (size_t i = 0; i < record.size(); ++i) {
+                const auto& f = record[i];
+                if (f.key_width == col_len && buffer[f.key_start] == col_first &&
+                    std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
+                    last_seen = static_cast<uint16_t>(i);
+                    predictor.update_history(column_name, last_seen);
+                    found = &f;
+                    break;
+                }
+            }
+        }
+
+        if (found != nullptr) {
+            resolved[row] = found;
+            const bool val_null =
+                is_null(buffer, found->value_start, found->value_start + found->value_width - 1);
+            if (!val_null) {
+                if (!inferred) {
+                    uint8_t vt = found->type;
                     if (vt == static_cast<uint8_t>(ValueType::String))
                         result.inferred_type = ColumnType::String;
                     else if (vt == static_cast<uint8_t>(ValueType::Boolean))
@@ -184,18 +235,20 @@ StringColumnResult extract_column(
                         result.inferred_type = ColumnType::Int64;
                     else if (vt == static_cast<uint8_t>(ValueType::Double))
                         result.inferred_type = ColumnType::Float64;
-                    goto infer_done;
+                    inferred = true;
                 }
-                break;
+                if (may_have_escapes && !col_has_escape &&
+                    found->type == static_cast<uint8_t>(ValueType::String) &&
+                    std::memchr(buffer + found->value_start, '\\', found->value_width) != nullptr) {
+                    col_has_escape = true;
+                }
             }
+        } else {
+            result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
         }
     }
-    infer_done:
 
-    // Unescape only string columns, and only when the buffer actually contains a backslash
-    // (escape-free data keeps the zero-copy fast path). Unescaping copies into result.data,
-    // so it forces copy mode; flag it so the consumer reads slices from data, not the buffer.
-    const bool do_unescape = may_have_escapes && (result.inferred_type == ColumnType::String);
+    const bool do_unescape = col_has_escape && result.inferred_type == ColumnType::String;
     result.data_owned = copy_bytes || do_unescape;
 
     // Preallocate estimated string data (rough estimate)
@@ -225,43 +278,9 @@ StringColumnResult extract_column(
         }
     };
 
-    // Get ordinal prediction candidates for this column
-    auto candidates = predictor.get_candidates(column_name);
-    uint16_t last_seen = candidates.empty() ? 0xFFFF : candidates[0];
-
     for (size_t row = 0; row < num_rows; ++row) {
-        const auto& record = records[row];
-        bool found = false;
-
-        // Fast path: try predicted ordinal first
-        if (last_seen != 0xFFFF && last_seen < record.size()) {
-            const auto& f = record[last_seen];
-            if (f.key_width == col_len &&
-                std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                emit_value(f, row);
-                found = true;
-            }
-        }
-
-        // Slow path: linear scan (fallback if prediction missed)
-        if (!found) {
-            for (size_t i = 0; i < record.size(); ++i) {
-                const auto& f = record[i];
-                if (f.key_width == col_len &&
-                    std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                    last_seen = static_cast<uint16_t>(i);
-                    predictor.update_history(column_name, last_seen);
-                    emit_value(f, row);
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        // Column not found in this record
-        if (!found) {
-            result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-        }
+        const FieldSpan* f = resolved[row];
+        if (f != nullptr) emit_value(*f, row);
     }
 
     return result;
@@ -493,37 +512,6 @@ std::vector<ParsedColumn> parse_all_columns(
         futs.push_back(pool.submit_task([&, c]() { do_one(c); }));
     for (auto& f : futs) f.get();
     return out;
-}
-
-void merge_string_column(StringColumnResult& dest, StringColumnResult& src) {
-    if (src.num_rows == 0) return;
-    if (dest.num_rows == 0) dest.inferred_type = src.inferred_type;
-
-    const uint32_t base   = static_cast<uint32_t>(dest.data.size());
-    const size_t   dest_n = dest.num_rows;
-    const size_t   total_n = dest_n + src.num_rows;
-
-    // String bytes: append, rebasing each row's offset; lengths append as-is.
-    dest.data.insert(dest.data.end(), src.data.begin(), src.data.end());
-    dest.offsets.reserve(total_n);
-    dest.lengths.reserve(total_n);
-    for (size_t i = 0; i < src.num_rows; ++i) {
-        dest.offsets.push_back(src.offsets[i] + base);
-        dest.lengths.push_back(src.lengths[i]);
-    }
-
-    // Null bitmap: bit-append src rows starting at bit dest_n (boundary not byte-aligned).
-    const size_t new_bytes = (total_n + 7) >> 3;
-    dest.null_bitmap.resize(new_bytes, 0xFF);  // appended rows default valid
-    const bool src_has_bitmap = !src.null_bitmap.empty();
-    for (size_t i = 0; i < src.num_rows; ++i) {
-        const size_t d = dest_n + i;
-        const bool valid = src_has_bitmap ? ((src.null_bitmap[i >> 3] >> (i & 7)) & 1u) : true;
-        if (valid) dest.null_bitmap[d >> 3] |=  static_cast<uint8_t>(1u << (d & 7));
-        else       dest.null_bitmap[d >> 3] &= static_cast<uint8_t>(~(1u << (d & 7)));
-    }
-
-    dest.num_rows = total_n;
 }
 
 }  // namespace rugo::_jsonl

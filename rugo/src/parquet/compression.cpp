@@ -21,35 +21,6 @@ namespace {
     }
 } // anonymous namespace
 
-std::vector<uint8_t> DecompressData(
-    const uint8_t* compressed_data,
-    size_t compressed_size, 
-    size_t uncompressed_size,
-    CompressionCodec codec) {
-    
-    switch (codec) {
-        case CompressionCodec::UNCOMPRESSED:
-            // For uncompressed data, just copy it
-            return std::vector<uint8_t>(compressed_data, compressed_data + compressed_size);
-            
-        case CompressionCodec::SNAPPY:
-            return DecompressSnappy(compressed_data, compressed_size, uncompressed_size);
-            
-        case CompressionCodec::ZSTD:
-            return DecompressZstd(compressed_data, compressed_size, uncompressed_size);
-            
-        case CompressionCodec::GZIP:
-            return DecompressGzip(compressed_data, compressed_size, uncompressed_size);
-            
-        default: {
-            std::ostringstream oss;
-            oss << "Unsupported compression codec: " << static_cast<int>(codec) 
-                << " (" << CodecName(codec) << ")";
-            throw std::runtime_error(oss.str());
-        }
-    }
-}
-
 std::vector<uint8_t> DecompressSnappy(
     const uint8_t* data, 
     size_t size, 

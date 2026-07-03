@@ -12,10 +12,12 @@ from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
+from libcpp.pair cimport pair
+from libcpp.unordered_map cimport unordered_map
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
-from rugo.parquet_reader cimport ColumnStats, RowGroupStats
+from rugo.parquet_reader cimport ColumnStats, RowGroupStats, FileStats
 
 
 cdef extern from "io_pipeline.hpp" namespace "rugo":
@@ -113,3 +115,33 @@ cdef tuple _read_footer_payload(
 )
 
 cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str cpp_path)
+
+
+# NativeScanPlan — planning-time output for the fully-native (zero-Python)
+# scan-pull path (src/cpp/engine/native_parquet_scan_source.hpp). See the class
+# docstring in pool_reader.pyx for the scope boundary (first landing).
+cdef class NativeScanPlan:
+    cdef ParquetIOPipeline* pipeline_ptr
+    cdef unordered_map[string, FileStats]* footer_map
+    cdef vector[pair[string, int]] work_items
+    cdef vector[string] column_names
+    cdef int in_flight_limit
+    cdef int n_items
+    cdef bint _closed
+    cdef MemoryPool _pool
+
+    cpdef void close(self)
+
+
+cpdef NativeScanPlan open_native_scan_plan(
+    paths,
+    column_names,
+    int decode_workers=*,
+    predicates=*,
+    file_sizes=*,
+)
+
+# Plan-time eligibility gate for the native scan Source: proves from parsed
+# footers that every projected column, in every row group, decodes to a
+# DirectKind the Source supports (increment-1 scope: plain numerics only).
+cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=*)

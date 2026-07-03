@@ -22,3 +22,14 @@ cdef int _dv_cxx_resolve_caches(CompiledBytecode bc, const CxxMorsel* m,
 cdef int _dv_filter_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                              int* col_idx, DrakenVector** lit_dv,
                              CxxMorsel** out_filtered, int* err_op) noexcept nogil
+
+# Pure-nogil expression span for a COMPUTED column (projection twin of the filter
+# span): evaluate + deep-copy the arena result into fresh draken_malloc'd buffers
+# the caller owns. rc 0 → out_vec/out_data/out_validity/out_sel filled; 4 → kernel
+# error; 98 → non-fixed-width result; 99 → arena OOM; other → not applicable.
+from libc.stdint cimport uint8_t
+cdef int _dv_eval_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
+                           int* col_idx, DrakenVector** lit_dv,
+                           DrakenVector* out_vec, void** out_data,
+                           uint8_t** out_validity, void** out_sel,
+                           int* err_op) noexcept nogil

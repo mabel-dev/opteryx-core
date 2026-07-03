@@ -9,6 +9,7 @@
  */
 
 #include <cstdint>
+#include <cstddef>
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +88,39 @@ struct case_ctx {
     void* else_bc;         // CompiledBytecode* for else branch (may be NULL)
     int assemble_kind;     // AssembleKind enum (how to assemble result)
 };
+
+/**
+ * Context for draken_in_list — bind-time membership set, allocated by copying
+ * a Python-built blob whose first bytes ARE this header:
+ *   [u32 count][u8 kind][u8 negate][u16 pad][payload...]
+ * kind 0: count x int64 SORTED ASCENDING (int family raw values; DECIMAL raw
+ *         quantized to the column's scale at bind time).
+ * kind 1: count x (u32 len + bytes) — UTF-8/ASCII string entries.
+ * The list never contains NULL (the plan compiler rejects those lists).
+ */
+struct in_list_ctx {
+    uint32_t count;
+    uint8_t  kind;
+    uint8_t  negate;
+    uint16_t _pad;
+    /* payload bytes follow the struct inline */
+};
+
+struct in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len);
+
+/**
+ * Context for draken_substring — SUBSTRING(str, start, count). `start` is 1-based
+ * (SQL); Python-slice semantics apply after `start -= 1` (when start > 0). When
+ * has_count is 0 the substring runs to the end of the string.
+ */
+struct substring_ctx {
+    int32_t start;
+    int32_t count;
+    uint8_t has_count;
+};
+
+struct substring_ctx* kernel_alloc_substring_ctx(int32_t start, int32_t count,
+                                                 uint8_t has_count);
 
 #ifdef __cplusplus
 }

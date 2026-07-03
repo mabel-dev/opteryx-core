@@ -20,13 +20,15 @@ Context allocation (for parameterized kernels):
   free_context(ctx) -> None
 """
 
-from libc.stdint cimport uint16_t
+from libc.stdint cimport uint8_t, uint16_t, uint32_t
+from libc.stddef cimport size_t
 from cpython.ref cimport PyObject
 
 # C declarations from kernel_registry.h
 cdef extern from "ops/kernels/kernel_registry.h":
     ctypedef void* kernel_fn_t
     bint kernel_registry_lookup(const char* name, kernel_fn_t* out_fn, void** out_ctx)
+    void kernel_registry_register(const char* name, kernel_fn_t fn)
 
     ctypedef struct cast_timestamp_ctx_:
         int unit
@@ -48,7 +50,17 @@ cdef extern from "ops/kernels/kernel_registry.h":
                                               unsigned char result_precision,
                                               unsigned char left_unit,
                                               unsigned char right_unit)
+    ctypedef struct in_list_ctx_:
+        uint32_t count
+    ctypedef in_list_ctx_ in_list_ctx
+
+    ctypedef struct substring_ctx_:
+        int start
+    ctypedef substring_ctx_ substring_ctx
+
     extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code)
+    in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len)
+    substring_ctx* kernel_alloc_substring_ctx(int start, int count, uint8_t has_count)
     void kernel_free_context(void* ctx)
 
 
@@ -132,6 +144,50 @@ def alloc_extraction_ctx(int sub_op_code):
     """
     cdef extraction_ctx* ctx = kernel_alloc_extraction_ctx(<uint16_t>sub_op_code)
     return <unsigned long long>ctx
+
+
+def alloc_in_list_ctx(bytes blob):
+    """
+    Allocate context for the IN-list membership kernel (draken_in_list).
+
+    Args:
+        blob: pre-built header+payload bytes —
+            [u32 count][u8 kind][u8 negate][u16 pad][payload]
+            kind 0: count x int64 sorted ascending; kind 1: count x (u32 len + bytes).
+
+    Returns:
+        Opaque integer pointer to in_list_ctx struct
+        Caller must free via free_context() when done
+    """
+    cdef const uint8_t* p = <const uint8_t*><char*>blob
+    cdef in_list_ctx* ctx = kernel_alloc_in_list_ctx(p, <size_t>len(blob))
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_substring_ctx(int start, int count, int has_count):
+    """Allocate context for the SUBSTRING kernel (draken_substring).
+
+    Args:
+        start: 1-based start position (SQL); adjusted to 0-based in the kernel.
+        count: substring length (ignored when has_count is 0).
+        has_count: 1 if a length was supplied, else 0 (substring runs to end).
+    """
+    cdef substring_ctx* ctx = kernel_alloc_substring_ctx(
+        <int>start, <int>count, <uint8_t>has_count)
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def register_kernel(str name, unsigned long long fn_ptr):
+    """Register an externally-compiled func_fn_t kernel (e.g. the bespoke DFA
+    runner) under `name` so bind-time resolution finds it like any built-in.
+    Call once at the owning module import; the address must stay valid for the
+    process lifetime (it lives in that module loaded .so)."""
+    kernel_registry_register(name.encode("utf-8"), <kernel_fn_t><void*>fn_ptr)
+    return None
 
 
 def free_context(unsigned long long ctx_ptr):

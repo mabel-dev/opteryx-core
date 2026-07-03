@@ -153,6 +153,68 @@ def _rebuild_and_chain(conditions: list) -> LogicalPlanNode:
     return result
 
 
+def _simplify_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry):
+    """Simplify an AND chain in a single pass.
+
+    Flattens the whole chain once, simplifies each conjunct once, then folds
+    constants / removes duplicates / rebuilds a single time. Doing all of this at
+    the top of the chain avoids the previous behaviour, where the generic
+    post-order walk re-flattened the accumulated left subtree at *every* AND node
+    (O(n^2) in chain length, with an O(n^2) dedup on top). A WHERE with dozens of
+    ANDed predicates made that dominate bind+optimize time; this is O(n).
+
+    Semantics preserved from the prior pairwise implementation:
+      * a literal FALSE conjunct short-circuits the whole chain to FALSE;
+      * literal TRUE conjuncts are dropped (an all-TRUE chain collapses to TRUE);
+      * duplicate conjuncts are removed only when the flattened chain has >2
+        members (the original only deduped on the >2 flatten path).
+    """
+    # One flatten of the whole chain, then simplify each conjunct exactly once.
+    # A conjunct may itself expand into an AND (e.g. De Morgan on NOT(OR ...),
+    # NOT IN expansion); splice those back in flat so the chain stays flat.
+    processed: list = []
+    for conjunct in _flatten_and_chain(node, telemetry):
+        simplified = update_expression_tree(conjunct, telemetry)
+        if simplified is None:
+            continue
+        if simplified.node_type == NodeType.AND:
+            processed.extend(_flatten_and_chain(simplified, telemetry))
+        else:
+            processed.append(simplified)
+
+    # Constant folding: FALSE short-circuits; TRUE conjuncts drop out.
+    kept: list = []
+    true_node = None
+    for cond in processed:
+        if _is_literal_false(cond):
+            telemetry.optimization_boolean_rewrite_and_false += 1
+            return cond
+        if _is_literal_true(cond):
+            telemetry.optimization_boolean_rewrite_and_true += 1
+            true_node = cond
+            continue
+        kept.append(cond)
+
+    # All conjuncts were TRUE — the chain is TRUE.
+    if not kept:
+        return true_node
+
+    # Dedup only kicks in for chains longer than two, matching the prior >2 gate.
+    if len(kept) > 2:
+        unique: list = []
+        seen: set = set()
+        for cond in kept:
+            if cond.uuid in seen:
+                telemetry.optimization_boolean_rewrite_and_redundant += 1
+                continue
+            seen.add(cond.uuid)
+            unique.append(cond)
+        telemetry.optimization_boolean_rewrite_and_flatten += 1
+        return _rebuild_and_chain(unique)
+
+    return _rebuild_and_chain(kept)
+
+
 def _flatten_or_chain(node: LogicalPlanNode) -> list:
     """
     Flatten nested OR chains into a list of conditions.
@@ -262,6 +324,12 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
             telemetry.optimization_boolean_rewrite_double_not += 1
             return update_expression_tree(centre_node.centre, telemetry)
 
+    # AND chains: handle the whole chain in one pass (flatten, simplify each
+    # conjunct, fold/dedup/rebuild once) rather than re-flattening at every AND
+    # node during the generic post-order walk below. See _simplify_and_chain.
+    if node.node_type == NodeType.AND:
+        return _simplify_and_chain(node, telemetry)
+
     # traverse the expression tree
     node.left = None if node.left is None else update_expression_tree(node.left, telemetry)
     node.centre = None if node.centre is None else update_expression_tree(node.centre, telemetry)
@@ -275,50 +343,5 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
             )
             for parameter in node.parameters
         ]
-
-    # Additional AND simplifications for predicate pushdown
-    if node.node_type == NodeType.AND:
-        # A AND TRUE => A
-        if _is_literal_true(node.right):
-            telemetry.optimization_boolean_rewrite_and_true += 1
-            return node.left
-        if _is_literal_true(node.left):
-            telemetry.optimization_boolean_rewrite_and_true += 1
-            return node.right
-
-        # A AND FALSE => FALSE
-        if _is_literal_false(node.right):
-            telemetry.optimization_boolean_rewrite_and_false += 1
-            return node.right
-        if _is_literal_false(node.left):
-            telemetry.optimization_boolean_rewrite_and_false += 1
-            return node.left
-
-        # Flatten nested AND chains to prepare for predicate pushdown
-        # Only flatten chains with more than 2 conditions to enable better pushdown
-        # ((A AND B) AND C) => (A AND (B AND C))
-        conditions = _flatten_and_chain(node, telemetry)
-
-        # Only proceed with flattening if we have more than 2 conditions
-        if len(conditions) > 2:
-            # Remove duplicate conditions from the chain
-            # A AND A => A
-            unique_conditions = []
-            for condition in conditions:
-                is_duplicate = False
-                for existing in unique_conditions:
-                    # Simple check: compare node structure (UUIDs should be same for duplicates)
-                    if condition.uuid == existing.uuid:
-                        telemetry.optimization_boolean_rewrite_and_redundant += 1
-                        is_duplicate = True
-                        break
-                if not is_duplicate:
-                    unique_conditions.append(condition)
-
-            # Rebuild the chain for better pushdown
-            # This creates a left-associative chain that's easier to traverse
-            if len(unique_conditions) < len(conditions) or len(unique_conditions) > 2:
-                telemetry.optimization_boolean_rewrite_and_flatten += 1
-                return _rebuild_and_chain(unique_conditions)
 
     return node

@@ -573,6 +573,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_DNF,
     BC_EXTRACTION,
     BC_FUNCTION,
+    BC_C_NATIVE_CHILD,
     BC_INSTR_C_NATIVE,
     BC_LOAD_COL,
     BC_LOAD_LIT_BOOL,
@@ -606,6 +607,11 @@ from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_N
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 from draken.core.buffers cimport DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_TIMESTAMP64
+from draken.core.buffers cimport DRAKEN_INTERVAL
+from draken.core.buffers cimport DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_DATE32
+from draken.core.buffers cimport DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_SEL_PERMUTATION
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
+from draken.core.buffers cimport str_length, str_is_inline, str_data, str_clone_with_offset
 from draken.core.buffers cimport draken_zero_sel, draken_zero_validity
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
@@ -616,7 +622,7 @@ cdef extern from "core/alloc.h":
     void  draken_free(void* p) nogil
 
 from draken.morsels.morsel cimport Morsel, cxx_to_morsel
-from draken.morsels.cxx_morsel cimport CxxMorsel, cxx_mask_c
+from draken.morsels.cxx_morsel cimport CxxMorsel, cxx_mask_c, cxx_column_child_vec
 from libcpp.memory cimport shared_ptr
 from draken.vectors.bool_vector cimport (
     BoolVector,
@@ -651,10 +657,14 @@ cdef extern from "ops/vec_result.h":
         uint32_t          length
         DrakenType        type
         uint8_t           flags
+        uint8_t           validity_embedded
 
 # Function-pointer typedefs per Decision 3 (Phase 9 design, §Post-design)
 ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) nogil
 ctypedef VecResult (*cast_fn_t)(void* ctx, const DrakenVector* v) nogil
+# ARRAY->VARCHAR (BC_C_NATIVE_CHILD): parent + owner-held child element vector.
+ctypedef VecResult (*cast_child_fn_t)(void* ctx, const DrakenVector* parent,
+                                      const DrakenVector* child) nogil
 ctypedef VecResult (*extr_fn_t)(void* ctx, const DrakenVector* v, const DrakenVector* key) nogil
 ctypedef VecResult (*func_fn_t)(void* ctx, const DrakenVector* const* args, uint32_t nargs) nogil
 ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) nogil
@@ -1353,6 +1363,47 @@ cdef inline int _dv_not_c(
     return 0
 
 
+cdef inline int _dv_unary_null_c(
+    int uop,                      # UOP_IS_NULL or UOP_IS_NOT_NULL
+    DrakenVector** dv_stack,
+    DrakenVector* dv_store,
+    Py_ssize_t* sp_io,
+    DrakenFrameArena* arena,
+    Py_ssize_t nbytes,
+    uint32_t num_rows,
+) noexcept nogil:
+    """IS [NOT] NULL over ANY input type: a pure validity-bitmap read (the validity
+    mask is indexed by LOGICAL row — no selection hop), producing a never-null
+    bit-packed BOOL result. Mirrors _dv_not_c's arena/result idiom."""
+    cdef Py_ssize_t sp = sp_io[0]
+    cdef DrakenVector* dv
+    cdef uint8_t* result
+    cdef uint32_t i
+    cdef uint8_t bit
+    sp -= 1
+    dv = dv_stack[sp]
+    if dv == NULL:
+        return 1
+    result = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
+    if result == NULL:
+        return 2
+    memset(result, 0, <size_t>nbytes)
+    if dv.validity == NULL:
+        # All rows valid: IS NULL = all false (already zeroed); IS NOT NULL = all true.
+        if uop == UOP_IS_NOT_NULL:
+            memset(result, 0xFF, <size_t>nbytes)
+    else:
+        for i in range(num_rows):
+            bit = (dv.validity[i >> 3] >> (i & 7)) & 1
+            if (bit == 0) == (uop == UOP_IS_NULL):
+                result[i >> 3] |= <uint8_t>(1 << (i & 7))
+    dv_store[sp] = draken_vector_from_dense(result, num_rows, DRAKEN_BOOL, NULL)
+    dv_stack[sp] = &dv_store[sp]
+    sp += 1
+    sp_io[0] = sp
+    return 0
+
+
 cdef inline int _dv_variadic_bool_c(
     int op,                       # 0 = DNF (AND-fold of terms), 1 = CNF (OR-fold)
     int arity,
@@ -1454,6 +1505,68 @@ cdef inline int _dv_compare_c(
             sp_io[0] = sp + 1
             return 0
     return 3
+
+
+cdef inline int _dv_vecresult_adopt_c(
+    VecResult* vr,
+    DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
+    DrakenFrameArena* arena,
+) noexcept nogil:
+    """Adopt an owned VecResult of ANY shape — dense, dict (owned codes), or a
+    canonical-block string (validity EMBEDDED in the block: one adoption frees
+    everything) — into the frame arena and push it. DECIMAL/DECIMAL128/TIMESTAMP64
+    results fold as RAW values (the VM's whole decimal/temporal model is
+    raw-domain — int64 or int128 — with bind-time scale/unit ctx; the descriptor
+    is re-attached at the plan-known boundary — ExprProjectOperator). rc 0."""
+    draken_frame_arena_adopt(arena, vr.data)
+    if vr.owns_selection:
+        draken_frame_arena_adopt(arena, <void*><uint32_t*>vr.selection)
+    if vr.validity != NULL and not vr.validity_embedded:
+        draken_frame_arena_adopt(arena, vr.validity)
+    dv_store[slot_idx].data = vr.data
+    dv_store[slot_idx].selection = vr.selection
+    dv_store[slot_idx].data_length = vr.data_length
+    dv_store[slot_idx].length = vr.length
+    dv_store[slot_idx].validity = vr.validity
+    dv_store[slot_idx].type = vr.type
+    # Shape hints are trusted for genuinely dense results only: some kernels
+    # reshape a dense block into a dict WITHOUT clearing the IDENTITY hint, and a
+    # wrongly-set hint (unlike a missed one) can change answers in shape-
+    # specialized consumers. 0 = "don't know" = uniform path, always correct.
+    dv_store[slot_idx].flags = vr.flags if vr.data_length == vr.length else 0
+    dv_stack[slot_idx] = &dv_store[slot_idx]
+    return 0
+
+
+cdef inline int _dv_vecresult_string_fold_c(
+    VecResult* vr,
+    DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
+    DrakenFrameArena* arena,
+) noexcept nogil:
+    """rc-5 handler for BINARY_OP/CAST inside the nogil VM: fold string-family,
+    DECIMAL and TIMESTAMP64 results natively (raw domain; descriptors re-attach at
+    the plan-known ExprProject boundary). DECIMAL128 stays rc 5 — and stays
+    unreachable: nogil admission never admits it."""
+    return _dv_vecresult_adopt_c(vr, dv_store, dv_stack, slot_idx, arena)
+
+
+cdef inline int _dv_function_kernel_c(
+    void* kernel_fn,
+    void* ctx_ptr,
+    const DrakenVector* const* fargs,
+    uint32_t arity,
+    DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
+    DrakenFrameArena* arena, VecResult* out_vr,
+) noexcept nogil:
+    """Phase 9a-fn: C-ABI scalar function dispatch (func_fn_t) — the kernel is
+    called DIRECTLY from the nogil VM, no Python/nanobind between them. rc 0 =
+    fixed-width or canonical-string result folded and pushed; rc 4 = kernel error
+    sentinel; rc 5 = descriptor-carrying result the arena DV cannot hold."""
+    cdef VecResult vr = (<func_fn_t>kernel_fn)(ctx_ptr, fargs, arity)
+    out_vr[0] = vr
+    if vr.data == NULL:
+        return 4
+    return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
 
 
 cdef inline int _dv_binop_kernel_c(
@@ -1612,6 +1725,8 @@ cdef int c_execute_dv_inner(
     cdef Py_ssize_t sp = 0
     cdef Py_ssize_t i
     cdef int opcode, rc, dv_op
+    cdef int arity, j
+    cdef const DrakenVector* fargs[16]
     cdef BytecodeInstr* slot
     cdef DrakenVector* dv_left_ptr
     cdef DrakenVector* dv_right_ptr
@@ -1670,6 +1785,28 @@ cdef int c_execute_dv_inner(
                 dv_op = _DRAKEN_CMP_OP[slot.op_code]
             rc = _dv_compare_c(dv_op, dv_stack, &sp,
                                slot.left_type_code, slot.right_type_code, num_rows, arena)
+        elif opcode == BC_UNARY_OP and (slot.op_code == UOP_IS_NULL
+                                        or slot.op_code == UOP_IS_NOT_NULL):
+            rc = _dv_unary_null_c(slot.op_code, dv_stack, dv_store, &sp, arena,
+                                  nbytes, num_rows)
+        elif opcode == BC_FUNCTION and (slot.flags & BC_INSTR_C_NATIVE) != 0:
+            # Phase 9a-fn: C-ABI function kernel, dispatched with NO Python between
+            # the VM and the kernel (the whole point — see engine_cutover memory).
+            arity = slot.arity
+            if arity < 0 or arity > 16:
+                err_op[0] = opcode
+                return 99
+            sp -= arity
+            for j in range(arity):
+                if dv_stack[sp + j] == NULL:
+                    err_op[0] = opcode
+                    return 1
+                fargs[j] = dv_stack[sp + j]
+            rc = _dv_function_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr, fargs,
+                                       <uint32_t>arity, dv_store, dv_stack, sp,
+                                       arena, &vr)
+            if rc == 0:
+                sp += 1
         elif opcode == BC_BINARY_OP:
             sp -= 1
             dv_right_ptr = dv_stack[sp]
@@ -1680,6 +1817,9 @@ cdef int c_execute_dv_inner(
                 return 1
             rc = _dv_binop_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
                                     dv_left_ptr, dv_right_ptr, dv_store, dv_stack, sp, arena, &vr)
+            if rc == 5:
+                # canonical-block string result (STRING_CONCAT) — fold nogil
+                rc = _dv_vecresult_string_fold_c(&vr, dv_store, dv_stack, sp, arena)
             if rc == 0:
                 sp += 1
         elif opcode == BC_CAST:
@@ -1688,8 +1828,21 @@ cdef int c_execute_dv_inner(
             if dv_left_ptr == NULL:
                 err_op[0] = opcode
                 return 1
-            rc = _dv_cast_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
-                                   dv_left_ptr, dv_store, dv_stack, sp, arena, &vr)
+            if (slot.flags & BC_C_NATIVE_CHILD) != 0:
+                # ARRAY->VARCHAR: dv_cache[i] holds the owner-resolved child
+                # element vector (NULL when the column carries no child).
+                if dv_cache[i] == NULL:
+                    err_op[0] = opcode
+                    return 4
+                vr = (<cast_child_fn_t>slot.kernel_fn)(<void*>slot.ctx_ptr,
+                                                       dv_left_ptr, dv_cache[i])
+                rc = 4 if vr.data == NULL else 5
+            else:
+                rc = _dv_cast_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
+                                       dv_left_ptr, dv_store, dv_stack, sp, arena, &vr)
+            if rc == 5:
+                # canonical-block string result (`*_to_string` casts) — fold nogil
+                rc = _dv_vecresult_string_fold_c(&vr, dv_store, dv_stack, sp, arena)
             if rc == 0:
                 sp += 1
         else:
@@ -1791,6 +1944,10 @@ cdef void _dv_fill_cache_cxx(
             dv_cache[k] = <DrakenVector*>&m.columns[col_idx[k]].view
         elif opcode == BC_LOAD_LIT_CONST:
             dv_cache[k] = lit_dv[k]
+        elif opcode == BC_CAST and (instrs[k].flags & BC_C_NATIVE_CHILD) != 0:
+            # ARRAY child element vector, held by the column's VectorOwner —
+            # NULL when the column has no child (kernel then fails loud).
+            dv_cache[k] = <DrakenVector*>cxx_column_child_vec(m, <uint32_t>col_idx[k])
         else:
             dv_cache[k] = NULL
 
@@ -1814,7 +1971,10 @@ cdef int _dv_cxx_resolve_caches(
         slot = &bc.instrs[k]
         col_idx[k] = -1
         lit_dv[k] = NULL
-        if slot.opcode == BC_LOAD_COL:
+        if slot.opcode == BC_LOAD_COL or (
+                slot.opcode == BC_CAST and (slot.flags & BC_C_NATIVE_CHILD) != 0):
+            # BC_C_NATIVE_CHILD casts carry the ARRAY operand's identity so the
+            # cache fill can resolve the owner-held child element vector.
             ident = <bytes>slot.column_identity
             for ci in range(nn):
                 nm = m.names[ci]          # libcpp string → bytes (auto-convert)
@@ -1861,6 +2021,252 @@ cdef int _dv_filter_span_cxx(
     return rc
 
 
+cdef int _dv_filter_and_mask_span_cxx(
+    BytecodeInstr* instrs, int count, const CxxMorsel* m,
+    int* col_idx, DrakenVector** lit_dv,
+    CxxMorsel** out_filtered, uint8_t* out_mask,
+    Py_ssize_t nbytes, uint32_t num_rows, int* err_op,
+) noexcept nogil:
+    """Scan pass-1 twin of _dv_filter_span_cxx: besides the filtered CxxMorsel it
+    ALSO copies the per-logical-row survival bitmap into out_mask (caller owns; nbytes
+    long). A row survives iff the predicate bit is set AND the row is non-NULL — the
+    mask is data-bitmap AND validity, matching cxx_mask_c's own drop semantics. Lets
+    the parquet scan produce mask_bytes without the GIL Morsel VM. rc as
+    _dv_filter_span_cxx."""
+    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_stack[64]
+    cdef DrakenVector  dv_store[64]
+    cdef int rc
+    cdef DrakenVector* mask_dv
+    cdef uint8_t* dense
+    cdef Py_ssize_t bi
+    cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    if arena == NULL:
+        err_op[0] = -99
+        return 99
+    _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
+                            arena, nbytes, num_rows, err_op)
+    if rc == 0:
+        mask_dv = dv_stack[0]
+        dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
+        if dense == NULL:
+            draken_frame_arena_destroy(arena)
+            err_op[0] = -99
+            return 99
+        memcpy(out_mask, dense, <size_t>nbytes)
+        if mask_dv.validity != NULL:
+            for bi in range(nbytes):
+                out_mask[bi] &= mask_dv.validity[bi]
+        out_filtered[0] = cxx_mask_c(m, mask_dv)
+    draken_frame_arena_destroy(arena)
+    return rc
+
+
+cdef size_t _dv_result_elem_size(DrakenType t) noexcept nogil:
+    """Byte width of one fixed-width value; 0 for bit-packed BOOL / unsupported."""
+    if t == DRAKEN_INT8:
+        return 1
+    if t == DRAKEN_INT16:
+        return 2
+    if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
+        return 4
+    if (t == DRAKEN_INT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
+            or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64):
+        return 8
+    if t == DRAKEN_DECIMAL128 or t == DRAKEN_INTERVAL:
+        return 16   # INTERVAL = {int64 months, int64 us}, a plain 16-byte value
+    return 0
+
+
+cdef int _dv_copy_result_string(
+    const DrakenVector* src,
+    DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+) noexcept nogil:
+    """Deep-copy a string result into ONE canonical consolidated block
+    [DrakenStringArena header | slots | arena] the caller owns — `data` points at
+    the header, exactly what draken's kernels read (buffers.h contract)."""
+    cdef uint32_t n = src.length
+    cdef uint32_t alloc_n = n if n > 0 else 1
+    cdef const DrakenStringArena* sa_in = <const DrakenStringArena*>src.data
+    cdef const DrakenStringSlot* slot
+    cdef size_t total_arena = 0
+    cdef uint32_t i, slen
+    cdef bint row_ok
+    for i in range(n):
+        if src.validity != NULL and not ((src.validity[i >> 3] >> (i & 7)) & 1):
+            continue
+        slot = &sa_in.slots[src.selection[i]]
+        if not str_is_inline(slot):
+            total_arena += str_length(slot)
+    cdef size_t slots_off = sizeof(DrakenStringArena)
+    cdef size_t arena_off = slots_off + <size_t>alloc_n * sizeof(DrakenStringSlot)
+    cdef uint8_t* blk = <uint8_t*>draken_malloc(arena_off + total_arena)
+    if blk == NULL:
+        return -1
+    cdef DrakenStringArena* sa_out = <DrakenStringArena*>blk
+    cdef DrakenStringSlot* dst = <DrakenStringSlot*>(blk + slots_off)
+    cdef uint8_t* out_arena = blk + arena_off if total_arena > 0 else NULL
+    sa_out.slots = dst
+    sa_out.arena = out_arena
+    sa_out.length = n
+    sa_out.arena_used = total_arena
+    sa_out.arena_cap = total_arena
+    sa_out.null_bitmap = NULL
+    sa_out.owns_buffers = 0     # the ONE block is owned by the caller's VectorOwner
+    sa_out.type = src.type
+    cdef size_t arena_pos = 0
+    for i in range(n):
+        row_ok = src.validity == NULL or ((src.validity[i >> 3] >> (i & 7)) & 1)
+        if not row_ok:
+            memset(&dst[i], 0, sizeof(DrakenStringSlot))
+            continue
+        slot = &sa_in.slots[src.selection[i]]
+        if str_is_inline(slot):
+            memcpy(&dst[i], slot, sizeof(DrakenStringSlot))
+        else:
+            slen = str_length(slot)
+            memcpy(out_arena + arena_pos, str_data(slot, sa_in.arena), slen)
+            str_clone_with_offset(&dst[i], slot, <uint32_t>arena_pos)
+            arena_pos += slen
+    cdef size_t vbytes = (<size_t>n + 7) >> 3
+    cdef uint8_t* validity = NULL
+    if src.validity != NULL:
+        validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
+        if validity == NULL:
+            draken_free(blk)
+            return -1
+        memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
+    cdef uint32_t* sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
+    if sel == NULL:
+        draken_free(blk)
+        if validity != NULL:
+            draken_free(validity)
+        return -1
+    for i in range(n):
+        sel[i] = i
+    out_vec.data = blk
+    out_vec.selection = sel
+    out_vec.data_length = n
+    out_vec.length = n
+    out_vec.validity = validity
+    out_vec.type = src.type
+    out_vec.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION
+    out_data[0] = blk
+    out_validity[0] = validity
+    out_sel[0] = sel
+    return 0
+
+
+cdef int _dv_copy_result_dense(
+    const DrakenVector* src,
+    DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+) noexcept nogil:
+    """Deep-copy an (arena-owned) expression result into fresh draken_malloc'd DENSE
+    buffers the caller takes ownership of (data / validity / identity selection).
+    The arena is destroyed right after this returns — nothing may alias it. Uniform
+    data[selection[i]] gather; BOOL is bit-packed. Fixed-width + BOOL only (the
+    is_all_c_native contract guarantees a fixed-width result); returns -1 for
+    anything else so the caller can fail loud."""
+    cdef uint32_t n = src.length
+    cdef uint32_t alloc_n = n if n > 0 else 1
+    cdef size_t es = _dv_result_elem_size(src.type)
+    cdef size_t vbytes = (<size_t>n + 7) >> 3
+    cdef uint8_t* data8
+    cdef const uint8_t* sbits
+    cdef uint8_t* validity = NULL
+    cdef uint32_t* sel
+    cdef uint32_t i, phys
+    cdef void* data
+
+    if (src.type == DRAKEN_VARCHAR or src.type == DRAKEN_NVARCHAR
+            or src.type == DRAKEN_VARBINARY):
+        return _dv_copy_result_string(src, out_vec, out_data, out_validity, out_sel)
+
+    if src.type == DRAKEN_BOOL:
+        data = draken_malloc(vbytes if vbytes > 0 else 1)
+        if data == NULL:
+            return -1
+        memset(data, 0, vbytes if vbytes > 0 else 1)
+        data8 = <uint8_t*>data
+        sbits = <const uint8_t*>src.data
+        for i in range(n):
+            phys = src.selection[i]
+            if (sbits[phys >> 3] >> (phys & 7)) & 1:
+                data8[i >> 3] |= <uint8_t>(1 << (i & 7))
+    else:
+        if es == 0:
+            return -1   # strings/arrays/decimal128 — not a c-native fixed result
+        data = draken_malloc(<size_t>alloc_n * es)
+        if data == NULL:
+            return -1
+        for i in range(n):
+            memcpy(<uint8_t*>data + <size_t>i * es,
+                   <const uint8_t*>src.data + <size_t>src.selection[i] * es, es)
+
+    if src.validity != NULL:
+        validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
+        if validity == NULL:
+            draken_free(data)
+            return -1
+        memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
+
+    sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
+    if sel == NULL:
+        draken_free(data)
+        if validity != NULL:
+            draken_free(validity)
+        return -1
+    for i in range(n):
+        sel[i] = i
+
+    out_vec.data = data
+    out_vec.selection = sel
+    out_vec.data_length = n
+    out_vec.length = n
+    out_vec.validity = validity
+    out_vec.type = src.type
+    out_vec.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION
+    out_data[0] = data
+    out_validity[0] = validity
+    out_sel[0] = sel
+    return 0
+
+
+cdef int _dv_eval_span_cxx(
+    BytecodeInstr* instrs, int count, const CxxMorsel* m,
+    int* col_idx, DrakenVector** lit_dv,
+    DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    int* err_op,
+) noexcept nogil:
+    """Pure-nogil expression span for a COMPUTED column (the projection twin of
+    _dv_filter_span_cxx): evaluate the program over pre-resolved (col_idx, lit_dv)
+    and deep-copy the arena result into fresh caller-owned buffers. rc 0 → out_vec/
+    out_data/out_validity/out_sel filled (ownership transferred); 4 → kernel error;
+    98 → non-fixed-width result (fail loud upstream); 99 → arena OOM; other → the
+    c_execute rc. No PyObject anywhere — callable from the engine's worker threads."""
+    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_stack[64]
+    cdef DrakenVector  dv_store[64]
+    cdef Py_ssize_t num_rows = m.num_rows()
+    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
+    cdef int rc
+    cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    if arena == NULL:
+        err_op[0] = -99
+        return 99
+    _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
+                            arena, nbytes, <uint32_t>num_rows, err_op)
+    if rc == 0:
+        if _dv_copy_result_dense(dv_stack[0], out_vec, out_data, out_validity,
+                                 out_sel) != 0:
+            err_op[0] = -98
+            rc = 98
+    draken_frame_arena_destroy(arena)
+    return rc
+
+
 cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
     """S3.2: evaluate an all-c-native predicate AND apply its mask in ONE nogil
     span over the CxxMorsel — the predicate result DV* feeds straight into
@@ -1894,6 +2300,50 @@ cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
         draken_error_message_clear()
         raise ValueError(err_msg)
     # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
+    return None
+
+
+cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel morsel):
+    """Parquet scan pass-1: for an all-c-native predicate, filter AND produce the
+    survival mask bytes in ONE nogil span — no GIL Morsel VM. Returns
+    (filtered_morsel, mask_bytes) where mask_bytes is the LSB-first per-row bitmap
+    (bit set = row survived), or None when not applicable (caller falls back to
+    execute_bytecode + filter_mask). Raises on a genuine C kernel error (rc 4)."""
+    cdef const CxxMorsel* m = morsel._cxx_ptr
+    if m == NULL or bc.count > 256:
+        return None
+    cdef Py_ssize_t num_rows = morsel.ptr.num_rows
+    if num_rows == 0:
+        return None
+    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
+    cdef int col_idx[256]
+    cdef DrakenVector* lit_dv[256]
+    cdef int err_op = 0
+    cdef int rc
+    cdef CxxMorsel* filtered = NULL
+    cdef uint8_t* mask_buf
+    cdef object err_msg, mask_bytes
+    if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
+        return None
+    mask_buf = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
+    if mask_buf == NULL:
+        return None
+    with nogil:
+        rc = _dv_filter_and_mask_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv,
+                                          &filtered, mask_buf, nbytes,
+                                          <uint32_t>num_rows, &err_op)
+    if rc == 0:
+        mask_bytes = (<char*>mask_buf)[:nbytes]   # owned Python bytes copy
+        draken_free(mask_buf)
+        return (cxx_to_morsel(shared_ptr[CxxMorsel](filtered)), mask_bytes)
+    draken_free(mask_buf)
+    if rc == 4:
+        err_msg = (
+            draken_get_error_message().decode("utf-8", "replace")
+            if draken_has_error() else "C kernel error"
+        )
+        draken_error_message_clear()
+        raise ValueError(err_msg)
     return None
 
 
@@ -1984,6 +2434,8 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef DrakenType result_dtype
     cdef VecResult cast_vr
     cdef VecResult binop_vr
+    cdef const DrakenVector* cfargs[16]   # C-native BC_FUNCTION operand scratch
+    cdef Py_ssize_t _fj
     cdef object cast_err_msg
     cdef int dv_op
     cdef int had_null
@@ -2386,6 +2838,40 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             # ----------------------------------------------------------
             if opcode == BC_FUNCTION:
                 arity = slot.arity
+
+                # C-native function kernel (func_fn_t): the compiler lowered this
+                # to a draken_* kernel (EXTRACT / LIKE / IN-list / CASE-blend) with
+                # NO callable_ref. Dispatch it directly — mirrors the BC_BINARY_OP
+                # C-native path above. A fixed-width/BOOL result folds into the
+                # arena; a canonical-string result is owned as a Vector.
+                if (slot.flags & BC_INSTR_C_NATIVE) != 0:
+                    if arity < 0 or arity > 16:
+                        raise ValueError("BC_FUNCTION: bad arity for C-native kernel")
+                    func_base = sp - arity
+                    for _fj in range(arity):
+                        if dv_stack[func_base + _fj] == NULL:
+                            raise ValueError("BC_FUNCTION: NULL operand for C-native kernel")
+                        cfargs[_fj] = dv_stack[func_base + _fj]
+                    sp = func_base
+                    rc = _dv_function_kernel_c(
+                        slot.kernel_fn, <void*>slot.ctx_ptr, cfargs,
+                        <uint32_t>arity, dv_store, dv_stack, sp, arena, &binop_vr)
+                    if rc == 4:
+                        cast_err_msg = (
+                            draken_get_error_message().decode("utf-8", "replace")
+                            if draken_has_error() else "C function kernel error"
+                        )
+                        draken_error_message_clear()
+                        raise ValueError(cast_err_msg)
+                    if rc == 5:
+                        legacy_result = Vector(draken_vecresult_own_c(binop_vr))
+                        anchor[sp] = legacy_result
+                        dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
+                    else:
+                        anchor[sp] = None   # rc 0: folded into the arena
+                    sp += 1
+                    continue
+
                 callable_obj = <object>slot.callable_ref
                 is_nb_callable = slot.bool_value != 0
 
@@ -2514,6 +3000,12 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                 # buffers are adopted into the frame arena and exposed as a dense
                 # DV*; the result Vector is materialized lazily only if consumed at
                 # frame exit (_slot_to_pyobj). Zero Python objects per morsel.
+                if (slot.flags & BC_C_NATIVE_CHILD) != 0:
+                    # ARRAY->VARCHAR is engine-only: this VM evaluates Python
+                    # Morsels and cannot resolve the owner-held child vector.
+                    raise ValueError(
+                        "ARRAY->VARCHAR cast reached the Morsel VM — engine-only "
+                        "instruction (BC_C_NATIVE_CHILD); fail loud")
                 if (slot.flags & BC_INSTR_C_NATIVE) != 0 and dv_left_ptr != NULL:
                     rc = _dv_cast_kernel_c(
                         slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr,

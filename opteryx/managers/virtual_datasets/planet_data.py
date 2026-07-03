@@ -25,6 +25,7 @@ can instantiate a PlanetData() class and use it like a Relation.
 import datetime
 import decimal
 
+import draken.draken_native as _draken_native
 from draken.draken_native import DrakenType
 from draken.draken_native import DrakenType as DT
 from draken.morsels.morsel import Morsel
@@ -53,7 +54,13 @@ def read(at_date=None, variables=None) -> Morsel:
         vector_from_sequence([0.33, 4.87, 5.97, 0.642, 1898, 568, 86.8, 102, 0.0146], dtype=DrakenType.FLOAT64),
         vector_from_sequence([4879, 12104, 12756, 6792, 142984, 120536, 51118, 49528, 2370], dtype=DT.INT32),
         vector_from_sequence([5427, 5243, 5514, 3933, 1326, 687, 1271, 1638, 2095], dtype=DT.INT16),
-        vector_from_sequence(list(map(decimal.Decimal, ("3.7", "8.9", "9.8", "3.7", "23.1", "9", "8.7", "11", "0.7"))), dtype=DrakenType.DECIMAL),
+        # gravity is declared DECIMAL(3, 1) in schema() below — the data MUST be
+        # materialized at that exact scale. vector_from_sequence's DECIMAL default
+        # is (18, 6), which silently disagreed with the declared type; every
+        # bind-time scale consumer (decimal binops, ROUND-family kernels) reads
+        # the DECLARATION, so the raw values must honor it.
+        _draken_native.vector_decimal_from_sequence(
+            list(map(decimal.Decimal, ("3.7", "8.9", "9.8", "3.7", "23.1", "9", "8.7", "11", "0.7"))), 3, 1),
         vector_from_sequence([4.3, 10.4, 11.2, 5, 59.5, 35.5, 21.3, 23.5, 1.3], dtype=DT.FLOAT32),
         vector_from_sequence([1407.6, -5832.5, 23.9, 24.6, 9.9, 10.7, -17.2, 16.1, -153.3], dtype=DT.FLOAT32),
         vector_from_sequence([4222.6, 2802, 24, 24.7, 9.9, 10.7, 17.2, 16.1, 153.3], dtype=DT.FLOAT32),

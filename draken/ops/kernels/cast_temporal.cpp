@@ -90,16 +90,66 @@ VecResult draken_cast_int64_to_timestamp(void* ctx, const DrakenVector* v) {
             default: return draken_error_sentinel_fmt("cast int64->timestamp: bad unit %d", unit_code);
         }
 
-        const uint32_t k = v->data_length;
+        // DENSE emit (gather through selection, identity-selection output) — a
+        // physical-domain (data_length-indexed) shape-preserving emit here
+        // caused a silent wrong-answer bug in the sibling DATE32->TIMESTAMP
+        // kernel on dict-shaped columns (see draken_cast_date32_to_timestamp).
+        const uint32_t n = v->length;
         const int64_t* src = static_cast<const int64_t*>(v->data);
-        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
-        for (uint32_t j = 0u; j < k; ++j)
-            out[j] = scale_days ? src[j] * 86'400'000'000LL : src[j];
+        for (uint32_t j = 0u; j < n; ++j) {
+            int64_t raw = src[v->selection[j]];
+            out[j] = scale_days ? raw * 86'400'000'000LL : raw;
+        }
         VecResult r;
         r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
         r.ts_unit = static_cast<uint8_t>(ts_unit);
-        kernel_preserve_shape(r, v);
+        r.length = n; r.data_length = n;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.validity = kernel_copy_validity(v);
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    });
+}
+
+// DATE32 → TIMESTAMP64: midnight of the date, in the target unit. DATE32 is int32
+// days-since-epoch; result = days * 86400 * (ticks per second for the unit).
+VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_DATE32)
+            return draken_error_sentinel_fmt("cast date32->timestamp: expected DATE32, got %d", v->type);
+        int unit_code = 2;   // default microseconds
+        if (ctx) unit_code = static_cast<const cast_timestamp_ctx*>(ctx)->unit;
+        if (unit_code == 0 || unit_code == 5) unit_code = 2;   // 5=days-scaled→us here
+        TimestampUnit ts_unit;
+        int64_t per_sec;
+        switch (unit_code) {
+            case 1: ts_unit = TimestampUnit::NANOSECONDS;  per_sec = 1000000000LL; break;
+            case 2: ts_unit = TimestampUnit::MICROSECONDS; per_sec = 1000000LL;    break;
+            case 3: ts_unit = TimestampUnit::MILLISECONDS; per_sec = 1000LL;       break;
+            case 4: ts_unit = TimestampUnit::SECONDS;      per_sec = 1LL;          break;
+            default: return draken_error_sentinel_fmt("cast date32->timestamp: bad unit %d", unit_code);
+        }
+        const int64_t mult = 86400LL * per_sec;
+        // DENSE output: gather through selection (uniform contract) and emit an
+        // identity-selection result — unambiguous for every downstream consumer.
+        const uint32_t n = v->length;
+        const int32_t* src = static_cast<const int32_t*>(v->data);
+        int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < n; ++j)
+            out[j] = static_cast<int64_t>(src[v->selection[j]]) * mult;
+        VecResult r;
+        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
+        r.ts_unit = static_cast<uint8_t>(ts_unit);
+        r.length = n; r.data_length = n;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.validity = kernel_copy_validity(v);
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
         return r;
     });
 }
@@ -202,11 +252,78 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
     });
 }
 
-// DATE32 ↔ TIMESTAMP64: no extracted compute yet; remain stubs.
-VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector) {
-    DRAKEN_KERNEL_TRY({ return draken_error_sentinel("cast date32->timestamp not yet implemented"); });
+namespace {
+// Kept OUTSIDE the DRAKEN_KERNEL_TRY macro body below: an in-body brace-init
+// array literal's commas are seen as macro-argument separators (the
+// preprocessor tracks () nesting, not {}), which breaks the macro call with
+// "too many arguments". A plain function call has none of that ambiguity.
+inline int64_t fk_ts_ticks_per_sec(unsigned unit) {
+    switch (unit & 3) {
+        case 1: return 1000;
+        case 2: return 1000000;
+        case 3: return 1000000000;
+        default: return 1;   // 0 = seconds
+    }
+}
+}  // namespace
+
+// TIMESTAMP64 → TIMESTAMP64 unit rescale (e.g. `EventTime::TIMESTAMP[s]` where
+// EventTime is already TIMESTAMP64 at a different unit). ctx = binary_op_ctx:
+// left_unit = source TimestampUnit, right_unit = target TimestampUnit (both
+// 0=s,1=ms,2=us,3=ns — the SAME convention draken_date_part/draken_date_trunc
+// use, NOT cast_timestamp_ctx's older 1=ns..5=days numbering). Narrowing
+// (source finer than target, e.g. us->s) floors toward -inf for correctness on
+// pre-epoch timestamps; widening (source coarser, e.g. s->us) is an exact
+// multiply. Identity (src==dst) degrades to a copy. DENSE emit (gather through
+// selection) per the date32-cast lesson: shape-preserving output caused a
+// silent wrong-answer bug there.
+VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        // INT64 accepted alongside TIMESTAMP64: same 8-byte payload — an INT64
+        // source is "a timestamp at the ctx-declared source unit" (the SQL
+        // suffix's interpretation), rescaled to the declared result unit.
+        if (v->type != DRAKEN_TIMESTAMP64 && v->type != DRAKEN_INT64)
+            return draken_error_sentinel_fmt("cast timestamp rescale: expected TIMESTAMP64/INT64, got %d", v->type);
+        if (!ctx) return draken_error_sentinel("cast timestamp rescale: missing ctx (units)");
+        const auto* c = static_cast<const binary_op_ctx*>(ctx);
+        const int64_t src_ticks = fk_ts_ticks_per_sec(c->left_unit);
+        const int64_t dst_ticks = fk_ts_ticks_per_sec(c->right_unit);
+        const TimestampUnit dst_unit = static_cast<TimestampUnit>(c->right_unit & 3);
+
+        const uint32_t n = v->length;
+        const int64_t* src = static_cast<const int64_t*>(v->data);
+        int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < n; ++j) {
+            int64_t raw = src[v->selection[j]];
+            if (src_ticks >= dst_ticks) {
+                int64_t factor = src_ticks / dst_ticks;
+                if (factor == 1) {
+                    out[j] = raw;
+                } else {
+                    int64_t q = raw / factor;
+                    int64_t r = raw % factor;
+                    out[j] = (r != 0 && ((r < 0) != (factor < 0))) ? q - 1 : q;
+                }
+            } else {
+                out[j] = raw * (dst_ticks / src_ticks);
+            }
+        }
+        VecResult r;
+        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
+        r.ts_unit = static_cast<uint8_t>(dst_unit);
+        r.length = n; r.data_length = n;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.validity = kernel_copy_validity(v);
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    });
 }
 
+// DATE32 → TIMESTAMP64 is implemented above (real, registered). timestamp→date32
+// remains a stub.
 VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* vector) {
     DRAKEN_KERNEL_TRY({ return draken_error_sentinel("cast timestamp->date32 not yet implemented"); });
 }

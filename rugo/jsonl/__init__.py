@@ -25,15 +25,6 @@ Source = Union[str, bytes, bytearray, memoryview]
 Predicate = Tuple[str, str, object]
 
 
-def _load(source: Source) -> bytes:
-    if isinstance(source, str):
-        with open(source, "rb") as f:
-            return f.read()
-    if isinstance(source, (bytes, bytearray, memoryview)):
-        return bytes(source)
-    raise TypeError("source must be a filename (str) or bytes/bytearray/memoryview")
-
-
 class JsonlMetadata:
     __slots__ = ("num_rows", "schema_columns")
 
@@ -116,8 +107,7 @@ def read_metadata(source: Source) -> JsonlMetadata:
 
     Reads the full file to count rows; infers schema from a sample.
     """
-    data = _load(source)
-    result = _read_jsonl(data, columns=None, predicates=None)
+    result = _read_jsonl(source, columns=None, predicates=None)
     if not result["success"]:
         raise RuntimeError(result.get("error", "JSONL metadata read failed"))
     schema_columns = [

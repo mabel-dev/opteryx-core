@@ -83,13 +83,8 @@ class OperatorMetadata:
     category: OperatorCategory
     parallel_strategy: ParallelStrategy = ParallelStrategy.SINGLE_THREAD
     parallelism: OperatorParallelism = OperatorParallelism.STATEFUL_SERIAL
-    # The breaker's declared parallel-sink capability (a ``ParallelSinkSpec``, or
-    # None). This is the "here is my parallel-sink factory, or None" self-knowledge
-    # from design §1.4 Phase A — it replaces the class-name dispatch dicts that used
-    # to live in pipeline_sink.py. ``parallelism`` (above) stays the STREAMING-op
-    # parallel-safety flag (DuckDB's ParallelOperator); this is the SINK role
-    # (DuckDB's ParallelSink). Typed loosely (``object``) so the catalog need not
-    # import the pipeline_sink types at module top.
+    # Retired old-engine field (parallel-sink spec); kept as a slot so historical
+    # registrations parse, always None now — the native engine owns parallelism.
     parallel_sink: Optional[object] = None
     is_pipeline_breaking: bool = False
     is_join: bool = False
@@ -215,15 +210,6 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
 
-    # Declared parallel-sink capabilities (design §1.4 Phase A). The three migrated
-    # breakers carry a ParallelSinkSpec; resolution is off this catalog meta, not the
-    # retired class-name dicts in pipeline_sink.py.
-    from opteryx.managers.execution.pipeline_sink import (
-        HASH_REPARTITION_AGG_SINK_SPEC,
-        HASH_REPARTITION_DISTINCT_SINK_SPEC,
-        SCALAR_MERGE_SINK_SPEC,
-    )
-
     r = OperatorRegistry()
 
     # -- Scan operators -------------------------------------------------------
@@ -280,7 +266,6 @@ def _build_registry() -> OperatorRegistry:
         name="Distinct",
         category=OperatorCategory.SET_OP,
         parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
-        parallel_sink=HASH_REPARTITION_DISTINCT_SINK_SPEC,
         is_pipeline_breaking=True,
     )
 
@@ -290,7 +275,6 @@ def _build_registry() -> OperatorRegistry:
         name="Aggregate",
         category=OperatorCategory.AGGREGATE,
         parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
-        parallel_sink=SCALAR_MERGE_SINK_SPEC,
         is_pipeline_breaking=True,
     )
     r.register(
@@ -298,7 +282,6 @@ def _build_registry() -> OperatorRegistry:
         name="Aggregate and Group",
         category=OperatorCategory.AGGREGATE,
         parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
-        parallel_sink=HASH_REPARTITION_AGG_SINK_SPEC,
         is_pipeline_breaking=True,
     )
 

@@ -31,6 +31,33 @@
 #include "ops/kernels/binop_kernels.h"   // P9.1: unified draken_binop (canonical)
 #include "ops/kernels/extraction_kernels.h"
 
+// Phase 9a-fn: scalar function kernels (function_kernels.cpp), func_fn_t shape:
+//   VecResult fn(void* ctx, const DrakenVector* const* args, uint32_t nargs)
+extern "C" {
+VecResult draken_length(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_upper(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_lower(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_abs(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sign(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sqrt(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_round(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_floor(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_ceiling(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_if_then_else(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_not_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_starts_with(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_ends_with(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_bitwise_not(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+}
+
 // ---------------------------------------------------------------------------
 // Kernel Registry Table (Phase 9a)
 // ---------------------------------------------------------------------------
@@ -47,6 +74,32 @@
 // and operand types, then look them up in this registry.
 //
 static std::map<std::string, kernel_fn_t> _kernel_registry = {
+    // ========================================================================
+    // Scalar function kernels (Phase 9a-fn, function_kernels.cpp)
+    // ========================================================================
+    {"draken_length", (kernel_fn_t)&draken_length},
+    {"draken_upper", (kernel_fn_t)&draken_upper},
+    {"draken_lower", (kernel_fn_t)&draken_lower},
+    {"draken_abs", (kernel_fn_t)&draken_abs},
+    {"draken_sign", (kernel_fn_t)&draken_sign},
+    {"draken_sqrt", (kernel_fn_t)&draken_sqrt},
+    {"draken_round", (kernel_fn_t)&draken_round},
+    {"draken_floor", (kernel_fn_t)&draken_floor},
+    {"draken_ceiling", (kernel_fn_t)&draken_ceiling},
+    {"draken_date_part", (kernel_fn_t)&draken_date_part},
+    {"draken_if_then_else", (kernel_fn_t)&draken_if_then_else},
+    {"draken_like", (kernel_fn_t)&draken_like},
+    {"draken_in_list", (kernel_fn_t)&draken_in_list},
+    {"draken_is_empty", (kernel_fn_t)&draken_is_empty},
+    {"draken_is_not_empty", (kernel_fn_t)&draken_is_not_empty},
+    {"draken_numeric_cmp", (kernel_fn_t)&draken_numeric_cmp},
+    {"draken_substring", (kernel_fn_t)&draken_substring},
+    {"draken_contains", (kernel_fn_t)&draken_contains},
+    {"draken_starts_with", (kernel_fn_t)&draken_starts_with},
+    {"draken_ends_with", (kernel_fn_t)&draken_ends_with},
+    {"draken_date_trunc", (kernel_fn_t)&draken_date_trunc},
+    {"draken_bitwise_not", (kernel_fn_t)&draken_bitwise_not},
+
     // ========================================================================
     // Cast kernels (31 total)
     // ========================================================================
@@ -78,6 +131,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // draken_cast_date32_to_string is an alias that is not separately defined).
     {"draken_cast_date_to_string", (kernel_fn_t)&draken_cast_date_to_string},
     {"draken_cast_int64_to_timestamp", (kernel_fn_t)&draken_cast_int64_to_timestamp},
+    {"draken_cast_date32_to_timestamp", (kernel_fn_t)&draken_cast_date32_to_timestamp},
+    {"draken_cast_timestamp_rescale", (kernel_fn_t)&draken_cast_timestamp_rescale},
+    {"draken_cast_float_to_decimal", (kernel_fn_t)&draken_cast_float_to_decimal},
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},
     {"draken_cast_timestamp_to_string", (kernel_fn_t)&draken_cast_timestamp_to_string},
@@ -91,6 +147,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_to_float64", (kernel_fn_t)&draken_cast_to_float64},
     {"draken_cast_to_int64", (kernel_fn_t)&draken_cast_to_int64},
     {"draken_cast_to_varchar", (kernel_fn_t)&draken_cast_to_varchar},
+    // TWO-vector signature (parent + child): dispatched ONLY via the VM's
+    // BC_C_NATIVE_CHILD cast path, never through the one-vector cast table.
+    {"draken_cast_array_to_varchar", (kernel_fn_t)&draken_cast_array_to_varchar},
     {"draken_cast_to_bool", (kernel_fn_t)&draken_cast_to_bool},
     {"draken_cast_to_date", (kernel_fn_t)&draken_cast_to_date},
 
@@ -201,6 +260,24 @@ extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code) {
         ctx->sub_op_code = sub_op_code;
     }
     return ctx;
+}
+
+in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len) {
+    // The blob's first bytes ARE the header (built by the binder); one copy.
+    if (blob == nullptr || blob_len < sizeof(in_list_ctx)) return nullptr;
+    auto* ctx = static_cast<in_list_ctx*>(malloc(blob_len));
+    if (ctx) memcpy(ctx, blob, blob_len);
+    return ctx;
+}
+
+substring_ctx* kernel_alloc_substring_ctx(int32_t start, int32_t count, uint8_t has_count) {
+    auto* ctx = static_cast<substring_ctx*>(malloc(sizeof(substring_ctx)));
+    if (ctx) { ctx->start = start; ctx->count = count; ctx->has_count = has_count; }
+    return ctx;
+}
+
+void kernel_registry_register(const char* name, kernel_fn_t fn) {
+    if (name != nullptr && fn != nullptr) _kernel_registry[std::string(name)] = fn;
 }
 
 void kernel_free_context(void* ctx) {

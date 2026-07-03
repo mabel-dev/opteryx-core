@@ -301,4 +301,20 @@ public:
     }
 };
 
+/**
+ * Spawn ONE detached native task on its own OS thread — deliberately NOT a
+ * BS::thread_pool task. Used for a coordinator/"driver" task that itself submits
+ * further native tasks to a *shared* BSThreadPoolBridge and blocks on wait_native():
+ * submitting that driver as a task ON the same pool it then recurses into corrupts
+ * the pool's internal task queue (BS::thread_pool's task submission is not meant to
+ * be re-entered from a thread that is itself one of the pool's own workers — this
+ * was reproduced as a real SIGSEGV inside BS::move_only_function's placement-new).
+ * A single ad-hoc thread here is safe under free-threaded CPython (the concurrent
+ * new-thread-state deadlock this whole bridge exists to avoid is a multi-thread
+ * pile-up, not a lone thread attaching alone).
+ */
+inline void spawn_detached_native_task(void (*fn)(void*), void* arg) {
+    std::thread(fn, arg).detach();
+}
+
 #endif // BS_POOL_BRIDGE_HPP

@@ -10,7 +10,7 @@
 
 from libc.stdint cimport uint8_t, int64_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
-from libc.string cimport memset, memcpy
+from libc.string cimport memset, memcpy, memchr
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
@@ -109,60 +109,8 @@ cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
         const uint8_t* needle, size_t needle_len
     ) nogil
 
-    struct ReadResult:
-        bint success
-        string error_message
-        vector[string] column_names
-        RecordSet records
-        vector[uint8_t] buffer_data
-        cmap[string, string] inferred_schema
-        size_t num_records
-
-    cdef cppclass JsonlReader:
-        JsonlReader(const string& file_path, const ParseContext& context)
-        JsonlReader(const uint8_t* buffer, size_t length, const ParseContext& context)
-        ReadResult next_chunk()
-        bint is_eof()
-        bint has_error()
-        const string& get_error()
-
 
 cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
-    cdef enum class ColumnType(uint8_t):
-        Int64   = 0
-        Float64 = 1
-        Bool    = 2
-        String  = 3
-        Null    = 4
-
-    struct StringColumnResult:
-        ColumnType inferred_type
-        size_t num_rows
-        vector[uint8_t] data
-        vector[uint32_t] offsets
-        vector[uint32_t] lengths
-        vector[uint8_t] null_bitmap
-        uint8_t* data_ptr()
-        uint32_t* offset_ptr()
-        uint32_t* length_ptr()
-        uint8_t* bitmap_ptr()
-
-    StringColumnResult extract_column(
-        const uint8_t* buffer,
-        const RecordSet& records,
-        const string& column_name,
-        OrdinalPredictor& predictor,
-        bint copy_bytes,
-        bint may_have_escapes
-    )
-
-    # Returns a NEW reference to a Draken Vector; the C++ side owns the Python edge.
-    # `base` is the buffer slices are read from (scr.data_ptr() in copy mode, or the
-    # original chunk buffer in no-copy mode).
-    object build_varchar_vector(const uint8_t* base, StringColumnResult& scr)
-    object build_typed_vector(const uint8_t* base, StringColumnResult& scr)
-    void merge_string_column(StringColumnResult& dest, StringColumnResult& src)
-
     # Parsed column buffers (no Python); produced in parallel off the GIL, then wrapped.
     cppclass ParsedColumn:
         pass
@@ -176,55 +124,70 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
     object wrap_column(ParsedColumn& pc)
 
 
-import os
+# Native mmap disk IO (src/cpp/disk_io.cpp) — same reader used by the Parquet path
+# (rugo/src/parquet/parquet_reader.pyx:read_parquet_from_path). Avoids materialising the
+# whole file as a Python bytes object: the OS pages the mapping in on demand instead of an
+# eager read() copy, which matters at JSONBench's larger tiers (up to 425GB uncompressed).
+cdef extern from "disk_io.h" nogil:
+    int read_all_mmap(const char* path, uint8_t** dst, size_t* out_len)
+    int unmap_memory_c(unsigned char* addr, size_t size)
 
 
-cdef bytes _maybe_prefilter(bytes buf, predicates):
+cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
     """Gated Volnitsky raw prefilter for a single selective string-equality predicate.
-    Returns a candidate sub-buffer (surviving lines) when it applies, else the original
-    buffer unchanged. SOUND: the needle is the quoted value, which a matching record always
-    contains regardless of whitespace; the predicate is re-applied downstream so false
-    positives are verified away. Self-disabling on non-string, short, or non-selective cases."""
+    Returns a NEW bytes object of surviving candidate lines when prefiltering applies and
+    helps, else None (caller keeps using the original buf/buf_len as-is). Only ever
+    materialises small BOUNDED samples (first ~4KB, first ~1MB) as Python bytes regardless
+    of buf_len — never copies the whole buffer just to decide whether to prefilter, so this
+    stays cheap even when buf points at a multi-hundred-GB mmap'd file. SOUND: the needle is
+    the quoted value, which a matching record always contains regardless of whitespace; the
+    predicate is re-applied downstream so false positives are verified away. Self-disabling
+    on non-string, short, or non-selective cases."""
     cdef PrefilterResult r
     cdef PrefilterResult sr
     cdef const uint8_t* ndl_ptr
-    cdef const uint8_t* sample_ptr
-    cdef const uint8_t* buf_ptr
+    cdef size_t first_len
+    cdef size_t sample_len
+    cdef bytes first_bytes
+    cdef bytes sample_bytes
 
     if not predicates or len(predicates) != 1:
-        return buf
+        return None
     col, op, val = predicates[0]
     if op != "==":
-        return buf
+        return None
 
     # Probe the first record: only prefilter when `col` is stored as a quoted (string)
     # value. A bare numeric/bool value isn't quoted, so a quoted needle would false-negative.
-    nl = buf.find(b"\n")
-    first = buf[:nl] if nl >= 0 else buf
+    # Bounded to 4KB — real JSONL lines are far shorter than that.
+    first_len = buf_len if buf_len < 4096 else 4096
+    first_bytes = (<const char*>buf)[:first_len]
+    nl = first_bytes.find(b"\n")
+    first = first_bytes[:nl] if nl >= 0 else first_bytes
     key = b'"' + col.encode("utf-8") + b'":'
     ki = first.find(key)
     if ki < 0:
-        return buf                      # key absent / non-compact formatting -> skip (safe)
+        return None                     # key absent / non-compact formatting -> skip (safe)
     if first[ki + len(key):ki + len(key) + 1] != b'"':
-        return buf                      # bare value -> skip (numeric hazard)
+        return None                     # bare value -> skip (numeric hazard)
 
     needle = b'"' + str(val).encode("utf-8") + b'"'
     if len(needle) < 8:                 # short/low-entropy value -> skip won't pay off
-        return buf
+        return None
 
     ndl_ptr = <const uint8_t*>needle
 
-    # Selectivity sample on the first ~1MB: if the needle already hits >30% of sampled rows,
-    # there's little to skip -> run the normal path instead of paying for a full prefilter.
-    sample = buf[:1_000_000]
-    sample_ptr = <const uint8_t*>sample
-    sr = volnitsky_prefilter(sample_ptr, len(sample), ndl_ptr, len(needle))
-    sample_lines = sample.count(b"\n")
+    # Selectivity sample on the first ~1MB (bounded, not the whole buffer): if the needle
+    # already hits >30% of sampled rows, there's little to skip -> run the normal path
+    # instead of paying for a full prefilter.
+    sample_len = buf_len if buf_len < 1_000_000 else 1_000_000
+    sr = volnitsky_prefilter(buf, sample_len, ndl_ptr, len(needle))
+    sample_bytes = (<const char*>buf)[:sample_len]
+    sample_lines = sample_bytes.count(b"\n")
     if sample_lines > 0 and sr.matched_records * 10 > sample_lines * 3:
-        return buf
+        return None
 
-    buf_ptr = <const uint8_t*>buf
-    r = volnitsky_prefilter(buf_ptr, len(buf), ndl_ptr, len(needle))
+    r = volnitsky_prefilter(buf, buf_len, ndl_ptr, len(needle))
     if r.candidates.size() == 0:
         return b""                      # no candidates -> empty buffer -> 0 rows
     return (<char*>r.candidates.data())[:r.candidates.size()]
@@ -259,24 +222,27 @@ def read_jsonl(
         'columns': list of Draken Vector objects
         'schema': dict of inferred/applied types
     """
+    if not use_threads:
+        # The non-threaded path was served by a sequential 64MB-chunked reader
+        # (JsonlReader::next_chunk) that no caller in this codebase ever invoked — it has
+        # been removed as dead code. Fail loud rather than silently falling back to the
+        # threaded path with different characteristics (e.g. schema inference was wired
+        # only into the removed path and never populated result['schema'] here either way).
+        raise NotImplementedError(
+            "read_jsonl(use_threads=False) is no longer supported; the sequential "
+            "chunked reader it used was unreachable dead code and has been removed."
+        )
+
     cdef ParseContext context
-    cdef JsonlReader* reader = NULL
     cdef Predicate pred
-    cdef ReadResult chunk_result
     cdef vector[string] column_names_cpp
-    cdef list chunk_buffers = []
-    cdef vector[RecordSet] chunk_records
+    cdef RecordSet records
     cdef size_t total_rows = 0
     cdef cmap[string, string] schema_cpp
-    cdef const uint8_t* buf_data
-    cdef size_t buf_len
-    cdef vector[MarkerPosition] markers
+    cdef const uint8_t* buf_data = NULL
+    cdef size_t buf_len = 0
     cdef InterpreterResult interp_result
     cdef OrdinalPredictor predictor
-    cdef bint threaded_succeeded = False
-    cdef string col_name_cpp
-    cdef vector[FieldSpan] first_record_cpp
-    cdef FieldSpan field
     cdef dict result = {
         'success': False,
         'column_names': [],
@@ -285,114 +251,112 @@ def read_jsonl(
         'schema': {}
     }
 
+    # mmap state for the file-path case (freed in the finally below). `in_memory_data`
+    # keeps whichever Python bytes object buf_data currently points into alive — the
+    # original in-memory input, or a fresh bytes object from the prefilter.
+    cdef uint8_t* mapped_ptr = NULL
+    cdef size_t mapped_len = 0
+    cdef bint owns_mmap = False
+    cdef int mmap_rc
+    cdef bytes path_bytes
+    cdef const char* c_path
+    cdef bytes in_memory_data
+    cdef const uint8_t[::1] buf_view
+    cdef object pf_result
+
+    # Build ParseContext
+    if columns:
+        for col in columns:
+            context.projected_columns.push_back(col.encode('utf-8'))
+
+    if predicates:
+        for col, op, val in predicates:
+            pred.column = col.encode('utf-8')
+            pred.op = <uint8_t>_jsonl_parse_op(op)
+            pred.value = str(val).encode('utf-8')
+            context.predicates.push_back(pred)
+
+    context.infer_schema = infer_schema
+    context.infer_sample_size = infer_sample_size
+    context.parse_arrays = parse_arrays
+    context.parse_objects = parse_objects
+    context.fail_on_error = fail_on_error
+
     try:
-        # Build ParseContext
-        if columns:
-            for col in columns:
-                context.projected_columns.push_back(col.encode('utf-8'))
+        if isinstance(data, str):
+            # mmap the file directly — no f.read() copy, no eager materialisation of the
+            # whole file as a Python bytes object. The OS pages the mapping in on demand;
+            # interpret_jsonl_threaded's newline-range splitting works over a raw pointer
+            # regardless of whether it's mmap'd or heap-allocated.
+            path_bytes = data.encode('utf-8')
+            c_path = path_bytes
+            with nogil:
+                mmap_rc = read_all_mmap(c_path, &mapped_ptr, &mapped_len)
+            if mmap_rc != 0:
+                raise OSError(-mmap_rc, f"read_all_mmap failed for {data!r}")
+            owns_mmap = True
+            buf_data = mapped_ptr
+            buf_len = mapped_len
+        elif isinstance(data, bytes):
+            in_memory_data = data
+            buf_data = <const uint8_t*>in_memory_data
+            buf_len = len(in_memory_data)
+        elif isinstance(data, (bytearray, memoryview)):
+            # Zero-copy: view the caller's buffer directly instead of coercing via
+            # bytes(data), which would force a full copy of a buffer the caller may
+            # already hold zero-copy (e.g. an mmap'd region of their own). `buf_view`
+            # keeps the buffer pinned for the rest of this call, same lifetime contract
+            # as in_memory_data. The caller must not mutate it while we read.
+            buf_view = memoryview(data).cast('B')
+            buf_len = buf_view.shape[0]
+            buf_data = &buf_view[0] if buf_len > 0 else NULL
+        else:
+            in_memory_data = bytes(data)
+            buf_data = <const uint8_t*>in_memory_data
+            buf_len = len(in_memory_data)
 
-        if predicates:
-            for col, op, val in predicates:
-                pred.column = col.encode('utf-8')
-                pred.op = <uint8_t>_jsonl_parse_op(op)
-                pred.value = str(val).encode('utf-8')
-                context.predicates.push_back(pred)
+        # Sparser-style raw prefilter: for a selective string-equality predicate, drop
+        # records that cannot contain the value before any structural parsing. Sound by
+        # construction (value-anchored needle), self-disabling on short/non-selective
+        # filters; the predicate is still applied downstream, so false positives are
+        # verified away. Only ever touches bounded samples of buf, not the whole thing.
+        if use_prefilter and buf_len > 0:
+            pf_result = _maybe_prefilter(buf_data, buf_len, predicates)
+            if pf_result is not None:
+                # Prefilter produced a fresh, smaller bytes object — the mmap'd file (if
+                # any) is no longer needed for parsing, so release it now rather than
+                # holding the mapping open for the rest of the call.
+                if owns_mmap:
+                    with nogil:
+                        unmap_memory_c(mapped_ptr, mapped_len)
+                    owns_mmap = False
+                in_memory_data = pf_result
+                buf_data = <const uint8_t*>in_memory_data
+                buf_len = len(in_memory_data)
 
-        context.infer_schema = infer_schema
-        context.infer_sample_size = infer_sample_size
-        context.parse_arrays = parse_arrays
-        context.parse_objects = parse_objects
-        context.fail_on_error = fail_on_error
+        if buf_len > 0:
+            # Parallel scan + document map: the buffer is split into newline-aligned
+            # ranges processed across a thread pool, then merged in order. (Per range
+            # it still does SIMD-scan -> markers -> state machine; fusing those two
+            # into one pass measured ~25% slower, so they stay decoupled.)
+            with nogil:
+                interp_result = interpret_jsonl_threaded(
+                    buf_data, buf_len, context, predictor, 0
+                )
 
-        # Try threaded path first if requested
-        threaded_succeeded = False
-        if use_threads:
-            # Load entire buffer
-            if isinstance(data, str):
-                with open(data, 'rb') as f:
-                    threaded_data = f.read()
-            elif isinstance(data, bytes):
-                threaded_data = data
-            else:
-                threaded_data = bytes(data)
+            if interp_result.all_records.num_records() > 0:
+                # Read column names from the first record BEFORE moving the
+                # records out (no projection = all columns).
+                column_names_cpp = first_record_keys(interp_result.all_records, buf_data)
+                total_rows = interp_result.num_records_passed
+                # Move (not copy) the record structure — tens of millions of
+                # FieldSpans + their per-record vectors.
+                records = move(interp_result.all_records)
 
-            # Sparser-style raw prefilter: for a selective string-equality predicate, drop
-            # records that cannot contain the value before any structural parsing. Sound by
-            # construction (value-anchored needle), self-disabling on short/non-selective
-            # filters; the predicate is still applied downstream, so false positives are
-            # verified away.
-            if use_prefilter and len(threaded_data) > 0:
-                threaded_data = _maybe_prefilter(threaded_data, predicates)
-
-            if len(threaded_data) > 0:
-                buf_data = <const uint8_t*>threaded_data
-                buf_len = len(threaded_data)
-                # Parallel scan + document map: the buffer is split into newline-aligned
-                # ranges processed across a thread pool, then merged in order. (Per range
-                # it still does SIMD-scan -> markers -> state machine; fusing those two
-                # into one pass measured ~25% slower, so they stay decoupled.)
-                with nogil:
-                    interp_result = interpret_jsonl_threaded(
-                        buf_data, buf_len, context, predictor, 0
-                    )
-
-                # Store result as single "chunk" if successful
-                if interp_result.all_records.num_records() > 0:
-                    # Read column names from the first record BEFORE moving the
-                    # records out (no projection = all columns).
-                    if column_names_cpp.empty():
-                        column_names_cpp = first_record_keys(interp_result.all_records, buf_data)
-
-                    chunk_buffers.append(threaded_data)
-                    total_rows = interp_result.num_records_passed
-                    # Move (not copy) the record structure — tens of millions of
-                    # FieldSpans + their per-record vectors — into the chunk store.
-                    chunk_records.push_back(move(interp_result.all_records))
-                    threaded_succeeded = True
-
-        # Fall back to sequential if threaded path failed or wasn't requested
-        if not threaded_succeeded:
-            # Sequential path: use JsonlReader chunking
-            if isinstance(data, str):
-                reader = new JsonlReader(<string>data.encode('utf-8'), context)
-            elif isinstance(data, bytes):
-                reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
-            else:
-                data_bytes = bytes(data)
-                reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
-
-            # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
-            # offsets remain valid when we later call extract_column per chunk.
-            while True:
-                chunk_result = reader.next_chunk()
-
-                if not chunk_result.success:
-                    if reader.has_error():
-                        result['error'] = reader.get_error().decode('utf-8')
-                    break
-
-                if chunk_result.num_records > 0:
-                    if column_names_cpp.empty():
-                        for col in chunk_result.column_names:
-                            column_names_cpp.push_back(col)
-
-                    # Keep buffer as bytes (owns the memory); move the records in.
-                    chunk_buffers.append(bytes(chunk_result.buffer_data))
-                    total_rows += chunk_result.num_records
-                    chunk_records.push_back(move(chunk_result.records))
-
-                    if chunk_result.inferred_schema.size() > 0:
-                        for key, value in chunk_result.inferred_schema:
-                            schema_cpp[key] = value
-
-                if reader.is_eof():
-                    break
-
-        # Build Draken vectors — one C++ call per column per chunk
+        # Build Draken vectors — buf_data/buf_len are still valid here (mmap released,
+        # or in_memory_data kept alive, only in the finally below).
         if total_rows > 0 and not column_names_cpp.empty():
-            vectors = _build_vectors_from_chunks(
-                chunk_buffers, chunk_records, column_names_cpp, total_rows
-            )
+            vectors = _build_vectors(buf_data, buf_len, records, column_names_cpp)
             result['columns'] = vectors
             result['column_names'] = [col.decode('utf-8') for col in column_names_cpp]
             result['num_rows'] = total_rows
@@ -402,8 +366,9 @@ def read_jsonl(
         return result
 
     finally:
-        if reader != NULL:
-            del reader
+        if owns_mmap:
+            with nogil:
+                unmap_memory_c(mapped_ptr, mapped_len)
 
 
 def benchmark_document_map(
@@ -458,106 +423,6 @@ def benchmark_document_map(
     }
 
 
-def read_jsonl_raw(
-    data,
-    columns=None,
-    predicates=None,
-    infer_schema=False,
-):
-    """
-    Read JSONL data and return raw FieldSpan records (no vector construction).
-    Used for benchmarking interpretation phase in isolation.
-
-    Returns:
-      dict with keys:
-        'success': bool
-        'num_rows': int (records that passed predicates)
-        'column_names': list[str]
-        'buffer_size_mb': float
-        'elapsed_ms': float
-        'sample_record': first record as list of field info dicts
-    """
-    import time
-
-    cdef ParseContext context
-    cdef JsonlReader* reader = NULL
-    cdef Predicate pred
-    cdef ReadResult chunk_result
-    cdef list column_names = []
-    cdef size_t total_rows = 0
-    cdef double total_bytes = 0
-    cdef dict result = {
-        'success': False,
-        'num_rows': 0,
-        'column_names': [],
-        'buffer_size_mb': 0.0,
-        'elapsed_ms': 0.0,
-        'sample_record': []
-    }
-
-    try:
-        start_time = time.perf_counter()
-
-        # Build ParseContext
-        if columns:
-            for col in columns:
-                context.projected_columns.push_back(col.encode('utf-8'))
-
-        if predicates:
-            for col, op, val in predicates:
-                pred.column = col.encode('utf-8')
-                pred.op = <uint8_t>_jsonl_parse_op(op)
-                pred.value = str(val).encode('utf-8')
-                context.predicates.push_back(pred)
-
-        context.infer_schema = infer_schema
-        context.infer_sample_size = 5
-        context.parse_arrays = False
-        context.parse_objects = False
-        context.fail_on_error = False
-
-        # Create reader
-        if isinstance(data, str):
-            reader = new JsonlReader(<string>data.encode('utf-8'), context)
-        elif isinstance(data, bytes):
-            reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
-        else:
-            data_bytes = bytes(data)
-            reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
-
-        # Read all chunks, accumulate row count
-        while True:
-            chunk_result = reader.next_chunk()
-
-            if not chunk_result.success:
-                break
-
-            if chunk_result.num_records > 0:
-                if not column_names:
-                    for col in chunk_result.column_names:
-                        column_names.append(col.decode('utf-8'))
-
-                total_rows += chunk_result.num_records
-                total_bytes += chunk_result.buffer_data.size()
-
-            if reader.is_eof():
-                break
-
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-
-        result['success'] = True
-        result['num_rows'] = total_rows
-        result['column_names'] = column_names
-        result['buffer_size_mb'] = total_bytes / 1024 / 1024
-        result['elapsed_ms'] = elapsed_ms
-
-        return result
-
-    finally:
-        if reader != NULL:
-            del reader
-
-
 cdef uint8_t _jsonl_parse_op(str op):
     ops = {
         '==': 0,  # EQ
@@ -570,62 +435,36 @@ cdef uint8_t _jsonl_parse_op(str op):
     return ops.get(op, 0)
 
 
-cdef list _build_vectors_from_chunks(
-    list chunk_buffers,
-    vector[RecordSet]& chunk_records,
-    vector[string]& column_names,
-    size_t total_rows
+cdef list _build_vectors(
+    const uint8_t* buf_ptr,
+    size_t buf_len,
+    RecordSet& records,
+    vector[string]& column_names
 ):
     """
-    For each column, extract as StringVector, then cast to inferred type.
-    No Python per-row iteration.
+    Parse every column of the buffer produced by the threaded scan+interpret path
+    (interpret_jsonl_threaded always yields exactly one merged RecordSet over one buffer —
+    its internal newline-range parallelism is orthogonal to this). No Python per-row
+    iteration. `buf_ptr` may point into an mmap'd file or an in-memory bytes buffer; the
+    caller is responsible for keeping it mapped/alive for the duration of this call.
     """
     cdef list vectors = []
-    cdef StringColumnResult chunk_col
-    cdef StringColumnResult merged
-    cdef bytes buf_bytes
-    cdef const uint8_t* buf_ptr
-    cdef string col_name_cpp
-    cdef size_t ci, pi
-    cdef size_t n_chunks = chunk_records.size()
-    cdef OrdinalPredictor predictor
+    cdef size_t pi
     cdef vector[ParsedColumn] parsed
     cdef bint may_esc
 
-    if n_chunks == 0 or len(chunk_buffers) == 0:
+    if records.num_records() == 0:
         return vectors
 
-    if n_chunks == 1:
-        # Common case: whole file fit in one chunk. Parse every column in parallel off
-        # the GIL (no-copy — spans index straight into the buffer), then wrap each into
-        # a Vector under the GIL (cheap, O(columns)).
-        buf_bytes = <bytes>chunk_buffers[0]
-        buf_ptr = <const uint8_t*>buf_bytes
-        may_esc = b'\\' in buf_bytes   # cheap buffer-wide gate: only then unescape strings
-        with nogil:
-            parsed = parse_all_columns(buf_ptr, chunk_records[0], column_names, 0, may_esc)
-        for pi in range(parsed.size()):
-            vec = wrap_column(parsed[pi])
-            if vec is not None:
-                vectors.append(vec)
-        return vectors
-
-    # Multi-chunk (>64MB file): the merged column outlives the individual chunk buffers,
-    # so extract WITH a copy and concatenate; build from merged.data (serial).
-    for col_name_cpp in column_names:
-        for ci in range(n_chunks):
-            buf_bytes = <bytes>chunk_buffers[ci]
-            buf_ptr = <const uint8_t*>buf_bytes
-            may_esc = b'\\' in buf_bytes
-            chunk_col = extract_column(buf_ptr, chunk_records[ci], col_name_cpp, predictor, True, may_esc)
-            if ci == 0:
-                merged = chunk_col
-            else:
-                merge_string_column(merged, chunk_col)
-        vec = build_typed_vector(merged.data_ptr(), merged)
+    # Cheap buffer-wide gate: only then attempt (column-scoped) unescaping downstream.
+    # memchr instead of Python `in` — buf_ptr may not be backed by a Python bytes object.
+    may_esc = memchr(buf_ptr, 0x5C, buf_len) != NULL
+    with nogil:
+        parsed = parse_all_columns(buf_ptr, records, column_names, 0, may_esc)
+    for pi in range(parsed.size()):
+        vec = wrap_column(parsed[pi])
         if vec is not None:
             vectors.append(vec)
-
     return vectors
 
 

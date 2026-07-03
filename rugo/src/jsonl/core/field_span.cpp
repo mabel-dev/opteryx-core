@@ -94,11 +94,12 @@ static void finalize_records(
     InterpreterResult& result,
     RecordSet& all_records,
     const uint8_t* buffer_data,
-    const ParseContext& context) {
+    const ParseContext& context,
+    const std::vector<Predicate>& predicates) {
 
     // Fast path: no projection and no predicates — build_map already produced the final
     // arena (empties dropped, no filtering), so move it wholesale.
-    if (context.predicates.empty() && context.projected_columns.empty()) {
+    if (predicates.empty() && context.projected_columns.empty()) {
         result.num_records_passed = all_records.num_records();
         result.all_records = std::move(all_records);
         return;
@@ -115,8 +116,8 @@ static void finalize_records(
             v.push_back({n.data(), static_cast<uint32_t>(n.size()), n.empty() ? uint8_t(0) : uint8_t(n[0])});
         return v;
     };
-    std::vector<Col> pcols; pcols.reserve(context.predicates.size());
-    for (const auto& p : context.predicates)
+    std::vector<Col> pcols; pcols.reserve(predicates.size());
+    for (const auto& p : predicates)
         pcols.push_back({p.column.data(), static_cast<uint32_t>(p.column.size()),
                          p.column.empty() ? uint8_t(0) : uint8_t(p.column[0])});
     std::vector<Col> jcols = make_cols(context.projected_columns);
@@ -138,9 +139,9 @@ static void finalize_records(
         const RecordView rec = all_records[r];
 
         bool passes = true;
-        for (size_t i = 0; i < context.predicates.size(); ++i) {
+        for (size_t i = 0; i < predicates.size(); ++i) {
             const FieldSpan* f = find(rec, pcols[i]);
-            if (f == nullptr || !evaluate_predicate(buffer_data, *f, context.predicates[i])) {
+            if (f == nullptr || !evaluate_predicate(buffer_data, *f, predicates[i])) {
                 passes = false;
                 break;
             }
@@ -174,6 +175,12 @@ InterpreterResult interpret_jsonl(
     InterpreterResult result;
     if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
 
+    // Predicate literals are parsed to int64/float64 ONCE here — not per row evaluated.
+    // interpret_jsonl runs once per newline-range (interpret_jsonl_threaded calls it once
+    // per thread chunk, typically single-digit count), so this is O(threads), never O(rows).
+    std::vector<Predicate> prepared_predicates = context.predicates;
+    for (auto& p : prepared_predicates) prepare_predicate(p);
+
     // Minimal-extent projection: when columns/predicates are named, build the map for ONLY
     // the projected ∪ predicate columns (exact bytes, no hashing) and stop scanning each
     // record once they are found. With nothing named, build the full data-blind map.
@@ -181,7 +188,7 @@ InterpreterResult interpret_jsonl(
     std::vector<WantedColumn> wanted_cols;
     MapProjection projbundle;
     const MapProjection* proj_ptr = nullptr;
-    if (!context.projected_columns.empty() || !context.predicates.empty()) {
+    if (!context.projected_columns.empty() || !prepared_predicates.empty()) {
         auto find_col = [&](const char* n, size_t l) -> int {
             for (size_t k = 0; k < wanted_cols.size(); ++k)
                 if (wanted_cols[k].len == l && std::memcmp(wanted_cols[k].name, n, l) == 0)
@@ -194,8 +201,8 @@ InterpreterResult interpret_jsonl(
                                        c.empty() ? uint8_t(0) : uint8_t(c[0]), -1});
         // A predicate column joins the wanted set (reusing an existing projected entry)
         // and carries its predicate index for inline evaluation.
-        for (size_t i = 0; i < context.predicates.size(); ++i) {
-            const std::string& pc = context.predicates[i].column;
+        for (size_t i = 0; i < prepared_predicates.size(); ++i) {
+            const std::string& pc = prepared_predicates[i].column;
             int k = find_col(pc.data(), pc.size());
             if (k >= 0) { if (wanted_cols[k].pred_idx < 0) wanted_cols[k].pred_idx = static_cast<int>(i); }
             else wanted_cols.push_back({pc.data(), static_cast<uint32_t>(pc.size()),
@@ -213,7 +220,7 @@ InterpreterResult interpret_jsonl(
         // is estimated from the first record's COLON markers (interior/nested/string colons
         // only inflate it, biasing conservatively toward keeping the projection).
         bool wide_projection = false;
-        if (context.predicates.empty()) {
+        if (prepared_predicates.empty()) {
             size_t first_record_fields = 0;
             for (const auto& m : markers) {
                 if (m.marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) break;
@@ -226,7 +233,7 @@ InterpreterResult interpret_jsonl(
         if (!wide_projection) {
             projbundle.columns    = &wanted_cols;
             projbundle.num_wanted = wanted_cols.size();
-            projbundle.predicates = &context.predicates;
+            projbundle.predicates = &prepared_predicates;
             proj_ptr = &projbundle;
         }
     }
@@ -243,7 +250,7 @@ InterpreterResult interpret_jsonl(
     }
     if (result.bytes_consumed == 0 && all_records.num_records() > 0) result.bytes_consumed = buffer_length;
 
-    finalize_records(result, all_records, buffer_data, context);
+    finalize_records(result, all_records, buffer_data, context, prepared_predicates);
     return result;
 }
 

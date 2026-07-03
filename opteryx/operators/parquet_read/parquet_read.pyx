@@ -105,6 +105,7 @@ def _null_filler_for(column_type):
 # the executor iterates a C struct array with stack-based dispatch.
 #
 from opteryx.expression.evaluator import execute_bytecode
+from opteryx.expression.evaluator import predicate_filter_and_mask_c_native as _predicate_filter_and_mask_c_native
 from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
@@ -531,6 +532,19 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
     result.rows_before_filter = p1_morsel.num_rows
 
+    # All-c-native predicate: filter + survival mask in ONE nogil span — no GIL
+    # Morsel VM. Only a non-c-native predicate falls through to execute_bytecode.
+    _fam = _predicate_filter_and_mask_c_native(compiled_predicate, p1_morsel)
+    if _fam is not None:
+        p1_filtered, mask_bytes = _fam
+        if not any(mask_bytes):
+            return result
+        result.survived = True
+        result.p1_filtered = p1_filtered
+        result.p1_identity_names = p1_identity_names
+        result.mask_bytes = mask_bytes
+        return result
+
     mask = execute_bytecode(compiled_predicate, p1_morsel)
 
     if not mask.any():
@@ -589,6 +603,9 @@ cdef class ParquetReadNode(ReaderNode):
     cdef bint _scan_finished              # decode-telemetry flushed once
     cdef bint _emitted_any                # any morsel returned (empty-result guard)
     cdef bint _empty_guard_done           # the single empty morsel already returned
+    cdef int64_t _sp_claims_pending       # row groups claimed via next_vectors() but not
+                                           # yet fully processed by this worker (see
+                                           # _single_pass_next's race-fix comment)
     # Hoisted single-pass plan (read by _single_pass_next; latmat reads the
     # _sp_* it shares via read_morsels).
     cdef object _sp_filesystem
@@ -653,6 +670,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._scan_finished = False
         self._emitted_any = False
         self._empty_guard_done = False
+        self._sp_claims_pending = 0
         self._compiled_predicate = None  # CompiledBytecode, bound once at execute() time
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
@@ -825,18 +843,22 @@ cdef class ParquetReadNode(ReaderNode):
         return True
 
     cdef void _record_morsel_emitted(self, object morsel):
-        """Apply per-emit accounting to both scan_readings and the telemetry mirror.
+        """Apply per-emit accounting to scan_readings (typed, native).
 
-        Keeps the dual-write pattern in one place so callers don't repeat the
-        six-line ScanReadings + telemetry update before every `yield`.
+        The Python `telemetry`/`readings` object mirror was REMOVED from this
+        per-morsel hot path: those fields are `object`-typed (forbidden — CLAUDE.md
+        §3/§9) and their backing store (`_QueryTelemetry._reading`, a plain unlocked
+        `defaultdict`) has no concurrency protection of its own. Under genuine
+        multi-threaded concurrent pull (the native worker fan-out), writing to it from
+        inside this `_scan_mtx`-held section stalled the whole scan. The rule is
+        absolute: blind to this mirror rather than touching Python object state from
+        a native concurrent path. `scan_readings` (typed cdef class) remains the
+        complete, lossless native record.
         """
         cdef int64_t num_rows = morsel.num_rows
         cdef int64_t num_bytes = morsel.nbytes
         cdef int64_t files_seen = len(self._parquet_files_seen)
         self.scan_readings.record_morsel_yielded(num_rows, num_bytes, files_seen)
-        self.telemetry.blobs_read = files_seen
-        self.telemetry.rows_read += num_rows
-        self.telemetry.bytes_processed += num_bytes
 
     cdef Morsel _commit_morsel(self, Morsel result_morsel, object path):
         """Single seam for ALL per-emitted-morsel shared-state mutation:
@@ -859,8 +881,10 @@ cdef class ParquetReadNode(ReaderNode):
 
     cdef shared_ptr[CxxMorsel] _commit_morsel_cxx(self, shared_ptr[CxxMorsel] cxm, object path):
         """S-B.2: the cxm-native twin of `_commit_morsel` for the single-pass path —
-        row-group accounting, file-seen, LIMIT decrement + slice (`cxx_slice_c`), and
-        the telemetry mirror, all on the C++ carrier with NO Python Morsel. `nbytes`
+        row-group accounting, file-seen, LIMIT decrement + slice (`cxx_slice_c`), all
+        on the C++ carrier with NO Python Morsel and NO Python telemetry object touch
+        (see `_record_morsel_emitted`'s docstring — the `object`-typed telemetry
+        mirror is forbidden inside this `_scan_mtx`-held native section). `nbytes`
         matches Morsel.nbytes' estimate (rows × cols × 8)."""
         cdef int64_t num_rows = cxm.get().num_rows()
         cdef int64_t num_cols = cxm.get().num_columns()
@@ -877,18 +901,24 @@ cdef class ParquetReadNode(ReaderNode):
                 self._records_to_read -= num_rows
         files_seen = len(self._parquet_files_seen)
         self.scan_readings.record_morsel_yielded(num_rows, num_rows * num_cols * 8, files_seen)
-        self.telemetry.blobs_read = files_seen
-        self.telemetry.rows_read += num_rows
         return cxm
 
     cdef shared_ptr[CxxMorsel] _single_pass_finish_cxx(self):
         """cxm-native twin of `_single_pass_finish`: emit one empty CxxMorsel if the
-        scan produced nothing, else NULL (end-of-stream). Caller holds `_scan_mtx`."""
+        scan produced nothing, else NULL (end-of-stream). Caller holds `_scan_mtx` —
+        no Python `readings` dict touch here (see `_record_morsel_emitted`'s
+        docstring); `empty_datasets` is no longer tracked from this native path.
+
+        `_sp_claims_pending == 0` is required before deciding "nothing was ever
+        produced" — see `_single_pass_next`'s race-fix comment. While another
+        worker's claimed row group is still mid-assembly, this returns NULL (this
+        caller's own stream just ends) rather than risk a duplicate/premature
+        courtesy morsel; whichever caller next observes pending==0 makes the real
+        decision, still exactly once (`_empty_guard_done` is the single-fire latch)."""
         cdef shared_ptr[CxxMorsel] out
-        if not self._emitted_any and not self._empty_guard_done:
+        if self._sp_claims_pending == 0 and not self._emitted_any and not self._empty_guard_done:
             self._empty_guard_done = True
             self._emitted_any = True
-            self.readings["empty_datasets"] += 1
             out = cxx_morsel_from_vectors_sp([], [])
         return out
 
@@ -988,8 +1018,18 @@ cdef class ParquetReadNode(ReaderNode):
         ``_lm_p1_cache``, unguarded pass-1 barrier) and the empty-manifest
         FALLBACK generator are NOT reentrant. The mode is a runtime decision, so
         resolve it here under the same init lock the pull uses, then report it —
-        the parallel strategies branch lockless-vs-serialised pull on this."""
-        self._scan_mtx.lock()
+        the parallel strategies branch lockless-vs-serialised pull on this.
+
+        The acquire is done with the thread state released (`with nogil`): under
+        free-threaded CPython (3.13t/3.14t), a thread parked in a contended
+        `std::mutex::lock()` while still ATTACHED cannot reach a safepoint, so it
+        blocks the runtime's stop-the-world (GC/QSBR) indefinitely if the holder
+        is itself waiting on that same pause — a real deadlock reproduced with
+        `dop=8` concurrent `next_morsel` pullers. Releasing the thread state
+        during the wait lets stop-the-world treat this thread as not running
+        Python; it re-attaches once the lock is actually acquired."""
+        with nogil:
+            self._scan_mtx.lock()
         if not self._scan_started:
             self._ensure_scan_started()
         self._scan_mtx.unlock()
@@ -1015,7 +1055,15 @@ cdef class ParquetReadNode(ReaderNode):
         # Init guard under the lock so concurrent first-callers plan the scan
         # exactly once and observe a fully-built _ipc_source before pulling. The
         # uncontended lock/unlock is negligible beside decode; no atomics needed.
-        self._scan_mtx.lock()
+        #
+        # The acquire releases the thread state (`with nogil`) — see
+        # `is_concurrent_pull_safe` for why: under free-threaded CPython, an
+        # ATTACHED thread parked in a contended `std::mutex::lock()` can't reach
+        # a safepoint, which deadlocks the runtime's stop-the-world if the lock
+        # holder is itself waiting on that pause (reproduced with `dop=8`
+        # concurrent pullers racing this same first-call init guard).
+        with nogil:
+            self._scan_mtx.lock()
         if not self._scan_started:
             self._ensure_scan_started()
         self._scan_mtx.unlock()
@@ -1069,16 +1117,20 @@ cdef class ParquetReadNode(ReaderNode):
         BasePlanNode.close_source(self)
 
     cdef void _flush_decode_telemetry(self) except *:
-        """Per-scan decode-time + filter-total telemetry. Mirrors the read_morsels
-        finally block; called once from close_source for the single-pass path."""
+        """Per-scan decode-time + filter-total telemetry, recorded into the typed
+        native `scan_readings` only. Called once from close_source for the
+        single-pass path, but still under `_scan_mtx` — no Python `telemetry`/
+        `readings` object touch here (see `_record_morsel_emitted`'s docstring); the
+        rule is absolute regardless of call frequency. `scan_readings` itself is the
+        complete native record; it is no longer mirrored into the Python `readings`
+        dict, so the EXPLAIN/reporting surface goes blind to this scan's stats
+        rather than the native path touching Python object state."""
         cdef int64_t decode_ns = <int64_t>time.monotonic_ns() - self._decode_start_ns
         self.scan_readings.record_decode_time(decode_ns)
-        self.telemetry.time_decoding_blobs += decode_ns
         self.scan_readings.record_filter_totals(
             self._total_rows_before_filter,
             self._total_rows_after_filter,
         )
-        self.scan_readings.flush_into(self.readings)
 
     cdef void _ensure_scan_started(self) except *:
         """Run the once-per-scan setup (schema resolution, identity maps, predicate
@@ -1184,6 +1236,13 @@ cdef class ParquetReadNode(ReaderNode):
             and bool(_pass2_names)
         )
         topn_active = topn_active and two_pass_eligible
+        import os as _dbg_os
+        if _dbg_os.environ.get("OPTERYX_SCAN_DEBUG"):
+            import sys as _dbg_sys
+            print(f"SCAN-DBG topn_active={topn_active} two_pass={two_pass_eligible} "
+                  f"topn_sort={self._topn_sort_name} limit={self._topn_limit} "
+                  f"p1={sorted(_pass1_only_names)[:4]} np2={len(_pass2_names)}",
+                  file=_dbg_sys.stderr)
         self._sp_topn_active = topn_active
         self._sp_two_pass_eligible = two_pass_eligible
         self._sp_pass1_column_names = []
@@ -1204,9 +1263,10 @@ cdef class ParquetReadNode(ReaderNode):
             self._scan_mode = _SCAN_FALLBACK
             return
 
-        self.readings["columns_read"] += len(read_schema.columns)
-        self.readings["parquet_filter_columns_read"] += len(filter_column_names)
-        self.readings["parquet_projection_columns_read"] += len(_planner_name_to_identity)
+        # NOTE: the `self.readings[...] += ...` Python-dict mirror was REMOVED here —
+        # this runs under `_scan_mtx`, reachable from `is_concurrent_pull_safe()`
+        # called by every worker (see `_record_morsel_emitted`'s docstring); the
+        # native-path "object forbidden" rule is absolute regardless of idempotency.
 
         # Row-group pruning stats from pushed-down predicates.
         self._sp_predicate_stats = extract_predicate_stats(self.predicates or [])
@@ -1348,7 +1408,29 @@ cdef class ParquetReadNode(ReaderNode):
         exhaustion (after one empty morsel if nothing was produced).
 
         Thread-safe: the pull + cxm assembly run on thread-local data with no lock;
-        only the per-scan accounting + `_commit_morsel_cxx` run under `_scan_mtx`."""
+        only the per-scan accounting + `_commit_morsel_cxx` run under `_scan_mtx`.
+
+        RACE FIX (found 2026-07-01 via ASan under genuinely concurrent dop>1 pull on a
+        tiny — few/one row-group — scan; reproduced as a real SIGSEGV, not a hang):
+        claiming a row group (`next_vectors()` returning non-None) and COMMITTING it
+        (setting `_emitted_any`) are separated by this method's lock-free assembly
+        section — a SECOND worker whose own `next_vectors()` returns None (no more
+        items to claim) in that window used to see `_emitted_any` still False and
+        wrongly conclude "the whole scan produced nothing", emitting a bogus
+        ZERO-COLUMN courtesy morsel via `_single_pass_finish_cxx`. That morsel is NOT
+        an EOS sentinel, so `StreamingScanSource`'s trampoline (which only skips
+        `MorselState.END_OF_STREAM`) forwarded it to the engine as real data —
+        `GroupSumCountSink`/`SumCountSink` then read `in->columns[0]` on an EMPTY
+        vector: undefined behaviour, observed as SIGSEGV. `_sp_claims_pending` closes
+        the window: a worker only decides "genuinely nothing was ever produced" once
+        every claimed-but-not-yet-processed row group (including OTHER workers')
+        counts back to zero — see `_single_pass_finish_cxx`. RESIDUAL LIMITATION
+        (documented, not hidden): under adversarial concurrent timing where every row
+        group's predicate filters to zero surviving rows, the once-per-scan courtesy
+        empty morsel (schema visibility for a truly empty result) can now be skipped
+        rather than produced — never wrong data, never a crash, just a rarer nicety
+        lost in a narrow concurrent corner. Serial (dop=1) callers are unaffected
+        (pending always hits zero before the single caller ever re-checks)."""
         cdef tuple pulled
         cdef list vectors
         cdef object path
@@ -1360,8 +1442,20 @@ cdef class ParquetReadNode(ReaderNode):
         while True:
             if self._limit_exhausted():
                 return self._finish_locked_cxx()
+            # Mark a claim attempt as "in flight" BEFORE calling next_vectors() —
+            # incrementing only AFTER a successful claim leaves a gap between the
+            # claim (under IpcRowGroupSource's OWN separate mutex) and the increment
+            # (under this scan's _scan_mtx), which a concurrently-exhausted second
+            # worker can slip through. Speculatively incrementing first and
+            # decrementing on a None result closes that gap entirely.
+            self._scan_mtx.lock()
+            self._sp_claims_pending += 1
+            self._scan_mtx.unlock()
             pulled = self._ipc_source.next_vectors()
             if pulled is None:
+                self._scan_mtx.lock()
+                self._sp_claims_pending -= 1
+                self._scan_mtx.unlock()
                 return self._finish_locked_cxx()
             vectors = pulled[0]
             bytes_fetched = pulled[1]
@@ -1377,6 +1471,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self.scan_readings.time_parquet_read_ranges_ns += read_ns
                 self.scan_readings.time_parquet_decode_columns_ns += decode_ns
                 self._total_rows_before_filter += pulled[6]
+                self._sp_claims_pending -= 1
                 self._scan_mtx.unlock()
                 continue
 
@@ -1416,6 +1511,7 @@ cdef class ParquetReadNode(ReaderNode):
             if has_identity:
                 self._total_rows_before_filter += rows_before_filter
                 self._total_rows_after_filter += rows_after_filter
+            self._sp_claims_pending -= 1
             if emit_cxm.get() != NULL:
                 emit_cxm = self._commit_morsel_cxx(emit_cxm, path)
                 self._emitted_any = True
@@ -1436,11 +1532,12 @@ cdef class ParquetReadNode(ReaderNode):
     cdef Morsel _single_pass_finish(self):
         """On exhaustion, emit exactly one empty Morsel if the scan produced
         nothing (parity with the generator's `result_morsel is None` guard),
-        otherwise signal end-of-stream with None. Caller holds `_scan_mtx`."""
+        otherwise signal end-of-stream with None. Caller holds `_scan_mtx` — no
+        Python `readings` dict touch here (see `_record_morsel_emitted`'s
+        docstring)."""
         if not self._emitted_any and not self._empty_guard_done:
             self._empty_guard_done = True
             self._emitted_any = True
-            self.readings["empty_datasets"] += 1
             return Morsel()
         return None
 

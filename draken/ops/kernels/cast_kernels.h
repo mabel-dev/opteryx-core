@@ -49,7 +49,9 @@ VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* vector);
 
 VecResult draken_cast_date32_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* vector);
 // Implemented as draken_cast_date_to_string (the registered/forward-declared name).
 VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* vector);
 
@@ -139,6 +141,16 @@ VecResult draken_cast_to_varchar_with_length(void* ctx, const DrakenVector* vect
  * Returns the input vector unchanged.
  */
 VecResult draken_cast_identity(void* ctx, const DrakenVector* vector);
+
+/**
+ * ARRAY -> VARCHAR rendering: ['a', 'b'] per row. TWO-vector signature — the
+ * elements live in the parent's child vector (owned by the VectorOwner, not
+ * reachable from the parent DrakenVector*), so the VM resolves and passes it
+ * explicitly (BC_C_NATIVE_CHILD). Never dispatched through the one-vector
+ * cast table.
+ */
+VecResult draken_cast_array_to_varchar(void* ctx, const DrakenVector* parent,
+                                       const DrakenVector* child);
 
 #ifdef __cplusplus
 }

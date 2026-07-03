@@ -16,15 +16,6 @@ enum class CompressionCodec {
     ZSTD = 6
 };
 
-// Main decompression function
-// Returns decompressed data as a vector
-std::vector<uint8_t> DecompressData(
-    const uint8_t* compressed_data,
-    size_t compressed_size,
-    size_t uncompressed_size,
-    CompressionCodec codec
-);
-
 // In-place variant: writes into caller-supplied buffer, resizing as needed.
 // Reusing the same buffer across calls avoids repeated heap allocation.
 void DecompressInto(

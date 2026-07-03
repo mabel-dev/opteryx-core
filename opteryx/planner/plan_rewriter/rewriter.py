@@ -11,6 +11,7 @@ from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewrit
 
 class PlanRewriterVisitor:
     def __init__(self, telemetry: QueryTelemetry):
+        self.telemetry = telemetry
         self.strategies = [cls(telemetry) for cls in STRATEGIES]
 
     def traverse(self, plan: LogicalPlan, strategy, ctes: dict) -> LogicalPlan:
@@ -44,6 +45,13 @@ class PlanRewriterVisitor:
             changed = False
             for strategy in self.strategies:
                 if strategy.should_i_run(current):
+                    before = (len(current), len(current.edges()))
                     current = self.traverse(current, strategy, ctes)
+                    self.telemetry.add_plan_rewrite(
+                        "plan_rewriter",
+                        strategy.__class__.__name__,
+                        before,
+                        (len(current), len(current.edges())),
+                    )
                     changed = True
         return current

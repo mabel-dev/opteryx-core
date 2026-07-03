@@ -17,6 +17,7 @@ from opteryx.expression.evaluator._impl import (
     execute_and_append,
     execute_bytecode,
     get_bytecode_worker_fn_ptr,
+    predicate_filter_and_mask_c_native,
 )
 from opteryx.expression.evaluator._impl import _OP_CODE, _verify_node_type_constants
 
@@ -65,4 +66,5 @@ __all__ = [
     "execute_and_append",
     "execute_bytecode",
     "get_bytecode_worker_fn_ptr",
+    "predicate_filter_and_mask_c_native",
 ]

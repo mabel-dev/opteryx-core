@@ -26,9 +26,12 @@
 // OUTPUT: bit-packed DRAKEN_BOOL VecResult. Allocated via cmp_alloc_bool_buf /
 // cmp_copy_validity from int64_compare.h (zero-init + masked validity copy).
 //
-// CONTAINS: uses Volnitsky algorithm (src/cpp/volnitsky.h) — same algorithm as
-// the former vector_contains.pyx. The bigram table is built once per call, then
-// probed per row. Null rows are skipped before the Volnitsky probe.
+// CONTAINS (case-sensitive): uses simd_contains_cs (src/cpp/volnitsky.h) — a
+// chunked first+last-byte SIMD verify (Muła's algorithm), no table. Measured
+// faster than volnitsky_contains_cs on realistic data (see memory: contains
+// kernel benchmark). CONTAINS (case-insensitive): still Volnitsky — measured
+// slower for CI (fold doubles the per-block compare cost). Null rows are
+// skipped before the probe either way.
 
 #include <cstdint>
 #include <cstring>
@@ -252,9 +255,10 @@ static inline VecResult str_ends_with_ci(
 }
 
 // ---------------------------------------------------------------------------
-// str_contains — case-sensitive substring search via Volnitsky algorithm.
+// str_contains — case-sensitive substring search via simd_contains_cs
+// (chunked first+last-byte SIMD verify, src/cpp/volnitsky.h). No table:
+// nothing to allocate, build, or free per call.
 //
-// Builds the bigram table once per call; probes each non-null row.
 // Empty needle → True for all non-null rows (SQL convention, matches old .pyx).
 // ---------------------------------------------------------------------------
 static inline VecResult str_contains(
@@ -281,17 +285,6 @@ static inline VecResult str_contains(
         return _ss_make_result(dst, out_null, n);
     }
 
-    // ndl_len==1 degenerates to the first-byte sieve: volnitsky_contains_cs
-    // returns right after _find_first_byte and never dereferences the table.
-    // Skip the 128 KB alloc+build+free entirely — nullptr is never read for a
-    // 1-byte needle, and volnitsky_free(nullptr) is a no-op.
-    VolnitskyTable* tbl = nullptr;
-    if (ndl_len >= 2) {
-        tbl = volnitsky_alloc();
-        if (!tbl) throw std::bad_alloc();
-        volnitsky_build(tbl, needle, ndl_len);
-    }
-
     // Compressed-shape fast path (dict / constant), all-valid input only.
     // Probe each DISTINCT slot once — not once per logical row — then return a
     // COMPRESSED bool vector that reuses the input's codes (copied: vectors own
@@ -314,18 +307,16 @@ static inline VecResult str_contains(
                             draken_malloc(static_cast<size_t>(n) * sizeof(uint32_t)));
         } catch (...) {
             draken_free(slot_bits);
-            volnitsky_free(tbl);
             throw;
         }
         if (codes != nullptr) {
             for (uint32_t k = 0; k < nd; ++k) {
                 const DrakenStringSlot* slot = &sa->slots[k];
-                if (volnitsky_contains_cs(str_data(slot, sa->arena), str_length(slot),
-                                          needle, ndl_len, tbl))
+                if (simd_contains_cs(str_data(slot, sa->arena), str_length(slot),
+                                      needle, ndl_len))
                     slot_bits[k >> 3u] |= static_cast<uint8_t>(1u << (k & 7u));
             }
             memcpy(codes, sel, static_cast<size_t>(n) * sizeof(uint32_t));
-            volnitsky_free(tbl);
 
             VecResult r;
             r.data           = slot_bits;
@@ -346,17 +337,16 @@ static inline VecResult str_contains(
     uint8_t* out_null = nullptr;
     if (src_null) {
         try { out_null = cmp_copy_validity(src_null, n); }
-        catch (...) { draken_free(dst); volnitsky_free(tbl); throw; }
+        catch (...) { draken_free(dst); throw; }
     }
     for (uint32_t i = 0; i < n; ++i) {
         if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
-        if (volnitsky_contains_cs(str_data(slot, sa->arena), str_length(slot),
-                                   needle, ndl_len, tbl))
+        if (simd_contains_cs(str_data(slot, sa->arena), str_length(slot),
+                              needle, ndl_len))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
     }
 
-    volnitsky_free(tbl);
     return _ss_make_result(dst, out_null, n);
 }
 

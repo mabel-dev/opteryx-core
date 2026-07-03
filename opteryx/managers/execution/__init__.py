@@ -47,20 +47,18 @@ def execute(plan, telemetry):
 
     # Triage by plan head. Non-pipeline special operations (EXPLAIN / SET / SHOW /
     # INSERT / DDL) run on serial_engine — they have no morsel pipeline to drive
-    # and never parallelise. EVERY data pipeline (SELECT and friends) runs on the
-    # M4 scheduler (scheduler_engine) — THE data executor, which hosts the per-shape
-    # drive substrate (parallel_engine) under its Event/Executor DAG: parallel where a
-    # strategy fits, serial-driven inline where it does not. serial_engine is NOT a
-    # fallback for data pipelines.
+    # and never parallelise. EVERY data pipeline (SELECT and friends) is compiled to
+    # the native pipeline-graph engine (src/cpp/engine/) and runs 100% natively —
+    # THE data executor, no second engine, no fallback. A plan the native engine has
+    # no operator for raises NotSupportedError at compile time (hard-cutover posture;
+    # see the engine_cutover_decisions memory).
     head_nodes = list(set(plan.get_exit_points()))
     if len(head_nodes) == 1 and is_special_op(plan[head_nodes[0]]):
         results, result_type = serial_execute(plan, telemetry=telemetry)
     else:
-        # M4 event-DAG scheduler — THE data executor (Step 7). The scheduler owns the
-        # data path end-to-end; there is no second live executor.
-        from .scheduler_engine import execute as scheduler_execute
+        from .compiler import execute_native
 
-        results, result_type = scheduler_execute(plan, telemetry=telemetry)
+        results, result_type = execute_native(plan, telemetry=telemetry)
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type

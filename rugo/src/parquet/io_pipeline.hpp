@@ -19,6 +19,7 @@
 #include <deque>
 #include <exception>
 #include <cstdint>
+#include <cstdio>
 #include <utility>
 #include <chrono>
 #include <condition_variable>

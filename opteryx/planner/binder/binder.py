@@ -364,40 +364,54 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     return node, context
 
 
-def traversive_recursive_bind(node: Node, context: Any) -> Tuple[Node, Any]:
+def traversive_recursive_bind(
+    node: Node, context: Any, format_cache: Optional[dict] = None
+) -> Tuple[Node, Any]:
     # First recurse and do this for all the sub parts of the evaluation plan
     for attr in ("left", "right", "centre"):
         if getattr(node, attr) is not None:
-            value, context = inner_binder(getattr(node, attr), context)
+            value, context = inner_binder(getattr(node, attr), context, format_cache)
             setattr(node, attr, value)
     if node.parameters:
         node.parameters, new_contexts = zip(
-            *(inner_binder(parm, context) for parm in node.parameters)
+            *(inner_binder(parm, context, format_cache) for parm in node.parameters)
         )
         merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
         context.schemas = merged_schemas
     if node.node_type == NodeType.CASE:
         # NodeType.CASE uses conditions/results/else_result instead of parameters
         if node.conditions:
-            bound, new_contexts = zip(*(inner_binder(c, context) for c in node.conditions))
+            bound, new_contexts = zip(
+                *(inner_binder(c, context, format_cache) for c in node.conditions)
+            )
             node.conditions = list(bound)
             merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
             context.schemas = merged_schemas
         if node.results:
-            bound, new_contexts = zip(*(inner_binder(r, context) for r in node.results))
+            bound, new_contexts = zip(
+                *(inner_binder(r, context, format_cache) for r in node.results)
+            )
             node.results = list(bound)
             merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
             context.schemas = merged_schemas
         if node.else_result is not None:
-            node.else_result, context = inner_binder(node.else_result, context)
+            node.else_result, context = inner_binder(node.else_result, context, format_cache)
     return node, context
 
 
-def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
+def inner_binder(
+    node: Node, context: BindingContext, format_cache: Optional[dict] = None
+) -> Tuple[Node, Any]:
     """
     Note, this is a tree within a tree. This function represents a single step in the execution
     plan (associated with the relational algebra) which may itself be an evaluation plan
     (executing comparisons).
+
+    ``format_cache`` memoizes format_expression renders for the lifetime of one
+    root bind (callers omit it; the root call creates it). Keys are computed
+    top-down over pristine subtrees, so within a root bind the cached render of
+    every node is exactly what an uncached render would produce — this collapses
+    the O(n²) per-node memo-key rendering of deep expressions to O(n).
     """
     # Import relevant classes and functions
     from opteryx.expression import ExpressionColumn, format_expression, get_all_nodes_of_type
@@ -422,14 +436,16 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     # need to treat the result like an IDENTIFIER
     # We discard columns not referenced, so this sometimes holds the only reference to
     # child columns, e.g. MAX(id), we may not have 'id' next time we see it, only MAX(id)
-    column_name = node.query_column or format_expression(node, True)
+    if format_cache is None:
+        format_cache = {}
+    column_name = node.query_column or format_expression(node, True, format_cache)
     for schema in context.schemas.values():
         found_column = schema.find_column(column_name, case_insensitive=True)
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
             # found_identity = found_column.identity
             with suppress(Exception):
-                node, _ = traversive_recursive_bind(node, context)
+                node, _ = traversive_recursive_bind(node, context, format_cache)
 
             node.schema_column = found_column
             node.query_column = node.alias or column_name
@@ -445,7 +461,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     schemas = context.schemas
 
     # do the sub trees off this node
-    node, context = traversive_recursive_bind(node, context)
+    node, context = traversive_recursive_bind(node, context, format_cache)
 
     # Now do the node we're at
     if node_type == NodeType.LITERAL:
@@ -727,9 +743,17 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 coerce = _COERCE.get(left_type, lambda v: v)
                 node.right.value = [None if v is None else coerce(v) for v in node.right.value]
 
-            mismatches = get_mismatched_condition_column_types(node, relaxed=True)
-            if mismatches:
-                raise IncompatibleTypesError(**mismatches)
+            # The type-mismatch check recurses the whole subtree for AND/OR/XOR
+            # nodes, but inner_binder already visits every comparison leaf
+            # bottom-up (each gets its own check before its parent connective is
+            # reached), so re-checking at each connective is pure O(n^2)
+            # re-walking on deep predicate chains. Only check at the nodes that do
+            # the actual per-comparison work; connectives just OR their children's
+            # results, which are already covered.
+            if node_type not in (NodeType.AND, NodeType.OR, NodeType.XOR):
+                mismatches = get_mismatched_condition_column_types(node, relaxed=True)
+                if mismatches:
+                    raise IncompatibleTypesError(**mismatches)
 
             result_type = determine_type(node)  # ColumnType | None (Phase 2)
             # D-2: when the result is DECIMAL, also derive (precision, scale).

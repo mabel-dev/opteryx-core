@@ -146,6 +146,92 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
   return decoded;
 }
 
+// Pointer-output variant: decodes directly into a caller-owned buffer with
+// capacity >= num_values, instead of a std::vector. Same algorithm as the
+// vector overload above (kept in sync manually — no shared body because the
+// running "last value" source differs: out[decoded-1] vs values.back()).
+// Used on hot paths where the destination (a pre-sized ext_* buffer or a
+// pre-reserved result vector slot) is already known, so decoding into a
+// temporary vector and then std::copy-ing it over is a wasted allocation +
+// extra full pass.
+// Returns the number of values decoded, or -1 on error.
+template <typename T>
+static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
+                                       int32_t num_values,
+                                       T *out) {
+  if (data_size < 4) return -1;
+
+  const uint8_t *ptr = data;
+  const uint8_t *end = data + data_size;
+
+  // Header
+  uint64_t block_size = ReadUnsignedVarint(ptr, end);
+  if (block_size == 0 || ptr >= end) return -1;
+
+  uint64_t num_miniblocks = ReadUnsignedVarint(ptr, end);
+  if (num_miniblocks == 0 || ptr >= end) return -1;
+
+  /* total_value_count */ ReadUnsignedVarint(ptr, end);
+  if (ptr >= end) return -1;
+
+  int64_t first_value = ReadZigZagVarint(ptr, end);
+  if (ptr > end) return -1;
+
+  out[0] = static_cast<T>(first_value);
+  if (num_values == 1) return 1;
+
+  int32_t decoded = 1;
+  uint32_t values_per_miniblock = static_cast<uint32_t>(block_size / num_miniblocks);
+
+  while (decoded < num_values && ptr < end) {
+    int64_t min_delta = ReadZigZagVarint(ptr, end);
+    if (ptr > end) break;
+
+    std::vector<uint8_t> bit_widths;
+    bit_widths.reserve(num_miniblocks);
+    for (uint64_t mb = 0; mb < num_miniblocks && ptr < end; mb++) {
+      bit_widths.push_back(*ptr++);
+    }
+    if (bit_widths.size() != num_miniblocks) break;
+
+    for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
+      uint8_t bit_width = bit_widths[mb];
+
+      if (bit_width == 0) {
+        // All deltas in this miniblock equal min_delta; no data bytes needed.
+        for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
+          T last = out[decoded - 1];
+          out[decoded] = last + static_cast<T>(min_delta);
+          decoded++;
+        }
+      } else {
+        int32_t bytes_needed =
+            (static_cast<int32_t>(values_per_miniblock) * bit_width + 7) / 8;
+        if (ptr + bytes_needed > end) break;
+
+        for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
+          uint64_t delta = 0;
+          int bit_pos    = i * bit_width;
+          int byte_pos   = bit_pos / 8;
+          int bit_offset = bit_pos % 8;
+
+          for (int b = 0; b < 9 && byte_pos + b < bytes_needed; b++) {
+            delta |= ((uint64_t)ptr[byte_pos + b]) << (b * 8);
+          }
+          delta = (delta >> bit_offset) & ((1ULL << bit_width) - 1);
+
+          T last = out[decoded - 1];
+          out[decoded] = last + static_cast<T>(min_delta + (int64_t)delta);
+          decoded++;
+        }
+        ptr += bytes_needed;
+      }
+    }
+  }
+
+  return decoded;
+}
+
 // ---------------------------------------------------------------------------
 // DELTA_BYTE_ARRAY (encoding id 6)
 // ---------------------------------------------------------------------------

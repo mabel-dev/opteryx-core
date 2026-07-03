@@ -38,7 +38,7 @@ cdef class FileColumnStats:
         self._min_cache = {}
         self._max_cache = {}
 
-    cdef void bind_schema(self, list column_names):
+    cpdef void bind_schema(self, list column_names):
         """Map schema field_ids (positions) to stat vector indices.
 
         Called once at FileEntry build time while the schema is known.

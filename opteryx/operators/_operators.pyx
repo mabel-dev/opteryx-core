@@ -35,11 +35,375 @@ from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from cpython.array cimport array
 import draken.draken_native as _draken_native
 
-from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t
+from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t, uint8_t, uint32_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
 from cpython.ref cimport PyObject
-from opteryx.compiled.thread_pool cimport CppThreadPool, native_task_fn
+from opteryx.compiled.thread_pool cimport CppThreadPool, native_task_fn, spawn_detached_native_task
+from opteryx.compiled.expression.compiled_expression cimport (
+    CompiledBytecode, BytecodeInstr, BC_LOAD_COL, BC_LOAD_LIT_CONST,
+    BC_LOAD_LIT_BOOL, BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
+    BC_COMPARE, BC_BINARY_OP, BC_CAST,
+    BC_CMP_INLIST_INLINE, BC_INSTR_C_NATIVE, BC_C_NATIVE_FIXED, BC_C_NATIVE_STRING,
+    BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_UNARY_OP, UOP_IS_NULL, UOP_IS_NOT_NULL, BC_FUNCTION,
+    BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_COMPARE,
+)
+from opteryx.expression.evaluator._impl cimport _dv_filter_span_cxx, _dv_eval_span_cxx
+from opteryx.compiled.morsel_queue cimport PyMorselQueue, MorselQueue
+from libcpp.vector cimport vector as cppvector
+from libcpp.unordered_map cimport unordered_map
+from libcpp.pair cimport pair
+from libcpp.string cimport string
+from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline
+from rugo.parquet_reader cimport FileStats
+from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
+
+# Slice 5a: the C++ morsel-driven engine demo (src/cpp/engine/) — proves the engine
+# processes REAL scan output through a real filter into the REAL output MorselQueue.
+cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil:
+    cdef struct DemoStats:
+        long long rows_in
+        long long rows_out
+    DemoStats run_filter_to_queue(
+        const cppvector[shared_ptr[CxxMorsel]]& morsels, size_t col_idx,
+        double threshold, int dop, MorselQueue* out_q, ErrCtx& err
+    )
+
+# Slice 5b: REAL scanned data through a REAL C++-native NULL-aware SUM/COUNT aggregate
+# Sink (extends slice 2's synthetic grouped-count pattern to genuine on-disk numeric
+# columns, correctly skipping NULLs).
+cdef extern from "engine/scan_aggregate_demo.hpp" namespace "opteryx::engine" nogil:
+    cdef struct AggDemoStats:
+        double sum
+        long long count
+    AggDemoStats run_sum_count(
+        const cppvector[shared_ptr[CxxMorsel]]& morsels, size_t col_idx,
+        int dop, ErrCtx& err
+    )
+
+# Slice 5c: REAL scanned data, GROUP BY a real numeric key column, REAL C++-native
+# NULL-aware SUM/COUNT per group (combines slice 2's hash-map breaker pattern with
+# slice 5b's NULL-aware reduction).
+cdef extern from "engine/scan_groupby_demo.hpp" namespace "opteryx::engine" nogil:
+    cdef struct GroupRow:
+        long long key
+        double sum
+        long long count
+    void run_group_sum_count(
+        const cppvector[shared_ptr[CxxMorsel]]& morsels, size_t key_col_idx,
+        size_t val_col_idx, int dop, ErrCtx& err, cppvector[GroupRow]& out
+    )
+
+# Slice 5d: REAL scanned data on BOTH sides of a hash join — build pipeline's Sink
+# builds the hash table over a real on-disk key column, probe pipeline's Operator fans
+# out matches via HAVE_MORE (the proven slice-4 mechanic) over a real on-disk probe key
+# column, NULL-aware on both sides.
+cdef extern from "engine/scan_join_demo.hpp" namespace "opteryx::engine" nogil:
+    long long run_hash_join_count(
+        const cppvector[shared_ptr[CxxMorsel]]& build_morsels, size_t build_key_col_idx,
+        const cppvector[shared_ptr[CxxMorsel]]& probe_morsels, size_t probe_key_col_idx,
+        int dop, ErrCtx& err
+    )
+
+# ---- REAL (non-demo) engine cutover, piece 1: scan -> filter -> exit, streamed on
+# demand (no pre-materialization) into the REAL production MorselQueue. This is the
+# shape execute() routes to the native engine for; see native_engine_real_filter below.
+ctypedef void (*ScanPullFn)(void* scan_ptr, shared_ptr[CxxMorsel]* out,
+                            int* finished, int* err_code) noexcept nogil
+
+cdef extern from "engine/streaming_scan_source.hpp" namespace "opteryx::engine" nogil:
+    pass  # ScanPullFn / StreamingScanSource are consumed only via real_filter_pipeline.hpp
+
+cdef extern from "engine/real_filter_pipeline.hpp" namespace "opteryx::engine" nogil:
+    cdef struct RealFilterStats:
+        long long rows_out
+    RealFilterStats run_real_filter_to_queue(
+        void* scan_ptr, ScanPullFn pull_fn, size_t col_idx, double threshold,
+        int dop, MorselQueue* out_q, ErrCtx& err, void* pool
+    )
+
+# ---- Genuinely native (zero-Python) engine cutover: NativeParquetScanSource ->
+# NumericFilterOperator -> queue. No PyObject anywhere in this pipeline's run —
+# see native_parquet_scan_source.hpp / native_filter_pipeline.hpp for the scope
+# boundary (fixed-width numeric columns, single-pass, no schema evolution).
+cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil:
+    cdef enum class CompareOp "opteryx::engine::CompareOp":
+        Gt "opteryx::engine::CompareOp::Gt"
+        GtEq "opteryx::engine::CompareOp::GtEq"
+        Lt "opteryx::engine::CompareOp::Lt"
+        LtEq "opteryx::engine::CompareOp::LtEq"
+        Eq "opteryx::engine::CompareOp::Eq"
+        NotEq "opteryx::engine::CompareOp::NotEq"
+    cdef struct SimplePredicate:
+        size_t col_idx
+        CompareOp op
+        double threshold
+
+# ---- REAL (non-demo) engine cutover, piece 2: scan -> [filter]* -> SUM/COUNT, streamed
+# on demand (no pre-materialization) — the ungrouped-aggregate counterpart of piece 1.
+# BLOCKING (an aggregate result is a handful of scalars, not a morsel stream), unlike
+# piece 1's streaming queue hand-off — see native_engine_real_aggregate below.
+cdef extern from "engine/real_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
+    AggDemoStats run_real_aggregate_to_result(
+        void* scan_ptr, ScanPullFn pull_fn, cppvector[SimplePredicate] predicates,
+        size_t col_idx, int dop, ErrCtx& err, void* pool
+    )
+
+# ---- REAL (non-demo) engine cutover, piece 3: scan -> [filter]* -> GROUP BY key ->
+# SUM/COUNT, streamed on demand (no pre-materialization) — the grouped-aggregate
+# counterpart of piece 2. BLOCKING (a grouped result is a handful of rows, not a morsel
+# stream) — see native_engine_real_groupby below.
+cdef extern from "engine/real_groupby_pipeline.hpp" namespace "opteryx::engine" nogil:
+    void run_real_groupby_to_result(
+        void* scan_ptr, ScanPullFn pull_fn, cppvector[SimplePredicate] predicates,
+        size_t key_col_idx, size_t val_col_idx, int dop, ErrCtx& err, void* pool,
+        cppvector[GroupRow]& out
+    )
+
+# ---- REAL (non-demo) engine cutover, piece 4: scan -> [filter]* -> build hash table;
+# scan -> [filter]* -> probe -> SUM/COUNT over one join-output column, streamed on demand
+# (no pre-materialization, BOTH sides) — the inner-equi-join counterpart of pieces 2/3.
+# BLOCKING (an aggregate result is a handful of scalars) — see native_engine_real_join
+# below.
+cdef extern from "engine/real_join_pipeline.hpp" namespace "opteryx::engine" nogil:
+    AggDemoStats run_real_join_aggregate_to_result(
+        void* build_scan_ptr, ScanPullFn build_pull_fn,
+        cppvector[SimplePredicate] build_predicates,
+        size_t build_key_col_idx, cppvector[size_t] build_payload_col_idx,
+        void* probe_scan_ptr, ScanPullFn probe_pull_fn,
+        cppvector[SimplePredicate] probe_predicates,
+        size_t probe_key_col_idx, cppvector[size_t] probe_payload_col_idx,
+        size_t agg_col_idx, int dop, ErrCtx& err, void* pool
+    )
+
+# ---- THE ENGINE: the pipeline-graph runner (engine.hpp). The plan compiler
+# (opteryx/managers/execution/compiler.py — planning, Python) builds the graph through
+# the NativePlan builder edge (see below); execution is ONE detached native driver
+# task running the whole graph, streaming the terminal pipeline into the production
+# MorselQueue the cursor drains. This is the general form that subsumes the four
+# narrow native_engine_real_* entry points above.
+cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
+    cdef struct SortKeySpec:
+        size_t col_idx
+        bint ascending
+
+# The engine's general expression operators (native_expression.hpp): programs are
+# lowered + resolved at PLAN time; execution calls back into the pure-nogil spans
+# in evaluation.pyx through these C fn-pointer shapes (the ScanPullFn idiom).
+ctypedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
+                             int* col_idx, void** lit_dv,
+                             CxxMorsel** out_filtered, int* err_op) noexcept nogil
+ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
+                           int* col_idx, void** lit_dv,
+                           DrakenVector* out_vec, void** out_data,
+                           uint8_t** out_validity, void** out_sel,
+                           int* err_op) noexcept nogil
+
+cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nogil:
+    cdef enum class AggFn "opteryx::engine::AggFn":
+        CountStar "opteryx::engine::AggFn::CountStar"
+        Count "opteryx::engine::AggFn::Count"
+        Sum "opteryx::engine::AggFn::Sum"
+        Avg "opteryx::engine::AggFn::Avg"
+        Min "opteryx::engine::AggFn::Min"
+        Max "opteryx::engine::AggFn::Max"
+        CountDistinct "opteryx::engine::AggFn::CountDistinct"
+    cdef cppclass AggSpec2:
+        AggFn fn
+        int col_idx
+        string name
+
+cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass Engine:
+        Engine() except +
+        size_t new_pipeline()
+        size_t new_buffer()
+        size_t new_join_ref()
+        void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bint serialize_pull)
+        void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
+                                    const unordered_map[string, FileStats]* footer_map,
+                                    const cppvector[pair[string, int]]* work_items,
+                                    const cppvector[string]* column_names,
+                                    int in_flight_limit)
+        void set_buffer_source(size_t p, size_t buf)
+        void add_filter(size_t p, cppvector[SimplePredicate] preds)
+        void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
+                             cppvector[void*] lit_dv, ExprFilterFn fn)
+        void add_expr_project(size_t p, void* instrs, int count, cppvector[int] col_idx,
+                              cppvector[void*] lit_dv, ExprEvalFn fn, string name,
+                              int lt_kind, int lt_unit, int lt_precision, int lt_scale)
+        void add_limit(size_t p, int64_t offset, int64_t limit)
+        void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
+        void set_pipeline_dop(size_t p, int dop)
+        void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
+        void add_join_probe(size_t p, size_t ref, size_t key_idx,
+                            cppvector[size_t] payload_idx)
+        void set_queue_sink(size_t p, MorselQueue* q)
+        void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
+        void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
+                              cppvector[AggSpec2] specs, size_t buf)
+        void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf)
+        void set_buffer_append_sink(size_t p, size_t buf)
+        void set_join_build_sink(size_t p, size_t key_idx, cppvector[size_t] payload_idx,
+                                 size_t ref)
+        size_t new_join2_ref()
+        void set_join2_build_sink(size_t p, cppvector[size_t] key_idx,
+                                  cppvector[size_t] payload_idx, size_t ref)
+        void add_join2_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
+                             cppvector[size_t] payload_idx, int mode)
+        void set_asof_build_sink(size_t p, cppvector[size_t] key_idx,
+                                 cppvector[size_t] payload_idx, size_t asof_idx,
+                                 size_t ref)
+        void add_asof_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
+                            cppvector[size_t] payload_idx, size_t asof_idx, int op)
+        void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf)
+        void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf)
+        void set_window_sink(size_t p, cppvector[SortKeySpec] sort_spec, size_t n_part,
+                             cppvector[int] fn_kinds, cppvector[string] fn_names, size_t buf)
+        void set_final_schema(cppvector[string] names, cppvector[DrakenType] types)
+        void run(int dop, void* pool, ErrCtx& err)
+
+
+cdef extern from "engine/native_filter_pipeline.hpp" namespace "opteryx::engine" nogil:
+    cdef struct NativeFilterStats:
+        long long rows_out
+    NativeFilterStats run_native_filter_to_queue(
+        ParquetIOPipeline* pipeline,
+        const unordered_map[string, FileStats]* footer_map,
+        const cppvector[pair[string, int]]* work_items,
+        const cppvector[string]* column_names,
+        int in_flight_limit, cppvector[SimplePredicate] predicates, int dop,
+        MorselQueue* out_q, ErrCtx& err, void* pool
+    )
+
+# ---- Genuinely native (zero-Python) UNGROUPED aggregate: NativeParquetScanSource ->
+# [NumericFilterOperator] -> NativeAggregateSink. See native_aggregate.hpp for the
+# scope boundary — SUM/COUNT/AVG only, fixed-width numeric only, NOT DECIMAL.
+cdef extern from "engine/native_aggregate.hpp" namespace "opteryx::engine" nogil:
+    cdef enum class ExprKind "opteryx::engine::ExprKind":
+        Column "opteryx::engine::ExprKind::Column"
+        Literal "opteryx::engine::ExprKind::Literal"
+        Add "opteryx::engine::ExprKind::Add"
+        Sub "opteryx::engine::ExprKind::Sub"
+        Mul "opteryx::engine::ExprKind::Mul"
+        Div "opteryx::engine::ExprKind::Div"
+    cdef cppclass NativeExpr:
+        ExprKind kind
+        size_t col_idx
+        double literal
+        shared_ptr[NativeExpr] left
+        shared_ptr[NativeExpr] right
+
+        @staticmethod
+        shared_ptr[NativeExpr] make_column(size_t idx)
+        @staticmethod
+        shared_ptr[NativeExpr] make_literal(double v)
+        @staticmethod
+        shared_ptr[NativeExpr] make_binary(ExprKind k, shared_ptr[NativeExpr] l,
+                                           shared_ptr[NativeExpr] r)
+
+    cdef enum class AggFunc "opteryx::engine::AggFunc":
+        Sum "opteryx::engine::AggFunc::Sum"
+        Count "opteryx::engine::AggFunc::Count"
+        Avg "opteryx::engine::AggFunc::Avg"
+    cdef struct AggregateSpec:
+        AggFunc func
+        bint is_decimal
+        shared_ptr[NativeExpr] expr
+        shared_ptr[DecimalExpr] decimal_expr
+
+cdef extern from "engine/native_decimal.hpp" namespace "opteryx::engine" nogil:
+    cdef enum class DecimalExprKind "opteryx::engine::DecimalExprKind":
+        Column "opteryx::engine::DecimalExprKind::Column"
+        Literal "opteryx::engine::DecimalExprKind::Literal"
+        Add "opteryx::engine::DecimalExprKind::Add"
+        Sub "opteryx::engine::DecimalExprKind::Sub"
+        Mul "opteryx::engine::DecimalExprKind::Mul"
+        Case "opteryx::engine::DecimalExprKind::Case"
+    cdef cppclass DecimalExpr:
+        DecimalExprKind kind
+        size_t col_idx
+        uint8_t scale
+        shared_ptr[DecimalExpr] left
+        shared_ptr[DecimalExpr] right
+        size_t cond_col_idx
+        string cond_prefix
+
+        @staticmethod
+        shared_ptr[DecimalExpr] make_column(size_t idx, uint8_t sc)
+        @staticmethod
+        shared_ptr[DecimalExpr] make_literal(int64_t unscaled, uint8_t sc)
+        @staticmethod
+        shared_ptr[DecimalExpr] make_binary(DecimalExprKind k, shared_ptr[DecimalExpr] l,
+                                            shared_ptr[DecimalExpr] r)
+        @staticmethod
+        shared_ptr[DecimalExpr] make_case(size_t cond_idx, string prefix,
+                                          shared_ptr[DecimalExpr] then_expr,
+                                          shared_ptr[DecimalExpr] else_expr)
+
+cdef extern from "engine/native_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
+    cdef struct NativeAggregateStats:
+        cppvector[double] result
+        cppvector[int64_t] decimal_hi
+        cppvector[uint64_t] decimal_lo
+        cppvector[uint8_t] decimal_scale
+    NativeAggregateStats run_native_aggregate_to_result(
+        ParquetIOPipeline* pipeline,
+        const unordered_map[string, FileStats]* footer_map,
+        const cppvector[pair[string, int]]* work_items,
+        const cppvector[string]* column_names,
+        int in_flight_limit, cppvector[SimplePredicate] predicates,
+        cppvector[AggregateSpec] specs, int dop, ErrCtx& err, void* thread_pool,
+        CppMemoryPool* decimal_pool, const cppvector[uint8_t]* decimal_columns
+    )
+
+cdef extern from "engine/native_grouped_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
+    cdef struct NativeGroupedAggregateStats:
+        uint32_t num_groups
+        cppvector[string] group_key_values
+        cppvector[double] result
+        cppvector[int64_t] decimal_hi
+        cppvector[uint64_t] decimal_lo
+        cppvector[uint8_t] decimal_scale
+    NativeGroupedAggregateStats run_native_grouped_aggregate_to_result(
+        ParquetIOPipeline* pipeline,
+        const unordered_map[string, FileStats]* footer_map,
+        const cppvector[pair[string, int]]* work_items,
+        const cppvector[string]* column_names,
+        int in_flight_limit, cppvector[SimplePredicate] predicates,
+        cppvector[size_t] group_col_idx,
+        cppvector[AggregateSpec] specs, int dop, ErrCtx& err, void* thread_pool,
+        CppMemoryPool* decimal_pool, const cppvector[uint8_t]* decimal_columns,
+        const cppvector[uint8_t]* varchar_columns
+    )
+
+cdef extern from "engine/native_hash_join_pipeline.hpp" namespace "opteryx::engine" nogil:
+    cdef struct NativeHashJoinAggregateStats:
+        cppvector[double] result
+        cppvector[int64_t] decimal_hi
+        cppvector[uint64_t] decimal_lo
+        cppvector[uint8_t] decimal_scale
+    NativeHashJoinAggregateStats run_native_hash_join_aggregate_to_result(
+        ParquetIOPipeline* build_pipeline,
+        const unordered_map[string, FileStats]* build_footer_map,
+        const cppvector[pair[string, int]]* build_work_items,
+        const cppvector[string]* build_column_names,
+        int build_in_flight_limit,
+        CppMemoryPool* build_decimal_pool, const cppvector[uint8_t]* build_decimal_columns,
+        const cppvector[uint8_t]* build_varchar_columns,
+        size_t build_key_col_idx, cppvector[size_t] build_payload_col_idx,
+        cppvector[SimplePredicate] build_predicates,
+        ParquetIOPipeline* probe_pipeline,
+        const unordered_map[string, FileStats]* probe_footer_map,
+        const cppvector[pair[string, int]]* probe_work_items,
+        const cppvector[string]* probe_column_names,
+        int probe_in_flight_limit,
+        CppMemoryPool* probe_decimal_pool, const cppvector[uint8_t]* probe_decimal_columns,
+        const cppvector[uint8_t]* probe_varchar_columns,
+        size_t probe_key_col_idx, cppvector[size_t] probe_payload_col_idx,
+        cppvector[SimplePredicate] probe_predicates,
+        cppvector[AggregateSpec] specs, int dop, ErrCtx& err, void* thread_pool
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1367,230 +1731,448 @@ def native_serial_drive(CppThreadPool pool, list chains, exit_node,
     return handle
 
 
-def run_breaker_segment(plan, scan_id, middle_ids, breaker_id, recomb_class,
-                        int workers, telemetry=None, exit_id=None, source_prep=None,
-                        out_q=None):
-    """COMPILED breaker-segment drive (moved out of parallel_engine.py — execution runs
-    in compiled code). PUSH-based: drives results into ``out_q`` and ``finish()``es it on
-    every exit. Typed where the types are LOCAL (ctx, the per-worker counters/lists, the
-    radix); ``plan`` / the ``sink`` adapter / ``source_prep`` are the PLANNER seams held as
-    ``object`` — the boundary crossed once. The per-morsel work is the already-native
-    ``native_accumulate_fanout`` / ``push_one`` / operator-owned recombination."""
-    import threading
+def native_engine_demo_filter(BasePlanNode scan, size_t col_idx, double threshold,
+                              int dop, PyMorselQueue out_q):
+    """Slice 5a edge: pull REAL morsels from ``scan`` (the existing native scan's typed
+    ``next_morsel()`` — already-compiled, not Python bytecode) into a vector, then hand
+    them to the pure C++ morsel-driven engine (``run_filter_to_queue``) which filters and
+    writes results into ``out_q`` — the REAL production output queue. The pull loop here
+    and the final ``out_q.finish()`` are the legitimate EDGE (construction / hand-off);
+    the parallel run inside ``run_filter_to_queue`` is 100% C++, no Python.
 
-    from opteryx import config
-    from opteryx import EOS as _EOS_SENTINEL
-    from opteryx.compiled.thread_pool import CppThreadPool
-    from opteryx.managers.execution.pipeline_compiler import compile_pipeline
-    from opteryx.managers.execution.pipeline_sink import make_sink
-    from opteryx.managers.execution.pipeline_sink import RecombClass
+    Returns ``(rows_in, rows_out)`` for verification. Demo/proof harness — supports only
+    numeric column filters (see ``NumericFilterOperator``); not the production cutover."""
+    cdef cppvector[shared_ptr[CxxMorsel]] morsels
+    cdef shared_ptr[CxxMorsel] cxm
+    cdef DemoStats stats
+    cdef ErrCtx err
 
-    cdef PipelineContext ctx
-    cdef list chains
-    cdef object exit_node, scan, breaker, head, sink, downstream, source, shape
-    cdef object probe_head, build_chains, build_scans, morsel, m, exc, clone
-    cdef Py_ssize_t radix = 1, index, k, buffered_rows
-    cdef bint exhausted, concurrent_safe
-    cdef list buffer, local_states, local_rows, errors, worker_heads, locals_
+    while True:
+        cxm = scan.next_morsel()
+        if cxm.get() == NULL:
+            break
+        if cxm.get().state == MorselState.END_OF_STREAM:
+            continue
+        morsels.push_back(cxm)
 
-    # ---- 1. compile ---------------------------------------------------------------
-    chains, exit_node, ctx = compile_pipeline(plan)
-    scan = plan[scan_id]
-    breaker = plan[breaker_id]
-    head = plan[middle_ids[0]] if middle_ids else breaker
+    err.code = 0
+    err.msg = NULL
+    with nogil:
+        stats = run_filter_to_queue(morsels, col_idx, threshold, dop, out_q._q, err)
+    out_q.finish()
+    if err.code != 0:
+        raise RuntimeError(f"native_engine_demo_filter: engine error code {err.code}")
+    return stats.rows_in, stats.rows_out
 
-    probe_head = None
-    build_chains = None
-    build_scans = None
-    if source_prep is not None:
-        source_prep.shared._ctx = ctx
-        scan = plan[source_prep.probe_scan_id]
-        shape = source_prep.shared._shape
-        if shape.build_scan_ids is not None:
-            build_ids = set(shape.build_scan_ids)
-        else:
-            build_ids = {shape.build_scan_id}
-        scan_obj_to_id = {
-            id(plan[nid]): nid
-            for nid in plan.nodes()
-            if getattr(plan[nid], "is_scan", False)
-        }
-        build_chains = []
-        build_scans = []
-        for sc, hd in chains:
-            if sc is scan:
-                probe_head = hd
-            elif scan_obj_to_id.get(id(sc)) in build_ids:
-                build_chains.append((sc, hd))
-                build_scans.append(sc)
-        head = probe_head
-        if probe_head is None or len(build_chains) != len(build_ids):
-            # Compiler did not produce the expected legs — refuse to guess, run serial.
-            from opteryx.managers.execution.parallel_engine import _serial_stream
-            ctx.terminate()
-            for m in _serial_stream(plan):
-                if not out_q.put(m):
-                    break
-            out_q.finish()
-            return
 
-    def _drain():
-        # Drain the Exit's pending output into out_q; False if the consumer abandoned.
-        if exit_node is None:
-            return True
-        while exit_node.has_pending():
-            if not out_q.put(exit_node.pop_pending()):
-                return False
-        return True
+def native_engine_demo_aggregate(BasePlanNode scan, size_t col_idx, int dop):
+    """Slice 5b edge: pull REAL morsels from ``scan`` into a vector, then hand them to
+    the pure C++ morsel-driven engine (``run_sum_count``) which runs a genuine
+    NULL-aware SUM/COUNT reduction over a real on-disk numeric column. The pull loop
+    here is the legitimate EDGE; the parallel run inside ``run_sum_count`` is 100% C++,
+    no Python. Returns ``(sum, count)`` for verification against the real opteryx
+    engine's result. Demo/proof harness — not the production cutover."""
+    cdef cppvector[shared_ptr[CxxMorsel]] morsels
+    cdef shared_ptr[CxxMorsel] cxm
+    cdef AggDemoStats stats
+    cdef ErrCtx err
 
-    while radix < workers:
-        radix <<= 1
+    while True:
+        cxm = scan.next_morsel()
+        if cxm.get() == NULL:
+            break
+        if cxm.get().state == MorselState.END_OF_STREAM:
+            continue
+        morsels.push_back(cxm)
 
-    pool = None
-    try:
-        # ---- 1b. join→agg: drive the BUILD side ONCE, serially -------------------
-        if source_prep is not None:
-            source_prep.shared.build(build_chains, exit_node)
-            if ctx.is_terminated():
-                return
-            if source_prep.shared.left_is_empty:
-                push_one(<BasePlanNode>head, _EOS_SENTINEL)
-                _drain()
-                return
+    err.code = 0
+    err.msg = NULL
+    with nogil:
+        stats = run_sum_count(morsels, col_idx, dop, err)
+    if err.code != 0:
+        raise RuntimeError(f"native_engine_demo_aggregate: engine error code {err.code}")
+    return stats.sum, stats.count
 
-        # ---- 2. row-floor: tiny inputs run serially through the ORIGINAL breaker --
-        buffer = []
-        buffered_rows = 0
-        exhausted = False
-        while buffered_rows < config.PARALLEL_MIN_ROWS:
-            morsel = pull_one(<BasePlanNode>scan)
-            if morsel is None:
-                exhausted = True
-                break
-            buffer.append(morsel)
-            buffered_rows += morsel.num_rows
 
-        if exhausted and buffered_rows < config.PARALLEL_MIN_ROWS:
-            for morsel in buffer:
-                if ctx.is_terminated():
-                    break
-                push_one(<BasePlanNode>head, morsel)
-                if not _drain():
-                    return
-            if not ctx.is_terminated():
-                push_one(<BasePlanNode>head, _EOS_SENTINEL)
-                _drain()
-            return
+def native_engine_demo_groupby(BasePlanNode scan, size_t key_col_idx, size_t val_col_idx,
+                               int dop):
+    """Slice 5c edge: pull REAL morsels from ``scan`` into a vector, then hand them to
+    the pure C++ morsel-driven engine (``run_group_sum_count``) which runs a genuine
+    GROUP BY (real numeric key column) with NULL-aware SUM/COUNT per group over a real
+    on-disk numeric value column. The pull loop here is the legitimate EDGE; the
+    parallel run is 100% C++, no Python. Returns ``{key: (sum, count)}`` for
+    verification against the real opteryx engine's result. Demo/proof harness — not the
+    production cutover."""
+    cdef cppvector[shared_ptr[CxxMorsel]] morsels
+    cdef shared_ptr[CxxMorsel] cxm
+    cdef cppvector[GroupRow] out
+    cdef ErrCtx err
+    cdef size_t i
 
-        def _readout_pool_factory():
-            return CppThreadPool(max(1, min(radix, workers)), "m4-generic-readout")
+    while True:
+        cxm = scan.next_morsel()
+        if cxm.get() == NULL:
+            break
+        if cxm.get().state == MorselState.END_OF_STREAM:
+            continue
+        morsels.push_back(cxm)
 
-        downstream = plan[exit_id] if exit_id is not None else None
-        sink = make_sink(
-            breaker, recomb_class, radix=radix, pool_factory=_readout_pool_factory,
-            ctx=ctx, downstream=downstream, telemetry=telemetry,
+    err.code = 0
+    err.msg = NULL
+    with nogil:
+        run_group_sum_count(morsels, key_col_idx, val_col_idx, dop, err, out)
+    if err.code != 0:
+        raise RuntimeError(f"native_engine_demo_groupby: engine error code {err.code}")
+
+    result = {}
+    for i in range(out.size()):
+        result[out[i].key] = (out[i].sum, out[i].count)
+    return result
+
+
+def native_engine_demo_join(BasePlanNode build_scan, size_t build_key_col_idx,
+                            BasePlanNode probe_scan, size_t probe_key_col_idx, int dop):
+    """Slice 5d edge: pull REAL morsels from BOTH ``build_scan`` and ``probe_scan`` into
+    vectors, then hand them to the pure C++ morsel-driven engine
+    (``run_hash_join_count``) which drives a genuine hash join — build pipeline builds
+    the hash table, probe pipeline's Operator fans out matches via HAVE_MORE — entirely
+    in C++. The two pull loops here are the legitimate EDGE. Returns the matched row
+    count for verification against the real opteryx engine's INNER JOIN result.
+    Demo/proof harness — not the production cutover."""
+    cdef cppvector[shared_ptr[CxxMorsel]] build_morsels, probe_morsels
+    cdef shared_ptr[CxxMorsel] cxm
+    cdef long long count
+    cdef ErrCtx err
+
+    while True:
+        cxm = build_scan.next_morsel()
+        if cxm.get() == NULL:
+            break
+        if cxm.get().state == MorselState.END_OF_STREAM:
+            continue
+        build_morsels.push_back(cxm)
+
+    while True:
+        cxm = probe_scan.next_morsel()
+        if cxm.get() == NULL:
+            break
+        if cxm.get().state == MorselState.END_OF_STREAM:
+            continue
+        probe_morsels.push_back(cxm)
+
+    err.code = 0
+    err.msg = NULL
+    with nogil:
+        count = run_hash_join_count(
+            build_morsels, build_key_col_idx, probe_morsels, probe_key_col_idx, dop, err
         )
-        if sink is None:
-            raise RuntimeError(
-                f"run_breaker_segment: no sink adapter for {recomb_class!r}"
+    if err.code != 0:
+        raise RuntimeError(f"native_engine_demo_join: engine error code {err.code}")
+    return count
+
+
+cdef void _scan_pull_run(void* scan_ptr, shared_ptr[CxxMorsel]* out,
+                         int* finished, int* err_code) noexcept with gil:
+    """GIL-held body of the streaming Source trampoline — holds the Python locals a
+    nogil function cannot. Calls the existing native scan's ``next_morsel()`` ON
+    DEMAND. Skips EOS-state morsels internally (mirrors the demo bridges' pull loops)
+    so the C++ side only ever sees real data or genuine exhaustion. A raised exception
+    is recorded via ``err_code`` (1); the caller surfaces the real Python exception,
+    stashed on the scan node by the existing ``_take_exc``/``_cxx_push_exc``
+    contract, at the GIL boundary after the run."""
+    cdef shared_ptr[CxxMorsel] cxm
+    cdef object scan_obj
+    cdef object exc
+    try:
+        scan_obj = <object><PyObject*>scan_ptr
+        while True:
+            cxm = (<BasePlanNode>scan_obj).next_morsel()
+            if cxm.get() == NULL:
+                finished[0] = 1
+                err_code[0] = 0
+                return
+            if cxm.get().state == MorselState.END_OF_STREAM:
+                continue
+            out[0] = cxm
+            finished[0] = 0
+            err_code[0] = 0
+            return
+    except BaseException as exc:
+        finished[0] = 1
+        err_code[0] = 1
+
+
+cdef void _scan_pull_trampoline(void* scan_ptr, shared_ptr[CxxMorsel]* out,
+                                int* finished, int* err_code) noexcept nogil:
+    """Native entry (matches ``ScanPullFn``) for ``StreamingScanSource`` — the REAL
+    (non-demo) cutover's streaming pull-on-demand callback, called from any worker
+    thread once per requested morsel. ``scan_ptr`` is a BORROWED ``PyObject*`` (the
+    caller's Python stack frame holds the real reference for the run's duration,
+    exactly like the slice 5a-d demo bridges' borrowed pointers)."""
+    _scan_pull_run(scan_ptr, out, finished, err_code)
+
+
+cdef struct _RealFilterArg:
+    void* scan_ptr      # borrowed PyObject* (the caller's stack frame keeps it alive)
+    size_t col_idx
+    double threshold
+    int dop
+    PyObject* out_q     # the output PyMorselQueue (borrowed)
+    PyObject* errors    # shared result list[exc] (borrowed)
+    void* pool          # opaque BSThreadPoolBridge* (borrowed; caller owns it for the
+                        # life of the query) — dop pipeline workers are submitted to it,
+                        # see executor.hpp. Kept as void*, never dereferenced here: it
+                        # must only be touched via bs_pool_submit_native/wait_native
+                        # (bs_pool_bridge_c.h), which resolve to thread_pool.so's own
+                        # compiled code — see executor.hpp's run_pipeline for why.
+
+
+cdef void _real_filter_run(_RealFilterArg* a) noexcept with gil:
+    """GIL-held body of the real-filter driver task. ``run_real_filter_to_queue`` BLOCKS
+    internally (its own ``run_pipeline`` joins all ``dop`` workers before returning) — that
+    blocking is safe here because it happens on THIS background driver task, not on the
+    caller's thread, so the caller's drain loop runs concurrently the whole time (the
+    bug this replaces: a synchronous call blocked the caller while its own un-drained,
+    bounded ``out_q`` filled and backpressure-deadlocked the very producer the caller was
+    waiting on — found via a real hang during slice-5-cutover verification, fixed by
+    matching ``native_serial_drive``'s submit-then-return-a-handle shape)."""
+    cdef ErrCtx err
+    cdef object exc, scan_obj
+    cdef object out_q = <object>a.out_q
+    cdef RealFilterStats stats
+    err.code = 0
+    err.msg = NULL
+    try:
+        stats = run_real_filter_to_queue(
+            a.scan_ptr, _scan_pull_trampoline, a.col_idx, a.threshold, a.dop,
+            (<PyMorselQueue>out_q)._q, err, a.pool
+        )
+        if err.code != 0:
+            scan_obj = <object><PyObject*>a.scan_ptr
+            exc = (<BasePlanNode>scan_obj)._take_exc()
+            (<list>(<object>a.errors)).append(
+                exc if exc is not None
+                else RuntimeError(f"native_engine_real_filter: engine error code {err.code}")
             )
-
-        if telemetry is not None:
-            telemetry._reading["generic_pipeline_workers"] = workers
-            if recomb_class is RecombClass.HASH_REPARTITION:
-                telemetry._reading["generic_pipeline_radix"] = radix
-
-        # ---- 3. W self-pull workers ----------------------------------------------
-        buf_iter = iter(buffer)
-        pull_lock = threading.Lock()
-        concurrent_safe = scan.is_concurrent_pull_safe()
-
-        def next_input():
-            if concurrent_safe:
-                with pull_lock:
-                    m = next(buf_iter, None)
-                if m is not None:
-                    return m
-                if ctx.is_terminated():
-                    return None
-                return pull_one(<BasePlanNode>scan)
-            with pull_lock:
-                if ctx.is_terminated():
-                    return None
-                m = next(buf_iter, None)
-                if m is not None:
-                    return m
-                return pull_one(<BasePlanNode>scan)
-
-        local_states = [None] * workers
-        local_rows = [0] * workers
-        errors = [None] * workers
-        worker_heads = [None] * workers
-
-        def _build_worker_chain(index):
-            clone = sink.make_local_sink_state(index)
-            chain = [spawn_worker(plan[nid]) for nid in middle_ids]
-            chain.append(clone)
-            for i, op in enumerate(chain):
-                op.set_context(ctx)
-                if i + 1 < len(chain):
-                    op.set_downstream(chain[i + 1])
-            chain_head = chain[0]
-            if source_prep is not None:
-                from opteryx.operators import JoinRightAdapter
-                cloned_join = spawn_worker(plan[source_prep.join_id])
-                source_prep.shared.prepare_worker_clone(cloned_join)
-                cloned_join.set_downstream(chain_head)
-                probe_ops = [spawn_worker(plan[nid]) for nid in source_prep.probe_middle_ids]
-                adapter = JoinRightAdapter(cloned_join)
-                adapter.set_context(ctx)
-                probe_chain = probe_ops + [adapter]
-                for i, op in enumerate(probe_chain):
-                    op.set_context(ctx)
-                    if i + 1 < len(probe_chain):
-                        op.set_downstream(probe_chain[i + 1])
-                chain_head = probe_chain[0]
-            return clone, chain_head
-
-        for index in range(workers):
-            local_states[index], worker_heads[index] = _build_worker_chain(index)
-
-        pool = CppThreadPool(workers, "m4-generic-sink")
-        native_accumulate_fanout(pool, worker_heads, next_input, ctx, local_rows, errors)
-        # ---- 4. errors barrier; combine ------------------------------------------
-        for exc in errors:
-            if exc is not None:
-                raise exc
-        if ctx.is_terminated():
-            return
-
-        locals_ = [
-            (local_states[k], local_rows[k])
-            for k in range(workers)
-            if local_states[k] is not None
-        ]
-        sink.combine(locals_)
-
-        # ---- 5. finalize read-out, then EOS through the sink's eos_target ---------
-        for m in sink.finalize_source():
-            if ctx.is_terminated():
-                return
-            if not out_q.put(m):
-                return
-        if ctx.is_terminated():
-            return
-        push_one(<BasePlanNode>sink.eos_target(), _EOS_SENTINEL)
-        _drain()
+    except BaseException as exc:
+        (<list>(<object>a.errors)).append(exc)
     finally:
-        # ---- 6. teardown: finish out_q on every exit so the consumer unblocks -----
         out_q.finish()
-        if pool is not None:
-            pool.shutdown(wait=True)
-        ctx.terminate()
-        scan.close_source()
-        if source_prep is not None and build_scans is not None:
-            for bs in build_scans:
-                bs.close_source()
+
+
+cdef void _real_filter_task(void* arg) noexcept nogil:
+    """Native task entry (matches ``native_task_fn``) for the real-filter driver."""
+    _real_filter_run(<_RealFilterArg*>arg)
+
+
+def native_engine_real_filter(CppThreadPool pool, BasePlanNode scan, size_t col_idx,
+                              double threshold, int dop, PyMorselQueue out_q,
+                              list errors):
+    """The REAL (non-demo) engine cutover, piece 1: scan -> filter -> exit, streamed ON
+    DEMAND from ``scan`` (no pre-pulled vector, unlike the slice 5a-d demo bridges) into
+    the REAL production ``out_q``. NON-BLOCKING: submits ONE native driver task and
+    returns immediately (matches ``native_serial_drive``'s shape) — the caller MUST drain
+    ``out_q`` concurrently (it is bounded; backpressure blocks the producer until drained)
+    and hold the returned ``NativeFanoutHandle`` until it has seen the sink finish. Every
+    per-morsel scan pull is driven by the pure C++ executor calling back into
+    ``_scan_pull_trampoline`` only when a worker actually needs the next morsel.
+
+    The driver itself runs on a lone detached ``std::thread`` (``spawn_detached_native_task``),
+    NOT as a task submitted to ``pool`` — it, in turn, submits the ``dop`` pipeline
+    workers to ``pool`` and blocks on ``wait_native()`` (see ``run_pipeline``'s pool
+    overload in executor.hpp). Running the driver AS a task on the same pool it then
+    recurses into corrupts that pool's task queue (reproduced as a real SIGSEGV inside
+    BS::thread_pool); a single ad-hoc thread for the driver sidesteps that entirely and
+    is not itself a free-threaded-attach risk (that hazard is specifically a multi-thread
+    pile-up, not one thread attaching alone). ``pool`` should be sized for exactly
+    ``dop`` — it is only ever asked to run the ``dop`` pipeline workers now."""
+    cdef _RealFilterArg* a = <_RealFilterArg*>malloc(sizeof(_RealFilterArg))
+    if a == NULL:
+        raise MemoryError()
+    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
+    handle._args = <void*>a
+    a.scan_ptr = <void*><PyObject*>scan
+    a.col_idx = col_idx
+    a.threshold = threshold
+    a.dop = dop
+    a.out_q = <PyObject*>out_q
+    a.errors = <PyObject*>errors
+    a.pool = <void*>pool._pool
+    spawn_detached_native_task(_real_filter_task, a)
+    return handle
+
+
+cdef CompareOp _compare_op_from_str(str op) except *:
+    if op == "Gt": return CompareOp.Gt
+    if op == "GtEq": return CompareOp.GtEq
+    if op == "Lt": return CompareOp.Lt
+    if op == "LtEq": return CompareOp.LtEq
+    if op == "Eq": return CompareOp.Eq
+    if op == "NotEq": return CompareOp.NotEq
+    raise ValueError(f"native_engine_real_aggregate: unsupported comparison op {op!r}")
+
+
+def native_engine_real_aggregate(CppThreadPool pool, BasePlanNode scan, list predicates,
+                                 size_t col_idx, int dop):
+    """REAL (non-demo) engine cutover, piece 2: scan -> [filter]* -> SUM/COUNT, streamed
+    ON DEMAND from ``scan`` (no pre-pulled vector, same ``_scan_pull_trampoline`` callback
+    as ``native_engine_real_filter``) — the ungrouped-aggregate counterpart of piece 1.
+
+    BLOCKING: an aggregate result is a handful of scalars, not a morsel stream, so (unlike
+    piece 1) this runs synchronously and returns ``(sum, count)`` directly — no queue, no
+    ``NativeFanoutHandle``. ``predicates`` is a list of ``(col_idx: int, op: str,
+    threshold: float)`` triples, ANDed together (same convention as
+    ``native_engine_real_filter``); pass an empty list for a bare scan -> aggregate (no
+    WHERE clause).
+
+    GIL is released for the run itself (``with nogil``) since ``run_real_aggregate_to_result``
+    blocks internally (its own ``run_pipeline`` submits ``dop`` workers to ``pool`` and joins
+    them) — each worker's scan pull transiently RE-ACQUIRES the GIL inside
+    ``_scan_pull_trampoline`` to call the real ``next_morsel()``; holding the GIL across the
+    whole blocking call here would deadlock those re-acquisitions."""
+    cdef cppvector[SimplePredicate] cpreds
+    cdef SimplePredicate sp
+    for p_col_idx, p_op, p_threshold in predicates:
+        sp.col_idx = <size_t>p_col_idx
+        sp.op = _compare_op_from_str(p_op)
+        sp.threshold = <double>p_threshold
+        cpreds.push_back(sp)
+
+    cdef ErrCtx err
+    err.code = 0
+    err.msg = NULL
+    cdef void* scan_ptr = <void*><PyObject*>scan
+    cdef void* pool_ptr = <void*>pool._pool
+    cdef AggDemoStats stats
+    with nogil:
+        stats = run_real_aggregate_to_result(
+            scan_ptr, _scan_pull_trampoline, cpreds, col_idx, dop, err, pool_ptr
+        )
+    if err.code != 0:
+        exc = scan._take_exc()
+        if exc is not None:
+            raise exc
+        raise RuntimeError(f"native_engine_real_aggregate: engine error code {err.code}")
+    return stats.sum, stats.count
+
+
+def native_engine_real_groupby(CppThreadPool pool, BasePlanNode scan, list predicates,
+                               size_t key_col_idx, size_t val_col_idx, int dop):
+    """REAL (non-demo) engine cutover, piece 3: scan -> [filter]* -> GROUP BY key ->
+    SUM/COUNT, streamed ON DEMAND from ``scan`` (same ``_scan_pull_trampoline`` callback
+    as pieces 1/2) — the grouped-aggregate counterpart of ``native_engine_real_aggregate``.
+
+    BLOCKING (a grouped result is a handful of rows, not a morsel stream). Returns a list
+    of ``(key: int, sum: float, count: int)`` tuples, one per distinct key. ``predicates``
+    is the same ``(col_idx, op, threshold)`` convention as the other real-cutover pieces;
+    pass an empty list for no WHERE clause. Non-null grouping keys only (matches
+    ``GroupSumCountSink``'s documented scope) — NULL keys are dropped, not grouped
+    together, so this is NOT eligible for a query whose grouping key can be NULL.
+
+    Same GIL-release rationale as ``native_engine_real_aggregate``: the call blocks
+    internally (``run_pipeline`` submits ``dop`` workers to ``pool`` and joins them), and
+    each worker's scan pull transiently re-acquires the GIL inside
+    ``_scan_pull_trampoline`` — holding the GIL across the whole call would deadlock
+    those re-acquisitions."""
+    cdef cppvector[SimplePredicate] cpreds
+    cdef SimplePredicate sp
+    for p_col_idx, p_op, p_threshold in predicates:
+        sp.col_idx = <size_t>p_col_idx
+        sp.op = _compare_op_from_str(p_op)
+        sp.threshold = <double>p_threshold
+        cpreds.push_back(sp)
+
+    cdef ErrCtx err
+    err.code = 0
+    err.msg = NULL
+    cdef void* scan_ptr = <void*><PyObject*>scan
+    cdef void* pool_ptr = <void*>pool._pool
+    cdef cppvector[GroupRow] out
+    with nogil:
+        run_real_groupby_to_result(
+            scan_ptr, _scan_pull_trampoline, cpreds, key_col_idx, val_col_idx, dop,
+            err, pool_ptr, out
+        )
+    if err.code != 0:
+        exc = scan._take_exc()
+        if exc is not None:
+            raise exc
+        raise RuntimeError(f"native_engine_real_groupby: engine error code {err.code}")
+    cdef size_t i
+    result = []
+    for i in range(out.size()):
+        result.append((out[i].key, out[i].sum, out[i].count))
+    return result
+
+
+def native_engine_real_join(CppThreadPool pool, BasePlanNode build_scan,
+                            list build_predicates, size_t build_key_col_idx,
+                            list build_payload_col_idx,
+                            BasePlanNode probe_scan,
+                            list probe_predicates, size_t probe_key_col_idx,
+                            list probe_payload_col_idx,
+                            size_t agg_col_idx, int dop):
+    """REAL (non-demo) engine cutover, piece 4: scan -> [filter]* -> build hash table;
+    scan -> [filter]* -> probe -> SUM/COUNT over one join-output column, streamed ON
+    DEMAND from BOTH ``build_scan``/``probe_scan`` (same ``_scan_pull_trampoline``
+    callback as pieces 1-3) — the inner-equi-join counterpart of
+    ``native_engine_real_aggregate``/``native_engine_real_groupby``.
+
+    Scope matches native_hash_join.hpp: INNER equi-join, single INT64/DECIMAL key,
+    fixed-width or VARCHAR (arena-aware) payload columns, no NULL payloads. Aggregates a
+    SINGLE raw join-output column (``agg_col_idx``, indexing the COMBINED space: build
+    payload columns first in ``build_payload_col_idx`` order, then probe payload columns
+    in ``probe_payload_col_idx`` order) — deliberately narrower than a computed
+    expression (matches pieces 2/3's own scope, not native_hash_join_pipeline.hpp's
+    AggregateSpec expression trees).
+
+    BLOCKING (a handful of scalars). Same GIL-release rationale as the other real-cutover
+    pieces: the call blocks internally (two sequential `run_pipeline`s, each submitting
+    `dop` workers to `pool` and joining them), and each worker's scan pull transiently
+    re-acquires the GIL inside `_scan_pull_trampoline` — holding the GIL across the whole
+    call would deadlock those re-acquisitions."""
+    cdef cppvector[SimplePredicate] build_cpreds, probe_cpreds
+    cdef SimplePredicate sp
+    for p_col_idx, p_op, p_threshold in build_predicates:
+        sp.col_idx = <size_t>p_col_idx
+        sp.op = _compare_op_from_str(p_op)
+        sp.threshold = <double>p_threshold
+        build_cpreds.push_back(sp)
+    for p_col_idx, p_op, p_threshold in probe_predicates:
+        sp.col_idx = <size_t>p_col_idx
+        sp.op = _compare_op_from_str(p_op)
+        sp.threshold = <double>p_threshold
+        probe_cpreds.push_back(sp)
+
+    cdef cppvector[size_t] build_payload, probe_payload
+    for idx in build_payload_col_idx:
+        build_payload.push_back(<size_t>idx)
+    for idx in probe_payload_col_idx:
+        probe_payload.push_back(<size_t>idx)
+
+    cdef ErrCtx err
+    err.code = 0
+    err.msg = NULL
+    cdef void* build_scan_ptr = <void*><PyObject*>build_scan
+    cdef void* probe_scan_ptr = <void*><PyObject*>probe_scan
+    cdef void* pool_ptr = <void*>pool._pool
+    cdef AggDemoStats stats
+    with nogil:
+        stats = run_real_join_aggregate_to_result(
+            build_scan_ptr, _scan_pull_trampoline, build_cpreds, build_key_col_idx,
+            build_payload,
+            probe_scan_ptr, _scan_pull_trampoline, probe_cpreds, probe_key_col_idx,
+            probe_payload,
+            agg_col_idx, dop, err, pool_ptr
+        )
+    if err.code != 0:
+        exc = build_scan._take_exc()
+        if exc is None:
+            exc = probe_scan._take_exc()
+        if exc is not None:
+            raise exc
+        raise RuntimeError(f"native_engine_real_join: engine error code {err.code}")
+    return stats.sum, stats.count
 
 
 cpdef BasePlanNode spawn_worker(BasePlanNode op):
@@ -1691,6 +2273,505 @@ cpdef void push_right_one(JoinNode join, object morsel) except *:
     if err.code != 0:
         _exc = join._take_exc()
         raise _exc if _exc is not None else RuntimeError("pipeline push failed")
+
+
+# =====================================================================================
+# THE ENGINE — general pipeline-graph execution (engine.hpp). Built by the plan
+# compiler (managers/execution/compiler.py) at PLAN time through NativePlan's builder
+# methods; run by ONE detached native driver task streaming into the production
+# MorselQueue. This subsumes the four narrow native_engine_real_* entry points.
+# =====================================================================================
+
+cdef int _expr_filter_tramp(void* instrs, int count, const CxxMorsel* m,
+                            int* col_idx, void** lit_dv,
+                            CxxMorsel** out_filtered, int* err_op) noexcept nogil:
+    """Native entry (matches ExprFilterFn) for ExprFilterOperator — the pure-nogil
+    predicate span in evaluation.pyx. No PyObject inside."""
+    return _dv_filter_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
+                               <DrakenVector**>lit_dv, out_filtered, err_op)
+
+
+cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
+                          int* col_idx, void** lit_dv,
+                          DrakenVector* out_vec, void** out_data,
+                          uint8_t** out_validity, void** out_sel,
+                          int* err_op) noexcept nogil:
+    """Native entry (matches ExprEvalFn) for ExprProjectOperator — the pure-nogil
+    computed-column span in evaluation.pyx. No PyObject inside."""
+    return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
+                             <DrakenVector**>lit_dv, out_vec, out_data,
+                             out_validity, out_sel, err_op)
+
+
+cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
+                                cppvector[int]& col_idx,
+                                cppvector[void*]& lit_dv) except -1:
+    """PLAN-TIME resolve (the compiler's layout replaces the first-morsel resolve the
+    old engine needed): LOAD_COL identity -> column index in ``layout`` (bytes
+    identities, stream order); LOAD_LIT_CONST -> the bind-time-materialized literal
+    Vector's DrakenVector*. Returns 0, or raises — a missing column at plan time is
+    a compiler bug, fail loud."""
+    cdef Py_ssize_t k
+    cdef BytecodeInstr* slot
+    cdef bytes ident
+    cdef object scalar_obj
+    cdef int ci
+    for k in range(bc.count):
+        slot = &bc.instrs[k]
+        ci = -1
+        lit_dv.push_back(NULL)
+        if slot.opcode == BC_LOAD_COL or (
+                slot.opcode == BC_CAST and (slot.flags & BC_C_NATIVE_CHILD) != 0):
+            # BC_C_NATIVE_CHILD casts carry the ARRAY operand's identity — the
+            # eval span resolves the owner-held child element vector through it.
+            ident = <bytes>slot.column_identity
+            try:
+                ci = <int>layout.index(ident)
+            except ValueError:
+                raise KeyError(
+                    f"native engine: expression references column {ident!r} which the "
+                    f"stream does not carry (layout: {layout!r})")
+        elif slot.opcode == BC_LOAD_LIT_CONST:
+            scalar_obj = <object>slot.literal_obj
+            lit_dv[lit_dv.size() - 1] = <void*>(<Vector>scalar_obj).unified()
+        col_idx.push_back(ci)
+    return 0
+
+
+def bytecode_is_all_c_native(CompiledBytecode bc):
+    """PLAN-TIME check for the compiler (the flag is a non-public cdef field): True
+    when every instruction runs on the C-native DV* path AND the program ends in a
+    compute op — the filter span's contract."""
+    return bool(bc.is_all_c_native)
+
+
+def bytecode_is_c_native_predicate(CompiledBytecode bc):
+    """PLAN-TIME filter admission: every instruction c-native (DESC results
+    included — intermediates fold raw) AND the FINAL op produces a boolean mask
+    (compare / bool algebra / IS NULL) — cxx_mask_c's contract."""
+    if not bytecode_ops_all_c_native(bc):
+        return False
+    cdef int last = bc.instrs[bc.count - 1].opcode
+    if last in (BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
+                BC_COMPARE, BC_UNARY_OP):
+        return True
+    # Bool-returning C-ABI function kernels (LIKE family) — marked at bind time
+    # with BC_RESULT_WRAP_AS_BOOL (0x20, compiled_expression.pyx flag contract).
+    return (last == BC_FUNCTION
+            and (bc.instrs[bc.count - 1].flags & 0x20) != 0)
+
+
+def bytecode_ops_all_c_native(CompiledBytecode bc):
+    """PLAN-TIME check for PROJECTION programs: every instruction runs on the
+    C-native DV* path, but the program may END in a load (a plain constant / column
+    projection) — _dv_eval_span_cxx deep-copies whatever the result DV is, so the
+    "last op must be an arena compute" restriction the GIL path needs does not
+    apply. Mirrors build_bytecode's per-instruction admission exactly."""
+    if bc.count == 0:
+        return False
+    cdef Py_ssize_t k
+    cdef int op, fl, opc
+    for k in range(bc.count):
+        op = bc.instrs[k].opcode
+        fl = bc.instrs[k].flags
+        if op in (BC_LOAD_COL, BC_LOAD_LIT_CONST, BC_LOAD_LIT_BOOL,
+                  BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF):
+            continue
+        if op == BC_COMPARE:
+            opc = bc.instrs[k].op_code
+            if (fl & BC_CMP_INLIST_INLINE) == 0 and 1 <= opc <= 6:
+                continue
+            return False
+        if op == BC_UNARY_OP:
+            opc = bc.instrs[k].op_code
+            if opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL:
+                continue
+            return False
+        if op == BC_BINARY_OP or op == BC_CAST:
+            if (fl & BC_INSTR_C_NATIVE) != 0 and \
+                    (fl & (BC_C_NATIVE_FIXED | BC_C_NATIVE_STRING
+                           | BC_C_NATIVE_DESC)) != 0:
+                continue
+            return False
+        if op == BC_FUNCTION:
+            if (fl & BC_INSTR_C_NATIVE) != 0:
+                continue
+            return False
+        return False
+    return True
+
+
+cdef class NativePlan:
+    """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
+    the Python references (scan plan nodes, compiled expression programs) whose
+    lifetimes must span the run. Builder methods are called by the plan compiler —
+    planning, not the hot path; every value crossing here is a plain int/float/bytes
+    decided at plan time."""
+    cdef Engine* _e
+    cdef public list scans   # BasePlanNode scan objects StreamingScanSource borrows
+    cdef public list held    # CompiledBytecode programs (own instrs + literal vectors)
+    cdef public list scan_plans  # NativeScanPlan objects NativeParquetScanSource borrows
+
+    def __cinit__(self):
+        self._e = new Engine()
+        self.scans = []
+        self.held = []
+        self.scan_plans = []
+
+    def __dealloc__(self):
+        if self._e != NULL:
+            del self._e
+            self._e = NULL
+
+    def new_pipeline(self):
+        return self._e.new_pipeline()
+
+    def new_buffer(self):
+        return self._e.new_buffer()
+
+    def new_join_ref(self):
+        return self._e.new_join_ref()
+
+    def set_scan_source(self, size_t p, scan, bint serialize_pull=False):
+        """Source = the existing native scan, pulled via the GIL trampoline — the ONE
+        tracked execution-path Python touch (see engine_cutover_decisions memory).
+        ``serialize_pull`` mutex-serialises the pull for scans that are not
+        concurrent-pull safe (two-pass latmat); operators/sink stay parallel."""
+        self.scans.append(scan)
+        self._e.set_scan_source(p, <void*><PyObject*>scan, _scan_pull_trampoline,
+                                serialize_pull)
+
+    def set_native_scan_source(self, size_t p, NativeScanPlan splan):
+        """Source = the fully-native parquet scan (NativeParquetScanSource): workers
+        pull decoded row groups straight from the rugo IO pipeline — no GIL
+        trampoline, no per-morsel thread attach. Only reachable when the plan-time
+        gate (``native_scan_supported``) proved every projected column eligible.
+        The Source borrows every pointer from ``splan``; this plan holds it alive
+        and ``close_scan_plans`` tears it down only after the driver is done."""
+        self.scan_plans.append(splan)
+        self._e.set_native_scan_source(p, splan.pipeline_ptr, splan.footer_map,
+                                       &splan.work_items, &splan.column_names,
+                                       splan.in_flight_limit)
+
+    def close_scan_plans(self):
+        """Cancel + shut down every NativeScanPlan's IO pipeline. MUST only run
+        after the engine driver has finished (its workers block inside the
+        pipeline's wait); ``execute_native`` calls this after the done-event."""
+        cdef NativeScanPlan sp
+        for sp in self.scan_plans:
+            sp.close()
+
+    def set_buffer_source(self, size_t p, size_t buf):
+        self._e.set_buffer_source(p, buf)
+
+    def add_filter(self, size_t p, list predicates):
+        """``predicates`` = [(col_idx:int, op:str, threshold:float), ...] ANDed."""
+        cdef cppvector[SimplePredicate] preds
+        cdef SimplePredicate sp
+        for col_idx, op, threshold in predicates:
+            sp.col_idx = <size_t>col_idx
+            sp.op = _compare_op_from_str(op)
+            sp.threshold = <double>threshold
+            preds.push_back(sp)
+        self._e.add_filter(p, preds)
+
+    def add_select(self, size_t p, list indices, list names):
+        cdef cppvector[size_t] idx
+        cdef cppvector[string] nms
+        for i in indices:
+            idx.push_back(<size_t>i)
+        for n in names:
+            nms.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
+        self._e.add_select(p, idx, nms)
+
+    def add_join_probe(self, size_t p, size_t ref, size_t key_idx, list payload_idx):
+        cdef cppvector[size_t] pay
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.add_join_probe(p, ref, key_idx, pay)
+
+    def set_queue_sink(self, size_t p, PyMorselQueue q):
+        self._e.set_queue_sink(p, q._q)
+
+    def set_agg_sink(self, size_t p, list specs, size_t buf):
+        """``specs`` = [(identity, fn:'CountStar'|'Count'|'Sum'|'Avg'|'Min'|'Max',
+        operand col_idx | -1), ...] in output-column order."""
+        self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf)
+
+    def set_groupby_sink(self, size_t p, list key_idx, list specs, size_t buf):
+        cdef cppvector[size_t] keys
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        self._e.set_groupby_sink(p, keys, _agg_spec_from_list(specs), buf)
+
+    def set_distinct_sink(self, size_t p, list on_idx, size_t buf):
+        """``on_idx`` = dedup key column indices; empty list = every column."""
+        cdef cppvector[size_t] on
+        for i in on_idx:
+            on.push_back(<size_t>i)
+        self._e.set_distinct_sink(p, on, buf)
+
+    def set_buffer_append_sink(self, size_t p, size_t buf):
+        """Stream this pipeline into a (possibly shared) buffer — UNION ALL legs."""
+        self._e.set_buffer_append_sink(p, buf)
+
+    def set_join_build_sink(self, size_t p, size_t key_idx, list payload_idx, size_t ref):
+        cdef cppvector[size_t] pay
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.set_join_build_sink(p, key_idx, pay, ref)
+
+    def new_join2_ref(self):
+        return self._e.new_join2_ref()
+
+    def set_join2_build_sink(self, size_t p, list key_idx, list payload_idx, size_t ref):
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.set_join2_build_sink(p, keys, pay, ref)
+
+    def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
+                        int mode):
+        """mode: 0=inner, 1=left outer (probe side preserved), 2=semi, 3=anti."""
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.add_join2_probe(p, ref, keys, pay, mode)
+
+    def set_asof_build_sink(self, size_t p, list key_idx, list payload_idx,
+                            size_t asof_idx, size_t ref):
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.set_asof_build_sink(p, keys, pay, asof_idx, ref)
+
+    def add_asof_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
+                       size_t asof_idx, int op):
+        """op: 0=GtEq, 1=Gt, 2=LtEq, 3=Lt (probe <op> build MATCH_CONDITION)."""
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.add_asof_probe(p, ref, keys, pay, asof_idx, op)
+
+    def add_expr_filter(self, size_t p, CompiledBytecode bc, list layout):
+        """General WHERE: a plan-lowered, plan-resolved c-native predicate program
+        (bool-final; DESC intermediates fold raw in the VM)."""
+        if not bytecode_is_c_native_predicate(bc):
+            raise ValueError("native engine: add_expr_filter requires a c-native "
+                             "bool-final program — the compiler must reject earlier")
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+        self.held.append(bc)
+        self._e.add_expr_filter(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
+                                _expr_filter_tramp)
+
+    def add_expr_project(self, size_t p, CompiledBytecode bc, list layout, name,
+                         logical=None):
+        """Append ONE computed column (identity ``name``) evaluated by a plan-lowered,
+        plan-resolved c-native program (load-ending programs allowed). ``logical`` =
+        (kind, unit, precision, scale) ints for descriptor-carrying results
+        (DECIMAL/TIMESTAMP) — re-attached to the output column's owner natively."""
+        if not bytecode_ops_all_c_native(bc):
+            raise ValueError("native engine: add_expr_project requires a c-native "
+                             "program — the compiler must reject this shape earlier")
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+        self.held.append(bc)
+        cdef string nm = <string>(name if isinstance(name, bytes)
+                                  else (<str>name).encode("utf-8"))
+        cdef int lk = 0, lu = 0, lp = 0, lsc = 0
+        if logical is not None:
+            lk = <int>logical[0]
+            lu = <int>logical[1]
+            lp = <int>logical[2]
+            lsc = <int>logical[3]
+        self._e.add_expr_project(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
+                                 _expr_eval_tramp, nm, lk, lu, lp, lsc)
+
+    def add_limit(self, size_t p, offset, limit):
+        """LIMIT/OFFSET on pipeline ``p``. ``limit`` None = unbounded (OFFSET-only)."""
+        cdef int64_t off = 0 if offset is None else <int64_t>offset
+        cdef int64_t lim = 0x7FFFFFFFFFFFFFFF if limit is None else <int64_t>limit
+        self._e.add_limit(p, off, lim)
+
+    def add_buffer_morsel(self, size_t buf, Morsel m):
+        """Plan-time materialization: place a (plan-constant) morsel into a buffer —
+        virtual datasets ($planets, VALUES, GENERATE_SERIES) cross the boundary HERE,
+        once, at compile time; execution reads the buffer natively."""
+        self._e.add_buffer_morsel(buf, morsel_to_cxx(m))
+
+    def set_pipeline_dop(self, size_t p, int dop):
+        """Force pipeline ``p``'s degree (order-sensitive consumers of a sorted
+        buffer run at 1). DOP is a number, never a code-path selector."""
+        self._e.set_pipeline_dop(p, dop)
+
+    def set_sort_sink(self, size_t p, list spec, size_t buf):
+        """``spec`` = [(col_idx:int, ascending:bool), ...] most significant first."""
+        self._e.set_sort_sink(p, _sort_spec_from_list(spec), buf)
+
+    def set_topn_sink(self, size_t p, list spec, size_t n, size_t buf):
+        self._e.set_topn_sink(p, _sort_spec_from_list(spec), n, buf)
+
+    def set_window_sink(self, size_t p, list sort_spec, size_t n_part,
+                        list fn_kinds, list fn_names, size_t buf):
+        """``sort_spec`` = [(col_idx, ascending), ...] = partition keys (all asc) then
+        order keys; ``n_part`` leading entries are the partition keys. ``fn_kinds`` =
+        int codes (0 ROW_NUMBER, 1 RANK, 2 DENSE_RANK); ``fn_names`` the output names."""
+        cdef cppvector[int] kinds
+        cdef cppvector[string] names
+        for k in fn_kinds:
+            kinds.push_back(<int>k)
+        for nm in fn_names:
+            names.push_back(<string>(nm if isinstance(nm, bytes) else (<str>nm).encode("utf-8")))
+        self._e.set_window_sink(p, _sort_spec_from_list(sort_spec), n_part,
+                                kinds, names, buf)
+
+    def set_final_schema(self, list names, list types):
+        """``names`` = final display names; ``types`` = DrakenType ints (physical) —
+        used for the courtesy empty-result morsel when a query yields zero rows."""
+        cdef cppvector[string] nms
+        cdef cppvector[DrakenType] ts
+        for n in names:
+            nms.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
+        for t in types:
+            ts.push_back(<DrakenType><int>t)
+        self._e.set_final_schema(nms, ts)
+
+
+cdef cppvector[SortKeySpec] _sort_spec_from_list(list spec) except *:
+    cdef cppvector[SortKeySpec] out
+    cdef SortKeySpec s
+    for col_idx, ascending in spec:
+        s.col_idx = <size_t>col_idx
+        s.ascending = bool(ascending)
+        out.push_back(s)
+    return out
+
+
+cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
+    """``spec`` = [(name:bytes|str, fn:str, col_idx:int|-1), ...] in output order."""
+    cdef cppvector[AggSpec2] out
+    cdef AggSpec2 s
+    for name, fn, col_idx in spec:
+        if fn == "CountStar":
+            s.fn = AggFn.CountStar
+        elif fn == "Count":
+            s.fn = AggFn.Count
+        elif fn == "CountDistinct":
+            s.fn = AggFn.CountDistinct
+        elif fn == "Sum":
+            s.fn = AggFn.Sum
+        elif fn == "Avg":
+            s.fn = AggFn.Avg
+        elif fn == "Min":
+            s.fn = AggFn.Min
+        elif fn == "Max":
+            s.fn = AggFn.Max
+        else:
+            raise ValueError(f"native engine: unknown aggregate function {fn!r}")
+        s.col_idx = <int>col_idx
+        s.name = <string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8"))
+        out.push_back(s)
+    return out
+
+
+cdef struct _EnginePlanArg:
+    void* engine        # Engine* — borrowed; the NativePlan PyObject owns it
+    int dop
+    PyObject* nplan     # borrowed NativePlan (keeps engine + scans alive via caller)
+    PyObject* out_q     # borrowed PyMorselQueue
+    PyObject* errors    # borrowed list[BaseException]
+    PyObject* done      # borrowed threading.Event — set() in the driver's finally so
+                        # the consumer can safely wait for the driver to stop touching
+                        # the pool before shutting it down (multi-pipeline runs keep
+                        # submitting between pipelines; see execute_native's finally)
+    void* pool          # opaque BSThreadPoolBridge* — see executor.hpp for why void*
+
+
+cdef void _engine_plan_run(_EnginePlanArg* a) noexcept with gil:
+    """Driver-task body. The engine run itself happens DETACHED (``with nogil``):
+    this thread blocks indefinitely inside ``bs_pool_wait_native`` with no safe
+    point, and on free-threaded CPython a thread that stays ATTACHED while blocked
+    in native code stalls every stop-the-world (GC) — which then parks every scan
+    worker at its trampoline's attach, wedging the whole query. Proven live: the
+    lldb signature is ``_PyThreadState_Attach -> _PyParkingLot_Park`` under
+    ``submit_work_native`` on all workers while this thread sits in
+    ``wait_native``. Attach is only held here for the prologue/epilogue Python
+    touches (error marshalling, queue finish)."""
+    cdef ErrCtx err
+    cdef object exc, scan_obj
+    cdef object out_q = <object>a.out_q
+    cdef object nplan = <object>a.nplan
+    cdef Engine* eng = <Engine*>a.engine
+    cdef int dop = a.dop
+    cdef void* pool = a.pool
+    err.code = 0
+    err.msg = NULL
+    try:
+        with nogil:
+            eng.run(dop, pool, err)
+        if err.code != 0:
+            exc = None
+            for scan_obj in (<NativePlan>nplan).scans:
+                exc = (<BasePlanNode>scan_obj)._take_exc()
+                if exc is not None:
+                    break
+            if exc is None:
+                exc = RuntimeError(
+                    "native engine: error code %d: %s" % (
+                        err.code,
+                        (<bytes>err.msg).decode("utf-8") if err.msg != NULL else "unknown",
+                    )
+                )
+            (<list>(<object>a.errors)).append(exc)
+    except BaseException as py_exc:
+        (<list>(<object>a.errors)).append(py_exc)
+    finally:
+        out_q.finish()
+        (<object>a.done).set()
+
+
+cdef void _engine_plan_task(void* arg) noexcept nogil:
+    _engine_plan_run(<_EnginePlanArg*>arg)
+
+
+def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
+                        PyMorselQueue out_q, list errors, done_event):
+    """Run a compiled native plan. NON-BLOCKING: submits ONE detached native driver
+    (spawn_detached_native_task — see native_engine_real_filter's docstring for why a
+    lone detached thread, not a task on ``pool``) which runs every pipeline in the
+    graph at degree ``dop`` on ``pool`` and streams the terminal pipeline into
+    ``out_q``. The caller MUST drain ``out_q`` concurrently (bounded; backpressure
+    blocks the producer) and hold BOTH the returned handle and ``nplan`` alive until
+    it has seen the sink finish."""
+    cdef _EnginePlanArg* a = <_EnginePlanArg*>malloc(sizeof(_EnginePlanArg))
+    if a == NULL:
+        raise MemoryError()
+    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
+    handle._args = <void*>a
+    a.engine = <void*>nplan._e
+    a.dop = dop
+    a.nplan = <PyObject*>nplan
+    a.out_q = <PyObject*>out_q
+    a.errors = <PyObject*>errors
+    a.done = <PyObject*>done_event
+    a.pool = <void*>pool._pool
+    spawn_detached_native_task(_engine_plan_task, a)
+    return handle
 
 
 cdef class JoinLeftAdapter(BasePlanNode):

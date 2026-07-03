@@ -43,6 +43,12 @@ cdef extern from "morsels/cxx_morsel.h" nogil:
         uint32_t num_rows() noexcept
         size_t num_columns() noexcept
 
+    # ARRAY child access (BC_C_NATIVE_CHILD): the elements of an ARRAY column
+    # live on the VectorOwner's child_owner subtree — this is the sanctioned
+    # C-level read of it (`own` itself stays undeclared above). NULL when the
+    # column is out of range, unowned, or has no child.
+    const DrakenVector* cxx_column_child_vec(const CxxMorsel* m, uint32_t idx) noexcept
+
 
 cdef extern from * nogil:
     """

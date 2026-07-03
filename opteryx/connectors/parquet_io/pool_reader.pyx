@@ -23,6 +23,7 @@ from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
+from libcpp.pair cimport pair
 import time
 import struct
 
@@ -1337,6 +1338,227 @@ cpdef IpcRowGroupSource open_pass2_source(
         pool_size=256*1024*1024,
     )
     return src
+
+
+cdef class NativeScanPlan:
+    """Planning-time output for the fully-native (zero-Python) scan-pull path used
+    by the pure C++ morsel-driven engine
+    (src/cpp/engine/native_parquet_scan_source.hpp).
+
+    Built ONCE, on the Python planning thread, by `open_native_scan_plan` — footer
+    fetch, row-group pruning, and pool sizing are genuinely planning work (per
+    CLAUDE.md's phase split: planning is Python, execution is native) and stay
+    here. Everything this class exposes (`pipeline_ptr`, `footer_map`,
+    `work_items`) is a raw C++ handle; the native engine's Source reads them
+    directly and never calls back into this module — or any Python object —
+    during its per-morsel pull loop.
+
+    First-landing scope (see `open_native_scan_plan`): local files only (no GCS
+    signed-URL rewrite, no prefetched-footer dicts, no pass-2 masks). The native
+    Source itself further requires every decoded column to land on a supported
+    fixed-width direct kind (INT64/FLOAT32/FLOAT64, dense or dict — the types
+    NumericFilterOperator already supports); it fails loud on anything else
+    (VARCHAR, BOOL, DECIMAL128, pool-path) rather than silently falling back.
+
+    `close()` must be called exactly once when the scan is done."""
+    # C attributes declared in pool_reader.pxd; only method bodies here.
+
+    def __cinit__(self):
+        self.pipeline_ptr = NULL
+        self.footer_map = NULL
+        self.in_flight_limit = 0
+        self.n_items = 0
+        self._closed = False
+        self._pool = None
+
+    def __dealloc__(self):
+        self.close()
+
+    cpdef void close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self.pipeline_ptr != NULL:
+            self.pipeline_ptr.cancel()
+            self.pipeline_ptr.wait_shutdown()
+            del self.pipeline_ptr
+            self.pipeline_ptr = NULL
+        if self.footer_map != NULL:
+            del self.footer_map
+            self.footer_map = NULL
+
+
+cpdef NativeScanPlan open_native_scan_plan(
+    paths,
+    column_names,
+    int decode_workers=4,
+    predicates=None,
+    file_sizes=None,
+):
+    """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
+    Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
+    reusing the same helpers, but returns raw C++ handles instead of a Cython
+    `IpcRowGroupSource` — local files only, no signed-URL rewrite, no
+    prefetched-footer dicts, no pass-2 masks (first landing; see
+    `NativeScanPlan`'s docstring for the rest of the scope boundary)."""
+    cdef NativeScanPlan plan = NativeScanPlan()
+    plan.footer_map = new unordered_map[string, FileStats]()
+    plan.column_names = [c.encode('utf-8') for c in column_names]
+
+    cdef string path_bytes_cpp
+    cdef const uint8_t* footer_buf_ptr
+    cdef size_t footer_buf_size
+    cdef RowGroupStats* rgp
+    cdef size_t rg_i, ci
+    cdef int64_t max_rg_bytes = 0
+    cdef int64_t rg_bytes
+    cdef int64_t est_rg, dyn_pool_size
+    cdef list work_items = []
+
+    for path in paths:
+        path_bytes_cpp = path.encode('utf-8')
+        if plan.footer_map[0].count(path_bytes_cpp) == 0:
+            if not _PARSED_FOOTER_CACHE.try_get(path, &plan.footer_map[0][path_bytes_cpp]):
+                envelope, _ = _read_footer_payload(
+                    path, file_sizes.get(path, -1) if file_sizes else -1, None
+                )
+                footer_buf_ptr = <const uint8_t*>envelope
+                footer_buf_size = len(envelope)
+                plan.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                    footer_buf_ptr, footer_buf_size
+                )
+                _PARSED_FOOTER_CACHE.put_fs(path, plan.footer_map[0][path_bytes_cpp])
+        bloom_path = path if _is_local_path(path) else None
+        for rg_i in range(plan.footer_map[0][path_bytes_cpp].row_groups.size()):
+            if predicates and not _rg_passes_predicates_native(
+                plan.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
+            ):
+                continue
+            work_items.append((path, rg_i))
+            plan.work_items.push_back(pair[string, int](path_bytes_cpp, <int>rg_i))
+
+    plan.n_items = len(work_items)
+    if plan.n_items == 0:
+        return plan
+
+    proj_set_bytes = {name.encode('utf-8') for name in column_names}
+    max_rg_bytes = 0
+    for path, rg_idx in work_items:
+        path_bytes_cpp = path.encode('utf-8')
+        rg_bytes = 0
+        rgp = &plan.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+        for ci in range(rgp.columns.size()):
+            if rgp.columns[ci].total_uncompressed_size > 0 and \
+                    bytes(rgp.columns[ci].name) in proj_set_bytes:
+                rg_bytes += rgp.columns[ci].total_uncompressed_size
+        if rg_bytes > max_rg_bytes:
+            max_rg_bytes = rg_bytes
+
+    plan.in_flight_limit = decode_workers + 2
+    est_rg = max_rg_bytes * 2
+    dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
+    if dyn_pool_size < 256*1024*1024:
+        dyn_pool_size = 256*1024*1024
+    plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
+    # A pool sink must be wired regardless — the decode worker's pool-path
+    # (dk=0) branch expects one to exist even though this plan's Source never
+    # routes a column there deliberately (it fails loud on dk=0 instead).
+    plan._pool = MemoryPool(dyn_pool_size, name="native-scan-io", auto_resize=False)
+    wire_pool_sink(plan.pipeline_ptr, plan._pool._pool)
+    return plan
+
+
+cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=None):
+    """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
+
+    Proves, from parsed footers (cache-warmed — not wasted work when the answer
+    is False, the trampoline path needs the same footers), that EVERY projected
+    column in EVERY row group of EVERY file:
+      - is present (no schema evolution on this path), and
+      - has a footer physical/logical type that provably decodes to a DirectKind
+        the native Source supports (io_pipeline.hpp direct_kind_for + its
+        Stage-4a logical gate): plain numeric only. DATE/TIMESTAMP (they rely on
+        the pool-consumer's schema coercion, which the native Source does not
+        do), int-backed DECIMAL (descriptor contract), BOOL, strings and nested
+        columns all refuse — those scans stay on the trampoline Source.
+
+    ``expected_kinds[i]`` pairs with ``column_names[i]``: "int" (schema INT64 —
+    parquet int32 widens to DK_INT64 on decode), "float32" or "float64".
+
+    Encoding is deliberately NOT checked: for single-pass (mask-free) decode,
+    plain, pure-dict (prefer_dict) and mixed dict+plain chunks all land on
+    supported kinds — see decode_column.cpp's mixed-encoding transition. The
+    footer encodings list cannot distinguish a dictionary page from a plain
+    fallback data page anyway (measured: every numeric chunk in the test corpus
+    lists dict+plain).
+    """
+    cdef FileStats fs
+    cdef const RowGroupStats* rgp
+    cdef const ColumnStats* csp
+    cdef size_t rg_i, ci, n_rg_cols
+    cdef Py_ssize_t k, ncols = len(column_names)
+    cdef const uint8_t* buf_ptr
+    cdef size_t buf_size
+    cdef bint found
+    cdef string s_int32 = b"int32"
+    cdef string s_int64 = b"int64"
+    cdef string s_float32 = b"float32"
+    cdef string s_float64 = b"float64"
+    cdef vector[string] wanted
+    cdef list kinds = []
+
+    if ncols == 0 or len(expected_kinds) != ncols:
+        return False
+    for k in range(ncols):
+        name = column_names[k]
+        wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
+        kind = expected_kinds[k]
+        if kind not in ("int", "float32", "float64"):
+            return False
+        kinds.append(kind)
+
+    for path in paths:
+        if not _is_local_path(path):
+            return False
+        if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+            envelope, _ = _read_footer_payload(
+                path, file_sizes.get(path, -1) if file_sizes else -1, None
+            )
+            buf_ptr = <const uint8_t*>envelope
+            buf_size = <size_t>len(envelope)
+            fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+            _PARSED_FOOTER_CACHE.put_fs(path, fs)
+        for rg_i in range(fs.row_groups.size()):
+            rgp = &fs.row_groups[rg_i]
+            n_rg_cols = rgp.columns.size()
+            for k in range(ncols):
+                found = False
+                for ci in range(n_rg_cols):
+                    csp = &rgp.columns[ci]
+                    if csp.name != wanted[<size_t>k]:
+                        continue
+                    kind = kinds[k]
+                    if kind == "int":
+                        if csp.physical_type != s_int32 and csp.physical_type != s_int64:
+                            return False
+                        if csp.logical_type.size() != 0 and \
+                                csp.logical_type != s_int32 and csp.logical_type != s_int64:
+                            return False
+                    elif kind == "float32":
+                        if csp.physical_type != s_float32:
+                            return False
+                        if csp.logical_type.size() != 0 and csp.logical_type != s_float32:
+                            return False
+                    else:  # float64
+                        if csp.physical_type != s_float64:
+                            return False
+                        if csp.logical_type.size() != 0 and csp.logical_type != s_float64:
+                            return False
+                    found = True
+                    break
+                if not found:
+                    return False
+    return True
 
 
 def iter_row_groups_ipc(

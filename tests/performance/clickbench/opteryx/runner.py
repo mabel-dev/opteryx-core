@@ -25,7 +25,7 @@ class Dataset(enum.Enum):
     FULL_SINGLE = "scratch.hits_single"
 
 
-DATASET = Dataset.FULL_SPLIT_RUGO_262K
+DATASET = Dataset.FULL_SPLIT
 
 # fmt:off
 STATEMENTS = [

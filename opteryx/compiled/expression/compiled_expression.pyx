@@ -225,6 +225,14 @@ cdef class _KernelContextWrapper:
         return f"<KernelContextWrapper {self.ctx_ptr}>"
 
 
+# Kernels that live in OTHER compiled modules and self-register with the draken
+# registry at their module's import — kernel name -> home module to import on a
+# bind-time lookup miss (see _resolve_kernel_and_context).
+cdef dict _EXTERNAL_KERNEL_HOMES = {
+    "draken__dfa_extract": "opteryx.compiled.vector_ops",
+}
+
+
 def _resolve_kernel_and_context(str kernel_name, context_allocator=None, context_arg=None):
     """Resolve a kernel by name and allocate context if needed.
 
@@ -235,6 +243,15 @@ def _resolve_kernel_and_context(str kernel_name, context_allocator=None, context
     from draken.ops.kernels._kernel_registry import lookup_kernel
 
     fn_ptr, ctx_ptr = lookup_kernel(kernel_name)
+    if fn_ptr is None and kernel_name in _EXTERNAL_KERNEL_HOMES:
+        # Kernels compiled OUTSIDE the draken registry .so register themselves at
+        # their module's import. Import the declared home module and retry ONCE —
+        # this makes bind-time resolution independent of import order (a lookup
+        # miss for a known-external kernel was observed intermittently when the
+        # home module had not been pulled in yet by the plan path).
+        import importlib
+        importlib.import_module(_EXTERNAL_KERNEL_HOMES[kernel_name])
+        fn_ptr, ctx_ptr = lookup_kernel(kernel_name)
     if fn_ptr is None:
         return None, None
 
@@ -290,13 +307,60 @@ cdef object _LogicalCategory_VARCHAR = None
 cdef object _LogicalCategory_ARRAY = None
 cdef object _LogicalCategory_BLOB = None
 cdef tuple _STRING_FAMILY = ()
+
+# draken_date_part bind-time part ids (kernel contract — function_kernels.cpp).
+cdef dict _EXTRACT_PARTS = {"YEAR": 1, "MONTH": 2, "DAY": 3, "QUARTER": 4,
+                            "HOUR": 5, "MINUTE": 6, "SECOND": 7}
+
+# draken_like bind-time modes (bit0 = negate, bit1 = case-insensitive).
+cdef dict _LIKE_MODES = {"Like": 0, "NotLike": 1, "ILike": 2, "NotILike": 3}
+
+# draken_contains modes — the optimizer's `LIKE '%x%'` → InStr rewrite family.
+cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr": 3}
+
+# draken_date_trunc unit ids (kernel contract — function_kernels.cpp FK_TR_*).
+cdef dict _TRUNC_PARTS = {"SECOND": 1, "MINUTE": 2, "HOUR": 3, "DAY": 4,
+                          "WEEK": 5, "MONTH": 6, "QUARTER": 7, "YEAR": 8}
+
+
+def _build_in_list_blob(values, left_type, int negate):
+    """Serialize a literal IN-list into the in_list_ctx blob (kernel contract —
+    kernel_context.h). Returns None when the list shape is outside the kernel's
+    contract (NULL entries, mixed/unsupported types) — caller falls through."""
+    import struct as _struct
+
+    if isinstance(values, (list, tuple, set, frozenset)):
+        vals = list(values)
+    else:
+        return None   # CarcharSet / PerfectHashSet wrappers stay on the Python path
+    if len(vals) == 0 or any(v is None for v in vals):
+        return None
+    phys = ""
+    if left_type is not None and left_type.physical is not None:
+        phys = getattr(left_type.physical, "name", "")
+    if phys in ("INT8", "INT16", "INT32", "INT64") and all(
+            isinstance(v, int) and not isinstance(v, bool) for v in vals):
+        items = sorted(set(int(v) for v in vals))
+        blob = _struct.pack("<IBBH", len(items), 0, negate, 0)
+        return blob + b"".join(_struct.pack("<q", v) for v in items)
+    if phys in ("VARCHAR", "NVARCHAR") and all(
+            isinstance(v, (str, bytes)) for v in vals):
+        entries = sorted(set(
+            v.encode("utf-8") if isinstance(v, str) else bytes(v) for v in vals))
+        blob = _struct.pack("<IBBH", len(entries), 1, negate, 0)
+        for e in entries:
+            blob += _struct.pack("<I", len(e)) + e
+        return blob
+    return None
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
 
 # Result-handling flag bits (read by execute_bytecode after kernel return).
 # Set at bind time; used to dispatch result wrapping without isinstance/type checks.
 BC_RESULT_NEEDS_NB_WRAP = 0x10  # result is a raw nanobind Vector → wrap in Cython shim
-BC_RESULT_WRAP_AS_BOOL  = 0x20  # wrap as BoolVector (else Vector); valid only with NEEDS_NB_WRAP
+BC_RESULT_WRAP_AS_BOOL  = 0x20  # nb path: wrap as BoolVector (with NEEDS_NB_WRAP);
+                                # C-native path: marks a bool-mask-returning kernel
+                                # (LIKE family) for filter admission in _operators
 BC_RESULT_NO_DV         = 0x40  # result has no DV* (constant / scalar / not a vector) → store NULL in dv_stack
 
 # Binary op string → BCBinaryOpCode. Built once at first use.
@@ -780,6 +844,63 @@ cdef Py_ssize_t _linearize(
             op_str,
         )
 
+        # LIKE-family and InStr-family (the optimizer's `LIKE '%x%'` → contains
+        # rewrite) — bind-time lowering to the C-ABI draken_like / draken_contains
+        # kernels (mode in binary_op_ctx.op_code: bit0 negate, bit1 ci; the
+        # pattern/needle travels as the second vector argument, so constant AND
+        # per-row patterns share one path).
+        _like_kernel = "draken_like"
+        _like_mode = _LIKE_MODES.get(op_str, -1)
+        if _like_mode < 0:
+            _like_mode = _CONTAINS_MODES.get(op_str, -1)
+            _like_kernel = "draken_contains"
+        if _like_mode >= 0:
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _lk_alloc
+            _lk_fn, _lk_ctx = _resolve_kernel_and_context(
+                _like_kernel, _lk_alloc, (_like_mode, 0, 0, 0, 0, 0, 0))
+            if _lk_fn is not None:
+                sub_depth = _linearize(node.left, bc, depth)
+                sub_depth = _linearize(node.right, bc, sub_depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 2
+                slot.bool_value = 0
+                # WRAP_AS_BOOL marks the result as a boolean mask — the filter
+                # admission (bytecode_is_c_native_predicate) keys on it.
+                slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                slot.kernel_fn = <void*>(<unsigned long long>_lk_fn)
+                if _lk_ctx is not None:
+                    bc._hold(_lk_ctx)
+                    slot.ctx_ptr = <void*>(<unsigned long long>_lk_ctx.ctx_ptr)
+                return sub_depth - 2 + 1
+            # kernel unavailable — fall through to the Python compare path
+
+        # IN-list — bind-time lowering to the C-ABI draken_in_list kernel for
+        # plain literal collections over integer-family or string columns.
+        # Lists containing NULL keep the Python path (three-valued IN semantics
+        # the blob cannot carry — engine admission then rejects loud).
+        if op_str in ("InList", "NotInList") and node.right != NULL \
+                and node.right.node_type == _NT_LITERAL:
+            _il_obj = <object>node.right.value
+            _il_blob = _build_in_list_blob(
+                _il_obj, left_type, 1 if op_str == "NotInList" else 0)
+            if _il_blob is not None:
+                from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _il_alloc
+                _il_fn, _il_ctx = _resolve_kernel_and_context(
+                    "draken_in_list", _il_alloc, _il_blob)
+                if _il_fn is not None:
+                    sub_depth = _linearize(node.left, bc, depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 1
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                    slot.kernel_fn = <void*>(<unsigned long long>_il_fn)
+                    if _il_ctx is not None:
+                        bc._hold(_il_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_il_ctx.ctx_ptr)
+                    return sub_depth   # pops the value, pushes the mask — net 0
+
         # Detect set/list literal on the right — fold if found.
         right_is_inlist_literal = False
         inlist_set_obj = None
@@ -837,6 +958,42 @@ cdef Py_ssize_t _linearize(
                 f"compiled_expression: unknown comparison operator {op_str!r}"
             )
         _ensure_sql_types()
+
+        # Mixed-type NUMERIC comparison — draken_compare_dv declines any type
+        # mismatch (DECIMAL vs FLOAT64 from a float-literal product, DECIMAL vs
+        # DECIMAL128, INT vs FLOAT, cross-scale DECIMAL) and would error with no
+        # fallback. Route to the ctx-carrying draken_numeric_cmp: BOTH-decimal
+        # pairs rescale exactly in int128, any-float pairs promote to double.
+        # Fires ONLY when the two numeric operands differ in (type, scale) — a
+        # matched same-type-same-scale pair stays on the fast draken_compare_dv.
+        _NUM_PHYS = ("INT8", "INT16", "INT32", "INT64",
+                     "FLOAT32", "FLOAT64", "DECIMAL", "DECIMAL128")
+        _lphys = getattr(left_type.physical, "name", "") if left_type is not None else ""
+        _rphys = getattr(right_type.physical, "name", "") if right_type is not None else ""
+        _lscale = (int(left_type.logical.scale)
+                   if left_type is not None and left_type.logical is not None
+                   and _lphys in ("DECIMAL", "DECIMAL128") else 0)
+        _rscale = (int(right_type.logical.scale)
+                   if right_type is not None and right_type.logical is not None
+                   and _rphys in ("DECIMAL", "DECIMAL128") else 0)
+        if (not right_is_inlist_literal and op_code_val in (1, 2, 3, 4, 5, 6)
+                and _lphys in _NUM_PHYS and _rphys in _NUM_PHYS
+                and (_lphys != _rphys or _lscale != _rscale)):
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _dc_alloc
+            _dc_fn, _dc_ctx = _resolve_kernel_and_context(
+                "draken_numeric_cmp", _dc_alloc,
+                (op_code_val, _lscale, _rscale, 0, 0, 0, 0))
+            if _dc_fn is not None:
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 2
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                slot.kernel_fn = <void*>(<unsigned long long>_dc_fn)
+                if _dc_ctx is not None:
+                    bc._hold(_dc_ctx)
+                    slot.ctx_ptr = <void*>(<unsigned long long>_dc_ctx.ctx_ptr)
+                return sub_depth - 2 + 1
 
         flags = 0
         _left_cat = left_type.category if left_type is not None else None
@@ -953,6 +1110,13 @@ cdef Py_ssize_t _linearize(
                 if slot.op_code != BOP_STRING_CONCAT and \
                         bin_result_phys not in ("DECIMAL", "DECIMAL128", "TIMESTAMP64"):
                     slot.flags |= BC_C_NATIVE_FIXED
+                elif slot.op_code == BOP_STRING_CONCAT:
+                    # canonical-block string result — nogil-foldable (S6)
+                    slot.flags |= BC_C_NATIVE_STRING
+                elif bin_result_phys in ("DECIMAL", "DECIMAL128", "TIMESTAMP64"):
+                    # raw-domain foldable (int64 or int128); descriptor re-attached
+                    # by the engine at the plan-known ExprProject boundary
+                    slot.flags |= BC_C_NATIVE_DESC
 
         # Phase 1 result-wrap pattern: kernels return nanobind Vectors.
         slot.flags |= BC_RESULT_NEEDS_NB_WRAP
@@ -971,6 +1135,36 @@ cdef Py_ssize_t _linearize(
         if node.centre == NULL:
             raise ValueError("compiled_expression: UNARY_OPERATOR missing centre operand")
         unary_op_str = <object>node.value
+
+        # BitwiseNot (~x) → C-ABI kernel, widened INT64 dense result.
+        if unary_op_str == "BitwiseNot":
+            _bn_fn, _bn_unused = _resolve_kernel_and_context("draken_bitwise_not", None, None)
+            if _bn_fn is not None:
+                sub_depth = _linearize(node.centre, bc, depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 1
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE
+                slot.kernel_fn = <void*>(<unsigned long long>_bn_fn)
+                return sub_depth   # pop 1, push 1 — net 0
+
+        # IsEmpty / IsNotEmpty (the optimizer's rewrite of `str = ''` / `str <> ''`)
+        # → C-ABI bool kernel, so the whole predicate stays c-native.
+        if unary_op_str in ("IsEmpty", "IsNotEmpty"):
+            _se_fn, _se_ignore = _resolve_kernel_and_context(
+                "draken_is_empty" if unary_op_str == "IsEmpty" else "draken_is_not_empty",
+                None, None)
+            if _se_fn is not None:
+                sub_depth = _linearize(node.centre, bc, depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 1
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                slot.kernel_fn = <void*>(<unsigned long long>_se_fn)
+                return sub_depth   # pop 1, push 1 — net 0
+
         sub_depth = _linearize(node.centre, bc, depth)
         slot = bc._push_instr()
         slot.opcode = BC_UNARY_OP
@@ -989,6 +1183,27 @@ cdef Py_ssize_t _linearize(
                 raise ValueError("compiled_expression: _PASSTHRU FUNCTION has no parameters")
             return _linearize(node.parameters[0], bc, depth)
 
+        # IF_THEN_ELSE — synthetic node from the plan compiler's CASE rewrite
+        # (no function_ref, no Python fallback; the C kernel is mandatory).
+        if func_val == "IF_THEN_ELSE":
+            if node.parameters.size() != 3:
+                raise ValueError("compiled_expression: IF_THEN_ELSE needs 3 parameters")
+            _ite_fn, _ite_unused = _resolve_kernel_and_context("draken_if_then_else", None, None)
+            if _ite_fn is None:
+                raise ValueError("compiled_expression: draken_if_then_else kernel missing")
+            sub_depth = depth
+            for i in range(3):
+                if node.parameters[i] == NULL:
+                    raise ValueError("compiled_expression: IF_THEN_ELSE parameter NULL")
+                sub_depth = _linearize(node.parameters[i], bc, sub_depth)
+            slot = bc._push_instr()
+            slot.opcode = BC_FUNCTION
+            slot.arity = 3
+            slot.bool_value = 0
+            slot.flags = BC_INSTR_C_NATIVE
+            slot.kernel_fn = <void*>(<unsigned long long>_ite_fn)
+            return sub_depth - 3 + 1
+
         n = <Py_ssize_t>node.parameters.size()
         func_ref_obj = <object>node.source_node
         func_py_node = func_ref_obj
@@ -998,6 +1213,171 @@ cdef Py_ssize_t _linearize(
                 f"compiled_expression: FUNCTION '{func_val}' has no function_ref — not bound"
             )
         callable_obj = func_ref_meta.selected_overload.kernel.callable_ref
+
+        # SUBSTRING(str, start[, count]) / LEFT(str, n) / RIGHT(str, n) — all lower to
+        # the one draken_substring kernel (LEFT = start 1 count n; RIGHT = start -n to
+        # end). start/count are LITERALS consumed into a substring_ctx; only the string
+        # operand is pushed. Result is a canonical string block (VARCHAR byte /
+        # NVARCHAR codepoint). NOTE the optimizer rewrites SUBSTRING(x,1,n) → LEFT(x,n).
+        _sub_func = func_val.upper() if func_val else ""
+        _sb_ok = False
+        _sb_start = 0
+        _sb_count = 0
+        _sb_has_count = 0
+        if _sub_func in ("SUBSTRING", "SUBSTR") and 2 <= n <= 3 \
+                and node.parameters[1] != NULL \
+                and node.parameters[1].node_type == _NT_LITERAL:
+            _sb_start_obj = <object>node.parameters[1].value
+            if isinstance(_sb_start_obj, (int, float)) and not isinstance(_sb_start_obj, bool):
+                _sb_start = int(_sb_start_obj)
+                if n == 3 and node.parameters[2] != NULL \
+                        and node.parameters[2].node_type == _NT_LITERAL:
+                    _sb_count_obj = <object>node.parameters[2].value
+                    if _sb_count_obj is not None:
+                        _sb_count = int(_sb_count_obj)
+                        _sb_has_count = 1
+                _sb_ok = True
+        elif _sub_func in ("LEFT", "RIGHT") and n == 2 \
+                and node.parameters[1] != NULL \
+                and node.parameters[1].node_type == _NT_LITERAL:
+            _sb_len_obj = <object>node.parameters[1].value
+            if isinstance(_sb_len_obj, (int, float)) and not isinstance(_sb_len_obj, bool):
+                _sb_len = int(_sb_len_obj)
+                if _sub_func == "LEFT":
+                    _sb_start = 1; _sb_count = _sb_len; _sb_has_count = 1
+                else:
+                    _sb_start = -_sb_len; _sb_has_count = 0
+                _sb_ok = True
+        if _sb_ok:
+            from draken.ops.kernels._kernel_registry import alloc_substring_ctx as _sb_alloc
+            _sb_fn, _sb_ctx = _resolve_kernel_and_context(
+                "draken_substring", _sb_alloc, (_sb_start, _sb_count, _sb_has_count))
+            if _sb_fn is not None:
+                sub_depth = _linearize(node.parameters[0], bc, depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 1
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE
+                slot.kernel_fn = <void*>(<unsigned long long>_sb_fn)
+                if _sb_ctx is not None:
+                    bc._hold(_sb_ctx)
+                    slot.ctx_ptr = <void*>(<unsigned long long>_sb_ctx.ctx_ptr)
+                # No callable_ref: this is a c-native kernel — there is no Python
+                # fallback, and every VM arm gates on BC_INSTR_C_NATIVE before ever
+                # reading callable_ref.
+                return sub_depth   # operand pushed, fn pops 1 pushes 1
+
+        # STARTS_WITH / ENDS_WITH (the optimizer's `LIKE 'x%'` / `LIKE '%x'` rewrite;
+        # CI variants for ILIKE; negation already wrapped in a NOT node) → C-ABI bool
+        # kernels. Both string args pushed; ci flag rides in binary_op_ctx.op_code.
+        _affix_map = {"_STARTS_WITH": ("draken_starts_with", 0),
+                      "_CI_STARTS_WITH": ("draken_starts_with", 2),
+                      "_ENDS_WITH": ("draken_ends_with", 0),
+                      "_CI_ENDS_WITH": ("draken_ends_with", 2)}
+        if func_val in _affix_map and n == 2:
+            _af_name, _af_ci = _affix_map[func_val]
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _af_alloc
+            _af_fn, _af_ctx = _resolve_kernel_and_context(
+                _af_name, _af_alloc, (_af_ci, 0, 0, 0, 0, 0, 0))
+            if _af_fn is not None:
+                sub_depth = _linearize(node.parameters[0], bc, depth)
+                sub_depth = _linearize(node.parameters[1], bc, sub_depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 2
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                slot.kernel_fn = <void*>(<unsigned long long>_af_fn)
+                if _af_ctx is not None:
+                    bc._hold(_af_ctx)
+                    slot.ctx_ptr = <void*>(<unsigned long long>_af_ctx.ctx_ptr)
+                return sub_depth - 2 + 1
+
+        # TRUNC(ts, unit) / DATE_TRUNC(unit, ts) — floor a TIMESTAMP to a unit
+        # boundary. Unit literal consumed into a binary_op_ctx (op_code=part id,
+        # left_unit=operand TimestampUnit); only the timestamp operand pushed.
+        _tr_func = func_val.upper() if func_val else ""
+        if _tr_func in ("TRUNC", "DATE_TRUNC", "DATETRUNC") and n == 2:
+            _tr_unit = 0
+            _tr_operand = -1
+            for _ti in range(2):
+                if node.parameters[_ti] != NULL \
+                        and node.parameters[_ti].node_type == _NT_LITERAL:
+                    _tv = <object>node.parameters[_ti].value
+                    if isinstance(_tv, bytes):
+                        _tv = _tv.decode("utf-8")
+                    if isinstance(_tv, str):
+                        _tr_unit = _TRUNC_PARTS.get(_tv.upper(), 0)
+                        _tr_operand = 1 - _ti
+            if _tr_unit != 0 and _tr_operand >= 0 \
+                    and node.parameters[_tr_operand] != NULL \
+                    and node.parameters[_tr_operand].schema_column != NULL:
+                _tr_sc = <object>node.parameters[_tr_operand].schema_column
+                _tr_ct = getattr(_tr_sc, "column_type", None)
+                _tr_phys = getattr(getattr(_tr_ct, "physical", None), "name", "")
+                if _tr_phys == "TIMESTAMP64" and _tr_ct.logical is not None:
+                    _tr_uv = int(_tr_ct.logical.unit.value)
+                    from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _tr_alloc
+                    _tr_fn, _tr_ctx = _resolve_kernel_and_context(
+                        "draken_date_trunc", _tr_alloc, (_tr_unit, 0, 0, 0, 0, _tr_uv, 0))
+                    if _tr_fn is not None:
+                        sub_depth = _linearize(node.parameters[_tr_operand], bc, depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 1
+                        slot.bool_value = 0
+                        slot.flags = BC_INSTR_C_NATIVE
+                        slot.kernel_fn = <void*>(<unsigned long long>_tr_fn)
+                        if _tr_ctx is not None:
+                            bc._hold(_tr_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_tr_ctx.ctx_ptr)
+                        return sub_depth
+
+        # EXTRACT(part FROM x) / YEAR(x)-family — bind-time lowering to the C-ABI
+        # draken_date_part kernel. The part literal is consumed HERE (never pushed);
+        # part id + the operand's TimestampUnit travel in a binary_op_ctx
+        # (op_code / left_unit — the same vehicle the temporal binops use).
+        _extr_func = func_val.upper() if func_val else ""
+        _dp_part = 0
+        _dp_operand = -1
+        if _extr_func == "EXTRACT" and n == 2 and node.parameters[0] != NULL \
+                and node.parameters[0].node_type == _NT_LITERAL:
+            _dp_val = <object>node.parameters[0].value
+            if isinstance(_dp_val, bytes):
+                _dp_val = _dp_val.decode("utf-8")
+            _dp_part = _EXTRACT_PARTS.get(str(_dp_val).upper(), 0)
+            _dp_operand = 1
+        elif _extr_func in _EXTRACT_PARTS and n == 1:
+            _dp_part = _EXTRACT_PARTS[_extr_func]
+            _dp_operand = 0
+        if _dp_part != 0 and node.parameters[_dp_operand] != NULL \
+                and node.parameters[_dp_operand].schema_column != NULL:
+            _dp_sc = <object>node.parameters[_dp_operand].schema_column
+            _dp_ct = getattr(_dp_sc, "column_type", None)
+            _dp_phys = getattr(getattr(_dp_ct, "physical", None), "name", "")
+            if _dp_phys in ("DATE32", "TIMESTAMP64"):
+                _dp_unit = 0
+                if _dp_phys == "TIMESTAMP64" and _dp_ct.logical is not None:
+                    _dp_unit = int(_dp_ct.logical.unit.value)
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _dp_alloc
+                _dp_fn, _dp_ctx = _resolve_kernel_and_context(
+                    "draken_date_part", _dp_alloc,
+                    (_dp_part, 0, 0, 0, 0, _dp_unit, 0))
+                if _dp_fn is not None:
+                    sub_depth = _linearize(node.parameters[_dp_operand], bc, depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 1
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE
+                    slot.kernel_fn = <void*>(<unsigned long long>_dp_fn)
+                    if _dp_ctx is not None:
+                        bc._hold(_dp_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_dp_ctx.ctx_ptr)
+                    # No callable_ref: c-native kernel, no Python fallback (VM arms
+                    # gate on BC_INSTR_C_NATIVE before reading callable_ref).
+                    return sub_depth   # operand pushed, fn pops 1 pushes 1 — net +1
 
         sub_depth = depth
         for i in range(n):
@@ -1031,9 +1411,33 @@ cdef Py_ssize_t _linearize(
         # This is the intended behaviour while function kernels are being ported.
         func_name = func_val.upper() if func_val else None
         if func_name is not None:
-            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(f"draken_{func_name.lower()}")
+            # ROUND-family over a DECIMAL operand: the kernel rounds EXACTLY in the
+            # raw int64 domain, which needs the operand's scale — a LogicalType
+            # detail the DrakenVector cannot carry — passed via a bind-time ctx
+            # (binary_op_ctx.left_scale, the same vehicle the decimal binops use).
+            _fn_ctx_alloc = None
+            _fn_ctx_arg = None
+            if func_name in ("ROUND", "FLOOR", "CEILING", "CEIL") and n >= 1 \
+                    and node.parameters[0] != NULL \
+                    and node.parameters[0].schema_column != NULL:
+                _fn_p0_sc = <object>node.parameters[0].schema_column
+                _fn_p0_ct = getattr(_fn_p0_sc, "column_type", None)
+                if (_fn_p0_ct is not None and _fn_p0_ct.logical is not None
+                        and getattr(_fn_p0_ct.physical, "name", "") == "DECIMAL"):
+                    from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
+                    _fn_ctx_alloc = alloc_binary_op_ctx
+                    _fn_ctx_arg = (0, int(_fn_p0_ct.logical.scale), 0, 0, 0, 0, 0)
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                f"draken_{func_name.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
             if fn_ptr is not None:
-                slot.kernel_fn = <void*>fn_ptr
+                # fn_ptr is a Python int carrying the C address — cast its VALUE,
+                # not the PyObject's address (a bare <void*> on the object stored
+                # the int OBJECT pointer: jump-to-garbage the first time anything
+                # actually dispatched a function kernel).
+                slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
+                if ctx_wrapper is not None:
+                    bc._hold(ctx_wrapper)   # frees the ctx with the bytecode
+                    slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
                 # Function kernels generally don't need context structs
                 slot.flags |= BC_INSTR_C_NATIVE
             # else: kernel not available yet (pending Phase 9a-fn); callable_ref path remains
@@ -1121,14 +1525,98 @@ cdef Py_ssize_t _linearize(
         from opteryx.expression.casts import _c_native_cast
         _cn = _c_native_cast(source_phys_name, cast_target_type, safe=cast_is_try)
         if _cn is not None:
-            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(_cn[0], None, None)
+            # TIMESTAMP-producing casts need the target unit in a cast_timestamp_ctx
+            # (1 ns / 2 us / 3 ms / 4 s / 5 days); default us when the cast left it
+            # implicit. Everything else is unit-less (None ctx).
+            _cn_alloc = None
+            _cn_arg = None
+            if _cn[0].endswith("_to_timestamp"):
+                # Target unit = binder-declared result unit (see the rescale branch
+                # below for why the SQL suffix is NOT the target). "days" has no
+                # TimestampUnit representation and keeps its special scaling code.
+                _cn_unit_map = {"ns": 1, "us": 2, "ms": 3, "s": 4, "days": 5}
+                from draken.ops.kernels._kernel_registry import alloc_cast_timestamp_ctx as _cn_alloc
+                _cn_arg = _cn_unit_map.get(cast_unit, 2)
+                if cast_unit != "days":
+                    _cn_res_sc = getattr(cast_py_node, "schema_column", None)
+                    _cn_res_ct = getattr(_cn_res_sc, "column_type", None) if _cn_res_sc is not None else None
+                    if _cn_res_ct is not None and _cn_res_ct.logical is not None:
+                        # TimestampUnit (0=s,1=ms,2=us,3=ns) -> cast_timestamp_ctx
+                        # numbering (4=s,3=ms,2=us,1=ns).
+                        _cn_arg = {0: 4, 1: 3, 2: 2, 3: 1}[int(_cn_res_ct.logical.unit.value)]
+            elif _cn[0] == "draken_cast_timestamp_rescale":
+                # TIMESTAMP64 -> TIMESTAMP64 unit rescale. THE TARGET UNIT IS THE
+                # BINDER-DECLARED RESULT ColumnType's unit — NOT the SQL suffix.
+                # The binder uses `::TIMESTAMP[s]` to declare how the SOURCE is
+                # interpreted (it re-types the source operand's unit to `s`) and
+                # ALWAYS types the cast RESULT as canonical microseconds. The
+                # engine re-attaches the plan-declared descriptor at the
+                # ExprProject boundary, so a kernel emitting values at any OTHER
+                # unit than that descriptor displays garbage (the descriptor/value
+                # mismatch behind the 1970-collapse bug — the ctx plumbing was
+                # never at fault; values survived verbatim, the UNIT lied).
+                # Units use TimestampUnit numbering (0=s,1=ms,2=us,3=ns), same as
+                # EXTRACT/TRUNC's binary_op_ctx convention.
+                # SOURCE unit: the operand's declared LogicalType when the binder
+                # attached one; otherwise the SQL suffix — `x::TIMESTAMP[s]` means
+                # "interpret x as SECONDS" (observed: when the same column is ALSO
+                # used raw, the binder leaves the operand's logical None and only
+                # the suffix carries the source interpretation).
+                _cn_sfx_map = {"s": 0, "ms": 1, "us": 2, "ns": 3}
+                _cn_src_unit = _cn_sfx_map.get(cast_unit, 2)
+                if source_sql is not None and source_sql.logical is not None:
+                    _cn_src_unit = int(source_sql.logical.unit.value)
+                _cn_dst_unit = 2   # binder's canonical default
+                _cn_res_sc = getattr(cast_py_node, "schema_column", None)
+                _cn_res_ct = getattr(_cn_res_sc, "column_type", None) if _cn_res_sc is not None else None
+                if _cn_res_ct is not None and _cn_res_ct.logical is not None:
+                    _cn_dst_unit = int(_cn_res_ct.logical.unit.value)
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
+                _cn_arg = (0, 0, 0, 0, 0, _cn_src_unit, _cn_dst_unit)
+            elif _cn[0].endswith("_to_decimal"):
+                # DECIMAL(p, s): params are the cast's (precision, scale) literals.
+                if len(cast_params) != 2:
+                    raise ValueError("CAST to DECIMAL requires (precision, scale)")
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
+                _cn_arg = (0, 0, 0, int(cast_params[1]), int(cast_params[0]), 0, 0)
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(_cn[0], _cn_alloc, _cn_arg)
             if fn_ptr is not None:
                 slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
                 slot.flags |= BC_INSTR_C_NATIVE
-                # S2: string-result cast kernels are named `..._to_string` (own the
-                # result as a Vector); everything else is fixed-width → nogil-safe.
-                if not _cn[0].endswith("_to_string"):
+                if ctx_wrapper is not None:
+                    bc._hold(ctx_wrapper)
+                    slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
+                # S2: string-result cast kernels are named `..._to_string`;
+                # their canonical-block results fold nogil too (S6). TIMESTAMP
+                # results are DESC (unit re-attached at the ExprProject boundary);
+                # everything else is plain fixed-width.
+                if _cn[0].endswith("_to_string"):
+                    slot.flags |= BC_C_NATIVE_STRING
+                elif (_cn[0].endswith("_to_timestamp") or _cn[0].endswith("_to_decimal")
+                        or _cn[0] == "draken_cast_timestamp_rescale"):
+                    slot.flags |= BC_C_NATIVE_DESC
+                else:
                     slot.flags |= BC_C_NATIVE_FIXED
+        elif (not cast_is_try and cast_target_type == "VARCHAR"
+                and (source_phys_name is None or source_phys_name == "ARRAY")
+                and bc.count >= 2
+                and bc.instrs[bc.count - 2].opcode == BC_LOAD_COL):
+            # ARRAY -> VARCHAR: the elements live in the column owner's child
+            # vector, unreachable from the parent DrakenVector*. Only a DIRECT
+            # column load has a child to resolve, hence the preceding-LOAD
+            # requirement. The binder leaves ARRAY columns UNTYPED
+            # (schema_column.column_type is None), so None is accepted here and
+            # the kernel fails loud at run time on any non-ARRAY parent. The VM
+            # resolves the child per morsel via the identity stored on THIS
+            # instruction (BC_C_NATIVE_CHILD) and dispatches the two-vector
+            # kernel; the result is a canonical string block (STRING).
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                "draken_cast_array_to_varchar", None, None)
+            if fn_ptr is not None:
+                slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
+                slot.flags |= (BC_INSTR_C_NATIVE | BC_C_NATIVE_STRING
+                               | BC_C_NATIVE_CHILD)
+                slot.column_identity = bc.instrs[bc.count - 2].column_identity
 
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel
@@ -1406,7 +1894,8 @@ _PURE_BITMAP_OPCODES = frozenset({
 _C_NATIVE_LOAD_OPCODES = frozenset({BC_LOAD_COL, BC_LOAD_LIT_CONST, BC_LOAD_LIT_BOOL})
 _C_NATIVE_BOOL_OPCODES = frozenset({BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF})
 _C_NATIVE_COMPUTE_OPCODES = frozenset(
-    _C_NATIVE_BOOL_OPCODES | {BC_COMPARE, BC_BINARY_OP, BC_CAST})
+    _C_NATIVE_BOOL_OPCODES | {BC_COMPARE, BC_BINARY_OP, BC_CAST, BC_UNARY_OP,
+                              BC_FUNCTION})
 
 def build_bytecode(CompiledExpressionHandle handle):
     """Linearise the lowered tree into a typed CompiledBytecode container."""
@@ -1443,8 +1932,26 @@ def build_bytecode(CompiledExpressionHandle handle):
                 continue
             bc.is_all_c_native = False
             break
+        if op == BC_UNARY_OP:
+            # IS [NOT] NULL is a pure validity read — nogil DV* arm exists
+            # (evaluation.pyx _dv_unary_null_c). Other unaries stay GIL.
+            opc = bc.instrs[k].op_code
+            if opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL:
+                continue
+            bc.is_all_c_native = False
+            break
         if op == BC_BINARY_OP or op == BC_CAST:
-            if (fl & BC_INSTR_C_NATIVE) != 0 and (fl & BC_C_NATIVE_FIXED) != 0:
+            # BC_C_NATIVE_CHILD is engine-only: this path evaluates over Python
+            # Morsels, which cannot resolve the owner-held ARRAY child vector.
+            if (fl & BC_INSTR_C_NATIVE) != 0 and (fl & BC_C_NATIVE_CHILD) == 0 and \
+                    (fl & (BC_C_NATIVE_FIXED | BC_C_NATIVE_STRING)) != 0:
+                continue
+            bc.is_all_c_native = False
+            break
+        if op == BC_FUNCTION:
+            # Phase 9a-fn: a resolved C-ABI kernel runs on the nogil DV* stack
+            # (fixed or canonical-block string result); Python callables do not.
+            if (fl & BC_INSTR_C_NATIVE) != 0:
                 continue
             bc.is_all_c_native = False
             break

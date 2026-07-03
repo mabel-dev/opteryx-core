@@ -286,6 +286,37 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
         if s in _CAST_STRINGS:
             return ("draken_cast_string_to_bool", 0)
         return None
+    # → TIMESTAMP (fixed-width int64; unit rides in cast_timestamp_ctx). The
+    # date32 kernel emits a DENSE gathered result (uniform selection read) after
+    # a dict-shape wrong-answer bug in its first shape-preserving version.
+    # int64→timestamp stays OFF (unverified against a value oracle).
+    if t in ("TIMESTAMP", "TIMESTAMP64"):
+        if s == "DATE32":
+            return ("draken_cast_date32_to_timestamp", 0)
+        if s == "INT64":
+            # INT64 and TIMESTAMP64 share the 8-byte payload, but a verbatim
+            # retag is only correct when the int is ALREADY at the declared
+            # result unit. `x::TIMESTAMP[s]` means "interpret x as SECONDS",
+            # and the binder declares the RESULT at canonical us — so the
+            # values must SCALE (x1e6 for [s]). Route through the rescale
+            # kernel (suffix = source unit, declared ct = target unit); it
+            # degrades to a copy when the units happen to match.
+            return ("draken_cast_timestamp_rescale", 0)
+        if s == "TIMESTAMP64":
+            # Rescales source-unit -> the BINDER-DECLARED result unit (always
+            # canonical us today; the `[s]` suffix re-types the SOURCE's
+            # interpretation, not the target). The earlier "1970 garbage" was a
+            # value/descriptor mismatch from targeting the SQL-suffix unit while
+            # ExprProject re-attached the plan-declared (us) descriptor — the ctx
+            # plumbing was never at fault (values survived verbatim, unit lied).
+            return ("draken_cast_timestamp_rescale", 0)
+        return None
+    # → DECIMAL (both tiers; the target (precision, scale) rides in a
+    # binary_op_ctx the lowering allocates from the cast params).
+    if t == "DECIMAL":
+        if s in ("FLOAT64", "FLOAT32"):
+            return ("draken_cast_float_to_decimal", 0)
+        return None
     # → VARCHAR / BLOB (string result; executor owns it as a Vector). NVARCHAR is
     # excluded (validate+retag, different kernel) and stays on the closure path.
     if t in ("VARCHAR", "BLOB"):

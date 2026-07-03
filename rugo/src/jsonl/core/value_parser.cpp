@@ -79,6 +79,24 @@ inline bool apply_op_f64(uint8_t op, double a, double b) {
 }
 }  // namespace
 
+void prepare_predicate(Predicate& pred) {
+    if (pred.value.empty()) return;
+    pred.pred_parsed_int = parse_int64(
+        reinterpret_cast<const uint8_t*>(pred.value.c_str()),
+        0,
+        pred.value.length() - 1,
+        pred.pred_int
+    );
+    if (!pred.pred_parsed_int) {
+        pred.pred_parsed_float = parse_float64(
+            reinterpret_cast<const uint8_t*>(pred.value.c_str()),
+            0,
+            pred.value.length() - 1,
+            pred.pred_float
+        );
+    }
+}
+
 bool evaluate_predicate(
     const uint8_t* buffer,
     const FieldSpan& value_span,
@@ -91,28 +109,12 @@ bool evaluate_predicate(
         return false;
     }
 
-    // Parse predicate value
-    int64_t pred_int = 0;
-    double pred_float = 0.0;
-    bool pred_parsed_int = false;
-    bool pred_parsed_float = false;
-
-    // Try to parse predicate value as number
-    pred_parsed_int = parse_int64(
-        reinterpret_cast<const uint8_t*>(pred.value.c_str()),
-        0,
-        pred.value.length() - 1,
-        pred_int
-    );
-
-    if (!pred_parsed_int) {
-        pred_parsed_float = parse_float64(
-            reinterpret_cast<const uint8_t*>(pred.value.c_str()),
-            0,
-            pred.value.length() - 1,
-            pred_float
-        );
-    }
+    // Predicate value's numeric parse is cached on `pred` by prepare_predicate() — read
+    // it here rather than re-parsing pred.value on every row evaluated.
+    const int64_t pred_int = pred.pred_int;
+    const double  pred_float = pred.pred_float;
+    const bool    pred_parsed_int = pred.pred_parsed_int;
+    const bool    pred_parsed_float = pred.pred_parsed_float;
 
     // Numeric field. The structural pass tags every number as Integer from its
     // first byte; a value like "3.5" only reveals itself as a float on parse. So
