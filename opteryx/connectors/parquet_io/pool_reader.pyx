@@ -104,8 +104,10 @@ _FOOTER_PREFETCH = 65536
 cdef ParquetParsedFooterCache _PARSED_FOOTER_CACHE = ParquetParsedFooterCache()
 
 
-cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i):
-    """Stage 4b: wrap direct DK_VARCHAR column i into a dense VARCHAR Vector.
+cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
+    """Stage 4b: wrap direct DK_VARCHAR column i into a dense Vector tagged
+    `want_type` (VARCHAR/NVARCHAR/VARBINARY — the schema's declared physical
+    type; all three share this exact byte layout).
 
     Takes the worker's slots (data) + validity via morsel_take_direct and the arena
     via morsel_take_string — nulling ALL of them on the MorselRef — then hands them
@@ -125,7 +127,7 @@ cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i):
     morsel_take_string(result[0], i, &arena_ptr, &codes_ptr)
     raw = draken_vector_own_string(
         <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
-        dval, dlen, DRAKEN_VARCHAR)
+        dval, dlen, want_type)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string failed")
     vec = Vector.__new__(Vector)
@@ -135,12 +137,12 @@ cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i):
     return vec
 
 
-cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i):
-    """Stage 4b: wrap direct DK_VARCHAR_DICT column i into a dict-shape VARCHAR
-    Vector. Like the plain wrap but also hands the codes selection to
-    draken_vector_own_string_dict, which owns all four buffers; morsel_take_direct
-    + morsel_take_string null slots/validity/arena/codes so the destructor frees
-    none of them (no double free)."""
+cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
+    """Stage 4b: wrap direct DK_VARCHAR_DICT column i into a dict-shape Vector
+    tagged `want_type` (VARCHAR/NVARCHAR/VARBINARY — same byte layout). Like the
+    plain wrap but also hands the codes selection to draken_vector_own_string_dict,
+    which owns all four buffers; morsel_take_direct + morsel_take_string null
+    slots/validity/arena/codes so the destructor frees none of them (no double free)."""
     cdef uint32_t dlen = result.columns[i].length
     cdef size_t arena_len = result.columns[i].arena_len
     cdef uint32_t data_length = result.columns[i].data_length
@@ -155,7 +157,7 @@ cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i):
     raw = draken_vector_own_string_dict(
         <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
         <uint32_t*>codes_ptr, data_length,
-        dval, dlen, DRAKEN_VARCHAR)
+        dval, dlen, want_type)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string_dict failed")
     vec = Vector.__new__(Vector)
@@ -200,11 +202,12 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     return vec
 
 
-cdef inline Vector _wrap_direct(MorselRef* result, size_t i):
+cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
     """Wrap direct column i into a Draken Vector via ownership transfer.
     morsel_take_direct hands the draken_alloc'd buffer + validity to the Vector and
     nulls the MorselRef slots so the destructor won't double-free. Fixed-width kinds
-    1..5; DK_VARCHAR (6) routes to the string wrap.
+    1..5; DK_VARCHAR (6)/DK_VARCHAR_DICT (7) route to the string wrap, tagged
+    `want_type` (VARCHAR/NVARCHAR/VARBINARY — the schema's declared physical type).
     """
     cdef int dk = result.columns[i].direct_kind
     cdef uint32_t dlen = result.columns[i].length
@@ -213,9 +216,9 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i):
     cdef uint8_t* dval
     cdef Vector vec
     if dk == 6:
-        return _wrap_string_direct(result, i)
+        return _wrap_string_direct(result, i, want_type)
     if dk == 7:
-        return _wrap_string_dict_direct(result, i)
+        return _wrap_string_dict_direct(result, i, want_type)
     if dk == 8 or dk == 9 or dk == 10:
         return _wrap_num_dict_direct(result, i, dk)
     if dk == 1:
@@ -834,6 +837,7 @@ cdef class IpcRowGroupSource:
     cdef list column_names               # str, submission order
     cdef list column_names_bytes         # bytes, for name-keyed callers
     cdef list column_null_fillers        # per-column callable n->Vector (schema-evolution NULL-fill); None = untyped
+    cdef dict column_string_types        # bytes name -> declared DrakenType (VARCHAR/NVARCHAR/VARBINARY); None = all VARCHAR
     cdef unordered_map[string, FileStats]* footer_map
     cdef object prefetched_footers
     cdef dict orig_to_cpp
@@ -851,6 +855,7 @@ cdef class IpcRowGroupSource:
         self._closed = False
         self.pipeline = None
         self.column_null_fillers = None
+        self.column_string_types = None
         self.next_to_submit = 0
         self.results_received = 0
         self.n_items = 0
@@ -923,6 +928,7 @@ cdef class IpcRowGroupSource:
         cdef int64_t fill_rows
         cdef bytes req_name
         cdef str cpp_path, path_str
+        cdef DrakenType want_type
 
         # ── Claim phase (under the cursor lock): advance the submit window to keep
         # it full, then take one result slot. No GIL-releasing call runs here. ──
@@ -971,12 +977,16 @@ cdef class IpcRowGroupSource:
                     ref_ids = {}
                 ref_ids[result.column_names[i]] = result.columns[i].ref_id
                 continue
-            vectors[i] = _wrap_direct(&result, i)
+            if self.column_string_types is not None:
+                want_type = <DrakenType><int>self.column_string_types.get(result.column_names[i], DRAKEN_VARCHAR)
+            else:
+                want_type = DRAKEN_VARCHAR
+            vectors[i] = _wrap_direct(&result, i, want_type)
 
         # Pool-path columns (strings/dict/list) are deserialized here and slotted
         # positionally; fixed-width + date/timestamp arrive direct via _wrap_direct.
         if ref_ids is not None:
-            pool_dict = deserialize_row_group(ref_ids, self.pipeline.pool)
+            pool_dict = deserialize_row_group(ref_ids, self.pipeline.pool, self.column_string_types)
             for i in range(ncols):
                 if vectors[i] is None:
                     vectors[i] = pool_dict[result.column_names[i]]
@@ -1105,17 +1115,26 @@ cpdef IpcRowGroupSource open_ipc_source(
     prefetched_footers=None,
     footer_bytes_cache=None,
     null_fillers=None,
+    string_types=None,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
     drives it with next_vectors() and releases it with close(). A source with
-    n_items == 0 is returned for empty/fully-pruned scans (close() still safe)."""
+    n_items == 0 is returned for empty/fully-pruned scans (close() still safe).
+
+    ``string_types``, when given, is a list of declared DrakenType tags (VARCHAR/
+    NVARCHAR/VARBINARY) parallel to ``column_names`` — the schema's physical type
+    for each projected column, used to tag decoded string columns instead of
+    always defaulting to VARCHAR (all three share the same byte layout)."""
     from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
     cdef IpcRowGroupSource src = IpcRowGroupSource()
     src.column_names = list(column_names)
     src.column_names_bytes = [c.encode('utf-8') for c in src.column_names]
     src.column_null_fillers = list(null_fillers) if null_fillers is not None else None
+    src.column_string_types = (
+        dict(zip(src.column_names_bytes, string_types)) if string_types is not None else None
+    )
     src.prefetched_footers = prefetched_footers
     src.footer_map = new unordered_map[string, FileStats]()
 
@@ -1273,6 +1292,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     query_id=None,
     footer_bytes_cache=None,
     null_fillers=None,
+    string_types=None,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -1280,7 +1300,9 @@ cpdef IpcRowGroupSource open_pass2_source(
     Returns an IpcRowGroupSource configured with explicit work items + per-row-group
     masks — no footer pruning (pass-1 already chose the row groups). The masked
     submit + the thread-safe next_vectors() consume are shared with the single-pass
-    driver. Pass-1 already fetched the footers, so these are cache hits."""
+    driver. Pass-1 already fetched the footers, so these are cache hits.
+
+    ``string_types``: see `open_ipc_source`."""
     if decode_workers <= 0:
         import os
         decode_workers = max(2, (os.cpu_count() or 4) - 2)
@@ -1289,6 +1311,9 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.column_names = list(column_names)
     src.column_names_bytes = [c.encode('utf-8') for c in src.column_names]
     src.column_null_fillers = list(null_fillers) if null_fillers is not None else None
+    src.column_string_types = (
+        dict(zip(src.column_names_bytes, string_types)) if string_types is not None else None
+    )
     src.prefetched_footers = None
     src.footer_map = new unordered_map[string, FileStats]()
 

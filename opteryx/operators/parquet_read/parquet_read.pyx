@@ -71,6 +71,7 @@ _TS_UNIT_BY_NAME = {
 
 # Producer-side typed-sequence dispatcher for the schema-evolution NULL fill.
 from draken.interop.vector_sequence import vector_from_sequence as _vector_from_sequence_typed
+from draken.core.buffers cimport DrakenType, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 
 
 def _null_filler_for(column_type):
@@ -99,6 +100,23 @@ def _null_filler_for(column_type):
     # The producer-side dispatcher covers ARRAY / BOOL / DATE32 / floats / ints /
     # INTERVAL / NVARCHAR / TIME32 / TIMESTAMP64 / VARBINARY / VARCHAR directly.
     return lambda n: _vector_from_sequence_typed([None] * n, dtype=name)
+
+
+def _string_type_for(column_type):
+    """Return the declared DrakenType tag (VARCHAR/NVARCHAR/VARBINARY) for a
+    string-family column, so the scan wraps/deserializes it as the schema
+    declares rather than always defaulting to VARCHAR — all three share the
+    exact same DrakenStringSlot/arena byte layout, so this only changes the
+    type tag, never how bytes are read. Non-string / untyped columns get
+    VARCHAR back (ignored, since only string tags 6/7 consult this value)."""
+    if column_type is None:
+        return DRAKEN_VARCHAR
+    name = column_type.physical.name
+    if name == "NVARCHAR":
+        return DRAKEN_NVARCHAR
+    if name == "VARBINARY":
+        return DRAKEN_VARBINARY
+    return DRAKEN_VARCHAR
 
 # Predicate evaluation is the bytecode VM only — no alternative paths. The
 # compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
@@ -628,6 +646,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef dict _sp_pass1_name_to_identity
     cdef dict _sp_pass2_name_to_identity
     cdef dict _sp_null_filler_by_name     # schema-evolution typed NULL-fill, by physical column name
+    cdef dict _sp_string_type_by_name     # declared DrakenType (VARCHAR/NVARCHAR/VARBINARY), by physical column name
     cdef bint _sp_topn_active
     cdef bint _sp_two_pass_eligible
     cdef CompiledBytecode _compiled_predicate
@@ -1150,6 +1169,12 @@ cdef class ParquetReadNode(ReaderNode):
         self._sp_null_filler_by_name = {
             col.name: _null_filler_for(col.column_type) for col in base_schema.columns
         }
+        # Per-column declared string type (VARCHAR/NVARCHAR/VARBINARY), keyed by
+        # physical name — same union schema, so the scan tags decoded string
+        # columns to match what the schema declared instead of always VARCHAR.
+        self._sp_string_type_by_name = {
+            col.name: _string_type_for(col.column_type) for col in base_schema.columns
+        }
 
         if self._planner_name_to_identity_cached is None:
             self._planner_name_to_identity_cached = {
@@ -1353,6 +1378,7 @@ cdef class ParquetReadNode(ReaderNode):
                 query_id=self._sp_query_id,
                 footer_bytes_cache=_FOOTER_CACHE,
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
+                string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
             )
             return
 
@@ -1368,6 +1394,7 @@ cdef class ParquetReadNode(ReaderNode):
             query_id=self._sp_query_id,
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
+            string_types=[self._sp_string_type_by_name[c] for c in column_names],
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -1610,6 +1637,7 @@ cdef class ParquetReadNode(ReaderNode):
             query_id=self._sp_query_id,
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
+            string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
         )
         self._lm_pass1_done = True
 

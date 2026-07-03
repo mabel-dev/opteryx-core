@@ -463,8 +463,11 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
 # ─── String builders ──────────────────────────────────────────────────────────
 
 cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
-                                const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    """Deserialize TAG_STR_DICT into a VARCHAR Vector using DrakenStringSlot."""
+                                const uint8_t* null_bitmap, uint32_t null_bitmap_len,
+                                DrakenType want_type=DRAKEN_VARCHAR):
+    """Deserialize TAG_STR_DICT into a Vector tagged `want_type` (VARCHAR/NVARCHAR/
+    VARBINARY — the schema's declared physical type; all three share this exact
+    byte layout) using DrakenStringSlot."""
     cdef uint32_t dict_size
     p = _read_u32(p, &dict_size)
 
@@ -527,7 +530,7 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
             memcpy(validity_buf, null_bitmap, null_bitmap_len)
         raw = draken_vector_own_string(
             <DrakenStringSlot*>slots_buf, NULL, 0,
-            validity_buf, num_rows, DRAKEN_VARCHAR)
+            validity_buf, num_rows, want_type)
         if raw == NULL:
             raise MemoryError("draken_vector_own_string failed")
         return _wrap_raw_pyobj(raw)
@@ -591,7 +594,7 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
         <DrakenStringSlot*>slots_buf,
         arena_buf, <size_t>arena_len,
         codes_buf, dict_size,
-        validity_buf, num_rows, DRAKEN_VARCHAR)
+        validity_buf, num_rows, want_type)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string_dict failed")
     if is_sorted:
@@ -600,15 +603,18 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
 
 
 cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
-                                 const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    """Deserialize TAG_STR_PLAIN (one length-prefixed string per row) into a VARCHAR Vector."""
+                                 const uint8_t* null_bitmap, uint32_t null_bitmap_len,
+                                 DrakenType want_type=DRAKEN_VARCHAR):
+    """Deserialize TAG_STR_PLAIN (one length-prefixed string per row) into a Vector
+    tagged `want_type` (VARCHAR/NVARCHAR/VARBINARY — same byte layout, the schema's
+    declared physical type)."""
     cdef uint32_t n
     cdef PyObject* raw
     p = _read_u32(p, &n)
 
     if n == 0:
         # Return empty string vector — no slots needed.
-        raw = draken_vector_own_string(NULL, NULL, 0, NULL, 0, DRAKEN_VARCHAR)
+        raw = draken_vector_own_string(NULL, NULL, 0, NULL, 0, want_type)
         if raw == NULL:
             raise MemoryError("draken_vector_own_string failed (empty)")
         return _wrap_raw_pyobj(raw)
@@ -672,7 +678,7 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     raw = draken_vector_own_string(
         <DrakenStringSlot*>slots_buf,
         arena_buf, <size_t>arena_pos,
-        validity_buf, n, DRAKEN_VARCHAR)
+        validity_buf, n, want_type)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string failed")
     return _wrap_raw_pyobj(raw)
@@ -782,8 +788,14 @@ cdef object _build_array_vector(const uint8_t* p, uint32_t num_rows,
 
 # ─── Public deserialization entry points ──────────────────────────────────────
 
-cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
+cpdef object deserialize_column(int64_t ref_id, MemoryPool pool, DrakenType want_string_type=DRAKEN_VARCHAR):
     """Deserialize one IPC blob from MemoryPool into a Draken vector.
+
+    `want_string_type` is the schema's declared physical type (VARCHAR/NVARCHAR/
+    VARBINARY) for TAG_STR_DICT/TAG_STR_PLAIN columns — all three share the exact
+    same DrakenStringSlot/arena byte layout, so this only changes the type tag
+    the resulting Vector carries, never how the bytes are parsed. Ignored for
+    non-string tags.
 
     Uses the Cython-native pool surface: reads the raw pointer under a latch
     (preventing concurrent compaction from moving the segment), parses
@@ -852,9 +864,9 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
             p += null_bitmap_len
 
             if tag == TAG_STR_DICT:
-                result = _build_string_dict(p, num_rows, null_bitmap, null_bitmap_len)
+                result = _build_string_dict(p, num_rows, null_bitmap, null_bitmap_len, want_string_type)
             elif tag == TAG_STR_PLAIN:
-                result = _build_string_plain(p, num_rows, null_bitmap, null_bitmap_len)
+                result = _build_string_plain(p, num_rows, null_bitmap, null_bitmap_len, want_string_type)
             elif tag == TAG_INT64_DICT:
                 result = _build_numeric_dict_int64(p, num_rows, null_bitmap, null_bitmap_len)
             elif tag == TAG_FLOAT32_DICT:
@@ -872,8 +884,12 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
     return result
 
 
-cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool):
+cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool, dict string_types=None):
     """Deserialize all columns for a row group from MemoryPool into Draken vectors.
+
+    `string_types` (optional): column name (bytes) -> declared DrakenType, for
+    columns whose schema type is NVARCHAR/VARBINARY rather than the VARCHAR
+    default (all three share the same byte layout — see `deserialize_column`).
 
     Fixed-width columns (tags 1..5) are deserialised in a single batched C++
     call that performs pool.read/parse/malloc/memcpy/unlatch for every column
@@ -923,7 +939,10 @@ cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool):
             elif status == STATUS_NOT_HANDLED:
                 # Dict / string tag — fall back to the Cython per-column path
                 # which re-latches the (still-pinned-by-its-own-ref) segment.
-                vec = deserialize_column(ref_id, pool)
+                vec = deserialize_column(
+                    ref_id, pool,
+                    string_types.get(col_name, DRAKEN_VARCHAR) if string_types is not None else DRAKEN_VARCHAR,
+                )
             elif status == STATUS_OOM:
                 raise MemoryError()
             else:

@@ -11,7 +11,9 @@
 //   DRAKEN_VARCHAR:    ASCII-only fold / byte-level operation.
 //   DRAKEN_NVARCHAR:   Unicode codepoint fold via utf8.h (case ops) or codepoint
 //                      reversal (reverse op).
-//   DRAKEN_VARBINARY:  throws std::invalid_argument for case ops; byte-reversal for reverse.
+//   DRAKEN_VARBINARY:  same ASCII-only byte fold as VARCHAR (case ops, trim) or
+//                      byte-reversal (reverse op) — same byte layout as VARCHAR,
+//                      no UTF-8 assumption made or needed; tag is preserved.
 //   Other types:       throws nb::type_error.
 //
 // Null TVL: null input row → null output row.  Validity bitmap allocated lazily.
@@ -75,15 +77,16 @@ static nb::object impl_lowercase(nb::object in_obj) {
     const DrakenVector* dv = draken_vector_unwrap(in_obj.ptr());
     if (!dv) throw nb::python_error();
 
-    // Type check + VARBINARY guard (per string-family design).
-    if (dv->type == DRAKEN_VARBINARY)
-        throw std::invalid_argument(
-            "vector_lowercase: VARBINARY does not support case operations");
+    // Type check. VARBINARY takes the same ASCII-only byte fold as VARCHAR —
+    // same DrakenStringSlot/arena layout, non-ASCII bytes pass through
+    // unchanged either way, so folding opaque bytes is safe; it just isn't
+    // NVARCHAR's UTF-8-aware path.
     const bool is_nvarchar = (dv->type == DRAKEN_NVARCHAR);
     if (dv->type != DRAKEN_VARCHAR &&
-        dv->type != DRAKEN_NVARCHAR)
+        dv->type != DRAKEN_NVARCHAR &&
+        dv->type != DRAKEN_VARBINARY)
         throw nb::type_error(
-            "vector_lowercase: expected VARCHAR or NVARCHAR Vector");
+            "vector_lowercase: expected VARCHAR, NVARCHAR, or VARBINARY Vector");
 
     // GIL-free compute: in_obj keeps the source arena alive for the whole call
     // and everything below — allocation, the fold loop, native cleanup — touches
@@ -96,8 +99,9 @@ static nb::object impl_lowercase(nb::object in_obj) {
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
 
-    // Output type tag: NVARCHAR input → NVARCHAR output; everything else → VARCHAR.
-    const DrakenType out_type = is_nvarchar ? DRAKEN_NVARCHAR : DRAKEN_VARCHAR;
+    // Output type tag matches the input's (VARCHAR->VARCHAR, VARBINARY->VARBINARY,
+    // NVARCHAR->NVARCHAR) — the tag is preserved, never widened.
+    const DrakenType out_type = is_nvarchar ? DRAKEN_NVARCHAR : dv->type;
 
     // Allocate output slots.
     const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
@@ -231,20 +235,19 @@ static nb::object impl_uppercase(nb::object in_obj) {
     const DrakenVector* dv = draken_vector_unwrap(in_obj.ptr());
     if (!dv) throw nb::python_error();
 
-    if (dv->type == DRAKEN_VARBINARY)
-        throw std::invalid_argument(
-            "vector_uppercase: VARBINARY does not support case operations");
+    // VARBINARY takes the same ASCII-only byte fold as VARCHAR — see
+    // impl_lowercase for the full rationale.
     const bool is_nvarchar = (dv->type == DRAKEN_NVARCHAR);
-    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR && dv->type != DRAKEN_VARBINARY)
         throw nb::type_error(
-            "vector_uppercase: expected VARCHAR or NVARCHAR Vector");
+            "vector_uppercase: expected VARCHAR, NVARCHAR, or VARBINARY Vector");
 
     // GIL-free compute — see impl_lowercase for the full rationale.
     nb::gil_scoped_release _rel;
 
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
-    const DrakenType out_type = is_nvarchar ? DRAKEN_NVARCHAR : DRAKEN_VARCHAR;
+    const DrakenType out_type = is_nvarchar ? DRAKEN_NVARCHAR : dv->type;
 
     const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
     DrakenStringSlot* out_slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
@@ -353,20 +356,19 @@ static nb::object impl_initcap(nb::object in_obj) {
     const DrakenVector* dv = draken_vector_unwrap(in_obj.ptr());
     if (!dv) throw nb::python_error();
 
-    if (dv->type == DRAKEN_VARBINARY)
-        throw std::invalid_argument(
-            "vector_initcap: VARBINARY does not support case operations");
+    // VARBINARY takes the same ASCII-only byte fold as VARCHAR — see
+    // impl_lowercase for the full rationale.
     const bool is_nvarchar = (dv->type == DRAKEN_NVARCHAR);
-    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR && dv->type != DRAKEN_VARBINARY)
         throw nb::type_error(
-            "vector_initcap: expected VARCHAR or NVARCHAR Vector");
+            "vector_initcap: expected VARCHAR, NVARCHAR, or VARBINARY Vector");
 
     // GIL-free compute — see impl_lowercase for the full rationale.
     nb::gil_scoped_release _rel;
 
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
-    const DrakenType out_type = is_nvarchar ? DRAKEN_NVARCHAR : DRAKEN_VARCHAR;
+    const DrakenType out_type = is_nvarchar ? DRAKEN_NVARCHAR : dv->type;
 
     const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
     DrakenStringSlot* out_slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
@@ -651,10 +653,10 @@ static nb::object impl_trim_common(nb::object in_obj, bool trim_left, bool trim_
     const DrakenVector* dv = draken_vector_unwrap(in_obj.ptr());
     if (!dv) throw nb::python_error();
 
-    if (dv->type == DRAKEN_VARBINARY)
-        throw std::invalid_argument("vector_trim: VARBINARY is not supported");
-    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
-        throw nb::type_error("vector_trim: expected VARCHAR or NVARCHAR Vector");
+    // ASCII-whitespace trim is byte-safe for VARBINARY too — no NVARCHAR-only
+    // logic here (the byte scan below doesn't distinguish string subtype).
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR && dv->type != DRAKEN_VARBINARY)
+        throw nb::type_error("vector_trim: expected VARCHAR, NVARCHAR, or VARBINARY Vector");
 
     // GIL-free compute — see impl_lowercase for the full rationale.
     nb::gil_scoped_release _rel;

@@ -12,10 +12,12 @@
 //   - fails LOUD with an error sentinel for anything outside its contract — never
 //     a silent wrong answer.
 //
-// Case transforms are VARCHAR-only: VARCHAR carries ASCII semantics by the draken
-// type contract, so byte-wise casing is CORRECT for it. NVARCHAR needs full Unicode
-// case mapping — that is a different feature; returning an error sentinel beats
-// silently drifting from str.upper() semantics.
+// Case transforms accept VARCHAR and VARBINARY: both carry the exact same
+// DrakenStringSlot/arena byte layout with no UTF-8 assumption, so an ASCII-range
+// byte fold (non-ASCII bytes pass through unchanged) is correct for either, and
+// preserves the input's tag. NVARCHAR needs full Unicode case mapping — that is
+// a different feature; returning an error sentinel beats silently drifting from
+// str.upper() semantics.
 
 #include <algorithm>   // std::binary_search — draken_in_list
 #include <vector>      // dict-shape per-unique staging (draken_length)
@@ -43,12 +45,13 @@ inline bool fk_is_string(DrakenType t) {
     return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY;
 }
 
-// Shared ASCII case transform (VARCHAR only — see file header).
+// Shared ASCII case transform (VARCHAR/VARBINARY only — see file header).
 VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char* who) {
-    if (v->type != DRAKEN_VARCHAR) {
+    if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_VARBINARY) {
         return draken_error_sentinel_fmt(
-            "%s: VARCHAR (ASCII) input required — NVARCHAR case mapping is not "
-            "implemented natively yet (fail loud, never wrong)", who);
+            "%s: VARCHAR or VARBINARY (ASCII-range byte fold) input required — "
+            "NVARCHAR case mapping is not implemented natively yet (fail loud, "
+            "never wrong)", who);
     }
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
     uint32_t n = v->length;
@@ -105,8 +108,7 @@ VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char*
             arena_pos += len;
         }
     }
-    return vecresult_from_string_block(block, n, arena_len, want_validity,
-                                       DRAKEN_VARCHAR);
+    return vecresult_from_string_block(block, n, arena_len, want_validity, v->type);
 }
 
 }  // namespace
