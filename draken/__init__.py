@@ -10,3 +10,8 @@ _flags = sys.getdlopenflags()
 sys.setdlopenflags(ctypes.RTLD_GLOBAL | os.RTLD_NOW)
 from draken import draken_native  # noqa: F401, E402
 sys.setdlopenflags(_flags)
+
+from draken.vectors import Vector  # noqa: E402
+from draken.morsels import Morsel  # noqa: E402
+
+__all__ = ["Vector", "Morsel"]
