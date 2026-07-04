@@ -41,6 +41,17 @@ enum IpcTag : uint8_t {
     kTagFloat64Dict = 10,
     kTagArray       = 11,  // list columns; Cython handles via _build_array_vector
     kTagInt128      = 12,  // DECIMAL128 (FLBA width 9..16, precision > 18)
+    // E33 — unsigned integer (exact declared width, never widened). Not handled
+    // by this fast C++ path (see the switch in ipc_deserialize.cpp) — Cython's
+    // column_deserializer.pyx parses them, mirroring tags 6-10.
+    kTagUInt8       = 13,
+    kTagUInt16      = 14,
+    kTagUInt32      = 15,
+    kTagUInt64      = 16,
+    kTagUInt8Dict   = 17,
+    kTagUInt16Dict  = 18,
+    kTagUInt32Dict  = 19,
+    kTagUInt64Dict  = 20,
 };
 
 // IpcKind describes the Vector shape produced for the caller.

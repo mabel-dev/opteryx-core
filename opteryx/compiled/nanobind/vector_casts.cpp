@@ -42,7 +42,6 @@ extern "C" VecResult vecresult_from_string_buffers(
 // Phase 9c: the cast compute now lives in draken kernels; these nanobind
 // entry points shim across to them (core in draken, binding calls across).
 #include "ops/kernels/cast_kernels.h"
-#include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"
 
 namespace nb = nanobind;
@@ -54,7 +53,11 @@ namespace nb = nanobind;
 // genuine kernel failures.
 static nb::object wrap_cast_result(VecResult r, bool parse_error_as_value = false) {
     if (!r.data) {
-        const char* msg = draken_get_error_message();
+        // r.error_msg is the failing kernel's own VecResult field (vec_result.h) —
+        // read directly rather than via draken_get_error_message(), which resolves
+        // to whichever extension's thread_local buffer dyld's flat namespace binds
+        // first and is not guaranteed to be the one this kernel actually wrote.
+        const char* msg = r.error_msg != nullptr ? r.error_msg : "C kernel error";
         if (parse_error_as_value) throw nb::value_error(msg);
         throw std::runtime_error(msg);
     }

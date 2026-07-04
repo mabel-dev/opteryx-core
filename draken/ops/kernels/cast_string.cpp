@@ -139,6 +139,105 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
     });
 }
 
+// E33 — STRING -> unsigned target (UINT8/16/32 ONLY — see draken_cast_string_to_uint64
+// below for why UINT64 needs its own parser): parse via the proven
+// draken_cast_string_to_int64 (same digit-validation/error-message contract for
+// malformed input), then range-check-narrow the INT64 intermediate through the
+// existing signed->unsigned kernel (draken_cast_integer_to_uintN), which itself
+// calls kernel_preserve_shape. Safe here because UINT8/16/32's full range never
+// exceeds INT64_MAX, so the intermediate int64 accumulation never overflows.
+// No new parsing logic — composition, not duplication (CLAUDE.md §3/§11).
+#define DRAKEN_CAST_STRING_TO_UINT(fn_name, narrow_fn)                                    \
+VecResult fn_name(void* ctx, const DrakenVector* v) {                                     \
+    DRAKEN_KERNEL_TRY({                                                                  \
+        if (!v) return draken_error_sentinel("Input vector is null");                    \
+        VecResult tmp = draken_cast_string_to_int64(ctx, v);                             \
+        if (!tmp.data) return tmp;  /* propagate the error sentinel as-is */             \
+        DrakenVector tmp_dv;                                                             \
+        tmp_dv.data        = tmp.data;                                                   \
+        tmp_dv.selection   = tmp.selection;                                              \
+        tmp_dv.data_length = tmp.data_length;                                            \
+        tmp_dv.length      = tmp.length;                                                 \
+        tmp_dv.validity    = tmp.validity;                                                \
+        tmp_dv.type        = tmp.type;                                                   \
+        tmp_dv.flags       = tmp.flags;                                                  \
+        VecResult r = narrow_fn(ctx, &tmp_dv);                                           \
+        draken_free(tmp.data);                                                           \
+        if (tmp.validity) draken_free(tmp.validity);                                     \
+        if (tmp.owns_selection && tmp.selection)                                          \
+            draken_free(const_cast<uint32_t*>(tmp.selection));                            \
+        return r;                                                                          \
+    });                                                                                    \
+}
+
+DRAKEN_CAST_STRING_TO_UINT(draken_cast_string_to_uint8,  draken_cast_integer_to_uint8)
+DRAKEN_CAST_STRING_TO_UINT(draken_cast_string_to_uint16, draken_cast_integer_to_uint16)
+DRAKEN_CAST_STRING_TO_UINT(draken_cast_string_to_uint32, draken_cast_integer_to_uint32)
+
+#undef DRAKEN_CAST_STRING_TO_UINT
+
+// E33 — STRING -> UINT64: genuine native parser with a uint64_t accumulator,
+// NOT composed through draken_cast_string_to_int64 like the narrower UINT8/16/32
+// casts above. UINT64's range (up to ~1.8e19) exceeds INT64_MAX (~9.2e18) — a
+// value in that gap (e.g. "9223372036854775808") would overflow the int64_t
+// accumulator in draken_cast_string_to_int64, which is undefined behavior in
+// C++, not merely a wrong answer. Overflow is checked digit-by-digit and raises
+// (fail loud — CLAUDE.md §1), matching the existing "Invalid digit" raise for
+// malformed input. No leading '-' is accepted (unsigned target).
+VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt("cast string->uint64: expected string, got %d", v->type);
+
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        const uint32_t n = v->length;
+        uint64_t* out = static_cast<uint64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(uint64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+
+        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+
+        for (uint32_t j = 0u; j < k; ++j) {
+            if (!live[j]) { out[j] = 0; continue; }
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint8_t* sdata = str_data(slot, sa->arena);
+            const uint32_t slen  = str_length(slot);
+
+            if (slen > 0 && sdata[0] == '-') {
+                draken_free(out);
+                return draken_error_sentinel(
+                    "cast string->uint64: negative value out of range for uint64_t");
+            }
+            uint64_t value = 0u;
+            for (uint32_t p = 0u; p < slen; ++p) {
+                const uint8_t c = sdata[p];
+                if (c < '0' || c > '9') {
+                    draken_free(out);
+                    return draken_error_sentinel("Invalid digit in integer literal");
+                }
+                const uint64_t digit = static_cast<uint64_t>(c - '0');
+                // Overflow check BEFORE the multiply/add: value*10+digit must not
+                // exceed UINT64_MAX. (UINT64_MAX - digit) / 10 is the largest
+                // `value` for which the next digit still fits.
+                if (value > (0xFFFFFFFFFFFFFFFFull - digit) / 10ull) {
+                    draken_free(out);
+                    return draken_error_sentinel("cast string->uint64: value out of range for uint64_t");
+                }
+                value = value * 10ull + digit;
+            }
+            out[j] = value;
+        }
+
+        VecResult r;
+        r.data = out; r.type = DRAKEN_UINT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
 VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");

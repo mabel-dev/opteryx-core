@@ -657,6 +657,11 @@ def _normalize_cast_type(data_type: str) -> str:
     if "nvarchar" in lower_type:
         return "NVARCHAR"
 
+    # Unsigned integer widths (E33) — exact match, ahead of the substring rules below
+    # (sqlparser-rs parses UINT8/16/32/64 as a distinct DataType, e.g. "UInt32").
+    if upper_type in ("UINT8", "UINT16", "UINT32", "UINT64"):
+        return upper_type
+
     # Map of substring patterns to normalized types
     type_mappings = {
         "timestamp": "TIMESTAMP",
@@ -824,10 +829,16 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 
     # Attempt to parse and cast the literal value
     try:
-        from opteryx.types.scalars.value_parsing import parse_value
+        from opteryx.types.scalars.value_parsing import parser_for
 
         _sql_type_lc = sql_type.category if isinstance(sql_type, ColumnType) else sql_type
-        parsed_value = parse_value(_sql_type_lc, literal_node.value)
+        # parser_for(), not parse_value(): parse_value() silently swallows parse
+        # failures and returns the value unchanged (fine for its other callers,
+        # which reconcile already-compatible literal branches) — but CAST on a
+        # literal must fail loud on bad input, matching the runtime CAST path.
+        parsed_value = (
+            None if literal_node.value is None else parser_for(_sql_type_lc)(literal_node.value)
+        )
         if isinstance(parsed_value, datetime.datetime):
             parsed_value = timestamp_to_int64_us(parsed_value)
         elif isinstance(parsed_value, datetime.date):

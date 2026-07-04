@@ -74,6 +74,15 @@ typedef enum {
     // tier (logical DECIMAL p≤38). Physical `data` is a 16-byte __int128 unscaled value;
     // scale/precision live in the mandatory logical descriptor. No native SIMD for int128.
     DRAKEN_DECIMAL128     = 103,
+
+    // Unsigned integers (E33): same-width kernel parity with the signed family;
+    // mixed signed/unsigned binary ops promote to the next-wider signed type
+    // (or DRAKEN_DECIMAL128 for UINT64+INT64). Appended at the tail, same as
+    // DECIMAL128/VECTOR_FP16/NULL above — do NOT relocate into 1-19.
+    DRAKEN_UINT8          = 104,
+    DRAKEN_UINT16         = 105,
+    DRAKEN_UINT32         = 106,
+    DRAKEN_UINT64         = 107,
 } DrakenType;
 
 typedef struct {
@@ -238,3 +247,6 @@ DRAKEN_STATIC_ASSERT(DRAKEN_INT64  == 4,   "DrakenType tag renumbered: DRAKEN_IN
 DRAKEN_STATIC_ASSERT(DRAKEN_BOOL   == 50,  "DrakenType tag renumbered: DRAKEN_BOOL");
 DRAKEN_STATIC_ASSERT(DRAKEN_VARCHAR == 60, "DrakenType tag renumbered: DRAKEN_VARCHAR");
 DRAKEN_STATIC_ASSERT(DRAKEN_NON_NATIVE == 100, "DrakenType tag renumbered: DRAKEN_NON_NATIVE");
+DRAKEN_STATIC_ASSERT(DRAKEN_DECIMAL128 == 103, "DrakenType tag renumbered: DRAKEN_DECIMAL128");
+DRAKEN_STATIC_ASSERT(DRAKEN_UINT8  == 104, "DrakenType tag renumbered: DRAKEN_UINT8");
+DRAKEN_STATIC_ASSERT(DRAKEN_UINT64 == 107, "DrakenType tag renumbered: DRAKEN_UINT64");

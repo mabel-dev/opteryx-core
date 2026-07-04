@@ -119,6 +119,15 @@ PyObject* draken_vector_own_dict_f64(
 PyObject* draken_vector_own_dict_f32(
     void* data, uint32_t data_length, uint32_t* codes, uint32_t length, uint8_t* validity);
 
+// draken_vector_own_dict — generic dict-encoded wrap, parameterized by `type`
+// (E33: added for DRAKEN_UINT8/16/32/64, which have no fixed elem size the way
+// _i64/_f64/_f32 do). Same ownership/parameter contract as draken_vector_own_dict_i64,
+// but the caller's `data` buffer must already be laid out in `type`'s native elem
+// size (1/2/4/8 bytes per unique value) — no widening happens here, unlike _i64.
+PyObject* draken_vector_own_dict(
+    void* data, uint32_t data_length, uint32_t* codes, uint32_t length,
+    uint8_t* validity, DrakenType type);
+
 
 // draken_vector_own_string — wrap hand-allocated string buffers in a new string-family Vector.
 //

@@ -17,6 +17,10 @@
  *     1 = int64   2 = int32   3 = float32   4 = float64   5 = bool
  *     6 = string (dict+arena)   7 = string (plain, no dict)
  *     8 = int64 dict   9 = float32 dict   10 = float64 dict
+ *     11 = array   12 = int128 (DECIMAL128)
+ *     13 = uint8   14 = uint16   15 = uint32   16 = uint64  (E33, plain — exact
+ *       declared width, never widened, unlike the int32->int64 convention above)
+ *     17 = uint8 dict   18 = uint16 dict   19 = uint32 dict   20 = uint64 dict
  *
  *   uint32_t num_rows
  *   uint32_t null_bitmap_len   (0 if column is non-nullable)
@@ -161,6 +165,32 @@ static void serialize_rle_int_as_int64(ByteSink& out,
             const int32_t cnt = col.rle_run_lengths[r];
             for (int32_t j = 0; j < cnt; ++j)
                 std::memcpy(raw + (off + j) * sizeof(int64_t), &v, sizeof(int64_t));
+            off += static_cast<size_t>(cnt);
+        }
+    }
+}
+
+// E33: unsigned analogue of serialize_rle_int_as_int64. col.rle_int64_values
+// already holds the correct zero-extended magnitude (decode_column.cpp's
+// is_unsigned branch never sign-extends it), so this only narrows to elem_bytes
+// (1/2/4/8) instead of always expanding to a fixed 8-byte int64 slot.
+static void serialize_rle_int_as_uint(ByteSink& out, const DecodedColumn& col,
+                                      int elem_bytes, uint8_t tag) {
+    write_u8(out, tag);
+    write_u32(out, static_cast<uint32_t>(col.num_rows));
+    write_null_bitmap(out, col);  // empty: rle path is non-nullable
+
+    uint32_t data_len = static_cast<uint32_t>(col.num_rows) * static_cast<uint32_t>(elem_bytes);
+    write_u32(out, data_len);
+    uint8_t* raw = out.advance(data_len);
+    if (raw) {
+        size_t off = 0;
+        const size_t n_runs = col.rle_run_lengths.size();
+        for (size_t r = 0; r < n_runs; ++r) {
+            const uint64_t v = static_cast<uint64_t>(col.rle_int64_values[r]);
+            const int32_t cnt = col.rle_run_lengths[r];
+            for (int32_t j = 0; j < cnt; ++j)
+                std::memcpy(raw + (off + j) * elem_bytes, &v, static_cast<size_t>(elem_bytes));
             off += static_cast<size_t>(cnt);
         }
     }
@@ -345,6 +375,56 @@ static void serialize_int32(ByteSink& out, const DecodedColumn& col) {
     uint32_t data_len = static_cast<uint32_t>(col.int32_values.size()) * 4;
     write_u32(out, data_len);
     write_bytes(out, col.int32_values.data(), data_len);
+}
+
+// E33: unsigned dispatcher — mirrors serialize_int64/serialize_int32's RLE/dict/
+// plain branching, but always preserves the exact declared width (never widens,
+// unlike the int32->int64 convention those two use). Handles both physical
+// carriers: "int32" (UINT8/16/32 all arrive this way — Parquet has no int8/int16
+// physical storage) and "int64" (UINT64). The source values (int32_values /
+// dict_int32_values / rle_int64_values / int64_values / dict_int64_values)
+// already hold the correct zero-extended magnitude — decode_column.cpp's
+// is_unsigned branch never sign-extends them — so this only narrows to
+// elem_bytes, never re-derives a value.
+static void serialize_uint(ByteSink& out, const DecodedColumn& col,
+                           int elem_bytes, uint8_t plain_tag, uint8_t dict_tag) {
+    const bool src_is_32 = (col.type == "int32");
+
+    if (!col.rle_int64_values.empty()) {
+        serialize_rle_int_as_uint(out, col, elem_bytes, plain_tag);
+        return;
+    }
+
+    const bool has_dict = src_is_32 ? !col.dict_int32_values.empty()
+                                     : !col.dict_int64_values.empty();
+    if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) && has_dict) {
+        const size_t dsz = src_is_32 ? col.dict_int32_values.size() : col.dict_int64_values.size();
+        std::vector<uint8_t> narrowed(dsz * static_cast<size_t>(elem_bytes));
+        for (size_t k = 0; k < dsz; ++k) {
+            const uint64_t v = src_is_32
+                ? static_cast<uint64_t>(static_cast<uint32_t>(col.dict_int32_values[k]))
+                : static_cast<uint64_t>(col.dict_int64_values[k]);
+            std::memcpy(narrowed.data() + k * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+        }
+        serialize_numeric_dict(out, dict_tag, col, narrowed.data(),
+                               static_cast<uint32_t>(dsz), static_cast<uint32_t>(elem_bytes));
+        return;
+    }
+
+    write_u8(out, plain_tag);
+    write_u32(out, static_cast<uint32_t>(col.num_rows));
+    write_null_bitmap(out, col);
+    const size_t count = src_is_32 ? col.int32_values.size() : col.int64_values.size();
+    std::vector<uint8_t> narrowed(count * static_cast<size_t>(elem_bytes));
+    for (size_t i = 0; i < count; ++i) {
+        const uint64_t v = src_is_32
+            ? static_cast<uint64_t>(static_cast<uint32_t>(col.int32_values[i]))
+            : static_cast<uint64_t>(col.int64_values[i]);
+        std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+    }
+    uint32_t data_len = static_cast<uint32_t>(narrowed.size());
+    write_u32(out, data_len);
+    write_bytes(out, narrowed.data(), data_len);
 }
 
 static void serialize_float32(ByteSink& out, const DecodedColumn& col) {
@@ -647,6 +727,14 @@ static void serialize_core(const DecodedColumn& col,
 
     if (t == "int128") {
         serialize_int128(out, col, decimal_precision, decimal_scale);
+    } else if (col.is_unsigned && (t == "int64" || t == "int32")) {
+        // E33: tags 13-16 plain (uint8/16/32/64), 17-20 dict.
+        switch (col.int_bit_width) {
+            case 8:  serialize_uint(out, col, 1, 13, 17); break;
+            case 16: serialize_uint(out, col, 2, 14, 18); break;
+            case 32: serialize_uint(out, col, 4, 15, 19); break;
+            default: serialize_uint(out, col, 8, 16, 20); break;
+        }
     } else if (t == "int64") {
         serialize_int64(out, col);
     } else if (t == "int32") {

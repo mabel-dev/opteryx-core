@@ -23,6 +23,24 @@ static inline int64_t ReadLE64(const uint8_t *p) {
          ((int64_t)p[7] << 56);
 }
 
+// Unsigned reads (E33): identical bit construction to ReadLE32/ReadLE64, but the
+// unsigned return type means a later widen to a larger width zero-extends instead
+// of sign-extends. Use these whenever the column's Parquet IntType annotation says
+// isSigned=false — using the signed readers there corrupts the value (a raw byte
+// pattern with the high bit set decodes as negative instead of as the true, larger
+// unsigned magnitude).
+static inline uint32_t ReadLE32U(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+static inline uint64_t ReadLE64U(const uint8_t *p) {
+  return (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
+         ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) |
+         ((uint64_t)p[5] << 40) | ((uint64_t)p[6] << 48) |
+         ((uint64_t)p[7] << 56);
+}
+
 static inline float ReadFloat32(const uint8_t *p) {
   uint32_t bits = ReadLE32(p);
   float value;

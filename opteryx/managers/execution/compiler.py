@@ -33,7 +33,13 @@ from opteryx.expression import NodeType
 _MAX_WORKER_CAP = 8
 _QUEUE_DEPTH = 4
 
-_INT_TYPES = (DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64)
+_INT_TYPES = (
+    DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+    # E33 — unsigned ints are aggregate/comparison operands the same way the
+    # signed family is; the native engine's per-row read/emit paths (SUM/MIN/MAX,
+    # GROUP BY / ORDER BY keys) already handle all eight widths correctly.
+    DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+)
 _NUMERIC_TYPES = _INT_TYPES + (DrakenType.FLOAT32, DrakenType.FLOAT64)
 _COMPARE_OPS = {"Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq"}
 
@@ -598,6 +604,18 @@ class _Compiler:
             funcs = list(getattr(node, "_functions", None) or [])
             if not funcs:
                 _unsupported("a window node with no functions")
+            # PARTITION BY / ORDER BY over a computed key (CAST(...), arithmetic,
+            # etc.): project the key expression to a stream column first, then
+            # resolve by identity — mirrors GroupedAggregateHashedNode's
+            # computed_keys and _sort_spec's `computed` handling above.
+            partition_by = list(node.parameters.get("partition_by") or [])
+            order_by = list(node.parameters.get("order_by") or [])
+            computed = [col for col in partition_by
+                        if col.node_type != NodeType.IDENTIFIER]
+            computed += [col for col, _asc in order_by
+                         if col.node_type != NodeType.IDENTIFIER]
+            if computed:
+                layout = self._add_computed(p, computed, layout)
             # sort_spec = partition keys (ASC) then order keys (their direction);
             # the WindowSink assigns ranks per partition over that ordering.
             sort_spec = []

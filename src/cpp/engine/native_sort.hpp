@@ -68,6 +68,7 @@ inline bool sort_key_type_supported(DrakenType t) {
         case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
         case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR: case DRAKEN_VARBINARY:
         case DRAKEN_DECIMAL128:   // int128 lane in SortKeyColumn
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:  // E33
             return true;
         default:
             return false;   // ARRAY/INTERVAL/VARIANT keys: fail loud
@@ -94,6 +95,14 @@ inline uint64_t sort_num_key(const DrakenVector& v, uint32_t row) {
         case DRAKEN_BOOL:
             sv = (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u;
             break;
+        // E33 — genuinely unsigned: already naturally ordered when compared as
+        // uint64_t directly, so no sign-flip (unlike the signed cases above,
+        // which need `^ SIGN` to make unsigned-comparison equal signed-order).
+        // Return here rather than falling through to the `sv ^ SIGN` tail.
+        case DRAKEN_UINT8:  return static_cast<uint64_t>(static_cast<const uint8_t* >(v.data)[phys]);
+        case DRAKEN_UINT16: return static_cast<uint64_t>(static_cast<const uint16_t*>(v.data)[phys]);
+        case DRAKEN_UINT32: return static_cast<uint64_t>(static_cast<const uint32_t*>(v.data)[phys]);
+        case DRAKEN_UINT64: return static_cast<const uint64_t*>(v.data)[phys];
         case DRAKEN_FLOAT32:
         case DRAKEN_FLOAT64: {
             double d = (v.type == DRAKEN_FLOAT32)
@@ -232,11 +241,11 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
 
 inline size_t gather_elem_size(DrakenType t) {
     switch (t) {
-        case DRAKEN_INT8:                                             return 1;
-        case DRAKEN_INT16:                                            return 2;
-        case DRAKEN_INT32: case DRAKEN_FLOAT32:
+        case DRAKEN_INT8: case DRAKEN_UINT8:                          return 1;
+        case DRAKEN_INT16: case DRAKEN_UINT16:                        return 2;
+        case DRAKEN_INT32: case DRAKEN_UINT32: case DRAKEN_FLOAT32:
         case DRAKEN_DATE32: case DRAKEN_TIME32:                       return 4;
-        case DRAKEN_INT64: case DRAKEN_FLOAT64: case DRAKEN_DECIMAL:
+        case DRAKEN_INT64: case DRAKEN_UINT64: case DRAKEN_FLOAT64: case DRAKEN_DECIMAL:
         case DRAKEN_TIMESTAMP64: case DRAKEN_TIME64:                  return 8;
         case DRAKEN_DECIMAL128:                                       return 16;
         default:                                                       return 0;

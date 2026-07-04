@@ -48,6 +48,37 @@ VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* vector);
 
+// E33 — any signed integer source (INT8/16/32/64) -> the named unsigned target,
+// range-checked (negative or out-of-range magnitude raises, never truncates/wraps).
+VecResult draken_cast_integer_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_uint64(void* ctx, const DrakenVector* vector);
+
+// E33 — any unsigned source (UINT8/16/32/64) -> INT64, range-checked (a UINT64
+// value > INT64_MAX raises rather than wrapping to negative).
+VecResult draken_cast_uint_to_int64(void* ctx, const DrakenVector* vector);
+
+// E33 — FLOAT64/FLOAT32 -> the named unsigned target, range-checked (negative,
+// NaN, or out-of-range magnitude raises; truncates toward zero otherwise).
+VecResult draken_cast_float_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_uint64(void* ctx, const DrakenVector* vector);
+
+// E33 — BOOL -> the named unsigned target (always 0/1, no range check needed).
+VecResult draken_cast_bool_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_uint64(void* ctx, const DrakenVector* vector);
+
+// E33 — VARCHAR/NVARCHAR/VARBINARY -> the named unsigned target (parse +
+// range-check; malformed digits or out-of-range values raise).
+VecResult draken_cast_string_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* vector);
+
 VecResult draken_cast_date32_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector);

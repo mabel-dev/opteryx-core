@@ -40,8 +40,10 @@ from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, Cpp
 
 from draken.core.buffers cimport DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_DECIMAL128
+from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from draken.vectors.vector cimport dict_int64_from_decoded as _dict_i64_from_decoded
+from draken.vectors.vector cimport dict_from_decoded as _dict_from_decoded
 
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
@@ -124,6 +126,16 @@ DEF TAG_INT64_DICT  = 8
 DEF TAG_FLOAT32_DICT = 9
 DEF TAG_FLOAT64_DICT = 10
 DEF TAG_ARRAY       = 11
+DEF TAG_INT128      = 12
+# E33 — unsigned, plain (exact declared width, never widened) and dict.
+DEF TAG_UINT8       = 13
+DEF TAG_UINT16      = 14
+DEF TAG_UINT32      = 15
+DEF TAG_UINT64      = 16
+DEF TAG_UINT8_DICT  = 17
+DEF TAG_UINT16_DICT = 18
+DEF TAG_UINT32_DICT = 19
+DEF TAG_UINT64_DICT = 20
 
 # sizeof(DrakenStringSlot) == 16 always (16-byte fixed-width slot, documented in string_slot.h).
 DEF SLOT_BYTES = 16
@@ -458,6 +470,111 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
         memcpy(validity_buf, null_bitmap, null_bitmap_len)
 
     return _vector_from_decoded(expanded, validity_buf, num_rows, DRAKEN_FLOAT64)
+
+
+# ─── E33: unsigned integer builders ───────────────────────────────────────────
+# Plain (13-16) and dict (17-20) tags are not routed through the C++ fast path
+# (ipc_deserialize.hpp only knows tags 1-5); they're new enough tags that adding
+# them there is deferred, mirroring how dict/string tags 6-10 already stay on
+# this Cython path. elem_bytes (1/2/4/8) always matches the declared UINT8/16/
+# 32/64 width exactly — these never widen, unlike the int32->int64 convention
+# the signed dict/plain builders above use.
+
+cdef object _build_numeric_plain_uint(const uint8_t* p, uint32_t num_rows,
+                                      const uint8_t* null_bitmap, uint32_t null_bitmap_len,
+                                      int elem_bytes, DrakenType dtype):
+    """Deserialize a TAG_UINT8/16/32/64 plain column, scattering compact->positional
+    exactly like _wrap_decoded_fixed does for the C++ fast-path tags."""
+    cdef uint32_t data_len
+    p = _read_u32(p, &data_len)
+    cdef uint32_t full_bytes = num_rows * <uint32_t>elem_bytes
+    cdef void* pos_data = draken_malloc(<size_t>(full_bytes if full_bytes > 0 else 1))
+    if pos_data == NULL:
+        raise MemoryError()
+
+    cdef uint8_t* dst = <uint8_t*>pos_data
+    cdef uint32_t row_i
+    cdef uint32_t compact_i
+    cdef uint8_t bit
+    if null_bitmap_len > 0 and data_len < full_bytes and num_rows > 0:
+        memset(dst, 0, <size_t>full_bytes)
+        compact_i = 0
+        for row_i in range(num_rows):
+            bit = (null_bitmap[row_i >> 3] >> (row_i & 7)) & 1
+            if bit:
+                memcpy(dst + row_i * elem_bytes, p + <size_t>compact_i * elem_bytes, elem_bytes)
+                compact_i += 1
+    elif full_bytes > 0:
+        memcpy(dst, p, <size_t>full_bytes)
+
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(pos_data)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    return _vector_from_decoded(pos_data, validity_buf, num_rows, dtype)
+
+
+cdef object _build_numeric_dict_uint(const uint8_t* p, uint32_t num_rows,
+                                     const uint8_t* null_bitmap, uint32_t null_bitmap_len,
+                                     int elem_bytes, DrakenType dtype):
+    """Deserialize a TAG_UINT8/16/32/64 dict column, preserving dict encoding via
+    dict_from_decoded (generic analogue of _build_numeric_dict_int64)."""
+    cdef uint32_t dict_size
+    p = _read_u32(p, &dict_size)
+    cdef uint8_t code_width = p[0]
+    p += 1
+    cdef uint8_t is_sorted = p[0]
+    p += 1
+    cdef uint32_t codes_len
+    p = _read_u32(p, &codes_len)
+    cdef const uint8_t* codes_ptr = p
+    p += codes_len
+    cdef uint32_t values_len
+    p = _read_u32(p, &values_len)
+    cdef const uint8_t* dict_src = p
+
+    cdef void* dict_vals = draken_malloc(<size_t>dict_size * <size_t>elem_bytes)
+    if dict_vals == NULL:
+        raise MemoryError()
+    memcpy(dict_vals, dict_src, <size_t>dict_size * <size_t>elem_bytes)
+
+    cdef uint32_t* codes_buf = <uint32_t*>draken_malloc(<size_t>num_rows * sizeof(uint32_t))
+    if codes_buf == NULL:
+        draken_free(dict_vals)
+        raise MemoryError()
+
+    cdef uint32_t i
+    cdef uint16_t tmp16
+    cdef uint32_t tmp32
+    if code_width == 1:
+        for i in range(num_rows):
+            codes_buf[i] = <uint32_t>codes_ptr[i]
+    elif code_width == 2:
+        for i in range(num_rows):
+            memcpy(&tmp16, codes_ptr + i * 2, 2)
+            codes_buf[i] = <uint32_t>tmp16
+    else:
+        for i in range(num_rows):
+            memcpy(&tmp32, codes_ptr + i * 4, 4)
+            codes_buf[i] = tmp32
+
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(codes_buf)
+            draken_free(dict_vals)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    cdef Vector _v = _dict_from_decoded(dict_vals, dict_size, codes_buf, num_rows, validity_buf, dtype)
+    if is_sorted:
+        draken_vector_mark_dict_sorted(<PyObject*>_v._nb)
+    return _v
 
 
 # ─── String builders ──────────────────────────────────────────────────────────
@@ -875,6 +992,22 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool, DrakenType want
                 result = _build_numeric_dict_float64(p, num_rows, null_bitmap, null_bitmap_len)
             elif tag == TAG_ARRAY:
                 result = _build_array_vector(p, num_rows, null_bitmap, null_bitmap_len)
+            elif tag == TAG_UINT8:
+                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_UINT8)
+            elif tag == TAG_UINT16:
+                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_UINT16)
+            elif tag == TAG_UINT32:
+                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_UINT32)
+            elif tag == TAG_UINT64:
+                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 8, DRAKEN_UINT64)
+            elif tag == TAG_UINT8_DICT:
+                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_UINT8)
+            elif tag == TAG_UINT16_DICT:
+                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_UINT16)
+            elif tag == TAG_UINT32_DICT:
+                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_UINT32)
+            elif tag == TAG_UINT64_DICT:
+                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 8, DRAKEN_UINT64)
             else:
                 raise ValueError(f"Unknown IPC type tag: {tag}")
     finally:

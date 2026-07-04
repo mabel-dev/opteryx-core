@@ -39,6 +39,10 @@ cdef extern from "core/buffers.h":
         DRAKEN_NULL
         DRAKEN_VECTOR_FP16
         DRAKEN_DECIMAL128
+        DRAKEN_UINT8
+        DRAKEN_UINT16
+        DRAKEN_UINT32
+        DRAKEN_UINT64
 
     # Category-A layout hint bits (informational; 0 = "don't know").
     unsigned int DRAKEN_SEL_IDENTITY

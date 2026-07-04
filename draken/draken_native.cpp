@@ -1689,6 +1689,26 @@ static int draken_vector_compare_at(const DrakenVector& v,
             const __int128* d = static_cast<const __int128*>(v.data);
             return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
         }
+        // E33 — unsigned comparison must use the unsigned type directly (not
+        // widen through a signed type), or a value >= 2^(width-1) would sort as
+        // "less than" a small value — exactly the corruption class this whole
+        // feature exists to prevent.
+        case DRAKEN_UINT8: {
+            const uint8_t* d = static_cast<const uint8_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_UINT16: {
+            const uint16_t* d = static_cast<const uint16_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_UINT32: {
+            const uint32_t* d = static_cast<const uint32_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_UINT64: {
+            const uint64_t* d = static_cast<const uint64_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
         case DRAKEN_FLOAT32: {
             const float* d = static_cast<const float*>(v.data);
             // Total order: NaN sorts highest, -0.0 == 0.0 (canonicalised at ingest).
@@ -2330,6 +2350,30 @@ extern "C" PyObject* draken_vector_own_dict_f32(
     try {
         DrakenVector v = draken_vector_from_dict(data, data_length, codes, length,
                                                   DRAKEN_FLOAT32, validity);
+        OwnedBuffer<void>    data_buf(data);
+        OwnedBuffer<uint8_t> val_buf(validity);
+        OwnedBuffer<void>    codes_buf(static_cast<void*>(codes));
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+    catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+    catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
+// draken_vector_own_dict — generic dict-encoded wrap (E33). Unlike _i64/_f64/_f32,
+// `type` is a parameter rather than hardcoded, mirroring how draken_vector_own_raw
+// already takes `type` generically. Added for DRAKEN_UINT8/16/32/64, whose elem size
+// (1/2/4/8 bytes) isn't fixed the way the existing _i64/_f64/_f32 wrappers assume.
+extern "C" PyObject* draken_vector_own_dict(
+    void* data, uint32_t data_length, uint32_t* codes, uint32_t length,
+    uint8_t* validity, DrakenType type)
+{
+    try {
+        DrakenVector v = draken_vector_from_dict(data, data_length, codes, length,
+                                                  type, validity);
         OwnedBuffer<void>    data_buf(data);
         OwnedBuffer<uint8_t> val_buf(validity);
         OwnedBuffer<void>    codes_buf(static_cast<void*>(codes));
@@ -2986,6 +3030,25 @@ static inline int64_t row_narrow_int(const DrakenVector& v, uint32_t i) noexcept
                 static_cast<const int32_t*>(v.data)[v.selection[i]]);
         default:           return row_int64(v, i);
     }
+}
+
+// E33: unsigned readback, boxed directly (not routed through row_narrow_int —
+// DRAKEN_UINT64's full range doesn't fit in int64_t, so it needs its own path
+// rather than a sign-extending narrow-int helper). nb::cast on an unsigned C++
+// integer produces a correct arbitrary-precision Python int even above
+// INT64_MAX, so this covers all four widths uniformly.
+static inline nb::object row_uint_boxed(const DrakenVector& v, uint32_t i) {
+    const uint32_t idx = v.selection[i];
+    switch (v.type) {
+        case DRAKEN_UINT8:  return nb::cast(static_cast<const uint8_t* >(v.data)[idx]);
+        case DRAKEN_UINT16: return nb::cast(static_cast<const uint16_t*>(v.data)[idx]);
+        case DRAKEN_UINT32: return nb::cast(static_cast<const uint32_t*>(v.data)[idx]);
+        default:            return nb::cast(static_cast<const uint64_t*>(v.data)[idx]);
+    }
+}
+
+static inline bool is_unsigned_type(DrakenType t) noexcept {
+    return t == DRAKEN_UINT8 || t == DRAKEN_UINT16 || t == DRAKEN_UINT32 || t == DRAKEN_UINT64;
 }
 
 // Cross-width integer arithmetic helpers (D.6).
@@ -4787,12 +4850,16 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
 
 static inline size_t concat_fixed_itemsize(DrakenType t) noexcept {
     switch (t) {
-        case DRAKEN_INT8:                       return 1u;
-        case DRAKEN_INT16:                      return 2u;
+        case DRAKEN_INT8:
+        case DRAKEN_UINT8:                       return 1u;  // E33
+        case DRAKEN_INT16:
+        case DRAKEN_UINT16:                      return 2u;  // E33
         case DRAKEN_INT32:
+        case DRAKEN_UINT32:                       // E33
         case DRAKEN_FLOAT32:
         case DRAKEN_DATE32:                     return 4u;
         case DRAKEN_INT64:
+        case DRAKEN_UINT64:                       // E33
         case DRAKEN_FLOAT64:
         case DRAKEN_TIMESTAMP64:
         case DRAKEN_DECIMAL:                    return 8u;
@@ -5865,6 +5932,10 @@ NB_MODULE(draken_native, m) {
         .value("NULL",         DRAKEN_NULL)
         .value("VECTOR_FP16",  DRAKEN_VECTOR_FP16)
         .value("DECIMAL128",   DRAKEN_DECIMAL128)
+        .value("UINT8",        DRAKEN_UINT8)
+        .value("UINT16",       DRAKEN_UINT16)
+        .value("UINT32",       DRAKEN_UINT32)
+        .value("UINT64",       DRAKEN_UINT64)
         .export_values();
 
     // ------------------------------------------------------------------
@@ -6035,6 +6106,7 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type == DRAKEN_VARIANT)   return row_string(v.vec, idx);
             if (v.vec.type == DRAKEN_VARBINARY) return row_bytes(v.vec, idx);
             if (is_float_type(v.vec.type))      return nb::cast(row_float(v.vec, idx));
+            if (is_unsigned_type(v.vec.type))   return row_uint_boxed(v.vec, idx);
             return nb::cast(row_narrow_int(v.vec, idx));
         })
         .def("to_pylist", [](const VectorOwner& v) {
@@ -6093,6 +6165,7 @@ NB_MODULE(draken_native, m) {
             const bool is_varchar  = (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR || v.vec.type == DRAKEN_VARIANT);
             const bool is_binary   = (v.vec.type == DRAKEN_VARBINARY);
             const bool is_float    = is_float_type(v.vec.type);
+            const bool is_uint     = is_unsigned_type(v.vec.type);
             const bool is_time64   = (v.vec.type == DRAKEN_TIME64);
             if (is_time && !v.logical_type)
                 throw std::invalid_argument(
@@ -6125,6 +6198,8 @@ NB_MODULE(draken_native, m) {
                     out.append(row_bytes(v.vec, i));
                 } else if (is_float) {
                     out.append(nb::cast(row_float(v.vec, i)));
+                } else if (is_uint) {
+                    out.append(row_uint_boxed(v.vec, i));
                 } else {
                     out.append(nb::cast(row_narrow_int(v.vec, i)));
                 }
@@ -6254,6 +6329,10 @@ NB_MODULE(draken_native, m) {
                 require_decimal_descriptor(v, "sum");
                 return unscaled_to_py_decimal(val, v.logical_type->scale);
             }
+            // E33: UINT64's true sum may exceed INT64_MAX — the kernel packs
+            // the correct bit pattern into `val`; reinterpret rather than
+            // value-cast, or a large sum would box as a wrong negative number.
+            if (v.vec.type == DRAKEN_UINT64) return nb::cast(static_cast<uint64_t>(val));
             return nb::cast(val);
         })
         // min(): empty or all-null → raises ValueError.
@@ -6334,6 +6413,8 @@ NB_MODULE(draken_native, m) {
                 require_decimal_descriptor(v, "min");
                 return unscaled_to_py_decimal(val, v.logical_type->scale);
             }
+            // E33: see the identical note in sum() above.
+            if (v.vec.type == DRAKEN_UINT64) return nb::cast(static_cast<uint64_t>(val));
             return nb::cast(val);
         })
         // max(): empty or all-null → raises ValueError.
@@ -6392,6 +6473,8 @@ NB_MODULE(draken_native, m) {
                 require_decimal_descriptor(v, "max");
                 return unscaled_to_py_decimal(val, v.logical_type->scale);
             }
+            // E33: see the identical note in sum() above.
+            if (v.vec.type == DRAKEN_UINT64) return nb::cast(static_cast<uint64_t>(val));
             return nb::cast(val);
         })
         // ----------------------------------------------------------------
@@ -6461,7 +6544,13 @@ NB_MODULE(draken_native, m) {
                 nb::gil_scoped_release _gil;                                   \
                 return vecresult_to_owner(draken_float_fn_s(self.vec, _s));    \
             }                                                                  \
-            const int64_t _si = nb::cast<int64_t>(other);                     \
+            /* E33: DRAKEN_UINT64's range doesn't fit int64_t — nb::cast<int64_t> */\
+            /* truncates any literal > INT64_MAX (e.g. 18446744073709551615 -> -1). */\
+            /* Cast via uint64_t and reinterpret the bits into the int64_t slot; */\
+            /* the kernel (u64_*_scalar) reverses this with static_cast<uint64_t>. */\
+            const int64_t _si = (self.vec.type == DRAKEN_UINT64)               \
+                ? static_cast<int64_t>(nb::cast<uint64_t>(other))              \
+                : nb::cast<int64_t>(other);                                    \
             nb::gil_scoped_release _gil;                                       \
             return vecresult_to_owner(draken_fn_s(self.vec, _si));            \
         })
@@ -6858,7 +6947,13 @@ NB_MODULE(draken_native, m) {
                 return vecresult_to_owner(draken_float_compare_scalar(fv.vec, s, op));
             }
             // INT64 (and other types): expect int scalar.
-            const int64_t si = nb::cast<int64_t>(scalar);
+            // E33: DRAKEN_UINT64's range doesn't fit int64_t — nb::cast<int64_t>
+            // truncates any literal > INT64_MAX (e.g. 18446744073709551615 -> -1).
+            // Cast via uint64_t and reinterpret the bits into the int64_t slot;
+            // the kernel (u64_compare_scalar) reverses this with static_cast<uint64_t>.
+            const int64_t si = (v.vec.type == DRAKEN_UINT64)
+                ? static_cast<int64_t>(nb::cast<uint64_t>(scalar))
+                : nb::cast<int64_t>(scalar);
             nb::gil_scoped_release _gil;
             return vecresult_to_owner(draken_compare_scalar(v.vec, si, op));
         }, nb::arg("scalar"), nb::arg("op"),
@@ -7159,8 +7254,14 @@ NB_MODULE(draken_native, m) {
                         hi_slot, hi_bytes,
                         lo_inclusive, hi_inclusive));
                 }
-                const int64_t lo_l = nb::cast<int64_t>(lo);
-                const int64_t hi_l = nb::cast<int64_t>(hi);
+                // E33: UINT64's range doesn't fit int64_t — reinterpret via
+                // uint64_t (matches compare_scalar's identical fix above).
+                const int64_t lo_l = (v.vec.type == DRAKEN_UINT64)
+                    ? static_cast<int64_t>(nb::cast<uint64_t>(lo))
+                    : nb::cast<int64_t>(lo);
+                const int64_t hi_l = (v.vec.type == DRAKEN_UINT64)
+                    ? static_cast<int64_t>(nb::cast<uint64_t>(hi))
+                    : nb::cast<int64_t>(hi);
                 nb::gil_scoped_release _gil;
                 return vecresult_to_owner(
                     draken_between(v.vec, lo_l, hi_l, lo_inclusive, hi_inclusive));
@@ -7314,6 +7415,16 @@ NB_MODULE(draken_native, m) {
                             const double f64v = draken::ops::fp_canon(d64);
                             raw = draken::ops::fp_bits64(f64v);
                         }
+                        uint64_t h;
+                        simd_hash_i64(&raw, &h, 1u);
+                        set.insert_or_ignore(h);
+                    }
+                } else if (v.vec.type == DRAKEN_UINT64) {
+                    // E33: values may exceed INT64_MAX — nb::cast<int64_t> would
+                    // truncate (same class of bug already fixed for compare_scalar/
+                    // between). Cast directly via uint64_t.
+                    for (size_t k = 0; k < n; ++k) {
+                        uint64_t raw = nb::cast<uint64_t>(values[static_cast<Py_ssize_t>(k)]);
                         uint64_t h;
                         simd_hash_i64(&raw, &h, 1u);
                         set.insert_or_ignore(h);
@@ -7940,6 +8051,122 @@ NB_MODULE(draken_native, m) {
         },
         nb::arg("values"), nb::arg("codes"), nb::arg("nullable") = nb::none(),
         "Build a dict-encoded INT32 Vector.");
+
+    // E33 — uint8/16/32 ingestion. make_narrow_int_from_sequence<T,TAG> is
+    // already generic and safe for these three widths: numeric_limits<T>::max()
+    // fits comfortably in the int64_t range-check it performs internally.
+    // UINT64 is NOT instantiated from this template — its max value doesn't fit
+    // int64_t, so the range check itself would be wrong; see
+    // vector_uint64_from_sequence below for a dedicated implementation.
+    m.def("vector_uint8_from_sequence",
+        [](nb::list seq) {
+            return make_narrow_int_from_sequence<uint8_t, DRAKEN_UINT8>(seq, "uint8");
+        },
+        nb::arg("sequence"),
+        "Build a dense UINT8 Vector from a Python list[int | None].\n"
+        "Raises OverflowError if any value is outside [0, 255].\n"
+        "None elements become null rows.");
+    m.def("vector_uint8_from_constant",
+        [](nb::object value, uint32_t length) {
+            return make_narrow_int_constant<uint8_t, DRAKEN_UINT8>(value, length, "uint8");
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape UINT8 Vector. value may be None (→ all-null constant).");
+
+    m.def("vector_uint16_from_sequence",
+        [](nb::list seq) {
+            return make_narrow_int_from_sequence<uint16_t, DRAKEN_UINT16>(seq, "uint16");
+        },
+        nb::arg("sequence"),
+        "Build a dense UINT16 Vector from a Python list[int | None].\n"
+        "Raises OverflowError if any value is outside [0, 65535].\n"
+        "None elements become null rows.");
+    m.def("vector_uint16_from_constant",
+        [](nb::object value, uint32_t length) {
+            return make_narrow_int_constant<uint16_t, DRAKEN_UINT16>(value, length, "uint16");
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape UINT16 Vector. value may be None (→ all-null constant).");
+
+    m.def("vector_uint32_from_sequence",
+        [](nb::list seq) {
+            return make_narrow_int_from_sequence<uint32_t, DRAKEN_UINT32>(seq, "uint32");
+        },
+        nb::arg("sequence"),
+        "Build a dense UINT32 Vector from a Python list[int | None].\n"
+        "Raises OverflowError if any value is outside [0, 4294967295].\n"
+        "None elements become null rows.");
+    m.def("vector_uint32_from_constant",
+        [](nb::object value, uint32_t length) {
+            return make_narrow_int_constant<uint32_t, DRAKEN_UINT32>(value, length, "uint32");
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape UINT32 Vector. value may be None (→ all-null constant).");
+
+    // UINT64 — dedicated (not the shared template): values up to 2^64-1 don't
+    // fit int64_t, so casting via nb::cast<uint64_t> and range-checking against
+    // uint64_t (not int64_t) limits is required, unlike the narrower widths above.
+    m.def("vector_uint64_from_sequence",
+        [](nb::list seq) {
+            const uint32_t length = static_cast<uint32_t>(seq.size());
+            uint64_t* data = static_cast<uint64_t*>(
+                draken_malloc((length > 0u ? length : 1u) * sizeof(uint64_t)));
+            if (!data) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(data);
+            bool has_nulls = false;
+            for (uint32_t i = 0; i < length; ++i) {
+                nb::object obj = seq[i];
+                if (obj.is_none()) {
+                    data[i] = 0u;
+                    has_nulls = true;
+                } else {
+                    data[i] = nb::cast<uint64_t>(obj);
+                }
+            }
+            OwnedBuffer<uint8_t> validity_buf;
+            uint8_t* validity = nullptr;
+            if (has_nulls) {
+                const uint32_t bm     = (length + 7u) / 8u;
+                const uint32_t padded = ((bm + 7u) & ~7u);
+                const size_t   vbytes = padded > 0u ? padded : 8u;
+                validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+                if (!validity) throw std::bad_alloc();
+                validity_buf.reset(validity);
+                std::memset(validity, 0xFF, vbytes);
+                for (uint32_t i = 0; i < length; ++i)
+                    if (seq[i].is_none())
+                        validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+            }
+            DrakenVector v = draken_vector_from_dense(data, length, DRAKEN_UINT64, validity);
+            return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+        },
+        nb::arg("sequence"),
+        "Build a dense UINT64 Vector from a Python list[int | None].\n"
+        "Raises OverflowError (via nb::cast) if any value is outside [0, 2^64-1].\n"
+        "None elements become null rows.");
+    m.def("vector_uint64_from_constant",
+        [](nb::object value, uint32_t length) {
+            const bool is_null = value.is_none();
+            uint64_t scalar = is_null ? 0u : nb::cast<uint64_t>(value);
+            uint64_t* data = static_cast<uint64_t*>(draken_malloc(sizeof(uint64_t)));
+            if (!data) throw std::bad_alloc();
+            data[0] = scalar;
+            OwnedBuffer<void> data_buf(data);
+            OwnedBuffer<uint8_t> validity_buf;
+            uint8_t* validity = nullptr;
+            if (is_null) {
+                const uint32_t padded = ((((length + 7u) >> 3) + 7u) & ~7u);
+                const size_t   vbytes = padded > 0u ? padded : 8u;
+                validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+                if (!validity) throw std::bad_alloc();
+                std::memset(validity, 0x00, vbytes);
+                validity_buf.reset(validity);
+            }
+            DrakenVector v = draken_vector_from_constant(data, length, DRAKEN_UINT64, validity);
+            return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape UINT64 Vector. value may be None (→ all-null constant).");
 
     // D.7 — float32 ingestion.
     m.def("vector_float32_from_sequence",

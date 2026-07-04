@@ -49,7 +49,6 @@ expression/
 │       ├── __init__.py             # Package entry / legacy submodule aliases
 │       ├── _impl.pyx               # Compiled evaluator entry points
 │       ├── evaluation.pyx          # Bytecode/evaluation orchestration
-│       ├── _c_kernel_dispatch.pyx  # Native C function-pointer kernel dispatch
 │       ├── arithmetic.pyx          # Arithmetic kernels
 │       ├── comparisons.pyx         # Comparison kernels
 │       ├── string_ops.pyx          # String expression kernels

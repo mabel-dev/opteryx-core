@@ -26,7 +26,7 @@ from opteryx.types.vectors.vector_types import node_is_vector_query_expression
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint32_t, uint64_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 
@@ -38,6 +38,7 @@ from draken.core.buffers cimport (
     DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_DECIMAL,
     DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_DATE32, DRAKEN_TIMESTAMP64,
     DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_BOOL, DRAKEN_INTERVAL,
+    DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64,
 )
 
 # you may not use this file except in compliance with the License.
@@ -483,6 +484,20 @@ cdef inline int64_t _num_read_i64(void* data, DrakenType t, uint32_t idx) noexce
         return <int64_t>(<int16_t*>data)[idx]
     elif t == DRAKEN_INT8:
         return <int64_t>(<int8_t*>data)[idx]
+    # E33 — UINT8/16/32 zero-extend into int64: the full unsigned range of each
+    # narrower width fits int64's positive range losslessly, so the existing
+    # SIGNED int64 comparison below stays correct with no special-casing.
+    elif t == DRAKEN_UINT8:
+        return <int64_t>(<uint8_t*>data)[idx]
+    elif t == DRAKEN_UINT16:
+        return <int64_t>(<uint16_t*>data)[idx]
+    elif t == DRAKEN_UINT32:
+        return <int64_t>(<uint32_t*>data)[idx]
+    elif t == DRAKEN_UINT64:
+        # E33 — bit-reinterpret only (NOT value-preserving: a value > INT64_MAX
+        # comes back negative here). Callers MUST compare the result as
+        # uint64_t, not signed, for DRAKEN_UINT64 — see _cmp_num/_cmp_multi.
+        return <int64_t>(<uint64_t*>data)[idx]
     else:  # DRAKEN_BOOL — bit-packed 1 bit/row LSB-first, NOT a byte array.
         # Byte-indexing here read the value of row idx*8 and overran the
         # ~n/8-byte buffer for idx >= n/8.
@@ -516,7 +531,13 @@ cdef inline int _cmp_num(
     else:
         ia = _num_read_i64(data, t, sel[a])
         ib = _num_read_i64(data, t, sel[b])
-        c = -1 if ia < ib else (1 if ia > ib else 0)
+        # E33 — DRAKEN_UINT64 values are bit-reinterpreted (not value-preserving)
+        # by _num_read_i64, so they MUST compare as uint64_t here — a signed
+        # compare would sort values > INT64_MAX as negative (wrong order).
+        if t == DRAKEN_UINT64:
+            c = -1 if (<uint64_t>ia < <uint64_t>ib) else (1 if (<uint64_t>ia > <uint64_t>ib) else 0)
+        else:
+            c = -1 if ia < ib else (1 if ia > ib else 0)
     return -c if descending else c
 
 
@@ -620,6 +641,12 @@ cdef inline int _cmp_multi(ColMeta* cols, Py_ssize_t ncols, Py_ssize_t a, Py_ssi
         elif m.kind == 1:
             cc = _num_cmp_f64(_num_read_f64(m.data, m.dtype, m.sel[a]),
                               _num_read_f64(m.data, m.dtype, m.sel[b]))
+        elif m.kind == 4:
+            # E33 — DRAKEN_UINT64: _num_read_i64 bit-reinterprets, so compare
+            # as uint64_t (a signed compare would sort large values negative).
+            ia = _num_read_i64(m.data, m.dtype, m.sel[a])
+            ib = _num_read_i64(m.data, m.dtype, m.sel[b])
+            cc = -1 if (<uint64_t>ia < <uint64_t>ib) else (1 if (<uint64_t>ia > <uint64_t>ib) else 0)
         else:
             ia = _num_read_i64(m.data, m.dtype, m.sel[a])
             ib = _num_read_i64(m.data, m.dtype, m.sel[b])
@@ -880,8 +907,14 @@ cdef class HeapSortNode(BasePlanNode):
                     cols[c].data = dv.data
                 elif (t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32 or t == DRAKEN_INT64
                       or t == DRAKEN_DECIMAL or t == DRAKEN_DATE32 or t == DRAKEN_TIMESTAMP64
-                      or t == DRAKEN_TIME32 or t == DRAKEN_TIME64 or t == DRAKEN_BOOL):
+                      or t == DRAKEN_TIME32 or t == DRAKEN_TIME64 or t == DRAKEN_BOOL
+                      or t == DRAKEN_UINT8 or t == DRAKEN_UINT16 or t == DRAKEN_UINT32):
                     cols[c].kind = 0
+                    cols[c].data = dv.data
+                elif t == DRAKEN_UINT64:
+                    # E33 — genuinely unsigned compare (kind 0's signed `<`/`>`
+                    # would misorder values > INT64_MAX); see _cmp_multi kind==4.
+                    cols[c].kind = 4
                     cols[c].data = dv.data
                 elif t == DRAKEN_INTERVAL:
                     cols[c].kind = 3
@@ -969,6 +1002,7 @@ cdef class HeapSortNode(BasePlanNode):
             t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32 or t == DRAKEN_INT64
             or t == DRAKEN_DECIMAL or t == DRAKEN_DATE32 or t == DRAKEN_TIMESTAMP64
             or t == DRAKEN_TIME32 or t == DRAKEN_TIME64 or t == DRAKEN_BOOL
+            or t == DRAKEN_UINT8 or t == DRAKEN_UINT16 or t == DRAKEN_UINT32 or t == DRAKEN_UINT64
         )
         if not (is_float or is_int):
             return None

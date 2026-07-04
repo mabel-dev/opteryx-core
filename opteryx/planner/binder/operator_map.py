@@ -519,8 +519,8 @@ def determine_type(node):
     if result_cat == OT.INTEGER and left_ct is not None and right_ct is not None:
         try:
             return compute_result_logical_type(left_ct, right_ct, operator, OT.INTEGER)
-        except Exception:
-            return result_ct  # placeholder INT64
+        except NotImplementedError:
+            return result_ct  # placeholder INT64 — genuinely unresolvable operand pairing
     if result_cat == OT.FLOAT and left_ct is not None and right_ct is not None:
         try:
             return compute_result_logical_type(left_ct, right_ct, operator, OT.FLOAT)

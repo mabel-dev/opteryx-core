@@ -35,6 +35,14 @@ struct DecodedColumn {
   std::vector<float> float32_values;     // for float32
   std::vector<double> float64_values;    // for float64
   std::string type; // "int32", "int64", "string", "boolean", "float32", "float64"
+  // E33: set from the column's Parquet IntType logical-type annotation
+  // (isSigned=false). int_bit_width is the DECLARED width (8/16/32/64) — note
+  // this is independent of `type`/physical width: a declared 8- or 16-bit
+  // unsigned column still arrives over the wire as physical "int32" (Parquet has
+  // no int8/int16 physical storage), so int_bit_width can be narrower than what
+  // `type` implies. 0 == not an integer column / no IntType annotation.
+  bool is_unsigned = false;
+  int32_t int_bit_width = 0;
   int32_t num_rows = 0;  // total rows including nulls (= sum of page_values)
   int32_t pages_skipped = 0;  // pages skipped due to row_mask (no selected rows in page)
   int32_t pages_decoded = 0;  // pages that passed the row_mask check and were decompressed/decoded

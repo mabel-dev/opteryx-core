@@ -439,6 +439,168 @@ VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* v) {
     });
 }
 
+// E33 — read the j-th physical value of ANY signed integer vector (INT8/16/32/64)
+// as int64_t, sign-extending narrower widths (mirrors draken_cast_integer_to_int64's
+// per-width read, generalized to include INT64 itself so one helper covers all
+// four signed source widths for the unsigned-target casts below).
+static inline int64_t cast_read_signed_i64(const DrakenVector* v, uint32_t j) {
+    switch (v->type) {
+        case DRAKEN_INT8:  return static_cast<int64_t>(static_cast<const int8_t* >(v->data)[j]);
+        case DRAKEN_INT16: return static_cast<int64_t>(static_cast<const int16_t*>(v->data)[j]);
+        case DRAKEN_INT32: return static_cast<int64_t>(static_cast<const int32_t*>(v->data)[j]);
+        default:           return static_cast<const int64_t*>(v->data)[j];  // DRAKEN_INT64
+    }
+}
+
+// E33 — signed integer (any of INT8/16/32/64) -> unsigned target, range-checked.
+// Negative values and magnitudes exceeding the target width both raise
+// std::overflow_error (fail loud — CLAUDE.md §1 — never silently truncate/wrap).
+// Null rows are skipped (any garbage placeholder is fine; validity masks them).
+#define DRAKEN_CAST_SIGNED_TO_UINT(fn_name, UT, TAG, UMAX)                              \
+VecResult fn_name(void* ctx, const DrakenVector* v) {                                    \
+    DRAKEN_KERNEL_TRY({                                                                 \
+        if (!v) return draken_error_sentinel("Input vector is null");                   \
+        if (v->type != DRAKEN_INT8 && v->type != DRAKEN_INT16 &&                        \
+            v->type != DRAKEN_INT32 && v->type != DRAKEN_INT64)                          \
+            return draken_error_sentinel_fmt(                                           \
+                #fn_name ": expected a signed integer source, got %d", v->type);         \
+        const uint32_t k = v->data_length;                                              \
+        UT* out = static_cast<UT*>(draken_malloc((k > 0u ? k : 1u) * sizeof(UT)));       \
+        if (!out) return draken_error_sentinel("Allocation failed");                    \
+        const bool has_nulls = (v->validity != nullptr);                                \
+        for (uint32_t j = 0u; j < k; ++j) {                                             \
+            if (has_nulls && !((v->validity[j >> 3] >> (j & 7u)) & 1u)) {                \
+                out[j] = 0; continue;                                                    \
+            }                                                                            \
+            const int64_t val = cast_read_signed_i64(v, j);                              \
+            if (val < 0 || static_cast<uint64_t>(val) > (UMAX)) {                        \
+                draken_free(out);                                                        \
+                return draken_error_sentinel_fmt(                                       \
+                    #fn_name ": value %lld out of range for " #UT, (long long)val);      \
+            }                                                                            \
+            out[j] = static_cast<UT>(val);                                              \
+        }                                                                                \
+        VecResult r;                                                                    \
+        r.data = out; r.type = TAG; r.validity_embedded = 0u; r.ts_unit = 0xFFu;         \
+        kernel_preserve_shape(r, v);                                                    \
+        return r;                                                                        \
+    });                                                                                  \
+}
+
+DRAKEN_CAST_SIGNED_TO_UINT(draken_cast_integer_to_uint8,  uint8_t,  DRAKEN_UINT8,  255ull)
+DRAKEN_CAST_SIGNED_TO_UINT(draken_cast_integer_to_uint16, uint16_t, DRAKEN_UINT16, 65535ull)
+DRAKEN_CAST_SIGNED_TO_UINT(draken_cast_integer_to_uint32, uint32_t, DRAKEN_UINT32, 4294967295ull)
+DRAKEN_CAST_SIGNED_TO_UINT(draken_cast_integer_to_uint64, uint64_t, DRAKEN_UINT64, 0xFFFFFFFFFFFFFFFFull)
+
+#undef DRAKEN_CAST_SIGNED_TO_UINT
+
+// E33 — reverse direction: unsigned source (any of UINT8/16/32/64) -> INT64.
+// UINT8/16/32 always fit int64_t's range losslessly (no check needed, unlike
+// the other direction); UINT64 needs one range check (values > INT64_MAX raise
+// rather than silently wrapping to negative).
+VecResult draken_cast_uint_to_int64(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_UINT8 && v->type != DRAKEN_UINT16 &&
+            v->type != DRAKEN_UINT32 && v->type != DRAKEN_UINT64)
+            return draken_error_sentinel_fmt(
+                "draken_cast_uint_to_int64: expected an unsigned integer source, got %d", v->type);
+        const uint32_t k = v->data_length;
+        const DrakenType st = v->type;
+        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < k; ++j) {
+            if (st == DRAKEN_UINT8)
+                out[j] = static_cast<int64_t>(static_cast<const uint8_t*>(v->data)[j]);
+            else if (st == DRAKEN_UINT16)
+                out[j] = static_cast<int64_t>(static_cast<const uint16_t*>(v->data)[j]);
+            else if (st == DRAKEN_UINT32)
+                out[j] = static_cast<int64_t>(static_cast<const uint32_t*>(v->data)[j]);
+            else {
+                const uint64_t uv = static_cast<const uint64_t*>(v->data)[j];
+                if (uv > 0x7FFFFFFFFFFFFFFFull) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "draken_cast_uint_to_int64: value %llu out of range for INT64",
+                        (unsigned long long)uv);
+                }
+                out[j] = static_cast<int64_t>(uv);
+            }
+        }
+        VecResult r;
+        r.data = out; r.type = DRAKEN_INT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+// E33 — FLOAT64/FLOAT32 -> unsigned target, range-checked. Negative values
+// (including NaN, which fails every comparison) and magnitudes exceeding the
+// target width both raise (fail loud — CLAUDE.md §1 — never silently
+// truncate/wrap), mirroring DRAKEN_CAST_SIGNED_TO_UINT above. Truncates
+// toward zero otherwise, matching draken_cast_float64_to_int64's convention.
+#define DRAKEN_CAST_FLOAT_TO_UINT(fn_name, UT, TAG, UMAX)                                \
+VecResult fn_name(void* ctx, const DrakenVector* v) {                                     \
+    DRAKEN_KERNEL_TRY({                                                                  \
+        if (!v) return draken_error_sentinel("Input vector is null");                    \
+        if (v->type != DRAKEN_FLOAT64 && v->type != DRAKEN_FLOAT32)                       \
+            return draken_error_sentinel_fmt(                                            \
+                #fn_name ": expected FLOAT, got %d", v->type);                            \
+        const uint32_t k = v->data_length;                                               \
+        const bool is64 = (v->type == DRAKEN_FLOAT64);                                   \
+        UT* out = static_cast<UT*>(draken_malloc((k > 0u ? k : 1u) * sizeof(UT)));        \
+        if (!out) return draken_error_sentinel("Allocation failed");                     \
+        for (uint32_t j = 0u; j < k; ++j) {                                              \
+            const double d = is64 ? static_cast<const double*>(v->data)[j]               \
+                                  : static_cast<double>(static_cast<const float*>(v->data)[j]); \
+            if (!(d >= 0.0) || d > static_cast<double>(UMAX)) {                          \
+                draken_free(out);                                                         \
+                return draken_error_sentinel_fmt(                                         \
+                    #fn_name ": value %g out of range for " #UT, d);                       \
+            }                                                                             \
+            out[j] = static_cast<UT>(d);                                                  \
+        }                                                                                 \
+        VecResult r;                                                                     \
+        r.data = out; r.type = TAG; r.validity_embedded = 0u; r.ts_unit = 0xFFu;          \
+        kernel_preserve_shape(r, v);                                                      \
+        return r;                                                                          \
+    });                                                                                    \
+}
+
+DRAKEN_CAST_FLOAT_TO_UINT(draken_cast_float_to_uint8,  uint8_t,  DRAKEN_UINT8,  255ull)
+DRAKEN_CAST_FLOAT_TO_UINT(draken_cast_float_to_uint16, uint16_t, DRAKEN_UINT16, 65535ull)
+DRAKEN_CAST_FLOAT_TO_UINT(draken_cast_float_to_uint32, uint32_t, DRAKEN_UINT32, 4294967295ull)
+DRAKEN_CAST_FLOAT_TO_UINT(draken_cast_float_to_uint64, uint64_t, DRAKEN_UINT64, 0xFFFFFFFFFFFFFFFFull)
+
+#undef DRAKEN_CAST_FLOAT_TO_UINT
+
+// E33 — BOOL -> unsigned target. Always 0 or 1, so no range check is ever
+// needed for any width (mirrors draken_cast_bool_to_int64).
+#define DRAKEN_CAST_BOOL_TO_UINT(fn_name, UT, TAG)                                        \
+VecResult fn_name(void* ctx, const DrakenVector* v) {                                     \
+    DRAKEN_KERNEL_TRY({                                                                  \
+        if (!v) return draken_error_sentinel("Input vector is null");                    \
+        if (v->type != DRAKEN_BOOL)                                                      \
+            return draken_error_sentinel_fmt(#fn_name ": expected BOOL, got %d", v->type); \
+        const uint32_t k = v->data_length;                                               \
+        const uint8_t* src = static_cast<const uint8_t*>(v->data);                        \
+        UT* out = static_cast<UT*>(draken_malloc((k > 0u ? k : 1u) * sizeof(UT)));        \
+        if (!out) return draken_error_sentinel("Allocation failed");                     \
+        for (uint32_t j = 0u; j < k; ++j)                                                \
+            out[j] = static_cast<UT>((src[j >> 3u] >> (j & 7u)) & 1u);                    \
+        VecResult r;                                                                     \
+        r.data = out; r.type = TAG; r.validity_embedded = 0u; r.ts_unit = 0xFFu;          \
+        kernel_preserve_shape(r, v);                                                      \
+        return r;                                                                          \
+    });                                                                                    \
+}
+
+DRAKEN_CAST_BOOL_TO_UINT(draken_cast_bool_to_uint8,  uint8_t,  DRAKEN_UINT8)
+DRAKEN_CAST_BOOL_TO_UINT(draken_cast_bool_to_uint16, uint16_t, DRAKEN_UINT16)
+DRAKEN_CAST_BOOL_TO_UINT(draken_cast_bool_to_uint32, uint32_t, DRAKEN_UINT32)
+DRAKEN_CAST_BOOL_TO_UINT(draken_cast_bool_to_uint64, uint64_t, DRAKEN_UINT64)
+
+#undef DRAKEN_CAST_BOOL_TO_UINT
 
 // FLOAT → DECIMAL (both tiers; SQL half-away-from-zero rounding at the target
 // scale). ctx = binary_op_ctx: result_scale + result_precision (p>18 → int128

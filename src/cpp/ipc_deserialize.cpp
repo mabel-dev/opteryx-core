@@ -207,6 +207,14 @@ void deserialize_fixed_column(const uint8_t* data, int64_t length, DecodedFixedC
         case kTagFloat32Dict:
         case kTagFloat64Dict:
         case 11:  // kTagArray — list columns handled by Cython _build_array_vector
+        case kTagUInt8:
+        case kTagUInt16:
+        case kTagUInt32:
+        case kTagUInt64:
+        case kTagUInt8Dict:
+        case kTagUInt16Dict:
+        case kTagUInt32Dict:
+        case kTagUInt64Dict:
             out.status = kStatusNotHandled;
             return;
 

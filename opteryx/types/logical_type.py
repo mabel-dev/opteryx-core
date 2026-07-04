@@ -46,6 +46,7 @@ __all__ = [
     "_CATEGORY_TO_CANONICAL",
     # canonical instances
     "INT8", "INT16", "INT32", "INT64",
+    "UINT8", "UINT16", "UINT32", "UINT64",
     "FLOAT32", "FLOAT64",
     "BOOLEAN", "DATE", "INTERVAL",
     "VARCHAR", "NVARCHAR", "VARBINARY", "VARIANT",
@@ -91,6 +92,10 @@ _CATEGORY_OF: dict = {
     DrakenType.INT16: LogicalCategory.INTEGER,
     DrakenType.INT32: LogicalCategory.INTEGER,
     DrakenType.INT64: LogicalCategory.INTEGER,
+    DrakenType.UINT8: LogicalCategory.INTEGER,
+    DrakenType.UINT16: LogicalCategory.INTEGER,
+    DrakenType.UINT32: LogicalCategory.INTEGER,
+    DrakenType.UINT64: LogicalCategory.INTEGER,
     DrakenType.DECIMAL: LogicalCategory.DECIMAL,
     DrakenType.DECIMAL128: LogicalCategory.DECIMAL,
     DrakenType.FLOAT32: LogicalCategory.FLOAT,
@@ -130,6 +135,10 @@ _NAME_OF: dict = {
     DrakenType.INT16: "INT16",
     DrakenType.INT32: "INT32",
     DrakenType.INT64: "INT64",
+    DrakenType.UINT8: "UINT8",
+    DrakenType.UINT16: "UINT16",
+    DrakenType.UINT32: "UINT32",
+    DrakenType.UINT64: "UINT64",
     DrakenType.FLOAT32: "FLOAT32",
     DrakenType.FLOAT64: "FLOAT64",
     DrakenType.BOOL: "BOOLEAN",
@@ -234,6 +243,10 @@ INT8 = ColumnType(DrakenType.INT8)
 INT16 = ColumnType(DrakenType.INT16)
 INT32 = ColumnType(DrakenType.INT32)
 INT64 = ColumnType(DrakenType.INT64)
+UINT8 = ColumnType(DrakenType.UINT8)
+UINT16 = ColumnType(DrakenType.UINT16)
+UINT32 = ColumnType(DrakenType.UINT32)
+UINT64 = ColumnType(DrakenType.UINT64)
 FLOAT32 = ColumnType(DrakenType.FLOAT32)
 FLOAT64 = ColumnType(DrakenType.FLOAT64)
 BOOLEAN = ColumnType(DrakenType.BOOL)

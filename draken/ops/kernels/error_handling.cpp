@@ -37,6 +37,7 @@ VecResult draken_error_sentinel(const char* error_message) {
     result.length = 0;
     result.type = DRAKEN_NULL;  // Sentinel type
     result.flags = 0;
+    result.error_msg = g_error_message;
 
     return result;
 }
@@ -66,6 +67,7 @@ VecResult draken_error_sentinel_fmt(const char* format, ...) {
     result.length = 0;
     result.type = DRAKEN_NULL;
     result.flags = 0;
+    result.error_msg = g_error_message;
 
     return result;
 }

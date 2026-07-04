@@ -89,6 +89,7 @@ inline bool agg2_operand_supported(DrakenType t) {
         case DRAKEN_TIME32: case DRAKEN_TIME64: case DRAKEN_BOOL:
         case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
         case DRAKEN_DECIMAL128:   // SUM/AVG/COUNT only — MIN/MAX guarded at capture
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:  // E33
             return true;
         default:
             return false;
@@ -123,6 +124,16 @@ inline int64_t agg2_read_raw(const DrakenVector& v, uint32_t row, bool is_float)
         case DRAKEN_TIME32: return static_cast<const int32_t*>(v.data)[phys];
         case DRAKEN_BOOL:
             return (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u;
+        // E33 — zero-extend (source is unsigned; sign-extending would corrupt).
+        // UINT64 is NOT listed here — it falls to `default`, which reads the raw
+        // 8 bytes as int64_t (a bit-pattern reinterpret, not a value cast) —
+        // exactly the reinterpretation needed: c.isum accumulates via ordinary
+        // int64_t `+=`, which is bit-identical to uint64_t `+=` (two's
+        // complement), so the sum's bit pattern round-trips correctly as long as
+        // the FINAL reported value is reinterpreted back to uint64_t for output.
+        case DRAKEN_UINT8:  return static_cast<int64_t>(static_cast<const uint8_t* >(v.data)[phys]);
+        case DRAKEN_UINT16: return static_cast<int64_t>(static_cast<const uint16_t*>(v.data)[phys]);
+        case DRAKEN_UINT32: return static_cast<int64_t>(static_cast<const uint32_t*>(v.data)[phys]);
         default:            return static_cast<const int64_t*>(v.data)[phys];
     }
 }

@@ -46,6 +46,14 @@ cdef Vector dict_int64_from_decoded(void* dict_vals, uint32_t data_length,
                                      uint8_t* validity)
 
 
+# dict_from_decoded — generic dict-encoded Vector of `dtype` (E33: DRAKEN_UINT8/16/
+# 32/64). dict_vals, codes, and validity MUST be draken_malloc'd; ownership
+# transferred on call.
+cdef Vector dict_from_decoded(void* dict_vals, uint32_t data_length,
+                              uint32_t* codes, uint32_t length,
+                              uint8_t* validity, DrakenType dtype)
+
+
 # Bitmap utilities (simd_popcount is also needed here for bytecode VM).
 
 cdef extern from "core/bitmap_ops.h" nogil:

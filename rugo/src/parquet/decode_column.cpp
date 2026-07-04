@@ -18,6 +18,7 @@
 #include "type_widening.hpp"
 #include "thread_pool.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -468,6 +469,15 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.type = target_col->physical_type;
     result.max_rep_level = target_col->max_repetition_level;
     result.max_def_level = target_col->max_definition_level;
+
+    // E33: detect an unsigned IntType logical-type annotation ("uint8"/"uint16"/
+    // "uint32"/"uint64", built in metadata.cpp from isSigned=false). Declared width
+    // can be narrower than the physical wire width (Parquet has no int8/int16
+    // physical storage — UINT8/UINT16 still arrive as physical "int32").
+    if (target_col->logical_type.rfind("uint", 0) == 0) {
+      result.is_unsigned = true;
+      result.int_bit_width = std::atoi(target_col->logical_type.c_str() + 4);
+    }
 
     // FIXED_LEN_BYTE_ARRAY DECIMAL is decoded big-endian sign-extended:
     //   width <= 8  → int64   (DECIMAL,  precision <= 18)
@@ -1292,12 +1302,19 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               }
             }
           } else if (int32_dict_mode) {
-            // Widen int32 → int64 in C++ to simplify the Cython binding.
+            // Widen int32 → int64 in C++ to simplify the Cython binding. E33: an
+            // unsigned column must zero-extend, not sign-extend, or a value with
+            // the high bit set (e.g. a genuine UINT32 > INT32_MAX) corrupts to
+            // negative. rle_int64_values stays the internal 64-bit holding buffer
+            // either way — the consumer narrows back to the declared UINT8/16/32
+            // width (result.int_bit_width) when tagging the final Draken vector.
             const int32_t dict_sz = (int32_t)result.dict_int32_values.size();
             for (size_t r = 0; r < run_codes.size(); ++r) {
               const int32_t code = run_codes[r];
               if (code < 0 || code >= dict_sz) return result;
-              const int64_t val = (int64_t)result.dict_int32_values[code];
+              const int64_t val = result.is_unsigned
+                  ? (int64_t)(uint32_t)result.dict_int32_values[code]
+                  : (int64_t)result.dict_int32_values[code];
               const int32_t cnt = run_counts[r];
               if (!result.rle_int64_values.empty() &&
                   result.rle_int64_values.back() == val) {

@@ -46,6 +46,8 @@
 #include "ops/interval_ops.h"       // D.12 — DRAKEN_INTERVAL kernels
 #include "ops/int_bitwise.h"        // E.2 — AND/OR/XOR/NOT/SHL/SHR across int8/16/32/64
 #include "ops/decimal_arith.h"     // E.32 — scale-aware DECIMAL arithmetic kernels
+#include "ops/uint64_arithmetic.h" // E33 — u64_add, u64_sub, … (genuine unsigned semantics)
+#include "ops/uint64_compare.h"    // E33 — u64_compare_scalar, u64_compare_vector
 
 // ---------------------------------------------------------------------------
 // TypeOps: one entry per DrakenType in the dispatch table.
@@ -242,15 +244,18 @@ static inline void hash_decimal128(const DrakenVector& v, uint64_t* out, uint32_
 }
 
 // ---------------------------------------------------------------------------
-// OpsTable: flat array[104] of TypeOps, indexed by DrakenType enum value.
+// OpsTable: flat array[108] of TypeOps, indexed by DrakenType enum value.
 // The D.11 tail extends past DRAKEN_NON_NATIVE (100): NULL=101, VECTOR_FP16=102,
-// DECIMAL128=103. 104 entries cover all tags. NULL / VECTOR_FP16 are handled at the
-// nanobind boundary and keep zero (null) slots here; DECIMAL128 fills only the
-// gather slots (its arithmetic/hash/reduction/compare are boundary-intercepted too).
+// DECIMAL128=103, UINT8=104, UINT16=105, UINT32=106, UINT64=107. 108 entries cover
+// all tags. NULL / VECTOR_FP16 are handled at the nanobind boundary and keep zero
+// (null) slots here; DECIMAL128 fills only the gather slots (its arithmetic/hash/
+// reduction/compare are boundary-intercepted too). UINT8/16/32/64 are unregistered
+// (zero slots) pending Stage 2 kernel parity (E33) — dispatching an unregistered op
+// on them fails loudly via the kSize/nullptr guard below, not silently.
 // Unfilled entries are zero-initialized (null function pointers).
 // ---------------------------------------------------------------------------
 struct OpsTable {
-    static constexpr unsigned kSize = 104u;
+    static constexpr unsigned kSize = 108u;
     TypeOps entries[kSize];
 
     OpsTable() noexcept {
@@ -447,6 +452,115 @@ struct OpsTable {
         // hash slot: needed by the multi-column key-hash path (c_hash → draken_hash)
         // and group-by/join keying. Cross-tier consistent with the int64 hash.
         entries[DRAKEN_DECIMAL128].hash        = hash_decimal128;
+
+        // E33 — UINT8/16/32/64. Gather ops (take/slice/materialize/compress),
+        // hash (GROUP BY/JOIN keys), arithmetic/compare/reductions/between/
+        // in_list for all four widths — UINT8/16/32 fit safely in the existing
+        // int64_t-based templates; UINT64 uses dedicated genuine-unsigned
+        // kernels for anything that does a real ORDER comparison (compare_*,
+        // between, sum/min/max's reported value) since the int64_t cast those
+        // templates use would misorder a value >= 2^63 as negative. hash and
+        // in_list are the one exception: safe to reuse the existing templates
+        // even at 64-bit width, because they only need bit-pattern consistency
+        // (same value hashes/matches the same way), not a correctly-ordered
+        // numeric interpretation. NOT registered (stays null, fails loud via
+        // the kSize/nullptr guard rather than silently miscomputing):
+        //   - neg: unsigned has no negation.
+        // UINT64 sum/min/max ARE registered — see u64_sum/min/max in
+        // uint64_arithmetic.h — but the Python-boxing sites (sum()/min()/max()
+        // in this file's nanobind Vector class) must reinterpret the returned
+        // int64_t bits as uint64_t; verify that's done wherever they're wired.
+        entries[DRAKEN_UINT8].hash        = draken::ops::hash_uint8;
+        entries[DRAKEN_UINT8].take        = draken::ops::u8_take;
+        entries[DRAKEN_UINT8].slice       = draken::ops::u8_slice;
+        entries[DRAKEN_UINT8].materialize = draken::ops::u8_materialize;
+        entries[DRAKEN_UINT8].compress    = draken::ops::u8_compress;
+        entries[DRAKEN_UINT8].add           = draken::ops::u8_add;
+        entries[DRAKEN_UINT8].sub           = draken::ops::u8_sub;
+        entries[DRAKEN_UINT8].mul           = draken::ops::u8_mul;
+        entries[DRAKEN_UINT8].div           = draken::ops::u8_div;
+        entries[DRAKEN_UINT8].mod           = draken::ops::u8_mod;
+        entries[DRAKEN_UINT8].add_s         = draken::ops::u8_add_scalar;
+        entries[DRAKEN_UINT8].sub_s         = draken::ops::u8_sub_scalar;
+        entries[DRAKEN_UINT8].mul_s         = draken::ops::u8_mul_scalar;
+        entries[DRAKEN_UINT8].div_s         = draken::ops::u8_div_scalar;
+        entries[DRAKEN_UINT8].mod_s         = draken::ops::u8_mod_scalar;
+        entries[DRAKEN_UINT8].compare_scalar = draken::ops::u8_compare_scalar;
+        entries[DRAKEN_UINT8].compare_vector = draken::ops::u8_compare_vector;
+        entries[DRAKEN_UINT8].between        = draken::ops::u8_between;
+        entries[DRAKEN_UINT8].in_list        = draken::ops::u8_in_list;
+        entries[DRAKEN_UINT8].sum           = draken::ops::u8_sum;
+        entries[DRAKEN_UINT8].min_r         = draken::ops::u8_min;
+        entries[DRAKEN_UINT8].max_r         = draken::ops::u8_max;
+
+        entries[DRAKEN_UINT16].hash        = draken::ops::hash_uint16;
+        entries[DRAKEN_UINT16].take        = draken::ops::u16_take;
+        entries[DRAKEN_UINT16].slice       = draken::ops::u16_slice;
+        entries[DRAKEN_UINT16].materialize = draken::ops::u16_materialize;
+        entries[DRAKEN_UINT16].compress    = draken::ops::u16_compress;
+        entries[DRAKEN_UINT16].add           = draken::ops::u16_add;
+        entries[DRAKEN_UINT16].sub           = draken::ops::u16_sub;
+        entries[DRAKEN_UINT16].mul           = draken::ops::u16_mul;
+        entries[DRAKEN_UINT16].div           = draken::ops::u16_div;
+        entries[DRAKEN_UINT16].mod           = draken::ops::u16_mod;
+        entries[DRAKEN_UINT16].add_s         = draken::ops::u16_add_scalar;
+        entries[DRAKEN_UINT16].sub_s         = draken::ops::u16_sub_scalar;
+        entries[DRAKEN_UINT16].mul_s         = draken::ops::u16_mul_scalar;
+        entries[DRAKEN_UINT16].div_s         = draken::ops::u16_div_scalar;
+        entries[DRAKEN_UINT16].mod_s         = draken::ops::u16_mod_scalar;
+        entries[DRAKEN_UINT16].compare_scalar = draken::ops::u16_compare_scalar;
+        entries[DRAKEN_UINT16].compare_vector = draken::ops::u16_compare_vector;
+        entries[DRAKEN_UINT16].between        = draken::ops::u16_between;
+        entries[DRAKEN_UINT16].in_list        = draken::ops::u16_in_list;
+        entries[DRAKEN_UINT16].sum           = draken::ops::u16_sum;
+        entries[DRAKEN_UINT16].min_r         = draken::ops::u16_min;
+        entries[DRAKEN_UINT16].max_r         = draken::ops::u16_max;
+
+        entries[DRAKEN_UINT32].hash        = draken::ops::hash_uint32;
+        entries[DRAKEN_UINT32].take        = draken::ops::u32_take;
+        entries[DRAKEN_UINT32].slice       = draken::ops::u32_slice;
+        entries[DRAKEN_UINT32].materialize = draken::ops::u32_materialize;
+        entries[DRAKEN_UINT32].compress    = draken::ops::u32_compress;
+        entries[DRAKEN_UINT32].add           = draken::ops::u32_add;
+        entries[DRAKEN_UINT32].sub           = draken::ops::u32_sub;
+        entries[DRAKEN_UINT32].mul           = draken::ops::u32_mul;
+        entries[DRAKEN_UINT32].div           = draken::ops::u32_div;
+        entries[DRAKEN_UINT32].mod           = draken::ops::u32_mod;
+        entries[DRAKEN_UINT32].add_s         = draken::ops::u32_add_scalar;
+        entries[DRAKEN_UINT32].sub_s         = draken::ops::u32_sub_scalar;
+        entries[DRAKEN_UINT32].mul_s         = draken::ops::u32_mul_scalar;
+        entries[DRAKEN_UINT32].div_s         = draken::ops::u32_div_scalar;
+        entries[DRAKEN_UINT32].mod_s         = draken::ops::u32_mod_scalar;
+        entries[DRAKEN_UINT32].compare_scalar = draken::ops::u32_compare_scalar;
+        entries[DRAKEN_UINT32].compare_vector = draken::ops::u32_compare_vector;
+        entries[DRAKEN_UINT32].between        = draken::ops::u32_between;
+        entries[DRAKEN_UINT32].in_list        = draken::ops::u32_in_list;
+        entries[DRAKEN_UINT32].sum           = draken::ops::u32_sum;
+        entries[DRAKEN_UINT32].min_r         = draken::ops::u32_min;
+        entries[DRAKEN_UINT32].max_r         = draken::ops::u32_max;
+
+        entries[DRAKEN_UINT64].hash        = draken::ops::hash_uint64;
+        entries[DRAKEN_UINT64].take        = draken::ops::u64_take;
+        entries[DRAKEN_UINT64].slice       = draken::ops::u64_slice;
+        entries[DRAKEN_UINT64].materialize = draken::ops::u64_materialize;
+        entries[DRAKEN_UINT64].compress    = draken::ops::u64_compress;
+        entries[DRAKEN_UINT64].add           = draken::ops::u64_add;
+        entries[DRAKEN_UINT64].sub           = draken::ops::u64_sub;
+        entries[DRAKEN_UINT64].mul           = draken::ops::u64_mul;
+        entries[DRAKEN_UINT64].div           = draken::ops::u64_div;
+        entries[DRAKEN_UINT64].mod           = draken::ops::u64_mod;
+        entries[DRAKEN_UINT64].add_s         = draken::ops::u64_add_scalar;
+        entries[DRAKEN_UINT64].sub_s         = draken::ops::u64_sub_scalar;
+        entries[DRAKEN_UINT64].mul_s         = draken::ops::u64_mul_scalar;
+        entries[DRAKEN_UINT64].div_s         = draken::ops::u64_div_scalar;
+        entries[DRAKEN_UINT64].mod_s         = draken::ops::u64_mod_scalar;
+        entries[DRAKEN_UINT64].compare_scalar = draken::ops::u64_compare_scalar;
+        entries[DRAKEN_UINT64].compare_vector = draken::ops::u64_compare_vector;
+        entries[DRAKEN_UINT64].sum           = draken::ops::u64_sum;
+        entries[DRAKEN_UINT64].min_r         = draken::ops::u64_min;
+        entries[DRAKEN_UINT64].max_r         = draken::ops::u64_max;
+        entries[DRAKEN_UINT64].between        = draken::ops::u64_between;
+        entries[DRAKEN_UINT64].in_list        = draken::ops::u64_in_list;
 
         // D.8 — TIMESTAMP64: physical dispatch reuses INT64 kernels.
         // Hot path dispatches on DRAKEN_TIMESTAMP64 and never reads the logical

@@ -101,7 +101,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_bitwise_not", (kernel_fn_t)&draken_bitwise_not},
 
     // ========================================================================
-    // Cast kernels (31 total)
+    // Cast kernels (43 total)
     // ========================================================================
 
     // Numeric type-specific casts (cast_numeric.cpp)
@@ -120,11 +120,38 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_integer_to_int64", (kernel_fn_t)&draken_cast_integer_to_int64},
     {"draken_cast_integer_to_string", (kernel_fn_t)&draken_cast_integer_to_string},
 
+    // E33 — any signed integer source (INT8/16/32/64) → the named unsigned
+    // target, range-checked (fail loud on negative/out-of-range, never wraps).
+    {"draken_cast_integer_to_uint8", (kernel_fn_t)&draken_cast_integer_to_uint8},
+    {"draken_cast_integer_to_uint16", (kernel_fn_t)&draken_cast_integer_to_uint16},
+    {"draken_cast_integer_to_uint32", (kernel_fn_t)&draken_cast_integer_to_uint32},
+    {"draken_cast_integer_to_uint64", (kernel_fn_t)&draken_cast_integer_to_uint64},
+    {"draken_cast_uint_to_int64", (kernel_fn_t)&draken_cast_uint_to_int64},
+
+    // E33 — FLOAT64/FLOAT32 → the named unsigned target, range-checked.
+    {"draken_cast_float_to_uint8", (kernel_fn_t)&draken_cast_float_to_uint8},
+    {"draken_cast_float_to_uint16", (kernel_fn_t)&draken_cast_float_to_uint16},
+    {"draken_cast_float_to_uint32", (kernel_fn_t)&draken_cast_float_to_uint32},
+    {"draken_cast_float_to_uint64", (kernel_fn_t)&draken_cast_float_to_uint64},
+
+    // E33 — BOOL → the named unsigned target (always 0/1, no range check).
+    {"draken_cast_bool_to_uint8", (kernel_fn_t)&draken_cast_bool_to_uint8},
+    {"draken_cast_bool_to_uint16", (kernel_fn_t)&draken_cast_bool_to_uint16},
+    {"draken_cast_bool_to_uint32", (kernel_fn_t)&draken_cast_bool_to_uint32},
+    {"draken_cast_bool_to_uint64", (kernel_fn_t)&draken_cast_bool_to_uint64},
+
     // String type-specific casts (cast_string.cpp)
     {"draken_cast_string_to_int64", (kernel_fn_t)&draken_cast_string_to_int64},
     {"draken_cast_string_to_bool", (kernel_fn_t)&draken_cast_string_to_bool},
     {"draken_cast_string_to_date32", (kernel_fn_t)&draken_cast_string_to_date32},
     {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},
+
+    // E33 — VARCHAR/NVARCHAR/VARBINARY → the named unsigned target (parse +
+    // range-check via composition with draken_cast_string_to_int64).
+    {"draken_cast_string_to_uint8", (kernel_fn_t)&draken_cast_string_to_uint8},
+    {"draken_cast_string_to_uint16", (kernel_fn_t)&draken_cast_string_to_uint16},
+    {"draken_cast_string_to_uint32", (kernel_fn_t)&draken_cast_string_to_uint32},
+    {"draken_cast_string_to_uint64", (kernel_fn_t)&draken_cast_string_to_uint64},
 
     // Temporal type-specific casts (cast_temporal.cpp)
     // DATE32 → VARCHAR ("YYYY-MM-DD"); registered under its real name (the header's

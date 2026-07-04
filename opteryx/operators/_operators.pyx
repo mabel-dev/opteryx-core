@@ -192,12 +192,13 @@ cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
 # in evaluation.pyx through these C fn-pointer shapes (the ScanPullFn idiom).
 ctypedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                              int* col_idx, void** lit_dv,
-                             CxxMorsel** out_filtered, int* err_op) noexcept nogil
+                             CxxMorsel** out_filtered, int* err_op,
+                             const char** err_msg) noexcept nogil
 ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                            int* col_idx, void** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
-                           int* err_op) noexcept nogil
+                           int* err_op, const char** err_msg) noexcept nogil
 
 cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nogil:
     cdef enum class AggFn "opteryx::engine::AggFn":
@@ -2284,23 +2285,24 @@ cpdef void push_right_one(JoinNode join, object morsel) except *:
 
 cdef int _expr_filter_tramp(void* instrs, int count, const CxxMorsel* m,
                             int* col_idx, void** lit_dv,
-                            CxxMorsel** out_filtered, int* err_op) noexcept nogil:
+                            CxxMorsel** out_filtered, int* err_op,
+                            const char** err_msg) noexcept nogil:
     """Native entry (matches ExprFilterFn) for ExprFilterOperator — the pure-nogil
     predicate span in evaluation.pyx. No PyObject inside."""
     return _dv_filter_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
-                               <DrakenVector**>lit_dv, out_filtered, err_op)
+                               <DrakenVector**>lit_dv, out_filtered, err_op, err_msg)
 
 
 cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
                           uint8_t** out_validity, void** out_sel,
-                          int* err_op) noexcept nogil:
+                          int* err_op, const char** err_msg) noexcept nogil:
     """Native entry (matches ExprEvalFn) for ExprProjectOperator — the pure-nogil
     computed-column span in evaluation.pyx. No PyObject inside."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, err_op)
+                             out_validity, out_sel, err_op, err_msg)
 
 
 cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,

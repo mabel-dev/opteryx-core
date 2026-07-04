@@ -241,6 +241,38 @@ static inline VecResult i64_bitwise_not(const DrakenVector& a)                  
 static inline VecResult i64_bitwise_shl(const DrakenVector& a, const DrakenVector& b) { return bi_shl_tmpl<int64_t, DRAKEN_INT64>(a, b); }
 static inline VecResult i64_bitwise_shr(const DrakenVector& a, const DrakenVector& b) { return bi_shr_tmpl<int64_t, DRAKEN_INT64>(a, b); }
 
+// E33 — UINT8/16/32/64. Same templates (bit ops don't care about signedness);
+// SHR on an unsigned T is a logical shift (zero-fill) via C++'s own semantics
+// for unsigned right-shift — no sign-extension special-casing needed, unlike SHR
+// on the signed family above.
+static inline VecResult u8_bitwise_and(const DrakenVector& a, const DrakenVector& b) { return bi_and_tmpl<uint8_t,  DRAKEN_UINT8>(a, b); }
+static inline VecResult u8_bitwise_or (const DrakenVector& a, const DrakenVector& b) { return bi_or_tmpl <uint8_t,  DRAKEN_UINT8>(a, b); }
+static inline VecResult u8_bitwise_xor(const DrakenVector& a, const DrakenVector& b) { return bi_xor_tmpl<uint8_t,  DRAKEN_UINT8>(a, b); }
+static inline VecResult u8_bitwise_not(const DrakenVector& a)                         { return bi_not_tmpl<uint8_t,  DRAKEN_UINT8>(a);    }
+static inline VecResult u8_bitwise_shl(const DrakenVector& a, const DrakenVector& b) { return bi_shl_tmpl<uint8_t,  DRAKEN_UINT8>(a, b); }
+static inline VecResult u8_bitwise_shr(const DrakenVector& a, const DrakenVector& b) { return bi_shr_tmpl<uint8_t,  DRAKEN_UINT8>(a, b); }
+
+static inline VecResult u16_bitwise_and(const DrakenVector& a, const DrakenVector& b) { return bi_and_tmpl<uint16_t, DRAKEN_UINT16>(a, b); }
+static inline VecResult u16_bitwise_or (const DrakenVector& a, const DrakenVector& b) { return bi_or_tmpl <uint16_t, DRAKEN_UINT16>(a, b); }
+static inline VecResult u16_bitwise_xor(const DrakenVector& a, const DrakenVector& b) { return bi_xor_tmpl<uint16_t, DRAKEN_UINT16>(a, b); }
+static inline VecResult u16_bitwise_not(const DrakenVector& a)                         { return bi_not_tmpl<uint16_t, DRAKEN_UINT16>(a);    }
+static inline VecResult u16_bitwise_shl(const DrakenVector& a, const DrakenVector& b) { return bi_shl_tmpl<uint16_t, DRAKEN_UINT16>(a, b); }
+static inline VecResult u16_bitwise_shr(const DrakenVector& a, const DrakenVector& b) { return bi_shr_tmpl<uint16_t, DRAKEN_UINT16>(a, b); }
+
+static inline VecResult u32_bitwise_and(const DrakenVector& a, const DrakenVector& b) { return bi_and_tmpl<uint32_t, DRAKEN_UINT32>(a, b); }
+static inline VecResult u32_bitwise_or (const DrakenVector& a, const DrakenVector& b) { return bi_or_tmpl <uint32_t, DRAKEN_UINT32>(a, b); }
+static inline VecResult u32_bitwise_xor(const DrakenVector& a, const DrakenVector& b) { return bi_xor_tmpl<uint32_t, DRAKEN_UINT32>(a, b); }
+static inline VecResult u32_bitwise_not(const DrakenVector& a)                         { return bi_not_tmpl<uint32_t, DRAKEN_UINT32>(a);    }
+static inline VecResult u32_bitwise_shl(const DrakenVector& a, const DrakenVector& b) { return bi_shl_tmpl<uint32_t, DRAKEN_UINT32>(a, b); }
+static inline VecResult u32_bitwise_shr(const DrakenVector& a, const DrakenVector& b) { return bi_shr_tmpl<uint32_t, DRAKEN_UINT32>(a, b); }
+
+static inline VecResult u64_bitwise_and(const DrakenVector& a, const DrakenVector& b) { return bi_and_tmpl<uint64_t, DRAKEN_UINT64>(a, b); }
+static inline VecResult u64_bitwise_or (const DrakenVector& a, const DrakenVector& b) { return bi_or_tmpl <uint64_t, DRAKEN_UINT64>(a, b); }
+static inline VecResult u64_bitwise_xor(const DrakenVector& a, const DrakenVector& b) { return bi_xor_tmpl<uint64_t, DRAKEN_UINT64>(a, b); }
+static inline VecResult u64_bitwise_not(const DrakenVector& a)                         { return bi_not_tmpl<uint64_t, DRAKEN_UINT64>(a);    }
+static inline VecResult u64_bitwise_shl(const DrakenVector& a, const DrakenVector& b) { return bi_shl_tmpl<uint64_t, DRAKEN_UINT64>(a, b); }
+static inline VecResult u64_bitwise_shr(const DrakenVector& a, const DrakenVector& b) { return bi_shr_tmpl<uint64_t, DRAKEN_UINT64>(a, b); }
+
 // ---------------------------------------------------------------------------
 // Dispatch entry points — one per op, switch on v.type.
 //
@@ -261,6 +293,10 @@ static inline VecResult fn_name(const DrakenVector& a, const DrakenVector& b) { 
         case DRAKEN_INT16: return i16_##kernel_stem(a, b);                             \
         case DRAKEN_INT32: return i32_##kernel_stem(a, b);                             \
         case DRAKEN_INT64: return i64_##kernel_stem(a, b);                             \
+        case DRAKEN_UINT8:  return u8_##kernel_stem(a, b);                             \
+        case DRAKEN_UINT16: return u16_##kernel_stem(a, b);                            \
+        case DRAKEN_UINT32: return u32_##kernel_stem(a, b);                            \
+        case DRAKEN_UINT64: return u64_##kernel_stem(a, b);                            \
         default: throw std::invalid_argument(#fn_name ": unsupported type");           \
     }                                                                                   \
 }
@@ -279,6 +315,10 @@ static inline VecResult bitwise_not(const DrakenVector& a) {
         case DRAKEN_INT16: return i16_bitwise_not(a);
         case DRAKEN_INT32: return i32_bitwise_not(a);
         case DRAKEN_INT64: return i64_bitwise_not(a);
+        case DRAKEN_UINT8:  return u8_bitwise_not(a);
+        case DRAKEN_UINT16: return u16_bitwise_not(a);
+        case DRAKEN_UINT32: return u32_bitwise_not(a);
+        case DRAKEN_UINT64: return u64_bitwise_not(a);
         default: throw std::invalid_argument("bitwise_not: unsupported type");
     }
 }

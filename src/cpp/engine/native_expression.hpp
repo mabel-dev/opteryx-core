@@ -27,13 +27,24 @@ namespace opteryx::engine {
 
 // Signatures of the Cython-side pure-nogil spans (passed in as C fn pointers, the
 // same idiom as ScanPullFn — the engine never links against the Cython module).
+// `err_msg` (rc 4 only) is the failing kernel's VecResult::error_msg (see
+// draken/ops/vec_result.h) — a pointer into that thread's error_handling.cpp
+// buffer, valid only until the next kernel call on THIS thread. It is threaded
+// through explicitly rather than re-fetched via draken_get_error_message():
+// error_handling.cpp is compiled into more than one extension (draken_native,
+// _kernel_registry), each with its own thread_local buffer, and this file's
+// `-undefined dynamic_lookup` binding to that symbol is not guaranteed to land
+// on the same copy the failing kernel actually wrote — confirmed empty in
+// practice. Passing the pointer as data sidesteps that ambiguity entirely.
 typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                             int* col_idx, void** lit_dv,
-                            CxxMorsel** out_filtered, int* err_op);
+                            CxxMorsel** out_filtered, int* err_op,
+                            const char** err_msg);
 typedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
-                          uint8_t** out_validity, void** out_sel, int* err_op);
+                          uint8_t** out_validity, void** out_sel, int* err_op,
+                          const char** err_msg);
 
 // One plan-resolved expression program. `instrs` is BORROWED — the NativePlan
 // holds the CompiledBytecode (and thereby the instruction array and every literal
@@ -44,6 +55,24 @@ struct ExprProgram {
     std::vector<int> col_idx;    // per-instruction column index (-1 = not a load)
     std::vector<void*> lit_dv;   // per-instruction literal DrakenVector* (or null)
 };
+
+// ErrCtx::msg is a bare `const char*` that must stay valid until the Cython raise
+// site reads it (see _engine_plan_run in _operators.pyx). `kernel_msg` (from the
+// ExprFilterFn/ExprEvalFn out-param) is only valid until the next kernel call on
+// THIS thread — that hasn't happened yet (this operator's worker thread bails out
+// immediately on error; see executor.hpp's `push`) — so it's still safe to read
+// here, but not safe to stash as-is. Combine it into a thread_local std::string:
+// thread_local (not a stack local) because `format_kernel_error`'s return value
+// must outlive this call, thread_local instead of a member on the operator
+// because the same Operator instance is shared and called concurrently by every
+// worker thread (dop > 1) — a member would race.
+inline const char* format_kernel_error(const char* op_name, int err_op,
+                                       const char* kernel_msg) {
+    static thread_local std::string buf;
+    buf = std::string(op_name) + " (err_op=" + std::to_string(err_op) + "): " +
+          (kernel_msg != nullptr ? kernel_msg : "");
+    return buf.c_str();
+}
 
 // ---- ExprFilterOperator: WHERE over an arbitrary c-native predicate --------------
 
@@ -61,12 +90,13 @@ struct ExprFilterOperator : Operator {
         if (in->num_rows() == 0) return OpResult::NEED_INPUT;
         CxxMorsel* filtered = nullptr;
         int err_op = 0;
+        const char* kernel_msg = nullptr;
         int rc = fn(prog.instrs, prog.count, in.get(), prog.col_idx.data(),
-                    prog.lit_dv.data(), &filtered, &err_op);
+                    prog.lit_dv.data(), &filtered, &err_op, &kernel_msg);
         if (rc != 0) {
             err.code = 1;
-            err.msg = "ExprFilterOperator: predicate evaluation failed (kernel error "
-                      "or non-c-native program reached execution — see err_op)";
+            err.msg = format_kernel_error("ExprFilterOperator: predicate evaluation failed",
+                                          err_op, kernel_msg);
             return OpResult::NEED_INPUT;
         }
         std::shared_ptr<CxxMorsel> result(filtered);
@@ -112,16 +142,18 @@ struct ExprMultiProjectOperator : Operator {
             uint8_t* validity = nullptr;
             void* sel = nullptr;
             int err_op = 0;
+            const char* kernel_msg = nullptr;
             int rc = fn(progs[k].instrs, progs[k].count, m.get(),
                         progs[k].col_idx.data(), progs[k].lit_dv.data(),
-                        &v, &data, &validity, &sel, &err_op);
+                        &v, &data, &validity, &sel, &err_op, &kernel_msg);
             if (rc != 0) {
                 err.code = 1;
                 err.msg = (rc == 98)
                     ? "ExprMultiProjectOperator: expression result is not a "
                       "fixed-width type this span can materialize — fail loud"
-                    : "ExprMultiProjectOperator: expression evaluation failed "
-                      "(kernel error)";
+                    : format_kernel_error(
+                          "ExprMultiProjectOperator: expression evaluation failed",
+                          err_op, kernel_msg);
                 return OpResult::NEED_INPUT;
             }
             CxxColumn nc;

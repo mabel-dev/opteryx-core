@@ -355,6 +355,7 @@ cdef class FilterNode(BasePlanNode):
         cdef CxxMorsel* filtered = NULL
         cdef CxxMorsel* selected = NULL
         cdef int err_op = 0
+        cdef const char* err_msg_ptr = NULL
         cdef int rc
         if is_eos:
             return self._emit_cdef(m, err)        # forward the EOS carrier
@@ -370,9 +371,12 @@ cdef class FilterNode(BasePlanNode):
                         self._flt_resolve_keep(raw)  # post-filter keep-columns (once)
                         self._flt_resolved = True
             if self._flt_nogil_ok:
+                # rc != 0 (kernel error / not applicable) falls through to the gil
+                # path below, which re-runs the predicate through the GIL VM and
+                # raises there with its own message — err_msg_ptr is unused here.
                 rc = _dv_filter_span_cxx(self._flt_instrs, self._flt_count, raw,
                                          self._flt_col_idx, self._flt_lit_dv,
-                                         &filtered, &err_op)
+                                         &filtered, &err_op, &err_msg_ptr)
                 if rc == 0:
                     self.nogil_filter_morsels += 1
                     if filtered != NULL and filtered.num_rows() > 0:

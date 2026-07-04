@@ -20,6 +20,9 @@ cdef extern from "core/draken_bridge.h":
     PyObject* draken_vector_own_dict_i64(void* data, uint32_t data_length,
                                           uint32_t* codes, uint32_t length,
                                           uint8_t* validity)
+    PyObject* draken_vector_own_dict(void* data, uint32_t data_length,
+                                      uint32_t* codes, uint32_t length,
+                                      uint8_t* validity, DrakenType dtype)
 
 cdef extern from *:
     """static inline void _vec_shim_decref(PyObject* op) { Py_DECREF(op); }"""
@@ -319,6 +322,26 @@ cdef Vector dict_int64_from_decoded(void* dict_vals, uint32_t data_length,
     cdef PyObject* raw = draken_vector_own_dict_i64(dict_vals, data_length, codes, length, validity)
     if raw == NULL:
         raise MemoryError("draken_vector_own_dict_i64 failed")
+    cdef Vector result = Vector.__new__(Vector)
+    result._nb = <object>raw
+    _vec_shim_decref(raw)
+    result._dv = draken_vector_unwrap(raw)
+    return result
+
+
+cdef Vector dict_from_decoded(void* dict_vals, uint32_t data_length,
+                              uint32_t* codes, uint32_t length,
+                              uint8_t* validity, DrakenType dtype):
+    """Create a dict-encoded Vector of `dtype` from hand-allocated (draken_malloc)
+    buffers. Generic analogue of dict_int64_from_decoded (E33: added for
+    DRAKEN_UINT8/16/32/64, which have no fixed elem size the way int64/float64/
+    float32 do — the caller's dict_vals buffer must already be laid out at
+    dtype's native elem size). All non-NULL buffers MUST be draken_malloc'd;
+    ownership is transferred on call.
+    """
+    cdef PyObject* raw = draken_vector_own_dict(dict_vals, data_length, codes, length, validity, dtype)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_dict failed")
     cdef Vector result = Vector.__new__(Vector)
     result._nb = <object>raw
     _vec_shim_decref(raw)

@@ -7,8 +7,11 @@ module is the authority for those parameters:
 
 - DECIMAL (p, s)  — SQL Server rules (Decision E), capped at our int64 precision of 18,
   overflow → raise (never silently truncate; int128 backing is the deferred fix).
-- INTEGER width   — the wider of the integer operands, matching Draken's kernel
-  (`promote_narrow_int` computes at `wider_int_type` = the wider operand).
+- INTEGER width   — same-sign pairs: the wider of the integer operands, matching
+  Draken's kernel (`promote_narrow_int` computes at `wider_int_type` = the wider
+  operand). Cross-sign pairs: widen to the smallest signed type covering both ranges
+  (DuckDB's UBIGINT+INTEGER -> HUGEINT rule); UINT64 x signed bottoms out at
+  DECIMAL128(38, 0), the only type wide enough. See `_int_result_type`.
 - FLOAT width     — FLOAT64 if any operand is FLOAT64, else FLOAT32 (integer/integer
   division yields FLOAT64).
 
@@ -36,14 +39,37 @@ _INT_RANK = {
 }
 _INT_BY_RANK = {0: lt.INT8, 1: lt.INT16, 2: lt.INT32, 3: lt.INT64}
 
-# Decimal digits needed to hold each signed integer width (for int-as-decimal in mixed
-# DECIMAL/INTEGER arithmetic). INT64 needs 19 digits — already over our cap of 18, so
-# any DECIMAL op INT64 that grows will hit the overflow policy and raise (honest).
+# Unsigned integer width ordering — same-sign pairs resolve exactly like _INT_RANK
+# (wider wins, sign preserved).
+_UINT_RANK = {
+    DrakenType.UINT8: 0,
+    DrakenType.UINT16: 1,
+    DrakenType.UINT32: 2,
+    DrakenType.UINT64: 3,
+}
+_UINT_BY_RANK = {0: lt.UINT8, 1: lt.UINT16, 2: lt.UINT32, 3: lt.UINT64}
+
+# Cross-sign promotion lattice: the narrowest native SIGNED type whose range is a
+# strict superset of the unsigned type's full range (matches DuckDB's implicit-cast
+# ladder: UTINYINT->SMALLINT, USMALLINT->INTEGER, UINTEGER->BIGINT, UBIGINT->HUGEINT).
+# UINT64's full range needs 65 bits — no native signed 64-bit type is wide enough, so
+# it has no entry here; that case is the DECIMAL128 escape valve handled explicitly in
+# `_int_result_type` (our int128-unscaled equivalent of DuckDB's HUGEINT).
+_MIN_SIGNED_FOR_UINT_RANK = {0: lt.INT16, 1: lt.INT32, 2: lt.INT64}
+
+# Decimal digits needed to hold each integer width (for int-as-decimal in mixed
+# DECIMAL/INTEGER arithmetic). INT64 needs 19 digits, UINT64 needs 20 — both already
+# over our int64-tier cap of 18, so any DECIMAL op growing past that hits the overflow
+# policy and raises (honest) rather than silently truncating.
 _INT_DIGITS = {
     DrakenType.INT8: 3,
     DrakenType.INT16: 5,
     DrakenType.INT32: 10,
     DrakenType.INT64: 19,
+    DrakenType.UINT8: 3,
+    DrakenType.UINT16: 5,
+    DrakenType.UINT32: 10,
+    DrakenType.UINT64: 20,
 }
 
 # Non-parameterized result categories -> canonical instance.
@@ -125,6 +151,39 @@ def _decimal_result(left: ColumnType, right: ColumnType, op: str) -> ColumnType:
     return _make_decimal(precision, scale)
 
 
+def _int_result_type(left: ColumnType, right: ColumnType) -> ColumnType:
+    """INTEGER-category result width for a binary op, per the signed/unsigned lattice.
+
+    Same-sign pairs: wider width wins (unchanged convention). Cross-sign pairs: widen
+    to the smallest signed type that can hold BOTH operands' full ranges — matches
+    DuckDB's UBIGINT+INTEGER -> HUGEINT rule. A UINT64 paired with anything has no
+    native signed 64-bit type wide enough (2^64-1 needs 65 bits), so it bottoms out at
+    DECIMAL128(38, 0) (int128 unscaled — DuckDB's HUGEINT equivalent).
+    """
+    operands = [o for o in (left, right) if o.category == LogicalCategory.INTEGER]
+    if not operands:
+        raise NotImplementedError(
+            "INTEGER result requires at least one INTEGER operand to size the width"
+        )
+    if len(operands) == 1:
+        return operands[0]
+
+    left_u = left.physical in _UINT_RANK
+    right_u = right.physical in _UINT_RANK
+
+    if left_u and right_u:
+        return _UINT_BY_RANK[max(_UINT_RANK[left.physical], _UINT_RANK[right.physical])]
+
+    if not left_u and not right_u:
+        return _INT_BY_RANK[max(_INT_RANK[left.physical], _INT_RANK[right.physical])]
+
+    signed_ct, uint_ct = (right, left) if left_u else (left, right)
+    min_signed = _MIN_SIGNED_FOR_UINT_RANK.get(_UINT_RANK[uint_ct.physical])
+    if min_signed is None:
+        return _make_decimal(38, 0)  # UINT64 x signed: no native signed width is wide enough
+    return _INT_BY_RANK[max(_INT_RANK[signed_ct.physical], _INT_RANK[min_signed.physical])]
+
+
 def compute_result_logical_type(
     left: ColumnType, right: ColumnType, op: str, result_category: LogicalCategory
 ) -> ColumnType:
@@ -139,16 +198,7 @@ def compute_result_logical_type(
         return _decimal_result(left, right, op)
 
     if result_category == LogicalCategory.INTEGER:
-        ranks = [
-            _INT_RANK[o.physical]
-            for o in (left, right)
-            if o.category == LogicalCategory.INTEGER
-        ]
-        if not ranks:
-            raise NotImplementedError(
-                "INTEGER result requires at least one INTEGER operand to size the width"
-            )
-        return _INT_BY_RANK[max(ranks)]
+        return _int_result_type(left, right)
 
     if result_category == LogicalCategory.FLOAT:
         if DrakenType.FLOAT64 in (left.physical, right.physical):

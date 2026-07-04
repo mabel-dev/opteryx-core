@@ -46,7 +46,8 @@ from opteryx.compiled.structures.column_stats cimport FileColumnStats, file_colu
 # GIL held). DirectKind 1=int64 2=float32 3=float64 4=bool 5=decimal128.
 from draken.core.buffers cimport (
     DrakenType, DrakenVector,
-    DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_DECIMAL128, DRAKEN_VARCHAR
+    DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_DECIMAL128, DRAKEN_VARCHAR,
+    DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 )
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from cpython.ref cimport PyObject
@@ -86,6 +87,9 @@ cdef extern from "core/draken_bridge.h":
     PyObject* draken_vector_own_dict_f32(
         void* data, uint32_t data_length,
         uint32_t* codes, uint32_t length, uint8_t* validity)
+    PyObject* draken_vector_own_dict(
+        void* data, uint32_t data_length,
+        uint32_t* codes, uint32_t length, uint8_t* validity, DrakenType vec_type)
 
 from rugo.parquet import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
@@ -174,7 +178,8 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     (dictionary) + validity come via morsel_take_direct; the codes selection via
     morsel_take_string (arena is NULL for numeric dicts). The draken own_dict_*
     entry owns all three buffers; both takes null the MorselRef slots so the
-    destructor frees nothing. dk: 8=int64, 9=float64, 10=float32."""
+    destructor frees nothing. dk: 8=int64, 9=float64, 10=float32,
+    15..18=uint8/16/32/64 (E33 — exact declared width, no widening)."""
     cdef uint32_t dlen = result.columns[i].length
     cdef uint32_t data_length = result.columns[i].data_length
     cdef void* data_ptr
@@ -183,12 +188,23 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     cdef void* codes_ptr
     cdef PyObject* raw
     cdef Vector vec
+    cdef DrakenType udtype
     data_ptr = morsel_take_direct(result[0], i, &dval)
     morsel_take_string(result[0], i, &arena_ptr, &codes_ptr)
     if dk == 9:
         raw = draken_vector_own_dict_f64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
     elif dk == 10:
         raw = draken_vector_own_dict_f32(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
+    elif dk == 15 or dk == 16 or dk == 17 or dk == 18:
+        if dk == 15:
+            udtype = DRAKEN_UINT8
+        elif dk == 16:
+            udtype = DRAKEN_UINT16
+        elif dk == 17:
+            udtype = DRAKEN_UINT32
+        else:
+            udtype = DRAKEN_UINT64
+        raw = draken_vector_own_dict(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval, udtype)
     else:
         raw = draken_vector_own_dict_i64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
     if raw == NULL:
@@ -219,7 +235,7 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
         return _wrap_string_direct(result, i, want_type)
     if dk == 7:
         return _wrap_string_dict_direct(result, i, want_type)
-    if dk == 8 or dk == 9 or dk == 10:
+    if dk == 8 or dk == 9 or dk == 10 or dk == 15 or dk == 16 or dk == 17 or dk == 18:
         return _wrap_num_dict_direct(result, i, dk)
     if dk == 1:
         dtype = DRAKEN_INT64
@@ -229,6 +245,14 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
         dtype = DRAKEN_FLOAT64
     elif dk == 4:
         dtype = DRAKEN_BOOL
+    elif dk == 11:
+        dtype = DRAKEN_UINT8
+    elif dk == 12:
+        dtype = DRAKEN_UINT16
+    elif dk == 13:
+        dtype = DRAKEN_UINT32
+    elif dk == 14:
+        dtype = DRAKEN_UINT64
     else:  # dk == 5
         dtype = DRAKEN_DECIMAL128
     dptr = morsel_take_direct(result[0], i, &dval)

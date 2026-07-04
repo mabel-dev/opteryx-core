@@ -90,6 +90,15 @@ def get_vector_type(obj) -> VectorType:
             "INT32": VectorType.INTEGER,
             "INT16": VectorType.INTEGER,
             "INT8": VectorType.INTEGER,
+            # E33 — unsigned ints collapse the same way the signed family does:
+            # UINT64 alongside the other 64-bit-wide type, UINT8/16/32 alongside
+            # the other narrow-int widths (LogicalCategory.INTEGER already
+            # collapses all eight signed+unsigned widths into one SQL-facing
+            # category — this mirrors that at the vector-dispatch level).
+            "UINT64": VectorType.INT64,
+            "UINT32": VectorType.INTEGER,
+            "UINT16": VectorType.INTEGER,
+            "UINT8": VectorType.INTEGER,
             "FLOAT64": VectorType.FLOAT64,
             "FLOAT32": VectorType.FLOAT64,
             "BOOL": VectorType.BOOL,

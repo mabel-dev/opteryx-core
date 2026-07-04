@@ -605,6 +605,7 @@ from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
 
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
+from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 from draken.core.buffers cimport DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_TIMESTAMP64
 from draken.core.buffers cimport DRAKEN_INTERVAL
@@ -658,6 +659,7 @@ cdef extern from "ops/vec_result.h":
         DrakenType        type
         uint8_t           flags
         uint8_t           validity_embedded
+        const char*       error_msg
 
 # Function-pointer typedefs per Decision 3 (Phase 9 design, §Post-design)
 ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) nogil
@@ -668,12 +670,6 @@ ctypedef VecResult (*cast_child_fn_t)(void* ctx, const DrakenVector* parent,
 ctypedef VecResult (*extr_fn_t)(void* ctx, const DrakenVector* v, const DrakenVector* key) nogil
 ctypedef VecResult (*func_fn_t)(void* ctx, const DrakenVector* const* args, uint32_t nargs) nogil
 ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) nogil
-
-# Error handling for kernel results
-cdef extern from "ops/kernels/error_handling.h":
-    const char* draken_get_error_message() nogil
-    void draken_error_message_clear() nogil
-    bint draken_has_error() nogil
 
 # VecResult → Python Vector (VectorOwner) trampoline. Declared returning `object`
 # so Cython manages the new reference; honors validity_embedded + ts_unit, which a
@@ -1713,14 +1709,18 @@ cdef int c_execute_dv_inner(
     DrakenFrameArena* arena,
     Py_ssize_t nbytes, uint32_t num_rows,
     int* err_op,
+    const char** err_msg,
 ) noexcept nogil:
     """Nogil DV* VM inner loop for is_all_c_native bytecodes.
 
     Loads read pre-resolved DV* from dv_cache; compute ops call the shared
     _dv_* helpers. Returns 0 on success (result at dv_stack[0]); otherwise the
     helper rc (1 NULL-operand, 2 alloc, 3 compare-N/A, 4 kernel-error, 5 string)
-    with *err_op set to the failing opcode. No PyObject, no anchor — the GIL
-    caller materializes dv_stack[0] (an arena result) and maps any error.
+    with *err_op set to the failing opcode. On rc 4, *err_msg is the failing
+    kernel's VecResult.error_msg (see vec_result.h — a pointer into THIS
+    thread's error_handling.cpp buffer, valid until the next kernel call on
+    this thread; NULL otherwise). No PyObject, no anchor — the GIL caller
+    materializes dv_stack[0] (an arena result) and maps any error.
     """
     cdef Py_ssize_t sp = 0
     cdef Py_ssize_t i
@@ -1732,6 +1732,7 @@ cdef int c_execute_dv_inner(
     cdef DrakenVector* dv_right_ptr
     cdef void* result_data_ptr
     cdef VecResult vr
+    err_msg[0] = NULL
     for i in range(n_instrs):
         slot = &instrs[i]
         opcode = slot.opcode
@@ -1850,6 +1851,8 @@ cdef int c_execute_dv_inner(
             return 99
         if rc != 0:
             err_op[0] = opcode
+            if rc == 4:
+                err_msg[0] = vr.error_msg
             return rc
     return 0
 
@@ -1877,6 +1880,7 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef int err_op = 0
+    cdef const char* err_msg_ptr = NULL
     cdef int rc
     cdef bint use_substrate = (m != NULL)
     cdef object err_msg
@@ -1897,16 +1901,15 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
                 _dv_fill_cache_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, dv_cache)
             rc = c_execute_dv_inner(
                 bc.instrs, bc.count, dv_cache, dv_stack, dv_store,
-                arena, nbytes, <uint32_t>num_rows, &err_op)
+                arena, nbytes, <uint32_t>num_rows, &err_op, &err_msg_ptr)
         if rc == 0:
             # Gate guarantees the last op is a compute op → arena result, anchor None.
             return _slot_to_pyobj(dv_stack[0], None, arena)
         if rc == 4:
             err_msg = (
-                draken_get_error_message().decode("utf-8", "replace")
-                if draken_has_error() else "C kernel error"
+                err_msg_ptr.decode("utf-8", "replace")
+                if err_msg_ptr != NULL else "C kernel error"
             )
-            draken_error_message_clear()
             raise ValueError(err_msg)
         if rc == 1:
             raise TypeError("evaluate_c_native: NULL operand")
@@ -1992,16 +1995,17 @@ cdef int _dv_cxx_resolve_caches(
 cdef int _dv_filter_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
-    CxxMorsel** out_filtered, int* err_op,
+    CxxMorsel** out_filtered, int* err_op, const char** err_msg,
 ) noexcept nogil:
     """Pure-nogil filter span: fill the DV* cache from a PRE-RESOLVED (col_idx,
     lit_dv) pair, evaluate the predicate, and gather the surviving rows via
     cxx_mask_c. Owns its frame arena (created/destroyed here). Returns the
-    c_execute rc: 0 → ``*out_filtered`` is a NEW owned CxxMorsel; 4 → kernel error;
-    99 → arena OOM; other → not applicable. (col_idx, lit_dv) are resolved ONCE by
-    the caller via _dv_cxx_resolve_caches and reused across morsels — that resolve is
-    the only GIL-needing step; this span has no PyObject access, so a converted
-    operator can call it inside `with nogil`."""
+    c_execute rc: 0 → ``*out_filtered`` is a NEW owned CxxMorsel; 4 → kernel error
+    (``*err_msg`` set, see c_execute_dv_inner); 99 → arena OOM; other → not
+    applicable. (col_idx, lit_dv) are resolved ONCE by the caller via
+    _dv_cxx_resolve_caches and reused across morsels — that resolve is the only
+    GIL-needing step; this span has no PyObject access, so a converted operator
+    can call it inside `with nogil`."""
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
@@ -2011,10 +2015,11 @@ cdef int _dv_filter_span_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     if arena == NULL:
         err_op[0] = -99
+        err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, <uint32_t>num_rows, err_op)
+                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
     if rc == 0:
         out_filtered[0] = cxx_mask_c(m, dv_stack[0])
     draken_frame_arena_destroy(arena)
@@ -2025,13 +2030,13 @@ cdef int _dv_filter_and_mask_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
     CxxMorsel** out_filtered, uint8_t* out_mask,
-    Py_ssize_t nbytes, uint32_t num_rows, int* err_op,
+    Py_ssize_t nbytes, uint32_t num_rows, int* err_op, const char** err_msg,
 ) noexcept nogil:
     """Scan pass-1 twin of _dv_filter_span_cxx: besides the filtered CxxMorsel it
     ALSO copies the per-logical-row survival bitmap into out_mask (caller owns; nbytes
     long). A row survives iff the predicate bit is set AND the row is non-NULL — the
     mask is data-bitmap AND validity, matching cxx_mask_c's own drop semantics. Lets
-    the parquet scan produce mask_bytes without the GIL Morsel VM. rc as
+    the parquet scan produce mask_bytes without the GIL Morsel VM. rc/err_msg as
     _dv_filter_span_cxx."""
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
@@ -2043,16 +2048,18 @@ cdef int _dv_filter_and_mask_span_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     if arena == NULL:
         err_op[0] = -99
+        err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, num_rows, err_op)
+                            arena, nbytes, num_rows, err_op, err_msg)
     if rc == 0:
         mask_dv = dv_stack[0]
         dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
         if dense == NULL:
             draken_frame_arena_destroy(arena)
             err_op[0] = -99
+            err_msg[0] = NULL
             return 99
         memcpy(out_mask, dense, <size_t>nbytes)
         if mask_dv.validity != NULL:
@@ -2065,13 +2072,14 @@ cdef int _dv_filter_and_mask_span_cxx(
 
 cdef size_t _dv_result_elem_size(DrakenType t) noexcept nogil:
     """Byte width of one fixed-width value; 0 for bit-packed BOOL / unsupported."""
-    if t == DRAKEN_INT8:
+    if t == DRAKEN_INT8 or t == DRAKEN_UINT8:
         return 1
-    if t == DRAKEN_INT16:
+    if t == DRAKEN_INT16 or t == DRAKEN_UINT16:
         return 2
-    if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
+    if (t == DRAKEN_INT32 or t == DRAKEN_UINT32 or t == DRAKEN_FLOAT32
+            or t == DRAKEN_DATE32 or t == DRAKEN_TIME32):
         return 4
-    if (t == DRAKEN_INT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
+    if (t == DRAKEN_INT64 or t == DRAKEN_UINT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
             or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64):
         return 8
     if t == DRAKEN_DECIMAL128 or t == DRAKEN_INTERVAL:
@@ -2237,14 +2245,15 @@ cdef int _dv_eval_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
-    int* err_op,
+    int* err_op, const char** err_msg,
 ) noexcept nogil:
     """Pure-nogil expression span for a COMPUTED column (the projection twin of
     _dv_filter_span_cxx): evaluate the program over pre-resolved (col_idx, lit_dv)
     and deep-copy the arena result into fresh caller-owned buffers. rc 0 → out_vec/
-    out_data/out_validity/out_sel filled (ownership transferred); 4 → kernel error;
-    98 → non-fixed-width result (fail loud upstream); 99 → arena OOM; other → the
-    c_execute rc. No PyObject anywhere — callable from the engine's worker threads."""
+    out_data/out_validity/out_sel filled (ownership transferred); 4 → kernel error
+    (``*err_msg`` set, see c_execute_dv_inner); 98 → non-fixed-width result (fail
+    loud upstream); 99 → arena OOM; other → the c_execute rc. No PyObject
+    anywhere — callable from the engine's worker threads."""
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
@@ -2254,14 +2263,16 @@ cdef int _dv_eval_span_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     if arena == NULL:
         err_op[0] = -99
+        err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, <uint32_t>num_rows, err_op)
+                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
     if rc == 0:
         if _dv_copy_result_dense(dv_stack[0], out_vec, out_data, out_validity,
                                  out_sel) != 0:
             err_op[0] = -98
+            err_msg[0] = NULL
             rc = 98
     draken_frame_arena_destroy(arena)
     return rc
@@ -2283,21 +2294,22 @@ cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
     cdef int col_idx[256]
     cdef DrakenVector* lit_dv[256]
     cdef int err_op = 0
+    cdef const char* err_msg_ptr = NULL
     cdef int rc
     cdef CxxMorsel* filtered = NULL
     cdef object err_msg
     if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
         return None
     with nogil:
-        rc = _dv_filter_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, &filtered, &err_op)
+        rc = _dv_filter_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, &filtered,
+                                 &err_op, &err_msg_ptr)
     if rc == 0:
         return cxx_to_morsel(shared_ptr[CxxMorsel](filtered))
     if rc == 4:
         err_msg = (
-            draken_get_error_message().decode("utf-8", "replace")
-            if draken_has_error() else "C kernel error"
+            err_msg_ptr.decode("utf-8", "replace")
+            if err_msg_ptr != NULL else "C kernel error"
         )
-        draken_error_message_clear()
         raise ValueError(err_msg)
     # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
     return None
@@ -2319,6 +2331,7 @@ cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel mors
     cdef int col_idx[256]
     cdef DrakenVector* lit_dv[256]
     cdef int err_op = 0
+    cdef const char* err_msg_ptr = NULL
     cdef int rc
     cdef CxxMorsel* filtered = NULL
     cdef uint8_t* mask_buf
@@ -2331,7 +2344,7 @@ cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel mors
     with nogil:
         rc = _dv_filter_and_mask_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv,
                                           &filtered, mask_buf, nbytes,
-                                          <uint32_t>num_rows, &err_op)
+                                          <uint32_t>num_rows, &err_op, &err_msg_ptr)
     if rc == 0:
         mask_bytes = (<char*>mask_buf)[:nbytes]   # owned Python bytes copy
         draken_free(mask_buf)
@@ -2339,10 +2352,9 @@ cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel mors
     draken_free(mask_buf)
     if rc == 4:
         err_msg = (
-            draken_get_error_message().decode("utf-8", "replace")
-            if draken_has_error() else "C kernel error"
+            err_msg_ptr.decode("utf-8", "replace")
+            if err_msg_ptr != NULL else "C kernel error"
         )
-        draken_error_message_clear()
         raise ValueError(err_msg)
     return None
 
@@ -2738,10 +2750,9 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         dv_store, dv_stack, sp, arena, &binop_vr)
                     if rc == 4:
                         cast_err_msg = (
-                            draken_get_error_message().decode("utf-8", "replace")
-                            if draken_has_error() else "C binop kernel error"
+                            binop_vr.error_msg.decode("utf-8", "replace")
+                            if binop_vr.error_msg != NULL else "C binop kernel error"
                         )
-                        draken_error_message_clear()
                         raise ValueError(cast_err_msg)
                     if rc == 5:
                         # String result (e.g. ||): consolidated block with embedded
@@ -2858,10 +2869,9 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         <uint32_t>arity, dv_store, dv_stack, sp, arena, &binop_vr)
                     if rc == 4:
                         cast_err_msg = (
-                            draken_get_error_message().decode("utf-8", "replace")
-                            if draken_has_error() else "C function kernel error"
+                            binop_vr.error_msg.decode("utf-8", "replace")
+                            if binop_vr.error_msg != NULL else "C function kernel error"
                         )
-                        draken_error_message_clear()
                         raise ValueError(cast_err_msg)
                     if rc == 5:
                         legacy_result = Vector(draken_vecresult_own_c(binop_vr))
@@ -3012,10 +3022,9 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         dv_store, dv_stack, sp, arena, &cast_vr)
                     if rc == 4:
                         cast_err_msg = (
-                            draken_get_error_message().decode("utf-8", "replace")
-                            if draken_has_error() else "C cast kernel error"
+                            cast_vr.error_msg.decode("utf-8", "replace")
+                            if cast_vr.error_msg != NULL else "C cast kernel error"
                         )
-                        draken_error_message_clear()
                         raise ValueError(cast_err_msg)
                     if rc == 5:
                         # String result: consolidated block with embedded validity —

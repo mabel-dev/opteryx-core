@@ -46,4 +46,14 @@ struct VecResult {
     uint8_t           dec_precision    = 0u;      // DECIMAL/DECIMAL128 result precision;
                                                   // 0 = no descriptor (carries scale too).
     uint8_t           dec_scale        = 0u;      // DECIMAL/DECIMAL128 result scale.
+    // On error (data == nullptr), points at the SAME thread's error_handling.cpp
+    // thread_local message buffer that draken_error_sentinel[_fmt] just formatted
+    // into. NOT a caller-owned string: valid only until the next kernel call on
+    // this thread. Read/copy it before that — never call draken_get_error_message()
+    // to re-fetch it, since error_handling.cpp is compiled into more than one
+    // extension (each with its own private thread_local buffer) and a caller that
+    // doesn't already hold this VecResult may bind to a DIFFERENT copy than the one
+    // the failing kernel actually wrote (silently returning an empty message). This
+    // field is the explicit, ABI-carried fix for that — nullptr on success.
+    const char*       error_msg        = nullptr;
 };

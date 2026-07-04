@@ -68,6 +68,24 @@ template<> struct NextWider<int32_t> {
     static constexpr DrakenType tag = DRAKEN_INT64;
 };
 
+// E33 — unsigned narrow widths widen to the next wider UNSIGNED type (same-sign,
+// matching the signed ladder above). UINT64 has no entry here — it's the widest
+// fixed-width unsigned type, so its arithmetic stays same-width (see u64_add
+// etc., mirroring how int64_arithmetic.h's i64_add is also same-width/non-
+// templated for the same reason).
+template<> struct NextWider<uint8_t>  {
+    using type = uint16_t;
+    static constexpr DrakenType tag = DRAKEN_UINT16;
+};
+template<> struct NextWider<uint16_t> {
+    using type = uint32_t;
+    static constexpr DrakenType tag = DRAKEN_UINT32;
+};
+template<> struct NextWider<uint32_t> {
+    using type = uint64_t;
+    static constexpr DrakenType tag = DRAKEN_UINT64;
+};
+
 // ===========================================================================
 // Internal helpers (fi_ prefix)
 // ===========================================================================
@@ -160,13 +178,21 @@ static inline VecResult fi_make_dense(T* data, uint8_t* validity, uint32_t n) {
 // ===========================================================================
 
 // Sign-extend the i-th logical value of any signed-int vector to int64.
+// E33: also zero-extends UINT8/16/32 — their full range fits in int64's positive
+// half, so a signed-vs-narrow-unsigned pair (e.g. INT32 + UINT16) can compute
+// here safely. UINT64 is deliberately NOT handled — its range doesn't fit in
+// int64_t; UINT64 x UINT64/narrow-unsigned goes through fi_read_u64/fi_uint_arith
+// below, and UINT64 x signed is the DECIMAL128 escape (draken_binop).
 static inline int64_t fi_read_i64(const DrakenVector& v, uint32_t i) {
     const uint32_t p = v.selection[i];
     switch (v.type) {
-        case DRAKEN_INT8:  return static_cast<const int8_t*>(v.data)[p];
-        case DRAKEN_INT16: return static_cast<const int16_t*>(v.data)[p];
-        case DRAKEN_INT32: return static_cast<const int32_t*>(v.data)[p];
-        case DRAKEN_INT64: return static_cast<const int64_t*>(v.data)[p];
+        case DRAKEN_INT8:   return static_cast<const int8_t*>(v.data)[p];
+        case DRAKEN_INT16:  return static_cast<const int16_t*>(v.data)[p];
+        case DRAKEN_INT32:  return static_cast<const int32_t*>(v.data)[p];
+        case DRAKEN_INT64:  return static_cast<const int64_t*>(v.data)[p];
+        case DRAKEN_UINT8:  return static_cast<int64_t>(static_cast<const uint8_t*>(v.data)[p]);
+        case DRAKEN_UINT16: return static_cast<int64_t>(static_cast<const uint16_t*>(v.data)[p]);
+        case DRAKEN_UINT32: return static_cast<int64_t>(static_cast<const uint32_t*>(v.data)[p]);
         default: throw std::invalid_argument("fi_read_i64: non-integer type");
     }
 }
@@ -192,12 +218,24 @@ static inline VecResult fi_int_arith_store(int op, const DrakenVector& a, const 
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
-// D.6 result tag = next-power of the wider operand width.
+// D.6 result tag = next-power of the wider operand width. E33: extended with an
+// "effective rank" that maps narrow-unsigned types (UINT8/16/32) to the rank of
+// the smallest SIGNED type that fully covers their range (matches
+// type_unification.py's cross-sign lattice) before applying the same
+// widen-the-max-rank-by-one rule used for pure-signed pairs. UINT64 must never
+// reach here (see fi_read_i64's contract above).
 static inline DrakenType fi_arith_result_tag(DrakenType ta, DrakenType tb) {
     auto rank = [](DrakenType t) -> int {
-        switch (t) { case DRAKEN_INT8: return 0; case DRAKEN_INT16: return 1;
-                     case DRAKEN_INT32: return 2; case DRAKEN_INT64: return 3;
-                     default: return -1; }
+        switch (t) {
+            case DRAKEN_INT8:   return 0;
+            case DRAKEN_UINT8:  return 1;  // needs INT16 to hold its full range
+            case DRAKEN_INT16:  return 1;
+            case DRAKEN_UINT16: return 2;  // needs INT32
+            case DRAKEN_INT32:  return 2;
+            case DRAKEN_UINT32: return 3;  // needs INT64
+            case DRAKEN_INT64:  return 3;
+            default: return -1;
+        }
     };
     const int r = rank(ta) > rank(tb) ? rank(ta) : rank(tb);
     switch (r) {
@@ -218,6 +256,75 @@ static inline VecResult fi_int_arith(int op, const DrakenVector& a, const Draken
         case DRAKEN_INT32: return fi_int_arith_store<int32_t, DRAKEN_INT32>(op, a, b);
         case DRAKEN_INT64: return fi_int_arith_store<int64_t, DRAKEN_INT64>(op, a, b);
         default: throw std::invalid_argument("fi_int_arith: bad result tag");
+    }
+}
+
+// ===========================================================================
+// E33 — all-unsigned cross-width arithmetic, mirroring fi_int_arith/fi_read_i64
+// exactly but in uint64_t space (zero-extend, unsigned div/mod, wraps on
+// overflow — well-defined for unsigned, unlike signed overflow). Used only when
+// BOTH operands are unsigned (UINT8/16/32/64 in any combination); a signed
+// operand paired with UINT64 cannot go through here (doesn't fit int64_t) and
+// is the DECIMAL128 escape in draken_binop instead.
+// ===========================================================================
+
+static inline uint64_t fi_read_u64(const DrakenVector& v, uint32_t i) {
+    const uint32_t p = v.selection[i];
+    switch (v.type) {
+        case DRAKEN_UINT8:  return static_cast<const uint8_t* >(v.data)[p];
+        case DRAKEN_UINT16: return static_cast<const uint16_t*>(v.data)[p];
+        case DRAKEN_UINT32: return static_cast<const uint32_t*>(v.data)[p];
+        case DRAKEN_UINT64: return static_cast<const uint64_t*>(v.data)[p];
+        default: throw std::invalid_argument("fi_read_u64: non-unsigned-integer type");
+    }
+}
+
+static inline uint64_t fi_apply_u64(int op, uint64_t x, uint64_t y) {
+    switch (op) {
+        case 1: return x + y;
+        case 2: return x - y;
+        case 3: return x * y;
+        case 5: return (y == 0u) ? 0u : x % y;
+        case 6: return (y == 0u) ? 0u : x / y;
+        default: throw std::invalid_argument("fi_apply_u64: unsupported op");
+    }
+}
+
+template<typename W, DrakenType WTAG>
+static inline VecResult fi_uint_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
+    const uint32_t n = a.length;
+    W* dst = fi_alloc<W>(n);
+    for (uint32_t i = 0; i < n; ++i)
+        dst[i] = static_cast<W>(fi_apply_u64(op, fi_read_u64(a, i), fi_read_u64(b, i)));
+    return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+}
+
+// Same-width widens by one step (mirroring fi_arith_result_tag's convention for
+// pure-signed pairs); UINT64 is the ceiling (stays UINT64, matching int64→int64).
+static inline DrakenType fi_uint_arith_result_tag(DrakenType ta, DrakenType tb) {
+    auto rank = [](DrakenType t) -> int {
+        switch (t) { case DRAKEN_UINT8: return 0; case DRAKEN_UINT16: return 1;
+                     case DRAKEN_UINT32: return 2; case DRAKEN_UINT64: return 3;
+                     default: return -1; }
+    };
+    const int r = rank(ta) > rank(tb) ? rank(ta) : rank(tb);
+    switch (r) {
+        case 0: return DRAKEN_UINT16;
+        case 1: return DRAKEN_UINT32;
+        case 2: return DRAKEN_UINT64;
+        case 3: return DRAKEN_UINT64;
+        default: throw std::invalid_argument("fi_uint_arith_result_tag: non-unsigned operand");
+    }
+}
+
+static inline VecResult fi_uint_arith(int op, const DrakenVector& a, const DrakenVector& b) {
+    if (a.length != b.length)
+        throw std::invalid_argument("fi_uint_arith: length mismatch");
+    switch (fi_uint_arith_result_tag(a.type, b.type)) {
+        case DRAKEN_UINT16: return fi_uint_arith_store<uint16_t, DRAKEN_UINT16>(op, a, b);
+        case DRAKEN_UINT32: return fi_uint_arith_store<uint32_t, DRAKEN_UINT32>(op, a, b);
+        case DRAKEN_UINT64: return fi_uint_arith_store<uint64_t, DRAKEN_UINT64>(op, a, b);
+        default: throw std::invalid_argument("fi_uint_arith: bad result tag");
     }
 }
 
@@ -1298,5 +1405,124 @@ static inline VecResult i32_materialize(const DrakenVector& v)                  
 static inline VecResult i32_compress(const DrakenVector& v)                       { return fixed_int_compress<int32_t, DRAKEN_INT32>(v); }
 static inline VecResult i32_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<int32_t>(v, lo, hi, li, hi_i); }
 static inline VecResult i32_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<int32_t>(v, s); }
+
+// ===========================================================================
+// E33 — unsigned gather ops (take/slice/materialize/compress). These templates
+// are signedness-agnostic (pure value copies via data[selection[i]] — no
+// arithmetic, no comparison), so instantiating them for uint8_t/16/32/64 needs
+// no new logic, only registration. Arithmetic/comparison/hash/aggregation
+// kernels for the unsigned family are Stage 2 scope and land separately.
+// ===========================================================================
+static inline VecResult u8_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint8_t, DRAKEN_UINT8>(v, idx, n); }
+static inline VecResult u8_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint8_t, DRAKEN_UINT8>(v, s, n); }
+static inline VecResult u8_materialize(const DrakenVector& v) { return fixed_int_materialize<uint8_t, DRAKEN_UINT8>(v); }
+static inline VecResult u8_compress(const DrakenVector& v) { return fixed_int_compress<uint8_t, DRAKEN_UINT8>(v); }
+
+static inline VecResult u16_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint16_t, DRAKEN_UINT16>(v, idx, n); }
+static inline VecResult u16_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint16_t, DRAKEN_UINT16>(v, s, n); }
+static inline VecResult u16_materialize(const DrakenVector& v) { return fixed_int_materialize<uint16_t, DRAKEN_UINT16>(v); }
+static inline VecResult u16_compress(const DrakenVector& v) { return fixed_int_compress<uint16_t, DRAKEN_UINT16>(v); }
+
+static inline VecResult u32_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint32_t, DRAKEN_UINT32>(v, idx, n); }
+static inline VecResult u32_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint32_t, DRAKEN_UINT32>(v, s, n); }
+static inline VecResult u32_materialize(const DrakenVector& v) { return fixed_int_materialize<uint32_t, DRAKEN_UINT32>(v); }
+static inline VecResult u32_compress(const DrakenVector& v) { return fixed_int_compress<uint32_t, DRAKEN_UINT32>(v); }
+
+// Hash reuses fixed_int_hash directly even at 64-bit width: for values whose
+// high bit is set (>= 2^63) the int64_t cast inside the template just
+// reinterprets the bit pattern, which is fine for hashing (only same-type
+// equal-key-hashes-equal matters) — unlike sum/min/max/compare, where the
+// VALUE reported to Python must be correct, hashing never needs to interpret
+// the bits as a number at all.
+static inline void      hash_uint64(const DrakenVector& v, uint64_t* o, uint32_t n) { fixed_int_hash<uint64_t, DRAKEN_UINT64>(v, o, n); }
+// in_list is hash-only membership (same §1 exception as the signed family) —
+// safe to reuse fixed_int_in_list directly even at 64-bit width: the
+// int64_t/uint64_t double-cast it performs is a lossless bit-reinterpretation
+// round-trip, so the hashed value is bit-identical to the original uint64_t
+// regardless of the intermediate signed cast (same reasoning as hash_uint64
+// above). This is NOT true of between (see u64_between in uint64_compare.h),
+// which does a genuine ORDER comparison and needs real unsigned semantics.
+static inline VecResult u64_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<uint64_t>(v, s); }
+static inline VecResult u64_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint64_t, DRAKEN_UINT64>(v, idx, n); }
+static inline VecResult u64_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint64_t, DRAKEN_UINT64>(v, s, n); }
+static inline VecResult u64_materialize(const DrakenVector& v) { return fixed_int_materialize<uint64_t, DRAKEN_UINT64>(v); }
+static inline VecResult u64_compress(const DrakenVector& v) { return fixed_int_compress<uint64_t, DRAKEN_UINT64>(v); }
+
+// ===========================================================================
+// E33 — same-type OpsTable kernels for UINT8/16/32 (arithmetic, compare,
+// between/in_list, sum/min/max). Every template used below (fixed_int_add,
+// fixed_int_compare_scalar, fixed_int_sum, etc.) is already generic over T —
+// unsigned T zero-extends correctly into the wider signed compute space these
+// templates use internally (int64_t/NextWider<T>), so no new kernel logic is
+// needed here, only instantiation + OpsTable registration (see hash.h).
+// `neg` is deliberately NOT instantiated for unsigned types (no such operation;
+// an unregistered slot fails loudly via the kSize/nullptr guard in hash.h).
+// UINT64 is NOT instantiated from these templates — its arithmetic needs
+// genuine uint64_t semantics (wrapping, unsigned div/mod/compare), which none
+// of these int64_t-based templates provide; see uint64_arithmetic.h /
+// uint64_compare.h instead.
+// ===========================================================================
+
+static inline VecResult u8_add(const DrakenVector& a, const DrakenVector& b) { return fixed_int_add<uint8_t>(a, b); }
+static inline VecResult u8_add_scalar(const DrakenVector& a, int64_t s) { return fixed_int_add_scalar<uint8_t>(a, s); }
+static inline VecResult u8_sub(const DrakenVector& a, const DrakenVector& b) { return fixed_int_sub<uint8_t>(a, b); }
+static inline VecResult u8_sub_scalar(const DrakenVector& a, int64_t s) { return fixed_int_sub_scalar<uint8_t>(a, s); }
+static inline VecResult u8_mul(const DrakenVector& a, const DrakenVector& b) { return fixed_int_mul<uint8_t>(a, b); }
+static inline VecResult u8_mul_scalar(const DrakenVector& a, int64_t s) { return fixed_int_mul_scalar<uint8_t>(a, s); }
+static inline VecResult u8_div(const DrakenVector& a, const DrakenVector& b) { return fixed_int_div<uint8_t>(a, b); }
+static inline VecResult u8_div_scalar(const DrakenVector& a, int64_t s) { return fixed_int_div_scalar<uint8_t>(a, s); }
+static inline VecResult u8_mod(const DrakenVector& a, const DrakenVector& b) { return fixed_int_mod<uint8_t>(a, b); }
+static inline VecResult u8_mod_scalar(const DrakenVector& a, int64_t s) { return fixed_int_mod_scalar<uint8_t>(a, s); }
+static inline VecResult u8_compare_scalar(const DrakenVector& v, int64_t s, int op) { return fixed_int_compare_scalar<uint8_t>(v, s, op); }
+static inline VecResult u8_compare_vector(const DrakenVector& a, const DrakenVector& b, int op) { return fixed_int_compare_vector<uint8_t>(a, b, op); }
+static inline VecResult u8_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<uint8_t>(v, lo, hi, li, hi_i); }
+static inline VecResult u8_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<uint8_t>(v, s); }
+static inline uint32_t  u8_sum(const DrakenVector& v, int64_t* o) { return fixed_int_sum<uint8_t>(v, o); }
+static inline uint32_t  u8_min(const DrakenVector& v, int64_t* o) { return fixed_int_min<uint8_t>(v, o); }
+static inline uint32_t  u8_max(const DrakenVector& v, int64_t* o) { return fixed_int_max<uint8_t>(v, o); }
+// Hash reuses fixed_int_hash directly: it sign/zero-extends T through int64_t
+// before hashing, which for unsigned T just reinterprets the bit pattern —
+// harmless for hashing (only same-type equal-key-hashes-equal matters, not
+// cross-type consistency or numeric ordering), unlike the sum/min/max/compare
+// concern where the VALUE reported to Python must be correct.
+static inline void      hash_uint8(const DrakenVector& v, uint64_t* o, uint32_t n) { fixed_int_hash<uint8_t, DRAKEN_UINT8>(v, o, n); }
+
+static inline VecResult u16_add(const DrakenVector& a, const DrakenVector& b) { return fixed_int_add<uint16_t>(a, b); }
+static inline VecResult u16_add_scalar(const DrakenVector& a, int64_t s) { return fixed_int_add_scalar<uint16_t>(a, s); }
+static inline VecResult u16_sub(const DrakenVector& a, const DrakenVector& b) { return fixed_int_sub<uint16_t>(a, b); }
+static inline VecResult u16_sub_scalar(const DrakenVector& a, int64_t s) { return fixed_int_sub_scalar<uint16_t>(a, s); }
+static inline VecResult u16_mul(const DrakenVector& a, const DrakenVector& b) { return fixed_int_mul<uint16_t>(a, b); }
+static inline VecResult u16_mul_scalar(const DrakenVector& a, int64_t s) { return fixed_int_mul_scalar<uint16_t>(a, s); }
+static inline VecResult u16_div(const DrakenVector& a, const DrakenVector& b) { return fixed_int_div<uint16_t>(a, b); }
+static inline VecResult u16_div_scalar(const DrakenVector& a, int64_t s) { return fixed_int_div_scalar<uint16_t>(a, s); }
+static inline VecResult u16_mod(const DrakenVector& a, const DrakenVector& b) { return fixed_int_mod<uint16_t>(a, b); }
+static inline VecResult u16_mod_scalar(const DrakenVector& a, int64_t s) { return fixed_int_mod_scalar<uint16_t>(a, s); }
+static inline VecResult u16_compare_scalar(const DrakenVector& v, int64_t s, int op) { return fixed_int_compare_scalar<uint16_t>(v, s, op); }
+static inline VecResult u16_compare_vector(const DrakenVector& a, const DrakenVector& b, int op) { return fixed_int_compare_vector<uint16_t>(a, b, op); }
+static inline VecResult u16_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<uint16_t>(v, lo, hi, li, hi_i); }
+static inline VecResult u16_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<uint16_t>(v, s); }
+static inline uint32_t  u16_sum(const DrakenVector& v, int64_t* o) { return fixed_int_sum<uint16_t>(v, o); }
+static inline uint32_t  u16_min(const DrakenVector& v, int64_t* o) { return fixed_int_min<uint16_t>(v, o); }
+static inline uint32_t  u16_max(const DrakenVector& v, int64_t* o) { return fixed_int_max<uint16_t>(v, o); }
+static inline void      hash_uint16(const DrakenVector& v, uint64_t* o, uint32_t n) { fixed_int_hash<uint16_t, DRAKEN_UINT16>(v, o, n); }
+
+static inline VecResult u32_add(const DrakenVector& a, const DrakenVector& b) { return fixed_int_add<uint32_t>(a, b); }
+static inline VecResult u32_add_scalar(const DrakenVector& a, int64_t s) { return fixed_int_add_scalar<uint32_t>(a, s); }
+static inline VecResult u32_sub(const DrakenVector& a, const DrakenVector& b) { return fixed_int_sub<uint32_t>(a, b); }
+static inline VecResult u32_sub_scalar(const DrakenVector& a, int64_t s) { return fixed_int_sub_scalar<uint32_t>(a, s); }
+static inline VecResult u32_mul(const DrakenVector& a, const DrakenVector& b) { return fixed_int_mul<uint32_t>(a, b); }
+static inline VecResult u32_mul_scalar(const DrakenVector& a, int64_t s) { return fixed_int_mul_scalar<uint32_t>(a, s); }
+static inline VecResult u32_div(const DrakenVector& a, const DrakenVector& b) { return fixed_int_div<uint32_t>(a, b); }
+static inline VecResult u32_div_scalar(const DrakenVector& a, int64_t s) { return fixed_int_div_scalar<uint32_t>(a, s); }
+static inline VecResult u32_mod(const DrakenVector& a, const DrakenVector& b) { return fixed_int_mod<uint32_t>(a, b); }
+static inline VecResult u32_mod_scalar(const DrakenVector& a, int64_t s) { return fixed_int_mod_scalar<uint32_t>(a, s); }
+static inline VecResult u32_compare_scalar(const DrakenVector& v, int64_t s, int op) { return fixed_int_compare_scalar<uint32_t>(v, s, op); }
+static inline VecResult u32_compare_vector(const DrakenVector& a, const DrakenVector& b, int op) { return fixed_int_compare_vector<uint32_t>(a, b, op); }
+static inline VecResult u32_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<uint32_t>(v, lo, hi, li, hi_i); }
+static inline VecResult u32_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<uint32_t>(v, s); }
+static inline uint32_t  u32_sum(const DrakenVector& v, int64_t* o) { return fixed_int_sum<uint32_t>(v, o); }
+static inline uint32_t  u32_min(const DrakenVector& v, int64_t* o) { return fixed_int_min<uint32_t>(v, o); }
+static inline uint32_t  u32_max(const DrakenVector& v, int64_t* o) { return fixed_int_max<uint32_t>(v, o); }
+static inline void      hash_uint32(const DrakenVector& v, uint64_t* o, uint32_t n) { fixed_int_hash<uint32_t, DRAKEN_UINT32>(v, o, n); }
 
 }} // namespace draken::ops

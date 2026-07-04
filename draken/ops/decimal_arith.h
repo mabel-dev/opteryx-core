@@ -127,6 +127,21 @@ static inline VecResult widen_i64_to_dec128(const DrakenVector& v) {
     return make_decimal128_result(dst, copy_validity(v.validity, n), n);
 }
 
+// E33 — widen a DRAKEN_UINT64 vector to int128 DRAKEN_DECIMAL128. Zero-extends
+// (not sign-extends): a UINT64 value >= 2^63 is always a large POSITIVE __int128,
+// never negative — this is the matrix's escape valve for UINT64 paired with a
+// signed integer (no fixed-width signed type holds the full UINT64 range, but
+// __int128 does, with room to spare). Mirrors widen_i64_to_dec128 exactly except
+// for the source type and the zero- vs sign-extension.
+static inline VecResult widen_u64_to_dec128(const DrakenVector& v) {
+    const uint32_t n = v.length;
+    const uint64_t* sd = static_cast<const uint64_t*>(v.data);
+    __int128* dst = alloc_i128(n);
+    for (uint32_t i = 0; i < n; ++i)
+        dst[i] = static_cast<__int128>(sd[v.selection[i]]);
+    return make_decimal128_result(dst, copy_validity(v.validity, n), n);
+}
+
 // Safely multiply v by 10, writing result to out. Returns false on int128 overflow.
 static inline bool i128_mul10(__int128 v, __int128& out) {
     // INT128_MAX = 2^127 - 1 ≈ 1.7e38; overflow when |v| > INT128_MAX / 10 ≈ 1.7e37.
@@ -670,6 +685,50 @@ static inline VecResult dec128_mod(
         if (b_aligned == 0)
             throw std::domain_error("dec128_mod: modulus is zero after scale alignment");
         dst[i] = ad[a.selection[i]] % b_aligned;     // sign of dividend (a)
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
+// E33 — scale-0 truncating integer divide, for the UINT64×INT64 promotion path
+// ONLY (see binop_dispatch.cpp's int_arith_op UINT64/INT64 branch): both
+// operands there are always freshly-widened int64/uint64 values at scale 0,
+// never a real DECIMAL column, so no scale alignment is needed or attempted.
+// Deliberately NOT general DECIMAL128 INT_DIVIDE — dec128_div computes true,
+// scale-expanding decimal division (wrong semantics for a truncating integer
+// op). Follows the established C-truncation-toward-zero, divide-by-zero->0
+// integer convention (i64_div, fixed_int_ops.h) rather than dec128_div's
+// raise-on-zero decimal convention.
+static inline VecResult dec128_int_divide(
+    const DrakenVector& a, const DrakenVector& b)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_int_divide: length mismatch");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        const __int128 bv = bd[b.selection[i]];
+        dst[i] = (bv == 0) ? 0 : (ad[a.selection[i]] / bv);   // truncates toward zero
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
+// E33 — scale-0 truncating integer modulo. Same scope/caller/convention notes
+// as dec128_int_divide above (mod-by-zero -> 0, sign of dividend — matches
+// i64_mod, NOT dec128_mod's raise-on-zero decimal convention).
+static inline VecResult dec128_int_mod(
+    const DrakenVector& a, const DrakenVector& b)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_int_mod: length mismatch");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        const __int128 bv = bd[b.selection[i]];
+        dst[i] = (bv == 0) ? 0 : (ad[a.selection[i]] % bv);   // sign of dividend
     }
     return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
 }

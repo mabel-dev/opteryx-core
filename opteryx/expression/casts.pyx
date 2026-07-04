@@ -230,6 +230,7 @@ def _cast_result_to_draken(result, resolved_type, args=()):
 # String-family and narrow-integer physical-type sets (DrakenType.name tokens).
 _CAST_STRINGS = ("VARCHAR", "NVARCHAR", "VARBINARY")
 _CAST_NARROW_INT = ("INT8", "INT16", "INT32")
+_CAST_UNSIGNED_INT = ("UINT8", "UINT16", "UINT32", "UINT64")  # E33
 
 
 def _c_native_cast(source_physical, target_type, bint safe=False):
@@ -273,6 +274,22 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
             return ("draken_cast_timestamp_to_int64", 0)
         if s == "DATE32":
             return ("draken_cast_date32_to_int64", 0)
+        # E33 — reverse direction: any unsigned source -> INT64, range-checked
+        # (a UINT64 value > INT64_MAX raises rather than wrapping negative).
+        if s in _CAST_UNSIGNED_INT:
+            return ("draken_cast_uint_to_int64", 0)
+        return None
+    # E33 — UINT8/16/32/64 target. Range-checked in the kernel itself (negative,
+    # NaN, or out-of-range magnitude raises — never silently truncates/wraps).
+    if t in ("UINT8", "UINT16", "UINT32", "UINT64"):
+        if s in _CAST_NARROW_INT or s == "INT64":
+            return (f"draken_cast_integer_to_{t.lower()}", 0)
+        if s in ("FLOAT64", "FLOAT32"):
+            return (f"draken_cast_float_to_{t.lower()}", 0)
+        if s == "BOOL":
+            return (f"draken_cast_bool_to_{t.lower()}", 0)
+        if s in _CAST_STRINGS:
+            return (f"draken_cast_string_to_{t.lower()}", 0)
         return None
     if t in ("DATE", "DATE32"):
         if s in _CAST_STRINGS:
@@ -495,7 +512,35 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_timestamp_to_int64, True, True
         if s == "DATE32":
             return vector_cast_date32_to_int64, True, True
+        # E33 — reverse direction fallback (the C-native path above,
+        # draken_cast_uint_to_int64, handles this at bind time when the source
+        # type is known; this closure only runs for late-bound sources).
+        # Range-checked: a UINT64 value > INT64_MAX raises, never wraps.
+        if s in _CAST_UNSIGNED_INT:
+            def _uint_to_int64_cast(arr):
+                result = [int(v) if v is not None else None for v in arr]
+                return _draken_native_casts.vector_from_sequence(result)
+            return _uint_to_int64_cast, False, True
         raise NotImplementedError(f"No native CAST {source_physical} → INTEGER")
+
+    # ---- UINT8/16/32/64 target (E33) ----
+    # No native zero-Python kernel yet (matches DECIMAL/ARRAY/VECTOR above) — a
+    # row-loop closure that parses each value as an integer, then hands the
+    # Python list to the width-specific native constructor, which performs the
+    # actual range check (negative values and out-of-range magnitude both raise
+    # OverflowError there — fail loud, never silently wrap/truncate).
+    if t in ("UINT8", "UINT16", "UINT32", "UINT64"):
+        def _uint_cast(arr):
+            caster = parser_for(LogicalCategory.INTEGER)
+            result = [caster(i) if i is not None else None for i in arr]
+            if t == "UINT8":
+                return _draken_native_casts.vector_uint8_from_sequence(result)
+            if t == "UINT16":
+                return _draken_native_casts.vector_uint16_from_sequence(result)
+            if t == "UINT32":
+                return _draken_native_casts.vector_uint32_from_sequence(result)
+            return _draken_native_casts.vector_uint64_from_sequence(result)
+        return _uint_cast, False, True
 
     # ---- BOOLEAN target ----
     if t == "BOOLEAN":

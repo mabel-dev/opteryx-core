@@ -369,10 +369,17 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
             return t == DRAKEN_INT8 || t == DRAKEN_INT16 ||
                    t == DRAKEN_INT32 || t == DRAKEN_INT64;
         };
+        // E33 — unsigned integers.
+        auto is_uint = [](DrakenType t) {
+            return t == DRAKEN_UINT8 || t == DRAKEN_UINT16 ||
+                   t == DRAKEN_UINT32 || t == DRAKEN_UINT64;
+        };
         auto is_float = [](DrakenType t) {
             return t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64;
         };
-        const bool both_numeric = (is_int(lt) || is_float(lt)) && (is_int(rt) || is_float(rt));
+        const bool both_numeric =
+            (is_int(lt) || is_uint(lt) || is_float(lt)) &&
+            (is_int(rt) || is_uint(rt) || is_float(rt));
 
         // DECIMAL × DECIMAL (both int64-backed) → DECIMAL (P9.1b-1). Scale-aware via
         // the existing dec_* kernels (PostgreSQL scale rules, architect E.32 — the
@@ -612,8 +619,82 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         const bool int_arith_op =
             (op == BOP_PLUS || op == BOP_MINUS || op == BOP_MULTIPLY ||
              op == BOP_MODULO || op == BOP_INT_DIVIDE);
-        if (int_arith_op && is_int(lt) && is_int(rt)) {
-            return draken::ops::fi_int_arith(op, *left, *right);
+        if (int_arith_op) {
+            // E33 — both operands unsigned (any width combination, including
+            // UINT64): genuine unsigned semantics (wrapping overflow, unsigned
+            // div/mod), computed in uint64_t space.
+            if (is_uint(lt) && is_uint(rt)) {
+                return draken::ops::fi_uint_arith(op, *left, *right);
+            }
+            // E33 — one signed, one narrow-unsigned (UINT8/16/32): fits int64_t
+            // space, so the existing signed cross-width path handles it once
+            // extended (fi_read_i64 zero-extends the unsigned side).
+            if ((is_int(lt) && is_uint(rt) && rt != DRAKEN_UINT64) ||
+                (is_int(rt) && is_uint(lt) && lt != DRAKEN_UINT64)) {
+                return draken::ops::fi_int_arith(op, *left, *right);
+            }
+            if (is_int(lt) && is_int(rt)) {
+                return draken::ops::fi_int_arith(op, *left, *right);
+            }
+            // E33 — UINT64 paired with INT64 (either order): the DECIMAL128
+            // escape from the design matrix (no fixed-width signed type holds
+            // the full UINT64 range; __int128 does, with room to spare). Both
+            // operands widen to int128 as scale-0 values and run through the
+            // existing dec128_* kernels — mirrors the DECIMAL128 promotion
+            // block above exactly, just without a DECIMAL-typed operand.
+            // UINT64 paired with a narrower signed int (INT8/16/32) is NOT
+            // handled here — mirrors the existing restriction on narrow ints
+            // combined with DECIMAL (they stay on the closure, which widens
+            // them itself) — falls through to the "not yet C-native" error.
+            if ((lt == DRAKEN_UINT64 && rt == DRAKEN_INT64) ||
+                (lt == DRAKEN_INT64 && rt == DRAKEN_UINT64)) {
+                const auto* c = static_cast<const binary_op_ctx*>(ctx);
+                const unsigned char sa = c->left_scale;
+                const unsigned char sb = c->right_scale;
+                VecResult lw = (lt == DRAKEN_UINT64)
+                    ? draken::ops::widen_u64_to_dec128(*left)
+                    : draken::ops::widen_i64_to_dec128(*left);
+                VecResult rw = (rt == DRAKEN_UINT64)
+                    ? draken::ops::widen_u64_to_dec128(*right)
+                    : draken::ops::widen_i64_to_dec128(*right);
+                DrakenVector lv = draken_vector_from_dense(lw.data, lw.length, DRAKEN_DECIMAL128, lw.validity);
+                DrakenVector rv = draken_vector_from_dense(rw.data, rw.length, DRAKEN_DECIMAL128, rw.validity);
+                auto free_temps = [&]() {
+                    draken_free(lw.data); draken_free(lw.validity);
+                    draken_free(rw.data); draken_free(rw.validity);
+                };
+                // PLUS/MINUS/MULTIPLY degenerate exactly to plain integer
+                // arithmetic in int128 space at scale 0, unambiguous.
+                // INT_DIVIDE/MODULO route through dec128_int_divide/dec128_int_mod
+                // (decimal_arith.h) — scale-0-only truncating integer div/mod with
+                // the established div-by-zero->0 convention (i64_div/i64_mod),
+                // NOT dec128_div/dec128_mod's true-decimal-division / raise-on-zero
+                // semantics (those are the wrong operation for a truncating op).
+                // BOP_DIVIDE (true `/`) never reaches here — the TRUE DIVIDE
+                // branch above (both_numeric -> FLOAT64) always intercepts it
+                // first, same as for every other integer pairing.
+                VecResult r;
+                try {
+                    switch (op) {
+                        case BOP_PLUS:       r = draken::ops::dec128_add(lv, sa, rv, sb); break;
+                        case BOP_MINUS:      r = draken::ops::dec128_sub(lv, sa, rv, sb); break;
+                        case BOP_MULTIPLY:   r = draken::ops::dec128_mul(lv, sa, rv, sb); break;
+                        case BOP_INT_DIVIDE: r = draken::ops::dec128_int_divide(lv, rv); break;
+                        case BOP_MODULO:     r = draken::ops::dec128_int_mod(lv, rv); break;
+                        default:
+                            free_temps();
+                            return draken_error_sentinel_fmt(
+                                "draken_binop: unsupported op %d for UINT64 x INT64 promotion", op);
+                    }
+                } catch (...) {
+                    free_temps();
+                    throw;
+                }
+                free_temps();
+                r.dec_precision = c->result_precision;
+                r.dec_scale = c->result_scale;
+                return r;
+            }
         }
 
         // Non-divide arithmetic with a FLOAT64 operand → FLOAT64 (DuckDB: any
@@ -637,7 +718,7 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         const bool bitwise_op =
             (op == BOP_BITWISE_OR || op == BOP_BITWISE_AND || op == BOP_BITWISE_XOR ||
              op == BOP_SHIFT_LEFT || op == BOP_SHIFT_RIGHT);
-        if (bitwise_op && is_int(lt) && is_int(rt)) {
+        if (bitwise_op && (is_int(lt) || is_uint(lt)) && (is_int(rt) || is_uint(rt))) {
             if (lt != rt)
                 return draken_error_sentinel_fmt(
                     "draken_binop: bitwise operands must be the same type: %d vs %d", (int)lt, (int)rt);

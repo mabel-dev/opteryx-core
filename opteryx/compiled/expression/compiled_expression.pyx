@@ -34,6 +34,7 @@ import struct as _struct
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
@@ -97,6 +98,19 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
             return Vector(_draken_native.vector_int16_from_constant(value, 1))
         if physical_type == <int>DRAKEN_INT32:
             return Vector(_draken_native.vector_int32_from_constant(value, 1))
+        # E33: UINT64 must be materialised directly — a value can exceed
+        # INT64_MAX (the fallback `vector_from_constant` below is INT64-only
+        # and would std::bad_cast on nb::cast<int64_t> for such a value).
+        # UINT8/16/32 route here too for directness, though their range always
+        # fits the INT64 fallback.
+        if physical_type == <int>DRAKEN_UINT8:
+            return Vector(_draken_native.vector_uint8_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_UINT16:
+            return Vector(_draken_native.vector_uint16_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_UINT32:
+            return Vector(_draken_native.vector_uint32_from_constant(value, 1))
+        if physical_type == <int>DRAKEN_UINT64:
+            return Vector(_draken_native.vector_uint64_from_constant(value, 1))
         if physical_type == <int>DRAKEN_FLOAT32:
             return Vector(_draken_native.vector_float32_from_constant(value, 1))
         if physical_type == <int>DRAKEN_FLOAT64:
@@ -386,7 +400,15 @@ _BOP_CODE = {
 # and stay on the resolve_binary_op closure until their families are ported. This
 # is a deterministic, fail-loud routing decision (no silent fallback): a binop is
 # either explicitly C-native here or explicitly on the closure.
-_BINOP_NATIVE_INT = frozenset({"INT8", "INT16", "INT32", "INT64"})
+_BINOP_NATIVE_INT = frozenset({
+    "INT8", "INT16", "INT32", "INT64",
+    # E33: draken_binop routes these to fi_int_arith (mixed with a narrow signed
+    # int, or narrow-unsigned-vs-narrow-unsigned) or fi_uint_arith (all-unsigned).
+    # UINT64 combined with a SIGNED int is not yet native (needs the DECIMAL128
+    # escape) — draken_binop fails loud for that specific combination rather than
+    # silently miscomputing, so it's still safe to list UINT64 here.
+    "UINT8", "UINT16", "UINT32", "UINT64",
+})
 _BINOP_NATIVE_FLOAT = frozenset({"FLOAT32", "FLOAT64"})
 _BINOP_NATIVE_STRING = frozenset({"VARCHAR", "NVARCHAR", "VARBINARY"})
 _BINOP_NATIVE_INTERVAL = frozenset({"INTERVAL"})
@@ -489,6 +511,20 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
         if ((l128 and r_i64dec) or (r128 and l_i64dec)) and \
                 (result_phys is None or result_phys == "DECIMAL128"):
             return True
+        # E33 — UINT64 x INT64 (either order): the DECIMAL128 escape valve from
+        # the design matrix (no fixed-width signed type holds UINT64's full
+        # range). PLUS/MINUS/MULTIPLY only — draken_binop degenerates these to
+        # plain int128 arithmetic at scale 0; INT_DIVIDE/MODULO stay on the
+        # closure (dec128_div/mod have different semantics — scale-expanding
+        # true division, and a divide-by-zero convention that diverges from
+        # plain integer DIV/MOD — not a safe reuse without dedicated design).
+        # UINT64 x narrower signed int (INT8/16/32) is NOT covered — mirrors
+        # the existing narrow-int restriction on the DECIMAL128 block above.
+        if op_code == BOP_PLUS or op_code == BOP_MINUS or op_code == BOP_MULTIPLY:
+            if (left_phys == "UINT64" and right_phys == "INT64") or \
+                    (left_phys == "INT64" and right_phys == "UINT64"):
+                if result_phys is None or result_phys == "DECIMAL128":
+                    return True
     # TEMPORAL (S-A.2): date/ts ± interval → TIMESTAMP(µs); date/ts − date/ts → INTERVAL.
     # The TIMESTAMP result carries its unit descriptor across the c-native wrap.
     if op_code == BOP_PLUS or op_code == BOP_MINUS:
