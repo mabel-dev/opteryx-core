@@ -2,10 +2,132 @@ from opteryx.models import PhysicalPlan
 from opteryx.operators.catalog import OperatorCategory, get_registry
 
 
-def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
-    excluded_nodes = []
-    builder = ""
+def _get_logical_node_type(node):
+    # Helper function to get logical node type using catalog category or name heuristics
+    try:
+        # First, try to use catalog metadata for reliable type detection
+        registry = get_registry()
+        metadata = registry.get(node.__class__)
+        if metadata:
+            # Some operators share the SET_OP category but represent
+            # different logical relations. Distinct is semantically an
+            # aggregate-style deduplication, not a union.
+            if metadata.name == "Distinct":
+                return "AggregateRel"
+            if metadata.name == "Union":
+                return "UnionRel"
+            category = metadata.category
+            category_map = {
+                OperatorCategory.SCAN: "ReadRel",
+                OperatorCategory.JOIN: "JoinRel",
+                OperatorCategory.AGGREGATE: "AggregateRel",
+                OperatorCategory.PROJECT: "ProjectRel",
+                OperatorCategory.FILTER: "FilterRel",
+                OperatorCategory.LIMIT: "LimitRel",
+                OperatorCategory.SORT: "SortRel",
+                OperatorCategory.SET_OP: "SetRel",
+                OperatorCategory.DDL: "DDLRel",
+                OperatorCategory.IO: "IRel",
+            }
+            return category_map.get(category)
 
+        # Fall back to name-based heuristics for operators not in catalog
+        if getattr(node, "is_scan", False):
+            return "ReadRel"
+        if getattr(node, "is_join", False):
+            return "JoinRel"
+
+        candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
+        if candidate is None:
+            return None
+        s = str(candidate).lower()
+        if "aggregate" in s or "group" in s or "distinct" in s:
+            return "AggregateRel"
+        if "project" in s or "projection" in s:
+            return "ProjectRel"
+        if "filter" in s or "where" in s:
+            return "FilterRel"
+        if "limit" in s:
+            return "LimitRel"
+        if "sort" in s or "order" in s:
+            return "SortRel"
+        if "union" in s:
+            return "UnionRel"
+        if "exit" in s:
+            return "ExitRel"
+        # default: title-case the candidate and append Rel
+        token = str(candidate)
+        token = token.replace(" ", "_").replace("-", "_")
+        token = token[0].upper() + token[1:] if token else token
+        return f"{token}Rel"
+    except (AttributeError, ValueError, TypeError):
+        return None
+
+
+# Exact, architect-specified display label per operator CLASS — distinct from
+# _get_logical_node_type's coarse category bucket, which can't tell a Parquet
+# scan from a function scan, or a hashed group-by from a plain aggregate.
+_OPERATOR_LABELS = {
+    "ParquetReadNode": "TABLE SCAN",
+    "ReaderNode": "SCAN",
+    "NullReaderNode": "SCAN",
+    "FunctionDatasetNode": "FUNCTION SCAN",
+    "FilterNode": "FILTER",
+    "ProjectionNode": "PROJECT",
+    "WindowNode": "WINDOW",
+    "GroupedAggregateHashedNode": "HASHED AGGREGATE",
+    "UngroupedAggregateNode": "UNGROUPED AGGREGATE",
+    "DistinctNode": "DISTINCT",
+    "SortNode": "SORT",
+    "HeapSortNode": "HEAP SORT",
+    "LimitNode": "LIMIT",
+    "DrakenInnerJoinNode": "HASH JOIN",
+    "NestedLoopJoinNode": "NESTED JOIN",
+    "NonEquiJoinNode": "NON EQUI JOIN",
+    "AsofJoinNode": "ASOF JOIN",
+    "CrossJoinNode": "CROSS JOIN",
+    "UnnestJoinNode": "UNNEST JOIN",
+    "ExitNode": "EXIT",
+}
+
+# OuterJoinNode/FilterJoinNode carry their variant in a dynamic self.join_type
+# instead of a fixed class-level one — abbreviated to match the parenthetical
+# convention (e.g. "OUTER JOIN (L)", "FILTER JOIN (LANA)").
+_OUTER_JOIN_DIRECTIONS = {
+    "left outer": "L",
+    "right outer": "R",
+    "full outer": "O",
+}
+_FILTER_JOIN_DIRECTIONS = {
+    "left semi": "LS",
+    "left anti": "LA",
+    "left anti null-aware": "LANA",
+}
+
+
+def _get_operator_label(node):
+    class_name = node.__class__.__name__
+    if class_name == "OuterJoinNode":
+        direction = _OUTER_JOIN_DIRECTIONS.get(node.join_type, node.join_type)
+        return f"OUTER JOIN ({direction})"
+    if class_name == "FilterJoinNode":
+        direction = _FILTER_JOIN_DIRECTIONS.get(node.join_type, node.join_type)
+        return f"FILTER JOIN ({direction})"
+    return _OPERATOR_LABELS.get(class_name)
+
+
+def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
+    """Build the per-node stats (keyed by node UID) and edge list for a plan.
+
+    This is the definitive per-node/edge record: native op stats overlaid onto
+    the plan-node identity, harvested after the run. As a side effect it
+    populates ``node.telemetry.operations`` and the shared ``telemetry.edges``
+    list — the structured source consumers should read instead of parsing a
+    rendered diagram.
+
+    Returns ``(node_stats_by_nid, node_map, excluded_nodes)`` for callers that
+    still need to render a diagram from this data (e.g. EXPLAIN).
+    """
     # Map node ids to node objects for telemetry fallbacks
     node_map = {nid: node for nid, node in plan.nodes(True)}
 
@@ -70,117 +192,91 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         for stat in stats:
             node_stats[stat["identity"]] = stat
 
-    # Helper function to get logical node type using catalog category or name heuristics
-    def _get_logical_node_type(node):
-        try:
-            # First, try to use catalog metadata for reliable type detection
-            registry = get_registry()
-            metadata = registry.get(node.__class__)
-            if metadata:
-                # Some operators share the SET_OP category but represent
-                # different logical relations. Distinct is semantically an
-                # aggregate-style deduplication, not a union.
-                if metadata.name == "Distinct":
-                    return "AggregateRel"
-                if metadata.name == "Union":
-                    return "UnionRel"
-                category = metadata.category
-                category_map = {
-                    OperatorCategory.SCAN: "ReadRel",
-                    OperatorCategory.JOIN: "JoinRel",
-                    OperatorCategory.AGGREGATE: "AggregateRel",
-                    OperatorCategory.PROJECT: "ProjectRel",
-                    OperatorCategory.FILTER: "FilterRel",
-                    OperatorCategory.LIMIT: "LimitRel",
-                    OperatorCategory.SORT: "SortRel",
-                    OperatorCategory.SET_OP: "SetRel",
-                    OperatorCategory.DDL: "DDLRel",
-                    OperatorCategory.IO: "IRel",
-                }
-                return category_map.get(category)
-
-            # Fall back to name-based heuristics for operators not in catalog
-            if getattr(node, "is_scan", False):
-                return "ReadRel"
-            if getattr(node, "is_join", False):
-                return "JoinRel"
-
-            candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
-            if candidate is None:
-                return None
-            s = str(candidate).lower()
-            if "aggregate" in s or "group" in s or "distinct" in s:
-                return "AggregateRel"
-            if "project" in s or "projection" in s:
-                return "ProjectRel"
-            if "filter" in s or "where" in s:
-                return "FilterRel"
-            if "limit" in s:
-                return "LimitRel"
-            if "sort" in s or "order" in s:
-                return "SortRel"
-            if "union" in s:
-                return "UnionRel"
-            if "exit" in s:
-                return "ExitRel"
-            # default: title-case the candidate and append Rel
-            token = str(candidate)
-            token = token.replace(" ", "_").replace("-", "_")
-            token = token[0].upper() + token[1:] if token else token
-            return f"{token}Rel"
-        except (AttributeError, ValueError, TypeError):
-            return None
+    # ExitNode is an internal engine relation, not a user-facing operator — it
+    # carries no useful telemetry of its own (a pure pass-through) and every
+    # consumer (EXPLAIN's own tree builder, Studio's operator-tree renderer)
+    # already splices it out and treats its child as the root. Drop it (and
+    # the edge into it) from the structured telemetry entirely, rather than
+    # emitting it for every consumer to filter back out. This is scoped to
+    # telemetry.operations/.edges only — plan_to_mermaid's own diagram string
+    # (EXPLAIN) still draws it, unchanged, via node_stats/excluded_nodes below.
+    exit_nids = {nid for nid, node in plan.nodes(True) if node.__class__.__name__ == "ExitNode"}
 
     # Store detailed stats in telemetry operations with node UID as key and type as field
     for nid, node in plan.nodes(True):
-        if not node.is_not_explained:
+        if not node.is_not_explained and nid not in exit_nids:
             stat = node_stats.get(node.identity)
             if stat:
                 # Add node type to the stat dictionary
                 node_type = _get_logical_node_type(node)
                 if node_type:
                     stat["type"] = node_type
+                # Exact operator display label (TABLE SCAN, HASH JOIN, etc.) —
+                # separate from the coarse "type" category bucket above.
+                operator_label = _get_operator_label(node)
+                if operator_label:
+                    stat["operator"] = operator_label
                 # Remove identity field - it's redundant with the key
                 stat.pop("identity", None)
                 # Use node UID (nid) as the key
                 node.telemetry.operations[nid] = stat
 
     # Build a structured edge list so consumers can reconstruct the plan DAG
-    # without parsing the Mermaid string.  Direction: from = producer, to = consumer.
-    # excluded_nodes is populated in the rendering loop below, so collect edges
-    # after the node loop but store them after the rendering loop.
+    # without parsing the Mermaid string. Direction: from = producer, to = consumer.
     _raw_edges = list(plan.edges())
 
-    # Grab any telemetry instance still reachable (the exit node is always present)
+    excluded_nodes = []
     _any_telemetry = None
     for nid, node in plan.nodes(True):
         if node.is_not_explained:
             excluded_nodes.append(nid)
             continue
-        builder += f"  {node.to_mermaid(nid)}\n"
         node_stats[nid] = node_stats.pop(node.identity, None)
         if _any_telemetry is None:
             _any_telemetry = node.telemetry
-    builder += "\n"
 
     # Write the edge list to telemetry now that excluded_nodes is finalised
     if _any_telemetry is not None:
         _any_telemetry.edges = [
             {"from": s, "to": t, **(({"leg": r}) if r else {})}
             for s, t, r in _raw_edges
-            if s not in excluded_nodes and t not in excluded_nodes
+            if s not in excluded_nodes and t not in excluded_nodes and t not in exit_nids
         ]
+
+    return node_stats, node_map, excluded_nodes
+
+
+def collect_plan_telemetry(plan: PhysicalPlan, stats: list = None) -> None:
+    """Populate node.telemetry.operations/.edges from the plan.
+
+    This is the data source for callers that need the plan's structure and
+    metrics (e.g. per-query telemetry sent to worker/jobs) but not a rendered
+    diagram — no mermaid string is built here.
+    """
+    _collect_node_stats(plan, stats)
+
+
+def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
+    node_stats, node_map, excluded_nodes = _collect_node_stats(plan, stats)
+    builder = ""
+
+    for nid, node in plan.nodes(True):
+        if node.is_not_explained:
+            continue
+        builder += f"  {node.to_mermaid(nid)}\n"
+    builder += "\n"
+
     for s, t, r in plan.edges():
         if t in excluded_nodes:
             continue
-        stats = node_stats.get(s) or {}
+        stats_ = node_stats.get(s) or {}
         # Prefer node-specific stats (records_out/bytes_out). Only fall back to
         # the node's telemetry for reader/scan nodes or when the stats are
         # missing/zero. This avoids propagating reader telemetry across
         # non-scan nodes which can produce misleading arrow labels.
         source_node = node_map.get(s)
-        records = stats.get("records_out")
-        bytes_ = stats.get("bytes_out")
+        records = stats_.get("records_out")
+        bytes_ = stats_.get("bytes_out")
         if source_node is not None:
             # Use telemetry only for scan nodes or when summary stats are absent/zero
             telemetry_rows = getattr(source_node.telemetry, "rows_read", None)

@@ -32,7 +32,7 @@ def render_filter(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.Aggregate)
 def render_aggregate(node: LogicalPlanNode) -> str:
-    response = "AGGREGATE ["
+    response = "UNGROUPED AGGREGATE ["
     for col in node.aggregates:
         if col.condition:
             response += (
@@ -49,7 +49,7 @@ def render_aggregate(node: LogicalPlanNode) -> str:
 def render_aggregate_group(node: LogicalPlanNode) -> str:
     aggregates = ", ".join(format_expression(col) for col in node.aggregates)
     groups = ", ".join(format_expression(col) for col in node.groups)
-    return f"AGGREGATE [{aggregates}] GROUP BY [{groups}]"
+    return f"HASHED AGGREGATE [{aggregates}] GROUP BY [{groups}]"
 
 
 @register_render(LogicalPlanStepType.Distinct)
@@ -118,7 +118,7 @@ def render_unnest(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.AggregateAndGroup)
 def render_aggregate_and_group(node: LogicalPlanNode) -> str:
-    result = f"AGGREGATE [{', '.join(format_expression(col) for col in node.aggregates)}] GROUP BY [{', '.join(format_expression(col) for col in node.groups)}]"
+    result = f"HASHED AGGREGATE [{', '.join(format_expression(col) for col in node.aggregates)}] GROUP BY [{', '.join(format_expression(col) for col in node.groups)}]"
     if node.having_condition is not None:
         result += f" ({format_expression(node.having_condition)})"
     return result
@@ -203,7 +203,7 @@ def render_scan(node: LogicalPlanNode) -> str:
     )
     hints = f" WITH({','.join(node.hints)})" if node.hints else ""
     limit = f" LIMIT {node.limit}" if node.limit else ""
-    return f"{io_async}READ{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{limit}"
+    return f"{io_async}SCAN{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{limit}"
 
 
 @register_render(LogicalPlanStepType.Set)

@@ -719,6 +719,13 @@ cdef class ParquetReadNode(ReaderNode):
 
     def sensors(self):
         base = super().sensors()
+        # ReaderNode.sensors() sets base["dataset"] from self.dataset, which is
+        # never populated on this class (the planner only passes "connector",
+        # not "dataset", for Parquet scans) — self.connector.dataset is the
+        # only place the real dataset name lives, and is what the old
+        # to_mermaid() read directly instead of going through sensors().
+        if self.connector is not None:
+            base["dataset"] = self.connector.dataset
         base["row_groups_read"] = self.readings.get("row_groups_read", 0)
         base["row_groups_pruned"] = self.readings.get("parquet_row_groups_pruned", 0)
         base["files_read"] = self.readings.get("files_read", 0)

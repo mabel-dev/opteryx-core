@@ -91,11 +91,10 @@ class _QueryTelemetry:
         )
         # sort the keys in the dictionary
         readings_dict = {key: readings_dict[key] for key in sorted(readings_dict)}
-        # put messages and plan at the end
+        # put messages and edges at the end
         readings_dict["version"] = opteryx.__version__
         readings_dict["messages"] = readings_dict.pop("messages", [])
         readings_dict["edges"] = readings_dict.pop("edges", [])
-        readings_dict["plan"] = readings_dict.pop("plan", None)
         return readings_dict
 
 

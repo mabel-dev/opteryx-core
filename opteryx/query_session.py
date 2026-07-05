@@ -407,9 +407,13 @@ class Session(DataFrame):
         if self._telemetry.end_time == 0:  # pragma: no cover
             self._telemetry.end_time = time.time_ns()
 
-        # Include mermaid diagram of the plan if available
+        # Populate per-node/edge telemetry from the plan (operations + edges).
+        # This is the definitive structured record; no mermaid string is built
+        # or stored here — EXPLAIN renders the diagram separately, on demand.
         if self._plan is not None:
-            self._telemetry.plan = self.mermaid()
+            from opteryx.utils import mermaid
+
+            mermaid.collect_plan_telemetry(self._plan)
 
         return self._telemetry.as_dict()
 
