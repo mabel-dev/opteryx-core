@@ -209,7 +209,54 @@ public:
     std::vector<std::string> final_names;   // terminal schema, for the empty-result morsel
     std::vector<DrakenType>  final_types;
 
+    // Plan-node identity currently being lowered. The compiler sets this once per plan
+    // node (set_current_identity) before that node's builder calls; every operator/sink/
+    // source created while it is current inherits it, so the harvest can attribute the
+    // per-operator readings back to the plan node. Empty for untagged (demo) call sites.
+    std::string current_identity_;
+    void set_current_identity(std::string s) { current_identity_ = std::move(s); }
+
+    // One harvested reading row (per operator/source/sink). Several may share an identity
+    // (a plan node lowered to multiple operators, or operator fusion) — the Python side
+    // sums them per identity.
+    struct OpReading {
+        std::string identity;
+        std::string role;   // "source" | "operator" | "sink"
+        uint64_t calls, rows_in, rows_out, bytes_in, bytes_out, exec_ns;
+    };
+    std::vector<OpReading> collect_op_stats() const {
+        std::vector<OpReading> out;
+        auto emit = [&out](const OpStats& s, const char* role) {
+            out.push_back(OpReading{
+                s.identity, role,
+                s.calls.load(), s.rows_in.load(), s.rows_out.load(),
+                s.bytes_in.load(), s.bytes_out.load(), s.exec_ns.load()});
+        };
+        for (const auto& pn : pipelines) {
+            if (pn->source) emit(pn->source->stats, "source");
+            for (const auto& op : pn->operators) emit(op->stats, "operator");
+            if (pn->sink) emit(pn->sink->stats, "sink");
+        }
+        return out;
+    }
+
     // ---- builder edge (called from Cython at plan-build time; not the hot path) ----
+    // Stamp the current plan-node identity onto a freshly built operator/source/sink and
+    // install it. Every builder below routes through these so no reading goes untagged.
+    Operator* add_op_(size_t p, std::unique_ptr<Operator> op) {
+        op->stats.identity = current_identity_;
+        pipelines[p]->operators.push_back(std::move(op));
+        return pipelines[p]->operators.back().get();
+    }
+    void set_sink_(size_t p, std::unique_ptr<Sink> s) {
+        s->stats.identity = current_identity_;
+        pipelines[p]->sink = std::move(s);
+    }
+    void set_source_(size_t p, std::unique_ptr<Source> s) {
+        s->stats.identity = current_identity_;
+        pipelines[p]->source = std::move(s);
+    }
+
     size_t new_pipeline() {
         pipelines.push_back(std::make_unique<PipelineNode>());
         return pipelines.size() - 1;
@@ -228,13 +275,13 @@ public:
     }
     void set_join2_build_sink(size_t p, std::vector<size_t> key_idx,
                               std::vector<size_t> payload_idx, size_t ref) {
-        pipelines[p]->sink =
-            std::make_unique<Join2BuildSink>(std::move(key_idx), std::move(payload_idx));
+        set_sink_(p,
+            std::make_unique<Join2BuildSink>(std::move(key_idx), std::move(payload_idx)));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_join2_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
                          std::vector<size_t> payload_idx, int mode) {
-        pipelines[p]->operators.push_back(std::make_unique<DeferredJoin2Probe>(
+        add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             static_cast<JoinMode>(mode)));
     }
@@ -243,19 +290,19 @@ public:
     void set_asof_build_sink(size_t p, std::vector<size_t> key_idx,
                              std::vector<size_t> payload_idx, size_t asof_idx,
                              size_t ref) {
-        pipelines[p]->sink = std::make_unique<Join2BuildSink>(
-            std::move(key_idx), std::move(payload_idx), static_cast<int>(asof_idx));
+        set_sink_(p, std::make_unique<Join2BuildSink>(
+            std::move(key_idx), std::move(payload_idx), static_cast<int>(asof_idx)));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_asof_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
                         std::vector<size_t> payload_idx, size_t asof_idx, int op) {
-        pipelines[p]->operators.push_back(std::make_unique<DeferredJoin2Probe>(
+        add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             JoinMode::LeftOuter, static_cast<int>(asof_idx), op));
     }
     void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bool serialize_pull) {
-        pipelines[p]->source =
-            std::make_unique<StreamingScanSource>(scan_ptr, fn, serialize_pull);
+        set_source_(p,
+            std::make_unique<StreamingScanSource>(scan_ptr, fn, serialize_pull));
     }
     // Zero-Python scan Source: workers pull decoded row groups straight from the
     // rugo IO pipeline — no GIL trampoline, no per-morsel thread attach. All the
@@ -269,15 +316,14 @@ public:
                                 const std::vector<std::pair<std::string, int>>* work_items,
                                 const std::vector<std::string>* column_names,
                                 int in_flight_limit) {
-        pipelines[p]->source = std::make_unique<NativeParquetScanSource>(
-            pipeline, footer_map, work_items, column_names, in_flight_limit);
+        set_source_(p, std::make_unique<NativeParquetScanSource>(
+            pipeline, footer_map, work_items, column_names, in_flight_limit));
     }
     void set_buffer_source(size_t p, size_t buf) {
-        pipelines[p]->source = std::make_unique<BufferSource>(buffers[buf].get());
+        set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));
     }
     void add_filter(size_t p, std::vector<SimplePredicate> preds) {
-        pipelines[p]->operators.push_back(
-            std::make_unique<NumericFilterOperator>(std::move(preds)));
+        add_op_(p, std::make_unique<NumericFilterOperator>(std::move(preds)));
     }
     void add_expr_filter(size_t p, void* instrs, int count, std::vector<int> col_idx,
                          std::vector<void*> lit_dv, ExprFilterFn fn,
@@ -290,8 +336,7 @@ public:
         prog.lit_dv = std::move(lit_dv);
         prog.const_col_idx = std::move(const_col_idx);
         prog.const_scalar_dv = std::move(const_scalar_dv);
-        pipelines[p]->operators.push_back(
-            std::make_unique<ExprFilterOperator>(std::move(prog), fn));
+        add_op_(p, std::make_unique<ExprFilterOperator>(std::move(prog), fn));
     }
     void add_expr_project(size_t p, void* instrs, int count, std::vector<int> col_idx,
                           std::vector<void*> lit_dv, ExprEvalFn fn, std::string name,
@@ -326,14 +371,13 @@ public:
         }
         std::vector<ExprProgram> ps;
         ps.push_back(std::move(prog));
-        pipelines[p]->operators.push_back(std::make_unique<ExprMultiProjectOperator>(
+        add_op_(p, std::make_unique<ExprMultiProjectOperator>(
             std::move(ps), fn,
             std::vector<std::string>{std::move(name)},
             std::vector<const LogicalType*>{logical}));
     }
     void add_limit(size_t p, int64_t offset, int64_t limit) {
-        pipelines[p]->operators.push_back(
-            std::make_unique<LimitOperator>(offset, limit, &pipelines[p]->halt));
+        add_op_(p, std::make_unique<LimitOperator>(offset, limit, &pipelines[p]->halt));
     }
     void add_buffer_morsel(size_t buf, MorselPtr m) {
         // Plan-time materialization edge: a virtual dataset's (plan-constant)
@@ -345,11 +389,10 @@ public:
         pipelines[p]->dop_override = dop;
     }
     void set_sort_sink(size_t p, std::vector<SortKeySpec> spec, size_t buf) {
-        pipelines[p]->sink = std::make_unique<SortSink>(std::move(spec), buffers[buf].get());
+        set_sink_(p, std::make_unique<SortSink>(std::move(spec), buffers[buf].get()));
     }
     void set_topn_sink(size_t p, std::vector<SortKeySpec> spec, size_t n, size_t buf) {
-        pipelines[p]->sink =
-            std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get());
+        set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get()));
     }
     // Window ranking: sort_spec = [partition keys asc..., order keys...]; n_part =
     // count of leading partition keys; fn_kinds[i] pairs with fn_names[i].
@@ -360,40 +403,40 @@ public:
         funcs.reserve(fn_kinds.size());
         for (size_t i = 0; i < fn_kinds.size(); ++i)
             funcs.push_back({static_cast<WinFn>(fn_kinds[i]), fn_names[i]});
-        pipelines[p]->sink = std::make_unique<WindowSink>(
-            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get());
+        set_sink_(p, std::make_unique<WindowSink>(
+            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get()));
     }
     void add_select(size_t p, std::vector<size_t> indices, std::vector<std::string> names) {
-        pipelines[p]->operators.push_back(
+        add_op_(p,
             std::make_unique<ColumnSelectOperator>(std::move(indices), std::move(names)));
     }
     void add_join_probe(size_t p, size_t ref, size_t key_idx, std::vector<size_t> payload_idx) {
-        pipelines[p]->operators.push_back(std::make_unique<DeferredJoinProbeOperator>(
+        add_op_(p, std::make_unique<DeferredJoinProbeOperator>(
             key_idx, std::move(payload_idx), join_refs[ref].get()));
     }
     void set_queue_sink(size_t p, MorselQueue* q) {
-        pipelines[p]->sink = std::make_unique<QueueSink>(q);
+        set_sink_(p, std::make_unique<QueueSink>(q));
         out_q = q;
     }
     void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf) {
-        pipelines[p]->sink =
-            std::make_unique<UngroupedAggSink>(std::move(specs), buffers[buf].get());
+        set_sink_(p,
+            std::make_unique<UngroupedAggSink>(std::move(specs), buffers[buf].get()));
     }
     void set_groupby_sink(size_t p, std::vector<size_t> key_idx,
                           std::vector<AggSpec2> specs, size_t buf) {
-        pipelines[p]->sink = std::make_unique<GroupBySink>(
-            std::move(key_idx), std::move(specs), buffers[buf].get());
+        set_sink_(p, std::make_unique<GroupBySink>(
+            std::move(key_idx), std::move(specs), buffers[buf].get()));
     }
     void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf) {
-        pipelines[p]->sink =
-            std::make_unique<DistinctSink>(std::move(on_idx), buffers[buf].get());
+        set_sink_(p,
+            std::make_unique<DistinctSink>(std::move(on_idx), buffers[buf].get()));
     }
     void set_buffer_append_sink(size_t p, size_t buf) {
-        pipelines[p]->sink = std::make_unique<BufferAppendSink>(buffers[buf].get());
+        set_sink_(p, std::make_unique<BufferAppendSink>(buffers[buf].get()));
     }
     void set_join_build_sink(size_t p, size_t key_idx, std::vector<size_t> payload_idx,
                              size_t ref) {
-        pipelines[p]->sink = std::make_unique<HashJoinBuildSink>(key_idx, std::move(payload_idx));
+        set_sink_(p, std::make_unique<HashJoinBuildSink>(key_idx, std::move(payload_idx)));
         pipelines[p]->fill_join_ref = static_cast<int>(ref);
     }
     void set_final_schema(std::vector<std::string> names, std::vector<DrakenType> types) {

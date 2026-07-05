@@ -13,7 +13,9 @@
 // vectorised kernel calls.
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "morsels/cxx_morsel.h"  // CxxMorsel, ErrCtx, MorselState  (build: -Idraken)
@@ -21,6 +23,25 @@
 namespace opteryx::engine {
 
 using MorselPtr = std::shared_ptr<CxxMorsel>;
+
+// ---- Per-operator telemetry (basic, always-on) -----------------------------------
+// One Source/Operator/Sink instance serves EVERY worker thread, so these counters are
+// shared and therefore atomic. Accumulation is PER-MORSEL (never per-row): the atomic
+// add + the timing clock read amortise over the thousands of rows in a morsel, the same
+// granularity as the engine's per-morsel virtual dispatch. `identity` ties the readings
+// back to the plan node the compiler lowered into this operator (the harvest keys on it).
+// The counters are inclusive of downstream work only for the source loop's own timing;
+// each operator/sink times just its own execute()/sink() call (the driver excludes the
+// recursive forward), so exec_ns is this operator's SELF time.
+struct OpStats {
+    std::string           identity;      // plan-node identity; empty = untagged (demos)
+    std::atomic<uint64_t> calls{0};      // input morsels handled
+    std::atomic<uint64_t> rows_in{0};
+    std::atomic<uint64_t> rows_out{0};
+    std::atomic<uint64_t> bytes_in{0};   // rows * columns * 8, matching the Python model
+    std::atomic<uint64_t> bytes_out{0};
+    std::atomic<uint64_t> exec_ns{0};    // wall time inside this operator's own call(s)
+};
 
 // ---- Opaque per-operator state. The engine owns the lifetimes. -------------------
 struct GlobalSourceState { virtual ~GlobalSourceState() = default; };
@@ -38,6 +59,7 @@ enum class SinkResult   { CONTINUE };
 
 // ---- Source: produces morsels; parallel via dynamic morsel assignment ------------
 struct Source {
+    OpStats stats;
     virtual ~Source() = default;
     virtual std::unique_ptr<GlobalSourceState> make_global() = 0;
     virtual std::unique_ptr<LocalSourceState>  make_local(GlobalSourceState&) = 0;
@@ -49,6 +71,7 @@ struct Source {
 
 // ---- Operator: in-pipeline transform (filter, projection, expression eval) -------
 struct Operator {
+    OpStats stats;
     virtual ~Operator() = default;
     virtual std::unique_ptr<OperatorState> make_state() = 0;
     virtual OpResult execute(const MorselPtr& in, OperatorState&,
@@ -57,6 +80,7 @@ struct Operator {
 
 // ---- Sink: pipeline terminal / breaker -------------------------------------------
 struct Sink {
+    OpStats stats;
     virtual ~Sink() = default;
     virtual std::unique_ptr<GlobalSinkState> make_global() = 0;
     virtual std::unique_ptr<LocalSinkState>  make_local(GlobalSinkState&) = 0;

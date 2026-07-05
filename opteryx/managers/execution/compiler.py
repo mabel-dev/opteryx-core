@@ -552,14 +552,14 @@ class _Compiler:
         in_edges = list(self.plan.ingoing_edges(nid))
 
         if kind == "FilterNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             bc = self._lower_expression(node.filter, "a filter predicate")
             const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, layout)
             self.nplan.add_expr_filter(p, bc, layout, const_col_idx, const_scalar_vecs)
             return p, layout
 
         if kind == "ProjectionNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             # Computed expressions come from the FULL projection list — the SELECT
             # columns plus any ORDER BY keys the planner routed through this node
             # (mirrors ProjectionNode.__init__'s own eval-node derivation).
@@ -579,7 +579,7 @@ class _Compiler:
             return p, out_ids
 
         if kind == "UngroupedAggregateNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             layout = self._project_agg_operands(p, node, layout)
             specs = self._parse_aggregates(getattr(node, "aggregates", None) or [], layout)
             buf = self.nplan.new_buffer()
@@ -591,7 +591,7 @@ class _Compiler:
             return p2, out_layout
 
         if kind == "GroupedAggregateHashedNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             group_cols = getattr(node, "group_by_columns", None) or []
             if not group_cols:
                 _unsupported("a GROUP BY with no keys")
@@ -634,7 +634,7 @@ class _Compiler:
             return p2, out_layout
 
         if kind == "DistinctNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             on = getattr(node, "_distinct_on", None)
             on_idx = []
             if on:
@@ -649,7 +649,7 @@ class _Compiler:
             return p2, layout
 
         if kind == "SortNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             spec, layout = self._sort_spec(p, node.order_by, layout)
             buf = self.nplan.new_buffer()
             self.nplan.set_sort_sink(p, spec, buf)
@@ -661,7 +661,7 @@ class _Compiler:
             return p2, layout
 
         if kind == "HeapSortNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             limit = getattr(node, "limit", None)
             if limit is None or int(limit) < 0:
                 _unsupported("a HeapSort without a positive LIMIT")
@@ -674,7 +674,7 @@ class _Compiler:
             return p2, layout
 
         if kind == "WindowNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             part_cols = list(getattr(node, "_partition_columns", None) or [])
             order_cols = list(getattr(node, "_order_columns", None) or [])
             order_asc = list(getattr(node, "_order_ascending", None) or [])
@@ -715,7 +715,7 @@ class _Compiler:
             return p2, list(layout) + list(fn_names)
 
         if kind == "LimitNode":
-            (p, layout) = self._compile_only_child(in_edges, kind)
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             # "First N of the stream" is only deterministic when one worker claims
             # morsels in stream order — LIMIT pins its pipeline to dop 1 (halt stops
             # the source early, so this is bounded work, not a full serial scan).
@@ -742,8 +742,12 @@ class _Compiler:
                 (lp, llayout) = self.compile_node(provider)
                 if len(llayout) < len(ids):
                     _unsupported("a UNION leg narrower than the union schema")
+                # The per-leg align/append is this UNION's plumbing — attribute it here,
+                # not to the leg whose identity compile_node just left current.
+                self.nplan.set_current_identity(node.identity)
                 self.nplan.add_select(lp, list(range(len(ids))), ids)
                 self.nplan.set_buffer_append_sink(lp, buf)
+            self.nplan.set_current_identity(node.identity)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             return p2, ids
@@ -780,10 +784,14 @@ class _Compiler:
             spec.append((layout.index(identity), bool(ascending)))
         return spec, layout
 
-    def _compile_only_child(self, in_edges, kind):
+    def _compile_only_child(self, in_edges, kind, node):
         if len(in_edges) != 1:
             _unsupported(f"a {kind} with {len(in_edges)} inputs")
-        return self.compile_node(in_edges[0][0])
+        result = self.compile_node(in_edges[0][0])
+        # The child's own compile stamped ITS identity as current; restore this node's
+        # so the operators/sink this branch is about to build are attributed here.
+        self.nplan.set_current_identity(node.identity)
+        return result
 
     def _native_scan_plan(self, scan):
         """Plan-time setup for the zero-Python scan Source (NativeParquetScanSource)
@@ -845,6 +853,9 @@ class _Compiler:
         )
 
     def _compile_scan(self, scan, kind):
+        # Tag the scan Source (and any materialized buffer source) with the scan node's
+        # identity so its per-operator readings attribute back to the ReadRel node.
+        self.nplan.set_current_identity(scan.identity)
         # ReaderNode = the generic non-parquet connector scan ($planets and the other
         # sample/virtual/in-memory relations). Its content is fully read either way
         # (no native streaming exists for it); materializing at plan time keeps
@@ -933,6 +944,7 @@ class _Compiler:
             build_keys, probe_keys = right_cols, left_cols
 
         bp, blayout = self.compile_node(build_id)
+        self.nplan.set_current_identity(node.identity)  # own the build sink + probe below
         build_key_idx = []
         for identity in build_keys:
             if identity not in blayout:
@@ -944,6 +956,7 @@ class _Compiler:
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref)
 
         pp, playout = self.compile_node(probe_id)
+        self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
         probe_key_idx = []
         for identity in probe_keys:
             if identity not in playout:
@@ -996,10 +1009,12 @@ class _Compiler:
         if asof_right not in blayout:
             _unsupported("an ASOF match column the build stream does not carry")
         ref = self.nplan.new_join2_ref()
+        self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe
         self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
                                        blayout.index(asof_right), ref)
 
         pp, playout = self.compile_node(legs["left"])
+        self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
         probe_key_idx = []
         for identity in left_cols:
             if identity not in playout:
@@ -1091,6 +1106,7 @@ def compile_to_native(plan):
     if len(in_edges) != 1:
         _unsupported(f"an Exit with {len(in_edges)} inputs")
     p, layout = compiler.compile_node(in_edges[0][0])
+    nplan.set_current_identity(exit_node.identity)  # exit select + queue sink
 
     # Exit semantics: select final_columns (identities) in order, rename to final_names.
     indices = []
@@ -1147,6 +1163,35 @@ def execute_native(plan, telemetry=None):
             # close once the driver — and therefore every engine worker — is done.
             out_q.close()
             done.wait()
+            # The driver is done, so every operator's counters are final: harvest the
+            # per-operator telemetry and fold it onto the session telemetry, keyed by
+            # plan-node identity (mermaid's get_node_stats reads it back for the
+            # ``operations`` breakdown). Several native operators can share one identity
+            # (a plan node lowered to multiple operators, operator fusion) — sum them.
+            if telemetry is not None:
+                op_stats: dict = {}
+                for row in nplan.collect_op_stats():
+                    ident = row["identity"]
+                    if not ident:
+                        continue
+                    agg = op_stats.get(ident)
+                    if agg is None:
+                        op_stats[ident] = {
+                            "records_in": row["records_in"],
+                            "records_out": row["records_out"],
+                            "bytes_in": row["bytes_in"],
+                            "bytes_out": row["bytes_out"],
+                            "calls": row["calls"],
+                            "execution_time": row["execution_time"],
+                        }
+                    else:
+                        agg["records_in"] += row["records_in"]
+                        agg["records_out"] += row["records_out"]
+                        agg["bytes_in"] += row["bytes_in"]
+                        agg["bytes_out"] += row["bytes_out"]
+                        agg["calls"] += row["calls"]
+                        agg["execution_time"] += row["execution_time"]
+                telemetry._reading["native_op_stats"] = op_stats
             pool.shutdown(wait=True)
             nplan.close_scan_plans()
             del handle

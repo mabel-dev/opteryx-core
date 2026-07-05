@@ -220,8 +220,19 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         string name
 
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
+        string identity
+        string role
+        uint64_t calls
+        uint64_t rows_in
+        uint64_t rows_out
+        uint64_t bytes_in
+        uint64_t bytes_out
+        uint64_t exec_ns
     cdef cppclass Engine:
         Engine() except +
+        void set_current_identity(string s)
+        cppvector[OpReading] collect_op_stats()
         size_t new_pipeline()
         size_t new_buffer()
         size_t new_join_ref()
@@ -2435,6 +2446,34 @@ cdef class NativePlan:
         if self._e != NULL:
             del self._e
             self._e = NULL
+
+    def set_current_identity(self, ident):
+        """Tag every operator/source/sink built after this call with ``ident`` (the
+        plan-node identity), so ``collect_op_stats`` can attribute the per-operator
+        readings back to the plan node. The compiler calls this once per node."""
+        cdef string s = (ident if isinstance(ident, bytes) else (<str>ident).encode("utf-8"))
+        self._e.set_current_identity(s)
+
+    def collect_op_stats(self):
+        """Harvest the per-operator execution telemetry accumulated during ``run``.
+        Returns a list of dicts, one per source/operator/sink; callers sum by
+        ``identity`` (several rows can share one plan-node identity). Must be called
+        AFTER the run has drained — the counters accumulate as morsels flow."""
+        cdef cppvector[OpReading] rows = self._e.collect_op_stats()
+        cdef OpReading r
+        out = []
+        for r in rows:
+            out.append({
+                "identity": r.identity.decode("utf-8"),
+                "role": r.role.decode("utf-8"),
+                "calls": int(r.calls),
+                "records_in": int(r.rows_in),
+                "records_out": int(r.rows_out),
+                "bytes_in": int(r.bytes_in),
+                "bytes_out": int(r.bytes_out),
+                "execution_time": int(r.exec_ns),
+            })
+        return out
 
     def new_pipeline(self):
         return self._e.new_pipeline()

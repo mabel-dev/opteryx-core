@@ -19,6 +19,8 @@
 // Python at most once and reuses it across pipeline runs, instead of re-running that
 // race on every single pipeline invocation.
 
+#include <cstdint>
+#include <ctime>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -28,6 +30,23 @@
 #include "../bs_pool_bridge_c.h"
 
 namespace opteryx::engine {
+
+// Monotonic nanosecond clock for the per-operator telemetry. CLOCK_MONOTONIC is the
+// same source the transitional Cython drive loop used; ~20ns per read, taken per morsel
+// (not per row), so it is noise against a morsel's kernel work.
+inline uint64_t telem_now_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull
+         + static_cast<uint64_t>(ts.tv_nsec);
+}
+
+// rows * columns * 8 — the byte estimate the Python operator model reports (bytes_in/out).
+inline uint64_t telem_nbytes(const MorselPtr& m) {
+    if (!m) return 0;
+    return static_cast<uint64_t>(m->num_rows()) * static_cast<uint64_t>(m->num_columns())
+         * 8ull;
+}
 
 // Per-worker state, shared by both dispatch backends below.
 struct WorkerCtx {
@@ -55,17 +74,32 @@ inline void run_worker(WorkerCtx* ctx) {
     // (HAVE_MORE — re-driven with the SAME input/state until EMIT/NEED_INPUT). This
     // is what lets ONE input morsel fan out to many outputs (join fan-out, UNNEST)
     // without losing any but the first batch.
+    const std::memory_order relaxed = std::memory_order_relaxed;
     std::function<void(MorselPtr, size_t)> push = [&](MorselPtr m, size_t stage) {
         if (e.code != 0) return;
         if (stage == p.operators.size()) {
+            OpStats& ss = p.sink->stats;
+            ss.calls.fetch_add(1, relaxed);
+            ss.rows_in.fetch_add(m ? m->num_rows() : 0, relaxed);
+            ss.bytes_in.fetch_add(telem_nbytes(m), relaxed);
+            uint64_t t0 = telem_now_ns();
             p.sink->sink(m, *ctx->gsink, *lsink, e);
+            ss.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
             return;
         }
+        OpStats& os = p.operators[stage]->stats;
+        os.calls.fetch_add(1, relaxed);
+        os.rows_in.fetch_add(m ? m->num_rows() : 0, relaxed);
+        os.bytes_in.fetch_add(telem_nbytes(m), relaxed);
         MorselPtr out;
         while (true) {
+            uint64_t t0 = telem_now_ns();
             OpResult orr = p.operators[stage]->execute(m, *op_states[stage], out, e);
+            os.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);  // SELF time — excludes forward
             if (e.code != 0) return;
             if (orr == OpResult::NEED_INPUT) return;       // consumed, no output
+            os.rows_out.fetch_add(out ? out->num_rows() : 0, relaxed);
+            os.bytes_out.fetch_add(telem_nbytes(out), relaxed);
             push(out, stage + 1);                          // EMIT or HAVE_MORE: forward
             if (e.code != 0) return;
             if (orr == OpResult::EMIT) return;              // this input is drained
@@ -73,12 +107,18 @@ inline void run_worker(WorkerCtx* ctx) {
         }
     };
 
+    OpStats& src = p.source->stats;
     MorselPtr in;
     while (true) {
         if (p.halt != nullptr && p.halt->load(std::memory_order_relaxed)) break;
+        uint64_t t0 = telem_now_ns();
         SourceResult sr = p.source->get_morsel(*ctx->gsrc, *lsrc, in, e);
+        src.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
         if (e.code != 0) return;
         if (sr == SourceResult::FINISHED) break;
+        src.calls.fetch_add(1, relaxed);
+        src.rows_out.fetch_add(in ? in->num_rows() : 0, relaxed);
+        src.bytes_out.fetch_add(telem_nbytes(in), relaxed);
         push(in, 0);
         if (e.code != 0) return;
     }

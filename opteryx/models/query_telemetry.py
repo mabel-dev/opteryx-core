@@ -75,6 +75,9 @@ class _QueryTelemetry:
             "bytes_processed",
             "columns_read",
             "bytes_read",
+            # per-operator native readings — surfaced via the ``operations`` breakdown
+            # (mermaid.get_node_stats), never as a top-level telemetry key.
+            "native_op_stats",
         ]
         for key in connector_only_keys:
             readings_dict.pop(key, None)

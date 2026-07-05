@@ -956,7 +956,8 @@ cdef class IpcRowGroupSource:
 
         # ── Claim phase (under the cursor lock): advance the submit window to keep
         # it full, then take one result slot. No GIL-releasing call runs here. ──
-        self._mtx.lock()
+        with nogil:
+            self._mtx.lock()
         submit_start = self.next_to_submit
         submit_end = submit_start
         while submit_end < self.n_items and \

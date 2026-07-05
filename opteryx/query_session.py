@@ -145,7 +145,6 @@ class Session(DataFrame):
             raise MissingSqlStatement("SQL provided was empty.")
 
         start = time.time_ns()
-        processing_bytes_estimate = 0
         try:
             self._plan = query_planner(
                 operation=operation,
@@ -155,26 +154,6 @@ class Session(DataFrame):
                 query_id=self.query_id,
                 telemetry=self._telemetry,
             )
-
-            # Extract bytes estimate from scan nodes in the plan
-            for nid, node in self._plan.nodes(data=True):
-                if getattr(node, "is_scan", False):
-                    try:
-                        # Get structured config directly without full dict conversion
-                        node_config = (
-                            node.plan_config()
-                            if getattr(node, "plan_config", None) is not None
-                            else getattr(node, "config", None)
-                        )
-                        if isinstance(node_config, dict) and "projection" in node_config:
-                            for proj_col in node_config.get("projection", []):
-                                col_bytes = proj_col.get("total-bytes") or 0
-                                processing_bytes_estimate += col_bytes
-                    except (AttributeError, TypeError):
-                        # Malformed node config (non-dict entries); skip byte
-                        # estimate for this node rather than failing the query.
-                        pass
-
         except RuntimeError as err:  # pragma: no cover
             raise SqlError(f"Error Executing SQL Statement ({err}) (QID:{self.query_id})") from err
         finally:
@@ -191,6 +170,18 @@ class Session(DataFrame):
                 "query": operation,
             },
         )
+
+        return results
+
+    def _emit_processed_bytes_billing(self, operation: str) -> None:
+        """Emit the DATA_PROCESSED_BYTES billing event.
+
+        Must be called *after* execution has completed and the results have
+        been fully consumed: ``bytes_processed`` is accumulated by the scan
+        operators as morsels flow, so it is only complete once the result
+        stream has been drained. Emitting earlier (e.g. right after the lazy
+        ``execute()`` call returns) always reports zero bytes.
+        """
         write_billing_event(
             billing_event=BillingEventType.DATA_PROCESSED_BYTES,
             billing_account="opteryx",
@@ -198,11 +189,9 @@ class Session(DataFrame):
                 "user": self.context.user,
                 "query_id": self.query_id,
                 "query": operation,
-                "bytes_processed": processing_bytes_estimate,
+                "bytes_processed": self._telemetry.bytes_processed,
             },
         )
-
-        return results
 
     def _execute_statements(
         self,
@@ -521,6 +510,7 @@ class Session(DataFrame):
             self._executed = True
             elapsed = time.time_ns() - start
             self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+            self._emit_processed_bytes_billing(operation)
             return
 
         def _yield_morsel(morsel: Morsel):
@@ -587,6 +577,7 @@ class Session(DataFrame):
         self._executed = True
         elapsed = time.time_ns() - start
         self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+        self._emit_processed_bytes_billing(operation)
 
     @property
     def messages(self) -> List[str]:

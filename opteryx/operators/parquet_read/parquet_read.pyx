@@ -944,7 +944,8 @@ cdef class ParquetReadNode(ReaderNode):
 
     cdef shared_ptr[CxxMorsel] _finish_locked_cxx(self):
         cdef shared_ptr[CxxMorsel] out
-        self._scan_mtx.lock()
+        with nogil:
+            self._scan_mtx.lock()
         out = self._single_pass_finish_cxx()
         self._scan_mtx.unlock()
         return out
@@ -1109,7 +1110,8 @@ cdef class ParquetReadNode(ReaderNode):
         cdef object src, src1, src2
         if self._scan_mode == _SCAN_SINGLE:
             # Lock so a concurrent late puller can't race the flush/close-once.
-            self._scan_mtx.lock()
+            with nogil:
+                self._scan_mtx.lock()
             if not self._scan_finished:
                 self._scan_finished = True
                 self._flush_decode_telemetry()
@@ -1121,7 +1123,8 @@ cdef class ParquetReadNode(ReaderNode):
                 src.close()
             return
         if self._scan_mode == _SCAN_LATMAT:
-            self._scan_mtx.lock()
+            with nogil:
+                self._scan_mtx.lock()
             if not self._scan_finished:
                 self._scan_finished = True
                 self._flush_decode_telemetry()
@@ -1469,12 +1472,14 @@ cdef class ParquetReadNode(ReaderNode):
             # (under this scan's _scan_mtx), which a concurrently-exhausted second
             # worker can slip through. Speculatively incrementing first and
             # decrementing on a None result closes that gap entirely.
-            self._scan_mtx.lock()
+            with nogil:
+                self._scan_mtx.lock()
             self._sp_claims_pending += 1
             self._scan_mtx.unlock()
             pulled = self._ipc_source.next_vectors()
             if pulled is None:
-                self._scan_mtx.lock()
+                with nogil:
+                    self._scan_mtx.lock()
                 self._sp_claims_pending -= 1
                 self._scan_mtx.unlock()
                 return self._finish_locked_cxx()
@@ -1487,7 +1492,8 @@ cdef class ParquetReadNode(ReaderNode):
             # Phase 2 empty row group (dictionary-membership skip): no assembly,
             # no morsel — just fold in I/O telemetry + the pre-filter row count.
             if vectors is None:
-                self._scan_mtx.lock()
+                with nogil:
+                    self._scan_mtx.lock()
                 self.bytes_in += bytes_fetched
                 self.scan_readings.time_parquet_read_ranges_ns += read_ns
                 self.scan_readings.time_parquet_decode_columns_ns += decode_ns
@@ -1525,7 +1531,8 @@ cdef class ParquetReadNode(ReaderNode):
                         emit_cxm = morsel_to_cxx(count_star)
 
             # ── Shared commit (under _scan_mtx; no GIL-releasing call inside) ──
-            self._scan_mtx.lock()
+            with nogil:
+                self._scan_mtx.lock()
             self.bytes_in += bytes_fetched
             self.scan_readings.time_parquet_read_ranges_ns += read_ns
             self.scan_readings.time_parquet_decode_columns_ns += decode_ns
@@ -1545,7 +1552,8 @@ cdef class ParquetReadNode(ReaderNode):
         """Locked wrapper around the exhaustion guard so the empty-result bookkeeping
         is consistent under concurrent pull."""
         cdef Morsel out
-        self._scan_mtx.lock()
+        with nogil:
+            self._scan_mtx.lock()
         out = self._single_pass_finish()
         self._scan_mtx.unlock()
         return out
@@ -1705,7 +1713,8 @@ cdef class ParquetReadNode(ReaderNode):
             result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
             rows_after_filter = result_morsel.num_rows
 
-            self._scan_mtx.lock()
+            with nogil:
+                self._scan_mtx.lock()
             self._total_rows_after_filter += rows_after_filter
             # Already assembled in output_identity_order — no select() needed.
             result_morsel = self._commit_morsel(result_morsel, path)

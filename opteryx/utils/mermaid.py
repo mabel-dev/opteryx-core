@@ -26,6 +26,21 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
             sensors = node.sensors()
             node_stat.update(sensors)
 
+            # Native-engine per-operator telemetry, harvested after the run and keyed by
+            # plan-node identity (execute_native). The plan-node Python objects never
+            # execute on the native path — the C++ Engine does — so their own counters
+            # stay zero; overlay the real readings here.
+            native_stats = node.telemetry._reading.get("native_op_stats")
+            if native_stats:
+                native = native_stats.get(node.identity)
+                if native:
+                    node_stat.update(native)
+                    # self_time == execution_time on the native path: the executor times
+                    # each operator's own call (the recursive downstream forward is
+                    # excluded), so there is no separate downstream component to subtract.
+                    node_stat["self_time"] = native["execution_time"]
+                    node_stat["downstream_time"] = 0
+
             # Add telemetry-specific readings for reader nodes
             if node.is_scan:
                 node_stat["rows_read"] = getattr(node.telemetry, "rows_read", 0)
