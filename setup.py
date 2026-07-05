@@ -615,16 +615,21 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     # Expression evaluator — consolidated .so for all evaluator leaf modules.
-    # Leaf .pyx files are textually included by _impl.pyx.
+    # Leaf .pyx files are textually included by _impl.pyx. json_ops.pyx cimports
+    # yyjson at C level; on Linux (RTLD_LOCAL) cyyjson.so's symbols are not
+    # visible to this extension, so yyjson.c must be compiled directly in (same
+    # as operations/__init__ above).
     Extension(
         "opteryx.expression.evaluator._impl",
         sources=[
             "opteryx/expression/evaluator/_impl.pyx",
             "opteryx/expression/evaluator/bytecode_worker.cpp",
+            "third_party/yyjson/src/yyjson.c",
         ],
         include_dirs=include_dirs
         + [
             "opteryx/expression/evaluator",  # bytecode_worker.h, bitmap_worker_pool.h
+            "third_party/yyjson/src",
         ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
