@@ -280,12 +280,16 @@ public:
             std::make_unique<NumericFilterOperator>(std::move(preds)));
     }
     void add_expr_filter(size_t p, void* instrs, int count, std::vector<int> col_idx,
-                         std::vector<void*> lit_dv, ExprFilterFn fn) {
+                         std::vector<void*> lit_dv, ExprFilterFn fn,
+                         std::vector<int> const_col_idx = {},
+                         std::vector<void*> const_scalar_dv = {}) {
         ExprProgram prog;
         prog.instrs = instrs;
         prog.count = count;
         prog.col_idx = std::move(col_idx);
         prog.lit_dv = std::move(lit_dv);
+        prog.const_col_idx = std::move(const_col_idx);
+        prog.const_scalar_dv = std::move(const_scalar_dv);
         pipelines[p]->operators.push_back(
             std::make_unique<ExprFilterOperator>(std::move(prog), fn));
     }

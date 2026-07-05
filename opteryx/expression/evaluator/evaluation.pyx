@@ -601,7 +601,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_EXTR_UNKNOWN, BC_EXTR_MAP_STRING, BC_EXTR_MAP_ARRAY,
     BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY,
 )
-from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
+from libc.stdint cimport uint8_t, int8_t, int16_t, int32_t, int64_t, uintptr_t, uint32_t
 
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
@@ -623,7 +623,7 @@ cdef extern from "core/alloc.h":
     void  draken_free(void* p) nogil
 
 from draken.morsels.morsel cimport Morsel, cxx_to_morsel
-from draken.morsels.cxx_morsel cimport CxxMorsel, cxx_mask_c, cxx_column_child_vec
+from draken.morsels.cxx_morsel cimport CxxMorsel, cxx_mask_c, cxx_mask_with_consts_c, cxx_column_child_vec
 from libcpp.memory cimport shared_ptr
 from draken.vectors.bool_vector cimport (
     BoolVector,
@@ -2022,6 +2022,40 @@ cdef int _dv_filter_span_cxx(
                             arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
     if rc == 0:
         out_filtered[0] = cxx_mask_c(m, dv_stack[0])
+    draken_frame_arena_destroy(arena)
+    return rc
+
+
+cdef int _dv_filter_span_with_consts_cxx(
+    BytecodeInstr* instrs, int count, const CxxMorsel* m,
+    int* col_idx, DrakenVector** lit_dv,
+    int32_t* const_col_idx, DrakenVector** const_scalar_dv, uint32_t n_consts,
+    CxxMorsel** out_filtered, int* err_op, const char** err_msg,
+) noexcept nogil:
+    """_dv_filter_span_cxx twin for a FilterNode with `IDENTIFIER = LITERAL`
+    const-replacements: gathers via cxx_mask_with_consts_c instead of cxx_mask_c,
+    so a column known-constant on every surviving row (e.g. WHERE col = 7) is
+    broadcast O(1) from a pre-resolved scalar DrakenVector* instead of being taken
+    and then discarded. (const_col_idx, const_scalar_dv) are resolved ONCE by the
+    caller (FilterNode._flt_resolve_consts) and reused across morsels — same
+    resolve-once contract as (col_idx, lit_dv)."""
+    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_stack[64]
+    cdef DrakenVector  dv_store[64]
+    cdef Py_ssize_t num_rows = m.num_rows()
+    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
+    cdef int rc
+    cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    if arena == NULL:
+        err_op[0] = -99
+        err_msg[0] = NULL
+        return 99
+    _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
+                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
+    if rc == 0:
+        out_filtered[0] = cxx_mask_with_consts_c(
+            m, dv_stack[0], const_col_idx, <const DrakenVector* const*>const_scalar_dv, n_consts)
     draken_frame_arena_destroy(arena)
     return rc
 

@@ -35,7 +35,7 @@ from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from cpython.array cimport array
 import draken.draken_native as _draken_native
 
-from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t, uint8_t, uint32_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t, uint8_t, uint32_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
 from cpython.ref cimport PyObject
@@ -48,7 +48,11 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_UNARY_OP, UOP_IS_NULL, UOP_IS_NOT_NULL, BC_FUNCTION,
     BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_COMPARE,
 )
-from opteryx.expression.evaluator._impl cimport _dv_filter_span_cxx, _dv_eval_span_cxx
+from opteryx.expression.evaluator._impl cimport (
+    _dv_filter_span_cxx,
+    _dv_filter_span_with_consts_cxx,
+    _dv_eval_span_cxx,
+)
 from opteryx.compiled.morsel_queue cimport PyMorselQueue, MorselQueue
 from libcpp.vector cimport vector as cppvector
 from libcpp.unordered_map cimport unordered_map
@@ -192,6 +196,7 @@ cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
 # in evaluation.pyx through these C fn-pointer shapes (the ScanPullFn idiom).
 ctypedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                              int* col_idx, void** lit_dv,
+                             int* const_col_idx, void** const_scalar_dv, int n_consts,
                              CxxMorsel** out_filtered, int* err_op,
                              const char** err_msg) noexcept nogil
 ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
@@ -229,7 +234,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_buffer_source(size_t p, size_t buf)
         void add_filter(size_t p, cppvector[SimplePredicate] preds)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
-                             cppvector[void*] lit_dv, ExprFilterFn fn)
+                             cppvector[void*] lit_dv, ExprFilterFn fn,
+                             cppvector[int] const_col_idx, cppvector[void*] const_scalar_dv)
         void add_expr_project(size_t p, void* instrs, int count, cppvector[int] col_idx,
                               cppvector[void*] lit_dv, ExprEvalFn fn, string name,
                               int lt_kind, int lt_unit, int lt_precision, int lt_scale)
@@ -2285,12 +2291,17 @@ cpdef void push_right_one(JoinNode join, object morsel) except *:
 
 cdef int _expr_filter_tramp(void* instrs, int count, const CxxMorsel* m,
                             int* col_idx, void** lit_dv,
+                            int* const_col_idx, void** const_scalar_dv, int n_consts,
                             CxxMorsel** out_filtered, int* err_op,
                             const char** err_msg) noexcept nogil:
     """Native entry (matches ExprFilterFn) for ExprFilterOperator — the pure-nogil
-    predicate span in evaluation.pyx. No PyObject inside."""
-    return _dv_filter_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
-                               <DrakenVector**>lit_dv, out_filtered, err_op, err_msg)
+    predicate span in evaluation.pyx. No PyObject inside. n_consts == 0 (no
+    `IDENTIFIER = LITERAL` const-replacements on this predicate) costs nothing extra
+    — _dv_filter_span_with_consts_cxx's const-scan loop is a no-op per column."""
+    return _dv_filter_span_with_consts_cxx(
+        <BytecodeInstr*>instrs, count, m, col_idx, <DrakenVector**>lit_dv,
+        <int32_t*>const_col_idx, <DrakenVector**>const_scalar_dv, <uint32_t>n_consts,
+        out_filtered, err_op, err_msg)
 
 
 cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
@@ -2567,18 +2578,34 @@ cdef class NativePlan:
             pay.push_back(<size_t>i)
         self._e.add_asof_probe(p, ref, keys, pay, asof_idx, op)
 
-    def add_expr_filter(self, size_t p, CompiledBytecode bc, list layout):
+    def add_expr_filter(self, size_t p, CompiledBytecode bc, list layout,
+                       list const_col_idx=None, list const_scalar_vecs=None):
         """General WHERE: a plan-lowered, plan-resolved c-native predicate program
-        (bool-final; DESC intermediates fold raw in the VM)."""
+        (bool-final; DESC intermediates fold raw in the VM). `const_col_idx` /
+        `const_scalar_vecs` (parallel lists, optional) name columns the compiler has
+        proven hold one literal value on every row surviving the predicate (an
+        `IDENTIFIER = LITERAL` conjunct) — those columns broadcast from the scalar
+        Vector in O(1) instead of being gathered and discarded. `const_scalar_vecs`
+        elements are length-1 Vectors; `held` keeps them (and their underlying
+        DrakenVector*) alive for the Engine's whole run, same as `bc`."""
         if not bytecode_is_c_native_predicate(bc):
             raise ValueError("native engine: add_expr_filter requires a c-native "
                              "bool-final program — the compiler must reject earlier")
         cdef cppvector[int] col_idx
         cdef cppvector[void*] lit_dv
+        cdef cppvector[int] c_const_col_idx
+        cdef cppvector[void*] c_const_scalar_dv
+        cdef Vector scalar_vec
         _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
         self.held.append(bc)
+        if const_col_idx:
+            for i in const_col_idx:
+                c_const_col_idx.push_back(<int>i)
+            for scalar_vec in const_scalar_vecs:
+                c_const_scalar_dv.push_back(<void*>scalar_vec.unified())
+            self.held.append(const_scalar_vecs)
         self._e.add_expr_filter(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
-                                _expr_filter_tramp)
+                                _expr_filter_tramp, c_const_col_idx, c_const_scalar_dv)
 
     def add_expr_project(self, size_t p, CompiledBytecode bc, list layout, name,
                          logical=None):

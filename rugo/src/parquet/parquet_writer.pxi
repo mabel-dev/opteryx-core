@@ -15,7 +15,7 @@
 # Phase 1 scope: INT64, FLOAT64, BOOL, VARCHAR/NVARCHAR/VARBINARY; PLAIN,
 # UNCOMPRESSED, single row group. Other physical types fail loud.
 
-from libc.stdint cimport uint8_t, uint32_t, int8_t, int16_t, int32_t, int64_t
+from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int8_t, int16_t, int32_t, int64_t
 from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -29,6 +29,10 @@ from draken.core.buffers cimport (
     DRAKEN_INT16,
     DRAKEN_INT32,
     DRAKEN_INT64,
+    DRAKEN_UINT8,
+    DRAKEN_UINT16,
+    DRAKEN_UINT32,
+    DRAKEN_UINT64,
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_BOOL,
@@ -118,9 +122,12 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
         not supported with splitting; if any column is an array type the value
         is ignored and a single row group is written.
 
-    Supported column types: INT8/16/32/64, FLOAT64, BOOL, VARCHAR, NVARCHAR,
-    VARBINARY, DATE32, TIMESTAMP64, DECIMAL, DECIMAL128, and all-null (NULL)
-    columns. Any other physical type raises ValueError (fail loud).
+    Supported column types: INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL,
+    VARCHAR, NVARCHAR, VARBINARY, DATE32, TIMESTAMP64, TIME32/64, INTERVAL,
+    DECIMAL, DECIMAL128, ARRAY, and all-null (NULL) columns. Any other physical
+    type raises ValueError (fail loud). Note: UINT types are stored as INT64
+    (parquet has no native unsigned type); UINT64 values exceeding INT64_MAX
+    will be truncated.
     """
     return _encode(morsel, compression, False, bloom_filters, dictionary,
                    max_rows_per_row_group)[0]
@@ -314,6 +321,44 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 else:
                     for j in range(nrows):
                         tmp64[j] = (<const int8_t*>dv.data)[sel[j]]
+                ci.dict_enabled = use_dict
+            i64_store.push_back(tmp64)
+            ci.type = PT_INT64
+            ci.i64 = i64_store.back().data()
+
+        elif t == DRAKEN_UINT8 or t == DRAKEN_UINT16 or t == DRAKEN_UINT32 or t == DRAKEN_UINT64:
+            # Unsigned integers widen to INT64. Note: UINT64 values exceeding INT64_MAX
+            # are truncated (parquet has no native unsigned type).
+            tmp64 = vector[int64_t]()
+            if dict_shape:
+                tmp64.resize(dict_n)
+                if t == DRAKEN_UINT64:
+                    for j in range(dict_n):
+                        tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[j]
+                elif t == DRAKEN_UINT32:
+                    for j in range(dict_n):
+                        tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[j]
+                elif t == DRAKEN_UINT16:
+                    for j in range(dict_n):
+                        tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[j]
+                else:
+                    for j in range(dict_n):
+                        tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[j]
+                did_preserve = True
+            else:
+                tmp64.resize(nrows)
+                if t == DRAKEN_UINT64:
+                    for j in range(nrows):
+                        tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[sel[j]]
+                elif t == DRAKEN_UINT32:
+                    for j in range(nrows):
+                        tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[sel[j]]
+                elif t == DRAKEN_UINT16:
+                    for j in range(nrows):
+                        tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[sel[j]]
+                else:
+                    for j in range(nrows):
+                        tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[sel[j]]
                 ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
@@ -631,7 +676,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         else:
             raise ValueError(
                 "write_parquet: unsupported column type %d for column %r "
-                "(supports INT8/16/32/64, FLOAT32/64, BOOL, VARCHAR/NVARCHAR/"
+                "(supports INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL, VARCHAR/NVARCHAR/"
                 "VARBINARY/VARIANT, DATE32, TIME32/64, TIMESTAMP64, INTERVAL, "
                 "DECIMAL/DECIMAL128, ARRAY of those, NULL; FP16 not yet)"
                 % (<int>t, names[i])

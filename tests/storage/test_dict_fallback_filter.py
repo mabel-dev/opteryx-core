@@ -70,7 +70,7 @@ def test_pure_dict_membership_skip_still_prunes():
     dict-encoded chunk must still prune an absent (but in-range) value without
     decoding any rows. Written by rugo's own writer (single all-dict data page).
     """
-    from rugo.parquet_writer import write_parquet
+    from rugo.parquet import write_parquet
 
     folder = "dictfallback_pure_tmp"
     try:

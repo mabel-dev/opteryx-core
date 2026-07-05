@@ -36,8 +36,15 @@ namespace opteryx::engine {
 // `-undefined dynamic_lookup` binding to that symbol is not guaranteed to land
 // on the same copy the failing kernel actually wrote — confirmed empty in
 // practice. Passing the pointer as data sidesteps that ambiguity entirely.
+// `const_col_idx`/`const_scalar_dv` (length `n_consts`) name columns the compiler
+// has proven hold a single literal value on every row surviving the predicate
+// (an `IDENTIFIER = LITERAL` conjunct — see compiler.py's FilterNode branch). The
+// span broadcasts those columns from the pre-resolved scalar DrakenVector* in O(1)
+// instead of gathering them and discarding the result. n_consts == 0 (the common
+// case) costs nothing extra — same as the old no-consts signature.
 typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                             int* col_idx, void** lit_dv,
+                            int* const_col_idx, void** const_scalar_dv, int n_consts,
                             CxxMorsel** out_filtered, int* err_op,
                             const char** err_msg);
 typedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
@@ -54,6 +61,13 @@ struct ExprProgram {
     int count = 0;
     std::vector<int> col_idx;    // per-instruction column index (-1 = not a load)
     std::vector<void*> lit_dv;   // per-instruction literal DrakenVector* (or null)
+    // `IDENTIFIER = LITERAL` const-replacements (ExprFilterOperator only; empty for
+    // ExprEvalFn programs). const_col_idx[k] holds a value equal to the scalar
+    // DrakenVector* at const_scalar_dv[k] (data_length == 1) on every row surviving
+    // the predicate — plan-time-proven by the compiler, resolved against the same
+    // `layout` as col_idx/lit_dv (see compiler.py's FilterNode branch).
+    std::vector<int> const_col_idx;
+    std::vector<void*> const_scalar_dv;
 };
 
 // ErrCtx::msg is a bare `const char*` that must stay valid until the Cython raise
@@ -92,7 +106,8 @@ struct ExprFilterOperator : Operator {
         int err_op = 0;
         const char* kernel_msg = nullptr;
         int rc = fn(prog.instrs, prog.count, in.get(), prog.col_idx.data(),
-                    prog.lit_dv.data(), &filtered, &err_op, &kernel_msg);
+                    prog.lit_dv.data(), prog.const_col_idx.data(), prog.const_scalar_dv.data(),
+                    static_cast<int>(prog.const_col_idx.size()), &filtered, &err_op, &kernel_msg);
         if (rc != 0) {
             err.code = 1;
             err.msg = format_kernel_error("ExprFilterOperator: predicate evaluation failed",

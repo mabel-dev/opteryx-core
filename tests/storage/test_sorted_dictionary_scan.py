@@ -23,7 +23,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
-from rugo.parquet_writer import write_parquet
+from rugo.parquet import write_parquet
 
 
 def _morsel(sql):

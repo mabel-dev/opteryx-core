@@ -25,7 +25,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
-from rugo.parquet_writer import write_parquet
+from rugo.parquet import write_parquet
 from rugo import parquet as rugo_parquet
 
 

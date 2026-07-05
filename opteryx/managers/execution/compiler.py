@@ -80,6 +80,51 @@ def _physical_type(schema_column):
     return ct.physical if ct is not None else None
 
 
+def _const_scalar_vector(dtype, value):
+    """Build a length-1 constant-encoded Vector for an `IDENTIFIER = LITERAL`
+    const-replacement column (see the FilterNode branch below). Returns None for a
+    dtype/value combination this can't safely represent (temporal, decimal, a
+    literal Python type that doesn't map onto dtype, etc.) — the caller skips the
+    broadcast optimization for that column and it takes the ordinary gather path.
+
+    Mirrors opteryx/operators/filter/filter.pyx's `_build_constant_vector_for_type`
+    (same dispatch, same supported-type set) — that Cython copy is unreachable from
+    the native engine's execution path (FilterNode.push is never called; only its
+    plan-time attributes are read here), so this is deliberately NOT a shared
+    import across the two — see the engine-cutover note this function was added
+    alongside."""
+    import draken.draken_native as _draken_native
+    from draken.vectors.vector import Vector
+
+    if dtype == DrakenType.BOOL:
+        if not isinstance(value, bool):
+            return None
+        return Vector(_draken_native.vector_from_bool_constant(value, 1))
+    if dtype == DrakenType.INT64:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return Vector(_draken_native.vector_from_constant(value, 1))
+    if dtype == DrakenType.FLOAT64:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return Vector(_draken_native.vector_float64_from_constant(float(value), 1))
+    if dtype in (DrakenType.VARCHAR, DrakenType.NVARCHAR):
+        if not isinstance(value, (str, bytes)):
+            return None
+        if isinstance(value, str):
+            value = value.encode("utf-8")
+        if dtype == DrakenType.NVARCHAR:
+            return Vector(_draken_native.vector_nvarchar_from_constant(value, 1))
+        return Vector(_draken_native.vector_varchar_from_constant(value, 1))
+    if dtype == DrakenType.VARBINARY:
+        if not isinstance(value, (str, bytes)):
+            return None
+        if isinstance(value, str):
+            value = value.encode()
+        return Vector(_draken_native.vector_varbinary_from_constant(value, 1))
+    return None
+
+
 class _Compiler:
     def __init__(self, plan, nplan):
         self.plan = plan
@@ -321,6 +366,37 @@ class _Compiler:
             _unsupported(f"{what} outside the c-native kernel set")
         return bc
 
+    def _resolve_const_replacements(self, node, layout):
+        """Resolve a FilterNode's `IDENTIFIER = LITERAL` const-replacements (already
+        extracted at plan-node construction time — see
+        opteryx/operators/filter/filter.pyx's `_extract_constant_replacements`,
+        which populates `node._const_replacements`) against this pipeline's layout.
+
+        Returns parallel (const_col_idx, const_scalar_vecs) lists for
+        NativePlan.add_expr_filter: a column proven constant on every surviving row
+        is broadcast O(1) from the scalar Vector instead of being gathered and
+        discarded. A replacement is skipped (falls through to the ordinary gather,
+        same answer, just without the optimization) when its column isn't in this
+        layout or `_const_scalar_vector` doesn't support the concrete
+        type/literal combination (temporal, decimal, etc.)."""
+        replacements = getattr(node, "_const_replacements", None)
+        if not replacements:
+            return [], []
+        const_col_idx = []
+        const_scalar_vecs = []
+        for identity, value in replacements:
+            if identity not in layout:
+                continue
+            dtype = self._layout_type(node, identity)
+            if dtype is None:
+                continue
+            vec = _const_scalar_vector(dtype, value)
+            if vec is None:
+                continue
+            const_col_idx.append(layout.index(identity))
+            const_scalar_vecs.append(vec)
+        return const_col_idx, const_scalar_vecs
+
     def _add_computed(self, p, eval_nodes, layout):
         """Append one ExprProject per computed expression (bind order preserved —
         later programs may reference earlier outputs). DECIMAL/TIMESTAMP results
@@ -478,7 +554,8 @@ class _Compiler:
         if kind == "FilterNode":
             (p, layout) = self._compile_only_child(in_edges, kind)
             bc = self._lower_expression(node.filter, "a filter predicate")
-            self.nplan.add_expr_filter(p, bc, layout)
+            const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, layout)
+            self.nplan.add_expr_filter(p, bc, layout, const_col_idx, const_scalar_vecs)
             return p, layout
 
         if kind == "ProjectionNode":

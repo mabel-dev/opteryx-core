@@ -21,7 +21,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _WORKLOAD = r"""
 import sys
 import opteryx
-from rugo.parquet_writer import write_parquet
+from rugo.parquet import write_parquet
 
 session = opteryx.session()
 

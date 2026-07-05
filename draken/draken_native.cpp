@@ -5638,6 +5638,45 @@ static CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
     return out;
 }
 
+// S1 twin: like cxx_mask, but columns listed in const_col_idx are known (by the
+// caller's static analysis of the predicate, e.g. `WHERE col = 7`) to be a single
+// literal value on every surviving row. Those columns are broadcast in O(1) from a
+// pre-resolved, caller-owned scalar DrakenVector* (data_length == 1, validity ==
+// nullptr — a never-null literal) via draken_vector_from_constant, instead of being
+// gathered via vector_take_impl and then thrown away. const_scalar_dv[k]'s `data`
+// buffer is NOT copied here — draken_vector_from_constant borrows it, so the
+// caller must keep it alive for as long as any morsel built from it is in use.
+static CxxMorsel cxx_mask_with_consts(const CxxMorsel& m, const DrakenVector& mask,
+                                       const int32_t* const_col_idx,
+                                       const DrakenVector* const* const_scalar_dv,
+                                       uint32_t n_consts) {
+    CxxMorsel out;
+    out.names = m.names;
+    std::vector<int32_t> idx_vec = mask_indices(mask);
+    const uint32_t n = static_cast<uint32_t>(idx_vec.size());
+    if (m.columns.empty()) { out.zero_col_rows = n; return out; }
+    out.columns.reserve(m.columns.size());
+    for (uint32_t ci = 0; ci < static_cast<uint32_t>(m.columns.size()); ++ci) {
+        const DrakenVector* scalar = nullptr;
+        for (uint32_t k = 0; k < n_consts; ++k) {
+            if (static_cast<uint32_t>(const_col_idx[k]) == ci) { scalar = const_scalar_dv[k]; break; }
+        }
+        CxxColumn nc;
+        if (scalar != nullptr) {
+            DrakenVector v = draken_vector_from_constant(
+                scalar->data, n, scalar->type, scalar->validity);
+            nc.own = std::make_shared<VectorOwner>(
+                v, OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(nullptr));
+        } else {
+            nc.own = std::make_shared<VectorOwner>(
+                vector_take_impl(*m.columns[ci].own, idx_vec.data(), n));
+        }
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    return out;
+}
+
 static CxxMorsel cxx_from_vectors_list(nb::list vectors) {
     CxxMorsel m;
     const size_t n = nb::len(vectors);
@@ -5690,6 +5729,12 @@ extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t l
 }
 extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) {
     return new CxxMorsel(cxx_mask(*m, *mask));
+}
+extern "C" CxxMorsel* cxx_mask_with_consts_c(
+        const CxxMorsel* m, const DrakenVector* mask,
+        const int32_t* const_col_idx, const DrakenVector* const* const_scalar_dv,
+        uint32_t n_consts) {
+    return new CxxMorsel(cxx_mask_with_consts(*m, *mask, const_col_idx, const_scalar_dv, n_consts));
 }
 // S-B.2: select/reorder columns by identity name (bytes → ptr+len arrays, since
 // identity names are opaque bytes). Pure container op (shares owners, no copy).

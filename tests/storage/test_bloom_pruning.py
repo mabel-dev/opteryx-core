@@ -27,7 +27,7 @@ import opteryx
 import draken.draken_native as dn
 from draken.vectors.vector import Vector
 from draken.morsels.morsel import Morsel
-from rugo.parquet_writer import write_parquet
+from rugo.parquet import write_parquet
 
 # Even numbers 0..199998 -> min=0, max=199998. Odd values in that range are
 # absent but un-prunable by min/max; value 4 is present.

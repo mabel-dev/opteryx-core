@@ -9,6 +9,7 @@
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode, BytecodeInstr
 from draken.morsels.cxx_morsel cimport CxxMorsel
 from draken.core.buffers cimport DrakenVector
+from libc.stdint cimport int32_t, uint32_t
 
 # GIL: resolve LOAD_COL identity → column index in the CxxMorsel and LOAD_LIT_CONST
 # → DV*. Stable for a fixed pipeline schema → resolve once, reuse. 0 ok, -1 column
@@ -25,6 +26,17 @@ cdef int _dv_filter_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* 
                              int* col_idx, DrakenVector** lit_dv,
                              CxxMorsel** out_filtered, int* err_op,
                              const char** err_msg) noexcept nogil
+
+# _dv_filter_span_cxx twin for FilterNode `IDENTIFIER = LITERAL` const-replacements:
+# columns in (const_col_idx, const_scalar_dv) are broadcast O(1) from a pre-resolved
+# scalar DrakenVector* (data_length == 1, validity == nullptr) instead of taken, since
+# the predicate already guarantees their value on every surviving row. Same
+# resolve-once-reuse and rc/err_msg contract as _dv_filter_span_cxx.
+cdef int _dv_filter_span_with_consts_cxx(
+    BytecodeInstr* instrs, int count, const CxxMorsel* m,
+    int* col_idx, DrakenVector** lit_dv,
+    int32_t* const_col_idx, DrakenVector** const_scalar_dv, uint32_t n_consts,
+    CxxMorsel** out_filtered, int* err_op, const char** err_msg) noexcept nogil
 
 # Pure-nogil expression span for a COMPUTED column (projection twin of the filter
 # span): evaluate + deep-copy the arena result into fresh draken_malloc'd buffers

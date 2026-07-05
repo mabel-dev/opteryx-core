@@ -31,10 +31,14 @@ from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
 from opteryx.expression.evaluator.evaluation import filter_morsel_c_native as _filter_morsel_c_native
 from opteryx.models import QueryProperties
 
-from libc.stdint cimport uint32_t
+from libc.stdint cimport int32_t, uint32_t
 from libc.stdlib cimport malloc, free
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode, BytecodeInstr
-from opteryx.expression.evaluator._impl cimport _dv_cxx_resolve_caches, _dv_filter_span_cxx
+from opteryx.expression.evaluator._impl cimport (
+    _dv_cxx_resolve_caches,
+    _dv_filter_span_cxx,
+    _dv_filter_span_with_consts_cxx,
+)
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DrakenVector
 from draken.morsels.cxx_morsel cimport cxx_select_c
@@ -103,8 +107,8 @@ def _extract_constant_replacements(filter_expr):
     return preds
 
 
-cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
-    """Produce a constant-encoded vector matching cur's concrete type.
+cdef Vector _build_constant_vector_for_type(DrakenType t, object value, Py_ssize_t length):
+    """Produce a constant-encoded vector of concrete type `t`.
 
     Returns None for vector types we don't yet handle (temporal, decimal, etc.)
     or when the literal's Python type can't safely map onto the column dtype.
@@ -113,7 +117,6 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     declare `cdef Vector new_vec` and downstream code that does
     `morsel._get_column(idx)` see a consistent type.
     """
-    cdef DrakenType t = cur.unified().type
     if t == DRAKEN_BOOL:
         if not isinstance(value, bool):
             return None
@@ -143,6 +146,11 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
             value = value.encode()
         return Vector(_draken_native.vector_varbinary_from_constant(value, length))
     return None
+
+
+cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
+    """_build_constant_vector_for_type, keyed off an existing column's concrete type."""
+    return _build_constant_vector_for_type(cur.unified().type, value, length)
 
 
 cdef Morsel _apply_constant_replacements(Morsel morsel, list replacements):
@@ -208,7 +216,7 @@ cdef class FilterNode(BasePlanNode):
     cdef CompiledBytecode _compiled_filter
     # S-B genuine-nogil filter path: cache the predicate resolve ONCE and run the
     # pure-nogil span per morsel (no GIL re-acquire in the hot body).
-    cdef bint _flt_nogil_ok            # c-native predicate AND no const-repl/post-filter
+    cdef bint _flt_nogil_ok            # c-native predicate (post-filter/const-repl handled nogil too)
     cdef bint _flt_resolved            # caches populated (first push)
     cdef BytecodeInstr* _flt_instrs    # cached bc.instrs (read nogil from self)
     cdef int _flt_count                # cached bc.count
@@ -221,6 +229,13 @@ cdef class FilterNode(BasePlanNode):
     cdef uint32_t* _flt_keep_lens      # keep-column name lengths (owned malloc)
     cdef uint32_t _flt_keep_n          # keep-column count
     cdef list _flt_keep_buffers        # keep the name bytes alive for the ptrs
+    # `IDENTIFIER = LITERAL` const-replacements applied natively (cxx_mask_with_consts_c)
+    # in the nogil span: a column proven constant on every surviving row is broadcast
+    # O(1) from a pre-resolved scalar DrakenVector* instead of taken and discarded.
+    cdef int32_t _flt_const_col_idx[256]  # replacement column index (resolved once)
+    cdef DrakenVector* _flt_const_dv[256]  # replacement scalar DV* (resolved once, length==1)
+    cdef uint32_t _flt_const_n         # replacement count actually applicable nogil (0 = none)
+    cdef list _flt_const_vecs          # keep the scalar Vector objects alive for the DV* pointers
     cdef public unsigned long long nogil_filter_morsels   # telemetry: nogil-path count
 
     def __cinit__(self, *args, **kwargs):
@@ -234,6 +249,8 @@ cdef class FilterNode(BasePlanNode):
         self._flt_keep_lens = NULL
         self._flt_keep_n = 0
         self._flt_keep_buffers = None
+        self._flt_const_n = 0
+        self._flt_const_vecs = None
         self._flt_resolved = False
         self._flt_has_post = False
         self._flt_nogil_ok = False
@@ -259,22 +276,25 @@ cdef class FilterNode(BasePlanNode):
         else:
             self._compiled_filter = None
 
-        # S-B nogil path eligibility: the predicate must be all-C-native and have no
-        # constant replacements (the only remaining GIL-bound step). The post-filter
-        # column select IS supported nogil via cxx_select_c (keep-columns resolved
-        # once, below). Ineligible cases keep the transitional gil-wrapped _push_impl.
+        # S-B nogil path eligibility: the predicate must be all-C-native. The
+        # post-filter column select (cxx_select_c) AND `IDENTIFIER = LITERAL`
+        # const-replacements (cxx_mask_with_consts_c) are BOTH supported nogil —
+        # their resolved state (keep-columns / (col_idx, scalar DV*)) is built
+        # once, below. Ineligible cases keep the transitional gil-wrapped _push_impl.
         self._flt_resolved = False
         self._flt_has_post = False
         self._flt_keep_ptrs = NULL
         self._flt_keep_lens = NULL
         self._flt_keep_n = 0
         self._flt_keep_buffers = None
+        self._flt_const_n = 0
+        self._flt_const_vecs = None
         self.nogil_filter_morsels = 0
-        # Tentative eligibility (no constant replacements). is_all_c_native is read at
-        # FIRST PUSH, not here: the flag is finalised after construction, so reading it
-        # in __init__ is stale. The runtime resolve below confirms it and pins the
-        # caches; an ineligible predicate sets _flt_nogil_ok False and never retries.
-        if self._compiled_filter is not None and not self._const_replacements:
+        # Tentative eligibility. is_all_c_native is read at FIRST PUSH, not here: the
+        # flag is finalised after construction, so reading it in __init__ is stale.
+        # The runtime resolve below confirms it and pins the caches; an ineligible
+        # predicate sets _flt_nogil_ok False and never retries.
+        if self._compiled_filter is not None:
             self._flt_nogil_ok = True
             self._flt_instrs = self._compiled_filter.instrs
             self._flt_count = self._compiled_filter.count
@@ -302,7 +322,7 @@ cdef class FilterNode(BasePlanNode):
         w.function_evaluations = self.function_evaluations
         w._const_replacements = self._const_replacements
         w._compiled_filter = self._compiled_filter
-        if w._compiled_filter is not None and not w._const_replacements:
+        if w._compiled_filter is not None:
             w._flt_nogil_ok = True
             w._flt_instrs = w._compiled_filter.instrs
             w._flt_count = w._compiled_filter.count
@@ -333,6 +353,49 @@ cdef class FilterNode(BasePlanNode):
             b = keep[i]
             self._flt_keep_ptrs[i] = <const char*>b
             self._flt_keep_lens[i] = <uint32_t>len(b)
+
+    cdef void _flt_resolve_consts(self, const CxxMorsel* m):
+        """GIL: resolve `IDENTIFIER = LITERAL` const-replacements to (col_idx,
+        scalar DrakenVector*) ONCE from the morsel schema — mirrors
+        _flt_resolve_keep. A replacement is dropped here (that column falls
+        through to the ordinary take in cxx_mask_with_consts_c, same as it
+        would in plain cxx_mask_c) when its column identity isn't found, or
+        _build_constant_vector_for_type doesn't support the concrete type
+        (temporal/decimal/etc.) — the GIL _push_impl fallback still folds
+        those via _apply_constant_replacements."""
+        cdef Py_ssize_t i, nn = <Py_ssize_t>m.names.size()
+        cdef bytes nm, identity
+        cdef object value
+        cdef Py_ssize_t found
+        cdef DrakenType t
+        cdef Vector scalar_vec
+        cdef list vecs = []
+        cdef list idxs = []
+        self._flt_const_n = 0
+        if not self._const_replacements:
+            return
+        for identity, value in self._const_replacements:
+            found = -1
+            for i in range(nn):
+                nm = m.names[i]
+                if nm == identity:
+                    found = i
+                    break
+            if found < 0:
+                continue
+            t = m.columns[found].view.type
+            scalar_vec = _build_constant_vector_for_type(t, value, 1)
+            if scalar_vec is None:
+                continue
+            idxs.append(<int>found)
+            vecs.append(scalar_vec)
+        if not idxs:
+            return
+        self._flt_const_vecs = vecs   # keep the scalar Vectors alive for the DV* pointers
+        self._flt_const_n = <uint32_t>len(idxs)
+        for i in range(len(idxs)):
+            self._flt_const_col_idx[i] = <int32_t>idxs[i]
+            self._flt_const_dv[i] = (<Vector>vecs[i]).unified()
 
     @property
     def config(self):  # pragma: no cover
@@ -368,15 +431,23 @@ cdef class FilterNode(BasePlanNode):
                                                       self._flt_col_idx, self._flt_lit_dv) != 0):
                         self._flt_nogil_ok = False   # not c-native / column not found
                     else:
-                        self._flt_resolve_keep(raw)  # post-filter keep-columns (once)
+                        self._flt_resolve_keep(raw)    # post-filter keep-columns (once)
+                        self._flt_resolve_consts(raw)  # eq-literal const-replacements (once)
                         self._flt_resolved = True
             if self._flt_nogil_ok:
                 # rc != 0 (kernel error / not applicable) falls through to the gil
                 # path below, which re-runs the predicate through the GIL VM and
                 # raises there with its own message — err_msg_ptr is unused here.
-                rc = _dv_filter_span_cxx(self._flt_instrs, self._flt_count, raw,
-                                         self._flt_col_idx, self._flt_lit_dv,
-                                         &filtered, &err_op, &err_msg_ptr)
+                if self._flt_const_n > 0:
+                    rc = _dv_filter_span_with_consts_cxx(
+                        self._flt_instrs, self._flt_count, raw,
+                        self._flt_col_idx, self._flt_lit_dv,
+                        self._flt_const_col_idx, self._flt_const_dv, self._flt_const_n,
+                        &filtered, &err_op, &err_msg_ptr)
+                else:
+                    rc = _dv_filter_span_cxx(self._flt_instrs, self._flt_count, raw,
+                                             self._flt_col_idx, self._flt_lit_dv,
+                                             &filtered, &err_op, &err_msg_ptr)
                 if rc == 0:
                     self.nogil_filter_morsels += 1
                     if filtered != NULL and filtered.num_rows() > 0:
