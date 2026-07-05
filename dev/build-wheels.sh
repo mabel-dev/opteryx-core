@@ -70,7 +70,7 @@ else
 fi
 echo "Using interpreter ${PYBIN}/python (abiflags='${resolved_abiflags}')"
 
-"${PYBIN}/python" -m pip install -U setuptools wheel setuptools-rust numpy cython auditwheel
+"${PYBIN}/python" -m pip install -U setuptools wheel setuptools-rust cython auditwheel
 
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 "${PYBIN}/python" setup.py build_ext --parallel "$NPROC" bdist_wheel
