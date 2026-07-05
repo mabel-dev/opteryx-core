@@ -18,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import rugo.parquet_reader as rp
+import rugo.rugo_native as rp
 
 PARQUET_DIR = REPO_ROOT / "testdata" / "parquet_tests"
 
@@ -47,7 +47,7 @@ def record(category, filename, status, detail=""):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_metadata(path: Path, raw: bytes) -> None:
+def check_metadata(path: Path, raw: bytes) -> None:
     """Attempt to read metadata; fail if an exception is raised or result is empty."""
     try:
         meta = rp.read_metadata_from_bytes(raw)
@@ -59,12 +59,12 @@ def test_metadata(path: Path, raw: bytes) -> None:
         record("METADATA", path.name, FAIL, "read_metadata_from_bytes returned None")
         return
 
-    num_rg = len(meta.get("row_groups", []))
-    num_cols = len(meta.get("schema", []))
+    num_rg = len(rp.read_rowgroup_stats(raw))
+    num_cols = len(meta.schema_columns)
     record("METADATA", path.name, PASS, f"{num_rg} row-group(s), {num_cols} schema field(s)")
 
 
-def test_data(path: Path, raw: bytes) -> None:
+def check_data(path: Path, raw: bytes) -> None:
     """
     Check decodability first; if supported, decode all columns into a Morsel
     and verify the result has rows and columns.
@@ -135,8 +135,8 @@ def main() -> int:
             record("READ", path.name, FAIL, str(exc))
             continue
 
-        test_metadata(path, raw)
-        test_data(path, raw)
+        check_metadata(path, raw)
+        check_data(path, raw)
 
     # ── Summary ────────────────────────────────────────────────────────────────
     counts = {PASS: 0, FAIL: 0, SKIP: 0}
@@ -160,6 +160,13 @@ def main() -> int:
         return 1
 
     return 0
+
+
+def test_all_parquet_test_files_decode():
+    """pytest entry point: run the metadata + data check over every file in
+    testdata/parquet_tests/ and fail if any check reported FAIL (SKIP is OK —
+    it marks files using an encoding the rugo decoder doesn't support)."""
+    assert main() == 0
 
 
 if __name__ == "__main__":

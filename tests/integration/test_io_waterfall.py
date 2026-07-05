@@ -6,8 +6,12 @@
 """Integration tests for IO waterfall tracing."""
 
 import json
+import os
+import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../dev"))
 
 import pytest
 from io_waterfall.reader import TraceReader

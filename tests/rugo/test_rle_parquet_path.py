@@ -1,20 +1,20 @@
 """
-Tests for the RLE fast path in the parquet reader.
+Tests for the parquet reader's decode correctness on highly-repetitive
+dict-encoded columns.
 
-The RLE path in _make_typed_int64_dictionary_vector (and float64 variants)
-fires when a dict-encoded column has >4:1 run compression AND no nulls.
-We create a synthetic parquet file with highly repetitive dict-encoded values
-and verify:
-
-  1. Int64 columns with consecutive repetitions trigger the RLE path
-  2. The resulting vector has DRAKEN_ENCODING_RLE (encoding == 2)
-  3. The RLE vector materialises to correct values (matches reference)
-  4. The RLE vector aggregates (sum/min/max) are correct
-  5. Columns that don't qualify (high cardinality, nulls) stay DICTIONARY
+The reader's decoder detects run-length structure in dict-encoded pages
+internally (see rle_run_lengths / _expand_rle_int64_into in
+rugo/src/parquet/parquet_reader.pxi) and uses it to expand values faster than
+a naive per-row dict lookup. Per the Vector Model contract (CLAUDE.md §11):
+"RLE does not exist past the scan boundary. Rugo expands RLE into one of the
+[dense/constant/dict] shapes above before handing data to the execution
+engine." So the returned Vector never reports an "RLE" shape — there is no
+`.encoding` property to assert against. What IS worth verifying, and what
+these tests check, is that highly-repetitive data decodes to the same correct
+values, aggregates, and derived vectors (take/equals) as a naive path would.
 """
 
 import sys
-import tempfile
 from pathlib import Path
 from array import array
 
@@ -24,12 +24,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import rugo.parquet_reader as rp
-
-# Encoding constants
-DRAKEN_ENCODING_DENSE = 0
-DRAKEN_ENCODING_DICTIONARY = 1
-DRAKEN_ENCODING_RLE = 2
+import rugo.rugo_native as rp
+import draken.draken_native as dn
+from draken.vectors.vector import Vector
 
 
 # ---------------------------------------------------------------------------
@@ -45,14 +42,13 @@ def _write_parquet(table: pa.Table) -> bytes:
 
 def _read_columns(raw: bytes, col_names: list) -> dict:
     """Read named columns from raw parquet bytes. Returns {name: vector}."""
-    meta = rp.read_metadata_from_bytes(raw)
-    all_cols = [c["name"] for c in meta["schema_columns"]]
+    all_cols = [c.name for c in rp.read_metadata_from_bytes(raw).schema_columns]
     morsels = rp.read_parquet(raw, all_cols)
     out = {}
     for morsel in morsels:
         for name in col_names:
             if name not in out:
-                out[name] = morsel.column(name.encode())
+                out[name] = morsel.column(name)
             # First row group wins; multiple groups are concatenated by caller if needed
     return out
 
@@ -61,6 +57,13 @@ def _ref_values(raw: bytes, col_name: str) -> list:
     """Read column via PyArrow as reference (ground truth)."""
     tbl = pq.read_table(pa.BufferReader(raw), columns=[col_name])
     return tbl[col_name].to_pylist()
+
+
+def _equals_mask(vec, value) -> list:
+    """Elementwise vec == value, via a constant vector (Vector has no bare
+    scalar-comparison method — equals_vector compares two Vectors)."""
+    const = Vector(dn.vector_from_constant(value, len(vec)))
+    return vec.equals_vector(const).to_pylist()
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +75,7 @@ def _build_rle_eligible_int64_parquet() -> bytes:
     Int64 column with 5 distinct values, each repeated 100 times.
     Dictionary: [10, 20, 30, 40, 50]
     Rows: [10]*100 + [20]*100 + [30]*100 + [40]*100 + [50]*100 = 500 rows
-    Runs: 5 → 5*4=20 < 500 → RLE path fires.
+    Runs: 5 → 5*4=20 < 500 → internal RLE decode path fires.
 
     Must be non-nullable so parquet omits definition-level pages — otherwise
     the Cython decoder populates valid_bits even for all-present columns,
@@ -88,7 +91,7 @@ def _build_rle_eligible_int64_parquet() -> bytes:
 
 def _build_high_cardinality_int64_parquet() -> bytes:
     """
-    Int64 column where every value is unique → no runs → DICTIONARY path.
+    Int64 column where every value is unique → no runs → plain dict path.
     Non-nullable to match the same definition-level conditions as the RLE test.
     """
     schema = pa.schema([pa.field("id", pa.int64(), nullable=False)])
@@ -100,7 +103,7 @@ def _build_nullable_int64_parquet() -> bytes:
     """
     Int64 column with nulls and high repetition.
     Nullable — definition levels are written, so valid_bits.size() > 0,
-    which disqualifies the RLE fast path → stays DICTIONARY.
+    which disqualifies the RLE fast path → decoded via the plain dict path.
     """
     values = [10 if i % 2 == 0 else None for i in range(500)]
     tbl = pa.table({"val": pa.array(values, type=pa.int64())})
@@ -109,9 +112,8 @@ def _build_nullable_int64_parquet() -> bytes:
 
 def _build_rle_eligible_int32_parquet() -> bytes:
     """
-    Int32 column (decoded as int64 via _make_typed_int64_from_int32_dictionary_vector)
-    with 4 distinct values, each repeated 125 times.
-    Runs: 4 → 4*4=16 < 500 → RLE path fires.
+    Int32 column (widened to int64 on decode) with 4 distinct values, each
+    repeated 125 times. Runs: 4 → 4*4=16 < 500 → internal RLE decode fires.
     Non-nullable to avoid definition-level pages.
     """
     values = []
@@ -123,22 +125,11 @@ def _build_rle_eligible_int32_parquet() -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Int64 RLE path tests
+# Int64 highly-repetitive column tests
 # ---------------------------------------------------------------------------
 
-def test_int64_rle_eligible_column_uses_rle_encoding():
-    """Repetitive int64 dict column must produce RLE-encoded vector."""
-    raw = _build_rle_eligible_int64_parquet()
-    cols = _read_columns(raw, ["score"])
-    vec = cols["score"]
-    assert vec.encoding == DRAKEN_ENCODING_RLE, (
-        f"expected RLE ({DRAKEN_ENCODING_RLE}), got {vec.encoding} "
-        f"(type={type(vec).__name__})"
-    )
-
-
 def test_int64_rle_materializes_to_correct_values():
-    """RLE int64 vector must expand to the original values."""
+    """Highly-repetitive int64 dict column must expand to the original values."""
     raw = _build_rle_eligible_int64_parquet()
     cols = _read_columns(raw, ["score"])
     vec = cols["score"]
@@ -158,7 +149,7 @@ def test_int64_rle_len_is_correct():
 
 
 def test_int64_rle_sum_is_correct():
-    """sum() on RLE-encoded parquet column must equal sum of original values."""
+    """sum() on a highly-repetitive parquet column must equal sum of original values."""
     raw = _build_rle_eligible_int64_parquet()
     cols = _read_columns(raw, ["score"])
     vec = cols["score"]
@@ -180,17 +171,15 @@ def test_int64_rle_max_is_correct():
 
 
 def test_int64_rle_take_produces_dense_correct():
-    """take() on RLE parquet vector returns dense with correct values."""
+    """take() on a highly-repetitive parquet column returns correct values."""
     raw = _build_rle_eligible_int64_parquet()
     cols = _read_columns(raw, ["score"])
     vec = cols["score"]
-    assert vec.encoding == DRAKEN_ENCODING_RLE
 
     # Take one index from each run
     indices = array("i", [0, 100, 200, 300, 400])
     taken = vec.take(indices)
 
-    assert taken.encoding == DRAKEN_ENCODING_DENSE
     assert taken.to_pylist() == [10, 20, 30, 40, 50]
 
 
@@ -199,8 +188,7 @@ def test_int64_rle_equals_produces_correct_mask():
     cols = _read_columns(raw, ["score"])
     vec = cols["score"]
 
-    mask = vec.equals(30)
-    result = mask.to_pylist()
+    result = _equals_mask(vec, 30)
 
     # Rows 200-299 should be True, rest False
     assert all(result[200:300])
@@ -209,19 +197,8 @@ def test_int64_rle_equals_produces_correct_mask():
 
 
 # ---------------------------------------------------------------------------
-# High-cardinality (no RLE) tests
+# High-cardinality tests
 # ---------------------------------------------------------------------------
-
-def test_high_cardinality_int64_does_not_use_rle():
-    """High-cardinality dict column must NOT use RLE encoding."""
-    raw = _build_high_cardinality_int64_parquet()
-    cols = _read_columns(raw, ["id"])
-    vec = cols["id"]
-    # Should be DICTIONARY or DENSE, not RLE
-    assert vec.encoding != DRAKEN_ENCODING_RLE, (
-        f"unexpected RLE encoding for high-cardinality column"
-    )
-
 
 def test_high_cardinality_int64_values_are_correct():
     raw = _build_high_cardinality_int64_parquet()
@@ -232,16 +209,8 @@ def test_high_cardinality_int64_values_are_correct():
 
 
 # ---------------------------------------------------------------------------
-# Nullable column (RLE path excluded)
+# Nullable column tests
 # ---------------------------------------------------------------------------
-
-def test_nullable_int64_does_not_use_rle():
-    """Columns with nulls must NOT use RLE fast path."""
-    raw = _build_nullable_int64_parquet()
-    cols = _read_columns(raw, ["val"])
-    vec = cols["val"]
-    assert vec.encoding != DRAKEN_ENCODING_RLE
-
 
 def test_nullable_int64_values_are_correct():
     raw = _build_nullable_int64_parquet()
@@ -252,18 +221,8 @@ def test_nullable_int64_values_are_correct():
 
 
 # ---------------------------------------------------------------------------
-# Int32-as-Int64 RLE path tests
+# Int32-as-Int64 highly-repetitive column tests
 # ---------------------------------------------------------------------------
-
-def test_int32_as_int64_rle_eligible_column_uses_rle_encoding():
-    """Repetitive int32 dict column (decoded as int64) must produce RLE vector."""
-    raw = _build_rle_eligible_int32_parquet()
-    cols = _read_columns(raw, ["code"])
-    vec = cols["code"]
-    assert vec.encoding == DRAKEN_ENCODING_RLE, (
-        f"expected RLE ({DRAKEN_ENCODING_RLE}), got {vec.encoding}"
-    )
-
 
 def test_int32_as_int64_rle_values_are_correct():
     raw = _build_rle_eligible_int32_parquet()
@@ -284,34 +243,4 @@ def test_int32_as_int64_rle_sum_is_correct():
 
 
 if __name__ == "__main__":
-    tests = [
-        test_int64_rle_eligible_column_uses_rle_encoding,
-        test_int64_rle_materializes_to_correct_values,
-        test_int64_rle_len_is_correct,
-        test_int64_rle_sum_is_correct,
-        test_int64_rle_min_is_correct,
-        test_int64_rle_max_is_correct,
-        test_int64_rle_take_produces_dense_correct,
-        test_int64_rle_equals_produces_correct_mask,
-        test_high_cardinality_int64_does_not_use_rle,
-        test_high_cardinality_int64_values_are_correct,
-        test_nullable_int64_does_not_use_rle,
-        test_nullable_int64_values_are_correct,
-        test_int32_as_int64_rle_eligible_column_uses_rle_encoding,
-        test_int32_as_int64_rle_values_are_correct,
-        test_int32_as_int64_rle_sum_is_correct,
-    ]
-    passed = failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  ✅ {t.__name__}")
-            passed += 1
-        except Exception as e:
-            import traceback
-            print(f"  ❌ {t.__name__}: {e}")
-            traceback.print_exc()
-            failed += 1
-    print(f"\n{passed} passed, {failed} failed")
-    if failed:
-        sys.exit(1)
+    pytest.main([__file__, "-v"])

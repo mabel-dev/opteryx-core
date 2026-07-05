@@ -2225,7 +2225,11 @@ cdef int _dv_copy_result_dense(
             or src.type == DRAKEN_VARBINARY):
         return _dv_copy_result_string(src, out_vec, out_data, out_validity, out_sel)
 
-    if src.type == DRAKEN_BOOL:
+    if src.type == DRAKEN_NULL:
+        # Self-describing null (buffers.h): type==NULL means every row is null,
+        # with no data and no validity buffer at all — nothing to copy.
+        data = NULL
+    elif src.type == DRAKEN_BOOL:
         data = draken_malloc(vbytes if vbytes > 0 else 1)
         if data == NULL:
             return -1

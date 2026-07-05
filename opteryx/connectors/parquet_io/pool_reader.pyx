@@ -1247,9 +1247,15 @@ cpdef IpcRowGroupSource open_ipc_source(
             cpp_path_str = orig_to_cpp.get(path, path)
             bloom_path = cpp_path_str if _is_local_path(cpp_path_str) else None
             for rg_i in range(src.footer_map[0][path_bytes_cpp].row_groups.size()):
+                import sys as _sys
+                print(f"DEBUG plan_single_pass_scan path={path!r} rg_i={rg_i} "
+                      f"bloom_path={bloom_path!r} predicates={predicates!r} "
+                      f"bloom_offset={src.footer_map[0][path_bytes_cpp].row_groups[rg_i].columns[0].bloom_offset!r}",
+                      file=_sys.stderr)
                 if predicates and not _rg_passes_predicates_native(
                     src.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
                 ):
+                    print(f"DEBUG PRUNED path={path!r} rg_i={rg_i}", file=_sys.stderr)
                     continue
                 work_items.append((path, rg_i))
 

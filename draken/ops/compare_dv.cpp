@@ -80,8 +80,20 @@ extern "C" DrakenVector* draken_compare_dv(
         return nullptr;
     }
     // Stage B: both operands must share the supported type. Cross-type
-    // (e.g. INT64 vs FLOAT64) goes to Python fallback.
-    if (left->type != right->type) {
+    // (e.g. INT64 vs FLOAT64) goes to Python fallback — EXCEPT the string
+    // family (VARCHAR/NVARCHAR/VARBINARY), which all share the german-string
+    // storage layout and are compared bytewise by ONE kernel (str_compare_vector,
+    // dispatched below by left->type) regardless of which of the three tags
+    // either side carries. Without this, a VARBINARY column compared against a
+    // literal (materialised VARCHAR by default) always declined here — silently
+    // falling back to the transitional GIL path for a single predicate, or
+    // hard-failing with no fallback inside an AND/OR expression on the native
+    // engine (which has none).
+    bool left_is_string  = left->type  == DRAKEN_VARCHAR || left->type  == DRAKEN_NVARCHAR
+                         || left->type == DRAKEN_VARBINARY;
+    bool right_is_string = right->type == DRAKEN_VARCHAR || right->type == DRAKEN_NVARCHAR
+                         || right->type == DRAKEN_VARBINARY;
+    if (left->type != right->type && !(left_is_string && right_is_string)) {
         return nullptr;
     }
 

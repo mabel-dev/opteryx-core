@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import pyarrow.parquet as pq  # test oracle only
 
 import rugo.parquet as rp
-import rugo.parquet_reader as pr
+import rugo.parquet as pr
 import draken.draken_native as dn
 from draken.vectors.vector import Vector
 from draken.morsels.morsel import Morsel

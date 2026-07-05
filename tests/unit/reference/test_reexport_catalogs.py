@@ -1,5 +1,5 @@
 
-from opteryx.reference.reexport_catalogs import reexport_reference_catalogs
+from reference.reexport_catalogs import reexport_reference_catalogs
 
 
 def test_reexport_reference_catalogs_writes_expected_targets(tmp_path):

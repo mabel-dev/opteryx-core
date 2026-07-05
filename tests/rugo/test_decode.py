@@ -3,14 +3,17 @@ Tests for Parquet data decoding functionality.
 """
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import rugo.parquet_reader as rp
+import rugo.rugo_native as rp
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
 
 
 def test_can_decode_uncompressed_plain():
@@ -48,38 +51,38 @@ def test_decode_string_column():
 
     # binary.parquet has 12 string values in first row group
     assert result is not None
-    assert result["success"]
-    assert result["column_names"] == ["foo"]
-    data = result["row_groups"][0][0]  # First row group, first column
+    morsel = result[0]
+    assert morsel.column_names == [b"foo"]
+    data = morsel.column("foo").to_pylist()
     assert isinstance(data, list)
     assert len(data) == 12
     assert all(isinstance(s, str) for s in data)
 
 
 def test_decode_nonexistent_column():
-    """Test that decoding a non-existent column returns None in the data."""
+    """Test that requesting a non-existent column yields an empty (columnless) morsel."""
     with open("testdata/parquet_tests/binary.parquet", "rb") as f:
         file_data = f.read()
 
     result = rp.read_parquet(file_data, ["nonexistent"])
-    # read_parquet returns success=True but column data is None
     assert result is not None
-    assert result["success"]
-    assert result["row_groups"][0][0] is None
+    morsel = result[0]
+    assert morsel.column_names == []
+    assert morsel.num_rows == 0
 
 
 def test_decode_compressed_column():
-    """Test that decoding a column with unsupported encoding returns None in the data."""
-    # planets.parquet uses DELTA_BYTE_ARRAY encoding
-    # We don't support DELTA_BYTE_ARRAY for decoding yet
+    """Test decoding a DELTA_BYTE_ARRAY-encoded column (planets.parquet 'name')."""
     with open("testdata/planets/planets.parquet", "rb") as f:
         file_data = f.read()
 
     result = rp.read_parquet(file_data, ["name"])
-    # read_parquet returns success=True but column data is None for unsupported encoding
     assert result is not None
-    assert result["success"]
-    assert result["row_groups"][0][0] is None
+    morsel = result[0]
+    assert morsel.column_names == [b"name"]
+    data = morsel.column("name").to_pylist()
+    assert len(data) == morsel.num_rows
+    assert all(isinstance(s, str) for s in data)
 
 
 def test_decode_int32_column():
@@ -90,8 +93,8 @@ def test_decode_int32_column():
     result = rp.read_parquet(file_data, ["int32_col"])
 
     assert result is not None
-    assert result["success"]
-    data = result["row_groups"][0][0]  # First row group, first column
+    morsel = result[0]
+    data = morsel.column("int32_col").to_pylist()
     assert isinstance(data, list)
     assert len(data) == 5
     assert data == [10, 20, 30, 40, 50]
@@ -105,8 +108,8 @@ def test_decode_int64_column():
     result = rp.read_parquet(file_data, ["int64_col"])
 
     assert result is not None
-    assert result["success"]
-    data = result["row_groups"][0][0]  # First row group, first column
+    morsel = result[0]
+    data = morsel.column("int64_col").to_pylist()
     assert isinstance(data, list)
     assert len(data) == 5
     assert data == [100, 200, 300, 400, 500]
@@ -120,8 +123,8 @@ def test_decode_string_column_types():
     result = rp.read_parquet(file_data, ["string_col"])
 
     assert result is not None
-    assert result["success"]
-    data = result["row_groups"][0][0]  # First row group, first column
+    morsel = result[0]
+    data = morsel.column("string_col").to_pylist()
     assert isinstance(data, list)
     assert len(data) == 5
     assert data == ["test1", "test2", "test3", "test4", "test5"]
@@ -142,8 +145,8 @@ def test_decode_snappy_compressed_column():
 
     # File has 2 row groups with 500 rows each
     assert result is not None
-    assert result["success"]
-    data = result["row_groups"][0][0]  # First row group, first column
+    morsel = result[0]
+    data = morsel.column("id").to_pylist()
     assert isinstance(data, list)
     assert len(data) == 500
     assert all(isinstance(x, int) for x in data)
@@ -159,13 +162,22 @@ def test_decode_dictionary_encoded_column():
 
     # File has 2 row groups with 500 rows each
     assert result is not None
-    assert result["success"]
+    morsel = result[0]
+    data = morsel.column("category").to_pylist()
+    assert isinstance(data, list)
+    assert len(data) == 500
 
-    # Dictionary decoding may or may not be fully implemented
-    data = result["row_groups"][0][0]  # First row group, first column
-    if data is not None:
-        assert isinstance(data, list)
-        assert len(data) == 500
+
+def _merged_column_stats(path, raw, col_name):
+    """Merge read_rowgroup_stats + fetch_column_chunk_info into the single
+    col_stats dict shape decode_column_from_chunk expects (see
+    test_all_metadata_fields.py's _first_column_metadata for why this needs
+    two calls under the current API)."""
+    rg_stats = next(
+        c for c in rp.read_rowgroup_stats(raw)[0]["columns"] if c["name"] == col_name
+    )
+    chunk_info = fetch_column_chunk_info(path, 0, [col_name])[col_name]
+    return {**rg_stats, **chunk_info}
 
 
 def test_decode_all_null_dictionary_encoded_zstd_column():
@@ -175,8 +187,10 @@ def test_decode_all_null_dictionary_encoded_zstd_column():
     pq.write_table(table, sink, compression="zstd", use_dictionary=True, data_page_size=1024)
     raw = sink.getvalue().to_pybytes()
 
-    metadata = rp.read_metadata_from_bytes(raw)
-    col_stats = metadata["row_groups"][0]["columns"][0]
+    with tempfile.NamedTemporaryFile(suffix=".parquet") as f:
+        f.write(raw)
+        f.flush()
+        col_stats = _merged_column_stats(f.name, raw, "severity")
 
     dict_off = col_stats.get("dictionary_page_offset")
     data_off = col_stats["data_page_offset"]
@@ -189,8 +203,10 @@ def test_decode_all_null_dictionary_encoded_zstd_column():
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
-    assert len(decoded) == 20000
-    assert decoded.null_count == 20000
+    assert decoded.length == 20000
+    null_bitmap = decoded.is_null()
+    assert len(null_bitmap) == 20000
+    assert all(b == 1 for b in null_bitmap)
 
 
 if __name__ == "__main__":

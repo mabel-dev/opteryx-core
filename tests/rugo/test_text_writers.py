@@ -115,8 +115,9 @@ def test_csv_roundtrips_through_rugo_reader():
     from rugo.csv import read_csv
 
     m = _morsel("SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(i, s)")
-    result = read_csv(write_csv(m))
-    assert result["column_names"] == ["i", "s"]
+    with read_csv(write_csv(m)) as reader:
+        morsel = next(iter(reader))
+    assert morsel.column_names == [b"i", b"s"]
 
 
 if __name__ == "__main__":

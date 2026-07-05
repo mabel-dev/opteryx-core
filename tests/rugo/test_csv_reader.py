@@ -23,7 +23,7 @@ Coverage:
 import pytest
 
 import draken  # noqa: F401 — must precede rugo.csv to resolve draken symbols
-from rugo.csv import read_csv
+from rugo.rugo_native import read_csv
 
 # ---------------------------------------------------------------------------
 # Helpers

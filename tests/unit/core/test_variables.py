@@ -8,7 +8,7 @@ from opteryx.types.logical_type import VARCHAR
 
 from opteryx.exceptions import PermissionsError
 from opteryx.models import Node
-from opteryx.shared.variables import SystemVariables
+from opteryx.variables import SystemVariables
 
 
 def test_variables_permissions():

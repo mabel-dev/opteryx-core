@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import rugo.parquet_reader as parquet
+import rugo.parquet as parquet
 
 # these are specific to the test files only
 EQUIVALENT_TYPES = {

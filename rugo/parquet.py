@@ -277,21 +277,26 @@ def read_metadata(source: Source):
 
 
 def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
+                  dictionary: bool = True,
                   max_rows_per_row_group: int = 262144) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
     bloom_filters: True (all equality-friendly columns), False, or an iterable
         of column names. Split-block bloom filters; floats/bools are excluded.
+    dictionary: True (default) dictionary-encodes eligible columns; False
+        forces PLAIN everywhere.
     max_rows_per_row_group: maximum rows per row group (default 2^18 = 262144).
         Pass 0 to write a single row group regardless of size.
     """
     return _native.write_parquet(morsel, compression=compression,
                                  bloom_filters=bloom_filters,
+                                 dictionary=dictionary,
                                  max_rows_per_row_group=max_rows_per_row_group)
 
 
 def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=True,
+                              dictionary: bool = True,
                               max_rows_per_row_group: int = 262144):
     """Like write_parquet but also returns {col_index: (min, max)} bounds.
 
@@ -299,4 +304,5 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
     """
     return _native.write_parquet_with_bounds(morsel, compression=compression,
                                              bloom_filters=bloom_filters,
+                                             dictionary=dictionary,
                                              max_rows_per_row_group=max_rows_per_row_group)

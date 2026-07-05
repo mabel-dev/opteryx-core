@@ -110,7 +110,7 @@ def test_statistics_min_max_null_count():
 def test_bloom_probe_roundtrip(tmp_path):
     """Bloom filter is byte-compatible with the reader's probe: present values
     must probe True (no false negatives); absent values mostly False."""
-    from rugo.parquet_reader import read_rowgroup_stats, bloom_filter_maybe_contains
+    from rugo.rugo_native import read_rowgroup_stats, bloom_filter_maybe_contains
 
     vals = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]
     sql = "SELECT s FROM (VALUES " + ",".join("('%s')" % v for v in vals) + ") AS t(s)"
@@ -135,7 +135,7 @@ def test_bloom_probe_roundtrip(tmp_path):
 
 
 def test_bloom_can_be_disabled():
-    from rugo.parquet_reader import read_rowgroup_stats
+    from rugo.rugo_native import read_rowgroup_stats
 
     sql = "SELECT s FROM (VALUES ('a'),('b'),('c')) AS t(s)"
     on = _morsel_write(sql, bloom_filters=True)
@@ -305,10 +305,10 @@ def test_null_typed_column_writes_as_int32():
 
 def test_rugo_can_parse_own_footer():
     """rugo's metadata reader must understand the footer we emit."""
-    from rugo.parquet_reader import read_metadata_from_bytes
+    from rugo.parquet import read_metadata
 
     buf = _write("SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(i, s)")
-    md = read_metadata_from_bytes(buf)
+    md = read_metadata(buf)
     assert md.num_rows == 2
     names = [c.name for c in md.schema_columns]
     assert names == ["i", "s"]

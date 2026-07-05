@@ -1,6 +1,6 @@
 from opteryx.models.physical_plan import PhysicalPlan
 from opteryx.models.query_properties import QueryProperties
-from opteryx.operators.distinct_node import DistinctNode
+from opteryx.operators._operators import DistinctNode
 from opteryx.utils.mermaid import plan_to_mermaid
 
 

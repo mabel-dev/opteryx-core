@@ -5,7 +5,7 @@ import pyarrow
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.operators.parquet_read_node import ParquetReadNode
+from opteryx.operators._operators import ParquetReadNode
 
 
 def test_dictionary_int32_casts_to_date64_via_date32():

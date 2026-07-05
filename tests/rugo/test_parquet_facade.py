@@ -27,19 +27,34 @@ def _planets_path() -> str:
 
 def test_read_all_columns_match_pyarrow():
     """Every planets column decodes correctly (E.28 reconstruction)."""
+    import decimal
+    import re
+
     import pyarrow.parquet as pq
 
     path = _planets_path()
     truth = pq.read_table(path).to_pydict()
     meta = parquet.read_metadata(path)
-    names = [c.name for c in meta.schema_columns]
+    schema_by_name = {c.name: c for c in meta.schema_columns}
 
     with parquet.read_parquet(path) as reader:
         morsels = list(reader)
     assert len(morsels) == 1
     m = morsels[0]
-    for name in names:
-        assert m.column(name.encode()).to_pylist() == truth[name], name
+    for name, col in schema_by_name.items():
+        got = m.column(name.encode()).to_pylist()
+        # DECIMAL columns are physically stored as unscaled int64/int128 (see
+        # CLAUDE.md Type System: physical DrakenType is separate from logical
+        # scale/precision) — apply the logical scale before comparing against
+        # PyArrow's already-scaled Decimal values.
+        decimal_match = re.match(r"decimal\((\d+),\s*(\d+)\)", col.logical_type)
+        if decimal_match:
+            scale = int(decimal_match.group(2))
+            got = [
+                decimal.Decimal(v).scaleb(-scale) if v is not None else None
+                for v in got
+            ]
+        assert got == truth[name], name
 
 
 def test_read_from_bytes_and_path_agree():
@@ -53,15 +68,15 @@ def test_read_from_bytes_and_path_agree():
 
 def test_filter_keeps_matching_row_group():
     path = _planets_path()
-    with parquet.read_parquet(path, columns=["name"], filters=[("id", ">", 4)]) as r:
+    with parquet.read_parquet(path, columns=["name"], predicates=[("id", ">", 4)]) as r:
         assert len(list(r)) == 1  # ids 1..9 — row group survives
 
 
 def test_filter_prunes_row_group():
     path = _planets_path()
-    with parquet.read_parquet(path, columns=["name"], filters=[("id", ">", 10_000)]) as r:
+    with parquet.read_parquet(path, columns=["name"], predicates=[("id", ">", 10_000)]) as r:
         assert list(r) == []  # pruned, nothing decoded
-    with parquet.read_parquet(path, filters=[("name", "=", "Zzz")]) as r:
+    with parquet.read_parquet(path, predicates=[("name", "=", "Zzz")]) as r:
         assert list(r) == []  # string min/max prune
 
 

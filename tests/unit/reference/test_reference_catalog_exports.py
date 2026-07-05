@@ -5,12 +5,12 @@ from pathlib import Path
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.reference import export_aggregate_catalog
-from opteryx.reference import export_clauses_catalog
-from opteryx.reference import export_joins_catalog
-from opteryx.reference import export_operator_catalog
-from opteryx.reference import export_type_catalog
-from opteryx.reference import export_unary_ops_catalog
+from reference import export_aggregate_catalog
+from reference import export_clauses_catalog
+from reference import export_joins_catalog
+from reference import export_operator_catalog
+from reference import export_type_catalog
+from reference import export_unary_ops_catalog
 
 
 def test_aggregate_catalog_json_matches_export():

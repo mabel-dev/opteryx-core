@@ -11,39 +11,56 @@ import glob
 
 import pytest
 
-import rugo.parquet_reader as parquet
+import rugo.parquet as parquet
+import rugo.rugo_native as _native
+from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
+
+
+def _first_column_metadata(file_path):
+    """Merge row-group stats + chunk info for the first row group's first
+    column: the current API splits what used to be one dict-shaped
+    `read_metadata` result across `read_rowgroup_stats` (min/max/null_count/
+    distinct_count/bloom) and `fetch_column_chunk_info` (offsets/encodings/
+    codec/num_values). `path_in_schema` is folded into `name` (dotted path)
+    in the current model, not a separate field. `index_page_offset` and
+    `key_value_metadata` exist on the C++ ColumnStats struct but are not
+    currently exposed to Python by either function.
+    """
+    with open(file_path, "rb") as f:
+        data = f.read()
+    rg_stats = _native.read_rowgroup_stats(data)[0]["columns"][0]
+    # fetch_column_chunk_info matches by top-level (dot-truncated) name, which
+    # is exactly what read_rowgroup_stats already reports as "name" — pass it
+    # straight through rather than the fully dotted schema_columns name (that
+    # mismatches for nested/repeated schemas, e.g. binary.parquet's "foo").
+    chunk_info = fetch_column_chunk_info(file_path, 0, [rg_stats["name"]])[rg_stats["name"]]
+    return {**rg_stats, **chunk_info}
 
 
 def test_all_metadata_fields_exposed():
-    """Test that all C++ ColumnStats fields are exposed in the Python dictionary."""
-    # Read a test file
-
-    files_to_test = glob.glob("testdata/*.parquet", recursive=True)
+    """Test that all currently-exposed ColumnStats fields are present."""
+    files_to_test = glob.glob("testdata/**/*.parquet", recursive=True)
+    assert files_to_test, "No parquet test files found"
 
     for file_path in files_to_test:
         print(f"\nTesting file: {file_path}")
 
-        metadata = parquet.read_metadata(file_path)
+        col = _first_column_metadata(file_path)
 
-        # Get first column metadata
-        assert metadata["row_groups"], "No row groups found"
-        assert metadata["row_groups"][0]["columns"], "No columns found"
-        col = metadata["row_groups"][0]["columns"][0]
-
-        # Define all expected fields from ColumnStats struct
+        # Fields currently exposed to Python across read_rowgroup_stats +
+        # fetch_column_chunk_info. Not included (not exposed anywhere):
+        # index_page_offset, key_value_metadata. path_in_schema is folded
+        # into "name".
         expected_fields = {
             # Basic fields
             "name",
             "physical_type",
             "logical_type",
-            "path_in_schema",  # not always present
             # Sizes & counts
             "num_values",
-            "total_uncompressed_size",
             "total_compressed_size",
             # Offsets
             "data_page_offset",
-            "index_page_offset",
             "dictionary_page_offset",
             # telemetry
             "min",
@@ -55,12 +72,12 @@ def test_all_metadata_fields_exposed():
             "bloom_length",
             # Encodings & codec
             "encodings",
-            "compression_codec",  # codec in C++
-            # Key/value metadata
-            "key_value_metadata",
+            "compression_codec",
+            "max_definition_level",
+            "max_repetition_level",
+            "type_length",
         }
 
-        # Check that all expected fields are present
         actual_fields = set(col.keys())
         missing_fields = expected_fields - actual_fields
         extra_fields = actual_fields - expected_fields
@@ -73,11 +90,11 @@ def test_all_metadata_fields_exposed():
 
 def test_metadata_field_types():
     """Test that metadata fields have the correct types."""
-    files_to_test = glob.glob("testdata/*.parquet", recursive=True)
+    files_to_test = glob.glob("testdata/**/*.parquet", recursive=True)
+    assert files_to_test, "No parquet test files found"
 
     for file_path in files_to_test:
-        metadata = parquet.read_metadata(file_path)
-        col = metadata["row_groups"][0]["columns"][0]
+        col = _first_column_metadata(file_path)
 
         # Check types
         assert isinstance(col["name"], str)
@@ -86,12 +103,8 @@ def test_metadata_field_types():
 
         # These can be int or None
         assert col["num_values"] is None or isinstance(col["num_values"], int)
-        assert col["total_uncompressed_size"] is None or isinstance(
-            col["total_uncompressed_size"], int
-        )
         assert col["total_compressed_size"] is None or isinstance(col["total_compressed_size"], int)
         assert col["data_page_offset"] is None or isinstance(col["data_page_offset"], int)
-        assert col["index_page_offset"] is None or isinstance(col["index_page_offset"], int)
         assert col["dictionary_page_offset"] is None or isinstance(
             col["dictionary_page_offset"], int
         )
@@ -107,19 +120,16 @@ def test_metadata_field_types():
         # Compression codec should be string or None
         assert col["compression_codec"] is None or isinstance(col["compression_codec"], str)
 
-        # Key/value metadata should be dict or None
-        assert col["key_value_metadata"] is None or isinstance(col["key_value_metadata"], dict)
-
         print("✅ All field types are correct")
 
 
 def test_metadata_field_values():
     """Test that metadata field values are reasonable."""
-    files_to_test = glob.glob("testdata/*.parquet", recursive=True)
+    files_to_test = glob.glob("testdata/**/*.parquet", recursive=True)
+    assert files_to_test, "No parquet test files found"
 
     for file_path in files_to_test:
-        metadata = parquet.read_metadata(file_path)
-        col = metadata["row_groups"][0]["columns"][0]
+        col = _first_column_metadata(file_path)
 
         # Basic fields should be present
         assert col.get("name") is not None
@@ -129,16 +139,12 @@ def test_metadata_field_values():
         # Sizes should be positive if present
         if col["num_values"] is not None:
             assert col["num_values"] > 0
-        if col["total_uncompressed_size"] is not None:
-            assert col["total_uncompressed_size"] > 0
         if col["total_compressed_size"] is not None:
             assert col["total_compressed_size"] > 0
 
         # Offsets should be non-negative if present
         if col["data_page_offset"] is not None:
             assert col["data_page_offset"] >= 0
-        if col["index_page_offset"] is not None:
-            assert col["index_page_offset"] >= 0
         if col["dictionary_page_offset"] is not None:
             assert col["dictionary_page_offset"] >= 0
 
@@ -167,18 +173,15 @@ def test_metadata_field_values():
         print(f"   - Type: {col['physical_type']} ({col['logical_type']})")
         print(f"   - Num values: {col['num_values']}")
         print(f"   - Compressed size: {col['total_compressed_size']} bytes")
-        print(f"   - Uncompressed size: {col['total_uncompressed_size']} bytes")
         print(f"   - Encodings: {col['encodings']}")
         print(f"   - Codec: {col['compression_codec']}")
 
 
 def test_multiple_columns():
     """Test that all columns have the complete chunk metadata via fetch_column_chunk_info."""
-    from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
-
     path = "testdata/planets/planets.parquet"
     schema = parquet.read_metadata(path)
-    column_names = [c["name"] for c in schema["schema_columns"]]
+    column_names = [c.name for c in schema.schema_columns]
 
     col_info = fetch_column_chunk_info(path, 0, column_names)
 

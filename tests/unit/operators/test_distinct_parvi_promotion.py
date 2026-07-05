@@ -6,7 +6,7 @@ from opteryx.compiled.morsel_ops.distinct import distinct
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.compiled.structures.parvi_set import ParviSetWrapper
 from opteryx.models.query_properties import QueryProperties
-from opteryx.operators.distinct_node import DistinctNode
+from opteryx.operators._operators import DistinctNode
 
 
 def test_parvi_promotion_preserves_seen_keys_across_morsels():

@@ -6,8 +6,8 @@ from opteryx.types.logical_type import LogicalCategory
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.vector_types import is_numeric_vector_type
-from opteryx.vector_types import node_is_numeric_vector
+from opteryx.types.vectors.vector_types import is_numeric_vector_type
+from opteryx.types.vectors.vector_types import node_is_numeric_vector
 
 
 def test_is_numeric_vector_type_recognizes_vector_type():

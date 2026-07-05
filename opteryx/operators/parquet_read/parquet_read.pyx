@@ -124,6 +124,7 @@ def _string_type_for(column_type):
 #
 from opteryx.expression.evaluator import execute_bytecode
 from opteryx.expression.evaluator import predicate_filter_and_mask_c_native as _predicate_filter_and_mask_c_native
+from opteryx.expression.evaluator.evaluation import filter_morsel_c_native as _filter_morsel_c_native
 from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
@@ -1112,6 +1113,7 @@ cdef class ParquetReadNode(ReaderNode):
             if not self._scan_finished:
                 self._scan_finished = True
                 self._flush_decode_telemetry()
+                self.scan_readings.flush_into(self.readings)
             src = self._ipc_source
             self._ipc_source = None
             self._scan_mtx.unlock()
@@ -1123,6 +1125,7 @@ cdef class ParquetReadNode(ReaderNode):
             if not self._scan_finished:
                 self._scan_finished = True
                 self._flush_decode_telemetry()
+                self.scan_readings.flush_into(self.readings)
             src1 = self._lm_pass1_src
             src2 = self._lm_pass2_src
             self._lm_pass1_src = None
@@ -1137,13 +1140,11 @@ cdef class ParquetReadNode(ReaderNode):
 
     cdef void _flush_decode_telemetry(self) except *:
         """Per-scan decode-time + filter-total telemetry, recorded into the typed
-        native `scan_readings` only. Called once from close_source for the
-        single-pass path, but still under `_scan_mtx` — no Python `telemetry`/
-        `readings` object touch here (see `_record_morsel_emitted`'s docstring); the
-        rule is absolute regardless of call frequency. `scan_readings` itself is the
-        complete native record; it is no longer mirrored into the Python `readings`
-        dict, so the EXPLAIN/reporting surface goes blind to this scan's stats
-        rather than the native path touching Python object state."""
+        native `scan_readings` only. Called once from close_source, under
+        `_scan_mtx`, before `scan_readings.flush_into(self.readings)` mirrors the
+        complete native record into the Python `readings` dict that sensors()
+        reads. This is a one-time finalization touch (see `_record_morsel_emitted`'s
+        docstring for why the hot loop itself never touches Python object state)."""
         cdef int64_t decode_ns = <int64_t>time.monotonic_ns() - self._decode_start_ns
         self.scan_readings.record_decode_time(decode_ns)
         self.scan_readings.record_filter_totals(
@@ -1261,13 +1262,6 @@ cdef class ParquetReadNode(ReaderNode):
             and bool(_pass2_names)
         )
         topn_active = topn_active and two_pass_eligible
-        import os as _dbg_os
-        if _dbg_os.environ.get("OPTERYX_SCAN_DEBUG"):
-            import sys as _dbg_sys
-            print(f"SCAN-DBG topn_active={topn_active} two_pass={two_pass_eligible} "
-                  f"topn_sort={self._topn_sort_name} limit={self._topn_limit} "
-                  f"p1={sorted(_pass1_only_names)[:4]} np2={len(_pass2_names)}",
-                  file=_dbg_sys.stderr)
         self._sp_topn_active = topn_active
         self._sp_two_pass_eligible = two_pass_eligible
         self._sp_pass1_column_names = []
