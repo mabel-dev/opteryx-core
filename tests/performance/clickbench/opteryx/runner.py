@@ -21,11 +21,11 @@ class Dataset(enum.Enum):
     FULL_SPLIT_RUGO = "scratch.hits_rugo"
     FULL_SPLIT_RUGO_250K = "scratch.hits_rugo_250k"
     FULL_SPLIT_RUGO_125K = "scratch.hits_rugo_125k"
-    FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k"
+    FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k" # preferred
     FULL_SINGLE = "scratch.hits_single"
 
 
-DATASET = Dataset.FULL_SPLIT
+DATASET = Dataset.FULL_SPLIT_RUGO_262K
 
 # fmt:off
 STATEMENTS = [
@@ -185,8 +185,8 @@ if __name__ == "__main__":  # pragma: no cover
         elif ratio <= 3.0:
             # Light green: within 300%
             return f"\033[38;2;72;209;204m{ratio_str}\033[0m"
-        elif ratio <= 10.0:
-            # Orange: 1000% slower
+        elif ratio <= 7.0:
+            # Orange: 700% slower
             return f"\033[38;2;255;165;0m{ratio_str}\033[0m"
         else:
             # Red: 1000%+ slower

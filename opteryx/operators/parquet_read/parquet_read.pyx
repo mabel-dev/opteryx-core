@@ -1110,6 +1110,28 @@ cdef class ParquetReadNode(ReaderNode):
             out = morsel_to_cxx(py)
         return out
 
+    def io_diagnostics(self):
+        """IO-pipeline diagnostics (GCS/HTTP request count, retries, latency
+        histogram, worker_blocked_ns) for this scan's active source(s). MUST be
+        read before close_source() drops the source references. Returns {} for the
+        empty-manifest fallback (no source opened) or once closed."""
+        if self._scan_mode == _SCAN_SINGLE and self._ipc_source is not None:
+            return self._ipc_source.diagnostics()
+        if self._scan_mode == _SCAN_LATMAT:
+            diags = {}
+            if self._lm_pass1_src is not None:
+                diags = dict(self._lm_pass1_src.diagnostics())
+            if self._lm_pass2_src is not None:
+                # Sum the two passes' scalar counters; keep pass-2's histogram shape.
+                p2 = self._lm_pass2_src.diagnostics()
+                for k, v in p2.items():
+                    if isinstance(v, (int, float)) and isinstance(diags.get(k), (int, float)):
+                        diags[k] += v
+                    else:
+                        diags[k] = v
+            return diags
+        return {}
+
     cpdef void close_source(self) except *:
         """Flush decode telemetry and release the source(s) on every exit path.
         The native single-pass and latmat paths own their flush + source close;

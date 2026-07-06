@@ -125,8 +125,23 @@ cdef class NativeScanPlan:
     cdef unordered_map[string, FileStats]* footer_map
     cdef vector[pair[string, int]] work_items
     cdef vector[string] column_names
+    # Per-projected-column declared string DrakenType (parallel to column_names):
+    # DRAKEN_VARCHAR/NVARCHAR/VARBINARY tag for string columns, 0 for non-string.
+    # The native Source borrows &string_types for per-column typing + DK_POOL
+    # varchar routing (WP-01).
+    cdef vector[int] string_types
+    # WP-11: parallel to column_names. `decimal_columns[i]` = 1 marks an int64-backed
+    # DECIMAL column (DK_POOL) so the native Source routes it to the decimal decoder;
+    # `logical_coerce[i]` packs the DATE/TIMESTAMP/TIME/DECIMAL retag kind + unit /
+    # precision-scale (see LC_* packing in native_parquet_scan_source.hpp). 0 = none.
+    cdef vector[uint8_t] decimal_columns
+    cdef vector[int] logical_coerce
     cdef int in_flight_limit
     cdef int n_items
+    # WP-02: row groups excluded by pushed-predicate min/max + bloom pruning at
+    # plan time. n_items is the SURVIVING (scanned) count; pruned + n_items ==
+    # every row group in the projected files. 0 when no predicates are pushed.
+    cdef int pruned_items
     cdef bint _closed
     cdef MemoryPool _pool
 
@@ -139,6 +154,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     int decode_workers=*,
     predicates=*,
     file_sizes=*,
+    string_types=*,
+    decimal_columns=*,
+    logical_coerce=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed

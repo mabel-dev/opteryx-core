@@ -161,14 +161,44 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                     # each operator's own call (the recursive downstream forward is
                     # excluded), so there is no separate downstream component to subtract.
                     node_stat["self_time"] = native["execution_time"]
-                    node_stat["downstream_time"] = 0
 
             # Add telemetry-specific readings for reader nodes
             if node.is_scan:
-                node_stat["rows_read"] = getattr(node.telemetry, "rows_read", 0)
-                node_stat["blobs_read"] = getattr(node.telemetry, "blobs_read", 0)
-                node_stat["bytes_processed"] = getattr(node.telemetry, "bytes_processed", 0)
-                node_stat["columns_read"] = getattr(node.telemetry, "columns_read", 0)
+                # These may already be present from sensors() (self.readings — the
+                # trampoline scan's ScanReadings, flushed by close_source in the
+                # driver teardown). Only fall back to the connector-level telemetry
+                # object when sensors() gave nothing, so a real flushed reading is
+                # never clobbered back to 0.
+                for _k in ("rows_read", "blobs_read", "bytes_processed", "columns_read"):
+                    if not node_stat.get(_k):
+                        node_stat[_k] = getattr(node.telemetry, _k, 0)
+                # columns_read has no ScanReadings field — default to the projected
+                # column count (native scans override it from scan_facts below).
+                if not node_stat.get("columns_read") and getattr(node, "columns", None):
+                    node_stat["columns_read"] = len(node.columns)
+
+                # Native scan path: the Cython ScanReadings above are all zero — the
+                # C++ engine scanned, not the Cython node. Overlay the real values:
+                # plan-time facts (files/row-groups/columns) harvested by identity,
+                # and rows/bytes from the native op-stat counters already overlaid
+                # onto this row above. native_scan_facts only carries native-path
+                # scans, so trampoline scans keep their own telemetry readings.
+                native_scan_facts = node.telemetry._reading.get("native_scan_facts")
+                if native_scan_facts:
+                    facts = native_scan_facts.get(node.identity)
+                    if facts:
+                        node_stat["files_read"] = facts["files_read"]
+                        # A blob == a file for the parquet scan; mirror files_read
+                        # (the Cython blobs_read counter is zero on the native path).
+                        node_stat["blobs_read"] = facts["files_read"]
+                        node_stat["row_groups_read"] = facts["row_groups_read"]
+                        node_stat["row_groups_pruned"] = facts["row_groups_pruned"]
+                        node_stat["columns_read"] = facts["columns_read"]
+                        # No pushed predicates on the native path → every column
+                        # read is a projection column, none read only for filtering.
+                        node_stat["parquet_projection_columns_read"] = facts["columns_read"]
+                        node_stat["rows_read"] = node_stat.get("records_out", 0)
+                        node_stat["bytes_processed"] = node_stat.get("bytes_out", 0)
 
             # Add node-specific attributes
             if getattr(node, "columns", None):
@@ -183,6 +213,30 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 node_stat["at_date"] = str(node.at_date)
             if getattr(node, "committed_at", None):
                 node_stat["committed_at"] = node.committed_at
+
+            # Field dedup (architect decision): the scan-specific readings duplicate
+            # the generic operator counters. Collapse each pair onto the generic
+            # survivor — backfilling it from the deprecated field when the survivor
+            # is unset (a scan is a source: records_in/bytes_in are 0, so they take
+            # the scanned rows/bytes) — then drop the deprecated names.
+            #   rows_read       → records_in
+            #   bytes_processed → bytes_in
+            #   files_read      → blobs_read
+            if "rows_read" in node_stat:
+                if not node_stat.get("records_in"):
+                    node_stat["records_in"] = node_stat["rows_read"]
+                node_stat.pop("rows_read", None)
+            if "bytes_processed" in node_stat:
+                if not node_stat.get("bytes_in"):
+                    node_stat["bytes_in"] = node_stat["bytes_processed"]
+                node_stat.pop("bytes_processed", None)
+            if "files_read" in node_stat:
+                if not node_stat.get("blobs_read"):
+                    node_stat["blobs_read"] = node_stat["files_read"]
+                node_stat.pop("files_read", None)
+            # downstream_time is dead on the native path (self_time == execution_time)
+            # and only ever nonzero under EXPLAIN ANALYZE tracing — drop it here.
+            node_stat.pop("downstream_time", None)
 
             stats.append(node_stat)
         return stats

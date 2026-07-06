@@ -729,8 +729,16 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     cdef PyObject* raw
     p = _read_u32(p, &n)
 
-    if n == 0:
-        # Return empty string vector — no slots needed.
+    # The `n` records in the stream are COMPACT (present-only) — Parquet omits null
+    # rows from the value stream, so a null row contributes no record. The Draken
+    # vector is POSITIONAL: one slot per logical row (row i at slot i), null rows
+    # holding an init-null slot masked by the validity bitmap. So the output length
+    # is num_rows, NOT n; we scatter the n present records to their row positions
+    # using the null bitmap — exactly like _wrap_decoded_fixed does for numerics.
+    # (Treating n as the length dropped every null row: all-null → 0 rows, and a
+    # partially-null plain column silently lost its null rows.)
+    if num_rows == 0:
+        # Empty column — no slots needed.
         raw = draken_vector_own_string(NULL, NULL, 0, NULL, 0, want_type)
         if raw == NULL:
             raise MemoryError("draken_vector_own_string failed (empty)")
@@ -749,7 +757,7 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
         scan += slen
 
     # Allocate draken_malloc'd buffers — all transferred to draken_vector_own_string.
-    cdef uint8_t* slots_buf = <uint8_t*>draken_malloc(<size_t>n * SLOT_BYTES)
+    cdef uint8_t* slots_buf = <uint8_t*>draken_malloc(<size_t>num_rows * SLOT_BYTES)
     if slots_buf == NULL:
         raise MemoryError()
 
@@ -768,17 +776,20 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
             raise MemoryError()
         memcpy(validity_buf, null_bitmap, null_bitmap_len)
 
-    # Second pass: fill arena and build slots.
+    # Second pass: scatter present records into positional slots. Null rows get an
+    # init-null slot and consume NO record from the (compact) stream; present rows
+    # consume the next record. With no null bitmap the column is non-nullable, so
+    # every row is present and n == num_rows (a straight positional copy).
     cdef uint32_t arena_pos = 0
     cdef DrakenStringSlot* slot_ptr
-    for i in range(n):
-        p = _read_u32(p, &slen)
+    for i in range(num_rows):
         slot_ptr = <DrakenStringSlot*>(slots_buf + <size_t>i * SLOT_BYTES)
         if null_bitmap_len > 0 and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
-            # Null row: init null slot, still skip the string bytes in the stream.
+            # Null row: init null slot; the stream carries no bytes for it.
             str_init_null(slot_ptr)
-            p += slen
-        elif slen > 12:
+            continue
+        p = _read_u32(p, &slen)
+        if slen > 12:
             # Long string → arena. draken_build_string_slot computes the hash from
             # p and records arena_pos as the offset; the bytes must live in the arena.
             memcpy(arena_buf + arena_pos, p, slen)
@@ -795,7 +806,7 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     raw = draken_vector_own_string(
         <DrakenStringSlot*>slots_buf,
         arena_buf, <size_t>arena_pos,
-        validity_buf, n, want_type)
+        validity_buf, num_rows, want_type)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string failed")
     return _wrap_raw_pyobj(raw)

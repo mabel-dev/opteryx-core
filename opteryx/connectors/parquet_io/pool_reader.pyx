@@ -895,6 +895,15 @@ cdef class IpcRowGroupSource:
             del self._mtx
             self._mtx = NULL
 
+    def diagnostics(self):
+        """IO-pipeline counters (GCS/HTTP request count, retries, latency
+        histogram, worker_blocked_ns) for this trampoline scan — the same surface
+        NativeScanPlan.diagnostics() exposes on the native path. Returns {} once the
+        pipeline is gone. Read BEFORE close() drops the pipeline reference."""
+        if self.pipeline is None:
+            return {}
+        return self.pipeline.diagnostics()
+
     cdef void _submit_one(self, int idx):
         """Submit one work item to the C++ pipeline. Called OUTSIDE the cursor
         lock — the pipeline's work queue is itself thread-safe and the footer map
@@ -1418,11 +1427,50 @@ cdef class NativeScanPlan:
         self.footer_map = NULL
         self.in_flight_limit = 0
         self.n_items = 0
+        self.pruned_items = 0
         self._closed = False
         self._pool = None
 
     def __dealloc__(self):
         self.close()
+
+    @property
+    def row_group_count(self):
+        """Number of row groups this scan will read (its surviving work-item
+        count). With a pushed predicate (WP-02) this is post-pruning; see
+        `pruned_row_group_count` for the number min/max + bloom pruning excluded."""
+        return self.n_items
+
+    @property
+    def pruned_row_group_count(self):
+        """Row groups excluded by pushed-predicate min/max + bloom pruning at plan
+        time (WP-02). 0 when no predicates are pushed. `row_group_count +
+        pruned_row_group_count` == every row group in the projected files."""
+        return self.pruned_items
+
+    def diagnostics(self):
+        """IO-pipeline counters for this native scan — the GCS/HTTP visibility the
+        native path was previously missing (the trampoline path exposes the same via
+        CppIOPipeline.diagnostics()). Must be called BEFORE close() tears the pipeline
+        down. Returns {} once closed so the harvest is order-safe."""
+        if self._closed or self.pipeline_ptr == NULL:
+            return {}
+        cdef int i
+        cdef int n_buckets = self.pipeline_ptr.http_latency_bucket_count()
+        cdef list latency_histogram = [
+            (self.pipeline_ptr.http_latency_bucket_bound_ms(i),
+             self.pipeline_ptr.http_latency_bucket(i))
+            for i in range(n_buckets)
+        ]
+        return {
+            "http_request_count": self.pipeline_ptr.http_request_count(),
+            "http_fetch_ops": self.pipeline_ptr.http_fetch_ops(),
+            "http_retries": self.pipeline_ptr.http_retries(),
+            "http_latency_histogram_ms": latency_histogram,
+            "worker_blocked_ns": self.pipeline_ptr.worker_blocked_ns(),
+            "spin_iterations": self.pipeline_ptr.spin_iterations(),
+            "enqueue_count": self.pipeline_ptr.enqueue_count(),
+        }
 
     cpdef void close(self):
         if self._closed:
@@ -1444,6 +1492,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     int decode_workers=4,
     predicates=None,
     file_sizes=None,
+    string_types=None,
+    decimal_columns=None,
+    logical_coerce=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
@@ -1454,6 +1505,30 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef NativeScanPlan plan = NativeScanPlan()
     plan.footer_map = new unordered_map[string, FileStats]()
     plan.column_names = [c.encode('utf-8') for c in column_names]
+    # Per-column declared string DrakenType (0 = non-string). Kept parallel to
+    # column_names so the native Source tags each string column and routes DK_POOL
+    # string columns to the varchar decoder (WP-01).
+    cdef Py_ssize_t _sti
+    if string_types is not None:
+        for _sti in range(len(column_names)):
+            plan.string_types.push_back(<int>string_types[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.string_types.push_back(0)
+    # WP-11: parallel decimal-routing flags + packed logical-coercion plan. Both
+    # default to all-zero (no coercion) so pre-WP-11 callers are unchanged.
+    if decimal_columns is not None:
+        for _sti in range(len(column_names)):
+            plan.decimal_columns.push_back(<uint8_t>decimal_columns[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.decimal_columns.push_back(0)
+    if logical_coerce is not None:
+        for _sti in range(len(column_names)):
+            plan.logical_coerce.push_back(<int>logical_coerce[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.logical_coerce.push_back(0)
 
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
@@ -1483,6 +1558,7 @@ cpdef NativeScanPlan open_native_scan_plan(
             if predicates and not _rg_passes_predicates_native(
                 plan.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
             ):
+                plan.pruned_items += 1
                 continue
             work_items.append((path, rg_i))
             plan.work_items.push_back(pair[string, int](path_bytes_cpp, <int>rg_i))
@@ -1554,6 +1630,17 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     cdef string s_int64 = b"int64"
     cdef string s_float32 = b"float32"
     cdef string s_float64 = b"float64"
+    cdef string s_byte_array = b"byte_array"
+    cdef string s_varchar = b"varchar"
+    cdef string s_binary = b"binary"
+    cdef string s_boolean = b"boolean"
+    # WP-11 footer tokens: rugo's metadata.cpp emits "date32[day]", "timestamp[unit]",
+    # "time[unit]" (optionally ",UTC"), "decimal(p,s)". We prefix-match the temporal /
+    # decimal families and check the physical width to pin down 32- vs 64-bit forms.
+    cdef string s_date32 = b"date32[day]"
+    cdef string s_timestamp = b"timestamp["
+    cdef string s_time = b"time["
+    cdef string s_decimal = b"decimal"
     cdef vector[string] wanted
     cdef list kinds = []
 
@@ -1563,7 +1650,8 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
         name = column_names[k]
         wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
         kind = expected_kinds[k]
-        if kind not in ("int", "float32", "float64"):
+        if kind not in ("int", "float32", "float64", "varchar", "bool",
+                        "decimal64", "decimal128", "date", "timestamp"):
             return False
         kinds.append(kind)
 
@@ -1591,13 +1679,54 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                     if kind == "int":
                         if csp.physical_type != s_int32 and csp.physical_type != s_int64:
                             return False
+                        # WP-11: parquet TIME is decoded as plain INT64 (the binder
+                        # models no TIME logical type from a scan), so a "time[...]"
+                        # annotation on an int column is admitted — it flows through
+                        # the ordinary int path, byte-identically to the trampoline.
                         if csp.logical_type.size() != 0 and \
-                                csp.logical_type != s_int32 and csp.logical_type != s_int64:
+                                csp.logical_type != s_int32 and csp.logical_type != s_int64 and \
+                                csp.logical_type.find(s_time) != 0:
                             return False
                     elif kind == "float32":
                         if csp.physical_type != s_float32:
                             return False
                         if csp.logical_type.size() != 0 and csp.logical_type != s_float32:
+                            return False
+                    elif kind == "varchar":
+                        # A plain string / raw-binary column: parquet byte_array whose
+                        # rugo footer logical_type is "varchar" (UTF8 → VARCHAR/NVARCHAR)
+                        # or "binary" (un-annotated byte_array → VARBINARY), or empty.
+                        # Reject fixed_len_byte_array, and LIST/MAP/DECIMAL/json/struct/
+                        # array/ENUM annotations — those decode nested/decimal, not a
+                        # string vector, so they stay on the trampoline (fail-closed).
+                        if csp.physical_type != s_byte_array:
+                            return False
+                        if csp.logical_type.size() != 0 and \
+                                csp.logical_type != s_varchar and csp.logical_type != s_binary:
+                            return False
+                    elif kind == "bool":
+                        # WP-11: parquet BOOLEAN → DK_BOOL dense (1 byte/row). No
+                        # logical annotation.
+                        if csp.physical_type != s_boolean:
+                            return False
+                    elif kind == "date":
+                        # WP-11: parquet DATE (int32 days) — footer "date32[day]".
+                        if csp.physical_type != s_int32:
+                            return False
+                        if csp.logical_type != s_date32:
+                            return False
+                    elif kind == "timestamp":
+                        # WP-11: TIMESTAMP → int64 with logical "timestamp[unit]".
+                        if csp.physical_type != s_int64:
+                            return False
+                        if csp.logical_type.find(s_timestamp) != 0:
+                            return False
+                    elif kind == "decimal64" or kind == "decimal128":
+                        # WP-11: DECIMAL — rugo footer logical "decimal(p,s)". p≤18 is
+                        # int64-backed (DK_POOL, decimal64); p>18 is int128 (DK_DECIMAL128,
+                        # decimal128). The classifier already split them by the schema's
+                        # physical type; the gate only confirms the column IS a decimal.
+                        if csp.logical_type.find(s_decimal) != 0:
                             return False
                     else:  # float64
                         if csp.physical_type != s_float64:

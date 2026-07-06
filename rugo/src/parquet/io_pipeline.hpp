@@ -1151,6 +1151,10 @@ class ParquetIOPipeline {
                     lt.empty() || lt == "int64" || lt == "int32" ||
                     lt == "float64" || lt == "float32" || lt == "boolean" ||
                     lt.rfind("date", 0) == 0 || lt.rfind("timestamp", 0) == 0 ||
+                    lt.rfind("time[", 0) == 0 ||  // WP-11: TIME is an int32/int64 stream,
+                                                  // decoded as plain INT64 (the consumer
+                                                  // models no TIME coercion) — direct-eligible
+                                                  // exactly like date/timestamp.
                     lt.rfind("uint", 0) == 0 ||  // E33: uint8/16/32/64 direct kinds
                     (lt.rfind("decimal", 0) == 0 && !decoded.int128_values.empty());
                 DirectKind dk = pool_sink_.draken_alloc ? direct_kind_for(decoded) : DK_POOL;

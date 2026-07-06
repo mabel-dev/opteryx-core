@@ -80,6 +80,60 @@ def _physical_type(schema_column):
     return ct.physical if ct is not None else None
 
 
+# WP-11 logical-coercion packing — mirrors the LC_* enum in
+# src/cpp/engine/native_parquet_scan_source.hpp exactly:
+#   packed = kind | (unit << 4) | (precision << 8) | (scale << 16)
+_LC_DECIMAL64 = 1
+_LC_DATE = 3
+_LC_TIMESTAMP = 4
+# TimestampUnit enum-name → draken unit code (matches logical_type.h TimestampUnit).
+_TS_UNIT_TO_INT = {"SECONDS": 0, "MILLISECONDS": 1, "MICROSECONDS": 2, "NANOSECONDS": 3}
+
+
+def _wp11_unit(sc):
+    """draken unit code (0=s,1=ms,2=us,3=ns) for a TIMESTAMP read-set column, from
+    its schema logical unit; defaults to microseconds (matches the trampoline scan's
+    "us" fallback in _sp_timestamp_unit_map)."""
+    ct = sc.column_type
+    lg = ct.logical if ct is not None else None
+    if lg is None or lg.unit is None:
+        return 2
+    return _TS_UNIT_TO_INT.get(lg.unit.name, 2)
+
+
+def _wp11_logical_coerce(sc, pt):
+    """WP-11: for a DECIMAL / DATE / TIMESTAMP read-set column, return
+    ``(kind_str, is_int64_decimal, packed_logical_coerce)`` describing the native
+    retag; return None for any other physical type, and None (fail-closed) for an
+    int64-backed DECIMAL whose plan-time precision/scale is missing or out of the
+    int64 range (>18) — the native decimal wire format carries no descriptor, so
+    without a valid plan-time precision/scale the scan must stay on the trampoline.
+
+    Parquet TIME is NOT handled here: the binder decodes it as plain INT64 (no TIME
+    logical type is modelled from a scan), so a time column reaches the ordinary int
+    path — see native_scan_supported's "int" footer branch, which admits a
+    time-annotated int column.
+
+    `kind_str` feeds native_scan_supported's footer gate; `packed` feeds the native
+    Source's build_column retag (LC_* packing)."""
+    if pt == DrakenType.DATE32:
+        return ("date", False, _LC_DATE)
+    if pt == DrakenType.TIMESTAMP64:
+        return ("timestamp", False, _LC_TIMESTAMP | (_wp11_unit(sc) << 4))
+    if pt == DrakenType.DECIMAL:
+        ct = sc.column_type
+        lg = ct.logical if ct is not None else None
+        if lg is None or lg.precision is None or lg.scale is None or lg.precision > 18:
+            return None
+        return ("decimal64", True,
+                _LC_DECIMAL64 | (int(lg.precision) << 8) | (int(lg.scale) << 16))
+    if pt == DrakenType.DECIMAL128:
+        # Self-describing: rugo fills ColumnOut.dec_precision/dec_scale from the
+        # footer, and build_column attaches the descriptor from those — no packing.
+        return ("decimal128", False, 0)
+    return None
+
+
 def _const_scalar_vector(dtype, value):
     """Build a length-1 constant-encoded Vector for an `IDENTIFIER = LITERAL`
     const-replacement column (see the FilterNode branch below). Returns None for a
@@ -129,6 +183,23 @@ class _Compiler:
     def __init__(self, plan, nplan):
         self.plan = plan
         self.nplan = nplan
+        # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
+        # node identity. "NativeParquetScanSource" == zero-Python native pull;
+        # "StreamingScanSource" == the GIL trampoline. Later work packages assert
+        # string/predicate scans migrate from the latter to the former.
+        self.scan_sources: dict = {}
+        # WP-02: per-native-scan relocated residual filter, keyed by scan node
+        # identity. When a pushed predicate is lowered to a c-native span and its
+        # scan admitted natively, this carries the wiring from _native_scan_plan to
+        # _compile_scan: (filter_bc, read_layout, emit_indices, emit_ids,
+        # need_select). Built per execute() and discarded with the compiler — no
+        # cross-query shared state.
+        self._relocated_scan_filters: dict = {}
+        # Per-native-scan plan-time facts, keyed by scan node identity. On the
+        # native path the Cython ParquetReadNode never executes, so its
+        # ScanReadings (row_groups_read/files_read/…) stay zero — these carry the
+        # real values, harvested into telemetry and overlaid by mermaid.py.
+        self.scan_facts: dict = {}
 
     # ---- expression lowering ------------------------------------------------------
     # Expressions are lowered ONCE, at plan time, to the phase-9 flat bytecode whose
@@ -354,17 +425,48 @@ class _Compiler:
                 rebuilt.parameters = new_params
         return rebuilt if rebuilt is not None else expr
 
-    def _lower_expression(self, expr, what):
+    def _lower_bytecode(self, expr):
+        """Lower `expr` to a `CompiledBytecode` through the standard plan-time
+        rewrites (CASE→IF_THEN_ELSE, BETWEEN→compares, decimal-literal rescale).
+        Does NOT gate on c-nativeness — the caller decides whether a non-c-native
+        program is a hard error (`_lower_expression`) or a fail-closed signal
+        (`_native_scan_plan`, WP-02)."""
         from opteryx.compiled.expression.compiled_expression import build_bytecode
         from opteryx.compiled.expression.compiled_expression import lower
-        from opteryx.operators._operators import bytecode_is_all_c_native
 
-        bc = build_bytecode(lower(
+        return build_bytecode(lower(
             self._rewrite_decimal_compares(self._rewrite_between(
                 self._rewrite_case(expr)))))
+
+    def _lower_expression(self, expr, what):
+        from opteryx.operators._operators import bytecode_is_all_c_native
+
+        bc = self._lower_bytecode(expr)
         if not bytecode_is_all_c_native(bc):
             _unsupported(f"{what} outside the c-native kernel set")
         return bc
+
+    def _compose_predicate_nodes(self, predicates):
+        """AND-compose a list of pushed predicate nodes into one right-leaning
+        tree — the VERBATIM composition the trampoline scan uses to build
+        `_compiled_predicate` (opteryx/operators/parquet_read/parquet_read.pyx's
+        `_compose_predicates`). Lowering this same tree is what keeps the relocated
+        native filter byte-identical to the trampoline path. `predicates` is
+        non-empty (the caller guards)."""
+        from opteryx.compiled.structures.node import Node
+        from opteryx.utils import random_string
+
+        nodes = [p.copy() for p in predicates if p is not None]
+        root = nodes.pop()
+        while nodes:
+            right = nodes.pop()
+            root = Node(
+                NodeType.AND,
+                left=root,
+                right=right,
+                schema_column=Node("schema_column", identity=random_string()),
+            )
+        return root
 
     def _resolve_const_replacements(self, node, layout):
         """Resolve a FilterNode's `IDENTIFIER = LITERAL` const-replacements (already
@@ -801,20 +903,33 @@ class _Compiler:
         is the one that runs; there is no runtime fallback (an unsupported column
         kind reaching the native Source is a gate bug and fails the query loud).
 
-        Increment-1 scope: local files, plain numeric projected columns only
-        (schema INT64/FLOAT32/FLOAT64 — parquet int32 widens to INT64 on decode),
-        no pushed row-level predicates, no scan-pushed LIMIT/TopN, no zero-column
-        projection, and the footer gate (native_scan_supported) proves every
-        column of every row group eligible — no schema evolution, no
-        DECIMAL/temporal/BOOL/string logical types."""
+        Scope: local files; columns that are numeric (schema INT64/FLOAT32/FLOAT64 —
+        parquet int32 widens to INT64 on decode) or string (VARCHAR/NVARCHAR/
+        VARBINARY, decoded natively via the DK_VARCHAR / DK_VARCHAR_DICT /
+        DK_POOL-string paths — WP-01); no scan-pushed LIMIT/TopN, no zero-column
+        projection; and the footer gate (native_scan_supported) proves every column
+        of every row group eligible — no schema evolution, no DECIMAL/temporal/BOOL
+        logical types.
+
+        WP-02 — pushed predicates: the per-row residual is RELOCATED to a native
+        downstream ExprFilter (see `_compile_scan`) instead of blocking admission.
+        The scan reads the READ-SET (projected ∪ predicate-input columns) so a
+        role-3 filter-only column is decoded and available to the filter, and
+        EMITS only the projection (via a trailing Select when read-set ⊋ emit-set).
+        Row-group / bloom PRUNING stays at the scan — the same
+        `extract_predicate_stats` triples the trampoline path uses are passed to
+        `open_native_scan_plan`, so bytes-read / row-groups-scanned are unchanged.
+        A predicate that does not lower to a c-native span fails CLOSED (returns
+        None → trampoline Source keeps the predicate on the old path)."""
         from opteryx import config
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+        from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+        from opteryx.expression import get_all_nodes_of_type
+        from opteryx.operators._operators import bytecode_is_all_c_native
 
         if not scan.columns:
             return None  # zero-projection COUNT(*) shape (b'*' constant column)
-        if getattr(scan, "predicates", None):
-            return None  # predicate relocation to an engine filter = next increment
         if getattr(scan, "limit", None) is not None:
             return None  # scan-pushed LIMIT semantics live in the trampoline scan
         if getattr(scan, "_topn_sort_name", None) is not None:
@@ -822,19 +937,108 @@ class _Compiler:
         manifest = getattr(scan, "manifest", None)
         if manifest is None or manifest.get_file_count() == 0:
             return None
+
+        predicates = getattr(scan, "predicates", None)
+
+        # WP-02 fail-closed gate: lower the AND-composed pushed predicate to a
+        # c-native span (the VERBATIM tree the trampoline lowers). Not lowerable →
+        # None → StreamingScanSource keeps the predicate. build_bytecode cannot
+        # raise here — the trampoline already builds the identical bytecode
+        # unconditionally at execute time — so `bytecode_is_all_c_native` is the
+        # only "not lowerable" signal and no try/except is needed.
+        filter_bc = None
+        if predicates:
+            filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
+            if not bytecode_is_all_c_native(filter_bc):
+                return None
+
+        # Read-set = projected columns (in scan.columns order), then predicate-only
+        # (role-3) columns appended. Deduped by identity; a pushed predicate on a
+        # projected column resolves to the same schema_column identity, so it is
+        # not re-added.
+        read_scs = [col.schema_column for col in scan.columns]
+        seen = {sc.identity for sc in read_scs}
+        if predicates:
+            for pred in predicates:
+                for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
+                    sc = getattr(ident, "schema_column", None)
+                    if sc is None:
+                        continue
+                    # WP-11 fail-closed: a BOOL column used as a predicate input is not
+                    # safely evaluable by the relocated c-native ExprFilter (bool
+                    # comparison raises err_op=11), even though bytecode_is_all_c_native
+                    # reports it lowerable. Rather than relocate and crash, fail the
+                    # whole scan closed so the predicate stays on the trampoline (which
+                    # evaluates it correctly). BOOL columns that are only PROJECTED (not
+                    # a predicate input) are unaffected — they decode natively. A native
+                    # c-native bool comparison kernel is a follow-on.
+                    if _physical_type(sc) == DrakenType.BOOL:
+                        return None
+                    if sc.identity not in seen:
+                        seen.add(sc.identity)
+                        read_scs.append(sc)
+
         kinds = []
-        for col in scan.columns:
-            pt = _physical_type(col.schema_column)
-            if pt == DrakenType.INT64:
+        string_types = []
+        # WP-11: parallel to read_scs. decimal_columns[i]=1 routes an int64-backed
+        # DECIMAL DK_POOL column to the native decimal decoder; logical_coerce[i]
+        # packs the DATE/TIMESTAMP/TIME/DECIMAL retag kind + unit / precision-scale
+        # (LC_* packing mirrored from native_parquet_scan_source.hpp). 0 = none.
+        decimal_columns = []
+        logical_coerce = []
+        for sc in read_scs:
+            pt = _physical_type(sc)
+            coerce = _wp11_logical_coerce(sc, pt)
+            # WP-11: parquet TIME binds to a TIME32/TIME64 schema type but decodes as
+            # plain INT64 (the binder models no TIME coercion) — the trampoline emits
+            # it as INT64. Route it through the int path so the native scan emits the
+            # identical INT64 column; the "int" footer gate admits the time[...]
+            # logical annotation.
+            if pt == DrakenType.INT64 or pt == DrakenType.TIME32 or pt == DrakenType.TIME64:
                 kinds.append("int")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
             elif pt == DrakenType.FLOAT32:
                 kinds.append("float32")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
             elif pt == DrakenType.FLOAT64:
                 kinds.append("float64")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY):
+                # WP-01: string columns decode natively (DK_VARCHAR / DK_VARCHAR_DICT
+                # / DK_POOL string). Carry the declared physical type so the native
+                # Source tags each vector byte-identically to the trampoline path.
+                kinds.append("varchar")
+                string_types.append(pt.value)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt == DrakenType.BOOL:
+                # WP-11: BOOLEAN → DK_BOOL dense, self-describing (no descriptor).
+                kinds.append("bool")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif coerce is not None:
+                # WP-11: DECIMAL / DATE / TIMESTAMP / TIME. `coerce` is (kind_str,
+                # is_int64_decimal, packed) — None here means the logical descriptor
+                # was missing/out-of-range, so fail the scan closed (below).
+                kind_str, is_int64_decimal, packed = coerce
+                kinds.append(kind_str)
+                string_types.append(0)
+                decimal_columns.append(1 if is_int64_decimal else 0)
+                logical_coerce.append(packed)
             else:
+                # A read-set column (projected OR role-3 filter-only) of a
+                # not-yet-admissible kind fails the whole scan closed. Deliberate
+                # strict check: role-3 columns must also be native-admissible.
                 return None
         paths = manifest.get_file_paths()
-        names = [col.schema_column.name for col in scan.columns]
+        names = [sc.name for sc in read_scs]
         file_sizes = {}
         files = getattr(manifest, "files", None)
         if files:
@@ -844,13 +1048,34 @@ class _Compiler:
                     file_sizes.setdefault(entry.file_path, size)
         if not native_scan_supported(paths, names, kinds, file_sizes or None):
             return None
-        return open_native_scan_plan(
+        # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
+        # so row groups excluded / bytes read are unchanged. Only pruning; the
+        # per-row residual is the relocated ExprFilter, not the scan.
+        pruning = extract_predicate_stats(predicates) if predicates else None
+        splan = open_native_scan_plan(
             paths,
             names,
             decode_workers=config.PARQUET_LOCAL_IO_WORKERS,
-            predicates=None,
+            predicates=pruning or None,
             file_sizes=file_sizes or None,
+            string_types=string_types,
+            decimal_columns=decimal_columns,
+            logical_coerce=logical_coerce,
         )
+
+        if filter_bc is not None:
+            # Wire the relocated residual for _compile_scan. The native Source emits
+            # the read-set in `names` order; read_layout is the parallel identities.
+            read_layout = [sc.identity for sc in read_scs]
+            emit_ids = [col.schema_column.identity for col in scan.columns]
+            emit_indices = [read_layout.index(identity) for identity in emit_ids]
+            # Projected columns lead read_layout, so read-set ⊋ emit-set iff there
+            # are appended role-3 columns — then a Select narrows back; else the
+            # Select would be the identity permutation and is elided (§3).
+            need_select = len(read_layout) > len(emit_ids)
+            self._relocated_scan_filters[scan.identity] = (
+                filter_bc, read_layout, emit_indices, emit_ids, need_select)
+        return splan
 
     def _compile_scan(self, scan, kind):
         # Tag the scan Source (and any materialized buffer source) with the scan node's
@@ -869,11 +1094,33 @@ class _Compiler:
             # Zero-Python Source: workers pull decoded row groups straight from
             # the rugo IO pipeline (no GIL trampoline, no per-morsel attach).
             # Same emit order and layout contract as the trampoline path below.
+            self.scan_sources[scan.identity] = "NativeParquetScanSource"
+            manifest = getattr(scan, "manifest", None)
+            reloc = self._relocated_scan_filters.get(scan.identity)
+            self.scan_facts[scan.identity] = {
+                "files_read": manifest.get_file_count() if manifest is not None else 0,
+                "row_groups_read": splan.row_group_count,
+                # WP-02: pushed-predicate min/max + bloom pruning at plan time.
+                "row_groups_pruned": splan.pruned_row_group_count,
+                # Read-set width (projected ∪ role-3 filter-only), not just the
+                # projection — that is what the native Source actually decodes.
+                "columns_read": len(reloc[1]) if reloc is not None else len(scan.columns),
+            }
             p = self.nplan.new_pipeline()
             self.nplan.set_native_scan_source(p, splan)
-            layout = [col.schema_column.identity for col in scan.columns]
             self._remember_types(scan.columns)
-            return p, layout
+            if reloc is None:
+                return p, [col.schema_column.identity for col in scan.columns]
+            # WP-02: the native Source emits the read-set; apply the relocated
+            # residual filter natively over that layout, then Select back to the
+            # projection (drops role-3 filter-only columns). The identity Select is
+            # elided when read-set == emit-set (need_select False).
+            filter_bc, read_layout, emit_indices, emit_ids, need_select = reloc
+            self.nplan.add_expr_filter(p, filter_bc, read_layout)
+            if need_select:
+                self.nplan.add_select(p, emit_indices, emit_ids)
+            return p, emit_ids
+        self.scan_sources[scan.identity] = "StreamingScanSource"
         p = self.nplan.new_pipeline()
         # A scan that is not concurrent-pull safe (two-pass latmat, fallback
         # generator) gets its pull mutex-serialised inside the Source; the rest of
@@ -1085,9 +1332,11 @@ class _Compiler:
 
 
 def compile_to_native(plan):
-    """Compile ``plan`` into a runnable ``(NativePlan, PyMorselQueue)``. Raises
-    ``NotSupportedError`` at once — before anything runs — for any shape the native
-    engine has no operator for."""
+    """Compile ``plan`` into a runnable ``(NativePlan, PyMorselQueue, scan_sources)``.
+    ``scan_sources`` maps each parquet scan node identity to the Source it was wired
+    to ("NativeParquetScanSource" or "StreamingScanSource") — WP-INSTR instrument 2.
+    Raises ``NotSupportedError`` at once — before anything runs — for any shape the
+    native engine has no operator for."""
     from opteryx.compiled.morsel_queue import PyMorselQueue
     from opteryx.operators._operators import NativePlan
 
@@ -1124,7 +1373,7 @@ def compile_to_native(plan):
         pt = _physical_type(col.schema_column)
         final_types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
     nplan.set_final_schema(list(exit_node.final_names), final_types)
-    return nplan, out_q
+    return nplan, out_q, compiler.scan_sources, compiler.scan_facts
 
 
 def execute_native(plan, telemetry=None):
@@ -1136,38 +1385,130 @@ def execute_native(plan, telemetry=None):
     from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.operators._operators import native_plan_execute
 
-    nplan, out_q = compile_to_native(plan)
+    import time as _t
+
+    # Native plan compilation (the _Compiler walk + bytecode lowering + operator
+    # instantiation) runs synchronously here, in the execution phase but BEFORE the
+    # driver generator produces anything — so it is inside time_executing yet
+    # invisible to time_engine_generator_total. Cost is ~independent of row count,
+    # so it dominates cheap queries. Timed as an always-on driver span.
+    _compile0 = _t.perf_counter_ns()
+    nplan, out_q, scan_sources, scan_facts = compile_to_native(plan)
+    _compile_ns = _t.perf_counter_ns() - _compile0
     dop = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
+    # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
+    # fact — recorded whether or not the GIL instrumentation is armed; the dict is
+    # tiny and costs nothing to attach).
     if telemetry is not None:
         telemetry._reading["native_engine_engaged"] = 1
         telemetry._reading["native_engine_dop"] = dop
+        telemetry._reading["scan_sources"] = dict(scan_sources)
+        # Native-scan plan-time facts (files/row-groups/columns read), keyed by
+        # scan identity — overlaid onto the scan's sensor row by mermaid.py to
+        # replace the always-zero ScanReadings fields on the native path.
+        if scan_facts:
+            telemetry._reading["native_scan_facts"] = dict(scan_facts)
+
+    # WP-INSTR instruments 1 & 4: arm the execution-time GIL instrumentation for the
+    # span of this run when the config flag is set. Disarmed by default → the
+    # instrumented sites pay a single-branch check and nothing else.
+    instrument_gil = bool(config.OPTERYX_INSTRUMENT_ENGINE)
 
     import threading
 
+    # A fresh thread pool is spawned PER QUERY — dop OS threads created here, on the
+    # calling thread, before the driver runs. Another fixed per-query cost inside
+    # time_executing but outside time_engine_generator_total.
+    _pool0 = _t.perf_counter_ns()
     pool = CppThreadPool(dop, "engine")
+    _pool_create_ns = _t.perf_counter_ns() - _pool0
     errors: list = []
     done = threading.Event()
 
     def generator():
+        # Always-on driver-span instrumentation. time_executing (measured around
+        # the whole generator in query_session) spans regions no operator counter
+        # covers: submit, first-morsel latency, cumulative queue-wait, the
+        # consumer's between-pull work (downstream of the yield), and teardown.
+        # perf_counter_ns is ~tens of ns; called O(1) per query + 2x per morsel,
+        # so it is noise. Keys are time_engine_* so as_dict auto-converts to s.
+        import time as _t
+
+        _gen_start = _t.perf_counter_ns()
+        _queue_wait_ns = 0
+        _consumer_ns = 0
+        _first_morsel_ns = 0
+        _got_first = False
+
+        if instrument_gil:
+            from opteryx.operators._operators import instr_gil_reset
+            from opteryx.operators._operators import instr_gil_set_enabled
+
+            # Arm BEFORE the driver submits so every worker sees the flag set.
+            instr_gil_reset()
+            instr_gil_set_enabled(True)
+        _t0 = _t.perf_counter_ns()
         handle = native_plan_execute(pool, nplan, dop, out_q, errors, done)
+        _submit_ns = _t.perf_counter_ns() - _t0
         try:
             while True:
+                _g0 = _t.perf_counter_ns()
                 item = out_q.get()
+                _g1 = _t.perf_counter_ns()
+                _queue_wait_ns += _g1 - _g0
+                if not _got_first:
+                    # First morsel out of the queue: submit + engine spin-up +
+                    # source setup (footer fetch etc.) latency to first output.
+                    _first_morsel_ns = _g1 - _gen_start
+                    _got_first = True
                 if item is None or item is MQ_FINISHED:
                     break
+                _y0 = _t.perf_counter_ns()
                 yield item
+                # Wall time the consumer spent before pulling the next morsel —
+                # generator is suspended here, so this is downstream-of-yield work
+                # (materialize, GCS part uploads, etc.) that also lands in
+                # time_executing despite the engine being idle.
+                _consumer_ns += _t.perf_counter_ns() - _y0
         finally:
             # Close first (unblocks any backpressured producer put), then wait for the
             # driver to stop touching the pool before tearing the pool down. Native
             # scan plans (rugo IO pipelines the Source borrows) are only safe to
             # close once the driver — and therefore every engine worker — is done.
             out_q.close()
+            _tw0 = _t.perf_counter_ns()
             done.wait()
+            _done_wait_ns = _t.perf_counter_ns() - _tw0
+            # Trampoline scans (StreamingScanSource) accumulate ScanReadings during
+            # next_morsel but only flush them into node.readings in close_source() —
+            # which the native engine's pull loop never calls (it just detects EOS).
+            # The driver is done (done.wait returned → every worker finished), so it
+            # is now safe to close each scan on this thread: flush_into populates the
+            # readings sensors()/mermaid read, and the source is released. Idempotent
+            # (close_source guards on _scan_finished), so scans that self-closed are
+            # untouched. Native-parquet scans have no ScanReadings to flush — their
+            # facts come from native_scan_facts — and their close_source is a no-op.
+            # IO diagnostics for trampoline scans must be read BEFORE close_source
+            # drops the source (and its IO pipeline) — collect them here, merged
+            # later with the native-scan diagnostics into one io_scan_diagnostics.
+            _io_diags: list = []
+            _scans = getattr(nplan, "scans", None)
+            if _scans:
+                if telemetry is not None:
+                    for _scan in _scans:
+                        _io_fn = getattr(_scan, "io_diagnostics", None)
+                        if _io_fn is not None:
+                            _diag = _io_fn()
+                            if _diag:
+                                _io_diags.append(_diag)
+                for _scan in _scans:
+                    _scan.close_source()
             # The driver is done, so every operator's counters are final: harvest the
             # per-operator telemetry and fold it onto the session telemetry, keyed by
             # plan-node identity (mermaid's get_node_stats reads it back for the
             # ``operations`` breakdown). Several native operators can share one identity
             # (a plan node lowered to multiple operators, operator fusion) — sum them.
+            _th0 = _t.perf_counter_ns()
             if telemetry is not None:
                 op_stats: dict = {}
                 for row in nplan.collect_op_stats():
@@ -1192,9 +1533,80 @@ def execute_native(plan, telemetry=None):
                         agg["calls"] += row["calls"]
                         agg["execution_time"] += row["execution_time"]
                 telemetry._reading["native_op_stats"] = op_stats
+            _harvest_ns = _t.perf_counter_ns() - _th0
+            # WP-INSTR instruments 1 & 4: harvest the execution-time GIL readings
+            # after the driver (and therefore every worker) is done, so the
+            # accumulators are final. Then disarm — the flag is process-global.
+            if instrument_gil:
+                from opteryx.operators._operators import instr_gil_set_enabled
+                from opteryx.operators._operators import instr_gil_total_ns
+                from opteryx.operators._operators import instr_gil_worker_report
+
+                if telemetry is not None:
+                    telemetry._reading["gil_held_ns"] = instr_gil_total_ns()
+                    telemetry._reading["worker_gil_sites"] = instr_gil_worker_report()
+                instr_gil_set_enabled(False)
+            _ts0 = _t.perf_counter_ns()
             pool.shutdown(wait=True)
+            _shutdown_ns = _t.perf_counter_ns() - _ts0
+            # Per-scan IO-pipeline diagnostics (GCS/HTTP request count, retries,
+            # latency histogram, worker_blocked_ns) — the scan network visibility.
+            # Native scan plans are read here BEFORE close_scan_plans tears their
+            # pipelines down, and merged with the trampoline diagnostics collected
+            # above (before close_source) into one io_scan_diagnostics list.
+            if telemetry is not None:
+                _scan_plans = getattr(nplan, "scan_plans", None)
+                if _scan_plans:
+                    for _sp in _scan_plans:
+                        _diag = _sp.diagnostics()
+                        if _diag:
+                            _io_diags.append(_diag)
+                if _io_diags:
+                    telemetry._reading["io_scan_diagnostics"] = _io_diags
+                    telemetry._reading["io_http_request_count"] = sum(
+                        d.get("http_request_count", 0) for d in _io_diags
+                    )
+                    telemetry._reading["io_http_retries"] = sum(
+                        d.get("http_retries", 0) for d in _io_diags
+                    )
+                    # ns → auto-converted to seconds in as_dict (time_ prefix).
+                    telemetry._reading["time_engine_io_worker_blocked"] = sum(
+                        d.get("worker_blocked_ns", 0) for d in _io_diags
+                    )
+            _tc0 = _t.perf_counter_ns()
             nplan.close_scan_plans()
+            _close_scans_ns = _t.perf_counter_ns() - _tc0
             del handle
+
+            if telemetry is not None:
+                _gen_total_ns = _t.perf_counter_ns() - _gen_start
+                # Portion of the generator's wall span NOT in the queue-wait,
+                # consumer, or teardown buckets — i.e. residual driver overhead
+                # between accounted spans (loop bookkeeping, native_plan_execute
+                # handle, etc.). Clamped at 0 to absorb clock jitter.
+                _accounted = (
+                    _queue_wait_ns + _consumer_ns + _done_wait_ns
+                    + _harvest_ns + _shutdown_ns + _close_scans_ns
+                )
+                _residual_ns = _gen_total_ns - _accounted
+                if _residual_ns < 0:
+                    _residual_ns = 0
+                r = telemetry._reading
+                # Pre-driver, per-query fixed costs (measured in execute_native's
+                # body, outside the generator span above).
+                r["time_engine_compile"] = _compile_ns
+                r["time_engine_pool_create"] = _pool_create_ns
+                r["time_engine_generator_total"] = _gen_total_ns
+                r["time_engine_submit"] = _submit_ns
+                r["time_engine_first_morsel"] = _first_morsel_ns
+                r["time_engine_queue_wait"] = _queue_wait_ns
+                r["time_engine_consumer_downstream"] = _consumer_ns
+                r["time_engine_teardown_done_wait"] = _done_wait_ns
+                r["time_engine_teardown_harvest"] = _harvest_ns
+                r["time_engine_teardown_shutdown"] = _shutdown_ns
+                r["time_engine_teardown_close_scans"] = _close_scans_ns
+                r["time_engine_residual"] = _residual_ns
+
             if errors:
                 raise errors[0]
 

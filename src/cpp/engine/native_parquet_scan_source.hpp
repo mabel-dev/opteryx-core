@@ -27,16 +27,35 @@
 //   - Single-pass only: no pass-2 late-materialization masks.
 //   - No schema evolution: every projected column must be present in every
 //     scanned row group (a NativeScanPlan built from a uniform file set).
-//   - Fixed-width direct columns only: DK_INT64/FLOAT32/FLOAT64 (dense or
-//     dict-shaped) plus DK_DECIMAL128 (dense only — rugo's decode layer has no
-//     "dict-encoded DECIMAL128" direct kind; a dictionary-encoded DECIMAL128
-//     column classifies as DK_POOL and is NOT handled here). DK_BOOL, DK_VARCHAR*,
-//     and the DK_POOL (string/list) path are NOT handled here; hitting one sets
-//     ErrCtx and stops the scan rather than guessing.
+//   - Fixed-width direct columns: DK_INT64/FLOAT32/FLOAT64/DK_BOOL (dense or
+//     dict-shaped, DK_BOOL dense) plus DK_DECIMAL128 (dense only — rugo's decode
+//     layer has no "dict-encoded DECIMAL128" direct kind; a dictionary-encoded
+//     DECIMAL128 column classifies as DK_POOL and is NOT handled here). The
+//     DK_POOL (list) path is NOT handled here; hitting one sets ErrCtx and stops
+//     the scan rather than guessing.
+//   - WP-11: a projected DATE / TIMESTAMP / int64-backed DECIMAL column decodes
+//     physically as int64 (DK_INT64/DICT) or DK_POOL; the plan flags it via
+//     `logical_coerce` (parallel to column_names) and build_column retags it to
+//     DRAKEN_DATE32 / TIMESTAMP64 / DECIMAL with the exact unit or precision/scale
+//     descriptor, byte-identically to the trampoline scan's `_coerce_vectors`.
+//     DECIMAL128 (DK_DECIMAL128) is self-describing via ColumnOut.dec_* and needs
+//     no `logical_coerce` entry. BOOL is DK_BOOL dense. Parquet TIME is decoded as
+//     plain INT64 (the binder does not model a TIME logical type from a scan), so
+//     it flows through the ordinary int path with no coercion — identical to the
+//     trampoline.
 //   - Exception: DK_POOL columns explicitly flagged via `decimal_columns` (plan-
 //     time known to be int64-backed DECIMAL — see native_decimal_pool_decode.hpp
 //     for why these are ALWAYS DK_POOL regardless of parquet encoding) are read
 //     directly from the wired MemoryPool and built as DRAKEN_DECIMAL.
+//   - String columns (VARCHAR / NVARCHAR / VARBINARY) ARE handled, in every shape
+//     rugo can emit for a projected byte_array column: DK_VARCHAR (plain dense),
+//     DK_VARCHAR_DICT (dict-shaped direct), and DK_POOL (RLE-skip-dense / plain
+//     pool fallback, both TAG_STR_DICT and TAG_STR_PLAIN — see
+//     native_varchar_pool_decode.hpp). Each is tagged with its declared
+//     DrakenType via `string_types` (parallel to column_names), so the general
+//     scan path admits string projections (WP-01). A DK_POOL column reaches the
+//     VARCHAR decoder when flagged by `string_types` (general scan) or the legacy
+//     `varchar_columns` array (agg/join callers).
 //   - Exception: DK_POOL columns explicitly flagged via `varchar_columns` (plan-
 //     time known to be a GROUP BY VARCHAR key — see native_varchar_pool_decode.hpp
 //     for why TPC-H's l_returnflag/l_linestatus land DK_POOL despite being
@@ -74,8 +93,30 @@
 #include "memory_pool.hpp"        // opteryx::MemoryPool
 #include "native_decimal_pool_decode.hpp"  // build_pool_decimal_column
 #include "native_varchar_pool_decode.hpp"  // build_pool_varchar_dict_column
+#include "logical_type.h"                  // LogicalType / logical_type_intern (WP-11 descriptors)
+#include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
 
 namespace opteryx::engine {
+
+// WP-11 per-column logical-coercion packing (parallel to column_names; 0 = none).
+// Mirrors the trampoline scan's `_sp_coerce_ops` exactly, packed into one int so it
+// threads through the existing `vector<int>`-style plan→native channel:
+//   bits [0:4]  kind   0=none 1=decimal(int64-backed) 3=date32 4=timestamp64
+//                       (decimal128 is self-describing via DK_DECIMAL128 +
+//                       ColumnOut.dec_* and needs NO entry; parquet TIME is
+//                       decoded as plain INT64 — the binder does not model a TIME
+//                       logical type — so it takes the ordinary int path, not a
+//                       coercion kind)
+//   bits [4:8]  unit   0=s 1=ms 2=us 3=ns  (timestamp only)
+//   bits [8:16] precision  (int64-backed decimal only)
+//   bits [16:24] scale      (int64-backed decimal only)
+enum : int {
+    LC_NONE = 0, LC_DECIMAL64 = 1, LC_DATE = 3, LC_TIMESTAMP = 4,
+};
+static inline int lc_kind(int packed)      { return packed & 0xF; }
+static inline int lc_unit(int packed)      { return (packed >> 4) & 0xF; }
+static inline int lc_precision(int packed) { return (packed >> 8) & 0xFF; }
+static inline int lc_scale(int packed)     { return (packed >> 16) & 0xFF; }
 
 struct NativeParquetScanGlobal : GlobalSourceState {
     std::mutex mtx;
@@ -106,6 +147,20 @@ struct NativeParquetScanSource : Source {
     // skip-dense" path and so classify DK_POOL rather than DK_VARCHAR_DICT —
     // verified directly against real files, this is not a hypothetical case.
     const std::vector<uint8_t>* varchar_columns;
+    // Per-projected-column declared string DrakenType (parallel to column_names):
+    // DRAKEN_VARCHAR / NVARCHAR / VARBINARY for string columns, 0 for non-string.
+    // Threaded from the plan-time schema so every string column — direct
+    // (DK_VARCHAR / DK_VARCHAR_DICT) or pool (DK_POOL) — is tagged with its exact
+    // declared type, byte-identically to column_deserializer.pyx's want_string_type.
+    // Also the general-scan signal that a DK_POOL column is a VARCHAR (the agg/join
+    // callers instead pass varchar_columns and leave this null → DRAKEN_VARCHAR).
+    const std::vector<int>* string_types;
+    // WP-11: per-column packed logical-coercion plan (see the LC_* packing above),
+    // parallel to column_names. null/empty → no temporal/decimal coercion (the
+    // original numeric+string behaviour). Threaded from the plan-time schema so a
+    // projected DATE/TIMESTAMP/TIME/int64-DECIMAL column is retagged natively,
+    // byte-identically to the trampoline scan's `_coerce_vectors`.
+    const std::vector<int>* logical_coerce;
 
     NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
                             const std::unordered_map<std::string, FileStats>* footer_map_,
@@ -114,10 +169,29 @@ struct NativeParquetScanSource : Source {
                             int in_flight_limit_,
                             MemoryPool* pool_ = nullptr,
                             const std::vector<uint8_t>* decimal_columns_ = nullptr,
-                            const std::vector<uint8_t>* varchar_columns_ = nullptr)
+                            const std::vector<uint8_t>* varchar_columns_ = nullptr,
+                            const std::vector<int>* string_types_ = nullptr,
+                            const std::vector<int>* logical_coerce_ = nullptr)
         : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
           column_names(column_names_), in_flight_limit(in_flight_limit_),
-          pool(pool_), decimal_columns(decimal_columns_), varchar_columns(varchar_columns_) {}
+          pool(pool_), decimal_columns(decimal_columns_), varchar_columns(varchar_columns_),
+          string_types(string_types_), logical_coerce(logical_coerce_) {}
+
+    // Packed coercion plan for projected column i (0 = none).
+    int coerce_for(size_t i) const {
+        if (logical_coerce != nullptr && i < logical_coerce->size())
+            return (*logical_coerce)[i];
+        return 0;
+    }
+
+    // Declared string DrakenType for projected column i, defaulting to DRAKEN_VARCHAR
+    // when no per-column type was threaded (agg/join callers) — matches the historic
+    // hardcoded tag those paths relied on.
+    DrakenType string_type_for(size_t i) const {
+        if (string_types != nullptr && i < string_types->size() && (*string_types)[i] != 0)
+            return static_cast<DrakenType>((*string_types)[i]);
+        return DRAKEN_VARCHAR;
+    }
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         return std::make_unique<NativeParquetScanGlobal>();
@@ -168,7 +242,7 @@ struct NativeParquetScanSource : Source {
         switch (dk) {
             case rugo::DK_INT64: case rugo::DK_FLOAT32: case rugo::DK_FLOAT64:
             case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
-            case rugo::DK_DECIMAL128:
+            case rugo::DK_DECIMAL128: case rugo::DK_BOOL:
                 return true;
             default:
                 return false;
@@ -180,8 +254,71 @@ struct NativeParquetScanSource : Source {
             case rugo::DK_INT64:      case rugo::DK_INT64_DICT:   return DRAKEN_INT64;
             case rugo::DK_FLOAT32:    case rugo::DK_FLOAT32_DICT: return DRAKEN_FLOAT32;
             case rugo::DK_DECIMAL128:                             return DRAKEN_DECIMAL128;
+            case rugo::DK_BOOL:                                   return DRAKEN_BOOL;
             default:                                              return DRAKEN_FLOAT64;
         }
+    }
+
+    // WP-11: build a projected DATE / TIMESTAMP column from an int64 (widened
+    // int32 for DATE) direct/dict column. Mirrors the trampoline scan's
+    // reinterpret_as_date32 / retag_int64_as_timestamp64 exactly:
+    //   - DATE32 narrows the int64 payload to int32 (per data_length, so
+    //     dict-shaped columns narrow the dictionary values and keep their codes)
+    //     and carries no logical type,
+    //   - TIMESTAMP64 keeps the int64 payload, only changes the tag, and attaches
+    //     an interned LogicalType carrying the unit (mandatory: a
+    //     DRAKEN_TIMESTAMP64 with a nullptr descriptor is a hard error in draken).
+    bool build_temporal_column(rugo::MorselRef& result, size_t i, int dk, int packed,
+                               CxxColumn& out) {
+        const int kind = lc_kind(packed);
+        const bool is_dict = (dk == rugo::DK_INT64_DICT);
+        const uint32_t length = result.columns[i].length;
+        const uint32_t data_length = is_dict ? result.columns[i].data_length : length;
+        uint8_t* validity = nullptr;
+        void* data = rugo::morsel_take_direct(result, i, &validity);
+        void* codes = nullptr;
+        if (is_dict) {
+            void* arena = nullptr;
+            rugo::morsel_take_string(result, i, &arena, &codes);  // codes only (numeric dict)
+        }
+
+        const bool is_date = (kind == LC_DATE);
+        const DrakenType dtype = is_date ? DRAKEN_DATE32 : DRAKEN_TIMESTAMP64;
+
+        void* payload = data;
+        OwnedBuffer<void> data_buf;
+        if (is_date) {
+            // int64 → int32 over the physical values (data_length), preserving any
+            // dict codes: byte-identical to draken's vector_reinterpret_as_date32.
+            int32_t* nd = static_cast<int32_t*>(
+                draken_malloc((data_length > 0u ? data_length : 1u) * sizeof(int32_t)));
+            const int64_t* sd = static_cast<const int64_t*>(data);
+            for (uint32_t k = 0; k < data_length; ++k)
+                nd[k] = static_cast<int32_t>(sd[k]);
+            draken_free(data);
+            payload = nd;
+            data_buf = OwnedBuffer<void>(nd);
+        } else {
+            data_buf = OwnedBuffer<void>(data);
+        }
+        OwnedBuffer<uint8_t> val_buf(validity);
+        OwnedBuffer<void> codes_buf(codes);
+
+        DrakenVector v = is_dict
+            ? draken_vector_from_dict(payload, data_length,
+                                      static_cast<const uint32_t*>(codes), length, dtype, validity)
+            : draken_vector_from_dense(payload, length, dtype, validity);
+        out.own = std::make_shared<VectorOwner>(v, std::move(data_buf), std::move(val_buf),
+                                                 std::move(codes_buf));
+        if (kind == LC_TIMESTAMP) {
+            LogicalType lt;
+            lt.kind = LogicalKind::TIMESTAMP;
+            lt.unit = static_cast<TimestampUnit>(lc_unit(packed));
+            lt.offset_minutes = 0;
+            out.own->logical_type = logical_type_intern(lt);
+        }
+        out.view = out.own->vec;
+        return true;
     }
 
     // Build a CxxColumn straight from ColumnOut's owned buffers — no Vector, no
@@ -200,34 +337,81 @@ struct NativeParquetScanSource : Source {
         if (dk == rugo::DK_POOL) {
             bool is_decimal = pool != nullptr && decimal_columns != nullptr &&
                                i < decimal_columns->size() && (*decimal_columns)[i] != 0;
-            if (is_decimal) return build_pool_decimal_column(pool, result.columns[i].ref_id, out, err);
-            bool is_varchar = pool != nullptr && varchar_columns != nullptr &&
-                              i < varchar_columns->size() && (*varchar_columns)[i] != 0;
-            if (is_varchar) return build_pool_varchar_dict_column(pool, result.columns[i].ref_id, out, err);
+            if (is_decimal) {
+                if (!build_pool_decimal_column(pool, result.columns[i].ref_id, out, err))
+                    return false;
+                // WP-11: int64-backed DECIMAL carries no scale on the wire; attach the
+                // plan-time-known precision/scale so a projected decimal reaches output
+                // byte-identically to the trampoline's `_int64_to_decimal(v, p, s)`.
+                const int packed = coerce_for(i);
+                if (lc_kind(packed) == LC_DECIMAL64) {
+                    LogicalType lt;
+                    lt.kind = LogicalKind::DECIMAL;
+                    lt.precision = static_cast<uint8_t>(lc_precision(packed));
+                    lt.scale = static_cast<uint8_t>(lc_scale(packed));
+                    out.own->logical_type = logical_type_intern(lt);
+                }
+                return true;
+            }
+            // A DK_POOL string column (RLE skip-dense, or the plain/non-positional
+            // pool fallback — see io_pipeline.hpp direct_kind_for) is flagged either
+            // by the general-scan per-column string type or the agg/join
+            // varchar_columns array; build_pool_varchar_column handles BOTH pool
+            // string tags (6 dict / 7 plain).
+            bool is_varchar = pool != nullptr &&
+                ((varchar_columns != nullptr && i < varchar_columns->size() &&
+                  (*varchar_columns)[i] != 0) ||
+                 (string_types != nullptr && i < string_types->size() &&
+                  (*string_types)[i] != 0));
+            if (is_varchar)
+                return build_pool_varchar_column(pool, result.columns[i].ref_id,
+                                                 string_type_for(i), out, err);
             return false;
         }
         if (dk == rugo::DK_VARCHAR_DICT) {
+            // Dict-shaped byte_array (build_direct_string_dict in io_pipeline.hpp):
+            // data_length unique slots + a per-row uint32 codes selection, long
+            // values in `arena`. emit_dict_string_column copies slots+arena into the
+            // canonical [DrakenStringArena|slots|arena] consolidated block — a raw
+            // slot pointer is NOT a valid string vector `data` (str kernels read it
+            // as DrakenStringArena*). Arena offsets are relative, so the verbatim
+            // copy needs no rebasing.
             uint32_t length = result.columns[i].length;
             uint32_t data_length = result.columns[i].data_length;
+            size_t arena_len = result.columns[i].arena_len;
             uint8_t* validity = nullptr;
             void* slots = rugo::morsel_take_direct(result, i, &validity);
             void* arena = nullptr;
             void* codes = nullptr;
             rugo::morsel_take_string(result, i, &arena, &codes);
-            // Arena (may be empty — every value inline) transfers into
-            // VectorOwner.arena_buf; slots reference it via a byte OFFSET
-            // (str_data(slot, arena_base)), never an absolute pointer, so this
-            // transfer needs no offset rebasing at all.
-            DrakenVector v = draken_vector_from_dict(slots, data_length,
-                                                     static_cast<const uint32_t*>(codes),
-                                                     length, DRAKEN_VARCHAR, validity);
-            out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(slots),
-                                                     OwnedBuffer<uint8_t>(validity),
-                                                     OwnedBuffer<void>(codes),
-                                                     OwnedBuffer<uint8_t>(static_cast<uint8_t*>(arena)));
-            out.view = out.own->vec;
+            emit_dict_string_column(static_cast<DrakenStringSlot*>(slots), data_length,
+                                    static_cast<uint8_t*>(arena), arena_len,
+                                    static_cast<uint32_t*>(codes), length,
+                                    validity, string_type_for(i), out);
             return true;
         }
+        if (dk == rugo::DK_VARCHAR) {
+            // Plain (non-dict) byte_array → dense positional DrakenStringSlot array
+            // (build_direct_string_plain in io_pipeline.hpp), one slot per row; long
+            // values live in `arena`, inline values in the slot. No per-row codes.
+            uint32_t length = result.columns[i].length;
+            size_t arena_len = result.columns[i].arena_len;
+            uint8_t* validity = nullptr;
+            void* slots = rugo::morsel_take_direct(result, i, &validity);
+            void* arena = nullptr;
+            void* codes = nullptr;
+            rugo::morsel_take_string(result, i, &arena, &codes);  // codes null for plain
+            emit_dense_string_column(static_cast<DrakenStringSlot*>(slots), length,
+                                     static_cast<uint8_t*>(arena), arena_len,
+                                     validity, string_type_for(i), out);
+            return true;
+        }
+        // WP-11: a projected int64 (or widened-int32) column the plan flags as
+        // DATE / TIMESTAMP / TIME is retagged natively (narrow + unit descriptor)
+        // rather than emitted as plain INT64.
+        const int packed = coerce_for(i);
+        if ((dk == rugo::DK_INT64 || dk == rugo::DK_INT64_DICT) && lc_kind(packed) != LC_NONE)
+            return build_temporal_column(result, i, dk, packed, out);
         if (!direct_kind_supported(dk)) return false;
         DrakenType dtype = draken_type_for(dk);
         uint32_t length = result.columns[i].length;
@@ -250,6 +434,17 @@ struct NativeParquetScanSource : Source {
         }
         out.own = std::make_shared<VectorOwner>(v, std::move(data_buf), std::move(val_buf),
                                                  std::move(codes_buf));
+        if (dk == rugo::DK_DECIMAL128) {
+            // WP-11: DECIMAL128 carries its precision/scale on the footer (rugo's
+            // parse_decimal_ps fills ColumnOut.dec_*); attach it so a projected
+            // decimal128 reaches output byte-identically to the trampoline's
+            // `_wrap_direct` → set_decimal_descriptor(dec_precision, dec_scale).
+            LogicalType lt;
+            lt.kind = LogicalKind::DECIMAL;
+            lt.precision = result.columns[i].dec_precision;
+            lt.scale = result.columns[i].dec_scale;
+            out.own->logical_type = logical_type_intern(lt);
+        }
         out.view = out.own->vec;
         return true;
     }

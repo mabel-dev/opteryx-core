@@ -241,7 +241,11 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
                                     const cppvector[string]* column_names,
-                                    int in_flight_limit)
+                                    int in_flight_limit,
+                                    CppMemoryPool* pool,
+                                    const cppvector[int]* string_types,
+                                    const cppvector[uint8_t]* decimal_columns,
+                                    const cppvector[int]* logical_coerce)
         void set_buffer_source(size_t p, size_t buf)
         void add_filter(size_t p, cppvector[SimplePredicate] preds)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
@@ -479,6 +483,116 @@ cdef extern from "time.h" nogil:
         long tv_nsec
     int CLOCK_MONOTONIC
     int clock_gettime(int clk_id, timespec *tp)
+
+
+cdef extern from "pythread.h":
+    unsigned long PyThread_get_thread_ident()
+
+
+# -----------------------------------------------------------------------------
+# WP-INSTR: execution-time GIL instrumentation (off by default, ~0 cost when off)
+#
+# Instruments 1 & 4 of the measurement harness. Times the wall-clock nanoseconds
+# spent inside the KNOWN execution-time ``with gil`` bodies — the scan-pull
+# trampoline (``_scan_pull_run``, entered once per morsel per worker for a
+# StreamingScanSource) and the carrier-flip error stash (``_stash_exc``) — and
+# records which OS thread entered which named site. Two derived readings:
+#   1. gil_held_ns  — summed over all sites; a native-gated numeric scan touches
+#      no execution Python and reports ~0, a trampoline scan reports clearly > 0.
+#   4. worker_gil_sites — the enumerated (thread, site) breakdown a purity guard
+#      checks: only whitelisted sites may appear; an empty list == zero
+#      execution-time Python ran on any worker.
+#
+# The NativeParquetScanSource path has NO Python callback, so it never records a
+# site — that absence IS the measurement.
+#
+# Armed for the span of one native run by ``execute_native`` when the
+# OPTERYX_INSTRUMENT_ENGINE config flag is set. The instrumented sites read a
+# single C flag and branch straight past when disarmed. The accumulators are
+# module globals mutated only from GIL-held bodies (no extra lock needed), and
+# are therefore NOT correct across concurrent queries in one process — this is a
+# diagnostic instrument, documented as such.
+# -----------------------------------------------------------------------------
+
+cdef struct _GilSite:
+    unsigned long tid
+    const char* name    # stable C string literal per call-site (compared by pointer)
+    long long calls
+    long long ns
+
+cdef int _gil_instr_enabled = 0
+cdef long long _gil_instr_total_ns = 0
+cdef _GilSite _gil_instr_sites[64]
+cdef int _gil_instr_site_count = 0
+
+# Stable C string literals (static storage) — safe to stash the pointer and to
+# compare by pointer identity; each call-site passes the same constant.
+cdef const char* _SITE_SCAN_PULL = "_scan_pull_run"
+cdef const char* _SITE_STASH_EXC = "_stash_exc"
+
+
+cdef inline long long _instr_mono_ns() noexcept:
+    cdef timespec ts
+    clock_gettime(CLOCK_MONOTONIC, &ts)
+    return (<long long>ts.tv_sec) * <long long>1000000000 + <long long>ts.tv_nsec
+
+
+cdef inline void _instr_record(const char* name, long long ns) noexcept:
+    """Attribute ``ns`` and one call to (current-thread, ``name``). Called only from
+    GIL-held bodies, so the shared accumulators need no extra lock."""
+    global _gil_instr_total_ns, _gil_instr_site_count
+    cdef unsigned long tid = PyThread_get_thread_ident()
+    cdef int i
+    _gil_instr_total_ns += ns
+    for i in range(_gil_instr_site_count):
+        if _gil_instr_sites[i].tid == tid and _gil_instr_sites[i].name == name:
+            _gil_instr_sites[i].calls += 1
+            _gil_instr_sites[i].ns += ns
+            return
+    if _gil_instr_site_count < 64:
+        _gil_instr_sites[_gil_instr_site_count].tid = tid
+        _gil_instr_sites[_gil_instr_site_count].name = name
+        _gil_instr_sites[_gil_instr_site_count].calls = 1
+        _gil_instr_sites[_gil_instr_site_count].ns = ns
+        _gil_instr_site_count += 1
+
+
+def instr_gil_set_enabled(bint on):
+    """Arm/disarm the execution-time GIL instrumentation (``execute_native`` only)."""
+    global _gil_instr_enabled
+    _gil_instr_enabled = 1 if on else 0
+
+
+def instr_gil_is_enabled():
+    return _gil_instr_enabled != 0
+
+
+def instr_gil_reset():
+    """Zero the per-query accumulators. Call before an armed run."""
+    global _gil_instr_total_ns, _gil_instr_site_count
+    _gil_instr_total_ns = 0
+    _gil_instr_site_count = 0
+
+
+def instr_gil_total_ns():
+    """Total nanoseconds spent inside instrumented execution-time GIL bodies."""
+    return _gil_instr_total_ns
+
+
+def instr_gil_worker_report():
+    """Per (thread, site) breakdown: list of ``{thread_id, site, calls, ns}``. The
+    distinct ``site`` values are the enumerated GIL-entry set a purity guard checks;
+    an empty list means no execution-time Python ran on any worker thread."""
+    cdef int i
+    out = []
+    for i in range(_gil_instr_site_count):
+        out.append({
+            "thread_id": <unsigned long>_gil_instr_sites[i].tid,
+            "site": (<bytes>_gil_instr_sites[i].name).decode("ascii"),
+            "calls": <long long>_gil_instr_sites[i].calls,
+            "ns": <long long>_gil_instr_sites[i].ns,
+        })
+    return out
 
 
 cdef packed struct TraceEvent:
@@ -795,7 +909,15 @@ cdef class BasePlanNode:
         """Record a body's Python exception so the driver can re-raise it at the
         gil boundary, and flag the status code. Prefer the shared context (every
         node on a pipeline shares it); fall back to the node when there is no
-        context (e.g. a direct-push unit test). First exception wins."""
+        context (e.g. a direct-push unit test). First exception wins.
+
+        WP-INSTR: this is an execution-time GIL body; when the engine
+        instrumentation is armed, bracket it so error-path Python re-entry is
+        counted in ``worker_gil_sites`` too (normally ~0 calls — it only runs on a
+        body's exception)."""
+        cdef long long _t0
+        if _gil_instr_enabled:
+            _t0 = _instr_mono_ns()
         if self._ctx is not None:
             if self._ctx._exc is None:
                 self._ctx._exc = exc
@@ -803,6 +925,8 @@ cdef class BasePlanNode:
             self._cxx_push_exc = exc
         if err != NULL:
             err.code = 1
+        if _gil_instr_enabled:
+            _instr_record(_SITE_STASH_EXC, _instr_mono_ns() - _t0)
 
     cdef inline object _peek_exc(self):
         """Return the stashed exception (context first, then node) WITHOUT
@@ -1891,6 +2015,22 @@ def native_engine_demo_join(BasePlanNode build_scan, size_t build_key_col_idx,
 
 cdef void _scan_pull_run(void* scan_ptr, shared_ptr[CxxMorsel]* out,
                          int* finished, int* err_code) noexcept with gil:
+    """WP-INSTR timing shim over the trampoline body. When the engine
+    instrumentation is disarmed this is a single branch straight into
+    ``_scan_pull_run_inner`` (the real GIL-held pull); when armed it brackets the
+    body with a monotonic clock so ``gil_held_ns`` / ``worker_gil_sites`` capture
+    every per-morsel, per-worker Python re-entry of the StreamingScanSource."""
+    cdef long long _t0
+    if not _gil_instr_enabled:
+        _scan_pull_run_inner(scan_ptr, out, finished, err_code)
+        return
+    _t0 = _instr_mono_ns()
+    _scan_pull_run_inner(scan_ptr, out, finished, err_code)
+    _instr_record(_SITE_SCAN_PULL, _instr_mono_ns() - _t0)
+
+
+cdef void _scan_pull_run_inner(void* scan_ptr, shared_ptr[CxxMorsel]* out,
+                               int* finished, int* err_code) noexcept:
     """GIL-held body of the streaming Source trampoline — holds the Python locals a
     nogil function cannot. Calls the existing native scan's ``next_morsel()`` ON
     DEMAND. Skips EOS-state morsels internally (mirrors the demo bridges' pull loops)
@@ -2501,9 +2641,23 @@ cdef class NativePlan:
         The Source borrows every pointer from ``splan``; this plan holds it alive
         and ``close_scan_plans`` tears it down only after the driver is done."""
         self.scan_plans.append(splan)
+        # The pool is wired regardless (its DK_POOL string path is data-driven);
+        # `string_types` tags every projected string column with its declared
+        # DrakenType and flags which DK_POOL columns are VARCHAR. An empty plan
+        # (no row groups) never allocates a pool — pass NULL; the Source finishes
+        # immediately without ever routing a column to the pool path.
+        cdef CppMemoryPool* pool_ptr = NULL
+        if splan._pool is not None:
+            pool_ptr = splan._pool._pool
+        # WP-11: `decimal_columns` routes int64-backed DECIMAL DK_POOL columns to
+        # the decimal decoder; `logical_coerce` carries the DATE/TIMESTAMP/TIME/
+        # DECIMAL retag kind + unit / precision-scale so those projections land
+        # byte-identically to the trampoline scan.
         self._e.set_native_scan_source(p, splan.pipeline_ptr, splan.footer_map,
                                        &splan.work_items, &splan.column_names,
-                                       splan.in_flight_limit)
+                                       splan.in_flight_limit,
+                                       pool_ptr, &splan.string_types,
+                                       &splan.decimal_columns, &splan.logical_coerce)
 
     def close_scan_plans(self):
         """Cancel + shut down every NativeScanPlan's IO pipeline. MUST only run

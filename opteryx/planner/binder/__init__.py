@@ -212,7 +212,16 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
                 sub_plan = None
             else:
                 # Catalog resolution step: one round trip resolves view-or-table.
+                # This is the Firestore catalog lookup — a per-relation cloud round
+                # trip, distinct from the GCS manifest/footer fetch timed in
+                # dataset.py (time_binding_metadata). Timed so the two cloud costs
+                # in the binder are visible separately (time_ prefix → seconds).
+                import time as _cat_time
+
+                _cat0 = _cat_time.monotonic_ns()
                 kind, resolved = resolve_relation(relation, telemetry)
+                if telemetry is not None:
+                    telemetry.time_binding_catalog += _cat_time.monotonic_ns() - _cat0
                 if kind == "view":
                     sub_plan = resolved
                 else:

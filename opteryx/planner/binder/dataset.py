@@ -132,6 +132,8 @@ def visit_function_dataset(
 
 
 def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    import time as _bind_time
+
     from opteryx.connectors import connector_factory
     from opteryx.exceptions import DatabaseError
     from opteryx.managers.permissions import can_perform_action
@@ -140,6 +142,13 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
     if node.alias in context.relations:
         raise AmbiguousDatasetError(dataset=node.alias)
+
+    # External-IO instrumentation for the binder (a big, mostly-invisible chunk of
+    # time_planning_binder for catalog datasets): connector/catalog resolution and
+    # the dataset metadata fetch (schema + footer stats over GCS/Firestore) are the
+    # per-query network cost paid before any data reads. Accumulated across scans;
+    # time_ prefix → as_dict reports seconds.
+    _bind_connector0 = _bind_time.monotonic_ns()
 
     # Get connector gateway (cached by prefix)
     gateway = connector_factory(node.relation, telemetry=context.telemetry)
@@ -163,6 +172,10 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     node.connector = gateway.table_engine(
         dataset_name, telemetry=context.telemetry, **engine_kwargs
     )
+    if context.telemetry is not None:
+        context.telemetry.time_binding_connector += (
+            _bind_time.monotonic_ns() - _bind_connector0
+        )
 
     # ensure this user can read the table
     if not can_perform_action(context.execution_context, node.relation, action="READ"):
@@ -173,6 +186,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if gateway.supports_diachronic:
         node.connector.start_date = node.start_date
         node.connector.end_date = node.end_date
+    _bind_meta0 = _bind_time.monotonic_ns()
     try:
         # Get dataset schema and build manifest (if supported by connector)
         # For Opteryx catalog connectors, this creates a Manifest with file-level stats
@@ -199,5 +213,10 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         from opteryx.exceptions import DatasetReadError
 
         raise DatasetReadError(f"Cannot read information for dataset '{node.relation}': {e}") from e
+    finally:
+        if context.telemetry is not None:
+            context.telemetry.time_binding_metadata += (
+                _bind_time.monotonic_ns() - _bind_meta0
+            )
 
     return node, context

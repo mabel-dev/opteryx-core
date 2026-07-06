@@ -108,6 +108,23 @@ When tracing is enabled, each event carrying a ``file_id`` will be skipped
 with probability ``1 - OPTERYX_TRACE_SAMPLE_RATE``.  This provides a simple
 way to reduce overhead on large scans by only recording a fraction of files.
 """
+OPTERYX_INSTRUMENT_ENGINE: bool = str(
+    get("OPTERYX_INSTRUMENT_ENGINE", "0")
+).lower() in (
+    "1",
+    "true",
+    "yes",
+)
+"""WP-INSTR diagnostic: arm the native execution-engine instrumentation for the
+duration of each native run. When enabled, ``execute_native`` measures the
+wall-clock nanoseconds spent inside the known execution-time ``with gil`` bodies
+(the scan-pull trampoline and the carrier-flip error stash) and records which
+worker thread entered which GIL site, surfacing them on the query telemetry as
+``gil_held_ns`` and ``worker_gil_sites``. Off by default — the instrumented sites
+read a single C flag and pay ~0 when disabled. NOT concurrency-safe across
+simultaneous queries in one process (module-global accumulators); it is a
+diagnostic, not a production counter."""
+
 OPTERYX_DISABLE_GC_DURING_QUERY: bool = str(
     get("OPTERYX_DISABLE_GC_DURING_QUERY", "0")
 ).lower() in (

@@ -78,6 +78,9 @@ class _QueryTelemetry:
             # per-operator native readings — surfaced via the ``operations`` breakdown
             # (mermaid.get_node_stats), never as a top-level telemetry key.
             "native_op_stats",
+            # per-native-scan plan-time facts — overlaid onto the scan's operation
+            # row by mermaid.get_node_stats, never a top-level key.
+            "native_scan_facts",
         ]
         for key in connector_only_keys:
             readings_dict.pop(key, None)

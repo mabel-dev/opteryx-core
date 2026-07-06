@@ -311,13 +311,28 @@ public:
     // Increment-1 scope: fixed-width numeric columns only — the plan-time gate
     // (native_scan_supported) must have proven every projected column eligible;
     // an unsupported kind reaching build_column is a gate bug and fails loud.
+    // `pool` + `string_types` (parallel to column_names: declared string DrakenType,
+    // 0 for non-string) widen this to string projections (WP-01): a DK_POOL string
+    // column decodes from `pool`, and every string column is tagged with its exact
+    // declared type. Both default null → the original numeric-only behaviour.
+    // `decimal_columns` + `logical_coerce` (both parallel to column_names) widen
+    // this to WP-11's decimal/temporal projections: `decimal_columns[i]` routes an
+    // int64-backed DECIMAL DK_POOL column to the decimal decoder, and
+    // `logical_coerce[i]` carries the retag kind + unit / precision-scale so
+    // DATE/TIMESTAMP/TIME/DECIMAL columns land byte-identically to the trampoline.
+    // Both default null → the original numeric+string behaviour.
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,
                                 const std::unordered_map<std::string, FileStats>* footer_map,
                                 const std::vector<std::pair<std::string, int>>* work_items,
                                 const std::vector<std::string>* column_names,
-                                int in_flight_limit) {
+                                int in_flight_limit,
+                                MemoryPool* pool = nullptr,
+                                const std::vector<int>* string_types = nullptr,
+                                const std::vector<uint8_t>* decimal_columns = nullptr,
+                                const std::vector<int>* logical_coerce = nullptr) {
         set_source_(p, std::make_unique<NativeParquetScanSource>(
-            pipeline, footer_map, work_items, column_names, in_flight_limit));
+            pipeline, footer_map, work_items, column_names, in_flight_limit,
+            pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce));
     }
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));
