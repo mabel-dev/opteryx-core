@@ -44,6 +44,8 @@
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
+#include "core/buffers.h"       // DrakenVector / DrakenStringArena — worker-side pass-1 predicate view
+#include "core/vector_alloc.h"  // draken_identity_sel — dense selection for the view
 
 namespace rugo {
 
@@ -141,6 +143,11 @@ struct MorselRef {
     // column's dictionary lacked every needle). The consumer skips it entirely.
     bool empty_filtered = false;
     int64_t empty_rows = 0;   // pre-filter row count, for telemetry
+    // Q24 latmat: bit-packed per-row survivor mask computed on the worker by a
+    // pushed pass-1 predicate (opteryx callback). Empty = no predicate pushed / not
+    // applicable → the consumer evaluates on the main thread (fallback). std::vector,
+    // freed automatically — NOT a draken buffer, so NOT touched by free_fn below.
+    std::vector<uint8_t> survivor_mask;
 
     MorselRef() = default;
     MorselRef(const MorselRef&) = delete;
@@ -158,6 +165,80 @@ struct MorselRef {
         }
     }
 };
+
+// Q24 latmat pass-1 predicate pushed from opteryx. `fn` is an opaque C-ABI callback
+// (opteryx_pass1_predicate_eval): int fn(void* ctx, DrakenVector** cols, int ncols,
+// uint32_t num_rows, uint8_t* out_mask). rugo stays opteryx-free — only draken's
+// DrakenVector and this fn-ptr cross the boundary. `cols` are the predicate's columns
+// by name, in the order the worker passes them (== ctx's resolved col_idx order).
+typedef int (*Pass1PredFn)(void*, DrakenVector**, int, uint32_t, uint8_t*);
+struct Pass1Pred {
+    Pass1PredFn fn = nullptr;
+    void*       ctx = nullptr;
+    std::vector<std::string> cols;   // predicate column names, in pass-order
+};
+
+// Build a NON-owning DrakenVector view over a decoded ColumnOut so the pushed
+// predicate can read it without a copy. Returns false for column shapes not yet
+// supported worker-side (caller then leaves survivor_mask empty → serial fallback).
+// `sa` backs a string column's arena header and must outlive `v`'s use.
+static inline bool pass1_build_dv_view(ColumnOut& co, uint32_t nrows,
+                                       DrakenStringArena& sa, DrakenVector& v) {
+    if (co.direct_kind == DK_VARCHAR) {
+        // Plain per-row string slots + separate byte arena (§ wp01 format). Wrap
+        // non-owning; str_contains only dereferences sa.slots[sel[i]] + sa.arena.
+        sa.slots       = static_cast<DrakenStringSlot*>(co.data);
+        sa.arena       = static_cast<uint8_t*>(co.arena);
+        sa.length      = nrows;
+        sa.arena_used  = co.arena_len;
+        sa.arena_cap   = co.arena_len;
+        sa.null_bitmap = co.validity;
+        sa.owns_buffers = 0;
+        sa.type        = DRAKEN_VARCHAR;
+        v.data        = &sa;
+        v.selection   = draken_identity_sel(nrows);   // dense
+        v.data_length = nrows;
+        v.length      = nrows;
+        v.validity    = co.validity;
+        v.type        = DRAKEN_VARCHAR;
+        v.flags       = 0;
+        return true;
+    }
+    return false;   // unsupported kind → serial fallback
+}
+
+// Run the pushed pass-1 predicate over a fully-decoded row group, filling
+// result.survivor_mask (bit-packed, nbytes). Leaves it empty (→ serial fallback) if
+// any predicate column is absent or an unsupported shape. Pure C++/no GIL — safe on
+// the decode worker thread.
+static inline void pass1_run_predicate(MorselRef& result, const Pass1Pred& pred) {
+    if (!pred.fn || !result.success || result.columns.empty()) return;
+    const uint32_t nrows = result.columns[0].length;
+    if (nrows == 0) return;
+    const int ncols = static_cast<int>(pred.cols.size());
+    if (ncols == 0 || ncols > 64) return;
+    DrakenStringArena arenas[64];
+    DrakenVector      dvs[64];
+    DrakenVector*     dvp[64];
+    for (int i = 0; i < ncols; ++i) {
+        int ci = -1;
+        for (size_t j = 0; j < result.column_names.size(); ++j)
+            if (result.column_names[j] == pred.cols[i]) { ci = static_cast<int>(j); break; }
+        if (ci < 0) return;                                   // column missing → fallback
+        if (result.columns[ci].length != nrows) return;       // width mismatch → fallback
+        if (!pass1_build_dv_view(result.columns[ci], nrows, arenas[i], dvs[i]))
+            return;                                            // unsupported shape → fallback
+        dvp[i] = &dvs[i];
+    }
+    const size_t nbytes = (static_cast<size_t>(nrows) + 7) >> 3;
+    result.survivor_mask.assign(nbytes, 0);
+    const int rc = pred.fn(pred.ctx, dvp, ncols, nrows, result.survivor_mask.data());
+    if (rc != 0) {
+        result.survivor_mask.clear();
+        result.success = false;
+        result.error = "pass-1 predicate eval failed (rc=" + std::to_string(rc) + ")";
+    }
+}
 
 // Take ownership of column i's direct buffers: returns `data` and (via out param)
 // `validity`, nulling both slots so MorselRef's destructor won't free them (the
@@ -803,6 +884,9 @@ class ParquetIOPipeline {
         std::vector<std::string> str_vals;   // kinds 1..4
     };
     std::unordered_map<std::string, ColDictPred> dict_preds_;
+    // Q24 latmat: pushed pass-1 predicate (opteryx callback). Set once before any
+    // submit; workers read it const, no sync.
+    Pass1Pred pass1_pred_;
 
     // Diagnostic counters for queue-contention investigation.
     std::atomic<uint64_t> spin_iterations_{0};
@@ -1248,6 +1332,11 @@ class ParquetIOPipeline {
 
         result.read_ns = total_read_ns;
         result.decode_ns = total_decode_ns;
+        // Q24 latmat: evaluate the pushed pass-1 predicate on this worker thread
+        // (parallel across the decode pool) and attach the survivor bitmap. No-op if
+        // no predicate pushed / unsupported shape → consumer falls back to serial.
+        if (pass1_pred_.fn != nullptr)
+            pass1_run_predicate(result, pass1_pred_);
         // Apply soft back-pressure: if the consumer is far behind, block
         // on the condition variable until it drains rather than spin-yielding.
         {
@@ -1309,6 +1398,16 @@ class ParquetIOPipeline {
         p.kind = kind; p.str_vals = vals;
     }
     void clear_eq_needles() { dict_preds_.clear(); }
+
+    // Q24 latmat: register the pushed pass-1 predicate. `fn`/`ctx` are opaque
+    // (opteryx_pass1_predicate_eval + Pass1PredCtx); `cols` are the predicate's
+    // column names in the order the ctx's col_idx expects. Set once before submit.
+    void set_pass1_predicate(void* fn, void* ctx, const std::vector<std::string>& cols) {
+        pass1_pred_.fn = reinterpret_cast<Pass1PredFn>(fn);
+        pass1_pred_.ctx = ctx;
+        pass1_pred_.cols = cols;
+    }
+    void clear_pass1_predicate() { pass1_pred_.fn = nullptr; pass1_pred_.ctx = nullptr; pass1_pred_.cols.clear(); }
 
     /**
      * Submit a row group for read + decode + serialize.

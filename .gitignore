@@ -1,3 +1,6 @@
+# M1-VALIDATE generated benchmark datasets (regenerated on demand, ~500MB)
+tests/performance/.m1data/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

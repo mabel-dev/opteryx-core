@@ -199,6 +199,7 @@ class Session(DataFrame):
         params: Optional[Iterable] = None,
         visibility_filters: Optional[Dict[str, Any]] = None,
     ):
+        self._telemetry.reset()
         self._telemetry.start_time = time.time_ns()
 
         if getattr(operation, "decode", None) is not None:

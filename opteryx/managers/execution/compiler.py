@@ -200,6 +200,14 @@ class _Compiler:
         # ScanReadings (row_groups_read/files_read/…) stay zero — these carry the
         # real values, harvested into telemetry and overlaid by mermaid.py.
         self.scan_facts: dict = {}
+        # A0 acceptance gate: per-scan residual-reason code, keyed by scan node
+        # identity, recorded when a parquet scan falls back to the per-morsel
+        # Python trampoline (StreamingScanSource). The value is the stable string
+        # for WHICH `_native_scan_plan` guard fired (one of the R1..R7 codes — see
+        # that method). Parallel to `scan_sources`: every "StreamingScanSource"
+        # entry has exactly one reason here. Plan-time only; never touched per
+        # morsel. Folded into telemetry `_reading["scan_residual_reasons"]`.
+        self.scan_residual_reasons: dict = {}
 
     # ---- expression lowering ------------------------------------------------------
     # Expressions are lowered ONCE, at plan time, to the phase-9 flat bytecode whose
@@ -929,13 +937,21 @@ class _Compiler:
         from opteryx.operators._operators import bytecode_is_all_c_native
 
         if not scan.columns:
-            return None  # zero-projection COUNT(*) shape (b'*' constant column)
+            # R1: zero-projection COUNT(*) shape (b'*' constant column)
+            self.scan_residual_reasons[scan.identity] = "zero_projection"
+            return None
         if getattr(scan, "limit", None) is not None:
-            return None  # scan-pushed LIMIT semantics live in the trampoline scan
+            # R2: scan-pushed LIMIT semantics live in the trampoline scan
+            self.scan_residual_reasons[scan.identity] = "pushed_limit"
+            return None
         if getattr(scan, "_topn_sort_name", None) is not None:
-            return None  # scan-fused TopN stays on the trampoline
+            # R3: scan-fused TopN stays on the trampoline
+            self.scan_residual_reasons[scan.identity] = "fused_topn"
+            return None
         manifest = getattr(scan, "manifest", None)
         if manifest is None or manifest.get_file_count() == 0:
+            # R7a: no manifest / zero files
+            self.scan_residual_reasons[scan.identity] = "no_manifest"
             return None
 
         predicates = getattr(scan, "predicates", None)
@@ -950,6 +966,8 @@ class _Compiler:
         if predicates:
             filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
             if not bytecode_is_all_c_native(filter_bc):
+                # R4: pushed predicate does not lower to a c-native span
+                self.scan_residual_reasons[scan.identity] = "unlowerable_predicate"
                 return None
 
         # Read-set = projected columns (in scan.columns order), then predicate-only
@@ -973,6 +991,8 @@ class _Compiler:
                     # a predicate input) are unaffected — they decode natively. A native
                     # c-native bool comparison kernel is a follow-on.
                     if _physical_type(sc) == DrakenType.BOOL:
+                        # R5: BOOL column used as a predicate input (WP-11 fail-closed)
+                        self.scan_residual_reasons[scan.identity] = "bool_predicate_input"
                         return None
                     if sc.identity not in seen:
                         seen.add(sc.identity)
@@ -1033,9 +1053,16 @@ class _Compiler:
                 decimal_columns.append(1 if is_int64_decimal else 0)
                 logical_coerce.append(packed)
             else:
-                # A read-set column (projected OR role-3 filter-only) of a
+                # R6: a read-set column (projected OR role-3 filter-only) of a
                 # not-yet-admissible kind fails the whole scan closed. Deliberate
                 # strict check: role-3 columns must also be native-admissible.
+                # Carry the offending DrakenType so R6 can be sub-censused by type
+                # (e.g. whether an ARRAY, or a missing-descriptor DECIMAL/temporal,
+                # dominates). `pt` is the column's physical type here; it is None
+                # for a column whose ColumnType has no physical tag (e.g. ARRAY),
+                # so guard the name lookup.
+                self.scan_residual_reasons[scan.identity] = (
+                    "non_admissible_kind:" + (pt.name if pt is not None else "NONE"))
                 return None
         paths = manifest.get_file_paths()
         names = [sc.name for sc in read_scs]
@@ -1047,6 +1074,9 @@ class _Compiler:
                 if isinstance(size, int) and size > 0:
                     file_sizes.setdefault(entry.file_path, size)
         if not native_scan_supported(paths, names, kinds, file_sizes or None):
+            # R7b: the footer gate (native_scan_supported) rejected the scan —
+            # schema evolution / a row group whose types are not all eligible.
+            self.scan_residual_reasons[scan.identity] = "footer_gate"
             return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
@@ -1373,7 +1403,7 @@ def compile_to_native(plan):
         pt = _physical_type(col.schema_column)
         final_types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
     nplan.set_final_schema(list(exit_node.final_names), final_types)
-    return nplan, out_q, compiler.scan_sources, compiler.scan_facts
+    return nplan, out_q, compiler.scan_sources, compiler.scan_facts, compiler.scan_residual_reasons
 
 
 def execute_native(plan, telemetry=None):
@@ -1393,7 +1423,7 @@ def execute_native(plan, telemetry=None):
     # invisible to time_engine_generator_total. Cost is ~independent of row count,
     # so it dominates cheap queries. Timed as an always-on driver span.
     _compile0 = _t.perf_counter_ns()
-    nplan, out_q, scan_sources, scan_facts = compile_to_native(plan)
+    nplan, out_q, scan_sources, scan_facts, scan_residual_reasons = compile_to_native(plan)
     _compile_ns = _t.perf_counter_ns() - _compile0
     dop = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
@@ -1403,6 +1433,12 @@ def execute_native(plan, telemetry=None):
         telemetry._reading["native_engine_engaged"] = 1
         telemetry._reading["native_engine_dop"] = dop
         telemetry._reading["scan_sources"] = dict(scan_sources)
+        # A0 acceptance gate: WHY each trampoline (StreamingScanSource) scan fell
+        # back — the stable R1..R7 reason code from _native_scan_plan, keyed by
+        # scan identity, parallel to scan_sources. Plan-time fact, always recorded
+        # (tiny dict), so a close-out chip can assert "reason Rx now shows zero".
+        if scan_residual_reasons:
+            telemetry._reading["scan_residual_reasons"] = dict(scan_residual_reasons)
         # Native-scan plan-time facts (files/row-groups/columns read), keyed by
         # scan identity — overlaid onto the scan's sensor row by mermaid.py to
         # replace the always-zero ScanReadings fields on the native path.

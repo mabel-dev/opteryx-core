@@ -38,6 +38,18 @@ Maps each parquet scan node identity to the Source the compiler wired it to:
 present. A later package asserts e.g. *"string scans now select
 NativeParquetScanSource."*
 
+#### 2a. `scan_residual_reasons` — WHY a scan is on the trampoline (A0)
+Parallel to `scan_sources`, keyed by the same scan identity: for every scan the
+compiler wired to `StreamingScanSource`, a stable machine-readable code for
+*which* `_native_scan_plan` guard fired — `zero_projection`, `pushed_limit`,
+`fused_topn`, `no_manifest`, `unlowerable_predicate`, `bool_predicate_input`,
+`non_admissible_kind:<DrakenType>`, `footer_gate`. Recorded at plan time (no
+per-morsel cost). This is the A0 acceptance gate: it lets a close-out chip assert
+"category Rx now shows zero trampoline fallbacks." See
+[`NATIVE_RESIDUAL_PLAN.md`](NATIVE_RESIDUAL_PLAN.md), the census tool
+`dev/native_residual_census.py`, and the gate test
+`tests/unit/operators/test_native_scan_residual_gate.py`.
+
 ### 3. Allocation harness — O(morsels), not O(rows)
 `dev/instrument_engine.py:measure_query_allocations(sql)` drains a query while
 sampling `sys.getallocatedblocks()` and reports:

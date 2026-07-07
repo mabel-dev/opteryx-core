@@ -714,12 +714,15 @@ struct BuiltDict {
   std::vector<uint32_t> codes; // one code per logical row (null rows => 0)
 };
 
-// Minimum bit width to represent dict codes [0, dict_count). 0 when the
-// dictionary has <=1 entry (every present code is 0 — no index bits on the
-// wire, matching the reader's bit_width==0 fast path).
+// Minimum bit width to represent dict codes [0, dict_count). Never 0: a
+// single-entry dictionary still needs bit_width==1 so the RLE_DICTIONARY data
+// page carries a real RLE run of zero-codes. Emitting bit_width==0 (empty index
+// stream) only round-trips with our own reader's bit_width==0 fast path — strict
+// readers (Arrow "Invalid number of indices: 0", DuckDB "Out of buffer") reject
+// it. Conformance beats the byte we'd save on degenerate columns.
 inline int dict_bit_width(uint32_t dict_count) {
   if (dict_count <= 1)
-    return 0;
+    return 1;
   uint32_t maxv = dict_count - 1;
   int bw = 0;
   while (maxv) {
@@ -730,49 +733,45 @@ inline int dict_bit_width(uint32_t dict_count) {
 }
 
 // RLE/bit-packing-hybrid encode of dictionary codes (the RLE_DICTIONARY data
-// stream, no length prefix). Greedy: a run of >=8 equal codes becomes an RLE
-// run; everything else is bit-packed in groups of 8 (trailing group
-// zero-padded), LSB-first, at `bit_width`. Inverse of
+// stream, no length prefix). A run of >=8 equal codes becomes an RLE run;
+// everything else is bit-packed, LSB-first, at `bit_width`. Inverse of
 // DecodeRLEBitPackedIndicesNoPrefix in decode_encodings.cpp.
+//
+// INVARIANT (load-bearing): a bit-packed run always decodes exactly groups*8
+// values — the reader has no per-run value count, it unpacks whole groups of 8
+// and only the page-level num_values caps the total. So zero-padding the final
+// group of a bit-packed run is ONLY safe when that group is the last thing in
+// the stream (its pad values fall past num_values and are dropped). Padding a
+// bit-packed run that is followed by any further run injects phantom values
+// that shift every subsequent code — catastrophic corruption on high-cardinality
+// columns (mostly-literal streams with occasional runs). Therefore a literal
+// segment emits only whole groups of 8; a non-multiple-of-8 tail that precedes
+// more data is emitted as RLE runs instead (RLE run length may be any value >=1,
+// so this is always legal), and only a tail at the very end of the stream is
+// bit-packed with padding.
 inline std::vector<uint8_t> encode_dict_indices(const uint32_t *codes, size_t n,
                                                 int bit_width) {
   std::vector<uint8_t> out;
-  if (bit_width == 0)
-    return out; // single-entry dict: reader fills zeros, nothing on the wire
   const int value_bytes = (bit_width + 7) / 8;
   const uint32_t mask =
       (bit_width >= 32) ? 0xFFFFFFFFu : ((1u << bit_width) - 1u);
-  size_t i = 0;
-  while (i < n) {
-    size_t run = 1;
-    while (i + run < n && codes[i + run] == codes[i])
-      run++;
-    if (run >= 8) {
-      put_varint(out, (uint64_t)run << 1); // low bit 0 => RLE run
-      uint32_t v = codes[i] & mask;
-      for (int b = 0; b < value_bytes; b++)
-        out.push_back((uint8_t)((v >> (8 * b)) & 0xFF));
-      i += run;
-      continue;
-    }
-    // Accumulate a bit-packed literal segment up to the next run of >=8.
-    size_t lit_start = i;
-    while (i < n) {
-      size_t r = 1;
-      while (i + r < n && codes[i + r] == codes[i])
-        r++;
-      if (r >= 8)
-        break;
-      i += r;
-    }
-    size_t lit_n = i - lit_start;
-    size_t groups = (lit_n + 7) / 8;
+  auto emit_rle = [&](uint32_t val, size_t run) {
+    put_varint(out, (uint64_t)run << 1); // low bit 0 => RLE run
+    uint32_t v = val & mask;
+    for (int b = 0; b < value_bytes; b++)
+      out.push_back((uint8_t)((v >> (8 * b)) & 0xFF));
+  };
+  // Bit-pack `count` codes starting at `base`, padding the final group with
+  // zeros. Safe mid-stream only when count is a multiple of 8 (no padding);
+  // the padded (count % 8 != 0) form is reserved for the stream's final run.
+  auto emit_bitpacked = [&](const uint32_t *base, size_t count) {
+    size_t groups = (count + 7) / 8;
     put_varint(out, ((uint64_t)groups << 1) | 1u); // low bit 1 => bit-packed
     uint64_t acc = 0;
     int nbits = 0;
     size_t total = groups * 8; // values, zero-padded to a whole group
     for (size_t k = 0; k < total; k++) {
-      uint32_t v = (k < lit_n) ? (codes[lit_start + k] & mask) : 0u;
+      uint32_t v = (k < count) ? (base[k] & mask) : 0u;
       acc |= (uint64_t)v << nbits;
       nbits += bit_width;
       while (nbits >= 8) {
@@ -782,6 +781,52 @@ inline std::vector<uint8_t> encode_dict_indices(const uint32_t *codes, size_t n,
       }
     }
     // total*bit_width is a whole number of bytes, so acc is drained here.
+  };
+  size_t i = 0;
+  while (i < n) {
+    size_t run = 1;
+    while (i + run < n && codes[i + run] == codes[i])
+      run++;
+    if (run >= 8) {
+      emit_rle(codes[i], run);
+      i += run;
+      continue;
+    }
+    // Literal segment [lit_start, j): consecutive codes up to the next run>=8
+    // (or the end of the stream).
+    size_t lit_start = i;
+    size_t j = i;
+    while (j < n) {
+      size_t r = 1;
+      while (j + r < n && codes[j + r] == codes[j])
+        r++;
+      if (r >= 8)
+        break;
+      j += r;
+    }
+    size_t lit_n = j - lit_start;
+    size_t full = (lit_n / 8) * 8; // whole groups of 8
+    if (full > 0)
+      emit_bitpacked(codes + lit_start, full);
+    size_t leftover = lit_n - full; // 0..7 trailing codes
+    if (leftover > 0) {
+      if (j >= n) {
+        // Final run of the stream: padding is safe (reader caps at num_values).
+        emit_bitpacked(codes + lit_start + full, leftover);
+      } else {
+        // Followed by more data: emit the tail as RLE runs so no padding is
+        // injected mid-stream.
+        size_t k = lit_start + full;
+        while (k < lit_start + lit_n) {
+          size_t r = 1;
+          while (k + r < lit_start + lit_n && codes[k + r] == codes[k])
+            r++;
+          emit_rle(codes[k], r);
+          k += r;
+        }
+      }
+    }
+    i = j;
   }
   return out;
 }

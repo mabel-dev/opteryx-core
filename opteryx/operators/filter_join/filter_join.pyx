@@ -62,6 +62,27 @@ from opteryx.models import QueryProperties
 # draken_is_compressed extern is declared in hashed_inner_join.pyx (same umbrella
 # module), so it is visible here.
 
+# WP-07: locally-aliased views of the raw C++ set classes for the nogil probe.
+# The bare names `CarcharSet` / `CppPerfectHashSet` are NOT cimported at module
+# scope — `_collectors_distinct.pxi` (folded into this same umbrella) declares its
+# own local `CarcharSet`, so a module-level cimport of that name collides. These
+# aliases bind the SAME C++ types under distinct Cython names, declaring only the
+# read-only probe methods the nogil push path calls. The raw pointers are read
+# from the wrappers' `_ptr` (via <void*>) once, under the GIL, in `_setup_probe`.
+from libc.stdint cimport int8_t as _fj_i8, int16_t as _fj_i16, uint64_t as _fj_u64
+
+cdef extern from "carchar_set.hpp" namespace "opteryx::carchar" nogil:
+    cdef cppclass _FJCarcharSet "opteryx::carchar::CarcharSet":
+        size_t probe_found_32(const _fj_u64* keys, int32_t* out_indices, size_t length) noexcept
+        size_t probe_not_found_32(const _fj_u64* keys, int32_t* out_indices, size_t length) noexcept
+
+cdef extern from "perfect_hash_set.hpp" namespace "opteryx::perfect_hash" nogil:
+    cdef cppclass _FJPerfectHashSet "opteryx::perfect_hash::PerfectHashSet":
+        size_t probe_found_32_i8(const _fj_i8* keys, int32_t* out, size_t length) noexcept
+        size_t probe_found_32_i16(const _fj_i16* keys, int32_t* out, size_t length) noexcept
+        size_t probe_not_found_32_i8(const _fj_i8* keys, int32_t* out, size_t length) noexcept
+        size_t probe_not_found_32_i16(const _fj_i16* keys, int32_t* out, size_t length) noexcept
+
 cdef uint64_t _NULL_HASH = <uint64_t>0x73d59cff8f94d86cULL
 
 # WP-13 Stage 2 — single-column compressed-key shaped k-probe for semi/anti. Probe
@@ -481,6 +502,21 @@ cdef class FilterJoinNode(JoinNode):
     cdef public bint _build_phase
     cdef public bint _use_phash
 
+    # WP-07 probe-side (push_left) true-nogil state. Everything the per-morsel
+    # probe path needs is resolved ONCE under the GIL at the first probe morsel
+    # (`_setup_probe`) into these C-level fields, so the steady-state push body
+    # touches no PyObject: raw C++ set pointers (extracted from the wrappers, which
+    # are kept alive via `right_hash_set`), key/cast column indices, and the mode.
+    cdef bint _probe_setup_done
+    cdef int32_t* _left_key_idx      # left join-key column indices (malloc'd)
+    cdef int32_t _n_left_key
+    cdef int32_t* _left_cast_col     # left columns needing an implicit key cast
+    cdef int* _left_cast_tgt         # 0 = FLOAT64, 1 = INT64 (parallel to _left_cast_col)
+    cdef int32_t _n_left_cast
+    cdef _FJCarcharSet* _seen_ptr       # raw hash-set (nogil probe); NULL until setup
+    cdef _FJPerfectHashSet* _phash_ptr  # raw perfect-hash set (nogil probe)
+    cdef int _filter_mode            # 0 = semi, 1 = anti, 2 = anti null-aware
+
     def __init__(self, properties=None, **parameters):
         self.join_type = parameters["type"]
         JoinNode.__init__(self, properties=properties, **parameters)
@@ -497,6 +533,27 @@ cdef class FilterJoinNode(JoinNode):
         self._right_has_null = False
         self._build_phase = True
         self._use_phash = False
+
+        self._probe_setup_done = False
+        self._left_key_idx = NULL
+        self._n_left_key = 0
+        self._left_cast_col = NULL
+        self._left_cast_tgt = NULL
+        self._n_left_cast = 0
+        self._seen_ptr = NULL
+        self._phash_ptr = NULL
+        self._filter_mode = 0
+
+    def __dealloc__(self):
+        if self._left_key_idx != NULL:
+            PyMem_Free(self._left_key_idx)
+            self._left_key_idx = NULL
+        if self._left_cast_col != NULL:
+            PyMem_Free(self._left_cast_col)
+            self._left_cast_col = NULL
+        if self._left_cast_tgt != NULL:
+            PyMem_Free(self._left_cast_tgt)
+            self._left_cast_tgt = NULL
 
     @property
     def name(self):  # pragma: no cover
@@ -591,58 +648,291 @@ cdef class FilterJoinNode(JoinNode):
         )
         self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
 
+    # ---- WP-07: true-nogil probe side (push_left) --------------------------
+    #
+    # The steady-state per-morsel path runs with NO GIL and constructs NO Python
+    # Morsel: it reads the incoming CxxMorsel carrier, applies any implicit
+    # join-key casts (cxx_cast_column_c), keys via cxx_hash_c, probes the raw C++
+    # set (CarcharSet / PerfectHashSet) directly, gathers the surviving rows with
+    # cxx_take_c/cxx_slice_c, and forwards via _emit_cdef. The GIL is taken only
+    # ONCE (first-morsel setup / PerfectHashSet→CarcharSet demotion) and on the
+    # error branch — never per morsel on the success path.
     cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
         cdef CxxMorsel* raw = m.get()
         cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        with gil:
-            try:
-                if is_eos:
-                    self._push_left_gil(_EOS_SENTINEL)
-                else:
-                    self._push_left_gil(cxx_to_morsel(m))
-            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
-                self._stash_exc(exc, err)
+        cdef shared_ptr[CxxMorsel] probe_sp
+        cdef shared_ptr[CxxMorsel] out_sp
+        cdef CxxMorsel* probe
+        cdef CxxMorsel* cptr
+        cdef CxxMorsel* result
+        cdef uint32_t n
+        cdef Py_ssize_t k
+        cdef bint demote = False
+
+        # Build-before-probe ordering invariant (fail loud, GIL only on the raise).
+        if not self._build_complete:
+            with gil:
+                from opteryx.exceptions import InvalidInternalStateError
+                self._stash_exc(InvalidInternalStateError(
+                    f"{self.name}: probe-side input arrived before the build side "
+                    "completed - build-before-probe ordering invariant violated."), err)
+            return err.code if err != NULL else 0
+
+        if is_eos:
+            out_sp = shared_ptr[CxxMorsel](cxx_morsel_new_eos())
+            self._emit_cdef(out_sp, err)
+            return err.code if err != NULL else 0
+
+        # One-time probe setup (GIL): resolve key/cast column indices, the raw
+        # set pointer and the mode. Runs once per query, never per morsel.
+        if not self._probe_setup_done:
+            with gil:
+                try:
+                    self._setup_probe(raw)
+                    self._probe_setup_done = True
+                except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
+                    self._stash_exc(exc, err)
+            if err != NULL and err.code != 0:
+                return err.code
+
+        # Apply implicit join-key casts on the carrier (nogil). Each cast returns
+        # a new CxxMorsel sharing the untouched columns; probe_sp keeps the live
+        # carrier alive across the body and frees intermediates.
+        probe_sp = m
+        for k in range(self._n_left_cast):
+            cptr = cxx_cast_column_c(probe_sp.get(), <uint32_t>self._left_cast_col[k],
+                                     self._left_cast_tgt[k])
+            if cptr == NULL:
+                with gil:
+                    from opteryx.exceptions import UnsupportedSyntaxError
+                    self._stash_exc(UnsupportedSyntaxError(
+                        "FilterJoin: implicit join-key cast failed"), err)
+                return err.code if err != NULL else 0
+            probe_sp = shared_ptr[CxxMorsel](cptr)
+        probe = probe_sp.get()
+
+        n = probe.num_rows()
+        if n == 0:
+            # semi/anti of an empty probe morsel is empty — emit it (cast) as-is.
+            self._emit_cdef(probe_sp, err)
+            return err.code if err != NULL else 0
+
+        # NOT IN with a null anywhere on the right → every left row is UNKNOWN → empty.
+        if self._filter_mode == 2 and self._right_has_null:
+            result = cxx_slice_c(probe, 0, 0)
+            out_sp = shared_ptr[CxxMorsel](result)
+            self._emit_cdef(out_sp, err)
+            return err.code if err != NULL else 0
+
+        result = NULL
+        if self._use_phash:
+            result = self._phash_probe_nogil(probe, &demote)
+            if demote:
+                # Probe side has nulls / non-dense narrow ints — rebuild a
+                # CarcharSet from the PerfectHashSet once, then use the hash path.
+                with gil:
+                    try:
+                        self._demote_to_carchar()
+                    except BaseException as exc:  # noqa: BLE001
+                        self._stash_exc(exc, err)
+                if err != NULL and err.code != 0:
+                    return err.code
+        if not self._use_phash:
+            result = self._carchar_probe_nogil(probe)
+
+        if result == NULL:
+            with gil:
+                self._stash_exc(MemoryError("FilterJoin: probe kernel allocation failed"), err)
+            return err.code if err != NULL else 0
+
+        out_sp = shared_ptr[CxxMorsel](result)
+        self._emit_cdef(out_sp, err)
         return err.code if err != NULL else 0
 
-    cdef void _push_left_gil(self, Morsel morsel) except *:
-        cdef Morsel result
-        cdef PerfectHashSet phash
-        cdef CarcharSetWrapper cs
-        self._require_build_complete()
-        if morsel is _EOS_SENTINEL:
-            self.emit(_EOS_SENTINEL)
-            return
-        morsel = self._apply_join_key_casts(morsel, is_left=True)
-        if morsel.num_rows == 0:
-            self.emit(morsel)
-            return
+    cdef void _setup_probe(self, CxxMorsel* probe) except *:
+        """One-time GIL setup for the nogil probe path: resolve left key columns,
+        the implicit-cast plan, the raw C++ set pointer and the filter mode."""
+        from opteryx.exceptions import InvalidInternalStateError
+        from opteryx.types.logical_type import LogicalCategory, ColumnType
+        cdef Py_ssize_t ncols = <Py_ssize_t>probe.names.size()
+        cdef Py_ssize_t i, j
+        name_to_idx = {}
+        for i in range(ncols):
+            name_to_idx[probe.names[i]] = i
 
-        if self._use_phash:
-            phash = <PerfectHashSet>self.right_hash_set
-            if self.join_type == "left semi":
-                result = _phash_probe(morsel, self.left_columns, phash,
-                                      True, self._right_has_null, False)
-            elif self.join_type == "left anti":
-                result = _phash_probe(morsel, self.left_columns, phash,
-                                      False, False, False)
-            elif self.join_type == "left anti null-aware":
-                result = _phash_probe(morsel, self.left_columns, phash,
-                                      False, self._right_has_null, True)
-            else:
-                result = None
-
-            if result is not None:
-                self.emit(result)
-                return
-            # PerfectHashSet probe fell back (probe side has nulls / non-dense).
-            # Rebuild a CarcharSetWrapper by hashing each stored value and use the hash path.
-            self._use_phash = False
-            self.right_hash_set = _rebuild_carchar_from_phash(phash)
-
-        cs = <CarcharSetWrapper>self.right_hash_set
         if self.join_type == "left semi":
-            self.emit(_semi_join_filter(morsel, self.left_columns, cs, self._right_has_null))
+            self._filter_mode = 0
         elif self.join_type == "left anti":
-            self.emit(_anti_join_filter(morsel, self.left_columns, cs))
+            self._filter_mode = 1
         elif self.join_type == "left anti null-aware":
-            self.emit(_anti_join_null_aware_filter(morsel, self.left_columns, cs))
+            self._filter_mode = 2
+        else:
+            raise InvalidInternalStateError(
+                f"FilterJoin: unsupported join_type {self.join_type!r}")
+
+        cdef list keys = list(self.left_columns or [])
+        self._n_left_key = <int32_t>len(keys)
+        if self._n_left_key == 0:
+            raise InvalidInternalStateError("FilterJoin: no left join-key columns")
+        self._left_key_idx = <int32_t*>PyMem_Malloc(<size_t>self._n_left_key * sizeof(int32_t))
+        if self._left_key_idx == NULL:
+            raise MemoryError()
+        for j in range(self._n_left_key):
+            name = keys[j]
+            keyb = name if isinstance(name, bytes) else str(name).encode("utf8")
+            if keyb not in name_to_idx:
+                raise InvalidInternalStateError(
+                    f"FilterJoin: left key column {keyb!r} not present in probe morsel")
+            self._left_key_idx[j] = <int32_t>name_to_idx[keyb]
+
+        # Implicit join-key cast plan → per-column (index, target) for the nogil path.
+        self._build_join_key_cast_plan()
+        cast_cols = []
+        cast_tgts = []
+        if self._join_key_cast_plan:
+            for rule in self._join_key_cast_plan:
+                col = rule["left_column"]
+                colb = col if isinstance(col, bytes) else str(col).encode("utf8")
+                if colb not in name_to_idx:
+                    continue
+                target = rule["target_type"]
+                cat = target.category if isinstance(target, ColumnType) else target
+                if cat == LogicalCategory.FLOAT:
+                    cast_cols.append(int(name_to_idx[colb])); cast_tgts.append(0)
+                elif cat == LogicalCategory.INTEGER:
+                    cast_cols.append(int(name_to_idx[colb])); cast_tgts.append(1)
+        self._n_left_cast = <int32_t>len(cast_cols)
+        if self._n_left_cast > 0:
+            self._left_cast_col = <int32_t*>PyMem_Malloc(<size_t>self._n_left_cast * sizeof(int32_t))
+            self._left_cast_tgt = <int*>PyMem_Malloc(<size_t>self._n_left_cast * sizeof(int))
+            if self._left_cast_col == NULL or self._left_cast_tgt == NULL:
+                raise MemoryError()
+            for j in range(self._n_left_cast):
+                self._left_cast_col[j] = <int32_t>cast_cols[j]
+                self._left_cast_tgt[j] = <int>cast_tgts[j]
+
+        # Extract the raw C++ set pointer (kept alive by right_hash_set).
+        if self._use_phash:
+            if not isinstance(self.right_hash_set, PerfectHashSet):
+                raise InvalidInternalStateError(
+                    "FilterJoin: _use_phash set but right_hash_set is not a PerfectHashSet")
+            self._phash_ptr = <_FJPerfectHashSet*><void*>(<PerfectHashSet>self.right_hash_set)._ptr
+        else:
+            if self.right_hash_set is None:
+                self.right_hash_set = CarcharSetWrapper()
+            self._seen_ptr = <_FJCarcharSet*><void*>(<CarcharSetWrapper>self.right_hash_set)._ptr
+
+    cdef void _demote_to_carchar(self) except *:
+        """PerfectHashSet→CarcharSet demotion (GIL, at most once per query): the
+        probe side turned out to carry nulls / non-dense narrow ints, which the
+        PerfectHashSet cannot answer. Rebuild a hash set and switch permanently."""
+        cdef PerfectHashSet phs = <PerfectHashSet>self.right_hash_set
+        self.right_hash_set = _rebuild_carchar_from_phash(phs)
+        self._use_phash = False
+        self._phash_ptr = NULL
+        self._seen_ptr = <_FJCarcharSet*><void*>(<CarcharSetWrapper>self.right_hash_set)._ptr
+
+    cdef CxxMorsel* _carchar_probe_nogil(self, CxxMorsel* probe) noexcept nogil:
+        """Per-row CarcharSet probe over the carrier (semi/anti/anti-null-aware).
+        Output rows are gathered in ascending row order — byte-identical to the
+        pre-conversion Morsel path. Returns NULL only on allocation failure."""
+        cdef uint32_t n = probe.num_rows()
+        cdef CxxMorsel* hashm = cxx_hash_c(probe, self._left_key_idx, <uint32_t>self._n_left_key)
+        if hashm == NULL:
+            return NULL
+        cdef DrakenVector* hview = &hashm.columns[0].view
+        cdef const uint64_t* khashes = <const uint64_t*>hview.data
+        cdef const uint32_t* codes = hview.selection
+        cdef bint compressed = draken_is_compressed(hview) != 0
+        cdef uint64_t* rowh_owned = NULL
+        cdef uint64_t* rowh
+        cdef Py_ssize_t i
+        if compressed:
+            rowh_owned = <uint64_t*>malloc(<size_t>(n if n > 0 else 1) * sizeof(uint64_t))
+            if rowh_owned == NULL:
+                cxx_morsel_delete(hashm)
+                return NULL
+            for i in range(n):
+                rowh_owned[i] = khashes[codes[i]]
+            rowh = rowh_owned
+        else:
+            rowh = <uint64_t*>khashes
+
+        cdef int32_t* out_buf = <int32_t*>malloc(<size_t>(n if n > 0 else 1) * sizeof(int32_t))
+        if out_buf == NULL:
+            if rowh_owned != NULL:
+                free(rowh_owned)
+            cxx_morsel_delete(hashm)
+            return NULL
+
+        cdef _FJCarcharSet* seen = self._seen_ptr
+        cdef Py_ssize_t cnt = 0
+        if self._filter_mode == 0:            # semi (IN)
+            cnt = seen.probe_found_32(rowh, out_buf, n)
+            if self._right_has_null and cnt > 0:
+                cnt = _compact_exclude_null(out_buf, cnt, rowh, _NULL_HASH)
+        elif self._filter_mode == 1:          # anti (EXCEPT / INTERSECT anti)
+            cnt = seen.probe_not_found_32(rowh, out_buf, n)
+        else:                                 # anti null-aware (NOT IN), right has no null here
+            cnt = seen.probe_not_found_32(rowh, out_buf, n)
+            if cnt > 0:
+                cnt = _compact_exclude_null(out_buf, cnt, rowh, _NULL_HASH)
+
+        cdef CxxMorsel* result
+        if cnt > 0:
+            result = cxx_take_c(probe, out_buf, <uint32_t>cnt)
+        else:
+            result = cxx_slice_c(probe, 0, 0)
+
+        free(out_buf)
+        if rowh_owned != NULL:
+            free(rowh_owned)
+        cxx_morsel_delete(hashm)
+        return result
+
+    cdef CxxMorsel* _phash_probe_nogil(self, CxxMorsel* probe, bint* demote_out) noexcept nogil:
+        """PerfectHashSet probe over a single dense, non-null narrow-int key column.
+        Sets demote_out=True (returns NULL) when the probe column is ineligible
+        (non-int8/16, non-dense, or nullable), so the caller falls back to the
+        rebuilt CarcharSet path — mirroring the pre-conversion _phash_probe."""
+        demote_out[0] = False
+        cdef DrakenVector* kv = &probe.columns[self._left_key_idx[0]].view
+        cdef DrakenType t = kv.type
+        cdef bint is_int8 = (t == DRAKEN_INT8)
+        cdef bint is_int16 = (t == DRAKEN_INT16)
+        if not (is_int8 or is_int16):
+            demote_out[0] = True
+            return NULL
+        if kv.data_length != kv.length:      # non-dense (dict / const) encoding
+            demote_out[0] = True
+            return NULL
+        if kv.validity != NULL:              # probe side has nulls → fall back
+            demote_out[0] = True
+            return NULL
+
+        cdef uint32_t n = probe.num_rows()
+        cdef void* dp = kv.data
+        cdef int32_t* out_buf = <int32_t*>malloc(<size_t>(n if n > 0 else 1) * sizeof(int32_t))
+        if out_buf == NULL:
+            return NULL
+        cdef _FJPerfectHashSet* ph = self._phash_ptr
+        cdef bint want_found = (self._filter_mode == 0)
+        cdef Py_ssize_t cnt = 0
+        if want_found:
+            if is_int8:
+                cnt = ph.probe_found_32_i8(<const _fj_i8*>dp, out_buf, n)
+            else:
+                cnt = ph.probe_found_32_i16(<const _fj_i16*>dp, out_buf, n)
+        else:
+            if is_int8:
+                cnt = ph.probe_not_found_32_i8(<const _fj_i8*>dp, out_buf, n)
+            else:
+                cnt = ph.probe_not_found_32_i16(<const _fj_i16*>dp, out_buf, n)
+
+        cdef CxxMorsel* result
+        if cnt > 0:
+            result = cxx_take_c(probe, out_buf, <uint32_t>cnt)
+        else:
+            result = cxx_slice_c(probe, 0, 0)
+        free(out_buf)
+        return result

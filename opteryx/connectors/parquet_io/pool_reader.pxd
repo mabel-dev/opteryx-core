@@ -47,6 +47,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         bint success
         bint empty_filtered
         int64_t empty_rows
+        vector[uint8_t] survivor_mask
 
     # Take ownership of column i's direct buffers (data returned, validity via
     # out param); nulls both slots so MorselRef's destructor won't free them.
@@ -70,6 +71,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         ) nogil
         void add_int_needles(const string& column, const vector[int64_t]& needles) nogil
         void add_str_pred(const string& column, int kind, const vector[string]& vals) nogil
+        void set_pass1_predicate(void* fn, void* ctx, const vector[string]& cols) nogil
         void clear_eq_needles() nogil
         bint try_get_result(MorselRef& out) nogil
         bint wait_and_get_result(MorselRef& out) nogil

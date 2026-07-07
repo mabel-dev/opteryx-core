@@ -318,6 +318,18 @@ cdef class CppIOPipeline:
             v.push_back(<string>b)
         self.pipeline.add_str_pred(column.encode('utf-8'), kind, v)
 
+    def set_pass1_predicate(self, size_t fn, size_t ctx, list columns):
+        """Q24 latmat: register a pushed pass-1 predicate evaluated on the decode
+        workers. `fn` is opteryx_pass1_predicate_eval's address (get_pass1_eval_fn_ptr),
+        `ctx` a Pass1PredCtx* address (kept alive by the caller for the scan's life),
+        `columns` the predicate's column names (bytes) in the ctx's col_idx order."""
+        cdef vector[string] v
+        cdef bytes b
+        for c in columns:
+            b = c if isinstance(c, bytes) else str(c).encode('utf-8')
+            v.push_back(<string>b)
+        self.pipeline.set_pass1_predicate(<void*>fn, <void*>ctx, v)
+
     def submit_work(self, str path, int rg_idx, list column_names, list column_stats_dicts):
         """Submit a row group for C++ read+decode+serialize (absolute file offsets)."""
         cdef vector[string] col_names_vec
@@ -510,9 +522,13 @@ cdef class CppIOPipeline:
     def diagnostics(self):
         cdef int i
         cdef int n_buckets = self.pipeline.http_latency_bucket_count()
-        # Histogram as [(upper_bound_ms, count), ...]; bound 0 = overflow bucket.
+        # Histogram as [{"le_ms": upper_bound, "count": n}, ...]; bound 0 = overflow
+        # bucket. List of MAPS, not list of tuples — this telemetry is persisted to
+        # Firestore, which rejects arrays-of-arrays (nested entities); a map inside
+        # an array is allowed.
         cdef list latency_histogram = [
-            (self.pipeline.http_latency_bucket_bound_ms(i), self.pipeline.http_latency_bucket(i))
+            {"le_ms": self.pipeline.http_latency_bucket_bound_ms(i),
+             "count": self.pipeline.http_latency_bucket(i)}
             for i in range(n_buckets)
         ]
         return {
@@ -944,6 +960,12 @@ cdef class IpcRowGroupSource:
             rg_ptr = &self.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
             self.pipeline.submit_work_native(cpp_path, rg_idx, self.column_names, rg_ptr)
 
+    def set_pass1_predicate(self, size_t fn, size_t ctx, list cols):
+        """Q24 latmat: register the pushed pass-1 predicate on the underlying pipeline
+        (forwards to CppIOPipeline). Must be called before the first next_vectors()
+        (i.e. before any row group is submitted)."""
+        self.pipeline.set_pass1_predicate(fn, ctx, cols)
+
     cpdef tuple next_vectors(self):
         """Block for the next decoded row group; return
         ``(vectors, bytes_fetched, read_ns, decode_ns, path, rg_idx)`` (vectors in
@@ -962,6 +984,7 @@ cdef class IpcRowGroupSource:
         cdef bytes req_name
         cdef str cpp_path, path_str
         cdef DrakenType want_type
+        cdef bytes survivor_mask
 
         # ── Claim phase (under the cursor lock): advance the submit window to keep
         # it full, then take one result slot. No GIL-releasing call runs here. ──
@@ -1072,8 +1095,15 @@ cdef class IpcRowGroupSource:
                     aligned[k] = Vector(vector_null_from_length(<uint32_t>fill_rows))
             vectors = aligned
 
+        # Q24 latmat: worker-computed pass-1 survivor bitmap (bit-packed, over the
+        # RG's rows). None when no predicate was pushed / unsupported shape → the
+        # scan evaluates the predicate on the main thread (serial fallback).
+        survivor_mask = None
+        if result.survivor_mask.size() > 0:
+            survivor_mask = <bytes>(<char*>result.survivor_mask.data())[:result.survivor_mask.size()]
+
         return (vectors, result.bytes_fetched, result.read_ns,
-                result.decode_ns, path_str, result.rg_idx)
+                result.decode_ns, path_str, result.rg_idx, survivor_mask)
 
     cdef int64_t _rg_num_rows(self, str path_str, int rg_idx):
         """Row-group logical row count, for NULL-filling a row group whose every
@@ -1457,9 +1487,11 @@ cdef class NativeScanPlan:
             return {}
         cdef int i
         cdef int n_buckets = self.pipeline_ptr.http_latency_bucket_count()
+        # List of MAPS, not tuples — persisted to Firestore, which rejects
+        # arrays-of-arrays (see CppIOPipeline.diagnostics()).
         cdef list latency_histogram = [
-            (self.pipeline_ptr.http_latency_bucket_bound_ms(i),
-             self.pipeline_ptr.http_latency_bucket(i))
+            {"le_ms": self.pipeline_ptr.http_latency_bucket_bound_ms(i),
+             "count": self.pipeline_ptr.http_latency_bucket(i)}
             for i in range(n_buckets)
         ]
         return {

@@ -2104,6 +2104,146 @@ cdef int _dv_filter_and_mask_span_cxx(
     return rc
 
 
+# ── Pass-1 worker predicate (Q24 latmat) ────────────────────────────────────────
+# Run the c-native predicate over decoded pass-1 columns supplied as a DrakenVector*
+# ARRAY (not a CxxMorsel) and emit the survivor bitmap. Called from the rugo
+# io_pipeline decode workers through an opaque C fn-ptr handed over at registration
+# (get_pass1_eval_fn_ptr) — rugo stays opteryx-free (only draken's DrakenVector and
+# this pointer cross). Pure nogil, no PyObject. Mirrors _dv_filter_and_mask_span_cxx
+# but sources column DVs from `cols` and produces only the mask (the main thread
+# applies it to the shipped survivor columns for top-N).
+
+ctypedef struct Pass1PredCtx:
+    BytecodeInstr*  instrs
+    int             count
+    const int*      col_idx    # per-instr: index into the `cols` array (BC_LOAD_COL)
+    DrakenVector**  lit_dv      # per-instr: literal DV* (BC_LOAD_LIT_CONST), else NULL
+
+
+ctypedef int (*Pass1EvalFn)(void*, DrakenVector**, int, uint32_t, uint8_t*) noexcept nogil
+
+
+cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
+                                      uint32_t num_rows, uint8_t* out_mask) noexcept nogil:
+    """Opaque C-ABI entry for the rugo decode worker. `ctx` is a Pass1PredCtx*
+    (resolved once on the main thread, kept alive by the scan). `cols[i]` is decoded
+    pass-1 predicate column i; `out_mask` is caller-owned, nbytes=(num_rows+7)//8.
+    Returns 0 → out_mask is the survivor bitmap (data-bit AND validity); else the
+    c_execute_dv_inner rc (worker fails loud)."""
+    cdef Pass1PredCtx* c = <Pass1PredCtx*>ctx
+    cdef BytecodeInstr* instrs = c.instrs
+    cdef int count = c.count
+    cdef const int* col_idx = c.col_idx
+    cdef DrakenVector** lit_dv = c.lit_dv
+    cdef Py_ssize_t nbytes = <Py_ssize_t>((num_rows + 7) >> 3)
+    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_stack[64]
+    cdef DrakenVector  dv_store[64]
+    cdef int rc = 0
+    cdef int err_op = 0
+    cdef int opcode = 0
+    cdef const char* err_msg = NULL
+    cdef DrakenVector* mask_dv = NULL
+    cdef uint8_t* dense = NULL
+    cdef Py_ssize_t bi = 0
+    cdef Py_ssize_t k = 0
+    cdef DrakenFrameArena* arena = NULL
+    if count > 256 or num_rows == 0:
+        return -1
+    arena = draken_frame_arena_create()
+    if arena == NULL:
+        return 99
+    for k in range(count):
+        opcode = instrs[k].opcode
+        if opcode == BC_LOAD_COL:
+            dv_cache[k] = cols[col_idx[k]]
+        elif opcode == BC_LOAD_LIT_CONST:
+            dv_cache[k] = lit_dv[k]
+        else:
+            dv_cache[k] = NULL
+    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
+                            arena, nbytes, num_rows, &err_op, &err_msg)
+    if rc == 0:
+        mask_dv = dv_stack[0]
+        dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
+        if dense == NULL:
+            draken_frame_arena_destroy(arena)
+            return 99
+        memcpy(out_mask, dense, <size_t>nbytes)
+        if mask_dv.validity != NULL:
+            for bi in range(nbytes):
+                out_mask[bi] &= mask_dv.validity[bi]
+    draken_frame_arena_destroy(arena)
+    return rc
+
+
+cpdef size_t get_pass1_eval_fn_ptr():
+    """Address of opteryx_pass1_predicate_eval as an int, for the scan to hand to the
+    rugo io_pipeline as an opaque predicate callback."""
+    cdef Pass1EvalFn fn = opteryx_pass1_predicate_eval
+    return <size_t><void*>fn
+
+
+cdef class Pass1PredResolver:
+    """Resolves a CompiledBytecode predicate to a Pass1PredCtx once (GIL) and keeps
+    everything the worker callback needs alive for the scan's life: the bytecode
+    (instrs + literal Vectors), the owned col_idx / lit_dv arrays. `col_idx[k]` maps
+    each BC_LOAD_COL to its position in `col_names` (the predicate's columns in first-
+    seen order); `col_names` are PHYSICAL names the rugo worker matches against its
+    decoded result.column_names. Only usable when the predicate is all-c-native."""
+    cdef Pass1PredCtx ctx
+    cdef CompiledBytecode _bc
+    cdef int* _col_idx
+    cdef DrakenVector** _lit_dv
+    cdef list _col_names
+    cdef list _lit_anchors
+
+    def __cinit__(self, CompiledBytecode bc, dict identity_to_physical):
+        cdef int count = bc.count
+        cdef int k
+        cdef BytecodeInstr* instrs = bc.instrs
+        cdef bytes ident
+        cdef object lit_obj
+        cdef dict ident_pos = {}
+        self._bc = bc
+        self._col_names = []
+        self._lit_anchors = []
+        self._col_idx = <int*>malloc(<size_t>count * sizeof(int))
+        self._lit_dv = <DrakenVector**>malloc(<size_t>count * sizeof(void*))
+        if self._col_idx == NULL or self._lit_dv == NULL:
+            raise MemoryError("Pass1PredResolver: malloc failed")
+        for k in range(count):
+            self._col_idx[k] = -1
+            self._lit_dv[k] = NULL
+            if instrs[k].opcode == BC_LOAD_COL:
+                ident = <bytes>instrs[k].column_identity
+                if ident not in ident_pos:
+                    ident_pos[ident] = len(self._col_names)
+                    self._col_names.append(identity_to_physical[ident])
+                self._col_idx[k] = <int>ident_pos[ident]
+            elif instrs[k].opcode == BC_LOAD_LIT_CONST:
+                lit_obj = <object>instrs[k].literal_obj
+                self._lit_anchors.append(lit_obj)
+                self._lit_dv[k] = (<Vector>lit_obj).unified()
+        self.ctx.instrs = instrs
+        self.ctx.count = count
+        self.ctx.col_idx = self._col_idx
+        self.ctx.lit_dv = self._lit_dv
+
+    @property
+    def col_names(self):
+        return list(self._col_names)
+
+    cpdef size_t ctx_ptr(self):
+        return <size_t><void*>&self.ctx
+
+    def __dealloc__(self):
+        if self._col_idx != NULL:
+            free(self._col_idx)
+        if self._lit_dv != NULL:
+            free(self._lit_dv)
+
+
 cdef size_t _dv_result_elem_size(DrakenType t) noexcept nogil:
     """Byte width of one fixed-width value; 0 for bit-packed BOOL / unsupported."""
     if t == DRAKEN_INT8 or t == DRAKEN_UINT8:

@@ -124,6 +124,8 @@ def _string_type_for(column_type):
 #
 from opteryx.expression.evaluator import execute_bytecode
 from opteryx.expression.evaluator import predicate_filter_and_mask_c_native as _predicate_filter_and_mask_c_native
+from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr as _get_pass1_eval_fn_ptr
+from opteryx.expression.evaluator.evaluation import Pass1PredResolver as _Pass1PredResolver
 from opteryx.expression.evaluator.evaluation import filter_morsel_c_native as _filter_morsel_c_native
 from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
@@ -520,6 +522,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     set timestamp_col_set,
     dict timestamp_unit_map,
     list pass1_column_names,
+    bytes precomputed_mask=None,
 ):
     """Pure pass-1 evaluation for a single row group.
 
@@ -544,8 +547,26 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     # C++ preserves column order; dict keys (bytes) are not used for identity lookup.
     cdef list p1_identity_names = [pass1_name_to_identity[col] for col in pass1_column_names]
     cdef list p1_vectors = list(row_group.values())
+    cdef list positions
     if not p1_identity_names:
         result.empty = True
+        return result
+
+    # Worker-computed survivor mask (Q24 latmat, pushed pass-1 predicate): the match
+    # already ran in parallel on the decode worker — just materialise the survivors.
+    # No predicate eval here. mask_bytes is LSB-first over the RG rows.
+    if precomputed_mask is not None:
+        result.rows_before_filter = len(p1_vectors[0]) if p1_vectors else 0
+        positions = _set_bit_positions(precomputed_mask)
+        # Drop any trailing padding bits beyond the logical row count.
+        while positions and <Py_ssize_t>positions[len(positions) - 1] >= result.rows_before_filter:
+            positions.pop()
+        if not positions:
+            return result
+        result.survived = True
+        result.p1_filtered = Morsel.from_vectors(p1_identity_names, p1_vectors).take(positions)
+        result.p1_identity_names = p1_identity_names
+        result.mask_bytes = precomputed_mask
         return result
 
     p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
@@ -651,6 +672,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef bint _sp_topn_active
     cdef bint _sp_two_pass_eligible
     cdef CompiledBytecode _compiled_predicate
+    cdef object _pass1_resolver           # Pass1PredResolver, kept alive for the scan
     # LIMIT counter for the source. Lives on the node (not a generator local) so
     # the single _commit_morsel mutation seam owns it — the granularity a future
     # per-scan lock guards (Stage 5). _records_unlimited mirrors the old float
@@ -692,6 +714,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._empty_guard_done = False
         self._sp_claims_pending = 0
         self._compiled_predicate = None  # CompiledBytecode, bound once at execute() time
+        self._pass1_resolver = None
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
         self.scan_readings = ScanReadings()
@@ -1406,6 +1429,20 @@ cdef class ParquetReadNode(ReaderNode):
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
                 string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
             )
+            # Q24 latmat: push the pass-1 predicate to the decode workers so the match
+            # runs in parallel there (nogil), not serially on this thread. Only when the
+            # predicate is fully c-native (the worker VM requires it); rugo silently
+            # falls back to serial for column shapes it can't view (survivor_mask empty).
+            if self._compiled_predicate is not None and self._compiled_predicate.is_all_c_native:
+                identity_to_physical = {
+                    ident: name for name, ident in self._sp_pass1_name_to_identity.items()
+                }
+                self._pass1_resolver = _Pass1PredResolver(self._compiled_predicate, identity_to_physical)
+                self._lm_pass1_src.set_pass1_predicate(
+                    _get_pass1_eval_fn_ptr(),
+                    self._pass1_resolver.ctx_ptr(),
+                    self._pass1_resolver.col_names,
+                )
             return
 
         self._scan_mode = _SCAN_SINGLE
@@ -1632,12 +1669,15 @@ cdef class ParquetReadNode(ReaderNode):
                 continue
             n = len(vectors)
             row_group = {self._lm_pass1_names_bytes[i]: vectors[i] for i in range(n)}
+            # pulled[6] carries the worker-computed survivor mask (bytes) when the
+            # pass-1 predicate was pushed to the decode workers, else None → serial eval.
             result = _evaluate_pass1_row_group(
                 path, rg_idx, row_group, self._compiled_predicate,
                 self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
                 self._sp_timestamp_unit_map,
                 self._sp_pass1_column_names,
+                <bytes>pulled[6] if pulled[6] is not None else None,
             )
             if result.empty:
                 continue

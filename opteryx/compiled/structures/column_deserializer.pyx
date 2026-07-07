@@ -1067,6 +1067,7 @@ cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool, dict string_type
     if outs == NULL:
         raise MemoryError()
 
+    i = 0
     try:
         with nogil:
             deserialize_row_group_fixed(
@@ -1098,6 +1099,22 @@ cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool, dict string_type
             row_group[col_name] = vec
             with nogil:
                 pool.release(ref_id)
+    except BaseException:
+        # deserialize_row_group_fixed already read/unlatched every column in
+        # the batch before returning (see ipc_deserialize.cpp), so a raise at
+        # column i leaves refs[i:] committed-but-unreleased in the pool for
+        # the rest of the query. Release them here or they sit pinned until
+        # the whole MemoryPool is torn down at query end. Best-effort: a
+        # ref_id that was never validly committed (e.g. the bad-ref-id status
+        # path) will itself raise on release — swallow that so it can't mask
+        # the original exception we're propagating.
+        for j in range(i, n):
+            try:
+                with nogil:
+                    pool.release(<int64_t>refs[j])
+            except Exception:
+                pass
+        raise
     finally:
         free(outs)
 

@@ -52,6 +52,7 @@
 #include "core/frame_arena.h"       // per-frame allocator
 #include "ops/compare_dv.h"         // arena-backed compare entry point
 #include "ops/arithmetic_dv.h"      // arena-backed arithmetic entry point
+#include "ops/kernels/cast_kernels.h" // WP-07: nogil join-key cast (to_float64/to_int64)
 
 namespace nb = nanobind;
 
@@ -5602,6 +5603,70 @@ static CxxMorsel cxx_take(const CxxMorsel& m, const int32_t* idx, uint32_t n) {
     return out;
 }
 
+// WP-07: two-sided inner-join align (nogil). Materialise a join result by
+// gathering left columns at lidx and right columns at ridx, then concatenating
+// the two column lists (all left columns, then all right columns) — the exact
+// column order and naming the Cython `align_tables` produces. Both index arrays
+// are assumed NON-NEGATIVE (inner join has no unmatched rows; RIGHT/FULL outer,
+// which use -1 sentinels, is out of scope here). Output row count == n. Pure
+// C++/nogil (reuses vector_take_impl), so the converted inner-join push body can
+// build its result off the carrier with no PyObject / no GIL.
+static CxxMorsel cxx_align(const CxxMorsel& l, const CxxMorsel& r,
+                           const int32_t* lidx, const int32_t* ridx, uint32_t n) {
+    CxxMorsel out;
+    out.names.reserve(l.names.size() + r.names.size());
+    for (const std::string& nm : l.names) out.names.push_back(nm);
+    for (const std::string& nm : r.names) out.names.push_back(nm);
+    out.columns.reserve(l.columns.size() + r.columns.size());
+    for (const CxxColumn& col : l.columns) {
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, lidx, n));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    for (const CxxColumn& col : r.columns) {
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, ridx, n));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    // A zero-column align (both sides projected away) still carries the row count.
+    if (out.columns.empty()) out.zero_col_rows = n;
+    return out;
+}
+
+// WP-07: cast ONE key column of a CxxMorsel to FLOAT64 (target==0) or INT64
+// (target==1) via the phase-9c native cast dispatch kernels (nogil, no PyObject).
+// Returns a NEW heap CxxMorsel sharing every other column's owner (shared_ptr
+// copy — no data copy), with columns[col_idx] replaced by the cast result. This
+// mirrors `_apply_join_key_casts`, which replaces the key column in-morsel so the
+// cast value flows to BOTH the join-key hash AND the emitted output. Returns
+// nullptr on a cast error (the kernel's VecResult data==nullptr sentinel) so the
+// caller surfaces it via ErrCtx; nullptr too if col_idx is out of range.
+static CxxMorsel* cxx_cast_column(const CxxMorsel& m, uint32_t col_idx, int target) {
+    if (col_idx >= m.columns.size()) return nullptr;
+    VecResult r = (target == 0)
+        ? draken_cast_to_float64(nullptr, &m.columns[col_idx].view)
+        : draken_cast_to_int64(nullptr, &m.columns[col_idx].view);
+    if (r.data == nullptr) return nullptr;  // cast-error sentinel
+    CxxMorsel* out = new CxxMorsel();
+    out->names = m.names;
+    out->state = m.state;
+    out->zero_col_rows = m.zero_col_rows;
+    out->columns.reserve(m.columns.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m.columns.size()); ++i) {
+        if (i == col_idx) {
+            CxxColumn nc;
+            nc.own  = std::make_shared<VectorOwner>(vecresult_to_owner(r));
+            nc.view = nc.own->vec;
+            out->columns.push_back(std::move(nc));
+        } else {
+            out->columns.push_back(m.columns[i]);  // shares owner, no copy
+        }
+    }
+    return out;
+}
+
 // S0: slice a row window from all columns (nogil; reuses vector_slice_impl).
 static CxxMorsel cxx_slice(const CxxMorsel& m, uint32_t start, uint32_t length) {
     CxxMorsel out;
@@ -5726,6 +5791,17 @@ extern "C" CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_
 }
 extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length) {
     return new CxxMorsel(cxx_slice(*m, start, length));
+}
+// WP-07: two-sided inner-join align (see cxx_align). lidx/ridx are non-negative
+// int32 index buffers of length n. Caller owns the result (cxx_morsel_delete).
+extern "C" CxxMorsel* cxx_align_c(const CxxMorsel* l, const CxxMorsel* r,
+                                  const int32_t* lidx, const int32_t* ridx, uint32_t n) {
+    return new CxxMorsel(cxx_align(*l, *r, lidx, ridx, n));
+}
+// WP-07: nogil join-key cast (see cxx_cast_column). target 0=FLOAT64, 1=INT64.
+// Returns nullptr on cast error / out-of-range col_idx. Caller owns the result.
+extern "C" CxxMorsel* cxx_cast_column_c(const CxxMorsel* m, uint32_t col_idx, int target) {
+    return cxx_cast_column(*m, col_idx, target);
 }
 extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) {
     return new CxxMorsel(cxx_mask(*m, *mask));

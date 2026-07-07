@@ -55,6 +55,9 @@ cdef extern from * nogil:
     extern "C" const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle);
     extern "C" CxxMorsel* cxx_take_c(const CxxMorsel*, const int32_t*, uint32_t);
     extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel*, uint32_t, uint32_t);
+    extern "C" CxxMorsel* cxx_align_c(const CxxMorsel*, const CxxMorsel*,
+                                      const int32_t*, const int32_t*, uint32_t);
+    extern "C" CxxMorsel* cxx_cast_column_c(const CxxMorsel*, uint32_t, int);
     extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel*, const DrakenVector*);
     extern "C" CxxMorsel* cxx_mask_with_consts_c(const CxxMorsel*, const DrakenVector*,
                                                   const int32_t*, const DrakenVector* const*, uint32_t);
@@ -70,6 +73,14 @@ cdef extern from * nogil:
     # returned CxxMorsel (free via cxx_morsel_delete). Wired by S-B.1.
     CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n) nogil
     CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length) nogil
+    # WP-07 two-sided inner-join align: gather left cols by lidx + right cols by
+    # ridx (both non-negative), concat into one CxxMorsel. Free via cxx_morsel_delete.
+    CxxMorsel* cxx_align_c(const CxxMorsel* l, const CxxMorsel* r,
+                           const int32_t* lidx, const int32_t* ridx, uint32_t n) nogil
+    # WP-07 nogil join-key cast: cast columns[col_idx] to FLOAT64 (target=0) or
+    # INT64 (target=1) via phase-9c dispatch kernels; new CxxMorsel shares the
+    # other columns. NULL on cast error / bad idx. Free via cxx_morsel_delete.
+    CxxMorsel* cxx_cast_column_c(const CxxMorsel* m, uint32_t col_idx, int target) nogil
     # S1: whole-morsel mask (keep rows valid AND true) — derives indices once,
     # type-takes each column nogil. mask is the predicate BoolVector's view.
     CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) nogil

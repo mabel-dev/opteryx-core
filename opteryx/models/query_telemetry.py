@@ -9,6 +9,17 @@ from collections import defaultdict
 
 class _QueryTelemetry:
     def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """Clear all readings back to per-query defaults.
+
+        Called at the start of each query on a long-lived Session: the
+        instance is a singleton keyed by query_id (see QueryTelemetry.__new__
+        below), so a Session reusing the same query_id across many
+        execute_to_morsels() calls must reset here, not reconstruct, or
+        messages/optimizer_trace grow unbounded for the life of the process.
+        """
         # predefine "messages" and "operations" so all new telemetry default to 0
         self._reading: dict = defaultdict(int)
         self._reading["messages"] = []
