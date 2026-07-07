@@ -1233,6 +1233,13 @@ class ParquetIOPipeline {
                 const std::string& lt = col_stats.logical_type;
                 const bool safe_logical =
                     lt.empty() || lt == "int64" || lt == "int32" ||
+                    // A1: signed narrow ints (int8/int16) widen to DK_INT64 on decode
+                    // exactly like int32 — no consumer-side coercion — so they are
+                    // direct-eligible. Without this they fell to DK_POOL, which the
+                    // native scan Source cannot decode for a numeric column (only the
+                    // trampoline's pool deserializer could), so admitting them to the
+                    // native scan raised "unsupported column encoding".
+                    lt == "int8" || lt == "int16" ||
                     lt == "float64" || lt == "float32" || lt == "boolean" ||
                     lt.rfind("date", 0) == 0 || lt.rfind("timestamp", 0) == 0 ||
                     lt.rfind("time[", 0) == 0 ||  // WP-11: TIME is an int32/int64 stream,

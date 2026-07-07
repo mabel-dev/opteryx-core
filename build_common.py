@@ -150,14 +150,48 @@ class build_ext(build_ext_orig):
             else:
                 print(f"Successfully compiled yyjson to {yyjson_obj}")
 
-        # mimalloc removed: draken now uses the system allocator (see
-        # draken/core/alloc.h). A bundled mimalloc — whether statically linked
-        # per-module (cross-module free UB) or as a shared dylib (heap
-        # corruption when a foreign native lib such as pandas/pyarrow loads into
-        # the process) — proved unsafe to coexist with the rest of the Python
-        # process. The system allocator is a single process-wide instance shared
-        # by every extension and every foreign library, so neither failure mode
-        # exists. mimalloc may return as an opt-in, measured prod build flag.
+        # Standalone mimalloc (vendored, third_party/mimalloc = v3.3.2), built as a
+        # SEPARATE shared library shipped as package data in draken/ — linked into
+        # NOTHING. draken itself still uses the system allocator (draken/core/alloc.h);
+        # this .so is inert until a deployment activates it via LD_PRELOAD.
+        #
+        # This is NOT the bundling that got mimalloc removed before. That failed two
+        # ways: statically linked per-module (cross-module free UB) and as a load-time
+        # dependency of our extensions (heap corruption when a foreign lib like
+        # pyarrow had already allocated via glibc). This ships an independent .so that
+        # nothing links or dlopens. Under LD_PRELOAD, ld.so makes it the single
+        # process-wide allocator from exec — before the interpreter, before any
+        # foreign lib — so neither failure mode can occur (validated: full ClickBench
+        # battery completes vs glibc OOM). Fixes glibc per-thread-arena fragmentation
+        # OOM under the multi-threaded native engine. Path: draken.preload_library_path().
+        _mi_ext = "dylib" if platform.system() == "Darwin" else "so"
+        _mi_out = os.path.join("draken", "libmimalloc.%s" % _mi_ext)
+        _mi_src = "third_party/mimalloc/src/static.c"
+        _mi_shared = ["-dynamiclib"] if platform.system() == "Darwin" else ["-shared", "-pthread"]
+        if not os.path.exists(_mi_out) or os.path.getmtime(_mi_src) > os.path.getmtime(_mi_out):
+            print("Building standalone mimalloc -> %s using compiler: %s" % (_mi_out, compiler))
+            _mi_res = subprocess.run(
+                [
+                    compiler,
+                    "-O2",
+                    "-DNDEBUG",
+                    "-DMI_MALLOC_OVERRIDE",  # export malloc/free so LD_PRELOAD interposes
+                    "-fPIC",
+                    *_mi_shared,
+                    "-Ithird_party/mimalloc/include",
+                    _mi_src,
+                    "-o",
+                    _mi_out,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            # Fail loud: a wheel that silently omits the preload lib would leave
+            # deployments pointing LD_PRELOAD at a missing file (§1 fail fast).
+            if _mi_res.returncode != 0:
+                raise RuntimeError("Failed to build standalone mimalloc: %s" % _mi_res.stderr)
+            print("Successfully built %s" % _mi_out)
 
         # libcurl is already built at module initialization time
         super().build_extensions()

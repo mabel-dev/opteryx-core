@@ -1306,6 +1306,9 @@ setup(
     else [RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
     package_data={
         "": ["*.pyx", "*.pxd", "*.h"],
+        # Standalone mimalloc preload lib built by build_common (see
+        # draken.preload_library_path); ships in the wheel, linked into nothing.
+        "draken": ["libmimalloc.so", "libmimalloc.dylib"],
     },
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

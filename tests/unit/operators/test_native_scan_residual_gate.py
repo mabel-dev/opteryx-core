@@ -77,15 +77,18 @@ def test_native_scan_records_no_residual():
 # when a close-out chip admits that shape natively → delete the marker then.
 # ---------------------------------------------------------------------------
 
-# (category, canonical SQL) — the residual frontier as of this A0 census.
+# (category, canonical SQL) — the residual frontier. `footer_gate` (R7b) was
+# CLOSED by A1 for the integer widths: narrow / unsigned / annotated INTEGER
+# columns now select the native scan (see test_footer_gate_int_widths_now_native
+# below). It stays reachable as a residual only via schema evolution — see
+# HAND_SET / test_residual_reason_reachable — which is a distinct, still-open
+# structural gap, NOT the integer admission this test tracked.
 _OPEN_CATEGORIES = [
-    ("zero_projection", census.HAND_SET["zero_projection"]),
     ("pushed_limit", census.HAND_SET["pushed_limit"]),
     ("fused_topn", census.HAND_SET["fused_topn"]),
     ("unlowerable_predicate", census.HAND_SET["unlowerable_predicate"]),
     ("bool_predicate_input", census.HAND_SET["bool_predicate_input"]),
     ("non_admissible_kind", census.HAND_SET["non_admissible_kind"]),
-    ("footer_gate", census.HAND_SET["footer_gate"]),
 ]
 
 
@@ -98,6 +101,76 @@ def test_category_now_native(category, sql):
     (the scan goes native), this xpasses → strict-xfail turns it RED, telling the
     author to retire this marker and mark the category closed."""
     assert_scan_native(sql)
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — A1 footer_gate integer admission. These were the strict-xfail
+# `footer_gate` frontier; they are now real passing assertions. clickbench_tiny
+# carries the full integer family: EventDate (parquet int32 / logical uint16),
+# AdvEngineID + ResolutionWidth (int32 / int16, signed-narrow — widen to INT64 on
+# decode), CounterID (int32 / int32), UserID (int64 / int64). Every width is
+# admitted byte-identically to the trampoline, so NONE is left fail-closed (UINT64
+# has a native DRAKEN_UINT64 vector — no truncation, so it too is admitted, not
+# fail-closed). The columns must go native in all four scan roles.
+_TINY = "testdata.clickbench_tiny"
+
+
+@pytest.mark.parametrize("sql", [
+    # projected (unsigned, signed-narrow, plain int32, int64)
+    "SELECT EventDate FROM %s" % _TINY,
+    "SELECT AdvEngineID FROM %s" % _TINY,
+    "SELECT ResolutionWidth FROM %s" % _TINY,
+    "SELECT CounterID FROM %s" % _TINY,
+    "SELECT UserID FROM %s" % _TINY,
+    "SELECT EventDate, AdvEngineID, ResolutionWidth, CounterID, UserID FROM %s" % _TINY,
+    # SIGNED narrow as a c-native predicate input (widens to INT64, VM-readable)
+    "SELECT AdvEngineID FROM %s WHERE AdvEngineID <> 0" % _TINY,
+    "SELECT ResolutionWidth FROM %s WHERE ResolutionWidth >= 1024" % _TINY,
+    # role-3 filter-only over a SIGNED narrow column: read but not emitted
+    "SELECT UserID FROM %s WHERE AdvEngineID <> 0" % _TINY,
+    # UNSIGNED column PROJECTED alongside a signed predicate — still native
+    "SELECT EventDate FROM %s WHERE AdvEngineID <> 0" % _TINY,
+])
+def test_footer_gate_int_widths_now_native(sql):
+    """A1: narrow / unsigned / annotated INTEGER columns now select the native scan
+    when projected, and signed-narrow columns go native in every role including as a
+    c-native predicate input. Was the footer_gate strict-xfail frontier; now a hard
+    pass."""
+    assert_scan_native(sql)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT EventDate FROM %s WHERE EventDate > 0" % _TINY,   # uint16 predicate input
+    "SELECT UserID FROM %s WHERE EventDate > 0" % _TINY,      # uint16 role-3 filter
+])
+def test_unsigned_predicate_input_fails_closed(sql):
+    """A1 documented fail-closed: an UNSIGNED integer column used as a c-native
+    predicate input stays on the trampoline (the relocated ExprFilter's bytecode VM
+    cannot read a UINT vector — err_op=11; the uint compare kernel is out-of-scope
+    follow-on). It is tagged `unsigned_predicate_input`, NOT admitted natively."""
+    sources, reasons, err = census.scan_residuals(sql)
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"StreamingScanSource"}, sources
+    assert set(reasons.values()) == {"unsigned_predicate_input"}, reasons
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — A2 zero-projection COUNT(*) WITH a pushed predicate. Was the
+# `zero_projection` strict-xfail frontier; now a real passing assertion. The
+# no-predicate bare `SELECT COUNT(*) FROM t` shape is NOT part of this residual
+# at all — it never reaches a scan (StatisticsOnlyResponseStrategy rewrites it to
+# a manifest-count literal at the optimizer level) — so it is not tracked here.
+# See tests/unit/operators/test_wp_a2_zero_projection_count_scan.py for the A/B
+# correctness parity harness (native vs forced-trampoline row counts).
+# ---------------------------------------------------------------------------
+
+
+def test_zero_projection_predicate_now_native():
+    """A2: COUNT(*) WITH a pushed predicate now selects the native scan — the
+    read-set is the role-3 predicate column(s), the emit-set is empty, and the row
+    count rides on the same `zero_col_rows` degenerate path the trampoline already
+    used. Was the `zero_projection` strict-xfail frontier; now a hard pass."""
+    assert_scan_native("SELECT COUNT(*) FROM 'testdata/flat/formats/parquet' WHERE followers > 0")
 
 
 if __name__ == "__main__":  # pragma: no cover

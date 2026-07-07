@@ -914,10 +914,12 @@ class _Compiler:
         Scope: local files; columns that are numeric (schema INT64/FLOAT32/FLOAT64 —
         parquet int32 widens to INT64 on decode) or string (VARCHAR/NVARCHAR/
         VARBINARY, decoded natively via the DK_VARCHAR / DK_VARCHAR_DICT /
-        DK_POOL-string paths — WP-01); no scan-pushed LIMIT/TopN, no zero-column
-        projection; and the footer gate (native_scan_supported) proves every column
-        of every row group eligible — no schema evolution, no DECIMAL/temporal/BOOL
-        logical types.
+        DK_POOL-string paths — WP-01); no scan-pushed LIMIT (R2, still open); and
+        the footer gate (native_scan_supported) proves every column of every row
+        group eligible — no schema evolution, no DECIMAL/temporal/BOOL logical
+        types. A scan-fused TopN hint (R3) is admitted (see below) — it is
+        ignored, not honoured, because the real sort/limit already happens in a
+        downstream native operator regardless of scan source.
 
         WP-02 — pushed predicates: the per-row residual is RELOCATED to a native
         downstream ExprFilter (see `_compile_scan`) instead of blocking admission.
@@ -928,7 +930,21 @@ class _Compiler:
         `extract_predicate_stats` triples the trampoline path uses are passed to
         `open_native_scan_plan`, so bytes-read / row-groups-scanned are unchanged.
         A predicate that does not lower to a c-native span fails CLOSED (returns
-        None → trampoline Source keeps the predicate on the old path)."""
+        None → trampoline Source keeps the predicate on the old path).
+
+        A2 — zero-projection COUNT(*) WITH a pushed predicate: emit-set is empty
+        (`scan.columns` is `[]`), read-set is role-3 predicate columns only. This
+        is the WP-02 read-set ⊋ emit-set degenerate case at its limit (emit-set =
+        ∅): the trailing Select's `indices`/`names` are both empty, which
+        `ColumnSelectOperator` already handles — it emits a genuine zero-column
+        morsel carrying the post-filter row count in `zero_col_rows`, the same
+        contract `UngroupedAggSink`'s CountStar already reads. No engine change
+        needed; only this guard had to stop bailing early. The bare
+        `COUNT(*)` no-predicate shape never reaches this method — it is rewritten
+        to a manifest-count literal upstream by `StatisticsOnlyResponseStrategy`
+        — so a zero-projection scan with NO predicate reaching here has no
+        read-set to build from and stays on the trampoline (see the guard
+        above)."""
         from opteryx import config
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
@@ -936,18 +952,36 @@ class _Compiler:
         from opteryx.expression import get_all_nodes_of_type
         from opteryx.operators._operators import bytecode_is_all_c_native
 
-        if not scan.columns:
-            # R1: zero-projection COUNT(*) shape (b'*' constant column)
+        if not scan.columns and not getattr(scan, "predicates", None):
+            # R1: zero-projection, no predicate — a bare COUNT(*) shape with
+            # nothing to read and no filter to relocate. Note: this is NOT the
+            # common bare-`SELECT COUNT(*) FROM t` form — that short-circuits to
+            # a literal manifest-count response in the optimizer
+            # (StatisticsOnlyResponseStrategy) and never reaches a scan at all.
+            # This guard only fires when that rewrite couldn't apply (e.g. no
+            # manifest stats) and there is truly no column to admit a read-set
+            # from. A2 closes the WITH-predicate zero-projection shape below —
+            # read-set = role-3 predicate columns, emit-set = empty, row count
+            # rides on the ColumnSelectOperator's zero_col_rows degenerate path.
             self.scan_residual_reasons[scan.identity] = "zero_projection"
             return None
         if getattr(scan, "limit", None) is not None:
             # R2: scan-pushed LIMIT semantics live in the trampoline scan
             self.scan_residual_reasons[scan.identity] = "pushed_limit"
             return None
-        if getattr(scan, "_topn_sort_name", None) is not None:
-            # R3: scan-fused TopN stays on the trampoline
-            self.scan_residual_reasons[scan.identity] = "fused_topn"
-            return None
+        # R3 (fused_topn) — CLOSED. `scan._topn_sort_name`/`_topn_limit` is a
+        # trampoline-only decode-skip HINT (WP-02 §9 pass-2 shrink): the
+        # downstream HeapSortNode always compiles to a real native
+        # `set_topn_sink` operator (see the HeapSortNode branch below in
+        # `_compile_scan`) that performs the actual sort/limit/tie-break/null-
+        # order generically over the incoming layout, independent of which
+        # scan Source feeds it. The native scan here simply ignores the hint
+        # and decodes its normal read-set; correctness is unaffected because
+        # the real cut always happens downstream. The only cost is that the
+        # trampoline's pass-2 decode-skip (itself only active when a WHERE
+        # predicate is ALSO pushed) is not available natively yet — the same,
+        # already-accepted single-pass-vs-late-mat tradeoff WP-02 documents
+        # for any predicate-bearing native scan (§9), not something new here.
         manifest = getattr(scan, "manifest", None)
         if manifest is None or manifest.get_file_count() == 0:
             # R7a: no manifest / zero files
@@ -976,6 +1010,7 @@ class _Compiler:
         # not re-added.
         read_scs = [col.schema_column for col in scan.columns]
         seen = {sc.identity for sc in read_scs}
+        predicate_input_names = []
         if predicates:
             for pred in predicates:
                 for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
@@ -994,6 +1029,26 @@ class _Compiler:
                         # R5: BOOL column used as a predicate input (WP-11 fail-closed)
                         self.scan_residual_reasons[scan.identity] = "bool_predicate_input"
                         return None
+                    # A2 fail-closed: a DATE/TIMESTAMP column used as a predicate input
+                    # hits the same relocated-ExprFilter gap as BOOL — the kernel cannot
+                    # evaluate a DATE32/TIMESTAMP64 vector (err_op=11 at runtime),
+                    # pre-existing and unrelated to the zero-projection admission this
+                    # work package closes (it was simply unreachable in the corpus until
+                    # a COUNT(*) WHERE <date/timestamp col> query started routing here —
+                    # confirmed reproducible via `SELECT Mission FROM testdata.missions
+                    # WHERE Lauched_at >= '1957-10-04'::DATE`, a TIMESTAMP64 column,
+                    # independent of this A2 chip). DATE/TIMESTAMP columns that are only
+                    # PROJECTED are unaffected — they decode/retag natively via
+                    # `logical_coerce`. A native DATE/TIMESTAMP-comparison kernel is a
+                    # follow-on (R4/R5-adjacent).
+                    if _physical_type(sc) in (DrakenType.DATE32, DrakenType.TIMESTAMP64):
+                        self.scan_residual_reasons[scan.identity] = "temporal_predicate_input"
+                        return None
+                    # A1: track predicate-input column names to fail closed below on an
+                    # UNSIGNED integer input (see the footer probe after paths). The
+                    # schema collapses every int width to canonical INT64, so the
+                    # unsigned tag is invisible here — it is checked against the footer.
+                    predicate_input_names.append(sc.name)
                     if sc.identity not in seen:
                         seen.add(sc.identity)
                         read_scs.append(sc)
@@ -1078,6 +1133,19 @@ class _Compiler:
             # schema evolution / a row group whose types are not all eligible.
             self.scan_residual_reasons[scan.identity] = "footer_gate"
             return None
+        if predicate_input_names:
+            from opteryx.connectors.parquet_io.pool_reader import any_column_unsigned
+            if any_column_unsigned(paths, predicate_input_names, file_sizes or None):
+                # R5b (A1): an UNSIGNED integer column is a c-native predicate input.
+                # It decodes to an exact-width DK_UINT vector, but the relocated
+                # ExprFilter's bytecode VM cannot read a UINT vector (err_op=11 at
+                # runtime) — the uint comparison kernel is out-of-scope follow-on work
+                # (R4/R5). Fail closed so the predicate stays on the trampoline, which
+                # evaluates it correctly. Projected-only unsigned columns are
+                # unaffected (they decode natively); only unsigned PREDICATE INPUTS
+                # fall back. Mirrors the WP-11 BOOL predicate-input fail-closed.
+                self.scan_residual_reasons[scan.identity] = "unsigned_predicate_input"
+                return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.

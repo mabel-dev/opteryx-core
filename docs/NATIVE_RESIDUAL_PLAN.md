@@ -24,26 +24,39 @@ same scans go native/trampoline as before; the fallbacks are only annotated.
 143 queries → 158 parquet scans observed (16 queries raised on unsupported /
 non-scan reasons — whole-query native-support gaps, out of scope for A0).
 
+**A0 baseline** (before the A1 close-out):
+
 | Source | scans |
 |---|---:|
 | `NativeParquetScanSource` (zero-Python) | 145 |
 | `StreamingScanSource` (trampoline) | **13** |
 
-Residual reasons for the 13 fallbacks:
+Residual reasons for the 13 A0 fallbacks:
 
-| Reason (guard) | battery count | reachable? |
-|---|---:|---|
-| `footer_gate` (R7b) | **10** | ✔ observed |
-| `zero_projection` (R1) | 2 | ✔ observed |
-| `fused_topn` (R3) | 1 | ✔ observed |
-| `pushed_limit` (R2) | 0 | ✔ hand-set |
-| `unlowerable_predicate` (R4) | 0 | ✔ hand-set (regex) |
-| `bool_predicate_input` (R5) | 0 | ✔ hand-set |
-| `non_admissible_kind:<T>` (R6) | 0 | ✔ hand-set (ARRAY) |
-| `no_manifest` (R7a) | 0 | ✖ no SQL trigger |
+| Reason (guard) | A0 count | after A1 | after A2 | reachable? |
+|---|---:|---:|---:|---|
+| `footer_gate` (R7b) | **10** | **1** | 1 | ✔ observed |
+| `zero_projection` (R1) | 2 | 2 | **0** | ✖ closed (A2) |
+| `fused_topn` (R3) | 1 | 1 | 1 | ✔ observed |
+| `pushed_limit` (R2) | 0 | 0 | 0 | ✔ hand-set |
+| `unlowerable_predicate` (R4) | 0 | 0 | 0 | ✔ hand-set (regex) |
+| `bool_predicate_input` (R5) | 0 | 0 | 0 | ✔ hand-set |
+| `unsigned_predicate_input` (R5b, A1) | — | 0 | 0 | ✔ hand-set |
+| `non_admissible_kind:<T>` (R6) | 0 | 0 | 0 | ✔ hand-set (ARRAY) |
+| `no_manifest` (R7a) | 0 | 0 | 0 | ✖ no SQL trigger |
+| `temporal_predicate_input` (new, A2) | — | — | 0 | ✔ observed (missions dataset, not in battery) |
 
-`footer_gate` alone is **77% of all fallbacks** — one close-out clears the
-majority of the residual.
+`footer_gate` was **77% of all A0 fallbacks**. **A1 closed the integer sub-case**:
+after A1 the battery has 4 trampoline scans (native 154 / 158), and `footer_gate`
+drops **10 → 1**. The single remainder is NOT an integer case — it is
+`EventTime::TIMESTAMP[ms]`, a column whose CAST retags an int64 footer column to
+TIMESTAMP the footer's `int64` annotation cannot satisfy (a temporal-cast gap,
+distinct from integer admission).
+
+**A2 closed `zero_projection`** (see the ordered worklist entry below): the battery
+now has 2 trampoline scans (native 156 / 158). A2 also introduced
+`temporal_predicate_input`, a NEW fail-closed guard for a pre-existing gap it
+uncovered (not present in the battery census, but reachable — see below).
 
 ## Corrections to the A0 residual enumeration (findings)
 
@@ -80,27 +93,77 @@ R7b below.
 Ordered by evidence (census count + independence), cheapest-highest-payoff first;
 R4 last because it overlaps uncommitted WIP.
 
-### 1. `footer_gate` (R7b) — **census 10** — *medium* — **DO FIRST**
-`native_scan_supported()` (C-side footer gate,
-`pool_reader.pyx:1629`) rejected the scan. Column-level probing on
-`clickbench_tiny`: bare-INT64 `UserID` passes, but `AdvEngineID`,
-`ResolutionWidth` (int-family) and `EventDate` (UINT16) **reject**. The int
-branch of the gate admits only physical int32/int64 with a logical annotation
-that is empty / `int32` / `int64` / `time[...]` (`pool_reader.pyx:1711-1721`) —
-so **narrow / unsigned integer logical annotations** (`INTEGER(bits,signed)`) and
-UINT16 are refused even though the value widens to INT64 on decode.
-* **Needs:** widen the footer int-gate + native int decode to admit narrow/unsigned
-  integer logical annotations (emit the same widened INT64 the trampoline does).
-* **First step:** add a C-side rejection reason to `native_scan_supported` so the
-  census can sub-tally *which* annotation rejects (the Python census cannot see
-  the C reason today). Highest payoff, largely mechanical, independent.
+### 1. `footer_gate` (R7b) — census 10 → **1** — **CLOSED for integers (A1)**
+`native_scan_supported()` (C-side footer gate, `pool_reader.pyx`) rejected the
+scan. A0 finding: bare-INT64 `UserID` passed, but `AdvEngineID`,
+`ResolutionWidth` (int16) and `EventDate` (uint16) **rejected** — the int branch
+admitted only empty / `int32` / `int64` / `time[...]` logical annotations, so
+narrow / unsigned integer annotations were refused.
 
-### 2. `zero_projection` (R1) — **census 2** — *small–medium*
-`not scan.columns` — a scan with an empty projection (`COUNT(*)` **with** a
-`WHERE`; a bare `COUNT(*)` short-circuits to a statistics response and never
-scans). The predicate column is read as a role-3 column, but no column is emitted.
-* **Needs:** a native zero-column/count Source that emits row-count-only morsels
-  while still decoding + applying the predicate columns. Self-contained.
+**A1 close-out (done).** Three coordinated changes admit every integer width and
+signedness byte-identically to the trampoline:
+1. **Footer gate** (`native_scan_supported`, `pool_reader.pyx`) — the "int" branch
+   now also admits `int8`/`int16`/`uint8`/`uint16`/`uint32`/`uint64` logical
+   annotations.
+2. **Native decode** (`safe_logical` in `rugo/src/parquet/io_pipeline.hpp`) — signed
+   `int8`/`int16` are now direct-eligible (widen to `DK_INT64` like `int32`); before
+   A1 they fell to `DK_POOL`, which the native Source cannot decode for a numeric
+   column. Unsigned widths were already direct (`DK_UINT{8,16,32,64}`, E33).
+3. **Native Source** (`native_parquet_scan_source.hpp`) — `direct_kind_supported` /
+   `draken_type_for` / the numeric-dict branch now handle `DK_UINT{8,16,32,64}` and
+   their dict shapes, tagging exact-width `DRAKEN_UINT*` (matching the trampoline's
+   `_wrap_direct`).
+
+The compiler classifier needed **no** width/signedness packing: the type system
+collapses every integer width to canonical `INT64`
+(`_CATEGORY_TO_CANONICAL[INTEGER]`), so the classifier already tags these "int";
+the exact width is recovered at decode from the parquet IntType annotation.
+
+**Fail-closed (A1, `unsigned_predicate_input` / R5b).** An UNSIGNED column used as a
+c-native **predicate input** stays on the trampoline: it decodes to an exact-width
+`DK_UINT` vector the relocated ExprFilter's bytecode VM cannot read (`err_op=11`;
+the uint compare kernel is out-of-scope R4/R5 follow-on). Detected at plan time via
+`any_column_unsigned` (the footer, since the schema collapses to INT64). Signed
+narrow ints widen to INT64 and work in every role, including as predicate inputs.
+No width is left fail-closed for projection/aggregation — UINT64 has a native
+`DRAKEN_UINT64` vector (no truncation).
+
+**Remaining `footer_gate` (census 1):** `EventTime::TIMESTAMP[ms]` — a temporal-cast
+column, not an integer case (out of A1 scope).
+
+### 2. `zero_projection` (R1) — census 2 → **0** — **CLOSED (A2)**
+`not scan.columns` — a scan with an empty projection. Inventory finding (A2):
+the task's assumed "common no-predicate `COUNT(*)`" shape is a NON-ISSUE — a bare
+`SELECT COUNT(*) FROM t` never reaches a scan at all (`StatisticsOnlyResponseStrategy`
+rewrites it to a manifest-count literal over `$no_table` at the optimizer level, before
+any scan node exists). The ENTIRE reachable residual is `COUNT(*)` **WITH** a `WHERE`:
+the predicate column is read as a role-3 column, but no column is emitted.
+
+**A2 close-out (done).** No engine change was needed — the WP-02 relocated-filter
+machinery already degenerates correctly at emit-set = ∅: `emit_ids`/`emit_indices`
+are naturally empty when `scan.columns` is `[]`, and `ColumnSelectOperator`
+(`src/cpp/engine/engine.hpp`) already handles a zero-index Select, emitting a
+genuine zero-column morsel whose row count rides on `zero_col_rows` — the exact
+contract `UngroupedAggSink`'s CountStar already reads for the trampoline path. The
+ONLY change was removing `_native_scan_plan`'s unconditional bail on
+`not scan.columns` (`compiler.py`): it now only bails when there is ALSO no
+predicate to build a read-set from (a shape with no SQL trigger for parquet scans,
+analogous to `no_manifest`/R7a).
+
+**A2 also uncovered and fail-closed a pre-existing, unrelated gap.** Running the
+newly-native `COUNT(*) WHERE <predicate>` shape against `make q` surfaced
+`SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'::DATE`
+crashing (`ExprFilterOperator ... err_op=11`). Confirmed pre-existing and
+independent of A2 (the identical crash reproduces on
+`SELECT Mission FROM testdata.missions WHERE Lauched_at >= ...`, a plain projection
+untouched by the A2 guard change): a DATE/TIMESTAMP column used as a c-native
+**predicate input** is not safely evaluable by the relocated ExprFilter kernel —
+the same failure class WP-11 already fail-closes for BOOL (R5) and unsigned
+integers (R5b), but no equivalent guard existed for DATE32/TIMESTAMP64. A2 adds
+that guard (`temporal_predicate_input`, alongside the BOOL/unsigned checks in
+`_native_scan_plan`); DATE/TIMESTAMP columns that are only *projected* are
+unaffected. A native DATE/TIMESTAMP-comparison kernel is a follow-on
+(R4/R5-adjacent, not part of A2's scope).
 
 ### 3. `pushed_limit` (R2) — **census 0** (reachable) — *small–medium*
 `scan.limit is not None` — LIMIT semantics currently live in the trampoline scan.

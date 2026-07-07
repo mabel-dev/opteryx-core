@@ -963,7 +963,10 @@ cdef class IpcRowGroupSource:
     def set_pass1_predicate(self, size_t fn, size_t ctx, list cols):
         """Q24 latmat: register the pushed pass-1 predicate on the underlying pipeline
         (forwards to CppIOPipeline). Must be called before the first next_vectors()
-        (i.e. before any row group is submitted)."""
+        (i.e. before any row group is submitted). No-op when all row groups were
+        pruned (self.pipeline is None, n_items == 0) — nothing to scan."""
+        if self.pipeline is None:
+            return
         self.pipeline.set_pass1_predicate(fn, ctx, cols)
 
     cpdef tuple next_vectors(self):
@@ -1660,6 +1663,19 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     cdef bint found
     cdef string s_int32 = b"int32"
     cdef string s_int64 = b"int64"
+    # A1 (E33): narrow / unsigned integer logical annotations rugo's metadata.cpp
+    # emits as "int8"/"int16"/"uint8"/"uint16"/"uint32"/"uint64" (signed int8/16
+    # and every unsigned width). The physical stream is still parquet int32/int64,
+    # so the physical check below is unchanged; only the logical annotation widens.
+    # Signed narrow widens to DK_INT64 on decode; unsigned preserves its exact
+    # width as DK_UINT{8,16,32,64} — both byte-identical to the trampoline
+    # (pool_reader _wrap_direct) and the native Source (draken_type_for).
+    cdef string s_int8 = b"int8"
+    cdef string s_int16 = b"int16"
+    cdef string s_uint8 = b"uint8"
+    cdef string s_uint16 = b"uint16"
+    cdef string s_uint32 = b"uint32"
+    cdef string s_uint64 = b"uint64"
     cdef string s_float32 = b"float32"
     cdef string s_float64 = b"float64"
     cdef string s_byte_array = b"byte_array"
@@ -1715,8 +1731,17 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         # models no TIME logical type from a scan), so a "time[...]"
                         # annotation on an int column is admitted — it flows through
                         # the ordinary int path, byte-identically to the trampoline.
+                        # A1 (E33): admit the full integer logical family — bare
+                        # (empty) / int8 / int16 / int32 / int64 / uint8 / uint16 /
+                        # uint32 / uint64. Signed int8/16 widen to DK_INT64 on decode;
+                        # unsigned widths decode to DK_UINT{8,16,32,64} (exact width).
+                        # direct_kind_for drives the width from the IntType annotation
+                        # itself, so accepting any of these here is sound.
                         if csp.logical_type.size() != 0 and \
+                                csp.logical_type != s_int8 and csp.logical_type != s_int16 and \
                                 csp.logical_type != s_int32 and csp.logical_type != s_int64 and \
+                                csp.logical_type != s_uint8 and csp.logical_type != s_uint16 and \
+                                csp.logical_type != s_uint32 and csp.logical_type != s_uint64 and \
                                 csp.logical_type.find(s_time) != 0:
                             return False
                     elif kind == "float32":
@@ -1770,6 +1795,65 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                 if not found:
                     return False
     return True
+
+
+cpdef bint any_column_unsigned(paths, column_names, file_sizes=None):
+    """A1 — does ANY of ``column_names`` carry an UNSIGNED integer IntType annotation
+    in ANY row group of ANY file (footer logical_type "uint8"/"uint16"/"uint32"/
+    "uint64")?
+
+    Used to FAIL CLOSED when an unsigned column would be a c-native predicate INPUT:
+    the decode preserves the exact unsigned width (DK_UINT{8,16,32,64}) but the
+    relocated native ExprFilter's bytecode VM cannot read a UINT vector (it widens
+    every integer through the signed int-family reader), so a pushed comparison over
+    it raises err_op=11 at runtime. Rather than crash, such a scan stays on the
+    trampoline (which evaluates the predicate correctly), mirroring the WP-11 BOOL
+    predicate-input fail-closed. Signed narrow ints (int8/int16) widen to INT64 and
+    ARE readable, so they are NOT flagged here. The schema collapses every integer
+    width to canonical INT64, so unsignedness is only visible in the footer — hence
+    this probe rather than a schema-type check in the compiler.
+    """
+    cdef FileStats fs
+    cdef const RowGroupStats* rgp
+    cdef const ColumnStats* csp
+    cdef size_t rg_i, ci, n_rg_cols
+    cdef Py_ssize_t k, ncols = len(column_names)
+    cdef const uint8_t* buf_ptr
+    cdef size_t buf_size
+    cdef string s_uint = b"uint"
+    cdef vector[string] wanted
+
+    if ncols == 0:
+        return False
+    for k in range(ncols):
+        name = column_names[k]
+        wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
+
+    for path in paths:
+        if not _is_local_path(path):
+            # A remote scan never reaches the native Source anyway (footer gate rejects
+            # non-local); treat as "cannot prove signed" → not flagged here.
+            continue
+        if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+            envelope, _ = _read_footer_payload(
+                path, file_sizes.get(path, -1) if file_sizes else -1, None
+            )
+            buf_ptr = <const uint8_t*>envelope
+            buf_size = <size_t>len(envelope)
+            fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+            _PARSED_FOOTER_CACHE.put_fs(path, fs)
+        for rg_i in range(fs.row_groups.size()):
+            rgp = &fs.row_groups[rg_i]
+            n_rg_cols = rgp.columns.size()
+            for k in range(ncols):
+                for ci in range(n_rg_cols):
+                    csp = &rgp.columns[ci]
+                    if csp.name != wanted[<size_t>k]:
+                        continue
+                    if csp.logical_type.find(s_uint) == 0:
+                        return True
+                    break
+    return False
 
 
 def iter_row_groups_ipc(

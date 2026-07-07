@@ -243,6 +243,14 @@ struct NativeParquetScanSource : Source {
             case rugo::DK_INT64: case rugo::DK_FLOAT32: case rugo::DK_FLOAT64:
             case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
             case rugo::DK_DECIMAL128: case rugo::DK_BOOL:
+            // A1 (E33): unsigned integer direct kinds — exact-width dense
+            // (DK_UINT8/16/32/64) and dict-shaped (DK_UINT*_DICT). Signed narrow
+            // ints already arrive as DK_INT64 (widened by decode's direct_kind_for),
+            // so only the unsigned family needs new tags here.
+            case rugo::DK_UINT8:  case rugo::DK_UINT16:
+            case rugo::DK_UINT32: case rugo::DK_UINT64:
+            case rugo::DK_UINT8_DICT:  case rugo::DK_UINT16_DICT:
+            case rugo::DK_UINT32_DICT: case rugo::DK_UINT64_DICT:
                 return true;
             default:
                 return false;
@@ -255,7 +263,26 @@ struct NativeParquetScanSource : Source {
             case rugo::DK_FLOAT32:    case rugo::DK_FLOAT32_DICT: return DRAKEN_FLOAT32;
             case rugo::DK_DECIMAL128:                             return DRAKEN_DECIMAL128;
             case rugo::DK_BOOL:                                   return DRAKEN_BOOL;
+            // A1 (E33): preserve the exact declared unsigned width (dense + dict share
+            // the tag), byte-identical to the trampoline's _wrap_direct / _wrap_num_dict_direct.
+            case rugo::DK_UINT8:      case rugo::DK_UINT8_DICT:   return DRAKEN_UINT8;
+            case rugo::DK_UINT16:     case rugo::DK_UINT16_DICT:  return DRAKEN_UINT16;
+            case rugo::DK_UINT32:     case rugo::DK_UINT32_DICT:  return DRAKEN_UINT32;
+            case rugo::DK_UINT64:     case rugo::DK_UINT64_DICT:  return DRAKEN_UINT64;
             default:                                              return DRAKEN_FLOAT64;
+        }
+    }
+
+    // A1 (E33): a numeric dict-shaped direct kind (dictionary values + per-row
+    // uint32 codes). Parallel to the DK_INT64_DICT / DK_FLOAT*_DICT set.
+    static bool is_numeric_dict_kind(int dk) {
+        switch (dk) {
+            case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
+            case rugo::DK_UINT8_DICT:  case rugo::DK_UINT16_DICT:
+            case rugo::DK_UINT32_DICT: case rugo::DK_UINT64_DICT:
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -421,7 +448,7 @@ struct NativeParquetScanSource : Source {
         OwnedBuffer<void> data_buf(data);
         OwnedBuffer<uint8_t> val_buf(validity);
         OwnedBuffer<void> codes_buf;
-        if (dk == rugo::DK_INT64_DICT || dk == rugo::DK_FLOAT64_DICT || dk == rugo::DK_FLOAT32_DICT) {
+        if (is_numeric_dict_kind(dk)) {
             uint32_t data_length = result.columns[i].data_length;
             void* arena = nullptr;
             void* codes = nullptr;

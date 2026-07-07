@@ -18,6 +18,22 @@ UV := $(PYTHON) -m uv
 PIP := $(UV) pip
 PYTEST := $(PYTHON) -m pytest
 COVERAGE := $(PYTHON) -m coverage
+
+# Allocator preload for the benchmark targets (clickbench / tpch / b). The engine
+# makes large per-query allocations that fragment the system allocator, so RSS
+# climbs across queries (and OOMs on Linux prod). Preload a fragmentation-aware
+# allocator so local/CI benchmarks match production behaviour. Platform-split:
+#   Linux → vendored mimalloc via LD_PRELOAD (draken.preload_library_path()).
+#   macOS → jemalloc via DYLD_INSERT_LIBRARIES — mimalloc SIGTRAPs on macOS 3.14t
+#           because it clashes with the interpreter's own bundled mimalloc; jemalloc
+#           does not (see mimalloc_preload_mac_crash memory). `brew install jemalloc`.
+# Empty (allocator not found) => no preload; the target still runs.
+ifeq ($(shell uname),Darwin)
+  _BENCH_JE := $(firstword $(wildcard /opt/homebrew/lib/libjemalloc.dylib /usr/local/lib/libjemalloc.dylib))
+  BENCH_PRELOAD := $(if $(_BENCH_JE),DYLD_INSERT_LIBRARIES=$(_BENCH_JE),)
+else
+  BENCH_PRELOAD = LD_PRELOAD=$(shell $(PYTHON) -c 'import draken; print(draken.preload_library_path() or "")' 2>/dev/null) MIMALLOC_PURGE_DELAY=100
+endif
 MYPY := $(PYTHON) -m mypy
 
 # Parallel job count for compilation
@@ -193,11 +209,11 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=1)
 	$(call print_blue,"Running TPC-H benchmark vs DuckDB...")
 	@clear || true
-	@$(PYTHON) tests/performance/tpch/runner.py
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py
 
 b: check-python
 	@clear || true
-	@$(PYTHON) scratch/brace.py
+	@env $(BENCH_PRELOAD) $(PYTHON) scratch/brace.py
 
 g:
 	@$(PYTHON) tests/groupby_combo_generator_resilient.py --config tests/groupby_combo_tests_config.json
@@ -211,7 +227,7 @@ go:
 clickbench:
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true

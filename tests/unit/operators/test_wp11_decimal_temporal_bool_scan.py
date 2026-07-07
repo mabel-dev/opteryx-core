@@ -336,20 +336,21 @@ def test_mixed_decimal_timestamp_bool(tmp_path, monkeypatch):
 
 # ── fail-closed: a genuinely unadmitted type stays on the trampoline ─────────
 
-def test_fail_closed_unadmitted_uint(tmp_path, monkeypatch):
-    """A UINT column is NOT an admissible WP-11 kind (unsigned ints are a separate
-    follow-on), but rugo decodes it fine — so the scan must fail CLOSED to
-    StreamingScanSource and still produce the correct result (never a silent wrong
-    answer). This is the clean unadmitted-type case: FLBA / nested types are not
-    rugo-decodable on either path, so UINT is the type that isolates the gate."""
+def test_projected_uint_now_native(tmp_path, monkeypatch):
+    """UINT was WP-11's deferred "separate follow-on"; A1 landed it. A PROJECTED uint
+    column now decodes on the native scan (exact-width DRAKEN_UINT*, byte-identical to
+    the trampoline), so this scan selects NativeParquetScanSource. (An unsigned column
+    used as a c-native PREDICATE INPUT still fails closed — covered by the A1 suite
+    test_wp_a1_native_int_widths_scan; here it is projection-only, so it goes native.)"""
     cols = {"u": (pa.uint32(), list(range(200))), "n": (pa.int64(), list(range(200)))}
     ds = _write(str(tmp_path / "fc"), cols)
     sql = "SELECT u, n FROM '%s'" % ds
 
     nat, nat_src = _drain(sql, False, monkeypatch)
-    tmp, _ = _drain(sql, True, monkeypatch)
+    tmp, tmp_src = _drain(sql, True, monkeypatch)
 
-    assert nat_src == ["StreamingScanSource"], nat_src
+    assert nat_src == ["NativeParquetScanSource"], nat_src
+    assert tmp_src == ["StreamingScanSource"], tmp_src
     assert nat == tmp
 
 
