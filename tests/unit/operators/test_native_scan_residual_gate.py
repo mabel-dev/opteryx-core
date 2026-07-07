@@ -83,6 +83,15 @@ def test_native_scan_records_no_residual():
 # below). It stays reachable as a residual only via schema evolution — see
 # HAND_SET / test_residual_reason_reachable — which is a distinct, still-open
 # structural gap, NOT the integer admission this test tracked.
+#
+# `fused_topn` (R3) is PARTIALLY closed by A3: the NO-predicate scan-fused
+# `ORDER BY ... LIMIT` now goes native (see test_fused_topn_no_predicate_now_native
+# below) — a real, measured tradeoff-free case. The composed shape (fused TopN
+# WITH a predicate, e.g. ClickBench Q24) stays fail-closed to the trampoline —
+# admitting it natively was tried and reverted after measuring a ~400%
+# regression on Q24 (losing the trampoline's two-pass late-mat decode-skip on
+# a wide SELECT * over a selective predicate). HAND_SET["fused_topn"] is now
+# that composed-shape trigger, so it stays in the open frontier below.
 _OPEN_CATEGORIES = [
     ("pushed_limit", census.HAND_SET["pushed_limit"]),
     ("fused_topn", census.HAND_SET["fused_topn"]),
@@ -171,6 +180,56 @@ def test_zero_projection_predicate_now_native():
     count rides on the same `zero_col_rows` degenerate path the trampoline already
     used. Was the `zero_projection` strict-xfail frontier; now a hard pass."""
     assert_scan_native("SELECT COUNT(*) FROM 'testdata/flat/formats/parquet' WHERE followers > 0")
+
+
+# ---------------------------------------------------------------------------
+# CLOSED (partially) — A3 scan-fused TopN, NO-predicate case only. The
+# `fused_topn` strict-xfail frontier remains for the composed (fused TopN WITH
+# a predicate) shape — see `_OPEN_CATEGORIES` above.
+#
+# Inventory finding: `scan._topn_sort_name` is a TRAMPOLINE-ONLY decode-skip
+# hint (WP-02 §9 pass-2 shrink) consumed by `_apply_topn` in parquet_read.pyx;
+# it only ever activates when a WHERE predicate is ALSO pushed. The actual
+# sort/limit/tie-break/null-order is always performed by the native
+# `HeapSortNode` -> `set_topn_sink` operator downstream of the scan
+# (compiler.py `_compile_scan`), generically over the incoming layout,
+# independent of scan Source. With NO predicate, the trampoline's own two-pass
+# late-mat never activates either, so admitting natively costs nothing — the
+# pre-existing native TopN sink does the real cut and no new native TopN/
+# heap-select kernel was needed.
+#
+# WITH a predicate, native admission was tried and REVERTED: it forces a full
+# single-pass decode of every projected column, losing the trampoline's
+# late-mat decode-skip — measured ~400% slower on ClickBench Q24 (`SELECT *
+# FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10`) and ~20%
+# on the ClickBench suite overall. That composed shape stays fail-closed to
+# the trampoline (tagged `fused_topn`) until native masked pass-2 decode
+# (WP-02 §9's true two-pass late-mat) exists to recover the decode-skip — a
+# future PERFORMANCE follow-on, not a Python/GIL residual. See
+# tests/unit/operators/test_wp_a3_fused_topn_scan.py for the A/B correctness
+# parity harness (ASC/DESC, ties, NULLs, multi-row-group) and the composed-
+# with-predicate fail-closed assertion.
+# ---------------------------------------------------------------------------
+
+
+def test_fused_topn_no_predicate_now_native():
+    """A3: a scan-fused `ORDER BY ... LIMIT` with NO predicate now selects the
+    native scan (measured no-regression — the trampoline does no decode-skip
+    for this shape either). Was part of the `fused_topn` strict-xfail
+    frontier; now a hard pass for this sub-case."""
+    assert_scan_native("SELECT * FROM testdata.clickbench_tiny ORDER BY EventTime LIMIT 10")
+
+
+def test_fused_topn_with_predicate_stays_trampoline():
+    """The composed shape (fused TopN WITH a predicate, e.g. ClickBench Q24) is
+    a deliberate, measured fail-closed — NOT an oversight. Admitting it
+    natively regressed Q24 ~400% by losing the trampoline's late-mat decode-
+    skip on a wide SELECT * over a selective predicate. Do not flip this
+    without a native masked pass-2 decode to recover that skip."""
+    sources, reasons, err = census.scan_residuals(census.HAND_SET["fused_topn"])
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"StreamingScanSource"}, sources
+    assert set(reasons.values()) == {"fused_topn"}, reasons
 
 
 if __name__ == "__main__":  # pragma: no cover

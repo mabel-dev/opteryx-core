@@ -164,7 +164,14 @@ inline void csv_field(std::string &out, const char *s, size_t n, char delim) {
 inline void json_string(std::string &out, const char *s, size_t n) {
   static const char *HEX = "0123456789abcdef";
   out.push_back('"');
-  for (size_t i = 0; i < n; i++) {
+  size_t i = 0;
+  for (; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c == '"' || c == '\\' || c < 0x20) break;
+  }
+  if (i == n) { out.append(s, n); out.push_back('"'); return; }
+  out.append(s, i);
+  for (; i < n; i++) {
     unsigned char c = (unsigned char)s[i];
     switch (c) {
     case '"':  out.append("\\\""); break;

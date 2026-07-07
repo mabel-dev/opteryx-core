@@ -76,9 +76,19 @@ cdef class PyMorselQueue:
         return bool(ok)
 
     def finish(self):
-        """Signal graceful end-of-data (producer side)."""
+        """Signal graceful end-of-data (producer side). Returns True (the signal is
+        unconditional — unlike put(), finish() cannot be refused)."""
         with nogil:
             self._q.finish()
+        return True
+
+    def wait_finished(self):
+        """Block (GIL released) until the producer has signalled finish() at least
+        once — the consumer's teardown gate on the early-abandon path, AFTER close().
+        No-op if finish() already happened. On the normal path the consumer observes
+        FINISHED from get() instead and never calls this."""
+        with nogil:
+            self._q.wait_finished()
 
     def get(self):
         """Dequeue one item: a Morsel (data), `MQ_FINISHED` (producer finished, all

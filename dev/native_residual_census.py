@@ -117,9 +117,16 @@ _EVOLVING = "testdata/flat/different"
 HAND_SET: Dict[str, str] = {
     # R2 — a scan-pushed LIMIT (no ORDER BY, so not a fused TopN).
     "pushed_limit": "SELECT followers FROM '%s' LIMIT 5" % _FLAT,
-    # R3 (fused_topn) — CLOSED (A3). No SQL trigger left to hand-set here: the
-    # scan-fused ORDER BY ... LIMIT hint is now admitted natively. See
-    # tests/unit/operators/test_wp_a3_fused_topn_scan.py.
+    # R3 (fused_topn) — PARTIALLY closed (A3). The NO-predicate scan-fused
+    # ORDER BY ... LIMIT is admitted natively (measured no-regression). WITH a
+    # predicate it still fails closed — measured ~400% regression on ClickBench
+    # Q24 (`SELECT * ... WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10`)
+    # from losing the trampoline's two-pass late-mat decode-skip. See
+    # tests/unit/operators/test_wp_a3_fused_topn_scan.py and
+    # docs/NATIVE_RESIDUAL_PLAN.md item 6.
+    "fused_topn":
+        "SELECT * FROM testdata.clickbench_tiny WHERE URL LIKE '%google%' "
+        "ORDER BY EventTime LIMIT 10",
     # R4 — a pushed predicate that does not lower to a c-native span (regex).
     "unlowerable_predicate": "SELECT followers FROM '%s' WHERE text RLIKE 'a'" % _FLAT,
     # R5 — a BOOL column used as a predicate input (WP-11 fail-closed).

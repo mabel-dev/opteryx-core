@@ -714,11 +714,24 @@ extensions = [
     # Thread pool (BS::thread_pool via BSThreadPoolBridge). thread_pool_bridge.cpp
     # is the ONE compiled home of bs_pool_bridge_c.h's cross-.so entry points —
     # see that header for why they must live only here.
+    #
+    # extra_compile_args MUST match CPP_FLAGS (-std=c++20), not a hand-rolled
+    # -std=c++17 — this is the EXACT mismatch the "-operators" extension's comment
+    # above warns about ("BS::thread_pool cross-.so ABI mismatch... caused by
+    # differing -std=/feature-macro flags"). BS::thread_pool.hpp branches on
+    # __cplusplus/__cpp_lib_move_only_function (e.g. which move_only_function
+    # implementation it uses), so a -std=c++17-compiled PriorityPool has a
+    # DIFFERENT memory layout than the -std=c++20-compiled one every other
+    # extension that touches it (pool_reader.so, _operators.so, both on
+    # CPP_FLAGS) expects — confirmed 2026-07-07: sharing a shared_ptr<PriorityPool>
+    # from this extension into pool_reader/_operators segfaulted inside
+    # std::priority_queue::emplace on the very first query, isolated to exactly
+    # this mismatch. Gap #3 Phase 2b (docs/DUCKDB_GAP3_DECODE_BUDGET_PLAN.md).
     Extension(
         name="opteryx.compiled.thread_pool",
         sources=["opteryx/compiled/thread_pool.pyx", "opteryx/compiled/thread_pool_bridge.cpp"],
         include_dirs=include_dirs,
-        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+        extra_compile_args=CPP_FLAGS,
         language="c++",
     ),
     # MorselQueue (moodycamel MPMC + LightweightSemaphore; carries shared_ptr[CxxMorsel])

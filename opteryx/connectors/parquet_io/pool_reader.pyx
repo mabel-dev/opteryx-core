@@ -24,8 +24,13 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 from libcpp.pair cimport pair
+from libcpp.memory cimport shared_ptr
 import time
 import struct
+
+# Gap #3 Phase 2b: shares the exec pool with a scan's decode pool instead of two
+# uncoordinated ones — see open_native_scan_plan's `pool` parameter.
+from opteryx.compiled.thread_pool cimport CppThreadPool, PriorityPool
 
 # Native mutex for thread-safe concurrent pull (M4 / no-GIL target). The lock is
 # the real cross-thread synchronisation once the GIL is gone; today it is held
@@ -1530,13 +1535,23 @@ cpdef NativeScanPlan open_native_scan_plan(
     string_types=None,
     decimal_columns=None,
     logical_coerce=None,
+    pool=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
     reusing the same helpers, but returns raw C++ handles instead of a Cython
     `IpcRowGroupSource` — local files only, no signed-URL rewrite, no
     prefetched-footer dicts, no pass-2 masks (first landing; see
-    `NativeScanPlan`'s docstring for the rest of the scope boundary)."""
+    `NativeScanPlan`'s docstring for the rest of the scope boundary).
+
+    ``pool`` (Gap #3 Phase 2b): the query's exec ``CppThreadPool``, if the caller
+    has one available (see ``execute_native``/``compile_to_native``). When given,
+    the scan's decode work SHARES that pool (tagged high-priority internally by
+    ``ParquetIOPipeline``) instead of constructing its own — one CPU budget instead
+    of two uncoordinated ones. ``None`` (the default) is fully supported and
+    unchanged from pre-Phase-2b behaviour: the pipeline self-constructs an
+    exclusive pool sized to ``decode_workers``, e.g. EXPLAIN-only planning, tests
+    that call this directly, or any caller outside the main query-execution path."""
     cdef NativeScanPlan plan = NativeScanPlan()
     plan.footer_map = new unordered_map[string, FileStats]()
     plan.column_names = [c.encode('utf-8') for c in column_names]
@@ -1620,7 +1635,12 @@ cpdef NativeScanPlan open_native_scan_plan(
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
         dyn_pool_size = 256*1024*1024
-    plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
+    cdef shared_ptr[PriorityPool] _shared_handle
+    if pool is not None:
+        _shared_handle = (<CppThreadPool>pool).pool_handle()
+        plan.pipeline_ptr = new ParquetIOPipeline(_shared_handle, 1024)
+    else:
+        plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
     # A pool sink must be wired regardless — the decode worker's pool-path
     # (dk=0) branch expects one to exist even though this plan's Source never
     # routes a column there deliberately (it fails loud on dk=0 instead).

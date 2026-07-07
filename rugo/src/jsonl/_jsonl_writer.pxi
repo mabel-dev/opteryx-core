@@ -23,7 +23,7 @@ cdef extern from "_text_render.hpp" namespace "rugo_text":
     string jsonl_write(const DrakenVector** dvs, const DrakenVector** childs,
                        const int* units, const int* scales,
                        const int* cunits, const int* cscales,
-                       const string* prefixes, size_t ncols, size_t nrows)
+                       const string* prefixes, size_t ncols, size_t nrows) nogil
 
 
 cdef inline int _unit_code(object u):
@@ -87,8 +87,9 @@ def write_jsonl(Morsel morsel not None):
             namebuf.push_back(b':')
             prefixes.push_back(namebuf)
 
-        out = jsonl_write(dvs, child_dvs, units, scales, cunits, cscales,
-                          prefixes.data(), <size_t>ncols, <size_t>nrows)
+        with nogil:
+            out = jsonl_write(dvs, child_dvs, units, scales, cunits, cscales,
+                              prefixes.data(), <size_t>ncols, <size_t>nrows)
         return PyBytes_FromStringAndSize(out.data(), out.size())
     finally:
         free(dvs); free(child_dvs)

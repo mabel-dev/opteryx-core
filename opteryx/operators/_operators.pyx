@@ -110,9 +110,12 @@ cdef extern from "engine/scan_join_demo.hpp" namespace "opteryx::engine" nogil:
         int dop, ErrCtx& err
     )
 
-# ---- REAL (non-demo) engine cutover, piece 1: scan -> filter -> exit, streamed on
-# demand (no pre-materialization) into the REAL production MorselQueue. This is the
-# shape execute() routes to the native engine for; see native_engine_real_filter below.
+# ScanPullFn: the streaming scan pull-on-demand callback. LIVE — ``_scan_pull_trampoline``
+# implements it and ``NativePlan.set_scan_source`` hands it to the engine. (The former
+# narrow ``native_engine_real_*`` Python wrappers that also used it were removed as dead
+# code once the general ``NativePlan``/``native_plan_execute`` engine subsumed them; the
+# ``run_real_*``/demo ``cdef extern`` declarations below are now unused Cython bindings,
+# retained only because their C++ impls back the engine slice unit tests.)
 ctypedef void (*ScanPullFn)(void* scan_ptr, shared_ptr[CxxMorsel]* out,
                             int* finished, int* err_code) noexcept nogil
 
@@ -147,7 +150,7 @@ cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil
 # ---- REAL (non-demo) engine cutover, piece 2: scan -> [filter]* -> SUM/COUNT, streamed
 # on demand (no pre-materialization) — the ungrouped-aggregate counterpart of piece 1.
 # BLOCKING (an aggregate result is a handful of scalars, not a morsel stream), unlike
-# piece 1's streaming queue hand-off — see native_engine_real_aggregate below.
+# piece 1's streaming queue hand-off. (Unused Cython binding — see the ScanPullFn note.)
 cdef extern from "engine/real_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
     AggDemoStats run_real_aggregate_to_result(
         void* scan_ptr, ScanPullFn pull_fn, cppvector[SimplePredicate] predicates,
@@ -157,7 +160,7 @@ cdef extern from "engine/real_aggregate_pipeline.hpp" namespace "opteryx::engine
 # ---- REAL (non-demo) engine cutover, piece 3: scan -> [filter]* -> GROUP BY key ->
 # SUM/COUNT, streamed on demand (no pre-materialization) — the grouped-aggregate
 # counterpart of piece 2. BLOCKING (a grouped result is a handful of rows, not a morsel
-# stream) — see native_engine_real_groupby below.
+# stream). (Unused Cython binding — see the ScanPullFn note.)
 cdef extern from "engine/real_groupby_pipeline.hpp" namespace "opteryx::engine" nogil:
     void run_real_groupby_to_result(
         void* scan_ptr, ScanPullFn pull_fn, cppvector[SimplePredicate] predicates,
@@ -168,8 +171,8 @@ cdef extern from "engine/real_groupby_pipeline.hpp" namespace "opteryx::engine" 
 # ---- REAL (non-demo) engine cutover, piece 4: scan -> [filter]* -> build hash table;
 # scan -> [filter]* -> probe -> SUM/COUNT over one join-output column, streamed on demand
 # (no pre-materialization, BOTH sides) — the inner-equi-join counterpart of pieces 2/3.
-# BLOCKING (an aggregate result is a handful of scalars) — see native_engine_real_join
-# below.
+# BLOCKING (an aggregate result is a handful of scalars). (Unused Cython binding — see
+# the ScanPullFn note.)
 cdef extern from "engine/real_join_pipeline.hpp" namespace "opteryx::engine" nogil:
     AggDemoStats run_real_join_aggregate_to_result(
         void* build_scan_ptr, ScanPullFn build_pull_fn,
@@ -185,8 +188,8 @@ cdef extern from "engine/real_join_pipeline.hpp" namespace "opteryx::engine" nog
 # (opteryx/managers/execution/compiler.py — planning, Python) builds the graph through
 # the NativePlan builder edge (see below); execution is ONE detached native driver
 # task running the whole graph, streaming the terminal pipeline into the production
-# MorselQueue the cursor drains. This is the general form that subsumes the four
-# narrow native_engine_real_* entry points above.
+# MorselQueue the cursor drains. This is the general form that subsumed (and replaced)
+# the four narrow native_engine_real_* entry points, now removed.
 cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
     cdef struct SortKeySpec:
         size_t col_idx
@@ -1728,17 +1731,6 @@ def native_readout_fanout(CppThreadPool pool, breaker, list chunk_lists,
         free(args)
 
 
-cdef struct _StatelessArg:
-    PyObject* head      # worker k's pre-cloned chain head (borrowed)
-    PyObject* exit      # worker k's exit clone (borrowed)
-    PyObject* source    # the shared self-pull source callable (borrowed)
-    PyObject* ctx       # the PipelineContext (borrowed)
-    PyObject* sink      # the SHARED PyMorselQueue (borrowed)
-    PyObject* errors    # shared result list[exc] (borrowed)
-    PyObject* eos       # EOS sentinel to flush after the drive, or NULL (borrowed)
-    int index
-
-
 cdef class NativeFanoutHandle:
     """Keeps a STREAMING fan-out's per-worker arg array alive while the workers run
     asynchronously (they read the borrowed pointers after the fan-out returns). The
@@ -1754,264 +1746,6 @@ cdef class NativeFanoutHandle:
         if self._args != NULL:
             free(self._args)
             self._args = NULL
-
-
-cdef void _stateless_run(_StatelessArg* a) noexcept with gil:
-    """GIL-held body of the native STREAMING stateless/join task: drive [head → exit]
-    into the SHARED sink, then (join shape) flush a terminal EOS through the chain so the
-    join emits its buffered probe results. Records any fault by index, then finishes the
-    sink once (the consumer counts W finishes)."""
-    cdef object exc
-    try:
-        stateless_worker_drive(
-            <BasePlanNode>(<object>a.head), <object>a.exit, <object>a.source,
-            <PipelineContext>(<object>a.ctx), <object>a.sink,
-        )
-        if a.eos != NULL and not (<PipelineContext>(<object>a.ctx)).is_terminated():
-            push_one_to_sink(
-                <BasePlanNode>(<object>a.head), <object>a.exit,
-                <object>a.eos, <object>a.sink,
-            )
-    except BaseException as exc:
-        (<object>a.errors)[a.index] = exc
-    finally:
-        (<object>a.sink).finish()
-
-
-cdef void _stateless_task(void* arg) noexcept nogil:
-    """Native task entry (matches ``native_task_fn``) for the streaming stateless fan-out."""
-    _stateless_run(<_StatelessArg*>arg)
-
-
-def native_stateless_fanout(CppThreadPool pool, list heads, list exits, object source,
-                            PipelineContext ctx, object sink, list errors, object eos=None):
-    """Native STREAMING stateless/join fan-out: submit W native worker tasks that each
-    drive ``[head → exit]`` into the SHARED ``sink`` — WITHOUT blocking (the caller drains
-    the sink concurrently; blocking here would deadlock on backpressure). When ``eos`` is
-    not None (the JOIN shape) each worker flushes that EOS sentinel through its chain
-    after the drive so the join emits its buffered probe results. Returns a
-    ``NativeFanoutHandle`` the caller MUST hold until it has drained all W sink finishes,
-    then drop — it owns the per-worker arg array (borrowed PyObject pointers into the
-    caller's live ``heads``/``exits``/``errors`` lists). Each worker finishes the sink
-    once. The native replacement for the stateless/join ``pool.submit(worker, k)`` loop."""
-    cdef Py_ssize_t W = len(heads)
-    cdef _StatelessArg* args = <_StatelessArg*>malloc(W * sizeof(_StatelessArg))
-    if args == NULL:
-        raise MemoryError()
-    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
-    handle._args = <void*>args
-    cdef PyObject* eos_ptr = (<PyObject*>eos) if eos is not None else NULL
-    cdef Py_ssize_t k
-    for k in range(W):
-        args[k].head = <PyObject*>heads[k]
-        args[k].exit = <PyObject*>exits[k]
-        args[k].source = <PyObject*>source
-        args[k].ctx = <PyObject*>ctx
-        args[k].sink = <PyObject*>sink
-        args[k].errors = <PyObject*>errors
-        args[k].eos = eos_ptr
-        args[k].index = <int>k
-        pool.submit_native(_stateless_task, &args[k])
-    return handle
-
-
-cdef struct _SerialArg:
-    PyObject* chains    # list of (scan, chain_head) tuples, DFS order (borrowed)
-    PyObject* exit      # the terminal Exit node, or None (borrowed)
-    PyObject* ctx       # the PipelineContext (borrowed)
-    PyObject* out_q     # the output PyMorselQueue (borrowed)
-    PyObject* errors    # shared result list[exc] (borrowed)
-
-
-cdef void _serial_run(_SerialArg* a) noexcept with gil:
-    """GIL-held body of the native SERIAL producer task: drive every scan's chain in
-    DFS order via ``drive_scan_to_sink`` (build legs ``finish=False``, the terminal
-    chain feeds the Exit → out_q), then finish out_q. A fault is stashed by the caller's
-    error list; out_q is finished on every exit so the consumer unblocks."""
-    cdef object exc, item
-    cdef list chains = <list>(<object>a.chains)
-    cdef object out_q = <object>a.out_q
-    cdef object exit_node = <object>a.exit
-    cdef PipelineContext ctx = <PipelineContext>(<object>a.ctx)
-    try:
-        for item in chains:
-            if ctx.is_terminated():
-                break
-            drive_scan_to_sink(
-                <BasePlanNode>item[0], <BasePlanNode>item[1], exit_node, ctx, out_q, False
-            )
-        out_q.finish()
-    except BaseException as exc:
-        (<list>(<object>a.errors)).append(exc)
-        out_q.finish()
-
-
-cdef void _serial_task(void* arg) noexcept nogil:
-    """Native task entry (matches ``native_task_fn``) for the serial producer drive."""
-    _serial_run(<_SerialArg*>arg)
-
-
-def native_serial_drive(CppThreadPool pool, list chains, exit_node,
-                        PipelineContext ctx, object out_q, list errors):
-    """Native SERIAL producer drive: submit ONE native task that drives the compiled
-    multi-chain pipeline into ``out_q`` (no Python ``task()`` closure, no Future). The
-    consumer drains ``out_q`` concurrently, so this is NON-blocking and returns a
-    ``NativeFanoutHandle`` the caller holds until it has drained the finish (the handle
-    owns the arg struct of borrowed pointers into the caller's live ``chains``/``errors``
-    and ``ctx``/``out_q``). The native replacement for ``_native_serial_execute``'s
-    Python producer closure."""
-    cdef _SerialArg* a = <_SerialArg*>malloc(sizeof(_SerialArg))
-    if a == NULL:
-        raise MemoryError()
-    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
-    handle._args = <void*>a
-    a.chains = <PyObject*>chains
-    a.exit = <PyObject*>exit_node
-    a.ctx = <PyObject*>ctx
-    a.out_q = <PyObject*>out_q
-    a.errors = <PyObject*>errors
-    pool.submit_native(_serial_task, a)
-    return handle
-
-
-def native_engine_demo_filter(BasePlanNode scan, size_t col_idx, double threshold,
-                              int dop, PyMorselQueue out_q):
-    """Slice 5a edge: pull REAL morsels from ``scan`` (the existing native scan's typed
-    ``next_morsel()`` — already-compiled, not Python bytecode) into a vector, then hand
-    them to the pure C++ morsel-driven engine (``run_filter_to_queue``) which filters and
-    writes results into ``out_q`` — the REAL production output queue. The pull loop here
-    and the final ``out_q.finish()`` are the legitimate EDGE (construction / hand-off);
-    the parallel run inside ``run_filter_to_queue`` is 100% C++, no Python.
-
-    Returns ``(rows_in, rows_out)`` for verification. Demo/proof harness — supports only
-    numeric column filters (see ``NumericFilterOperator``); not the production cutover."""
-    cdef cppvector[shared_ptr[CxxMorsel]] morsels
-    cdef shared_ptr[CxxMorsel] cxm
-    cdef DemoStats stats
-    cdef ErrCtx err
-
-    while True:
-        cxm = scan.next_morsel()
-        if cxm.get() == NULL:
-            break
-        if cxm.get().state == MorselState.END_OF_STREAM:
-            continue
-        morsels.push_back(cxm)
-
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        stats = run_filter_to_queue(morsels, col_idx, threshold, dop, out_q._q, err)
-    out_q.finish()
-    if err.code != 0:
-        raise RuntimeError(f"native_engine_demo_filter: engine error code {err.code}")
-    return stats.rows_in, stats.rows_out
-
-
-def native_engine_demo_aggregate(BasePlanNode scan, size_t col_idx, int dop):
-    """Slice 5b edge: pull REAL morsels from ``scan`` into a vector, then hand them to
-    the pure C++ morsel-driven engine (``run_sum_count``) which runs a genuine
-    NULL-aware SUM/COUNT reduction over a real on-disk numeric column. The pull loop
-    here is the legitimate EDGE; the parallel run inside ``run_sum_count`` is 100% C++,
-    no Python. Returns ``(sum, count)`` for verification against the real opteryx
-    engine's result. Demo/proof harness — not the production cutover."""
-    cdef cppvector[shared_ptr[CxxMorsel]] morsels
-    cdef shared_ptr[CxxMorsel] cxm
-    cdef AggDemoStats stats
-    cdef ErrCtx err
-
-    while True:
-        cxm = scan.next_morsel()
-        if cxm.get() == NULL:
-            break
-        if cxm.get().state == MorselState.END_OF_STREAM:
-            continue
-        morsels.push_back(cxm)
-
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        stats = run_sum_count(morsels, col_idx, dop, err)
-    if err.code != 0:
-        raise RuntimeError(f"native_engine_demo_aggregate: engine error code {err.code}")
-    return stats.sum, stats.count
-
-
-def native_engine_demo_groupby(BasePlanNode scan, size_t key_col_idx, size_t val_col_idx,
-                               int dop):
-    """Slice 5c edge: pull REAL morsels from ``scan`` into a vector, then hand them to
-    the pure C++ morsel-driven engine (``run_group_sum_count``) which runs a genuine
-    GROUP BY (real numeric key column) with NULL-aware SUM/COUNT per group over a real
-    on-disk numeric value column. The pull loop here is the legitimate EDGE; the
-    parallel run is 100% C++, no Python. Returns ``{key: (sum, count)}`` for
-    verification against the real opteryx engine's result. Demo/proof harness — not the
-    production cutover."""
-    cdef cppvector[shared_ptr[CxxMorsel]] morsels
-    cdef shared_ptr[CxxMorsel] cxm
-    cdef cppvector[GroupRow] out
-    cdef ErrCtx err
-    cdef size_t i
-
-    while True:
-        cxm = scan.next_morsel()
-        if cxm.get() == NULL:
-            break
-        if cxm.get().state == MorselState.END_OF_STREAM:
-            continue
-        morsels.push_back(cxm)
-
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        run_group_sum_count(morsels, key_col_idx, val_col_idx, dop, err, out)
-    if err.code != 0:
-        raise RuntimeError(f"native_engine_demo_groupby: engine error code {err.code}")
-
-    result = {}
-    for i in range(out.size()):
-        result[out[i].key] = (out[i].sum, out[i].count)
-    return result
-
-
-def native_engine_demo_join(BasePlanNode build_scan, size_t build_key_col_idx,
-                            BasePlanNode probe_scan, size_t probe_key_col_idx, int dop):
-    """Slice 5d edge: pull REAL morsels from BOTH ``build_scan`` and ``probe_scan`` into
-    vectors, then hand them to the pure C++ morsel-driven engine
-    (``run_hash_join_count``) which drives a genuine hash join — build pipeline builds
-    the hash table, probe pipeline's Operator fans out matches via HAVE_MORE — entirely
-    in C++. The two pull loops here are the legitimate EDGE. Returns the matched row
-    count for verification against the real opteryx engine's INNER JOIN result.
-    Demo/proof harness — not the production cutover."""
-    cdef cppvector[shared_ptr[CxxMorsel]] build_morsels, probe_morsels
-    cdef shared_ptr[CxxMorsel] cxm
-    cdef long long count
-    cdef ErrCtx err
-
-    while True:
-        cxm = build_scan.next_morsel()
-        if cxm.get() == NULL:
-            break
-        if cxm.get().state == MorselState.END_OF_STREAM:
-            continue
-        build_morsels.push_back(cxm)
-
-    while True:
-        cxm = probe_scan.next_morsel()
-        if cxm.get() == NULL:
-            break
-        if cxm.get().state == MorselState.END_OF_STREAM:
-            continue
-        probe_morsels.push_back(cxm)
-
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        count = run_hash_join_count(
-            build_morsels, build_key_col_idx, probe_morsels, probe_key_col_idx, dop, err
-        )
-    if err.code != 0:
-        raise RuntimeError(f"native_engine_demo_join: engine error code {err.code}")
-    return count
 
 
 cdef void _scan_pull_run(void* scan_ptr, shared_ptr[CxxMorsel]* out,
@@ -2069,269 +1803,6 @@ cdef void _scan_pull_trampoline(void* scan_ptr, shared_ptr[CxxMorsel]* out,
     caller's Python stack frame holds the real reference for the run's duration,
     exactly like the slice 5a-d demo bridges' borrowed pointers)."""
     _scan_pull_run(scan_ptr, out, finished, err_code)
-
-
-cdef struct _RealFilterArg:
-    void* scan_ptr      # borrowed PyObject* (the caller's stack frame keeps it alive)
-    size_t col_idx
-    double threshold
-    int dop
-    PyObject* out_q     # the output PyMorselQueue (borrowed)
-    PyObject* errors    # shared result list[exc] (borrowed)
-    void* pool          # opaque BSThreadPoolBridge* (borrowed; caller owns it for the
-                        # life of the query) — dop pipeline workers are submitted to it,
-                        # see executor.hpp. Kept as void*, never dereferenced here: it
-                        # must only be touched via bs_pool_submit_native/wait_native
-                        # (bs_pool_bridge_c.h), which resolve to thread_pool.so's own
-                        # compiled code — see executor.hpp's run_pipeline for why.
-
-
-cdef void _real_filter_run(_RealFilterArg* a) noexcept with gil:
-    """GIL-held body of the real-filter driver task. ``run_real_filter_to_queue`` BLOCKS
-    internally (its own ``run_pipeline`` joins all ``dop`` workers before returning) — that
-    blocking is safe here because it happens on THIS background driver task, not on the
-    caller's thread, so the caller's drain loop runs concurrently the whole time (the
-    bug this replaces: a synchronous call blocked the caller while its own un-drained,
-    bounded ``out_q`` filled and backpressure-deadlocked the very producer the caller was
-    waiting on — found via a real hang during slice-5-cutover verification, fixed by
-    matching ``native_serial_drive``'s submit-then-return-a-handle shape)."""
-    cdef ErrCtx err
-    cdef object exc, scan_obj
-    cdef object out_q = <object>a.out_q
-    cdef RealFilterStats stats
-    err.code = 0
-    err.msg = NULL
-    try:
-        stats = run_real_filter_to_queue(
-            a.scan_ptr, _scan_pull_trampoline, a.col_idx, a.threshold, a.dop,
-            (<PyMorselQueue>out_q)._q, err, a.pool
-        )
-        if err.code != 0:
-            scan_obj = <object><PyObject*>a.scan_ptr
-            exc = (<BasePlanNode>scan_obj)._take_exc()
-            (<list>(<object>a.errors)).append(
-                exc if exc is not None
-                else RuntimeError(f"native_engine_real_filter: engine error code {err.code}")
-            )
-    except BaseException as exc:
-        (<list>(<object>a.errors)).append(exc)
-    finally:
-        out_q.finish()
-
-
-cdef void _real_filter_task(void* arg) noexcept nogil:
-    """Native task entry (matches ``native_task_fn``) for the real-filter driver."""
-    _real_filter_run(<_RealFilterArg*>arg)
-
-
-def native_engine_real_filter(CppThreadPool pool, BasePlanNode scan, size_t col_idx,
-                              double threshold, int dop, PyMorselQueue out_q,
-                              list errors):
-    """The REAL (non-demo) engine cutover, piece 1: scan -> filter -> exit, streamed ON
-    DEMAND from ``scan`` (no pre-pulled vector, unlike the slice 5a-d demo bridges) into
-    the REAL production ``out_q``. NON-BLOCKING: submits ONE native driver task and
-    returns immediately (matches ``native_serial_drive``'s shape) — the caller MUST drain
-    ``out_q`` concurrently (it is bounded; backpressure blocks the producer until drained)
-    and hold the returned ``NativeFanoutHandle`` until it has seen the sink finish. Every
-    per-morsel scan pull is driven by the pure C++ executor calling back into
-    ``_scan_pull_trampoline`` only when a worker actually needs the next morsel.
-
-    The driver itself runs on a lone detached ``std::thread`` (``spawn_detached_native_task``),
-    NOT as a task submitted to ``pool`` — it, in turn, submits the ``dop`` pipeline
-    workers to ``pool`` and blocks on ``wait_native()`` (see ``run_pipeline``'s pool
-    overload in executor.hpp). Running the driver AS a task on the same pool it then
-    recurses into corrupts that pool's task queue (reproduced as a real SIGSEGV inside
-    BS::thread_pool); a single ad-hoc thread for the driver sidesteps that entirely and
-    is not itself a free-threaded-attach risk (that hazard is specifically a multi-thread
-    pile-up, not one thread attaching alone). ``pool`` should be sized for exactly
-    ``dop`` — it is only ever asked to run the ``dop`` pipeline workers now."""
-    cdef _RealFilterArg* a = <_RealFilterArg*>malloc(sizeof(_RealFilterArg))
-    if a == NULL:
-        raise MemoryError()
-    cdef NativeFanoutHandle handle = NativeFanoutHandle.__new__(NativeFanoutHandle)
-    handle._args = <void*>a
-    a.scan_ptr = <void*><PyObject*>scan
-    a.col_idx = col_idx
-    a.threshold = threshold
-    a.dop = dop
-    a.out_q = <PyObject*>out_q
-    a.errors = <PyObject*>errors
-    a.pool = <void*>pool._pool
-    spawn_detached_native_task(_real_filter_task, a)
-    return handle
-
-
-cdef CompareOp _compare_op_from_str(str op) except *:
-    if op == "Gt": return CompareOp.Gt
-    if op == "GtEq": return CompareOp.GtEq
-    if op == "Lt": return CompareOp.Lt
-    if op == "LtEq": return CompareOp.LtEq
-    if op == "Eq": return CompareOp.Eq
-    if op == "NotEq": return CompareOp.NotEq
-    raise ValueError(f"native_engine_real_aggregate: unsupported comparison op {op!r}")
-
-
-def native_engine_real_aggregate(CppThreadPool pool, BasePlanNode scan, list predicates,
-                                 size_t col_idx, int dop):
-    """REAL (non-demo) engine cutover, piece 2: scan -> [filter]* -> SUM/COUNT, streamed
-    ON DEMAND from ``scan`` (no pre-pulled vector, same ``_scan_pull_trampoline`` callback
-    as ``native_engine_real_filter``) — the ungrouped-aggregate counterpart of piece 1.
-
-    BLOCKING: an aggregate result is a handful of scalars, not a morsel stream, so (unlike
-    piece 1) this runs synchronously and returns ``(sum, count)`` directly — no queue, no
-    ``NativeFanoutHandle``. ``predicates`` is a list of ``(col_idx: int, op: str,
-    threshold: float)`` triples, ANDed together (same convention as
-    ``native_engine_real_filter``); pass an empty list for a bare scan -> aggregate (no
-    WHERE clause).
-
-    GIL is released for the run itself (``with nogil``) since ``run_real_aggregate_to_result``
-    blocks internally (its own ``run_pipeline`` submits ``dop`` workers to ``pool`` and joins
-    them) — each worker's scan pull transiently RE-ACQUIRES the GIL inside
-    ``_scan_pull_trampoline`` to call the real ``next_morsel()``; holding the GIL across the
-    whole blocking call here would deadlock those re-acquisitions."""
-    cdef cppvector[SimplePredicate] cpreds
-    cdef SimplePredicate sp
-    for p_col_idx, p_op, p_threshold in predicates:
-        sp.col_idx = <size_t>p_col_idx
-        sp.op = _compare_op_from_str(p_op)
-        sp.threshold = <double>p_threshold
-        cpreds.push_back(sp)
-
-    cdef ErrCtx err
-    err.code = 0
-    err.msg = NULL
-    cdef void* scan_ptr = <void*><PyObject*>scan
-    cdef void* pool_ptr = <void*>pool._pool
-    cdef AggDemoStats stats
-    with nogil:
-        stats = run_real_aggregate_to_result(
-            scan_ptr, _scan_pull_trampoline, cpreds, col_idx, dop, err, pool_ptr
-        )
-    if err.code != 0:
-        exc = scan._take_exc()
-        if exc is not None:
-            raise exc
-        raise RuntimeError(f"native_engine_real_aggregate: engine error code {err.code}")
-    return stats.sum, stats.count
-
-
-def native_engine_real_groupby(CppThreadPool pool, BasePlanNode scan, list predicates,
-                               size_t key_col_idx, size_t val_col_idx, int dop):
-    """REAL (non-demo) engine cutover, piece 3: scan -> [filter]* -> GROUP BY key ->
-    SUM/COUNT, streamed ON DEMAND from ``scan`` (same ``_scan_pull_trampoline`` callback
-    as pieces 1/2) — the grouped-aggregate counterpart of ``native_engine_real_aggregate``.
-
-    BLOCKING (a grouped result is a handful of rows, not a morsel stream). Returns a list
-    of ``(key: int, sum: float, count: int)`` tuples, one per distinct key. ``predicates``
-    is the same ``(col_idx, op, threshold)`` convention as the other real-cutover pieces;
-    pass an empty list for no WHERE clause. Non-null grouping keys only (matches
-    ``GroupSumCountSink``'s documented scope) — NULL keys are dropped, not grouped
-    together, so this is NOT eligible for a query whose grouping key can be NULL.
-
-    Same GIL-release rationale as ``native_engine_real_aggregate``: the call blocks
-    internally (``run_pipeline`` submits ``dop`` workers to ``pool`` and joins them), and
-    each worker's scan pull transiently re-acquires the GIL inside
-    ``_scan_pull_trampoline`` — holding the GIL across the whole call would deadlock
-    those re-acquisitions."""
-    cdef cppvector[SimplePredicate] cpreds
-    cdef SimplePredicate sp
-    for p_col_idx, p_op, p_threshold in predicates:
-        sp.col_idx = <size_t>p_col_idx
-        sp.op = _compare_op_from_str(p_op)
-        sp.threshold = <double>p_threshold
-        cpreds.push_back(sp)
-
-    cdef ErrCtx err
-    err.code = 0
-    err.msg = NULL
-    cdef void* scan_ptr = <void*><PyObject*>scan
-    cdef void* pool_ptr = <void*>pool._pool
-    cdef cppvector[GroupRow] out
-    with nogil:
-        run_real_groupby_to_result(
-            scan_ptr, _scan_pull_trampoline, cpreds, key_col_idx, val_col_idx, dop,
-            err, pool_ptr, out
-        )
-    if err.code != 0:
-        exc = scan._take_exc()
-        if exc is not None:
-            raise exc
-        raise RuntimeError(f"native_engine_real_groupby: engine error code {err.code}")
-    cdef size_t i
-    result = []
-    for i in range(out.size()):
-        result.append((out[i].key, out[i].sum, out[i].count))
-    return result
-
-
-def native_engine_real_join(CppThreadPool pool, BasePlanNode build_scan,
-                            list build_predicates, size_t build_key_col_idx,
-                            list build_payload_col_idx,
-                            BasePlanNode probe_scan,
-                            list probe_predicates, size_t probe_key_col_idx,
-                            list probe_payload_col_idx,
-                            size_t agg_col_idx, int dop):
-    """REAL (non-demo) engine cutover, piece 4: scan -> [filter]* -> build hash table;
-    scan -> [filter]* -> probe -> SUM/COUNT over one join-output column, streamed ON
-    DEMAND from BOTH ``build_scan``/``probe_scan`` (same ``_scan_pull_trampoline``
-    callback as pieces 1-3) — the inner-equi-join counterpart of
-    ``native_engine_real_aggregate``/``native_engine_real_groupby``.
-
-    Scope matches native_hash_join.hpp: INNER equi-join, single INT64/DECIMAL key,
-    fixed-width or VARCHAR (arena-aware) payload columns, no NULL payloads. Aggregates a
-    SINGLE raw join-output column (``agg_col_idx``, indexing the COMBINED space: build
-    payload columns first in ``build_payload_col_idx`` order, then probe payload columns
-    in ``probe_payload_col_idx`` order) — deliberately narrower than a computed
-    expression (matches pieces 2/3's own scope, not native_hash_join_pipeline.hpp's
-    AggregateSpec expression trees).
-
-    BLOCKING (a handful of scalars). Same GIL-release rationale as the other real-cutover
-    pieces: the call blocks internally (two sequential `run_pipeline`s, each submitting
-    `dop` workers to `pool` and joining them), and each worker's scan pull transiently
-    re-acquires the GIL inside `_scan_pull_trampoline` — holding the GIL across the whole
-    call would deadlock those re-acquisitions."""
-    cdef cppvector[SimplePredicate] build_cpreds, probe_cpreds
-    cdef SimplePredicate sp
-    for p_col_idx, p_op, p_threshold in build_predicates:
-        sp.col_idx = <size_t>p_col_idx
-        sp.op = _compare_op_from_str(p_op)
-        sp.threshold = <double>p_threshold
-        build_cpreds.push_back(sp)
-    for p_col_idx, p_op, p_threshold in probe_predicates:
-        sp.col_idx = <size_t>p_col_idx
-        sp.op = _compare_op_from_str(p_op)
-        sp.threshold = <double>p_threshold
-        probe_cpreds.push_back(sp)
-
-    cdef cppvector[size_t] build_payload, probe_payload
-    for idx in build_payload_col_idx:
-        build_payload.push_back(<size_t>idx)
-    for idx in probe_payload_col_idx:
-        probe_payload.push_back(<size_t>idx)
-
-    cdef ErrCtx err
-    err.code = 0
-    err.msg = NULL
-    cdef void* build_scan_ptr = <void*><PyObject*>build_scan
-    cdef void* probe_scan_ptr = <void*><PyObject*>probe_scan
-    cdef void* pool_ptr = <void*>pool._pool
-    cdef AggDemoStats stats
-    with nogil:
-        stats = run_real_join_aggregate_to_result(
-            build_scan_ptr, _scan_pull_trampoline, build_cpreds, build_key_col_idx,
-            build_payload,
-            probe_scan_ptr, _scan_pull_trampoline, probe_cpreds, probe_key_col_idx,
-            probe_payload,
-            agg_col_idx, dop, err, pool_ptr
-        )
-    if err.code != 0:
-        exc = build_scan._take_exc()
-        if exc is None:
-            exc = probe_scan._take_exc()
-        if exc is not None:
-            raise exc
-        raise RuntimeError(f"native_engine_real_join: engine error code {err.code}")
-    return stats.sum, stats.count
 
 
 cpdef BasePlanNode spawn_worker(BasePlanNode op):
@@ -2438,7 +1909,8 @@ cpdef void push_right_one(JoinNode join, object morsel) except *:
 # THE ENGINE — general pipeline-graph execution (engine.hpp). Built by the plan
 # compiler (managers/execution/compiler.py) at PLAN time through NativePlan's builder
 # methods; run by ONE detached native driver task streaming into the production
-# MorselQueue. This subsumes the four narrow native_engine_real_* entry points.
+# MorselQueue. This subsumed (and replaced) the four narrow native_engine_real_* entry
+# points, which have been removed.
 # =====================================================================================
 
 cdef int _expr_filter_tramp(void* instrs, int count, const CxxMorsel* m,
@@ -2564,6 +2036,24 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
             return False
         return False
     return True
+
+
+cdef CompareOp _compare_op_from_str(object op) except *:
+    """Map an AST compare-op name ("Gt"/"GtEq"/"Lt"/"LtEq"/"Eq"/"NotEq") to the engine
+    ``CompareOp`` enum. Used by ``NativePlan.add_filter``'s SimplePredicate builder."""
+    if op == "Gt":
+        return CompareOp.Gt
+    elif op == "GtEq":
+        return CompareOp.GtEq
+    elif op == "Lt":
+        return CompareOp.Lt
+    elif op == "LtEq":
+        return CompareOp.LtEq
+    elif op == "Eq":
+        return CompareOp.Eq
+    elif op == "NotEq":
+        return CompareOp.NotEq
+    raise ValueError(f"native engine: unsupported compare op {op!r}")
 
 
 cdef class NativePlan:
@@ -2912,16 +2402,54 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
     return out
 
 
+cdef class NativeErrorSlot:
+    """Native terminal-error channel for the plan driver — replaces the borrowed
+    Python ``errors`` list the detached driver used to append to. The driver records
+    the engine's ``ErrCtx`` here (a C ``int`` code plus a ``std::string`` COPY of the
+    message, taken while the ErrCtx pointer is still valid) after ``eng.run()`` returns
+    and BEFORE it finishes the output queue; the Python consumer reads it on its own
+    thread once the queue is finished and builds/raises the exception. NO Python object
+    is created or mutated on the native driver thread — ``code`` is a C int and ``msg``
+    a C++ ``std::string`` — so this is a purely-native slot, not a borrowed container."""
+    cdef public int code
+    cdef string msg
+
+    def __cinit__(self):
+        self.code = 0
+
+    def message(self):
+        """Consumer-side: the native message copy decoded to str ('' if none)."""
+        return self.msg.decode("utf-8") if self.msg.size() else ""
+
+
+def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
+    """Consumer-side (GIL, the legitimate result-marshaling edge): turn the driver's
+    terminal ErrCtx into the exception to raise. Prefer a scan's stashed Python
+    exception (rich traceback, e.g. a decode error), else synthesize a RuntimeError
+    from the native code + message. Called by execute_native AFTER the output queue is
+    finished (every worker joined), so reading the scans' stashed exceptions is
+    race-free. Returns None when there is no terminal error."""
+    cdef object exc
+    cdef object scan_obj
+    if errslot.code == 0:
+        return None
+    for scan_obj in nplan.scans:
+        exc = (<BasePlanNode>scan_obj)._take_exc()
+        if exc is not None:
+            return exc
+    return RuntimeError(
+        "native engine: error code %d: %s" % (errslot.code, errslot.message() or "unknown")
+    )
+
+
 cdef struct _EnginePlanArg:
     void* engine        # Engine* — borrowed; the NativePlan PyObject owns it
     int dop
     PyObject* nplan     # borrowed NativePlan (keeps engine + scans alive via caller)
     PyObject* out_q     # borrowed PyMorselQueue
-    PyObject* errors    # borrowed list[BaseException]
-    PyObject* done      # borrowed threading.Event — set() in the driver's finally so
-                        # the consumer can safely wait for the driver to stop touching
-                        # the pool before shutting it down (multi-pipeline runs keep
-                        # submitting between pipelines; see execute_native's finally)
+    PyObject* errslot   # borrowed NativeErrorSlot — the driver records the terminal
+                        # ErrCtx (code + msg copy) here; NO Python object is mutated.
+                        # The consumer reads it after the queue is finished.
     void* pool          # opaque BSThreadPoolBridge* — see executor.hpp for why void*
 
 
@@ -2932,13 +2460,18 @@ cdef void _engine_plan_run(_EnginePlanArg* a) noexcept with gil:
     in native code stalls every stop-the-world (GC) — which then parks every scan
     worker at its trampoline's attach, wedging the whole query. Proven live: the
     lldb signature is ``_PyThreadState_Attach -> _PyParkingLot_Park`` under
-    ``submit_work_native`` on all workers while this thread sits in
-    ``wait_native``. Attach is only held here for the prologue/epilogue Python
-    touches (error marshalling, queue finish)."""
+    ``submit_work_native`` on all workers while this thread sits in ``wait_native``.
+
+    Completion/error are coordinated back to the consumer with NATIVE machinery only:
+    the terminal ErrCtx is copied into the native ``errslot`` (a C int + a std::string,
+    no Python object), and the driver's LAST act is ``out_q.finish()`` — the queue's
+    own out-of-band finish signal. The consumer observing the queue finished is itself
+    proof this driver has returned from ``eng.run()`` (every worker joined) and stopped
+    touching the pool; it then builds the Python exception from ``errslot`` on its own
+    thread. No borrowed ``threading.Event`` and no borrowed ``list`` are touched here."""
     cdef ErrCtx err
-    cdef object exc, scan_obj
     cdef object out_q = <object>a.out_q
-    cdef object nplan = <object>a.nplan
+    cdef NativeErrorSlot errslot = <NativeErrorSlot>(<object>a.errslot)
     cdef Engine* eng = <Engine*>a.engine
     cdef int dop = a.dop
     cdef void* pool = a.pool
@@ -2947,25 +2480,17 @@ cdef void _engine_plan_run(_EnginePlanArg* a) noexcept with gil:
     try:
         with nogil:
             eng.run(dop, pool, err)
-        if err.code != 0:
-            exc = None
-            for scan_obj in (<NativePlan>nplan).scans:
-                exc = (<BasePlanNode>scan_obj)._take_exc()
-                if exc is not None:
-                    break
-            if exc is None:
-                exc = RuntimeError(
-                    "native engine: error code %d: %s" % (
-                        err.code,
-                        (<bytes>err.msg).decode("utf-8") if err.msg != NULL else "unknown",
-                    )
-                )
-            (<list>(<object>a.errors)).append(exc)
-    except BaseException as py_exc:
-        (<list>(<object>a.errors)).append(py_exc)
+        # Record the terminal ErrCtx natively (int + std::string copy — the msg
+        # pointer is "valid at raise time", i.e. now, so copy it before it can go
+        # stale). The consumer turns this into the Python exception after finish().
+        errslot.code = err.code
+        if err.code != 0 and err.msg != NULL:
+            errslot.msg = string(err.msg)
     finally:
+        # LAST act: the sole, purely-native completion signal. Ordered AFTER the
+        # errslot write (which the consumer reads only once it observes finish, so
+        # the write is visible via the finish/get acquire-release handshake).
         out_q.finish()
-        (<object>a.done).set()
 
 
 cdef void _engine_plan_task(void* arg) noexcept nogil:
@@ -2973,14 +2498,20 @@ cdef void _engine_plan_task(void* arg) noexcept nogil:
 
 
 def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
-                        PyMorselQueue out_q, list errors, done_event):
-    """Run a compiled native plan. NON-BLOCKING: submits ONE detached native driver
-    (spawn_detached_native_task — see native_engine_real_filter's docstring for why a
-    lone detached thread, not a task on ``pool``) which runs every pipeline in the
-    graph at degree ``dop`` on ``pool`` and streams the terminal pipeline into
-    ``out_q``. The caller MUST drain ``out_q`` concurrently (bounded; backpressure
-    blocks the producer) and hold BOTH the returned handle and ``nplan`` alive until
-    it has seen the sink finish."""
+                        PyMorselQueue out_q, NativeErrorSlot errslot):
+    """Run a compiled native plan. NON-BLOCKING: submits ONE detached native driver via
+    spawn_detached_native_task — a lone detached std::thread, NOT a task on ``pool``:
+    the driver blocks in ``eng.run``'s native wait with no safe point, and on
+    free-threaded CPython a thread that stays ATTACHED while blocked in native code
+    stalls every stop-the-world GC (see ``_engine_plan_run``'s docstring). It runs every
+    pipeline in the graph at degree ``dop`` on ``pool`` and streams the terminal
+    pipeline into
+    ``out_q``. Completion is signalled purely natively via ``out_q.finish()`` (the
+    driver's last act) and any terminal error via the native ``errslot``. The caller
+    MUST drain ``out_q`` concurrently (bounded; backpressure blocks the producer) and
+    hold the returned handle, ``nplan``, ``out_q`` and ``errslot`` alive until it has
+    seen the sink finish (normal path) or waited via ``out_q.wait_finished()`` (abandon
+    path)."""
     cdef _EnginePlanArg* a = <_EnginePlanArg*>malloc(sizeof(_EnginePlanArg))
     if a == NULL:
         raise MemoryError()
@@ -2990,8 +2521,7 @@ def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
     a.dop = dop
     a.nplan = <PyObject*>nplan
     a.out_q = <PyObject*>out_q
-    a.errors = <PyObject*>errors
-    a.done = <PyObject*>done_event
+    a.errslot = <PyObject*>errslot
     a.pool = <void*>pool._pool
     spawn_detached_native_task(_engine_plan_task, a)
     return handle

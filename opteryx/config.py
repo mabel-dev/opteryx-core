@@ -190,7 +190,7 @@ MAX_EXECUTION_WORKERS: int = (
 """Central parallel execution scheduler width (M4). **Softcoded by default**:
 unset / "auto" / an impossible value (0 or less) is stored as 0 here, and
 resolve_worker_count derives the effective width from the core count,
-max(1, min(cpu-2, 8)). **An explicit positive integer is HONOURED EXACTLY** — never
+max(1, min(cpu-2, 16)). **An explicit positive integer is HONOURED EXACTLY** — never
 clamped, never silently overridden, not even to the physical core count; set 128 and
 you get 128 workers (oversubscription is warned once, not reduced). Worker count is
 degree-of-parallelism only — it never selects a code path (W=1 is one worker, not the
@@ -202,13 +202,6 @@ PARALLEL_MIN_ROWS: int = int(get("PARALLEL_MIN_ROWS", 262_144))
 buffered rows than this runs through the operator's own (single-producer) path —
 below it the per-worker clone + thread setup dominate. Bench-tuned; set to 0 to
 force-engage parallel on any input (testing/benchmarking)."""
-
-M4_USE_SCHEDULER: bool = str(get("M4_USE_SCHEDULER", "1")).lower() in ("1", "true", "yes")
-"""Route data pipelines through the M4 event-DAG scheduler
-(managers/execution/scheduler_engine.py) — THE data executor (Step 7). Default ON: the
-scheduler hosts the per-shape drive substrate (parallel_engine.py) under its
-Event/Executor DAG (one Event per pipeline segment; build-before-probe as add_dependency
-edges). See docs/GENERIC_PIPELINE_PARALLELISM_DESIGN.md §5 Step 7."""
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
@@ -241,7 +234,6 @@ class Features:
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
     parquet_pool_reader = str(get("FEATURE_PARQUET_POOL_READER", "1")).lower() in ("1", "true", "yes")
-    parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
     enable_dpccp_join_planning = bool(get("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", True))
 

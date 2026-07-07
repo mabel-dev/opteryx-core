@@ -17,6 +17,7 @@ BSThreadPoolBridge::submit() which returns a concurrent.futures.Future.
 
 from cpython.ref cimport PyObject
 from libcpp.string cimport string
+from libcpp.memory cimport shared_ptr
 
 # Py_DECREF from cpython.ref takes `object`, not `PyObject*`.
 # Declare a raw alias so we can balance new-reference returns from C++.
@@ -74,6 +75,13 @@ cdef class CppThreadPool:
         """Block until all native tasks submitted so far complete, WITHOUT tearing
         the pool down (reusable for a second native fan-out)."""
         self._pool.wait_native()
+
+    cdef shared_ptr[PriorityPool] pool_handle(self) noexcept nogil:
+        """Gap #3 Phase 2b: hand out the underlying priority pool so a parquet
+        scan can share it instead of constructing its own decode pool (see
+        ParquetIOPipeline's injecting constructor, rugo/src/parquet/io_pipeline.hpp).
+        Caller must not outlive this pool's teardown (see submit_native's note)."""
+        return self._pool.pool_handle()
 
     def __enter__(self):
         return self

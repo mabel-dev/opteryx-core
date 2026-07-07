@@ -832,13 +832,51 @@ class ParquetIOPipeline {
         std::vector<uint8_t> row_mask;           // empty = no mask (decode all rows)
     };
 
-    std::shared_ptr<BS::light_thread_pool> decode_pool_;
+    // Priority-capable pool (Gap #3 Phase 2b): same vendored BS::thread_pool template
+    // as the plain BS::light_thread_pool this used to be (light_thread_pool IS
+    // thread_pool<tp::none> — see BS_thread_pool.hpp), feature flag on. Decode tasks
+    // submit at BS::pr::high so they don't queue behind exec-pool backlog when this
+    // pool is SHARED with the execution engine (see owns_pool_ below). A pool with
+    // only one priority ever used behaves identically to tp::none, so this is safe
+    // for the standalone-constructor (self-owned, no injection) path too.
+    std::shared_ptr<BS::thread_pool<BS::tp::priority>> decode_pool_;
+    // True when this pipeline constructed decode_pool_ itself (the original,
+    // standalone-rugo-compatible path) — safe to decode_pool_->wait() on shutdown,
+    // since the pool is exclusive to this pipeline. False when the pool was INJECTED
+    // (shared with other work, e.g. the execution engine's aggregate/sort tasks) —
+    // decode_pool_->wait() would then block on unrelated tasks finishing, which is
+    // wrong; shutdown must instead drain only THIS pipeline's own pending_work_.
+    bool owns_pool_ = true;
     // Multi-producer (4 decode workers) / single-consumer (Python-side caller)
     // queue. Lock contention is negligible vs the IO/decode cost per item.
     std::deque<MorselRef> result_queue_;
+    // Gap #3 Phase 2b (deadlock fix): claimable queue of not-yet-decoded work,
+    // guarded by queue_mutex_. submit_row_group pushes the WorkItem HERE and
+    // dispatches a pool ticket that merely CLAIMS from here (run_one_pending) —
+    // the ticket is not the work. A puller blocked in wait_and_get_result can
+    // then claim and decode an item ITSELF instead of waiting for a free pool
+    // worker (which, when this pool is shared with the exec engine, may never
+    // exist — the reentrant-pool deadlock). Whoever pops an item under the lock
+    // owns it; the paired ticket that finds the queue empty is a no-op.
+    std::deque<WorkItem> pending_items_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     size_t queue_capacity_;
+    // Gap #3 Phase 2b (teardown safety): count of dispatched pool TICKETS that may
+    // still touch `this`, decremented as each ticket's ABSOLUTE last action (after
+    // the trailing queue_cv_.notify in decode_row_group). Distinct from pending_work_
+    // (which counts undecoded ROWGROUPS): pending_work_ hitting 0 means "all work
+    // counted", NOT "all tickets referencing `this` have finished". On the injected
+    // (shared) pool we cannot decode_pool_->wait() to guarantee that, so wait_shutdown
+    // spins on this reaching 0 — a spin (not a cv-wait) so there is no condvar for a
+    // ticket to notify after ~ParquetIOPipeline has destroyed it (a notify-after-free
+    // the old pending_work_ cv-wait was latently exposed to).
+    std::atomic<int> tickets_inflight_{0};
+    // Observability: how many row groups were decoded INLINE by a blocked puller
+    // (via the wait_and_get_result help-loop) rather than by a pool worker. A
+    // sustained non-zero value is the "exec starved of decode results" signal a
+    // future WIP-rebalancing controller would react to.
+    std::atomic<uint64_t> inline_decodes_{0};
 
     // Thread-local HTTP client: each BS worker thread owns its own HttpClient
     // and thus its own CURLSH connection cache. Eliminates CURL_LOCK_DATA_CONNECT
@@ -1001,6 +1039,43 @@ class ParquetIOPipeline {
     static std::string fetch_url_for(const std::string& path) {
         if (path.substr(0, 5) == "gs://") return gcs_to_https(path);
         return path;
+    }
+
+    // Gap #3 Phase 2b: a pool ticket's body — claim ONE pending item and decode it.
+    // If the queue is empty (a helper already claimed everything), this is a no-op:
+    // items and tickets are counted 1:1 per submit but not identity-paired, so some
+    // tickets legitimately find nothing. pending_work_ is balanced by decode_row_group
+    // (which the caller only reaches when it actually claimed an item).
+    void run_one_pending() {
+        WorkItem item;
+        {
+            std::lock_guard<std::mutex> lk(queue_mutex_);
+            if (pending_items_.empty()) return;
+            item = std::move(pending_items_.front());
+            pending_items_.pop_front();
+        }
+        decode_row_group(item);
+    }
+
+    // Gap #3 Phase 2b: enqueue work + dispatch its claiming ticket. Ordering is
+    // load-bearing: pending_work_++ FIRST (before the item is claimable, so a
+    // helper/ticket that grabs it and runs decode_row_group's pending_work_-- can
+    // never drive the counter negative), THEN publish the item, THEN count+dispatch
+    // the ticket. The ticket decrements tickets_inflight_ as its LAST act, after
+    // run_one_pending (hence after decode_row_group's trailing queue_cv_.notify) —
+    // so tickets_inflight_==0 guarantees no ticket will touch `this` again.
+    void enqueue_pending(WorkItem&& item) {
+        pending_work_++;
+        {
+            std::lock_guard<std::mutex> lk(queue_mutex_);
+            pending_items_.push_back(std::move(item));
+        }
+        queue_cv_.notify_one();  // wake a helper blocked in wait_and_get_result
+        tickets_inflight_.fetch_add(1, std::memory_order_relaxed);
+        decode_pool_->detach_task([this]() {
+            run_one_pending();
+            tickets_inflight_.fetch_sub(1, std::memory_order_release);
+        }, BS::pr::high);
     }
 
     void decode_row_group(const WorkItem& item) {
@@ -1378,9 +1453,23 @@ class ParquetIOPipeline {
     }
 
  public:
+    // Standalone path (unchanged behaviour): self-constructs an exclusive pool.
+    // Kept for the standalone rugo wheel and any caller that doesn't inject one —
+    // rugo/ stays opteryx-free; nothing here depends on the execution engine.
     ParquetIOPipeline(int decode_workers = 4,
                       size_t result_queue_capacity = 256)
-        : decode_pool_(std::make_shared<BS::light_thread_pool>(decode_workers)),
+        : decode_pool_(std::make_shared<BS::thread_pool<BS::tp::priority>>(decode_workers)),
+          owns_pool_(true),
+          queue_capacity_(result_queue_capacity) {}
+
+    // Injection path (Gap #3 Phase 2b): shares an externally-owned pool (e.g. the
+    // execution engine's exec pool) instead of constructing its own. The caller
+    // retains ownership and lifetime responsibility for `pool` — it must outlive
+    // this pipeline. wait_shutdown() will NOT call pool->wait() (see owns_pool_).
+    ParquetIOPipeline(std::shared_ptr<BS::thread_pool<BS::tp::priority>> pool,
+                      size_t result_queue_capacity = 256)
+        : decode_pool_(std::move(pool)),
+          owns_pool_(false),
           queue_capacity_(result_queue_capacity) {}
 
     ~ParquetIOPipeline() {
@@ -1425,17 +1514,12 @@ class ParquetIOPipeline {
                           const std::vector<ColumnStats>& column_stats) {
         if (shutdown_) return;
 
-        pending_work_++;
-
         WorkItem item;
         item.path = path;
         item.rg_idx = rg_idx;
         item.column_names = column_names;
         item.column_stats = column_stats;
-
-        decode_pool_->detach_task([this, item = std::move(item)]() {
-            decode_row_group(item);
-        });
+        enqueue_pending(std::move(item));
     }
 
     /**
@@ -1449,18 +1533,13 @@ class ParquetIOPipeline {
                           const std::vector<uint8_t>& row_mask) {
         if (shutdown_) return;
 
-        pending_work_++;
-
         WorkItem item;
         item.path = path;
         item.rg_idx = rg_idx;
         item.column_names = column_names;
         item.column_stats = column_stats;
         item.row_mask = row_mask;
-
-        decode_pool_->detach_task([this, item = std::move(item)]() {
-            decode_row_group(item);
-        });
+        enqueue_pending(std::move(item));
     }
 
     bool try_get_result(MorselRef& out) {
@@ -1479,16 +1558,40 @@ class ParquetIOPipeline {
      */
     bool wait_and_get_result(MorselRef& out) {
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        queue_cv_.wait(lk, [this]() {
-            return !result_queue_.empty() || shutdown_.load(std::memory_order_relaxed);
-        });
-        if (result_queue_.empty()) {
-            return false;  // shutdown and nothing left
+        while (true) {
+            if (!result_queue_.empty()) {
+                out = std::move(result_queue_.front());
+                result_queue_.pop_front();
+                queue_cv_.notify_one();  // wake a blocked producer if queue was full
+                return true;
+            }
+            if (shutdown_.load(std::memory_order_relaxed)) {
+                return false;  // shutdown and nothing left
+            }
+            // Gap #3 Phase 2b (deadlock fix): rather than block waiting for a free
+            // pool worker to produce a result — which, on a pool SHARED with the exec
+            // engine, may never happen if every worker (including this thread's) is
+            // itself blocked here — claim a pending item and decode it OURSELVES.
+            // This guarantees progress: if we are blocked, either a result is in
+            // flight (we loop and take it), or an item is claimable (we decode it),
+            // or pending_work_ is drained (shutdown/return). No all-wait state exists.
+            if (!pending_items_.empty()) {
+                WorkItem item = std::move(pending_items_.front());
+                pending_items_.pop_front();
+                inline_decodes_.fetch_add(1, std::memory_order_relaxed);
+                lk.unlock();
+                decode_row_group(item);  // does its own queue_mutex_ locking + notify
+                lk.lock();
+                continue;  // our decode likely enqueued a result — re-check
+            }
+            // Nothing ready and nothing to help with: sleep until a pool worker
+            // produces a result, a new item is published, or we shut down.
+            queue_cv_.wait(lk, [this]() {
+                return !result_queue_.empty()
+                    || shutdown_.load(std::memory_order_relaxed)
+                    || !pending_items_.empty();
+            });
         }
-        out = std::move(result_queue_.front());
-        result_queue_.pop_front();
-        queue_cv_.notify_one();  // wake a blocked producer if queue was full
-        return true;
     }
 
     // WP-8: signal early cancellation. Non-blocking — flips the flag and wakes
@@ -1504,8 +1607,29 @@ class ParquetIOPipeline {
     void wait_shutdown() {
         shutdown_ = true;
         queue_cv_.notify_all();
-        if (decode_pool_) {
+        if (!decode_pool_) return;
+        if (owns_pool_) {
+            // Exclusive pool: safe to wait for EVERYTHING in it, nothing else
+            // submits here.
             decode_pool_->wait();
+        } else {
+            // Shared/injected pool (Gap #3 Phase 2b): pool->wait() would block on
+            // unrelated work (other operators' tasks, possibly another query's), so
+            // we cannot use it. We must still guarantee no dispatched ticket touches
+            // `this` after we return (the destructor is about to free queue_mutex_/
+            // queue_cv_/pending_items_). pending_work_==0 is INSUFFICIENT for that —
+            // it means "all rowgroups decoded", but a ticket's body (run_one_pending
+            // + the trailing tickets_inflight_ decrement, and decode_row_group's
+            // trailing queue_cv_.notify) can still be executing after the last
+            // pending_work_-- lands. So wait on tickets_inflight_ (decremented as
+            // each ticket's ABSOLUTE last action) reaching 0. SPIN, not a cv-wait:
+            // a cv-wait here would itself be the object a still-running ticket
+            // notifies into after we've been destroyed (the notify-after-free the
+            // old pending_work_ cv-wait was latently exposed to). Teardown-only, so
+            // the brief spin cost is irrelevant.
+            while (tickets_inflight_.load(std::memory_order_acquire) != 0) {
+                std::this_thread::yield();
+            }
         }
     }
 

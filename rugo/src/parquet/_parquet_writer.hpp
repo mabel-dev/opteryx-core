@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef HAVE_ZSTD
@@ -831,6 +832,72 @@ inline std::vector<uint8_t> encode_dict_indices(const uint32_t *codes, size_t n,
   return out;
 }
 
+// Cheap pre-check before the full auto-build hash pass: sample up to
+// SAMPLE_CAP present values at an even stride across the column and check
+// whether the sample already looks essentially all-distinct. If so, the full
+// build (which hashes up to present/2 rows before its own cap kicks in — see
+// DICT_MAX_CARDINALITY below) is very unlikely to succeed, so skip straight to
+// PLAIN instead of paying for it. A stride (not a prefix) avoids being fooled
+// by column locality (e.g. a value that's constant for a leading run then
+// diverges). This can only cost a compression opportunity on a low-cardinality
+// column whose sample happened to look diverse — never a correctness issue,
+// since PLAIN is always a valid fallback and the full build's own cap still
+// applies whenever this pre-check doesn't fire.
+static const size_t DICT_SAMPLE_CAP = 512;
+static const double DICT_SAMPLE_DISTINCT_THRESHOLD = 0.95;
+
+template <typename T>
+inline bool dict_sample_looks_high_cardinality(const T *vals, const uint8_t *validity,
+                                               size_t num_rows, size_t present) {
+  if (present <= DICT_SAMPLE_CAP)
+    return false; // column is small enough that the full build is cheap anyway
+  const size_t stride = num_rows / DICT_SAMPLE_CAP;
+  std::unordered_set<T> seen;
+  size_t sampled = 0;
+  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
+    if (!is_valid(validity, i))
+      continue;
+    seen.insert(vals[i]);
+    sampled++;
+  }
+  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+}
+
+inline bool dict_sample_looks_high_cardinality_f64(const double *vals, const uint8_t *validity,
+                                                    size_t num_rows, size_t present) {
+  if (present <= DICT_SAMPLE_CAP)
+    return false;
+  const size_t stride = num_rows / DICT_SAMPLE_CAP;
+  std::unordered_set<uint64_t> seen;
+  size_t sampled = 0;
+  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
+    if (!is_valid(validity, i))
+      continue;
+    uint64_t bits;
+    std::memcpy(&bits, &vals[i], 8);
+    seen.insert(bits);
+    sampled++;
+  }
+  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+}
+
+inline bool dict_sample_looks_high_cardinality_str(const StrSlice *vals, const uint8_t *validity,
+                                                    size_t num_rows, size_t present) {
+  if (present <= DICT_SAMPLE_CAP)
+    return false;
+  const size_t stride = num_rows / DICT_SAMPLE_CAP;
+  std::unordered_set<std::string_view> seen;
+  size_t sampled = 0;
+  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
+    if (!is_valid(validity, i))
+      continue;
+    const StrSlice &s = vals[i];
+    seen.insert(std::string_view((const char *)s.ptr, s.len));
+    sampled++;
+  }
+  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+}
+
 // Auto-build a dictionary over fixed-width values. Returns false (=> emit
 // PLAIN) once the distinct count exceeds the gate; on success `dict` holds the
 // unique values in first-seen order and `codes` one code per logical row.
@@ -1374,23 +1441,31 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
         if (present > 0) {
           switch (rg_cols[i].type) {
           case PT_INT32:
-            built = build_numeric_dict<int32_t>(rg_cols[i].i32, rg_cols[i].validity,
-                                                rg_rows, present, bd.i32, bd.codes);
+            if (!dict_sample_looks_high_cardinality<int32_t>(rg_cols[i].i32, rg_cols[i].validity,
+                                                              rg_rows, present))
+              built = build_numeric_dict<int32_t>(rg_cols[i].i32, rg_cols[i].validity,
+                                                  rg_rows, present, bd.i32, bd.codes);
             if (built) { dcol.i32 = bd.i32.data(); dcol.dict_count = (uint32_t)bd.i32.size(); }
             break;
           case PT_INT64:
-            built = build_numeric_dict<int64_t>(rg_cols[i].i64, rg_cols[i].validity,
-                                                rg_rows, present, bd.i64, bd.codes);
+            if (!dict_sample_looks_high_cardinality<int64_t>(rg_cols[i].i64, rg_cols[i].validity,
+                                                              rg_rows, present))
+              built = build_numeric_dict<int64_t>(rg_cols[i].i64, rg_cols[i].validity,
+                                                  rg_rows, present, bd.i64, bd.codes);
             if (built) { dcol.i64 = bd.i64.data(); dcol.dict_count = (uint32_t)bd.i64.size(); }
             break;
           case PT_DOUBLE:
-            built = build_double_dict(rg_cols[i].f64, rg_cols[i].validity,
-                                      rg_rows, present, bd.f64, bd.codes);
+            if (!dict_sample_looks_high_cardinality_f64(rg_cols[i].f64, rg_cols[i].validity,
+                                                         rg_rows, present))
+              built = build_double_dict(rg_cols[i].f64, rg_cols[i].validity,
+                                        rg_rows, present, bd.f64, bd.codes);
             if (built) { dcol.f64 = bd.f64.data(); dcol.dict_count = (uint32_t)bd.f64.size(); }
             break;
           case PT_BYTE_ARRAY:
-            built = build_string_dict(rg_cols[i].strs, rg_cols[i].validity,
-                                      rg_rows, present, bd.strs, bd.codes);
+            if (!dict_sample_looks_high_cardinality_str(rg_cols[i].strs, rg_cols[i].validity,
+                                                         rg_rows, present))
+              built = build_string_dict(rg_cols[i].strs, rg_cols[i].validity,
+                                        rg_rows, present, bd.strs, bd.codes);
             if (built) { dcol.strs = bd.strs.data(); dcol.dict_count = (uint32_t)bd.strs.size(); }
             break;
           default:

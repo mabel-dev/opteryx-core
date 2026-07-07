@@ -44,7 +44,7 @@ cdef class DistinctNode(BasePlanNode):
     # collector, `_push_impl` routes each input morsel into per-worker bins by
     # hash(dedup-key) % W instead of deduping — the dedup runs later, in parallel,
     # on the disjoint bins. None = normal serial dedup. Mirrors the grouped-agg
-    # `_engine` swap (parallel_engine._ScatterCollectEngine).
+    # scatter-collector `_engine` swap.
     cdef public object _scatter_engine
 
     def __init__(self, properties=None, **parameters):

@@ -22,6 +22,7 @@ cdef extern from "morsel_queue.hpp" nogil:
         cbool put(shared_ptr[CxxMorsel] m)
         MorselQueueStatus get(shared_ptr[CxxMorsel]& out)
         void finish()
+        void wait_finished()
         void close()
         cbool closed()
         size_t capacity()

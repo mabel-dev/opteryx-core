@@ -14,9 +14,11 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.pair cimport pair
 from libcpp.unordered_map cimport unordered_map
+from libcpp.memory cimport shared_ptr
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
+from opteryx.compiled.thread_pool cimport CppThreadPool, PriorityPool
 from rugo.parquet_reader cimport ColumnStats, RowGroupStats, FileStats
 
 
@@ -58,6 +60,10 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
 
     cdef cppclass ParquetIOPipeline:
         ParquetIOPipeline(int decode_workers, size_t queue_capacity) except +
+        # Gap #3 Phase 2b: shares an externally-owned priority pool (the query's
+        # exec CppThreadPool) instead of self-constructing one — see the injecting
+        # constructor in io_pipeline.hpp for the ownership/lifetime contract.
+        ParquetIOPipeline(shared_ptr[PriorityPool] pool, size_t queue_capacity) except +
         void submit_row_group(
             const string& path, int rg_idx,
             const vector[string]& column_names,
@@ -159,6 +165,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     string_types=*,
     decimal_columns=*,
     logical_coerce=*,
+    pool=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed

@@ -18,9 +18,6 @@ class Dataset(enum.Enum):
     TINY = "testdata.clickbench_tiny"
     MID = "scratch.hits_mid"
     FULL_SPLIT = "scratch.hits"
-    FULL_SPLIT_RUGO = "scratch.hits_rugo"
-    FULL_SPLIT_RUGO_250K = "scratch.hits_rugo_250k"
-    FULL_SPLIT_RUGO_125K = "scratch.hits_rugo_125k"
     FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k" # preferred
     FULL_SINGLE = "scratch.hits_single"
 

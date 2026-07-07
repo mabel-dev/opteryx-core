@@ -18,7 +18,7 @@
 
 namespace rugo_text {
 
-typedef void (*EmitFn)(std::string &, const struct Col &, size_t);
+typedef void (*EmitFn)(std::string &, struct Col &, size_t);
 
 struct Col {
   const DrakenVector *dv;    // original column (validity + per-cell formatters)
@@ -29,6 +29,7 @@ struct Col {
   EmitFn emit;               // resolved once per column
   void *free_data;           // cast result block to draken_free (else null)
   const uint32_t *free_sel;  // owned cast selection to draken_free (else null)
+  std::string scratch;       // reused per-row JSON staging buffer (ec_array only)
 };
 
 // Fetch the rendered string cell at logical row i from a string-source vector.
@@ -44,33 +45,33 @@ static inline bool sv_cell(const DrakenVector &sv, size_t i, const char *&p,
 }
 
 // ---- JSON cell emitters ----
-static void ej_raw(std::string &o, const Col &c, size_t i) {
+static void ej_raw(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n;
   if (sv_cell(c.sv, i, p, n)) o.append(p, n); else o.append("null");
 }
-static void ej_quoted(std::string &o, const Col &c, size_t i) {
+static void ej_quoted(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n;
   if (sv_cell(c.sv, i, p, n)) { o.push_back('"'); o.append(p, n); o.push_back('"'); }
   else o.append("null");
 }
-static void ej_string(std::string &o, const Col &c, size_t i) {
+static void ej_string(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n;
   if (sv_cell(c.sv, i, p, n)) json_string(o, p, n); else o.append("null");
 }
-static void ej_float(std::string &o, const Col &c, size_t i) {
+static void ej_float(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_FLOAT64) fmt_double(o, ((const double *)c.dv->data)[p]);
   else fmt_double(o, ((const float *)c.dv->data)[p]);
 }
-static void ej_decimal(std::string &o, const Col &c, size_t i) {
+static void ej_decimal(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_DECIMAL)
     fmt_decimal(o, (__int128)((const int64_t *)c.dv->data)[p], c.scale);
   else { __int128 v; std::memcpy(&v, (const uint8_t *)c.dv->data + (size_t)p * 16, 16); fmt_decimal(o, v, c.scale); }
 }
-static void ej_time(std::string &o, const Col &c, size_t i) {
+static void ej_time(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
   o.push_back('"');
@@ -78,13 +79,13 @@ static void ej_time(std::string &o, const Col &c, size_t i) {
   else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.unit);
   o.push_back('"');
 }
-static void ej_timestamp(std::string &o, const Col &c, size_t i) {
+static void ej_timestamp(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   o.push_back('"');
   fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.unit);
   o.push_back('"');
 }
-static void ej_array(std::string &o, const Col &c, size_t i) {
+static void ej_array(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   const int32_t *offs = (const int32_t *)c.dv->data;
   uint32_t p = c.dv->selection[i];
@@ -93,43 +94,43 @@ static void ej_array(std::string &o, const Col &c, size_t i) {
   for (int32_t k = s; k < e; k++) { if (k > s) o.push_back(','); render_json_scalar(o, c.child, (size_t)k, c.cunit, c.cscale); }
   o.push_back(']');
 }
-static void ej_null(std::string &o, const Col &c, size_t i) { (void)c; (void)i; o.append("null"); }
+static void ej_null(std::string &o, Col &c, size_t i) { (void)c; (void)i; o.append("null"); }
 
 // ---- CSV cell emitters (null -> empty field) ----
-static void ec_raw(std::string &o, const Col &c, size_t i) {
+static void ec_raw(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n; if (sv_cell(c.sv, i, p, n)) o.append(p, n);
 }
-static void ec_string(std::string &o, const Col &c, size_t i) {
+static void ec_string(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n; if (sv_cell(c.sv, i, p, n)) csv_field(o, p, n, c.delim);
 }
-static void ec_float(std::string &o, const Col &c, size_t i) {
+static void ec_float(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_FLOAT64) fmt_double(o, ((const double *)c.dv->data)[p]);
   else fmt_double(o, ((const float *)c.dv->data)[p]);
 }
-static void ec_decimal(std::string &o, const Col &c, size_t i) {
+static void ec_decimal(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_DECIMAL)
     fmt_decimal(o, (__int128)((const int64_t *)c.dv->data)[p], c.scale);
   else { __int128 v; std::memcpy(&v, (const uint8_t *)c.dv->data + (size_t)p * 16, 16); fmt_decimal(o, v, c.scale); }
 }
-static void ec_time(std::string &o, const Col &c, size_t i) {
+static void ec_time(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_TIME64) fmt_time(o, ((const int64_t *)c.dv->data)[p], c.unit);
   else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.unit);
 }
-static void ec_timestamp(std::string &o, const Col &c, size_t i) {
+static void ec_timestamp(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.unit);
 }
-static void ec_array(std::string &o, const Col &c, size_t i) {
+static void ec_array(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
-  std::string tmp; ej_array(tmp, c, i); csv_field(o, tmp.data(), tmp.size(), c.delim);
+  c.scratch.clear(); ej_array(c.scratch, c, i); csv_field(o, c.scratch.data(), c.scratch.size(), c.delim);
 }
-static void ec_null(std::string &o, const Col &c, size_t i) { (void)o; (void)c; (void)i; }
+static void ec_null(std::string &o, Col &c, size_t i) { (void)o; (void)c; (void)i; }
 
 static inline void vr_to_dv(const VecResult &vr, DrakenVector &dv) {
   dv.data = vr.data; dv.selection = vr.selection; dv.validity = vr.validity;

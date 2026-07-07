@@ -30,6 +30,14 @@
 #include <condition_variable>
 #include "BS_thread_pool.hpp"
 
+// Gap #3 Phase 2b: a plain (non-template) name for this specific instantiation, so
+// Cython's `cdef extern from` (which declares TYPE-parameterised cppclasses, not
+// non-type/enum-value template parameters like BS::tp::priority) can reference it
+// as `shared_ptr[PriorityPool]`. Identical type to BS::thread_pool<BS::tp::priority>
+// wherever that's spelled out directly (e.g. rugo's io_pipeline.hpp) — a `using`
+// alias, not a distinct type; no cast needed crossing between the two spellings.
+using PriorityPool = BS::thread_pool<BS::tp::priority>;
+
 
 /**
  * Thread-safe result container: holds the result or exception until the Python
@@ -205,13 +213,20 @@ public:
  */
 class BSThreadPoolBridge {
 private:
-    std::shared_ptr<BS::light_thread_pool> pool_;
+    // Gap #3 Phase 2b: priority-capable (same vendored template as before,
+    // light_thread_pool IS thread_pool<tp::none> — see BS_thread_pool.hpp), so the
+    // execution engine's pool can be handed to a scan (ParquetIOPipeline's injecting
+    // constructor, rugo/src/parquet/io_pipeline.hpp) and share one CPU budget instead
+    // of running two uncoordinated pools. Decode tasks submit at BS::pr::high there;
+    // everything submitted through this bridge (aggregate/sort/join/etc.) defaults to
+    // BS::pr::normal, unchanged from today's effective FIFO ordering.
+    std::shared_ptr<PriorityPool> pool_;
     std::string name_;
     int max_workers_;
 
 public:
     BSThreadPoolBridge(int max_workers, const std::string& name)
-        : pool_(std::make_shared<BS::light_thread_pool>(max_workers)),
+        : pool_(std::make_shared<PriorityPool>(max_workers)),
           name_(name),
           max_workers_(max_workers) {}
 
@@ -263,8 +278,22 @@ public:
      * native-worker-drive path — the per-morsel drive runs without a Python
      * callable bouncing through `ResultContainer`/`TaskWrapper`.
      */
-    void submit_native(void (*fn)(void*), void* arg) {
-        pool_->detach_task([fn, arg]() { fn(arg); });
+    void submit_native(void (*fn)(void*), void* arg, BS::priority_t priority = BS::pr::normal) {
+        pool_->detach_task([fn, arg]() { fn(arg); }, priority);
+    }
+
+    /**
+     * Gap #3 Phase 2b: expose the underlying pool so it can be shared with a
+     * scan (ParquetIOPipeline's injecting constructor). Caller must not outlive
+     * this bridge's own pool teardown — the returned shared_ptr keeps the pool
+     * alive independently, but submitting to it after this bridge shuts down
+     * races with nothing since BS::thread_pool::detach_task after destruction
+     * is undefined; callers are expected to stop submitting once the query that
+     * owns this bridge completes, same lifetime discipline as every other use
+     * of this pool today.
+     */
+    std::shared_ptr<PriorityPool> pool_handle() const {
+        return pool_;
     }
 
     /**

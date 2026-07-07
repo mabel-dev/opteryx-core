@@ -15,6 +15,8 @@
 # Phase 1 scope: INT64, FLOAT64, BOOL, VARCHAR/NVARCHAR/VARBINARY; PLAIN,
 # UNCOMPRESSED, single row group. Other physical types fail loud.
 
+cimport cython
+
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int8_t, int16_t, int32_t, int64_t
 from libc.string cimport memcpy
 from libcpp.string cimport string
@@ -81,6 +83,17 @@ from parquet_writer cimport (
     CODEC_UNCOMPRESSED,
     CODEC_ZSTD,
 )
+
+
+@cython.cdivision(True)
+cdef inline int64_t _floordiv_pos(int64_t a, int64_t b) noexcept nogil:
+    """Floor division for a positive divisor b (Python `//` semantics), in
+    plain C arithmetic so it's usable inside `with nogil` blocks — Cython's
+    default `//`/`%` on C ints requires the GIL for the zero-division check."""
+    cdef int64_t q = a / b
+    if a % b != 0 and a < 0:
+        q -= 1
+    return q
 
 
 cdef inline void _put_u32le(uint8_t* dst, size_t off, uint32_t v) noexcept nogil:
@@ -278,19 +291,24 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         dict_n = dv.data_length
         dict_shape = use_dict and dict_n >= 1 and dict_n < <uint32_t>nrows
 
+        # Below: per-column setup (Python attribute/name access, validation)
+        # happens under the GIL; the O(nrows) materialization loop for each
+        # branch runs `with nogil` — it only touches typed C/C++ locals.
+
         if t == DRAKEN_INT64:
             tmp64 = vector[int64_t]()
             src64 = <const int64_t*>dv.data
-            if dict_shape:
-                tmp64.resize(dict_n)
-                for j in range(dict_n):
-                    tmp64[j] = src64[j]
-                did_preserve = True
-            else:
-                tmp64.resize(nrows)
-                for j in range(nrows):
-                    tmp64[j] = src64[sel[j]]
-                ci.dict_enabled = use_dict
+            with nogil:
+                if dict_shape:
+                    tmp64.resize(dict_n)
+                    for j in range(dict_n):
+                        tmp64[j] = src64[j]
+                    did_preserve = True
+                else:
+                    tmp64.resize(nrows)
+                    for j in range(nrows):
+                        tmp64[j] = src64[sel[j]]
+                    ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.i64 = i64_store.back().data()
@@ -298,30 +316,31 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
             # Narrow integers widen losslessly to INT64.
             tmp64 = vector[int64_t]()
-            if dict_shape:
-                tmp64.resize(dict_n)
-                if t == DRAKEN_INT32:
-                    for j in range(dict_n):
-                        tmp64[j] = (<const int32_t*>dv.data)[j]
-                elif t == DRAKEN_INT16:
-                    for j in range(dict_n):
-                        tmp64[j] = (<const int16_t*>dv.data)[j]
+            with nogil:
+                if dict_shape:
+                    tmp64.resize(dict_n)
+                    if t == DRAKEN_INT32:
+                        for j in range(dict_n):
+                            tmp64[j] = (<const int32_t*>dv.data)[j]
+                    elif t == DRAKEN_INT16:
+                        for j in range(dict_n):
+                            tmp64[j] = (<const int16_t*>dv.data)[j]
+                    else:
+                        for j in range(dict_n):
+                            tmp64[j] = (<const int8_t*>dv.data)[j]
+                    did_preserve = True
                 else:
-                    for j in range(dict_n):
-                        tmp64[j] = (<const int8_t*>dv.data)[j]
-                did_preserve = True
-            else:
-                tmp64.resize(nrows)
-                if t == DRAKEN_INT32:
-                    for j in range(nrows):
-                        tmp64[j] = (<const int32_t*>dv.data)[sel[j]]
-                elif t == DRAKEN_INT16:
-                    for j in range(nrows):
-                        tmp64[j] = (<const int16_t*>dv.data)[sel[j]]
-                else:
-                    for j in range(nrows):
-                        tmp64[j] = (<const int8_t*>dv.data)[sel[j]]
-                ci.dict_enabled = use_dict
+                    tmp64.resize(nrows)
+                    if t == DRAKEN_INT32:
+                        for j in range(nrows):
+                            tmp64[j] = (<const int32_t*>dv.data)[sel[j]]
+                    elif t == DRAKEN_INT16:
+                        for j in range(nrows):
+                            tmp64[j] = (<const int16_t*>dv.data)[sel[j]]
+                    else:
+                        for j in range(nrows):
+                            tmp64[j] = (<const int8_t*>dv.data)[sel[j]]
+                    ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.i64 = i64_store.back().data()
@@ -330,36 +349,37 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             # Unsigned integers widen to INT64. Note: UINT64 values exceeding INT64_MAX
             # are truncated (parquet has no native unsigned type).
             tmp64 = vector[int64_t]()
-            if dict_shape:
-                tmp64.resize(dict_n)
-                if t == DRAKEN_UINT64:
-                    for j in range(dict_n):
-                        tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[j]
-                elif t == DRAKEN_UINT32:
-                    for j in range(dict_n):
-                        tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[j]
-                elif t == DRAKEN_UINT16:
-                    for j in range(dict_n):
-                        tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[j]
+            with nogil:
+                if dict_shape:
+                    tmp64.resize(dict_n)
+                    if t == DRAKEN_UINT64:
+                        for j in range(dict_n):
+                            tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[j]
+                    elif t == DRAKEN_UINT32:
+                        for j in range(dict_n):
+                            tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[j]
+                    elif t == DRAKEN_UINT16:
+                        for j in range(dict_n):
+                            tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[j]
+                    else:
+                        for j in range(dict_n):
+                            tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[j]
+                    did_preserve = True
                 else:
-                    for j in range(dict_n):
-                        tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[j]
-                did_preserve = True
-            else:
-                tmp64.resize(nrows)
-                if t == DRAKEN_UINT64:
-                    for j in range(nrows):
-                        tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[sel[j]]
-                elif t == DRAKEN_UINT32:
-                    for j in range(nrows):
-                        tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[sel[j]]
-                elif t == DRAKEN_UINT16:
-                    for j in range(nrows):
-                        tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[sel[j]]
-                else:
-                    for j in range(nrows):
-                        tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[sel[j]]
-                ci.dict_enabled = use_dict
+                    tmp64.resize(nrows)
+                    if t == DRAKEN_UINT64:
+                        for j in range(nrows):
+                            tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[sel[j]]
+                    elif t == DRAKEN_UINT32:
+                        for j in range(nrows):
+                            tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[sel[j]]
+                    elif t == DRAKEN_UINT16:
+                        for j in range(nrows):
+                            tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[sel[j]]
+                    else:
+                        for j in range(nrows):
+                            tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[sel[j]]
+                    ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.i64 = i64_store.back().data()
@@ -367,16 +387,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_FLOAT64:
             tmpf = vector[double]()
             srcf = <const double*>dv.data
-            if dict_shape:
-                tmpf.resize(dict_n)
-                for j in range(dict_n):
-                    tmpf[j] = srcf[j]
-                did_preserve = True
-            else:
-                tmpf.resize(nrows)
-                for j in range(nrows):
-                    tmpf[j] = srcf[sel[j]]
-                ci.dict_enabled = use_dict
+            with nogil:
+                if dict_shape:
+                    tmpf.resize(dict_n)
+                    for j in range(dict_n):
+                        tmpf[j] = srcf[j]
+                    did_preserve = True
+                else:
+                    tmpf.resize(nrows)
+                    for j in range(nrows):
+                        tmpf[j] = srcf[sel[j]]
+                    ci.dict_enabled = use_dict
             f64_store.push_back(tmpf)
             ci.type = PT_DOUBLE
             ci.f64 = f64_store.back().data()
@@ -385,9 +406,10 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             tmpb = vector[uint8_t]()
             tmpb.resize(nrows)
             srcb = <const uint8_t*>dv.data  # bit-packed, LSB-first, by physical idx
-            for j in range(nrows):
-                p = sel[j]
-                tmpb[j] = (srcb[p >> 3] >> (p & 7)) & 1
+            with nogil:
+                for j in range(nrows):
+                    p = sel[j]
+                    tmpb[j] = (srcb[p >> 3] >> (p & 7)) & 1
             bool_store.push_back(tmpb)
             ci.type = PT_BOOLEAN
             ci.boolean = bool_store.back().data()
@@ -397,22 +419,23 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             # VARIANT is German-string-backed JSON text -> written as a STRING.
             arena = <DrakenStringArena*>dv.data
             tmps = vector[StrSlice]()
-            if dict_shape:
-                tmps.resize(dict_n)
-                for j in range(dict_n):
-                    slot = &arena.slots[j]
-                    ss.ptr = str_data(slot, arena.arena)
-                    ss.len = str_length(slot)
-                    tmps[j] = ss
-                did_preserve = True
-            else:
-                tmps.resize(nrows)
-                for j in range(nrows):
-                    slot = &arena.slots[sel[j]]
-                    ss.ptr = str_data(slot, arena.arena)
-                    ss.len = str_length(slot)
-                    tmps[j] = ss
-                ci.dict_enabled = use_dict
+            with nogil:
+                if dict_shape:
+                    tmps.resize(dict_n)
+                    for j in range(dict_n):
+                        slot = &arena.slots[j]
+                        ss.ptr = str_data(slot, arena.arena)
+                        ss.len = str_length(slot)
+                        tmps[j] = ss
+                    did_preserve = True
+                else:
+                    tmps.resize(nrows)
+                    for j in range(nrows):
+                        slot = &arena.slots[sel[j]]
+                        ss.ptr = str_data(slot, arena.arena)
+                        ss.len = str_length(slot)
+                        tmps[j] = ss
+                    ci.dict_enabled = use_dict
             str_store.push_back(tmps)
             ci.type = PT_BYTE_ARRAY
             ci.is_utf8 = (t != DRAKEN_VARBINARY)  # VARIANT/VARCHAR/NVARCHAR -> UTF8
@@ -421,16 +444,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_FLOAT32:
             # widen losslessly to DOUBLE (every float32 is exact in float64)
             tmpf = vector[double]()
-            if dict_shape:
-                tmpf.resize(dict_n)
-                for j in range(dict_n):
-                    tmpf[j] = (<const float*>dv.data)[j]
-                did_preserve = True
-            else:
-                tmpf.resize(nrows)
-                for j in range(nrows):
-                    tmpf[j] = (<const float*>dv.data)[sel[j]]
-                ci.dict_enabled = use_dict
+            with nogil:
+                if dict_shape:
+                    tmpf.resize(dict_n)
+                    for j in range(dict_n):
+                        tmpf[j] = (<const float*>dv.data)[j]
+                    did_preserve = True
+                else:
+                    tmpf.resize(nrows)
+                    for j in range(nrows):
+                        tmpf[j] = (<const float*>dv.data)[sel[j]]
+                    ci.dict_enabled = use_dict
             f64_store.push_back(tmpf)
             ci.type = PT_DOUBLE
             ci.f64 = f64_store.back().data()
@@ -448,8 +472,9 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 ci.ts_unit = TU_MILLIS
                 tmp32 = vector[int32_t]()
                 tmp32.resize(nrows)
-                for j in range(nrows):
-                    tmp32[j] = (<const int32_t*>dv.data)[sel[j]] * mul
+                with nogil:
+                    for j in range(nrows):
+                        tmp32[j] = (<const int32_t*>dv.data)[sel[j]] * mul
                 i32_store.push_back(tmp32)
                 ci.type = PT_INT32
                 ci.i32 = i32_store.back().data()
@@ -457,8 +482,9 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 ci.ts_unit = TU_NANOS if unit == "ns" else TU_MICROS
                 tmp64 = vector[int64_t]()
                 tmp64.resize(nrows)
-                for j in range(nrows):
-                    tmp64[j] = (<const int64_t*>dv.data)[sel[j]]
+                with nogil:
+                    for j in range(nrows):
+                        tmp64[j] = (<const int64_t*>dv.data)[sel[j]]
                 i64_store.push_back(tmp64)
                 ci.type = PT_INT64
                 ci.i64 = i64_store.back().data()
@@ -470,15 +496,16 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             srcb = <const uint8_t*>dv.data  # reinterpret as int64 pairs below
             tmpdec = vector[uint8_t]()
             tmpdec.resize(<size_t>nrows * 12)
-            for j in range(nrows):
-                p = sel[j]
-                months = (<const int64_t*>dv.data)[2 * p]
-                us = (<const int64_t*>dv.data)[2 * p + 1]
-                days = us // 86400000000
-                millis = (us % 86400000000) // 1000
-                _put_u32le(tmpdec.data(), <size_t>j * 12, <uint32_t>months)
-                _put_u32le(tmpdec.data(), <size_t>j * 12 + 4, <uint32_t>days)
-                _put_u32le(tmpdec.data(), <size_t>j * 12 + 8, <uint32_t>millis)
+            with nogil:
+                for j in range(nrows):
+                    p = sel[j]
+                    months = (<const int64_t*>dv.data)[2 * p]
+                    us = (<const int64_t*>dv.data)[2 * p + 1]
+                    days = _floordiv_pos(us, 86400000000)
+                    millis = _floordiv_pos(us - days * <int64_t>86400000000, 1000)
+                    _put_u32le(tmpdec.data(), <size_t>j * 12, <uint32_t>months)
+                    _put_u32le(tmpdec.data(), <size_t>j * 12 + 4, <uint32_t>days)
+                    _put_u32le(tmpdec.data(), <size_t>j * 12 + 8, <uint32_t>millis)
             dec_store.push_back(tmpdec)
             ci.type = PT_FLBA
             ci.logical = LK_INTERVAL
@@ -488,16 +515,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_DATE32:
             tmp32 = vector[int32_t]()
             src32 = <const int32_t*>dv.data
-            if dict_shape:
-                tmp32.resize(dict_n)
-                for j in range(dict_n):
-                    tmp32[j] = src32[j]
-                did_preserve = True
-            else:
-                tmp32.resize(nrows)
-                for j in range(nrows):
-                    tmp32[j] = src32[sel[j]]
-                ci.dict_enabled = use_dict
+            with nogil:
+                if dict_shape:
+                    tmp32.resize(dict_n)
+                    for j in range(dict_n):
+                        tmp32[j] = src32[j]
+                    did_preserve = True
+                else:
+                    tmp32.resize(nrows)
+                    for j in range(nrows):
+                        tmp32[j] = src32[sel[j]]
+                    ci.dict_enabled = use_dict
             i32_store.push_back(tmp32)
             ci.type = PT_INT32
             ci.logical = LK_DATE
@@ -527,16 +555,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                     % (unit, names[i]))
             tmp64 = vector[int64_t]()
             src64 = <const int64_t*>dv.data
-            if dict_shape:
-                tmp64.resize(dict_n)
-                for j in range(dict_n):
-                    tmp64[j] = src64[j] * mul
-                did_preserve = True
-            else:
-                tmp64.resize(nrows)
-                for j in range(nrows):
-                    tmp64[j] = src64[sel[j]] * mul
-                ci.dict_enabled = use_dict
+            with nogil:
+                if dict_shape:
+                    tmp64.resize(dict_n)
+                    for j in range(dict_n):
+                        tmp64[j] = src64[j] * mul
+                    did_preserve = True
+                else:
+                    tmp64.resize(nrows)
+                    for j in range(nrows):
+                        tmp64[j] = src64[sel[j]] * mul
+                    ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.logical = LK_TIMESTAMP
@@ -553,9 +582,10 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             tmpdec = vector[uint8_t]()
             tmpdec.resize(<size_t>nrows * dec_w)
             srcb = <const uint8_t*>dv.data
-            for j in range(nrows):
-                memcpy(tmpdec.data() + <size_t>j * dec_w,
-                       srcb + <size_t>sel[j] * dec_w, dec_w)
+            with nogil:
+                for j in range(nrows):
+                    memcpy(tmpdec.data() + <size_t>j * dec_w,
+                           srcb + <size_t>sel[j] * dec_w, dec_w)
             dec_store.push_back(tmpdec)
             ci.type = PT_FLBA
             ci.logical = LK_DECIMAL
@@ -614,45 +644,46 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             elem_f64 = vector[double]()
             elem_b = vector[uint8_t]()
             elem_s = vector[StrSlice]()
-            for j in range(nrows):
-                p = sel[j]
-                if dv.validity != NULL and not ((dv.validity[p >> 3] >> (p & 7)) & 1):
-                    rep_v.push_back(0); def_v.push_back(0)   # null list
-                    continue
-                a_start = offs[p]
-                a_end = offs[p + 1]
-                if a_start == a_end:
-                    rep_v.push_back(0); def_v.push_back(1)   # empty list
-                    continue
-                for k in range(a_start, a_end):
-                    rlev = 0 if k == a_start else 1  # ternary-in-push_back miscompiles
-                    rep_v.push_back(rlev)
-                    if child_val != NULL and not ((child_val[k >> 3] >> (k & 7)) & 1):
-                        def_v.push_back(2)                   # null element
+            with nogil:
+                for j in range(nrows):
+                    p = sel[j]
+                    if dv.validity != NULL and not ((dv.validity[p >> 3] >> (p & 7)) & 1):
+                        rep_v.push_back(0); def_v.push_back(0)   # null list
                         continue
-                    def_v.push_back(3)                       # present element
-                    cp = child_sel[k]
-                    if elem_kind == 0:
-                        if ct == DRAKEN_INT64:
-                            elem_i64.push_back((<const int64_t*>cdv.data)[cp])
-                        elif ct == DRAKEN_INT32:
-                            elem_i64.push_back((<const int32_t*>cdv.data)[cp])
-                        elif ct == DRAKEN_INT16:
-                            elem_i64.push_back((<const int16_t*>cdv.data)[cp])
+                    a_start = offs[p]
+                    a_end = offs[p + 1]
+                    if a_start == a_end:
+                        rep_v.push_back(0); def_v.push_back(1)   # empty list
+                        continue
+                    for k in range(a_start, a_end):
+                        rlev = 0 if k == a_start else 1  # ternary-in-push_back miscompiles
+                        rep_v.push_back(rlev)
+                        if child_val != NULL and not ((child_val[k >> 3] >> (k & 7)) & 1):
+                            def_v.push_back(2)                   # null element
+                            continue
+                        def_v.push_back(3)                       # present element
+                        cp = child_sel[k]
+                        if elem_kind == 0:
+                            if ct == DRAKEN_INT64:
+                                elem_i64.push_back((<const int64_t*>cdv.data)[cp])
+                            elif ct == DRAKEN_INT32:
+                                elem_i64.push_back((<const int32_t*>cdv.data)[cp])
+                            elif ct == DRAKEN_INT16:
+                                elem_i64.push_back((<const int16_t*>cdv.data)[cp])
+                            else:
+                                elem_i64.push_back((<const int8_t*>cdv.data)[cp])
+                        elif elem_kind == 1:
+                            if ct == DRAKEN_FLOAT64:
+                                elem_f64.push_back((<const double*>cdv.data)[cp])
+                            else:
+                                elem_f64.push_back((<const float*>cdv.data)[cp])
+                        elif elem_kind == 2:
+                            elem_b.push_back(((<const uint8_t*>cdv.data)[cp >> 3] >> (cp & 7)) & 1)
                         else:
-                            elem_i64.push_back((<const int8_t*>cdv.data)[cp])
-                    elif elem_kind == 1:
-                        if ct == DRAKEN_FLOAT64:
-                            elem_f64.push_back((<const double*>cdv.data)[cp])
-                        else:
-                            elem_f64.push_back((<const float*>cdv.data)[cp])
-                    elif elem_kind == 2:
-                        elem_b.push_back(((<const uint8_t*>cdv.data)[cp >> 3] >> (cp & 7)) & 1)
-                    else:
-                        child_slot = &child_arena.slots[cp]
-                        ss.ptr = str_data(child_slot, child_arena.arena)
-                        ss.len = str_length(child_slot)
-                        elem_s.push_back(ss)
+                            child_slot = &child_arena.slots[cp]
+                            ss.ptr = str_data(child_slot, child_arena.arena)
+                            ss.len = str_length(child_slot)
+                            elem_s.push_back(ss)
             level_store.push_back(rep_v)
             ci.rep_levels = level_store.back().data()
             level_store.push_back(def_v)
@@ -687,8 +718,9 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         if did_preserve:
             tmpc = vector[uint32_t]()
             tmpc.resize(nrows)
-            for j in range(nrows):
-                tmpc[j] = sel[j]
+            with nogil:
+                for j in range(nrows):
+                    tmpc[j] = sel[j]
             codes_store.push_back(tmpc)
             ci.codes = codes_store.back().data()
             ci.dict_count = dict_n
@@ -709,8 +741,10 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         cols.push_back(ci)
 
     cdef vector[ColumnStats] stats
-    cdef vector[uint8_t] out = WriteParquet(cols, <size_t>nrows, codec, 3, &stats,
-                                            <size_t>max_rows_per_row_group)
+    cdef vector[uint8_t] out
+    with nogil:
+        out = WriteParquet(cols, <size_t>nrows, codec, 3, &stats,
+                           <size_t>max_rows_per_row_group)
     cdef bytes data = PyBytes_FromStringAndSize(<const char*>out.data(), out.size())
     if not want_bounds:
         return data, None

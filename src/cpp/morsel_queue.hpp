@@ -111,6 +111,25 @@ class MorselQueue {
     // thread wrote the data.
     void finish() noexcept {
         finish_count_.fetch_add(1, std::memory_order_acq_rel);
+        // Monotonic "finish() ever happened" flag + wakeup, for wait_finished().
+        // Kept separate from finish_count_ (which get() decrements as it claims
+        // FINISHED events) so wait_finished() sees the driver's terminal signal even
+        // on paths where get() consumed the count first.
+        finished_ever_.store(true, std::memory_order_release);
+        finish_sem_.signal();
+    }
+
+    // Block until finish() has been called at least once (ever). The result consumer
+    // uses this ONLY on the early-abandon path: after close() fast-stops the producer,
+    // it waits here for the detached driver to observe the closed sink, unwind
+    // eng.run() (every worker joined), and call finish() — so teardown never races a
+    // still-running driver. On the normal path the consumer instead observes FINISHED
+    // from get(), which is itself proof the driver is done, and never calls this.
+    // Timed poll (self-healing); returns immediately if finish() already happened.
+    void wait_finished() noexcept {
+        while (!finished_ever_.load(std::memory_order_acquire)) {
+            finish_sem_.wait(kWaitUs);
+        }
     }
 
     // Idempotent. Marks closed, drops every queued morsel (freeing it via its
@@ -136,7 +155,9 @@ class MorselQueue {
 
     moodycamel::BlockingConcurrentQueue<std::shared_ptr<CxxMorsel>> q_;
     moodycamel::LightweightSemaphore slots_;
+    moodycamel::LightweightSemaphore finish_sem_;
     std::atomic<bool> closed_{false};
     std::atomic<long long> finish_count_{0};
+    std::atomic<bool> finished_ever_{false};
     std::size_t capacity_;
 };

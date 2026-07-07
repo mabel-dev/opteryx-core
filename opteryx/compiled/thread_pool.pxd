@@ -10,11 +10,19 @@ uncontended."""
 
 from cpython.ref cimport PyObject
 from libcpp.string cimport string
+from libcpp.memory cimport shared_ptr
 
 ctypedef void (*native_task_fn)(void*) noexcept nogil
 
 
 cdef extern from "bs_pool_bridge.hpp":
+    # Gap #3 Phase 2b: opaque handle to the priority-capable pool backing this
+    # bridge — Cython only ever moves a shared_ptr[PriorityPool] around (e.g. into
+    # rugo's ParquetIOPipeline injecting constructor), never touches its methods
+    # directly, so no member declarations are needed here.
+    cdef cppclass PriorityPool:
+        pass
+
     cdef cppclass BSThreadPoolBridge:
         BSThreadPoolBridge(int max_workers, const string& name) except +
         PyObject* submit(PyObject* callable, PyObject* args, PyObject* kwargs)
@@ -22,6 +30,7 @@ cdef extern from "bs_pool_bridge.hpp":
         void wait_native() nogil
         void shutdown(bint wait) nogil
         int max_workers()
+        shared_ptr[PriorityPool] pool_handle() nogil
 
     # ONE detached OS thread, not a pool task — for a coordinator that itself
     # submits further native tasks to a *shared* BSThreadPoolBridge and blocks
@@ -38,3 +47,4 @@ cdef class CppThreadPool:
 
     cdef void submit_native(self, native_task_fn fn, void* arg) noexcept nogil
     cdef void wait_native(self) noexcept nogil
+    cdef shared_ptr[PriorityPool] pool_handle(self) noexcept nogil

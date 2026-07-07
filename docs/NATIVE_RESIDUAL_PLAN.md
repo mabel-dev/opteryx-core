@@ -33,18 +33,18 @@ non-scan reasons — whole-query native-support gaps, out of scope for A0).
 
 Residual reasons for the 13 A0 fallbacks:
 
-| Reason (guard) | A0 count | after A1 | after A2 | reachable? |
-|---|---:|---:|---:|---|
-| `footer_gate` (R7b) | **10** | **1** | 1 | ✔ observed |
-| `zero_projection` (R1) | 2 | 2 | **0** | ✖ closed (A2) |
-| `fused_topn` (R3) | 1 | 1 | 1 | ✔ observed |
-| `pushed_limit` (R2) | 0 | 0 | 0 | ✔ hand-set |
-| `unlowerable_predicate` (R4) | 0 | 0 | 0 | ✔ hand-set (regex) |
-| `bool_predicate_input` (R5) | 0 | 0 | 0 | ✔ hand-set |
-| `unsigned_predicate_input` (R5b, A1) | — | 0 | 0 | ✔ hand-set |
-| `non_admissible_kind:<T>` (R6) | 0 | 0 | 0 | ✔ hand-set (ARRAY) |
-| `no_manifest` (R7a) | 0 | 0 | 0 | ✖ no SQL trigger |
-| `temporal_predicate_input` (new, A2) | — | — | 0 | ✔ observed (missions dataset, not in battery) |
+| Reason (guard) | A0 count | after A1 | after A2 | after A3 | reachable? |
+|---|---:|---:|---:|---:|---|
+| `footer_gate` (R7b) | **10** | **1** | 1 | 1 | ✔ observed |
+| `zero_projection` (R1) | 2 | 2 | **0** | 0 | ✖ closed (A2) |
+| `fused_topn` (R3) | 1 | 1 | 1 | 1 | ✔ observed (see below — partially closed) |
+| `pushed_limit` (R2) | 0 | 0 | 0 | 0 | ✔ hand-set |
+| `unlowerable_predicate` (R4) | 0 | 0 | 0 | 0 | ✔ hand-set (regex) |
+| `bool_predicate_input` (R5) | 0 | 0 | 0 | 0 | ✔ hand-set |
+| `unsigned_predicate_input` (R5b, A1) | — | 0 | 0 | 0 | ✔ hand-set |
+| `non_admissible_kind:<T>` (R6) | 0 | 0 | 0 | 0 | ✔ hand-set (ARRAY) |
+| `no_manifest` (R7a) | 0 | 0 | 0 | 0 | ✖ no SQL trigger |
+| `temporal_predicate_input` (new, A2) | — | — | 0 | 0 | ✔ observed (missions dataset, not in battery) |
 
 `footer_gate` was **77% of all A0 fallbacks**. **A1 closed the integer sub-case**:
 after A1 the battery has 4 trampoline scans (native 154 / 158), and `footer_gate`
@@ -57,6 +57,16 @@ distinct from integer admission).
 now has 2 trampoline scans (native 156 / 158). A2 also introduced
 `temporal_predicate_input`, a NEW fail-closed guard for a pre-existing gap it
 uncovered (not present in the battery census, but reachable — see below).
+
+**A3 closed `fused_topn` for the NO-predicate sub-case only** (R3, see the
+ordered worklist entry below). The battery count is UNCHANGED (native 156 /
+158, 2 trampoline scans) because the battery's one `fused_topn` trigger is
+ClickBench Q24 — `SELECT * ... WHERE URL LIKE '%google%' ORDER BY EventTime
+LIMIT 10` — which is exactly the composed (predicate-bearing) sub-case that
+A3 deliberately did NOT admit (see below: admitting it was tried and reverted
+after measuring a ~400% regression on Q24). The no-predicate sub-case has no
+trigger in this battery, so its close-out is only visible via the dedicated
+unit tests, not this census.
 
 ## Corrections to the A0 residual enumeration (findings)
 
@@ -182,11 +192,71 @@ raises err_op=11). BOOL columns that are only *projected* already decode nativel
 * **Needs:** BOOL in the c-native span (a c-native bool-comparison kernel).
   **Overlaps R4** (both are c-native kernel coverage).
 
-### 6. `fused_topn` (R3) — **census 1** — *structural*
+### 6. `fused_topn` (R3) — census 1 → **1** — **PARTIALLY CLOSED (A3)**
 `scan._topn_sort_name is not None` — an `ORDER BY … LIMIT` fused into the scan
 (observed on `SELECT * … ORDER BY … LIMIT`).
-* **Needs:** the WP-02 §9 two-pass **late-materialization** (rank on sort keys,
-  then materialize the top-N rows). Structural; independent of R4.
+
+**Inventory finding.** `scan._topn_sort_name`/`_topn_limit`/`_topn_descending`
+is a **trampoline-only decode-skip hint**, not the mechanism that produces
+correctness. `TopNScanPushdownStrategy` (`opteryx/planner/optimizer/strategies/
+topn_scan_pushdown.py`) stamps it purely so the trampoline's own two-pass
+late-materialization (`_apply_topn` in `parquet_read.pyx`, which used Python
+`to_pylist()` + `sorted()`) can shrink pass-2 decode to just the rows that can
+survive the cut. Separately, `HeapSortNode` **always** compiles to a real
+native `set_topn_sink` operator (`compiler.py::_compile_scan`, generically over
+the incoming layout) that performs the actual sort / limit / tie-break /
+null-order — this already ran downstream of `StreamingScanSource` before A3,
+independent of scan Source. So the scan-level hint changes nothing about
+*which rows reach the client*; the open question was only ever about decode
+cost, not correctness.
+
+**First attempt (reverted): admit unconditionally.** The first cut removed the
+guard unconditionally and let native ignore the hint in every case, reasoning
+that the no-predicate case is genuinely free (the trampoline's own
+`two_pass_eligible` never activates without a pushed WHERE, so neither path
+decode-skips). **This missed the composed case.** ClickBench Q24 —
+`SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10` — IS
+a fused-TopN-with-predicate query, and there the trampoline's two-pass
+late-mat is doing real, load-bearing work: it decodes only the predicate
+(`URL`) and sort-key (`EventTime`) columns for the whole 100M-row table, then
+the other ~100 projected columns only for the handful of `LIKE`-surviving
+rows. Sending this shape native (ignoring the hint) forces a full single-pass
+decode of **every** column of **every** row — **measured ~400% slower on Q24
+and ~20% slower on the ClickBench suite overall**. This was caught after
+landing (not before — the pre-land benchmark only exercised a synthetic
+no-predicate case) and reverted the same day.
+
+**A3 close-out (as landed).** `_native_scan_plan` (`compiler.py`) admits a
+fused-TopN scan to native **only when it carries no predicate**:
+```python
+if (getattr(scan, "_topn_sort_name", None) is not None
+        and getattr(scan, "predicates", None)):
+    self.scan_residual_reasons[scan.identity] = "fused_topn"
+    return None
+```
+No new native TopN/heap-select kernel was needed for the no-predicate
+sub-case — the "hard part" (native heap-select) already existed and already
+ran on this exact plan shape, unconditionally, regardless of scan Source. The
+composed (predicate-bearing) sub-case remains an **open, fail-closed residual**
+— it is the one case the census still reports, and it is the correct,
+measured decision, not an oversight.
+
+**Future performance follow-on (not a correctness/residual gap):** closing the
+composed sub-case natively requires full WP-02 §9 two-pass late-materialization
+— pass-1 decode of predicate/sort-key columns → native heap-select survivor
+mask → masked pass-2 decode of the remaining projected columns via
+`submit_work_native_masked`. That is real, structural work (the native source
+does not do masked pass-2 decode today) — do not attempt to close it by simply
+removing the predicate check above again without that machinery in place; that
+is precisely what produced the Q24 regression.
+
+See `tests/unit/operators/test_wp_a3_fused_topn_scan.py` for the A/B
+correctness parity harness (ascending/descending, ties, NULLs, N above/below a
+row-group boundary, and a large-N edge — all no-predicate) plus the fail-closed
+assertion for the composed shape, and
+`tests/unit/operators/test_native_scan_residual_gate.py::test_fused_topn_no_predicate_now_native`
+/ `test_fused_topn_with_predicate_stays_trampoline` for the acceptance-gate
+assertions.
 
 ### 7. `unlowerable_predicate` (R4) — **census 0** (regex reachable) — *structural* — **DO LAST**
 A pushed predicate that does not lower to a c-native span (regex / `RLIKE`).

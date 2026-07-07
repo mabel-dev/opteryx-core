@@ -30,7 +30,7 @@ from opteryx.constants import ResultType
 from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType
 
-_MAX_WORKER_CAP = 8
+_MAX_WORKER_CAP = 16
 _QUEUE_DEPTH = 4
 
 _INT_TYPES = (
@@ -180,9 +180,17 @@ def _const_scalar_vector(dtype, value):
 
 
 class _Compiler:
-    def __init__(self, plan, nplan):
+    def __init__(self, plan, nplan, pool=None):
         self.plan = plan
         self.nplan = nplan
+        # Gap #3 Phase 2b: the query's exec CppThreadPool, if constructed early
+        # enough to be available at scan-compile time (see compile_to_native /
+        # execute_native). Forwarded to open_native_scan_plan so the scan's decode
+        # pool is SHARED with execution instead of a second, uncoordinated pool.
+        # None is a fully supported value — every scan-opening call site falls back
+        # to its own self-constructed pool, unchanged behaviour (EXPLAIN, tests that
+        # compile a plan directly, any caller outside execute_native).
+        self._pool = pool
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
         # node identity. "NativeParquetScanSource" == zero-Python native pull;
         # "StreamingScanSource" == the GIL trampoline. Later work packages assert
@@ -969,19 +977,38 @@ class _Compiler:
             # R2: scan-pushed LIMIT semantics live in the trampoline scan
             self.scan_residual_reasons[scan.identity] = "pushed_limit"
             return None
-        # R3 (fused_topn) — CLOSED. `scan._topn_sort_name`/`_topn_limit` is a
-        # trampoline-only decode-skip HINT (WP-02 §9 pass-2 shrink): the
-        # downstream HeapSortNode always compiles to a real native
-        # `set_topn_sink` operator (see the HeapSortNode branch below in
-        # `_compile_scan`) that performs the actual sort/limit/tie-break/null-
-        # order generically over the incoming layout, independent of which
-        # scan Source feeds it. The native scan here simply ignores the hint
-        # and decodes its normal read-set; correctness is unaffected because
-        # the real cut always happens downstream. The only cost is that the
-        # trampoline's pass-2 decode-skip (itself only active when a WHERE
-        # predicate is ALSO pushed) is not available natively yet — the same,
-        # already-accepted single-pass-vs-late-mat tradeoff WP-02 documents
-        # for any predicate-bearing native scan (§9), not something new here.
+        # R3 (fused_topn) — CLOSED for the NO-PREDICATE case only. `scan.
+        # _topn_sort_name`/`_topn_limit` is a trampoline-only decode-skip HINT
+        # (WP-02 §9 pass-2 shrink): the downstream HeapSortNode always compiles
+        # to a real native `set_topn_sink` operator (see the HeapSortNode
+        # branch below in `_compile_scan`) that performs the actual sort/
+        # limit/tie-break/null-order generically over the incoming layout,
+        # independent of which scan Source feeds it. With NO predicate, the
+        # trampoline's own two-pass late-mat never activates either (it
+        # requires a pushed WHERE — see `two_pass_eligible` in
+        # parquet_read.pyx), so admitting natively costs nothing: both paths
+        # already do a full single-pass decode. Measured on the full 100M-row
+        # ClickBench dataset: no regression, gil_held_ns/trampoline_calls == 0.
+        #
+        # WITH a predicate, the trampoline's late-mat DOES activate and is not
+        # optional cheap insurance: ClickBench Q24 (`SELECT * FROM hits WHERE
+        # URL LIKE '%google%' ORDER BY EventTime LIMIT 10`) decodes only the
+        # predicate + sort-key columns for the whole table, then the other
+        # ~100 projected columns for just the tiny LIKE-surviving set. Sending
+        # this shape native (ignoring the hint, per the no-predicate reasoning
+        # above) forces a full single-pass decode of EVERY column of EVERY row
+        # — measured ~400% slower on Q24 and ~20% on the ClickBench suite
+        # overall. So THIS composed shape (fused TopN + predicate) still fails
+        # closed to the trampoline, tagged `fused_topn`, until native masked
+        # pass-2 decode (WP-02 §9's true two-pass late-mat) exists to recover
+        # the decode-skip. This is a real, measured decision, not caution for
+        # its own sake — do not remove this check without benchmarking Q24 (or
+        # an equivalent selective-predicate + wide-SELECT-* + small-LIMIT
+        # shape) at ClickBench scale first.
+        if (getattr(scan, "_topn_sort_name", None) is not None
+                and getattr(scan, "predicates", None)):
+            self.scan_residual_reasons[scan.identity] = "fused_topn"
+            return None
         manifest = getattr(scan, "manifest", None)
         if manifest is None or manifest.get_file_count() == 0:
             # R7a: no manifest / zero files
@@ -1159,6 +1186,24 @@ class _Compiler:
             string_types=string_types,
             decimal_columns=decimal_columns,
             logical_coerce=logical_coerce,
+            # Gap #3 Phase 2b Step 2: the query's exec pool is SHARED with this scan's
+            # decode work (one CPU budget, decode tagged high-priority). The reentrant-
+            # pool deadlock this originally hit (an exec worker blocking in
+            # wait_and_get_result for a decode task on the same pool, with no free
+            # worker to run it) is fixed in ParquetIOPipeline by the help-loop: a
+            # blocked puller decodes a pending item itself instead of waiting. See
+            # docs/DUCKDB_GAP3_DECODE_BUDGET_PLAN.md §Phase 2b Step 2.
+            # Gap #3 Phase 2b Step 2 — pool sharing DISABLED (2026-07-07). Passing
+            # self._pool here shares the exec pool with this scan's decode work. It
+            # was measured neutral-to-slightly-negative on every real payload (positive
+            # only under absurd decode-worker over-provisioning; -68% at DOP=1) — the
+            # premise (decode contending for cores) does not hold: decode is either
+            # memory-bandwidth-bound or idle, never a core hog. So sharing is off.
+            # This is the safe first step of reverting the whole Phase 2b arc; the C++
+            # plumbing (io_pipeline.hpp help-loop, Step 1/2) is a separate revert,
+            # entangled with pre-existing uncommitted work, pending a git-diff carve.
+            # See docs/DUCKDB_GAP3_DECODE_BUDGET_PLAN.md.
+            pool=None,
         )
 
         if filter_bc is not None:
@@ -1429,12 +1474,17 @@ class _Compiler:
         return None
 
 
-def compile_to_native(plan):
+def compile_to_native(plan, pool=None):
     """Compile ``plan`` into a runnable ``(NativePlan, PyMorselQueue, scan_sources)``.
     ``scan_sources`` maps each parquet scan node identity to the Source it was wired
     to ("NativeParquetScanSource" or "StreamingScanSource") — WP-INSTR instrument 2.
     Raises ``NotSupportedError`` at once — before anything runs — for any shape the
-    native engine has no operator for."""
+    native engine has no operator for.
+
+    ``pool``: the query's exec CppThreadPool (Gap #3 Phase 2b), if the caller
+    constructed it before compiling — see execute_native. None (the default) is
+    fully supported: every scan falls back to its own self-constructed decode pool,
+    identical to pre-Phase-2b behaviour."""
     from opteryx.compiled.morsel_queue import PyMorselQueue
     from opteryx.operators._operators import NativePlan
 
@@ -1447,7 +1497,7 @@ def compile_to_native(plan):
         _unsupported(f"a plan headed by {type(exit_node).__name__}")
 
     nplan = NativePlan()
-    compiler = _Compiler(plan, nplan)
+    compiler = _Compiler(plan, nplan, pool=pool)
 
     in_edges = list(plan.ingoing_edges(exit_id))
     if len(in_edges) != 1:
@@ -1481,9 +1531,22 @@ def execute_native(plan, telemetry=None):
     from opteryx import config
     from opteryx.compiled.morsel_queue import MQ_FINISHED
     from opteryx.compiled.thread_pool import CppThreadPool
+    from opteryx.operators._operators import NativeErrorSlot
+    from opteryx.operators._operators import build_terminal_exc
     from opteryx.operators._operators import native_plan_execute
 
     import time as _t
+
+    dop = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
+
+    # Gap #3 Phase 2b: the exec pool is now constructed BEFORE compilation (moved
+    # up from after) so it can be handed to compile_to_native and shared with any
+    # parquet scan's decode pool, instead of the scan self-constructing its own
+    # uncoordinated one. dop does not depend on the compiled plan — only on config
+    # and cpu count — so this reorder changes nothing about what dop resolves to.
+    _pool0 = _t.perf_counter_ns()
+    pool = CppThreadPool(dop, "engine")
+    _pool_create_ns = _t.perf_counter_ns() - _pool0
 
     # Native plan compilation (the _Compiler walk + bytecode lowering + operator
     # instantiation) runs synchronously here, in the execution phase but BEFORE the
@@ -1491,9 +1554,10 @@ def execute_native(plan, telemetry=None):
     # invisible to time_engine_generator_total. Cost is ~independent of row count,
     # so it dominates cheap queries. Timed as an always-on driver span.
     _compile0 = _t.perf_counter_ns()
-    nplan, out_q, scan_sources, scan_facts, scan_residual_reasons = compile_to_native(plan)
+    nplan, out_q, scan_sources, scan_facts, scan_residual_reasons = compile_to_native(
+        plan, pool=pool
+    )
     _compile_ns = _t.perf_counter_ns() - _compile0
-    dop = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
     # fact — recorded whether or not the GIL instrumentation is armed; the dict is
     # tiny and costs nothing to attach).
@@ -1518,16 +1582,11 @@ def execute_native(plan, telemetry=None):
     # instrumented sites pay a single-branch check and nothing else.
     instrument_gil = bool(config.OPTERYX_INSTRUMENT_ENGINE)
 
-    import threading
-
-    # A fresh thread pool is spawned PER QUERY — dop OS threads created here, on the
-    # calling thread, before the driver runs. Another fixed per-query cost inside
-    # time_executing but outside time_engine_generator_total.
-    _pool0 = _t.perf_counter_ns()
-    pool = CppThreadPool(dop, "engine")
-    _pool_create_ns = _t.perf_counter_ns() - _pool0
-    errors: list = []
-    done = threading.Event()
+    # Completion + terminal-error coordination is fully native: the detached driver
+    # signals completion by finishing ``out_q`` (its last act) and records any terminal
+    # error in this native ``errslot`` (a C int + std::string, no Python object touched
+    # from the driver thread). No ``threading.Event`` and no borrowed error list.
+    errslot = NativeErrorSlot()
 
     def generator():
         # Always-on driver-span instrumentation. time_executing (measured around
@@ -1543,6 +1602,11 @@ def execute_native(plan, telemetry=None):
         _consumer_ns = 0
         _first_morsel_ns = 0
         _got_first = False
+        # Did we drain the queue all the way to its native FINISHED signal? If so, the
+        # driver is provably done (finish() is its last act) and teardown needs no
+        # further wait. If we broke out early (consumer abandon / GeneratorExit), we
+        # must wait for the driver's finish() natively before teardown (see finally).
+        _saw_finished = False
 
         if instrument_gil:
             from opteryx.operators._operators import instr_gil_reset
@@ -1552,7 +1616,7 @@ def execute_native(plan, telemetry=None):
             instr_gil_reset()
             instr_gil_set_enabled(True)
         _t0 = _t.perf_counter_ns()
-        handle = native_plan_execute(pool, nplan, dop, out_q, errors, done)
+        handle = native_plan_execute(pool, nplan, dop, out_q, errslot)
         _submit_ns = _t.perf_counter_ns() - _t0
         try:
             while True:
@@ -1566,6 +1630,11 @@ def execute_native(plan, telemetry=None):
                     _first_morsel_ns = _g1 - _gen_start
                     _got_first = True
                 if item is None or item is MQ_FINISHED:
+                    # MQ_FINISHED is the driver's native completion signal (its last
+                    # act) — reaching it proves every worker joined, so teardown skips
+                    # the wait below. (None = queue already closed, which we only do in
+                    # our own finally, so it is not expected mid-loop.)
+                    _saw_finished = item is MQ_FINISHED
                     break
                 _y0 = _t.perf_counter_ns()
                 yield item
@@ -1581,14 +1650,21 @@ def execute_native(plan, telemetry=None):
             # close once the driver — and therefore every engine worker — is done.
             out_q.close()
             _tw0 = _t.perf_counter_ns()
-            done.wait()
+            # Normal path: we already drained to MQ_FINISHED, so the driver is proven
+            # done — no wait. Abandon path (GeneratorExit / early break): close() above
+            # fast-stopped the producer; wait natively for the driver to unwind
+            # eng.run() (every worker joined) and call finish() before tearing down the
+            # pool and scans. This is the native replacement for the old done.wait().
+            if not _saw_finished:
+                out_q.wait_finished()
             _done_wait_ns = _t.perf_counter_ns() - _tw0
             # Trampoline scans (StreamingScanSource) accumulate ScanReadings during
             # next_morsel but only flush them into node.readings in close_source() —
             # which the native engine's pull loop never calls (it just detects EOS).
-            # The driver is done (done.wait returned → every worker finished), so it
-            # is now safe to close each scan on this thread: flush_into populates the
-            # readings sensors()/mermaid read, and the source is released. Idempotent
+            # The driver is done (queue FINISHED, or wait_finished returned → every
+            # worker finished), so it is safe to close each scan on this thread:
+            # flush_into populates the readings sensors()/mermaid read, and the source
+            # is released. Idempotent
             # (close_source guards on _scan_finished), so scans that self-closed are
             # untouched. Native-parquet scans have no ScanReadings to flush — their
             # facts come from native_scan_facts — and their close_source is a no-op.
@@ -1711,7 +1787,12 @@ def execute_native(plan, telemetry=None):
                 r["time_engine_teardown_close_scans"] = _close_scans_ns
                 r["time_engine_residual"] = _residual_ns
 
-            if errors:
-                raise errors[0]
+            # Terminal error (if any) is raised on THIS consumer thread — the
+            # legitimate result-marshaling edge — built from the native errslot the
+            # driver populated before it finished the queue. build_terminal_exc prefers
+            # a scan's stashed rich exception, else a RuntimeError from code+msg.
+            _terminal_exc = build_terminal_exc(nplan, errslot)
+            if _terminal_exc is not None:
+                raise _terminal_exc
 
     return generator(), ResultType.TABULAR
