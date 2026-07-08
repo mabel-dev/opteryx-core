@@ -18,9 +18,21 @@ edge (`PyMorselQueue`) for isolation testing — the scheduler will later call t
 from libcpp cimport bool as cbool
 from libcpp.memory cimport shared_ptr
 from libc.stddef cimport size_t
+from libc.stdio cimport fprintf, fflush, stderr
 
 from draken.morsels.cxx_morsel cimport CxxMorsel
 from draken.morsels.morsel cimport Morsel, morsel_to_cxx, cxx_to_morsel
+
+import os as _os
+
+# Crash-bisect breadcrumbs. When OPTERYX_QUEUE_TRACE is set, get() writes an
+# unbuffered, immediately-flushed line to stderr around each of its two distinct
+# failure surfaces — the native moodycamel dequeue and the CxxMorsel->Morsel
+# materialize — so that on a SIGSEGV the LAST line printed names which one was
+# executing. fprintf+fflush to the C-level stderr survives a segfault (no Python
+# buffering, no async writer thread) where the OPTERYX_TRACE recorder's in-memory
+# list would be lost. Off (zero overhead past the branch) unless explicitly armed.
+cdef int _QTRACE = 1 if _os.environ.get("OPTERYX_QUEUE_TRACE") else 0
 
 
 # Returned by PyMorselQueue.get() when the producer has gracefully FINISHED (all
@@ -95,13 +107,26 @@ cdef class PyMorselQueue:
         data drained), or None (consumer abandoned via close(), remainder dropped)."""
         cdef shared_ptr[CxxMorsel] out
         cdef MorselQueueStatus status
+        if _QTRACE:
+            fprintf(stderr, b"[QTRACE] get: calling native dequeue\n")
+            fflush(stderr)
         with nogil:
             status = self._q.get(out)
+        if _QTRACE:
+            fprintf(stderr, b"[QTRACE] get: dequeue returned status=%d\n", <int>status)
+            fflush(stderr)
         if status == MorselQueueStatus.ABANDONED:
             return None
         if status == MorselQueueStatus.FINISHED:
             return MQ_FINISHED
-        return cxx_to_morsel(out)
+        if _QTRACE:
+            fprintf(stderr, b"[QTRACE] get: materializing CxxMorsel -> Morsel\n")
+            fflush(stderr)
+        result = cxx_to_morsel(out)
+        if _QTRACE:
+            fprintf(stderr, b"[QTRACE] get: materialize done\n")
+            fflush(stderr)
+        return result
 
     def close(self):
         with nogil:

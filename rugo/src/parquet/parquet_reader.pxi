@@ -155,6 +155,7 @@ import draken.draken_native as _dn
 # leaf value (every row null or empty) — see _make_array_vector.
 cdef int _DK_EL_VARCHAR = int(_dn.VARCHAR.value)
 cdef int _DK_EL_INT64 = int(_dn.INT64.value)
+cdef int _DK_EL_UINT64 = int(_dn.UINT64.value)
 cdef int _DK_EL_FLOAT64 = int(_dn.FLOAT64.value)
 cdef int _DK_EL_BOOL = int(_dn.BOOL.value)
 
@@ -1095,27 +1096,41 @@ cdef list _array_leaf_values(parquet_reader.DecodedColumn& col):
     cdef bint use_codes = has_dict and (not col.dict_codes_array.empty())
     cdef uint8_t cw = col.code_width if col.code_width in (1, 2, 4) else 1
     cdef list vals = []
+    # Unsigned leaf (Parquet INTEGER(width, isSigned=false)): the physical bits
+    # are read as signed then reinterpreted so values above INT64_MAX come back
+    # as the correct non-negative Python int (draken's UINT64 constructor rejects
+    # negatives). Mirrors decode_column.cpp's is_unsigned tagging.
+    cdef bint uns = col.is_unsigned
+    cdef int64_t iraw
 
     if col_type == b"int64":
         for i in range(n_levels):
             if col.def_levels[i] != max_def:
                 continue
             if use_codes:
-                vals.append(col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)])
+                iraw = col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
             elif has_dict:
-                vals.append(col.dict_int64_values[col.dict_indices[vi]]); vi += 1
+                iraw = col.dict_int64_values[col.dict_indices[vi]]; vi += 1
             else:
-                vals.append(col.int64_values[vi]); vi += 1
+                iraw = col.int64_values[vi]; vi += 1
+            if uns:
+                vals.append(<uint64_t>iraw)
+            else:
+                vals.append(iraw)
     elif col_type == b"int32":
         for i in range(n_levels):
             if col.def_levels[i] != max_def:
                 continue
             if use_codes:
-                vals.append(<int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)])
+                iraw = <int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
             elif has_dict:
-                vals.append(<int64_t>col.dict_int32_values[col.dict_indices[vi]]); vi += 1
+                iraw = <int64_t>col.dict_int32_values[col.dict_indices[vi]]; vi += 1
             else:
-                vals.append(<int64_t>col.int32_values[vi]); vi += 1
+                iraw = <int64_t>col.int32_values[vi]; vi += 1
+            if uns:
+                vals.append(<uint64_t>(<uint32_t>iraw))
+            else:
+                vals.append(iraw)
     elif col_type == b"byte_array":
         # Draken's array constructor detects a string child by PyUnicode, so leaf
         # values must be `str` (utf-8), matching the scalar string path's logical
@@ -1227,7 +1242,9 @@ cdef Vector _make_array_vector(
     if col_type == b"byte_array":
         el_type = _DK_EL_VARCHAR
     elif col_type == b"int64" or col_type == b"int32":
-        el_type = _DK_EL_INT64
+        # Unsigned leaf → UINT64 child so the draken constructor stores the
+        # full unsigned range (values were reinterpreted in _array_leaf_values).
+        el_type = _DK_EL_UINT64 if decoded_col.is_unsigned else _DK_EL_INT64
     elif col_type == b"float64" or col_type == b"float32":
         el_type = _DK_EL_FLOAT64
     elif col_type == b"boolean":

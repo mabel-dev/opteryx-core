@@ -474,9 +474,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // "uint32"/"uint64", built in metadata.cpp from isSigned=false). Declared width
     // can be narrower than the physical wire width (Parquet has no int8/int16
     // physical storage — UINT8/UINT16 still arrive as physical "int32").
-    if (target_col->logical_type.rfind("uint", 0) == 0) {
-      result.is_unsigned = true;
-      result.int_bit_width = std::atoi(target_col->logical_type.c_str() + 4);
+    // For a LIST column the leaf's logical type is carried on the container as
+    // "array<uint64>" (or "array<array<uint64>>" when nested), so match "uint"
+    // as the innermost element type rather than only as a leading prefix — the
+    // leaf element's signedness governs how its values decode.
+    {
+      const std::string &lt = target_col->logical_type;
+      size_t pos = lt.rfind("uint");
+      if (pos != std::string::npos && pos + 4 < lt.size() &&
+          lt[pos + 4] >= '0' && lt[pos + 4] <= '9') {
+        result.is_unsigned = true;
+        result.int_bit_width = std::atoi(lt.c_str() + pos + 4);
+      }
     }
 
     // FIXED_LEN_BYTE_ARRAY DECIMAL is decoded big-endian sign-extended:

@@ -58,7 +58,10 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         const uint32_t* codes
         uint32_t dict_count
         bint dict_enabled
+        bint is_unsigned
+        int int_bit_width
         bint is_array
+        int array_depth
         PType elem_type
         bint elem_is_utf8
         const uint8_t* rep_levels

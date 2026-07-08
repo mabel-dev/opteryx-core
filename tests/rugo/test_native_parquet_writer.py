@@ -246,17 +246,56 @@ def test_array_roundtrip(compression):
     assert vals == [["x", "yy"], None, ["z"]]
 
 
-def test_nested_array_fails_loud():
-    """Array-of-array (non-primitive element) is out of scope — must raise."""
+@pytest.mark.parametrize("compression", ["zstd", "none"])
+def test_nested_array_roundtrip(compression):
+    """Depth-2 LIST columns (list<list<scalar>>) round-trip through the writer's
+    2-level Dremel encoding, verified against PyArrow. Covers null outer/middle
+    lists, empty lists, null leaf elements, and every supported leaf type."""
     import draken.draken_native as dn
     from draken.vectors.vector import Vector
     from draken.morsels.morsel import Morsel
 
-    m = Morsel.from_vectors(
-        ["n"], [Vector(dn.vector_array_from_sequence([[[1, 2], [3]], [[4]]]))]
+    def one(name, nb):
+        mor = Morsel.from_vectors([name], [Vector(nb)])
+        cols, types = _read_pyarrow(write_parquet(mor, compression=compression))
+        return types[name], cols[name]
+
+    data_i = [[[1, 2, 3], [4, 5]], [[]], [], None, [None, [6]], [[7, None, 9]]]
+    ty, vals = one("li", dn.vector_array_from_sequence(data_i))
+    assert ty == "list<element: list<element: int64>>"
+    assert vals == data_i
+
+    data_s = [[["x", "yy"], ["z"]], [[None]], None]
+    ty, vals = one("ls", dn.vector_array_from_sequence(data_s))
+    assert ty == "list<element: list<element: string>>"
+    assert vals == data_s
+
+
+@pytest.mark.parametrize("compression", ["zstd", "none"])
+def test_nested_uint64_array_roundtrip(compression):
+    """Depth-2 list<list<uint64>>: the leaf carries an INTEGER(64, isSigned=false)
+    annotation so full-range unsigned hash values (> INT64_MAX, up to UINT64_MAX)
+    round-trip exactly instead of coming back as negative signed ints. Verified
+    against PyArrow (the authoritative external reader)."""
+    import draken.draken_native as dn
+    from draken.vectors.vector import Vector
+    from draken.morsels.morsel import Morsel
+
+    data_u = [
+        [[14748331363633426810, 8346750105840572524], [1]],
+        [[]],
+        [],
+        None,
+        [None, [2833214737711462458]],
+        [[18446744073709551615, 0, None]],
+    ]
+    nb = dn.vector_array_from_sequence(
+        data_u, element_type=dn.DrakenType.UINT64.value, nesting_depth=2
     )
-    with pytest.raises(ValueError, match="unsupported ARRAY element type"):
-        write_parquet(m)
+    mor = Morsel.from_vectors(["lu"], [Vector(nb)])
+    cols, types = _read_pyarrow(write_parquet(mor, compression=compression))
+    assert types["lu"] == "list<element: list<element: uint64>>"
+    assert cols["lu"] == data_u
 
 
 def test_decimal_stats_numeric_order():

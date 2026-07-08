@@ -137,6 +137,44 @@ static VectorOwner make_int64_from_sequence(nb::list seq) {
     return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
 }
 
+// E33 — dedicated UINT64 factory (not the shared narrow-int template: values
+// up to 2^64-1 don't fit int64_t, so the cast/range-check must go through
+// uint64_t, not int64_t). Shared by vector_uint64_from_sequence and the
+// DRAKEN_ARRAY leaf builder (make_array_from_sequence) below.
+static VectorOwner make_uint64_from_sequence(nb::list seq) {
+    const uint32_t length = static_cast<uint32_t>(seq.size());
+    uint64_t* data = static_cast<uint64_t*>(
+        draken_malloc((length > 0u ? length : 1u) * sizeof(uint64_t)));
+    if (!data) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(data);
+    bool has_nulls = false;
+    for (uint32_t i = 0; i < length; ++i) {
+        nb::object obj = seq[i];
+        if (obj.is_none()) {
+            data[i] = 0u;
+            has_nulls = true;
+        } else {
+            data[i] = nb::cast<uint64_t>(obj);
+        }
+    }
+    OwnedBuffer<uint8_t> validity_buf;
+    uint8_t* validity = nullptr;
+    if (has_nulls) {
+        const uint32_t bm     = (length + 7u) / 8u;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        const size_t   vbytes = padded > 0u ? padded : 8u;
+        validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) throw std::bad_alloc();
+        validity_buf.reset(validity);
+        std::memset(validity, 0xFF, vbytes);
+        for (uint32_t i = 0; i < length; ++i)
+            if (seq[i].is_none())
+                validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+    }
+    DrakenVector v = draken_vector_from_dense(data, length, DRAKEN_UINT64, validity);
+    return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+}
+
 // ---------------------------------------------------------------------------
 // C.2 factory: constant-shape int64 vector (data_length == 1, length rows).
 // value_obj may be None → all-null constant.
@@ -4141,6 +4179,12 @@ static nb::object child_elem_to_py(const VectorOwner& child, uint32_t child_idx)
         return nb::cast(row_float(child.vec, child_idx));
     if (child.vec.type == DRAKEN_BOOL)
         return nb::cast(row_bool(child.vec, child_idx));
+    // E33: unsigned children (e.g. UINT64 hash arrays) must box through
+    // row_uint_boxed, not row_narrow_int's int64 reinterpretation — a value
+    // above INT64_MAX would silently come back negative/sign-flipped
+    // otherwise, corrupting anything that orders or compares on the value.
+    if (is_unsigned_type(child.vec.type))
+        return row_uint_boxed(child.vec, child_idx);
     return nb::cast(row_narrow_int(child.vec, child_idx));
 }
 
@@ -4183,7 +4227,7 @@ static VectorOwner take_child(const VectorOwner& src_child,
 // D.13: array ingestion — Python list[list | None] → dense DRAKEN_ARRAY vector.
 //
 // Child type inferred from first non-null, non-empty element:
-//   int   → DRAKEN_INT64
+//   int   → DRAKEN_INT64 (or DRAKEN_UINT64 at the leaf level — see below)
 //   str   → DRAKEN_VARCHAR
 //   list  → DRAKEN_ARRAY (recursive)
 //
@@ -4195,13 +4239,21 @@ static VectorOwner take_child(const VectorOwner& src_child,
 //     the leaf element_type is threaded down through the recursion.
 // element_type < 0 / nesting_depth <= 0 selects the legacy value-only behaviour
 // (default DRAKEN_INT64 when nothing can be inferred).
+//
+// int-vs-uint is the one ambiguity value-inference can never resolve on its
+// own (a Python int looks the same either way) — so at the leaf level
+// (nesting_depth == 1), an explicit element_type == DRAKEN_UINT64 hint
+// overrides the value-inferred DRAKEN_INT64 rather than only being consulted
+// when every row is null/empty. Values must still fit uint64_t; nb::cast
+// raises OverflowError otherwise (same contract as vector_uint64_from_sequence).
 // ---------------------------------------------------------------------------
 static VectorOwner make_array_from_sequence(
         nb::list seq, int element_type = -1, int nesting_depth = 0) {
     const uint32_t length = static_cast<uint32_t>(seq.size());
 
-    enum ChildType { CT_UNKNOWN, CT_INT64, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
+    enum ChildType { CT_UNKNOWN, CT_INT64, CT_UINT64, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
     ChildType child_type = CT_UNKNOWN;
+    const bool leaf_is_uint64 = (nesting_depth == 1) && (element_type == DRAKEN_UINT64);
 
     // Pass 1: detect child type, compute offsets, collect flat child elements.
     std::vector<int32_t> offsets(length + 1u);
@@ -4235,7 +4287,8 @@ static VectorOwner make_array_from_sequence(
                 if (first.is_none()) continue;
                 // bool must precede int: Python bool is a subclass of int.
                 if      (PyBool_Check(first.ptr()))                        child_type = CT_BOOL;
-                else if (PyLong_Check(first.ptr()))                        child_type = CT_INT64;
+                else if (PyLong_Check(first.ptr()))
+                    child_type = leaf_is_uint64 ? CT_UINT64 : CT_INT64;
                 else if (PyFloat_Check(first.ptr()))                       child_type = CT_FLOAT64;
                 else if (PyUnicode_Check(first.ptr()))                     child_type = CT_STRING;
                 else if (PyList_Check(first.ptr()) || PyTuple_Check(first.ptr())) child_type = CT_ARRAY;
@@ -4264,6 +4317,7 @@ static VectorOwner make_array_from_sequence(
                 case DRAKEN_BOOL:      child_type = CT_BOOL;    break;
                 case DRAKEN_ARRAY:     child_type = CT_ARRAY;   break;
                 case DRAKEN_INT64:     child_type = CT_INT64;   break;
+                case DRAKEN_UINT64:    child_type = CT_UINT64;  break;
                 default:               child_type = CT_INT64;   break;  // legacy
             }
         }
@@ -4328,6 +4382,9 @@ static VectorOwner make_array_from_sequence(
             break;
         case CT_BOOL:
             child = std::make_unique<VectorOwner>(make_bool_from_sequence(flat_children));
+            break;
+        case CT_UINT64:
+            child = std::make_unique<VectorOwner>(make_uint64_from_sequence(flat_children));
             break;
         default:
             child = std::make_unique<VectorOwner>(make_int64_from_sequence(flat_children));
@@ -8232,39 +8289,7 @@ NB_MODULE(draken_native, m) {
     // fit int64_t, so casting via nb::cast<uint64_t> and range-checking against
     // uint64_t (not int64_t) limits is required, unlike the narrower widths above.
     m.def("vector_uint64_from_sequence",
-        [](nb::list seq) {
-            const uint32_t length = static_cast<uint32_t>(seq.size());
-            uint64_t* data = static_cast<uint64_t*>(
-                draken_malloc((length > 0u ? length : 1u) * sizeof(uint64_t)));
-            if (!data) throw std::bad_alloc();
-            OwnedBuffer<void> data_buf(data);
-            bool has_nulls = false;
-            for (uint32_t i = 0; i < length; ++i) {
-                nb::object obj = seq[i];
-                if (obj.is_none()) {
-                    data[i] = 0u;
-                    has_nulls = true;
-                } else {
-                    data[i] = nb::cast<uint64_t>(obj);
-                }
-            }
-            OwnedBuffer<uint8_t> validity_buf;
-            uint8_t* validity = nullptr;
-            if (has_nulls) {
-                const uint32_t bm     = (length + 7u) / 8u;
-                const uint32_t padded = ((bm + 7u) & ~7u);
-                const size_t   vbytes = padded > 0u ? padded : 8u;
-                validity = static_cast<uint8_t*>(draken_malloc(vbytes));
-                if (!validity) throw std::bad_alloc();
-                validity_buf.reset(validity);
-                std::memset(validity, 0xFF, vbytes);
-                for (uint32_t i = 0; i < length; ++i)
-                    if (seq[i].is_none())
-                        validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
-            }
-            DrakenVector v = draken_vector_from_dense(data, length, DRAKEN_UINT64, validity);
-            return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
-        },
+        &make_uint64_from_sequence,
         nb::arg("sequence"),
         "Build a dense UINT64 Vector from a Python list[int | None].\n"
         "Raises OverflowError (via nb::cast) if any value is outside [0, 2^64-1].\n"

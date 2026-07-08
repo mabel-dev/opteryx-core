@@ -92,6 +92,10 @@ enum {
   CONV_TIME_MICROS = 8,
   CONV_TIMESTAMP_MILLIS = 9,
   CONV_TIMESTAMP_MICROS = 10,
+  CONV_UINT_8 = 11,
+  CONV_UINT_16 = 12,
+  CONV_UINT_32 = 13,
+  CONV_UINT_64 = 14,
   CONV_INTERVAL = 21,
 };
 
@@ -166,12 +170,29 @@ struct ColumnInput {
   uint32_t dict_count = 0;         // number of dictionary entries
   bool dict_enabled = false;       // attempt AUTO-BUILD for plain buffers
 
+  // ---- unsigned integer logical annotation ----
+  // Parquet has no unsigned physical type: an unsigned column is stored as the
+  // signed physical type (INT32/INT64) plus an INTEGER(bitWidth, isSigned=false)
+  // LogicalType annotation. The stored bits are identical to the signed value
+  // (a lossless reinterpret), so nothing changes in the value encoders — only
+  // the schema gains the annotation, and a conformant reader (PyArrow/DuckDB/
+  // Polars/rugo) reads the bits back as unsigned. `int_bit_width` is 8/16/32/64;
+  // for a scalar column it annotates the column, for an ARRAY it annotates the
+  // leaf `element`. 0 => signed (no annotation).
+  bool is_unsigned = false;
+  int int_bit_width = 0;
+
   // ---- ARRAY (LIST) columns ----
-  // When `is_array`, this column is a list. The element values live in the
-  // typed buffers above (i32/i64/f64/boolean/strs), holding only the
-  // num_elements PRESENT (def==3) elements in order; `elem_type`/`elem_is_utf8`
-  // describe them. `rep_levels`/`def_levels` hold `num_levels` entries.
+  // When `is_array`, this column is a list nested `array_depth` levels deep
+  // (1 = list<scalar>, 2 = list<list<scalar>>). The leaf element values live in
+  // the typed buffers above (i32/i64/f64/boolean/strs), holding only the
+  // num_elements PRESENT elements in order; `elem_type`/`elem_is_utf8` describe
+  // the leaf. `rep_levels`/`def_levels` hold `num_levels` entries under the
+  // all-nullable nesting scheme (max_rep == array_depth, max_def ==
+  // 2*array_depth + 1). `is_unsigned`/`int_bit_width` (above), when set,
+  // annotate the leaf element as unsigned.
   bool is_array = false;
+  int array_depth = 1;
   PType elem_type = PT_INT64;
   bool elem_is_utf8 = false;
   const uint8_t *rep_levels = nullptr;
@@ -179,6 +200,14 @@ struct ColumnInput {
   size_t num_levels = 0;
   size_t num_elements = 0;
 };
+
+// Minimum bit width to hold values in [0, maxval]. bit_width(0)=0, (1)=1,
+// (2)=2, (5)=3. Used for RLE level packing of rep/def streams.
+inline int level_bit_width(uint32_t maxval) {
+  int bw = 0;
+  while (maxval) { bw++; maxval >>= 1; }
+  return bw;
+}
 
 // ---- small endian helpers ----
 
@@ -653,11 +682,16 @@ inline PageBuild build_data_page(const ColumnInput &col, size_t num_rows,
 // num_elements present (def==3) element values are PLAIN-encoded.
 inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
                                        int zstd_level) {
+  // All-nullable nesting scheme: max_rep == array_depth, max_def ==
+  // 2*array_depth + 1. RLE level packing needs the bit width of each max
+  // (depth 1: rep bw 1, def bw 2; depth 2: rep bw 2, def bw 3).
+  const int rep_bw = level_bit_width((uint32_t)col.array_depth);
+  const int def_bw = level_bit_width((uint32_t)(2 * col.array_depth + 1));
   std::vector<uint8_t> body;
-  std::vector<uint8_t> rep = encode_levels_rle(col.rep_levels, col.num_levels, 1);
+  std::vector<uint8_t> rep = encode_levels_rle(col.rep_levels, col.num_levels, rep_bw);
   put_u32_le(body, (uint32_t)rep.size());
   body.insert(body.end(), rep.begin(), rep.end());
-  std::vector<uint8_t> def = encode_levels_rle(col.def_levels, col.num_levels, 2);
+  std::vector<uint8_t> def = encode_levels_rle(col.def_levels, col.num_levels, def_bw);
   put_u32_le(body, (uint32_t)def.size());
   body.insert(body.end(), def.begin(), def.end());
 
@@ -1128,12 +1162,41 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
 
 // ---- schema serialization ----
 
+// Emit an INTEGER(bitWidth, isSigned=false) LogicalType annotation as the
+// current schema element's field 10 (logicalType). Matches PyArrow/parquet-mr
+// output for unsigned integer columns: the physical type stays signed INT32/
+// INT64 and a conformant reader reads the bits back as unsigned. Field 10 is
+// the last field in a SchemaElement, preserving ascending field-id order.
+inline void emit_uint_logical(TCompactWriter &w, int bit_width) {
+  // Emits the legacy ConvertedType (field 6) AND the modern logicalType union
+  // (field 10); the caller owns the enclosing SchemaElement struct's
+  // structBegin/structEnd. Both are written because some readers (DuckDB) key
+  // unsigned detection on the legacy ConvertedType, matching parquet-mr/PyArrow
+  // output. Field ids stay ascending (6 before 10); caller has already written
+  // fields <= 4.
+  int conv = bit_width == 8 ? CONV_UINT_8
+           : bit_width == 16 ? CONV_UINT_16
+           : bit_width == 32 ? CONV_UINT_32
+           : CONV_UINT_64;
+  w.writeI32Field(6, conv);            // ConvertedType UINT_N
+  w.writeFieldHeader(CT_STRUCT, 10);   // logicalType
+  w.structBegin();                     //   LogicalType union
+  w.writeFieldHeader(CT_STRUCT, 10);   //   INTEGER member (union field id 10)
+  w.structBegin();                     //     IntType { 1: i8 bitWidth; 2: bool isSigned }
+  w.writeFieldHeader(CT_BYTE, 1);      //       bitWidth (i8)
+  w.writeByte((uint8_t)bit_width);
+  w.writeBoolField(2, false);          //       isSigned = false
+  w.structEnd();                       //     IntType
+  w.structEnd();                       //   LogicalType union
+}
+
 inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols) {
-  // Flat pre-order list: root + each column's subtree (1 element for a
-  // primitive; 3 for a LIST: group, repeated "list" group, "element").
+  // Flat pre-order list: root + each column's subtree. A primitive is 1 element;
+  // a LIST nested `array_depth` deep is (2*array_depth + 1): each level adds a
+  // LIST group + a repeated "list" group, plus the single leaf "element".
   uint32_t n_elems = 1;
   for (const auto &c : cols)
-    n_elems += c.is_array ? 3 : 1;
+    n_elems += c.is_array ? (uint32_t)(2 * c.array_depth + 1) : 1;
   w.writeFieldHeader(CT_LIST, 2); // FileMetaData.schema
   w.writeListHeader(CT_STRUCT, n_elems);
 
@@ -1145,25 +1208,32 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
 
   for (const auto &c : cols) {
     if (c.is_array) {
-      // LIST group (OPTIONAL) -> repeated "list" group -> "element".
-      w.structBegin();
-      w.writeI32Field(3, REP_OPTIONAL);            // repetition_type
-      w.writeStringField(4, c.name);               // name
-      w.writeI32Field(5, 1);                       // num_children
-      w.writeI32Field(6, CONV_LIST);               // converted_type LIST
-      w.writeFieldHeader(CT_STRUCT, 10);           // logicalType
-      w.structBegin();                             //   LogicalType union
-      w.writeFieldHeader(CT_STRUCT, 3);            //   LIST member
-      w.structBegin();                             //   ListType {}
-      w.structEnd();
-      w.structEnd();
-      w.structEnd();
+      // `array_depth` nested LIST levels then the leaf. Each level is a LIST
+      // group (OPTIONAL) followed by a repeated "list" group. The outermost
+      // group carries the column name; deeper LIST groups are named "element"
+      // (the element of the enclosing list is itself a list). Mirrors Arrow/
+      // PyArrow's encoding, e.g. depth 2:
+      //   name(List) -> list -> element(List) -> list -> element(leaf).
+      for (int lvl = 0; lvl < c.array_depth; lvl++) {
+        w.structBegin();                           // LIST group
+        w.writeI32Field(3, REP_OPTIONAL);          // repetition_type
+        w.writeStringField(4, lvl == 0 ? c.name : std::string("element"));
+        w.writeI32Field(5, 1);                     // num_children
+        w.writeI32Field(6, CONV_LIST);             // converted_type LIST
+        w.writeFieldHeader(CT_STRUCT, 10);         // logicalType
+        w.structBegin();                           //   LogicalType union
+        w.writeFieldHeader(CT_STRUCT, 3);          //   LIST member
+        w.structBegin();                           //   ListType {}
+        w.structEnd();
+        w.structEnd();
+        w.structEnd();
 
-      w.structBegin();                             // repeated group "list"
-      w.writeI32Field(3, REP_REPEATED);
-      w.writeStringField(4, "list");
-      w.writeI32Field(5, 1);                       // num_children
-      w.structEnd();
+        w.structBegin();                           // repeated group "list"
+        w.writeI32Field(3, REP_REPEATED);
+        w.writeStringField(4, "list");
+        w.writeI32Field(5, 1);                     // num_children
+        w.structEnd();
+      }
 
       w.structBegin();                             // "element" leaf
       w.writeI32Field(1, (int32_t)c.elem_type);    // type
@@ -1171,6 +1241,8 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.writeStringField(4, "element");
       if (c.elem_type == PT_BYTE_ARRAY && c.elem_is_utf8)
         w.writeI32Field(6, CONV_UTF8);
+      if (c.is_unsigned && c.int_bit_width > 0)   // unsigned leaf annotation
+        emit_uint_logical(w, c.int_bit_width);
       w.structEnd();
       continue;
     }
@@ -1245,6 +1317,11 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.structEnd();
     } else if (c.type == PT_BYTE_ARRAY && c.is_utf8) {
       w.writeI32Field(6, CONV_UTF8);               // converted_type
+    } else if (c.is_unsigned && c.int_bit_width > 0) {
+      // Plain unsigned integer column: physical INT32/INT64 + INTEGER(width,
+      // isSigned=false) logicalType. Bits are the signed reinterpret; a
+      // conformant reader recovers the unsigned value.
+      emit_uint_logical(w, c.int_bit_width);
     }
     w.structEnd();
   }
@@ -1280,13 +1357,17 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
       w.writeListI32(ENC_PLAIN);
       w.writeListI32(ENC_RLE);
     }
-    // path_in_schema: [name] for primitives; [name,"list","element"] for lists.
+    // path_in_schema: [name] for primitives; for a list nested `array_depth`
+    // deep, [name, ("list","element") x array_depth] — e.g. depth 1
+    // [name,"list","element"], depth 2 [name,"list","element","list","element"].
     w.writeFieldHeader(CT_LIST, 3);
     if (c.is_array) {
-      w.writeListHeader(CT_BINARY, 3);
+      w.writeListHeader(CT_BINARY, (uint32_t)(1 + 2 * c.array_depth));
       w.writeListString(c.name);
-      w.writeListString("list");
-      w.writeListString("element");
+      for (int lvl = 0; lvl < c.array_depth; lvl++) {
+        w.writeListString("list");
+        w.writeListString("element");
+      }
     } else {
       w.writeListHeader(CT_BINARY, 1);
       w.writeListString(c.name);
