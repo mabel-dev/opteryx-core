@@ -152,6 +152,11 @@ cdef class NativeScanPlan:
     cdef int pruned_items
     cdef bint _closed
     cdef MemoryPool _pool
+    # Wall time spent fetching/parsing footers not already in _PARSED_FOOTER_CACHE
+    # (one network round-trip per uncached file, serial). This is genuine IO, not
+    # plan compilation — kept separate so callers can report it as its own cost
+    # instead of it silently inflating whatever timer wraps this function.
+    cdef public uint64_t footer_fetch_ns
 
     cpdef void close(self)
 

@@ -1468,6 +1468,7 @@ cdef class NativeScanPlan:
         self.pruned_items = 0
         self._closed = False
         self._pool = None
+        self.footer_fetch_ns = 0
 
     def __dealloc__(self):
         self.close()
@@ -1589,11 +1590,15 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef int64_t rg_bytes
     cdef int64_t est_rg, dyn_pool_size
     cdef list work_items = []
+    cdef uint64_t _footer_t0
 
     for path in paths:
         path_bytes_cpp = path.encode('utf-8')
         if plan.footer_map[0].count(path_bytes_cpp) == 0:
             if not _PARSED_FOOTER_CACHE.try_get(path, &plan.footer_map[0][path_bytes_cpp]):
+                # Not "compile" — a real network round-trip (cold cache), timed on its
+                # own so it cannot hide inside whatever span calls this function.
+                _footer_t0 = time.perf_counter_ns()
                 envelope, _ = _read_footer_payload(
                     path, file_sizes.get(path, -1) if file_sizes else -1, None
                 )
@@ -1603,6 +1608,7 @@ cpdef NativeScanPlan open_native_scan_plan(
                     footer_buf_ptr, footer_buf_size
                 )
                 _PARSED_FOOTER_CACHE.put_fs(path, plan.footer_map[0][path_bytes_cpp])
+                plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
         bloom_path = path if _is_local_path(path) else None
         for rg_i in range(plan.footer_map[0][path_bytes_cpp].row_groups.size()):
             if predicates and not _rg_passes_predicates_native(

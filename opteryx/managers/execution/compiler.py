@@ -227,6 +227,13 @@ class _Compiler:
         # entry has exactly one reason here. Plan-time only; never touched per
         # morsel. Folded into telemetry `_reading["scan_residual_reasons"]`.
         self.scan_residual_reasons: dict = {}
+        # Wall time (ns) spent inside open_native_scan_plan's cold-cache footer
+        # fetch/parse, summed across every scan this compile touches. This is
+        # network IO, not plan compilation — execute_native subtracts it out of
+        # time_engine_compile and reports it separately (time_engine_footer_fetch)
+        # so "compile" stops silently meaning "compile plus however many blobs'
+        # footers were uncached."
+        self.footer_fetch_ns = 0
 
     # ---- expression lowering ------------------------------------------------------
     # Expressions are lowered ONCE, at plan time, to the phase-9 flat bytecode whose
@@ -1219,6 +1226,7 @@ class _Compiler:
             # See docs/DUCKDB_GAP3_DECODE_BUDGET_PLAN.md.
             pool=None,
         )
+        self.footer_fetch_ns += splan.footer_fetch_ns
 
         if filter_bc is not None:
             # Wire the relocated residual for _compile_scan. The native Source emits
@@ -1535,7 +1543,8 @@ def compile_to_native(plan, pool=None):
         pt = _physical_type(col.schema_column)
         final_types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
     nplan.set_final_schema(list(exit_node.final_names), final_types)
-    return nplan, out_q, compiler.scan_sources, compiler.scan_facts, compiler.scan_residual_reasons
+    return (nplan, out_q, compiler.scan_sources, compiler.scan_facts,
+            compiler.scan_residual_reasons, compiler.footer_fetch_ns)
 
 
 def execute_native(plan, telemetry=None):
@@ -1567,11 +1576,18 @@ def execute_native(plan, telemetry=None):
     # driver generator produces anything — so it is inside time_executing yet
     # invisible to time_engine_generator_total. Cost is ~independent of row count,
     # so it dominates cheap queries. Timed as an always-on driver span.
+    #
+    # compile_to_native also does cold-cache footer fetch/parse for every native
+    # parquet scan it touches (open_native_scan_plan) — real network IO, not plan
+    # compilation, and on a large/uncached file set it can dominate this whole
+    # span (one serial round-trip per uncached file). compiler.footer_fetch_ns
+    # carries that cost back out so it's subtracted below: time_engine_compile
+    # reports actual compile cost, and time_engine_footer_fetch reports the IO
+    # separately instead of one hiding inside the other's name.
     _compile0 = _t.perf_counter_ns()
-    nplan, out_q, scan_sources, scan_facts, scan_residual_reasons = compile_to_native(
-        plan, pool=pool
-    )
-    _compile_ns = _t.perf_counter_ns() - _compile0
+    (nplan, out_q, scan_sources, scan_facts, scan_residual_reasons,
+     _footer_fetch_ns) = compile_to_native(plan, pool=pool)
+    _compile_ns = _t.perf_counter_ns() - _compile0 - _footer_fetch_ns
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
     # fact — recorded whether or not the GIL instrumentation is armed; the dict is
     # tiny and costs nothing to attach).
@@ -1791,6 +1807,7 @@ def execute_native(plan, telemetry=None):
                 # Pre-driver, per-query fixed costs (measured in execute_native's
                 # body, outside the generator span above).
                 r["time_engine_compile"] = _compile_ns
+                r["time_engine_footer_fetch"] = _footer_fetch_ns
                 r["time_engine_pool_create"] = _pool_create_ns
                 r["time_engine_generator_total"] = _gen_total_ns
                 r["time_engine_submit"] = _submit_ns
