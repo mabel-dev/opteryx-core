@@ -4219,7 +4219,11 @@ static VectorOwner make_array_from_sequence(
         if (!PyList_Check(row.ptr()) && !PyTuple_Check(row.ptr()))
             throw std::invalid_argument(
                 "vector_array_from_sequence: each non-null element must be a list");
-        nb::list sub = nb::cast<nb::list>(row);
+        // nb::cast<nb::list> requires the concrete list type and throws
+        // std::bad_cast for a tuple even though the check above admits one —
+        // convert tuples via the generic (PySequence_List-backed) constructor,
+        // keep the zero-copy borrow for the already-list common case.
+        nb::list sub = PyTuple_Check(row.ptr()) ? nb::list(row) : nb::cast<nb::list>(row);
         const uint32_t sub_len = static_cast<uint32_t>(sub.size());
 
         if (child_type == CT_UNKNOWN) {
