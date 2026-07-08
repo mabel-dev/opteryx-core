@@ -2064,6 +2064,53 @@ struct DistinctSink : Sink {
         size_t ncols = in->columns.size();
         uint32_t mi = static_cast<uint32_t>(l.morsels.size());
         bool used = false;
+
+        size_t dedup_ncols = on_idx.empty() ? ncols : on_idx.size();
+        if (dedup_ncols == 1) {
+            const DrakenVector& v =
+                in->columns[on_idx.empty() ? 0 : on_idx[0]].view;
+            if (draken_is_compressed(&v)) {
+                // §11-sanctioned dict-shape fast path: one key per PHYSICAL
+                // unique value (+ one for NULL if present) instead of per row —
+                // rows sharing a dict code are known equal without hashing.
+                std::vector<uint32_t> first_row(v.data_length, UINT32_MAX);
+                uint32_t null_row = UINT32_MAX;
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!sort_row_valid(v, i)) {
+                        if (null_row == UINT32_MAX) null_row = i;
+                        continue;
+                    }
+                    uint32_t phys = v.selection[i];
+                    if (first_row[phys] == UINT32_MAX) first_row[phys] = i;
+                }
+                if (null_row != UINT32_MAX) {
+                    l.scratch.clear();
+                    if (!key_append(l.scratch, v, null_row, err))
+                        return SinkResult::CONTINUE;
+                    if (l.seen.insert(l.scratch).second) {
+                        l.kept_keys.push_back(l.scratch);
+                        l.ref_m.push_back(mi);
+                        l.ref_r.push_back(null_row);
+                        used = true;
+                    }
+                }
+                for (uint32_t j = 0; j < v.data_length; ++j) {
+                    if (first_row[j] == UINT32_MAX) continue;
+                    l.scratch.clear();
+                    if (!key_append_phys(l.scratch, v, j, err))
+                        return SinkResult::CONTINUE;
+                    if (l.seen.insert(l.scratch).second) {
+                        l.kept_keys.push_back(l.scratch);
+                        l.ref_m.push_back(mi);
+                        l.ref_r.push_back(first_row[j]);
+                        used = true;
+                    }
+                }
+                if (used) l.morsels.push_back(in);
+                return SinkResult::CONTINUE;
+            }
+        }
+
         for (uint32_t i = 0; i < rows; ++i) {
             l.scratch.clear();
             if (on_idx.empty()) {
