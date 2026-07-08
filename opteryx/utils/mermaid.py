@@ -160,7 +160,13 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                     # self_time == execution_time on the native path: the executor times
                     # each operator's own call (the recursive downstream forward is
                     # excluded), so there is no separate downstream component to subtract.
+                    # execution_time/self_time are WALL time (may include a blocked wait,
+                    # e.g. a scan's get_morsel() pull) summed across every dop worker
+                    # thread — not comparable to time_taken_s. cpu_time_ms is the CPU
+                    # actually consumed (CLOCK_THREAD_CPUTIME_ID), also thread-summed,
+                    # which is near-zero for an operator that's mostly blocked waiting.
                     node_stat["self_time"] = native["execution_time"]
+                    node_stat["cpu_time_ms"] = native["cpu_time"] / 1_000_000
 
             # Add telemetry-specific readings for reader nodes
             if node.is_scan:

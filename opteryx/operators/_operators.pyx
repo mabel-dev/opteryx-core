@@ -233,6 +233,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         uint64_t bytes_in
         uint64_t bytes_out
         uint64_t exec_ns
+        uint64_t cpu_ns
     cdef cppclass Engine:
         Engine() except +
         void set_current_identity(string s)
@@ -2103,6 +2104,7 @@ cdef class NativePlan:
                 "bytes_in": int(r.bytes_in),
                 "bytes_out": int(r.bytes_out),
                 "execution_time": int(r.exec_ns),
+                "cpu_time": int(r.cpu_ns),
             })
         return out
 

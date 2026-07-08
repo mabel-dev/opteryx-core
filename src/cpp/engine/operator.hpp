@@ -41,6 +41,8 @@ struct OpStats {
     std::atomic<uint64_t> bytes_in{0};   // rows * columns * 8, matching the Python model
     std::atomic<uint64_t> bytes_out{0};
     std::atomic<uint64_t> exec_ns{0};    // wall time inside this operator's own call(s)
+    std::atomic<uint64_t> cpu_ns{0};     // CPU time actually consumed (CLOCK_THREAD_CPUTIME_ID);
+                                          // excludes time blocked/asleep, unlike exec_ns
 };
 
 // ---- Opaque per-operator state. The engine owns the lifetimes. -------------------

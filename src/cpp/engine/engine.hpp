@@ -222,7 +222,7 @@ public:
     struct OpReading {
         std::string identity;
         std::string role;   // "source" | "operator" | "sink"
-        uint64_t calls, rows_in, rows_out, bytes_in, bytes_out, exec_ns;
+        uint64_t calls, rows_in, rows_out, bytes_in, bytes_out, exec_ns, cpu_ns;
     };
     std::vector<OpReading> collect_op_stats() const {
         std::vector<OpReading> out;
@@ -230,7 +230,8 @@ public:
             out.push_back(OpReading{
                 s.identity, role,
                 s.calls.load(), s.rows_in.load(), s.rows_out.load(),
-                s.bytes_in.load(), s.bytes_out.load(), s.exec_ns.load()});
+                s.bytes_in.load(), s.bytes_out.load(), s.exec_ns.load(),
+                s.cpu_ns.load()});
         };
         for (const auto& pn : pipelines) {
             if (pn->source) emit(pn->source->stats, "source");

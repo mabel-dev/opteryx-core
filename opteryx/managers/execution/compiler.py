@@ -46,6 +46,17 @@ _COMPARE_OPS = {"Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq"}
 _oversubscribe_warned = False
 
 
+def _connector_type(scan) -> str:
+    """Storage backend for ``scan``'s connector — mirrors the trampoline path's
+    resolution in parquet_read.pyx (``_sp_connector_type``), so the native path
+    picks the same IO-worker budget for the same connector."""
+    connector = getattr(scan, "connector", None)
+    filesystem = getattr(connector, "filesystem", None)
+    if filesystem is not None:
+        return getattr(connector, "storage_type", None) or connector.__type__
+    return "FILESYSTEM"
+
+
 def resolve_worker_count(requested) -> int:
     """Effective degree of parallelism. Unset/"auto" is softcoded (cpu-2, capped);
     an explicit positive request is HONOURED EXACTLY (warned if oversubscribed,
@@ -1177,10 +1188,13 @@ class _Compiler:
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
         pruning = extract_predicate_stats(predicates) if predicates else None
+        connector_type = _connector_type(scan)
         splan = open_native_scan_plan(
             paths,
             names,
-            decode_workers=config.PARQUET_LOCAL_IO_WORKERS,
+            decode_workers=config.PARQUET_GCS_IO_WORKERS
+            if connector_type in ("GCS", "GS")
+            else config.PARQUET_LOCAL_IO_WORKERS,
             predicates=pruning or None,
             file_sizes=file_sizes or None,
             string_types=string_types,
@@ -1704,6 +1718,7 @@ def execute_native(plan, telemetry=None):
                             "bytes_out": row["bytes_out"],
                             "calls": row["calls"],
                             "execution_time": row["execution_time"],
+                            "cpu_time": row["cpu_time"],
                         }
                     else:
                         agg["records_in"] += row["records_in"]
@@ -1712,6 +1727,7 @@ def execute_native(plan, telemetry=None):
                         agg["bytes_out"] += row["bytes_out"]
                         agg["calls"] += row["calls"]
                         agg["execution_time"] += row["execution_time"]
+                        agg["cpu_time"] += row["cpu_time"]
                 telemetry._reading["native_op_stats"] = op_stats
             _harvest_ns = _t.perf_counter_ns() - _th0
             # WP-INSTR instruments 1 & 4: harvest the execution-time GIL readings

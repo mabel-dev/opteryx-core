@@ -41,6 +41,17 @@ inline uint64_t telem_now_ns() {
          + static_cast<uint64_t>(ts.tv_nsec);
 }
 
+// Per-THREAD CPU-time clock: only advances while this thread is actually scheduled and
+// running, not while blocked in a mutex/condvar wait (e.g. the scan's get_morsel() pull
+// from the async decode pipeline). Read alongside telem_now_ns() at the same call sites
+// to split "real work" (cpu_ns) from "elapsed, possibly-blocked" (exec_ns) per operator.
+inline uint64_t telem_cpu_now_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull
+         + static_cast<uint64_t>(ts.tv_nsec);
+}
+
 // rows * columns * 8 — the byte estimate the Python operator model reports (bytes_in/out).
 inline uint64_t telem_nbytes(const MorselPtr& m) {
     if (!m) return 0;
@@ -83,8 +94,10 @@ inline void run_worker(WorkerCtx* ctx) {
             ss.rows_in.fetch_add(m ? m->num_rows() : 0, relaxed);
             ss.bytes_in.fetch_add(telem_nbytes(m), relaxed);
             uint64_t t0 = telem_now_ns();
+            uint64_t c0 = telem_cpu_now_ns();
             p.sink->sink(m, *ctx->gsink, *lsink, e);
             ss.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
+            ss.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
             return;
         }
         OpStats& os = p.operators[stage]->stats;
@@ -94,8 +107,10 @@ inline void run_worker(WorkerCtx* ctx) {
         MorselPtr out;
         while (true) {
             uint64_t t0 = telem_now_ns();
+            uint64_t c0 = telem_cpu_now_ns();
             OpResult orr = p.operators[stage]->execute(m, *op_states[stage], out, e);
             os.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);  // SELF time — excludes forward
+            os.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
             if (e.code != 0) return;
             if (orr == OpResult::NEED_INPUT) return;       // consumed, no output
             os.rows_out.fetch_add(out ? out->num_rows() : 0, relaxed);
@@ -112,8 +127,10 @@ inline void run_worker(WorkerCtx* ctx) {
     while (true) {
         if (p.halt != nullptr && p.halt->load(std::memory_order_relaxed)) break;
         uint64_t t0 = telem_now_ns();
+        uint64_t c0 = telem_cpu_now_ns();
         SourceResult sr = p.source->get_morsel(*ctx->gsrc, *lsrc, in, e);
         src.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
+        src.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
         if (e.code != 0) return;
         if (sr == SourceResult::FINISHED) break;
         src.calls.fetch_add(1, relaxed);
