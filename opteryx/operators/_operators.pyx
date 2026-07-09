@@ -260,6 +260,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               cppvector[void*] lit_dv, ExprEvalFn fn, string name,
                               int lt_kind, int lt_unit, int lt_precision, int lt_scale)
         void add_limit(size_t p, int64_t offset, int64_t limit)
+        void add_unnest(size_t p, uint32_t array_idx, string target_name, bint drop_source)
+        void add_unnest_literal(size_t p, shared_ptr[CxxMorsel] lit, string target_name)
         void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
         void set_pipeline_dop(size_t p, int dop)
         void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
@@ -2322,6 +2324,25 @@ cdef class NativePlan:
         cdef int64_t off = 0 if offset is None else <int64_t>offset
         cdef int64_t lim = 0x7FFFFFFFFFFFFFFF if limit is None else <int64_t>limit
         self._e.add_limit(p, off, lim)
+
+    def add_unnest(self, size_t p, size_t array_idx, target_name, bint drop_source):
+        """CROSS JOIN UNNEST on pipeline ``p``: expand columns[array_idx] (an ARRAY)
+        into the flattened element column ``target_name`` (bytes/str). ``drop_source``
+        replaces the consumed array column in place; otherwise the target is appended
+        and the raw array survives."""
+        cdef string nm = <string>(target_name if isinstance(target_name, bytes)
+                                  else (<str>target_name).encode("utf-8"))
+        self._e.add_unnest(p, <uint32_t>array_idx, nm, drop_source)
+
+    def add_unnest_literal(self, size_t p, Morsel lit, target_name):
+        """CROSS JOIN UNNEST over a LITERAL array: ``lit`` is a plan-constant
+        one-column Morsel of the literal's elements (materialized at compile time,
+        like a virtual dataset). Each input row is repeated len(lit) times with the
+        literal tiled across them; the target column is appended."""
+        cdef string nm = <string>(target_name if isinstance(target_name, bytes)
+                                  else (<str>target_name).encode("utf-8"))
+        self.held.append(lit)   # keep the literal's vectors alive for the whole run
+        self._e.add_unnest_literal(p, morsel_to_cxx(lit), nm)
 
     def add_buffer_morsel(self, size_t buf, Morsel m):
         """Plan-time materialization: place a (plan-constant) morsel into a buffer —

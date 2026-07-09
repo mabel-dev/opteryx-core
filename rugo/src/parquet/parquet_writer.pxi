@@ -639,12 +639,6 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             # child via array_child. def: 0=null list, 1=empty, 2=null elem,
             # 3=present; rep: 0=new row, 1=continuation.
             offs = <const int32_t*>dv.data
-            child = Vector(v._nb.array_child)
-            keepalive.append(child)
-            cdv = child.unified()
-            ct = cdv.type
-            child_sel = cdv.selection
-            child_val = cdv.validity
 
             rep_v = vector[uint8_t]()
             def_v = vector[uint8_t]()
@@ -655,239 +649,268 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             row_lvl_off = vector[uint32_t]()
             row_elem_off = vector[uint32_t]()
 
-            if ct == DRAKEN_ARRAY:
-                # depth-2 nested list: list<list<scalar>>. `child` is the middle
-                # ARRAY vector; descend once more to the scalar leaf. All-nullable
-                # nesting scheme (max_rep=2, max_def=5); rep/def per the Dremel
-                # scheme the reader (_make_array_vector) inverts.
-                mid_dv = cdv
-                offs_mid = <const int32_t*>mid_dv.data
-                mid_sel = mid_dv.selection
-                mid_val = mid_dv.validity
-                leafv = Vector(child._nb.array_child)
-                keepalive.append(leafv)
-                leaf_dv = leafv.unified()
-                leaf_t = leaf_dv.type
-                leaf_sel = leaf_dv.selection
-                leaf_val = leaf_dv.validity
-                ci.array_depth = 2
-
-                if leaf_t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
-                    elem_kind = 0
-                    ci.elem_type = PT_INT64
-                elif leaf_t in (DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32,
-                                DRAKEN_UINT64):
-                    # Unsigned leaves widen to physical INT64 (lossless bit
-                    # reinterpret) + INTEGER(64, isSigned=false) annotation so a
-                    # conformant reader recovers the unsigned value.
-                    elem_kind = 0
-                    ci.elem_type = PT_INT64
-                    ci.is_unsigned = True
-                    ci.int_bit_width = 64
-                elif leaf_t == DRAKEN_FLOAT32 or leaf_t == DRAKEN_FLOAT64:
-                    elem_kind = 1
-                    ci.elem_type = PT_DOUBLE
-                elif leaf_t == DRAKEN_BOOL:
-                    elem_kind = 2
-                    ci.elem_type = PT_BOOLEAN
-                elif leaf_t in (DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
-                                DRAKEN_VARIANT):
-                    elem_kind = 3
-                    ci.elem_type = PT_BYTE_ARRAY
-                    ci.elem_is_utf8 = (leaf_t != DRAKEN_VARBINARY)
-                    child_arena = <DrakenStringArena*>leaf_dv.data
-                else:
-                    raise ValueError(
-                        "write_parquet: unsupported nested ARRAY leaf type %d for "
-                        "%r (supports int/uint/float/bool/string leaves)"
-                        % (<int>leaf_t, names[i]))
-
+            if v._nb.array_child_type is None:
+                # Zero elements anywhere in this column (every row's list is
+                # null or empty) -- array_child legitimately has no
+                # child_owner to fetch here (draken_native.cpp raises rather
+                # than return one). Every row can only encode def=0 (null
+                # list) or def=1 (empty list); no element is ever written, so
+                # the leaf physical type is arbitrary -- fall back to INT32,
+                # the same convention as the DRAKEN_NULL column case above.
+                elem_kind = 0
+                ci.elem_type = PT_INT32
                 with nogil:
                     for j in range(nrows):
                         row_lvl_off.push_back(<uint32_t>rep_v.size())
-                        if elem_kind == 0:
-                            row_elem_off.push_back(<uint32_t>elem_i64.size())
-                        elif elem_kind == 1:
-                            row_elem_off.push_back(<uint32_t>elem_f64.size())
-                        elif elem_kind == 2:
-                            row_elem_off.push_back(<uint32_t>elem_b.size())
-                        else:
-                            row_elem_off.push_back(<uint32_t>elem_s.size())
-                        p = sel[j]
-                        if dv.validity != NULL and not ((dv.validity[j >> 3] >> (j & 7)) & 1):
-                            rep_v.push_back(0); def_v.push_back(0)   # null outer list
-                            continue
-                        mstart = offs[p]
-                        mend = offs[p + 1]
-                        if mstart == mend:
-                            rep_v.push_back(0); def_v.push_back(1)   # empty outer list
-                            continue
-                        first_in_record = True
-                        for mi in range(mstart, mend):
-                            rlev = 0 if first_in_record else 1
-                            if mid_val != NULL and not ((mid_val[mi >> 3] >> (mi & 7)) & 1):
-                                rep_v.push_back(rlev); def_v.push_back(2)  # null middle list
-                                first_in_record = False
-                                continue
-                            mp = mid_sel[mi]
-                            lstart = offs_mid[mp]
-                            lend = offs_mid[mp + 1]
-                            if lstart == lend:
-                                rep_v.push_back(rlev); def_v.push_back(3)  # empty middle list
-                                first_in_record = False
-                                continue
-                            first_in_mid = True
-                            for li in range(lstart, lend):
-                                if first_in_record:
-                                    rlev = 0
-                                elif first_in_mid:
-                                    rlev = 1
-                                else:
-                                    rlev = 2
-                                rep_v.push_back(rlev)
-                                if leaf_val != NULL and not ((leaf_val[li >> 3] >> (li & 7)) & 1):
-                                    def_v.push_back(4)                 # null leaf element
-                                    first_in_record = False
-                                    first_in_mid = False
-                                    continue
-                                def_v.push_back(5)                     # present leaf element
-                                lp = leaf_sel[li]
-                                if elem_kind == 0:
-                                    if leaf_t == DRAKEN_INT64:
-                                        elem_i64.push_back((<const int64_t*>leaf_dv.data)[lp])
-                                    elif leaf_t == DRAKEN_UINT64:
-                                        elem_i64.push_back(<int64_t>(<const uint64_t*>leaf_dv.data)[lp])
-                                    elif leaf_t == DRAKEN_INT32:
-                                        elem_i64.push_back((<const int32_t*>leaf_dv.data)[lp])
-                                    elif leaf_t == DRAKEN_UINT32:
-                                        elem_i64.push_back(<int64_t>(<const uint32_t*>leaf_dv.data)[lp])
-                                    elif leaf_t == DRAKEN_INT16:
-                                        elem_i64.push_back((<const int16_t*>leaf_dv.data)[lp])
-                                    elif leaf_t == DRAKEN_UINT16:
-                                        elem_i64.push_back(<int64_t>(<const uint16_t*>leaf_dv.data)[lp])
-                                    elif leaf_t == DRAKEN_INT8:
-                                        elem_i64.push_back((<const int8_t*>leaf_dv.data)[lp])
-                                    else:  # UINT8
-                                        elem_i64.push_back(<int64_t>(<const uint8_t*>leaf_dv.data)[lp])
-                                elif elem_kind == 1:
-                                    if leaf_t == DRAKEN_FLOAT64:
-                                        elem_f64.push_back((<const double*>leaf_dv.data)[lp])
-                                    else:
-                                        elem_f64.push_back((<const float*>leaf_dv.data)[lp])
-                                elif elem_kind == 2:
-                                    elem_b.push_back(((<const uint8_t*>leaf_dv.data)[lp >> 3] >> (lp & 7)) & 1)
-                                else:
-                                    child_slot = &child_arena.slots[lp]
-                                    ss.ptr = str_data(child_slot, child_arena.arena)
-                                    ss.len = str_length(child_slot)
-                                    elem_s.push_back(ss)
-                                first_in_record = False
-                                first_in_mid = False
-                    # Sentinel: row_lvl_off[nrows]/row_elem_off[nrows] close the
-                    # final row's [start, end) range.
-                    row_lvl_off.push_back(<uint32_t>rep_v.size())
-                    if elem_kind == 0:
                         row_elem_off.push_back(<uint32_t>elem_i64.size())
-                    elif elem_kind == 1:
-                        row_elem_off.push_back(<uint32_t>elem_f64.size())
-                    elif elem_kind == 2:
-                        row_elem_off.push_back(<uint32_t>elem_b.size())
-                    else:
-                        row_elem_off.push_back(<uint32_t>elem_s.size())
-            else:
-                if ct in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
-                    elem_kind = 0
-                    ci.elem_type = PT_INT64
-                elif ct in (DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64):
-                    elem_kind = 0
-                    ci.elem_type = PT_INT64
-                    ci.is_unsigned = True
-                    ci.int_bit_width = 64
-                elif ct == DRAKEN_FLOAT32 or ct == DRAKEN_FLOAT64:
-                    elem_kind = 1
-                    ci.elem_type = PT_DOUBLE
-                elif ct == DRAKEN_BOOL:
-                    elem_kind = 2
-                    ci.elem_type = PT_BOOLEAN
-                elif ct in (DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
-                            DRAKEN_VARIANT):
-                    elem_kind = 3
-                    ci.elem_type = PT_BYTE_ARRAY
-                    ci.elem_is_utf8 = (ct != DRAKEN_VARBINARY)
-                    child_arena = <DrakenStringArena*>cdv.data
-                else:
-                    raise ValueError(
-                        "write_parquet: unsupported ARRAY element type %d for %r "
-                        "(supports int/uint/float/bool/string elements)"
-                        % (<int>ct, names[i]))
-                with nogil:
-                    for j in range(nrows):
-                        row_lvl_off.push_back(<uint32_t>rep_v.size())
-                        if elem_kind == 0:
-                            row_elem_off.push_back(<uint32_t>elem_i64.size())
-                        elif elem_kind == 1:
-                            row_elem_off.push_back(<uint32_t>elem_f64.size())
-                        elif elem_kind == 2:
-                            row_elem_off.push_back(<uint32_t>elem_b.size())
-                        else:
-                            row_elem_off.push_back(<uint32_t>elem_s.size())
                         p = sel[j]
                         if dv.validity != NULL and not ((dv.validity[p >> 3] >> (p & 7)) & 1):
                             rep_v.push_back(0); def_v.push_back(0)   # null list
-                            continue
-                        a_start = offs[p]
-                        a_end = offs[p + 1]
-                        if a_start == a_end:
+                        else:
                             rep_v.push_back(0); def_v.push_back(1)   # empty list
-                            continue
-                        for k in range(a_start, a_end):
-                            rlev = 0 if k == a_start else 1  # ternary-in-push_back miscompiles
-                            rep_v.push_back(rlev)
-                            if child_val != NULL and not ((child_val[k >> 3] >> (k & 7)) & 1):
-                                def_v.push_back(2)                   # null element
-                                continue
-                            def_v.push_back(3)                       # present element
-                            cp = child_sel[k]
-                            if elem_kind == 0:
-                                if ct == DRAKEN_INT64:
-                                    elem_i64.push_back((<const int64_t*>cdv.data)[cp])
-                                elif ct == DRAKEN_UINT64:
-                                    elem_i64.push_back(<int64_t>(<const uint64_t*>cdv.data)[cp])
-                                elif ct == DRAKEN_INT32:
-                                    elem_i64.push_back((<const int32_t*>cdv.data)[cp])
-                                elif ct == DRAKEN_UINT32:
-                                    elem_i64.push_back(<int64_t>(<const uint32_t*>cdv.data)[cp])
-                                elif ct == DRAKEN_INT16:
-                                    elem_i64.push_back((<const int16_t*>cdv.data)[cp])
-                                elif ct == DRAKEN_UINT16:
-                                    elem_i64.push_back(<int64_t>(<const uint16_t*>cdv.data)[cp])
-                                elif ct == DRAKEN_INT8:
-                                    elem_i64.push_back((<const int8_t*>cdv.data)[cp])
-                                else:  # UINT8
-                                    elem_i64.push_back(<int64_t>(<const uint8_t*>cdv.data)[cp])
-                            elif elem_kind == 1:
-                                if ct == DRAKEN_FLOAT64:
-                                    elem_f64.push_back((<const double*>cdv.data)[cp])
-                                else:
-                                    elem_f64.push_back((<const float*>cdv.data)[cp])
-                            elif elem_kind == 2:
-                                elem_b.push_back(((<const uint8_t*>cdv.data)[cp >> 3] >> (cp & 7)) & 1)
-                            else:
-                                child_slot = &child_arena.slots[cp]
-                                ss.ptr = str_data(child_slot, child_arena.arena)
-                                ss.len = str_length(child_slot)
-                                elem_s.push_back(ss)
-                    # Sentinel: row_lvl_off[nrows]/row_elem_off[nrows] close the
-                    # final row's [start, end) range.
                     row_lvl_off.push_back(<uint32_t>rep_v.size())
-                    if elem_kind == 0:
-                        row_elem_off.push_back(<uint32_t>elem_i64.size())
-                    elif elem_kind == 1:
-                        row_elem_off.push_back(<uint32_t>elem_f64.size())
-                    elif elem_kind == 2:
-                        row_elem_off.push_back(<uint32_t>elem_b.size())
+                    row_elem_off.push_back(<uint32_t>elem_i64.size())
+            else:
+                child = Vector(v._nb.array_child)
+                keepalive.append(child)
+                cdv = child.unified()
+                ct = cdv.type
+                child_sel = cdv.selection
+                child_val = cdv.validity
+
+                if ct == DRAKEN_ARRAY:
+                    # depth-2 nested list: list<list<scalar>>. `child` is the middle
+                    # ARRAY vector; descend once more to the scalar leaf. All-nullable
+                    # nesting scheme (max_rep=2, max_def=5); rep/def per the Dremel
+                    # scheme the reader (_make_array_vector) inverts.
+                    mid_dv = cdv
+                    offs_mid = <const int32_t*>mid_dv.data
+                    mid_sel = mid_dv.selection
+                    mid_val = mid_dv.validity
+                    leafv = Vector(child._nb.array_child)
+                    keepalive.append(leafv)
+                    leaf_dv = leafv.unified()
+                    leaf_t = leaf_dv.type
+                    leaf_sel = leaf_dv.selection
+                    leaf_val = leaf_dv.validity
+                    ci.array_depth = 2
+
+                    if leaf_t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
+                        elem_kind = 0
+                        ci.elem_type = PT_INT64
+                    elif leaf_t in (DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32,
+                                    DRAKEN_UINT64):
+                        # Unsigned leaves widen to physical INT64 (lossless bit
+                        # reinterpret) + INTEGER(64, isSigned=false) annotation so a
+                        # conformant reader recovers the unsigned value.
+                        elem_kind = 0
+                        ci.elem_type = PT_INT64
+                        ci.is_unsigned = True
+                        ci.int_bit_width = 64
+                    elif leaf_t == DRAKEN_FLOAT32 or leaf_t == DRAKEN_FLOAT64:
+                        elem_kind = 1
+                        ci.elem_type = PT_DOUBLE
+                    elif leaf_t == DRAKEN_BOOL:
+                        elem_kind = 2
+                        ci.elem_type = PT_BOOLEAN
+                    elif leaf_t in (DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
+                                    DRAKEN_VARIANT):
+                        elem_kind = 3
+                        ci.elem_type = PT_BYTE_ARRAY
+                        ci.elem_is_utf8 = (leaf_t != DRAKEN_VARBINARY)
+                        child_arena = <DrakenStringArena*>leaf_dv.data
                     else:
-                        row_elem_off.push_back(<uint32_t>elem_s.size())
+                        raise ValueError(
+                            "write_parquet: unsupported nested ARRAY leaf type %d for "
+                            "%r (supports int/uint/float/bool/string leaves)"
+                            % (<int>leaf_t, names[i]))
+
+                    with nogil:
+                        for j in range(nrows):
+                            row_lvl_off.push_back(<uint32_t>rep_v.size())
+                            if elem_kind == 0:
+                                row_elem_off.push_back(<uint32_t>elem_i64.size())
+                            elif elem_kind == 1:
+                                row_elem_off.push_back(<uint32_t>elem_f64.size())
+                            elif elem_kind == 2:
+                                row_elem_off.push_back(<uint32_t>elem_b.size())
+                            else:
+                                row_elem_off.push_back(<uint32_t>elem_s.size())
+                            p = sel[j]
+                            if dv.validity != NULL and not ((dv.validity[j >> 3] >> (j & 7)) & 1):
+                                rep_v.push_back(0); def_v.push_back(0)   # null outer list
+                                continue
+                            mstart = offs[p]
+                            mend = offs[p + 1]
+                            if mstart == mend:
+                                rep_v.push_back(0); def_v.push_back(1)   # empty outer list
+                                continue
+                            first_in_record = True
+                            for mi in range(mstart, mend):
+                                rlev = 0 if first_in_record else 1
+                                if mid_val != NULL and not ((mid_val[mi >> 3] >> (mi & 7)) & 1):
+                                    rep_v.push_back(rlev); def_v.push_back(2)  # null middle list
+                                    first_in_record = False
+                                    continue
+                                mp = mid_sel[mi]
+                                lstart = offs_mid[mp]
+                                lend = offs_mid[mp + 1]
+                                if lstart == lend:
+                                    rep_v.push_back(rlev); def_v.push_back(3)  # empty middle list
+                                    first_in_record = False
+                                    continue
+                                first_in_mid = True
+                                for li in range(lstart, lend):
+                                    if first_in_record:
+                                        rlev = 0
+                                    elif first_in_mid:
+                                        rlev = 1
+                                    else:
+                                        rlev = 2
+                                    rep_v.push_back(rlev)
+                                    if leaf_val != NULL and not ((leaf_val[li >> 3] >> (li & 7)) & 1):
+                                        def_v.push_back(4)                 # null leaf element
+                                        first_in_record = False
+                                        first_in_mid = False
+                                        continue
+                                    def_v.push_back(5)                     # present leaf element
+                                    lp = leaf_sel[li]
+                                    if elem_kind == 0:
+                                        if leaf_t == DRAKEN_INT64:
+                                            elem_i64.push_back((<const int64_t*>leaf_dv.data)[lp])
+                                        elif leaf_t == DRAKEN_UINT64:
+                                            elem_i64.push_back(<int64_t>(<const uint64_t*>leaf_dv.data)[lp])
+                                        elif leaf_t == DRAKEN_INT32:
+                                            elem_i64.push_back((<const int32_t*>leaf_dv.data)[lp])
+                                        elif leaf_t == DRAKEN_UINT32:
+                                            elem_i64.push_back(<int64_t>(<const uint32_t*>leaf_dv.data)[lp])
+                                        elif leaf_t == DRAKEN_INT16:
+                                            elem_i64.push_back((<const int16_t*>leaf_dv.data)[lp])
+                                        elif leaf_t == DRAKEN_UINT16:
+                                            elem_i64.push_back(<int64_t>(<const uint16_t*>leaf_dv.data)[lp])
+                                        elif leaf_t == DRAKEN_INT8:
+                                            elem_i64.push_back((<const int8_t*>leaf_dv.data)[lp])
+                                        else:  # UINT8
+                                            elem_i64.push_back(<int64_t>(<const uint8_t*>leaf_dv.data)[lp])
+                                    elif elem_kind == 1:
+                                        if leaf_t == DRAKEN_FLOAT64:
+                                            elem_f64.push_back((<const double*>leaf_dv.data)[lp])
+                                        else:
+                                            elem_f64.push_back((<const float*>leaf_dv.data)[lp])
+                                    elif elem_kind == 2:
+                                        elem_b.push_back(((<const uint8_t*>leaf_dv.data)[lp >> 3] >> (lp & 7)) & 1)
+                                    else:
+                                        child_slot = &child_arena.slots[lp]
+                                        ss.ptr = str_data(child_slot, child_arena.arena)
+                                        ss.len = str_length(child_slot)
+                                        elem_s.push_back(ss)
+                                    first_in_record = False
+                                    first_in_mid = False
+                        # Sentinel: row_lvl_off[nrows]/row_elem_off[nrows] close the
+                        # final row's [start, end) range.
+                        row_lvl_off.push_back(<uint32_t>rep_v.size())
+                        if elem_kind == 0:
+                            row_elem_off.push_back(<uint32_t>elem_i64.size())
+                        elif elem_kind == 1:
+                            row_elem_off.push_back(<uint32_t>elem_f64.size())
+                        elif elem_kind == 2:
+                            row_elem_off.push_back(<uint32_t>elem_b.size())
+                        else:
+                            row_elem_off.push_back(<uint32_t>elem_s.size())
+                else:
+                    if ct in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
+                        elem_kind = 0
+                        ci.elem_type = PT_INT64
+                    elif ct in (DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64):
+                        elem_kind = 0
+                        ci.elem_type = PT_INT64
+                        ci.is_unsigned = True
+                        ci.int_bit_width = 64
+                    elif ct == DRAKEN_FLOAT32 or ct == DRAKEN_FLOAT64:
+                        elem_kind = 1
+                        ci.elem_type = PT_DOUBLE
+                    elif ct == DRAKEN_BOOL:
+                        elem_kind = 2
+                        ci.elem_type = PT_BOOLEAN
+                    elif ct in (DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
+                                DRAKEN_VARIANT):
+                        elem_kind = 3
+                        ci.elem_type = PT_BYTE_ARRAY
+                        ci.elem_is_utf8 = (ct != DRAKEN_VARBINARY)
+                        child_arena = <DrakenStringArena*>cdv.data
+                    else:
+                        raise ValueError(
+                            "write_parquet: unsupported ARRAY element type %d for %r "
+                            "(supports int/uint/float/bool/string elements)"
+                            % (<int>ct, names[i]))
+                    with nogil:
+                        for j in range(nrows):
+                            row_lvl_off.push_back(<uint32_t>rep_v.size())
+                            if elem_kind == 0:
+                                row_elem_off.push_back(<uint32_t>elem_i64.size())
+                            elif elem_kind == 1:
+                                row_elem_off.push_back(<uint32_t>elem_f64.size())
+                            elif elem_kind == 2:
+                                row_elem_off.push_back(<uint32_t>elem_b.size())
+                            else:
+                                row_elem_off.push_back(<uint32_t>elem_s.size())
+                            p = sel[j]
+                            if dv.validity != NULL and not ((dv.validity[p >> 3] >> (p & 7)) & 1):
+                                rep_v.push_back(0); def_v.push_back(0)   # null list
+                                continue
+                            a_start = offs[p]
+                            a_end = offs[p + 1]
+                            if a_start == a_end:
+                                rep_v.push_back(0); def_v.push_back(1)   # empty list
+                                continue
+                            for k in range(a_start, a_end):
+                                rlev = 0 if k == a_start else 1  # ternary-in-push_back miscompiles
+                                rep_v.push_back(rlev)
+                                if child_val != NULL and not ((child_val[k >> 3] >> (k & 7)) & 1):
+                                    def_v.push_back(2)                   # null element
+                                    continue
+                                def_v.push_back(3)                       # present element
+                                cp = child_sel[k]
+                                if elem_kind == 0:
+                                    if ct == DRAKEN_INT64:
+                                        elem_i64.push_back((<const int64_t*>cdv.data)[cp])
+                                    elif ct == DRAKEN_UINT64:
+                                        elem_i64.push_back(<int64_t>(<const uint64_t*>cdv.data)[cp])
+                                    elif ct == DRAKEN_INT32:
+                                        elem_i64.push_back((<const int32_t*>cdv.data)[cp])
+                                    elif ct == DRAKEN_UINT32:
+                                        elem_i64.push_back(<int64_t>(<const uint32_t*>cdv.data)[cp])
+                                    elif ct == DRAKEN_INT16:
+                                        elem_i64.push_back((<const int16_t*>cdv.data)[cp])
+                                    elif ct == DRAKEN_UINT16:
+                                        elem_i64.push_back(<int64_t>(<const uint16_t*>cdv.data)[cp])
+                                    elif ct == DRAKEN_INT8:
+                                        elem_i64.push_back((<const int8_t*>cdv.data)[cp])
+                                    else:  # UINT8
+                                        elem_i64.push_back(<int64_t>(<const uint8_t*>cdv.data)[cp])
+                                elif elem_kind == 1:
+                                    if ct == DRAKEN_FLOAT64:
+                                        elem_f64.push_back((<const double*>cdv.data)[cp])
+                                    else:
+                                        elem_f64.push_back((<const float*>cdv.data)[cp])
+                                elif elem_kind == 2:
+                                    elem_b.push_back(((<const uint8_t*>cdv.data)[cp >> 3] >> (cp & 7)) & 1)
+                                else:
+                                    child_slot = &child_arena.slots[cp]
+                                    ss.ptr = str_data(child_slot, child_arena.arena)
+                                    ss.len = str_length(child_slot)
+                                    elem_s.push_back(ss)
+                        # Sentinel: row_lvl_off[nrows]/row_elem_off[nrows] close the
+                        # final row's [start, end) range.
+                        row_lvl_off.push_back(<uint32_t>rep_v.size())
+                        if elem_kind == 0:
+                            row_elem_off.push_back(<uint32_t>elem_i64.size())
+                        elif elem_kind == 1:
+                            row_elem_off.push_back(<uint32_t>elem_f64.size())
+                        elif elem_kind == 2:
+                            row_elem_off.push_back(<uint32_t>elem_b.size())
+                        else:
+                            row_elem_off.push_back(<uint32_t>elem_s.size())
 
             level_store.push_back(rep_v)
             ci.rep_levels = level_store.back().data()

@@ -346,33 +346,26 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     )
                     continue
 
-                # Here we're pushing filters into the UNNEST - this means that
-                # CROSS JOIN UNNEST will produce fewer rows... it still does
-                # the equality check, but all in one step which is generally faster
-                # Note: there are a lot of things that need to be true to push the
-                # filter into the UNNEST function
+                # NOTE: folding an Eq/InList filter on the unnested column INTO the
+                # UNNEST (`node.filters`) is intentionally disabled. The native
+                # UnnestOperator (src/cpp/engine/native_unnest.hpp) does plain
+                # expansion only and does not apply a folded value filter. Falling
+                # through to the branch below places the predicate as a standalone
+                # FilterNode AFTER the unnest, which compiles to the proven native
+                # ExprFilter (correct; it filters the expanded stream rather than
+                # during expansion — a perf, not correctness, difference). Re-enable
+                # the fold once the native operator applies node.filters.
+                # A predicate that references the UNNEST TARGET must be placed directly
+                # ABOVE the unnest: the target column does not exist below it, so
+                # letting it stay in `remaining_predicates` pushes it past the unnest
+                # (and any join) down onto the scan, where resolving the target's
+                # identity dies with a KeyError. `unnest_target` is a LogicalColumn and
+                # has NO `.identity` — the old `node.unnest_target.identity` was always
+                # None, so this clause never fired and only column-vs-column predicates
+                # (query_columns == known_columns) were correctly placed here.
                 if (
-                    len(predicate.columns) == 1
-                    and predicate.condition.left.node_type
-                    in (NodeType.LITERAL, NodeType.IDENTIFIER)
-                    and predicate.condition.right.node_type
-                    in (NodeType.LITERAL, NodeType.IDENTIFIER)
-                    and predicate.columns[0].schema_column.identity
-                    == node.unnest_target.schema_column.identity
-                    and predicate.condition.value in {"Eq", "InList"}
-                ):
-                    filters = node.filters or []
-                    new_values = predicate.condition.right.value
-                    if not isinstance(new_values, (list, set, tuple)):
-                        new_values = [new_values]
-                    else:
-                        new_values = list(new_values)
-                    node.filters = set(filters + new_values)
-                    self.telemetry.optimization_predicate_pushdown_cross_join_unnest += 1
-                    context.optimized_plan[context.node_id] = node
-
-                elif (
-                    query_columns == (known_columns) or node.unnest_target.identity in query_columns
+                    node.unnest_target.schema_column.identity in known_columns
+                    or query_columns == known_columns
                 ):
                     self.telemetry.optimization_predicate_pushdown += 1
                     context.optimized_plan.insert_node_after(

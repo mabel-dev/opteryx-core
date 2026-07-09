@@ -339,6 +339,7 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         self.telemetry = telemetry
         self.kwargs = kwargs
         self.kwargs.pop("connector", None)
+        self.kwargs.pop("prefix", None)
         self.catalog_factory = catalog
 
     def _get_catalog(self, catalog_name: str):

@@ -306,7 +306,8 @@ DEF _NT_LITERAL = 42
 DEF _NT_EVALUATED = 44
 DEF _NT_CAST = 45
 DEF _NT_EXTRACTION_OPERATOR = 46
-DEF _NT_BETWEEN = 47
+# NT_BETWEEN (47) has no lowering arm — `lower()` expands BETWEEN into a pair of
+# compares before the C node tree is built (see `expand_between`).
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1032,37 @@ cdef Py_ssize_t _linearize(
                     slot.ctx_ptr = <void*>(<unsigned long long>_dc_ctx.ctx_ptr)
                 return sub_depth - 2 + 1
 
+        # Mixed-domain TEMPORAL comparison — draken_compare_dv declines a DATE32-vs-
+        # TIMESTAMP64 type mismatch (no fallback on the native engine → hard error)
+        # and, worse, silently mis-compares two TIMESTAMP64 operands carried at
+        # DIFFERENT units (its raw-int ordering is unit-blind). Route BOTH to the
+        # unit-aware draken_temporal_cmp, which promotes each side to nanoseconds
+        # (DATE days×86.4e12; TIMESTAMP scaled by its bind-time unit) before
+        # comparing. Fires ONLY when the two temporal operands differ in physical
+        # type OR unit — a matched date/date or same-unit ts/ts pair stays on the
+        # fast draken_compare_dv. Mirrors the numeric-mismatch routing above.
+        _TEMPORAL_PHYS = ("DATE32", "TIMESTAMP64")
+        _lunit = _binop_ts_unit(left_type)
+        _runit = _binop_ts_unit(right_type)
+        if (not right_is_inlist_literal and op_code_val in (1, 2, 3, 4, 5, 6)
+                and _lphys in _TEMPORAL_PHYS and _rphys in _TEMPORAL_PHYS
+                and (_lphys != _rphys or _lunit != _runit)):
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _tc_alloc
+            _tc_fn, _tc_ctx = _resolve_kernel_and_context(
+                "draken_temporal_cmp", _tc_alloc,
+                (op_code_val, 0, 0, 0, 0, _lunit, _runit))
+            if _tc_fn is not None:
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 2
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                slot.kernel_fn = <void*>(<unsigned long long>_tc_fn)
+                if _tc_ctx is not None:
+                    bc._hold(_tc_ctx)
+                    slot.ctx_ptr = <void*>(<unsigned long long>_tc_ctx.ctx_ptr)
+                return sub_depth - 2 + 1
+
         flags = 0
         _left_cat = left_type.category if left_type is not None else None
         _right_cat = right_type.category if right_type is not None else None
@@ -1052,31 +1084,6 @@ cdef Py_ssize_t _linearize(
             slot.literal_obj = <PyObject*>inlist_set_obj
             return sub_depth      # pop 1 push 1 — net 0
         return sub_depth - 1      # pop 2 push 1 — net -1
-
-    # ------------------------------------------------------------------
-    # NT_BETWEEN — compile left operand, store bounds and inclusivity flags
-    # at compile time; draken_between is called at execution.
-    # ------------------------------------------------------------------
-    if nt == _NT_BETWEEN:
-        if node.left == NULL:
-            raise ValueError("compiled_expression: BETWEEN missing left operand")
-        sub_depth = _linearize(node.left, bc, depth)
-
-        between_val = <object>node.value
-        lower_incl = between_val[0]
-        upper_incl = between_val[1]
-        lower_obj = <object>node.right.value if node.right != NULL else None
-        upper_obj = <object>node.centre.value if node.centre != NULL else None
-
-        slot = bc._push_instr()
-        slot.opcode = BC_BETWEEN
-        slot.op_code = 1 if lower_incl else 0
-        slot.bool_value = 1 if upper_incl else 0
-        bc._hold(lower_obj)
-        bc._hold(upper_obj)
-        slot.literal_obj = <PyObject*>lower_obj if lower_obj is not None else NULL
-        slot.literal_obj2 = <PyObject*>upper_obj if upper_obj is not None else NULL
-        return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
     # NT_BINARY_OPERATOR — Phase 6: resolve kernel at bind time, store
@@ -1912,10 +1919,70 @@ cdef class CompiledExpressionHandle:
         return self._root
 
 
+def expand_between(node):
+    """PLAN-TIME tree rewrite: BETWEEN(operand; lower, upper) becomes
+    AND(operand >= lower, operand <= upper), honouring each bound's inclusivity.
+
+    BETWEEN is pure sugar. A dedicated opcode had to carry both bounds as raw
+    PyObject scalars and compare them RAW against the column, which silently
+    mis-compared a DATE32 column (days) against a TIMESTAMP64 bound (unit-scaled
+    ticks) — `date_col BETWEEN <ts> AND <ts>` returned zero rows. Expanding to
+    two compares routes each bound through BC_COMPARE, which resolves the
+    unit-aware `draken_temporal_cmp` for mixed-domain temporal operands.
+
+    Called from `lower()` so NO caller can produce a domain-blind range check,
+    and from the plan-time rewrite chain (`_rewrite_decimal_compares` must see
+    the expanded compares to rescale decimal bounds). Idempotent: a tree with no
+    BETWEEN is returned unchanged. Non-mutating — parents of a changed child are
+    rebuilt via Node.copy()."""
+    from opteryx.compiled.structures.node import Node
+    from opteryx.expression import NodeType
+
+    if not isinstance(node, Node):
+        return node
+    if node.node_type == NodeType.BETWEEN:
+        lower_incl, upper_incl = node.value
+        operand = expand_between(node.left)
+        lo = Node(NodeType.COMPARISON_OPERATOR,
+                  value=("GtEq" if lower_incl else "Gt"))
+        lo.left = operand
+        lo.right = node.right      # lower-bound literal node, reused as-is
+        hi = Node(NodeType.COMPARISON_OPERATOR,
+                  value=("LtEq" if upper_incl else "Lt"))
+        hi.left = operand
+        hi.right = node.centre     # upper-bound literal node
+        both = Node(NodeType.AND)
+        both.left = lo
+        both.right = hi
+        return both
+
+    rebuilt = None
+    for attr in ("left", "right", "centre"):
+        child = getattr(node, attr)
+        if isinstance(child, Node):
+            new_child = expand_between(child)
+            if new_child is not child:
+                if rebuilt is None:
+                    rebuilt = node.copy()
+                setattr(rebuilt, attr, new_child)
+    params = node.parameters
+    if isinstance(params, list):
+        new_params = [expand_between(c) if isinstance(c, Node) else c for c in params]
+        if any(a is not b for a, b in zip(new_params, params)):
+            if rebuilt is None:
+                rebuilt = node.copy()
+            rebuilt.parameters = new_params
+    return rebuilt if rebuilt is not None else node
+
+
 def lower(node):
-    """Lower an opteryx Node tree into a CompiledExpressionHandle."""
+    """Lower an opteryx Node tree into a CompiledExpressionHandle.
+
+    BETWEEN is expanded to a pair of compares FIRST — see `expand_between`. This
+    is the single entry point that builds the C node tree, so no consumer can
+    reach the executor with a domain-blind range check."""
     cdef CompiledExpressionHandle handle = CompiledExpressionHandle()
-    handle._root = handle._arena.lower(node)
+    handle._root = handle._arena.lower(expand_between(node))
     return handle
 
 
@@ -1954,7 +2021,7 @@ def build_bytecode(CompiledExpressionHandle handle):
     # Enables evaluate_c_native (whole-bytecode single GIL release). Excludes:
     # inline-IN-list / non-ordinal compares (LIKE/IN — Python kernels), string-
     # result binop/cast (need a Vector owner), and FUNCTION/EXTRACTION/UNARY/
-    # BETWEEN/CASE/LIT_SET/LIT_SCALAR (GIL).
+    # CASE/LIT_SET/LIT_SCALAR (GIL).
     cdef int op, fl, opc
     bc.is_all_c_native = bc.count > 0
     for k in range(bc.count):

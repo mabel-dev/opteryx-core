@@ -561,7 +561,6 @@ cpdef execute_and_append(list compiled_evals, morsel):
 
 from opteryx.compiled.expression.compiled_expression cimport (
     BC_AND,
-    BC_BETWEEN,
     BC_BINARY_OP,
     BC_CASE,
     BC_CAST,
@@ -2879,25 +2878,6 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     compare_result = draken_compare_int(
                         slot.op_code, py_left, py_right, left_type_code, right_type_code
                     )
-                anchor[sp] = compare_result
-                dv_stack[sp] = (<Vector>compare_result).unified()
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # BC_BETWEEN — typed draken_between (cpdef)
-            # ----------------------------------------------------------
-            if opcode == BC_BETWEEN:
-                sp -= 1
-                dv_left_ptr = dv_stack[sp]
-                py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-                compare_result = draken_between(
-                    py_left,
-                    <object>slot.literal_obj if slot.literal_obj != NULL else None,
-                    <object>slot.literal_obj2 if slot.literal_obj2 != NULL else None,
-                    slot.op_code != 0,
-                    slot.bool_value != 0,
-                )
                 anchor[sp] = compare_result
                 dv_stack[sp] = (<Vector>compare_result).unified()
                 sp += 1

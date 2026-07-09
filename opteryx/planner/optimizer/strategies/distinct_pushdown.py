@@ -45,21 +45,14 @@ class DistinctPushdownStrategy(OptimizationStrategy):
             context.collected_distincts.append(node)
             return context
 
-        if (
-            node.node_type == LogicalPlanStepType.Unnest
-            and context.collected_distincts
-            and node.pre_update_columns == {node.unnest_target.schema_column.identity}
-        ):
-            # Very specifically testing for a DISTINCT on the unnested column, only.
-            # In this situation we do the DISTINCT on the intermediate results of the CJU,
-            # this means we create smaller tables out of the CROSS JOIN => faster
-            node.distinct = True
-            context.optimized_plan[context.node_id] = node
-            for distict_node in context.collected_distincts:
-                self.telemetry.optimization_distinct_pushdown_into_cross_join_unnest += 1
-                context.optimized_plan.remove_node(distict_node.nid, heal=True)
-            context.collected_distincts.clear()
-            return context
+        # NOTE: DISTINCT-into-CROSS JOIN UNNEST folding is intentionally disabled.
+        # The native UnnestOperator (src/cpp/engine/native_unnest.hpp) does plain
+        # expansion only — it does not fold a `node.distinct` dedup. Leaving the
+        # DISTINCT as a standalone node lets it compile to the proven native
+        # DistinctSink after the unnest (correct; it dedups the fully-expanded
+        # stream instead of the intermediate — a perf, not correctness, difference).
+        # Re-enable once the native operator folds distinct. The Unnest barrier
+        # below still clears collected DISTINCTs so they are not pushed past it.
 
         if node.node_type in (
             LogicalPlanStepType.Aggregate,

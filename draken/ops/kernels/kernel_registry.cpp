@@ -50,6 +50,7 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
 VecResult draken_is_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_not_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_starts_with(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -93,6 +94,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_is_empty", (kernel_fn_t)&draken_is_empty},
     {"draken_is_not_empty", (kernel_fn_t)&draken_is_not_empty},
     {"draken_numeric_cmp", (kernel_fn_t)&draken_numeric_cmp},
+    {"draken_temporal_cmp", (kernel_fn_t)&draken_temporal_cmp},
     {"draken_substring", (kernel_fn_t)&draken_substring},
     {"draken_contains", (kernel_fn_t)&draken_contains},
     {"draken_starts_with", (kernel_fn_t)&draken_starts_with},

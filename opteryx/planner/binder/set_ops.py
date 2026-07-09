@@ -218,6 +218,30 @@ def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     return node, context
 
 
+# Python element type -> ColumnType for a LITERAL array's elements. `bool` must
+# precede `int` conceptually — the lookup is by EXACT type, never isinstance, so a
+# bool never resolves as an integer.
+_LITERAL_ELEMENT_TYPES = {
+    bool: _lt.BOOLEAN,
+    int: _lt.INT64,
+    float: _lt.FLOAT64,
+    str: _lt.VARCHAR,
+    bytes: _lt.VARBINARY,
+}
+
+
+def _literal_array_element_type(values):
+    """ColumnType of a literal array's elements, inferred from the first non-NULL
+    value. Mixed or unrecognised element types stay VARIANT (fail late, not wrong)."""
+    if not isinstance(values, (list, tuple, set)):
+        return _lt.VARIANT
+    for value in values:
+        if value is None:
+            continue
+        return _LITERAL_ELEMENT_TYPES.get(type(value), _lt.VARIANT)
+    return _lt.VARIANT
+
+
 def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     node.columns = []
 
@@ -231,10 +255,12 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         arr_ct = node.unnest_column.type
         if isinstance(arr_ct, ColumnType) and arr_ct.element is not None:
             elem_ct = arr_ct.element
-        elif isinstance(arr_ct, ColumnType):
-            elem_ct = _lt.VARIANT
         else:
-            elem_ct = _lt.VARIANT
+            # A literal array carries no declared element type. Infer it from the
+            # values: VARIANT has no physical vector type, so leaving it VARIANT
+            # makes the unnested column unmaterializable (and unfilterable)
+            # downstream. Falls back to VARIANT only when nothing is inferable.
+            elem_ct = _literal_array_element_type(node.unnest_column.value)
         schema_column = ConstantColumn(
             name=node.unnest_alias,
             column_type=elem_ct,

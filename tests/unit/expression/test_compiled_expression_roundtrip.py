@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "..", "..", ".."))
 
+from opteryx.compiled.expression.compiled_expression import expand_between
 from opteryx.compiled.expression.compiled_expression import lower
 from opteryx.expression import NodeType
 from opteryx.models import Node
@@ -85,20 +86,47 @@ def test_function_with_parameters():
     _roundtrip(Node(node_type=NodeType.FUNCTION, value="CONCAT", parameters=[a, b]))
 
 
-def test_between_uses_centre():
-    col = Node(node_type=NodeType.IDENTIFIER, value="age")
-    lo = Node(node_type=NodeType.LITERAL, value=18)
-    hi = Node(node_type=NodeType.LITERAL, value=65)
-    # BETWEEN packs lower into .right, upper into .centre per evaluation.pyx.
-    _roundtrip(
-        Node(
-            node_type=NodeType.BETWEEN,
-            value=(True, True),
-            left=col,
-            right=lo,
-            centre=hi,
-        )
+def _between(lower_incl, upper_incl):
+    """BETWEEN packs the lower bound into .right and the upper into .centre."""
+    return Node(
+        node_type=NodeType.BETWEEN,
+        value=(lower_incl, upper_incl),
+        left=Node(node_type=NodeType.IDENTIFIER, value="age"),
+        right=Node(node_type=NodeType.LITERAL, value=18),
+        centre=Node(node_type=NodeType.LITERAL, value=65),
     )
+
+
+def test_between_expands_to_compares():
+    """BETWEEN never reaches the arena — `lower()` rewrites it into a pair of
+    compares so each bound goes through the unit-aware compare routing rather
+    than a raw, domain-blind range check."""
+    node = _between(True, True)
+    expanded = expand_between(node)
+
+    assert expanded.node_type == NodeType.AND
+    assert expanded.left.node_type == NodeType.COMPARISON_OPERATOR
+    assert expanded.left.value == "GtEq"
+    assert expanded.left.right is node.right  # lower bound
+    assert expanded.right.value == "LtEq"
+    assert expanded.right.right is node.centre  # upper bound
+    assert expanded.left.left is expanded.right.left  # shared operand
+
+    # lower() applies the same rewrite, so no NT_BETWEEN reaches the C tree.
+    walk = lower(node).node_type_walk()
+    assert walk == _python_walk(expanded)
+    assert int(NodeType.BETWEEN) not in [node_type for node_type, _ in walk]
+
+
+def test_between_exclusive_bounds_use_strict_compares():
+    expanded = expand_between(_between(False, False))
+    assert expanded.left.value == "Gt"
+    assert expanded.right.value == "Lt"
+
+
+def test_expand_between_is_idempotent():
+    once = expand_between(_between(True, True))
+    assert expand_between(once) is once
 
 
 def test_dnf_uses_parameters():
@@ -176,7 +204,9 @@ if __name__ == "__main__":
     test_binary_compare()
     test_and_of_compares()
     test_function_with_parameters()
-    test_between_uses_centre()
+    test_between_expands_to_compares()
+    test_between_exclusive_bounds_use_strict_compares()
+    test_expand_between_is_idempotent()
     test_dnf_uses_parameters()
     test_deeply_nested()
     test_real_query_expressions()

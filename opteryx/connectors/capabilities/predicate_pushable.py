@@ -55,38 +55,56 @@ class PredicatePushable:
 
     PUSHABLE_TYPES: set = {t for t in LogicalCategory}
 
+    # Node kinds a pushed predicate may be built from. A boolean-returning FUNCTION
+    # is itself a predicate, so FUNCTION joins the set for that shape only — CASE and
+    # everything else stay out.
+    _SIMPLE_NODE_TYPES = (
+        NodeType.IDENTIFIER,
+        NodeType.LITERAL,
+        NodeType.COMPARISON_OPERATOR,
+        NodeType.BETWEEN,
+        NodeType.UNARY_OPERATOR,
+    )
+
     def can_push(self, operator: Node, types: set = None) -> bool:
-        # Boolean-returning functions are their own predicate — push without further analysis
-        if (
-            operator.condition.node_type == NodeType.FUNCTION
-            and getattr(getattr(operator.condition, "schema_column", None), "category", None)
+        condition = operator.condition
+        # Boolean-returning functions are their own predicate (LIKE lowers to
+        # _STARTS_WITH / InStr / ... this way). They still have to satisfy the node
+        # and type gates: returning True here unconditionally let a CASE, and a
+        # DECIMAL column the connector never declared it could handle, through into
+        # the scan.
+        is_boolean_function = (
+            condition.node_type == NodeType.FUNCTION
+            and getattr(getattr(condition, "schema_column", None), "category", None)
             == LogicalCategory.BOOLEAN
-        ):
-            return True
+        )
+
         # we can only push simple expressions
-        all_nodes = get_all_nodes_of_type(operator.condition, ("*",))
-        if any(
-            n.node_type
-            not in (
-                NodeType.IDENTIFIER,
-                NodeType.LITERAL,
-                NodeType.COMPARISON_OPERATOR,
-                NodeType.BETWEEN,
-                NodeType.UNARY_OPERATOR,
-            )
+        allowed_node_types = self._SIMPLE_NODE_TYPES
+        if is_boolean_function:
+            allowed_node_types = allowed_node_types + (NodeType.FUNCTION,)
+        all_nodes = get_all_nodes_of_type(condition, ("*",))
+        if any(n.node_type not in allowed_node_types for n in all_nodes):
+            return False
+
+        # we can only push certain types. `types` is derived by the caller from the
+        # condition's left/right legs, which are None for a FUNCTION — so read the
+        # categories off every referenced column rather than trusting that alone.
+        column_types = {
+            n.schema_column.category
             for n in all_nodes
-        ):
+            if n.node_type == NodeType.IDENTIFIER and n.schema_column is not None
+        }
+        effective_types = set(types or ()) | column_types
+        if effective_types and not effective_types.issubset(self.PUSHABLE_TYPES):
             return False
-        # we can only push certain types
-        if types and not types.issubset(self.PUSHABLE_TYPES):
-            return False
+
+        if is_boolean_function:
+            return True
+
         # we can only push certain operators
         # BETWEEN nodes store inclusivity flags in .value (a tuple), not a string op name
-        op_key = (
-            "Between"
-            if operator.condition.node_type == NodeType.BETWEEN
-            else operator.condition.value
-        )
+        op_key = "Between" if condition.node_type == NodeType.BETWEEN else condition.value
         return self.PUSHABLE_OPS.get(op_key, False)
 
     def __init__(self, **kwargs):

@@ -185,6 +185,17 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             if scan is None:
                 continue
 
+            # AVAILABILITY GUARD: a leg's relation names include DERIVED relations
+            # (a CROSS JOIN UNNEST contributes a synthetic `$unnest-*` schema), but
+            # its readers are only the base scans. Pushing a range on a derived
+            # column onto a base scan attaches a predicate to a relation that does
+            # not produce it — the scan's predicate resolver then dies with a
+            # KeyError on the unresolvable identity. Only push onto the reader that
+            # IS the target column's relation.
+            scan_names = {getattr(scan, "alias", None), getattr(scan, "relation", None)}
+            if target_relation not in scan_names:
+                continue
+
             connector = getattr(scan, "connector", None)
             if connector is not None and getattr(connector, "supports_predicate_pushdown", False):
                 if not scan.predicates:

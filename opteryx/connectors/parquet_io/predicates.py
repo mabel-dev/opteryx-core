@@ -35,6 +35,62 @@ from typing import Tuple
 # Supported comparison operators (as used in NodeType.COMPARISON_OPERATOR nodes).
 _PRUNABLE_OPS = frozenset({"Eq", "NotEq", "Gt", "GtEq", "Lt", "LtEq"})
 
+# Physical types whose stored representation is a bare temporal integer whose
+# meaning depends on a domain: DATE32 stores days, TIMESTAMP64 stores unit-scaled
+# ticks (s/ms/us/ns), TIME32/TIME64 store time-of-day ticks. Row-group pruning
+# compares these raw integers directly, so two temporal operands are only
+# order-comparable when they share both the physical type and (where applicable)
+# the unit.
+_TEMPORAL_PHYSICALS = None  # lazily populated from DrakenType on first use
+
+
+def _temporal_domain_mismatch(col_node, literal_node) -> bool:
+    """True when *col* and *literal* are both temporal but occupy different raw
+    domains — DATE32 (days) vs TIMESTAMP64 (microseconds), or two TIMESTAMP64s
+    with different units.
+
+    Row-group pruning compares a column's raw decoded min/max against the
+    literal's raw materialised value. Those integers are only order-comparable
+    within one domain: DATE32 stores days, TIMESTAMP64[us] stores microseconds,
+    etc. A cross-domain raw compare silently prunes the wrong row groups (a bare
+    DATE column vs a ``::TIMESTAMP`` literal pruned every row group -> 0 rows).
+    When the domains differ we decline the pushdown; the residual native filter
+    (``draken_temporal_cmp``, which promotes both sides to nanoseconds) then
+    produces the correct answer.
+    """
+    global _TEMPORAL_PHYSICALS
+    if _TEMPORAL_PHYSICALS is None:
+        from opteryx.types.logical_type import DrakenType
+
+        _TEMPORAL_PHYSICALS = frozenset(
+            {
+                DrakenType.DATE32,
+                DrakenType.TIMESTAMP64,
+                DrakenType.TIME32,
+                DrakenType.TIME64,
+            }
+        )
+
+    col_sc = getattr(col_node, "schema_column", None)
+    col_ct = getattr(col_sc, "column_type", None)
+    lit_ct = getattr(literal_node, "type", None)
+    if col_ct is None or lit_ct is None:
+        return False
+
+    col_phys = col_ct.physical
+    lit_phys = lit_ct.physical
+    if col_phys not in _TEMPORAL_PHYSICALS or lit_phys not in _TEMPORAL_PHYSICALS:
+        return False  # not both temporal — not a temporal-domain question
+    if col_phys != lit_phys:
+        return True  # e.g. DATE32 (days) vs TIMESTAMP64 (ticks)
+
+    # Same physical type: only the unit can still differ (TIMESTAMP64/TIME*).
+    col_logical = col_ct.logical
+    lit_logical = lit_ct.logical
+    col_unit = col_logical.unit if col_logical is not None else None
+    lit_unit = lit_logical.unit if lit_logical is not None else None
+    return col_unit != lit_unit
+
 _INVERT_OP = {
     "Gt": "Lt",
     "GtEq": "LtEq",
@@ -147,6 +203,11 @@ def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
     if not col_name:
         return None
 
+    # Decline a cross-domain temporal IN list (e.g. DATE column IN (::TIMESTAMP,
+    # ...)) — the raw min/max compare would be domain-blind; residual filter runs.
+    if _temporal_domain_mismatch(left, right):
+        return None
+
     values = right.value
     if not isinstance(values, (list, tuple, set)):
         return None
@@ -181,6 +242,14 @@ def _try_extract_between(node) -> List[Tuple[str, str, Any]]:
         return []
     col_name = getattr(col_sc, "name", None)
     if not col_name:
+        return []
+
+    # Decline the whole BETWEEN if either bound is a cross-domain temporal literal
+    # (e.g. DATE column BETWEEN two ``::TIMESTAMP`` bounds) — same reasoning as
+    # `_try_extract`; the residual native filter still evaluates it correctly.
+    if _temporal_domain_mismatch(node.left, node.right) or _temporal_domain_mismatch(
+        node.left, node.centre
+    ):
         return []
 
     lower_inclusive, upper_inclusive = node.value  # (bool, bool)
@@ -230,6 +299,12 @@ def _try_extract(node) -> Optional[Tuple[str, str, Any]]:
         return None
     col_name = getattr(col_sc, "name", None)
     if not col_name:
+        return None
+
+    # A DATE column vs a ``::TIMESTAMP`` literal (or unit-mismatched temporals)
+    # cannot be pruned by a raw min/max compare — decline and let the residual
+    # native filter handle it (see `_temporal_domain_mismatch`).
+    if _temporal_domain_mismatch(left, right):
         return None
 
     value = right.value

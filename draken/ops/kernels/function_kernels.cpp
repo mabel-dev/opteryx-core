@@ -634,9 +634,21 @@ inline size_t fk_fixed_elem_size(DrakenType t) {
 
 extern "C" {
 
+// A branch materialised as DRAKEN_NULL (a typed NULL literal — e.g. an implicit
+// CASE ELSE, or a literal ELSE/THEN of NULL) has no `data`/`selection` to read:
+// per its contract ("no data, no validity") every row is invalid. Treat it as
+// invalid UNCONDITIONALLY, never call fk_row_valid or dereference its buffers.
+inline bool fk_ite_branch_valid(const DrakenVector* v, bool is_null_branch, uint32_t row) {
+    return !is_null_branch && fk_row_valid(v, row);
+}
+
 // SQL CASE semantics: a NULL condition row selects the else branch; the output
-// row's validity is the CHOSEN branch's validity. Branch types must already
-// match (bind-time literal coercion in the plan compiler) — never coerced here.
+// row's validity is the CHOSEN branch's validity. Non-NULL branch types must
+// already match (bind-time literal coercion in the plan compiler) — never
+// coerced here. A DRAKEN_NULL branch (typed-NULL literal that lost its type —
+// see `_materialise_constant_literal`'s comment: only VARCHAR family keeps a
+// typed null) is the one exception: it pairs with ANY other branch type and
+// contributes only invalidity, never data.
 VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 3)
         return draken_error_sentinel("draken_if_then_else: expected 3 arguments");
@@ -645,26 +657,64 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
     const DrakenVector* b = args[2];
     if (m->type != DRAKEN_BOOL)
         return draken_error_sentinel("draken_if_then_else: condition must be BOOLEAN");
+
+    const bool a_isnull = (a->type == DRAKEN_NULL);
+    const bool b_isnull = (b->type == DRAKEN_NULL);
+    if (a_isnull && b_isnull) {
+        // CASE WHEN ... THEN NULL ELSE NULL END (or equivalent) — every row is
+        // NULL regardless of the condition, and neither branch has a real type
+        // to borrow (SQL narrows an all-NULL expression's declared type at bind
+        // time; this kernel never sees that type). `VecResult.data == nullptr`
+        // is the ABI's ERROR sentinel (see _dv_function_kernel_c) — a genuine
+        // all-NULL SUCCESS must never use it. Mirror the established idiom
+        // (binary_op_arithmetic.cpp's DRAKEN_NULL-operand handling): allocate a
+        // real dummy buffer of a concrete placeholder type (content is never
+        // read — every row is marked invalid) instead of the DRAKEN_NULL tag.
+        uint32_t n = m->length;
+        auto* out_data = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+        if (out_data == nullptr) return draken_error_sentinel("allocation failed");
+        const size_t nb = (static_cast<size_t>(n) + 7) / 8;
+        auto* out_validity = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+        if (out_validity == nullptr) { draken_free(out_data); return draken_error_sentinel("allocation failed"); }
+        std::memset(out_validity, 0, nb > 0 ? nb : 1);
+        VecResult r{};
+        r.data = out_data;
+        r.validity = out_validity;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length = n;
+        r.length = n;
+        r.type = DRAKEN_INT64;
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    }
+    // Dispatch (family selection, output-type decisions) always uses the REAL
+    // side's type when the other is a null branch — the blend loops below never
+    // read the null branch's data, only its (unconditional) invalidity.
+    const DrakenType a_eff = a_isnull ? b->type : a->type;
+    const DrakenType b_eff = b_isnull ? a->type : b->type;
+    const bool force_validity = a_isnull || b_isnull;
+
     // STRING branches: blend into one canonical consolidated block. A mixed
     // {VARCHAR, NVARCHAR} pair widens to NVARCHAR (ASCII is valid UTF-8 —
     // exact); VARBINARY only pairs with VARBINARY (fail loud otherwise).
-    if (fk_is_string(a->type) && fk_is_string(b->type)) {
+    if (fk_is_string(a_eff) && fk_is_string(b_eff)) {
         DrakenType s_t;
-        if (a->type == b->type) {
-            s_t = a->type;
-        } else if ((a->type == DRAKEN_VARCHAR && b->type == DRAKEN_NVARCHAR) ||
-                   (a->type == DRAKEN_NVARCHAR && b->type == DRAKEN_VARCHAR)) {
+        if (a_eff == b_eff) {
+            s_t = a_eff;
+        } else if ((a_eff == DRAKEN_VARCHAR && b_eff == DRAKEN_NVARCHAR) ||
+                   (a_eff == DRAKEN_NVARCHAR && b_eff == DRAKEN_VARCHAR)) {
             s_t = DRAKEN_NVARCHAR;
         } else {
             return draken_error_sentinel(
                 "draken_if_then_else: VARBINARY branch paired with a text branch");
         }
-        const auto* asa = static_cast<const DrakenStringArena*>(a->data);
-        const auto* bsa = static_cast<const DrakenStringArena*>(b->data);
+        const auto* asa = a_isnull ? nullptr : static_cast<const DrakenStringArena*>(a->data);
+        const auto* bsa = b_isnull ? nullptr : static_cast<const DrakenStringArena*>(b->data);
         const auto* smbits = static_cast<const uint8_t*>(m->data);
         uint32_t sn = m->length;
         const int want_validity =
-            (a->validity != nullptr || b->validity != nullptr) ? 1 : 0;
+            (force_validity || a->validity != nullptr || b->validity != nullptr) ? 1 : 0;
         // Pass 1: long-form byte total of the CHOSEN branch per row.
         size_t arena_len = 0;
         for (uint32_t i = 0; i < sn; ++i) {
@@ -674,7 +724,7 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
                 cond = (smbits[mp >> 3] >> (mp & 7)) & 1u;
             }
             const DrakenVector* src = cond ? a : b;
-            if (!fk_row_valid(src, i)) continue;
+            if (!fk_ite_branch_valid(src, cond ? a_isnull : b_isnull, i)) continue;
             const auto* sa = cond ? asa : bsa;
             uint32_t len = str_length(&sa->slots[src->selection[i]]);
             if (len > STR_INLINE_MAX) arena_len += len;
@@ -698,7 +748,7 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
                 cond = (smbits[mp >> 3] >> (mp & 7)) & 1u;
             }
             const DrakenVector* src = cond ? a : b;
-            if (!fk_row_valid(src, i)) {
+            if (!fk_ite_branch_valid(src, cond ? a_isnull : b_isnull, i)) {
                 std::memset(&slots[i], 0, sizeof(DrakenStringSlot));
                 svalidity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
                 continue;
@@ -721,20 +771,67 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
         return vecresult_from_string_block(block, sn, arena_len, want_validity, s_t);
     }
 
-    DrakenType out_t = a->type;
+    // BOOL branches: bit-packed, not a fixed-width element array — blend bit by
+    // bit rather than through the memcpy path below (which assumes `es` bytes
+    // per row). Mirrors the STRING block's per-row cond-select shape.
+    if (a_eff == DRAKEN_BOOL && b_eff == DRAKEN_BOOL) {
+        uint32_t bn = m->length;
+        size_t bnb = (static_cast<size_t>(bn) + 7) / 8;
+        auto* bout = static_cast<uint8_t*>(draken_malloc(bnb > 0 ? bnb : 1));
+        if (bout == nullptr) return draken_error_sentinel("allocation failed");
+        std::memset(bout, 0, bnb > 0 ? bnb : 1);
+        uint8_t* bvalidity = nullptr;
+        if (force_validity || a->validity != nullptr || b->validity != nullptr) {
+            bvalidity = static_cast<uint8_t*>(draken_malloc(bnb > 0 ? bnb : 1));
+            if (bvalidity == nullptr) { draken_free(bout); return draken_error_sentinel("allocation failed"); }
+            std::memset(bvalidity, 0xFF, bnb > 0 ? bnb : 1);
+        }
+        const auto* mbits = static_cast<const uint8_t*>(m->data);
+        const auto* abits = a_isnull ? nullptr : static_cast<const uint8_t*>(a->data);
+        const auto* bbits = b_isnull ? nullptr : static_cast<const uint8_t*>(b->data);
+        for (uint32_t i = 0; i < bn; ++i) {
+            bool cond = false;
+            if (fk_row_valid(m, i)) {
+                uint32_t mp = m->selection[i];
+                cond = (mbits[mp >> 3] >> (mp & 7)) & 1u;
+            }
+            const DrakenVector* src = cond ? a : b;
+            if (!fk_ite_branch_valid(src, cond ? a_isnull : b_isnull, i)) {
+                if (bvalidity != nullptr)
+                    bvalidity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            const uint8_t* sbits = cond ? abits : bbits;
+            uint32_t sp = src->selection[i];
+            if ((sbits[sp >> 3] >> (sp & 7)) & 1u)
+                bout[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+        VecResult br{};
+        br.data = bout;
+        br.validity = bvalidity;
+        br.selection = draken_identity_sel(bn);
+        br.owns_selection = false;
+        br.data_length = bn;
+        br.length = bn;
+        br.type = DRAKEN_BOOL;
+        br.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return br;
+    }
+
+    DrakenType out_t = a_eff;
     bool widen = false;   // DECIMAL (int64 tier) side sign-extends to int128
-    if (a->type != b->type) {
+    if (a_eff != b_eff) {
         // DECIMAL literal branches cannot materialize at the int128 tier, so a
         // {DECIMAL, DECIMAL128} pair is legitimate — the plan compiler
         // guarantees equal scales (raw-domain widening is then exact).
-        if ((a->type == DRAKEN_DECIMAL && b->type == DRAKEN_DECIMAL128) ||
-            (a->type == DRAKEN_DECIMAL128 && b->type == DRAKEN_DECIMAL)) {
+        if ((a_eff == DRAKEN_DECIMAL && b_eff == DRAKEN_DECIMAL128) ||
+            (a_eff == DRAKEN_DECIMAL128 && b_eff == DRAKEN_DECIMAL)) {
             out_t = DRAKEN_DECIMAL128;
             widen = true;
         } else {
             return draken_error_sentinel_fmt(
                 "draken_if_then_else: branch types differ (%d vs %d) — bind-time "
-                "coercion missing", (int)a->type, (int)b->type);
+                "coercion missing", (int)a_eff, (int)b_eff);
         }
     }
     size_t es = fk_fixed_elem_size(out_t);
@@ -745,7 +842,7 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
     auto* out = static_cast<uint8_t*>(draken_malloc((n > 0 ? n : 1) * es));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
     uint8_t* validity = nullptr;
-    if (a->validity != nullptr || b->validity != nullptr) {
+    if (force_validity || a->validity != nullptr || b->validity != nullptr) {
         size_t vb = (static_cast<size_t>(n) + 7) / 8;
         validity = static_cast<uint8_t*>(draken_malloc(vb > 0 ? vb : 1));
         if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
@@ -759,7 +856,7 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
             cond = (mbits[mp >> 3] >> (mp & 7)) & 1u;
         }
         const DrakenVector* src = cond ? a : b;
-        if (!fk_row_valid(src, i)) {
+        if (!fk_ite_branch_valid(src, cond ? a_isnull : b_isnull, i)) {
             validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
             std::memset(out + static_cast<size_t>(i) * es, 0, es);
             continue;
@@ -1200,8 +1297,73 @@ VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_
             if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) continue;
             double a = fk_read_num_double(L, L->selection[i], ls);
             double b = fk_read_num_double(R, R->selection[i], rs);
-            if (fk_cmp_i128(op, a, b)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+            if (fk_cmp_dbl(op, a, b)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
+    }
+    VecResult r{};
+    r.data = out;
+    r.validity = nullptr;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length = n;
+    r.length = n;
+    r.type = DRAKEN_BOOL;
+    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    return r;
+}
+
+// Read one temporal row and promote it to a common fine domain: NANOSECONDS,
+// held in __int128 so no date (days×86.4e12) or ns TIMESTAMP ever overflows.
+// DATE32 rows are days-since-epoch (unit-less — SQL promotes a DATE to the
+// instant at midnight); TIMESTAMP64 rows carry their unit in ctx (0=s,1=ms,
+// 2=us,3=ns). The vector's OWN type tag says which it is — the unit is only
+// consulted for the TIMESTAMP64 side. Kept in ns (not us) so a nanosecond
+// TIMESTAMP compares exactly rather than being truncated.
+inline __int128 fk_temporal_to_ns(const DrakenVector* v, uint32_t phys,
+                                  unsigned char unit) {
+    if (v->type == DRAKEN_DATE32) {
+        return static_cast<__int128>(static_cast<const int32_t*>(v->data)[phys])
+               * static_cast<__int128>(86400000000000LL);   // days -> ns
+    }
+    static const int64_t unit_to_ns[4] = {1000000000LL, 1000000LL, 1000LL, 1LL};
+    return static_cast<__int128>(static_cast<const int64_t*>(v->data)[phys])
+           * static_cast<__int128>(unit_to_ns[unit & 3]);   // {s,ms,us,ns} -> ns
+}
+
+// Mixed-domain TEMPORAL comparison. draken_compare_dv's fast path declines any
+// type mismatch (DATE32 vs TIMESTAMP64) and silently mis-compares two TIMESTAMP64
+// operands carried at DIFFERENT units (raw-int ordering ignores the unit) — both
+// leave a WHERE predicate wrong with no fallback on the native engine. The
+// compiler routes here ONLY when the two temporal operands differ in physical
+// type OR unit (a matched date/date or same-unit ts/ts pair stays on the fast
+// draken_compare_dv). Both sides promote to ns in __int128, then compare. Nulls
+// (either side) yield bit 0 — SQL 3-valued: a NULL operand drops the row.
+VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 2)
+        return draken_error_sentinel("draken_temporal_cmp: expected 2 arguments");
+    if (ctx == nullptr)
+        return draken_error_sentinel("draken_temporal_cmp: missing ctx (op + units)");
+    const auto* c = static_cast<const binary_op_ctx*>(ctx);
+    const int op = c->op_code;
+    if (op < 1 || op > 6)
+        return draken_error_sentinel("draken_temporal_cmp: bad op_code");
+    const DrakenVector* L = args[0];
+    const DrakenVector* R = args[1];
+    if ((L->type != DRAKEN_DATE32 && L->type != DRAKEN_TIMESTAMP64) ||
+        (R->type != DRAKEN_DATE32 && R->type != DRAKEN_TIMESTAMP64))
+        return draken_error_sentinel("draken_temporal_cmp: DATE/TIMESTAMP operands required");
+
+    uint32_t n = L->length;
+    size_t nb = (static_cast<size_t>(n) + 7) / 8;
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+    if (out == nullptr) return draken_error_sentinel("allocation failed");
+    std::memset(out, 0, nb > 0 ? nb : 1);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) continue;
+        __int128 a = fk_temporal_to_ns(L, L->selection[i], c->left_unit);
+        __int128 b = fk_temporal_to_ns(R, R->selection[i], c->right_unit);
+        if (fk_cmp_i128(op, a, b)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     }
     VecResult r{};
     r.data = out;

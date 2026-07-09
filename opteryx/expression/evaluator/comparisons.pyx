@@ -417,21 +417,3 @@ cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, i
         raise NotImplementedError(f"draken_compare_int: unsupported vector type {vec_type!r}")
 
     return result.not_vector() if negate else result
-
-
-cpdef draken_between(col, lower, upper, bint lower_inclusive, bint upper_inclusive):
-    vec_type = get_vector_type(col)
-
-    if vec_type in (VectorType.INT64, VectorType.INTEGER):
-        return col.between(_coerce_int64(lower), _coerce_int64(upper), lower_inclusive, upper_inclusive)
-    if vec_type == VectorType.FLOAT64:
-        return col.between(_coerce_float(lower), _coerce_float(upper), lower_inclusive, upper_inclusive)
-    if vec_type == VectorType.TIMESTAMP:
-        return col.between(_coerce_timestamp(lower), _coerce_timestamp(upper), lower_inclusive, upper_inclusive)
-    if vec_type == VectorType.DATE32:
-        return col.between(_coerce_date32(lower), _coerce_date32(upper), lower_inclusive, upper_inclusive)
-    if vec_type == VectorType.DECIMAL:
-        lo_op = OP_GT_EQ if lower_inclusive else OP_GT
-        hi_op = OP_LT_EQ if upper_inclusive else OP_LT
-        return _decimal_compare(lo_op, col, lower).and_vector(_decimal_compare(hi_op, col, upper))
-    raise NotImplementedError(f"draken_between: unsupported vector type {vec_type!r}")

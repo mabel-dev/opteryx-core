@@ -5696,6 +5696,104 @@ static CxxMorsel cxx_align(const CxxMorsel& l, const CxxMorsel& r,
     return out;
 }
 
+// CROSS JOIN UNNEST (nogil). Expand ARRAY column `array_idx` into one output row
+// per element: every parent row is repeated by its array length and gains the
+// flattened element under `target_name`. NULL/empty array rows contribute zero
+// rows (INNER unnest semantics — matches the legacy UnnestJoinNode). All parent
+// columns (INCLUDING the source ARRAY, which downstream may still reference) are
+// replicated via cxx_take; the flattened element column is built by take_child
+// over the owner's child subtree. A parent row's array span is read through the
+// uniform DrakenVector access (`offsets[selection[i]]`, validity keyed on the
+// LOGICAL row) so it is correct for dense/constant/dict array shapes alike.
+//
+// When the expansion is empty (every row null/empty) the result carries 0 rows;
+// the caller drops such a morsel (no output), so the placeholder NULL-typed
+// target is never observed downstream. Caller owns the result (cxx_morsel_delete).
+//
+// `drop_source`: when true the consumed source ARRAY column is REPLACED in place by
+// the flattened target (nothing above the unnest reads the raw array — and a
+// replicated ARRAY cannot pass a downstream gather_rows join/sort). When false the
+// target is APPENDED and the raw array survives, which `SELECT *` needs.
+static CxxMorsel cxx_unnest(const CxxMorsel& m, uint32_t array_idx,
+                            const std::string& target_name, bool drop_source) {
+    const CxxColumn& arrcol = m.columns[array_idx];
+    const DrakenVector& av = arrcol.view;
+    const int32_t* offsets = static_cast<const int32_t*>(av.data);
+    const uint32_t nrows = av.length;
+
+    // Pass 1: parent logical-row index (with repeats) + flat child index array.
+    std::vector<int32_t> parent_idx;
+    std::vector<int32_t> child_idx;
+    for (uint32_t i = 0u; i < nrows; ++i) {
+        if (!row_is_valid(av, i)) continue;              // null array row → no rows
+        const uint32_t sel_i = av.selection[i];
+        const int32_t start = offsets[sel_i];
+        const int32_t end   = offsets[sel_i + 1u];
+        for (int32_t j = start; j < end; ++j) {
+            parent_idx.push_back(static_cast<int32_t>(i));
+            child_idx.push_back(j);
+        }
+    }
+    const uint32_t out_n = static_cast<uint32_t>(parent_idx.size());
+
+    // Flatten the element column into the unnest target BEFORE replicating parents:
+    // take_child reads the ORIGINAL child owner (child_idx are physical child
+    // positions), independent of the parent gather.
+    CxxColumn tc;
+    if (out_n > 0u && arrcol.own && arrcol.own->child_owner) {
+        tc.own = std::make_shared<VectorOwner>(take_child(*arrcol.own->child_owner, child_idx));
+    } else {
+        // No elements anywhere → empty target (morsel is dropped by the caller).
+        tc.own = std::make_shared<VectorOwner>(make_null_vector(out_n));
+    }
+    tc.view = tc.own->vec;
+
+    // Replicate every parent column (ARRAY-aware) by the expanded parent index, then
+    // either replace the consumed source array in place or append alongside it. The
+    // compiler's _compile_unnest tracks the identical column layout either way.
+    CxxMorsel out = cxx_take(m, parent_idx.data(), out_n);
+    if (drop_source) {
+        out.columns[array_idx] = std::move(tc);
+        out.names[array_idx] = target_name;
+    } else {
+        out.columns.push_back(std::move(tc));
+        out.names.push_back(target_name);
+    }
+    return out;
+}
+
+// CROSS JOIN UNNEST over a LITERAL array (nogil). `vals` is a plan-constant
+// one-column morsel holding the literal's elements. Every parent row is repeated
+// `k = vals.num_rows()` times and the literal is tiled across them, so the output
+// is the cartesian product parent x literal — the semantics of
+// `T CROSS JOIN UNNEST((a,b,c)) AS x`. Unlike the column form there is no source
+// ARRAY column to consume, so the target column is APPENDED. A zero-length literal
+// yields 0 rows (caller drops the morsel).
+static CxxMorsel cxx_unnest_literal(const CxxMorsel& m, const CxxMorsel& vals,
+                                    const std::string& target_name) {
+    const uint32_t nrows = m.num_rows();
+    const uint32_t k = vals.num_rows();
+
+    std::vector<int32_t> parent_idx;
+    std::vector<int32_t> child_idx;
+    const size_t total = static_cast<size_t>(nrows) * static_cast<size_t>(k);
+    parent_idx.reserve(total);
+    child_idx.reserve(total);
+    for (uint32_t i = 0u; i < nrows; ++i) {
+        for (uint32_t j = 0u; j < k; ++j) {
+            parent_idx.push_back(static_cast<int32_t>(i));
+            child_idx.push_back(static_cast<int32_t>(j));
+        }
+    }
+    const uint32_t out_n = static_cast<uint32_t>(total);
+
+    CxxMorsel out   = cxx_take(m,    parent_idx.data(), out_n);
+    CxxMorsel tiled = cxx_take(vals, child_idx.data(),  out_n);
+    out.columns.push_back(std::move(tiled.columns[0]));
+    out.names.push_back(target_name);
+    return out;
+}
+
 // WP-07: cast ONE key column of a CxxMorsel to FLOAT64 (target==0) or INT64
 // (target==1) via the phase-9c native cast dispatch kernels (nogil, no PyObject).
 // Returns a NEW heap CxxMorsel sharing every other column's owner (shared_ptr
@@ -5849,6 +5947,25 @@ extern "C" const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle) {
 // are GIL-free: no Python/nanobind in the body. NOT yet called (S-B.1 wires them).
 extern "C" CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n) {
     return new CxxMorsel(cxx_take(*m, idx, n));
+}
+// CROSS JOIN UNNEST (see cxx_unnest). array_idx is the ARRAY column to expand;
+// target_name is the identity (opaque bytes) of the flattened element column
+// appended after every replicated parent column. Caller owns the result and must
+// check num_rows(): a 0-row result means the batch produced no unnested rows.
+extern "C" CxxMorsel* cxx_unnest_c(const CxxMorsel* m, uint32_t array_idx,
+                                   const char* target_name, uint32_t target_name_len,
+                                   int drop_source) {
+    return new CxxMorsel(cxx_unnest(*m, array_idx,
+                                    std::string(target_name, target_name_len),
+                                    drop_source != 0));
+}
+// CROSS JOIN UNNEST over a literal array (see cxx_unnest_literal). `vals` is the
+// plan-constant one-column morsel of literal elements. Caller owns the result.
+extern "C" CxxMorsel* cxx_unnest_literal_c(const CxxMorsel* m, const CxxMorsel* vals,
+                                           const char* target_name, uint32_t target_name_len) {
+    if (vals == nullptr || vals->columns.size() != 1u) return nullptr;
+    return new CxxMorsel(cxx_unnest_literal(*m, *vals,
+                                            std::string(target_name, target_name_len)));
 }
 extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length) {
     return new CxxMorsel(cxx_slice(*m, start, length));

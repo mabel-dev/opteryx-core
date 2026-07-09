@@ -147,6 +147,47 @@ class ValueRange:
         return _range.strip()
 
 
+_TEMPORAL_PHYSICALS = None  # lazily populated from DrakenType on first use
+
+
+def _literal_domain_key(literal_node) -> Any:
+    """Return a key identifying the raw numeric domain of a literal, or None when
+    the literal is not temporal.
+
+    Compaction compares literal values against each other (contradiction
+    detection, bound selection, equality dedup) using their RAW materialised
+    values. Temporal literals materialise into domain-specific integers — a DATE
+    literal becomes days-since-epoch, a TIMESTAMP[us] literal becomes
+    microseconds-since-epoch. Comparing across domains is meaningless: for
+    1975-01-01 vs 1978-01-01 the raw values are 157766400000000 (us) and 2922
+    (days), so the *earlier* instant compares as the larger number and the range
+    is declared a contradiction — folding the whole filter to FALSE.
+
+    Literals sharing one key are safely order-comparable by their raw values.
+    """
+    global _TEMPORAL_PHYSICALS
+    if _TEMPORAL_PHYSICALS is None:
+        from opteryx.types.logical_type import DrakenType
+
+        _TEMPORAL_PHYSICALS = frozenset(
+            {
+                DrakenType.DATE32,
+                DrakenType.TIMESTAMP64,
+                DrakenType.TIME32,
+                DrakenType.TIME64,
+            }
+        )
+
+    literal_type = getattr(literal_node, "type", None)
+    if literal_type is None:
+        return None
+    physical = literal_type.physical
+    if physical not in _TEMPORAL_PHYSICALS:
+        return None
+    logical = literal_type.logical
+    return (physical, logical.unit if logical is not None else None)
+
+
 @dataclass
 class PredicateOccurrence:
     """Record of a predicate instance within the logical plan."""
@@ -155,6 +196,7 @@ class PredicateOccurrence:
     predicate: Node
     operator: str
     value: Any
+    domain: Any = None  # `_literal_domain_key` of the literal bound
 
 
 @dataclass
@@ -222,7 +264,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             info = self._extract_comparison_info(predicate)
             if not info:
                 continue
-            column_id, operator, value = info
+            column_id, operator, value, domain = info
             # Group by (chain_root, column_id) — predicates on the same column but
             # in different plan branches (different chain_root) stay separate.
             column_key = (chain_root, column_id)
@@ -235,6 +277,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                     predicate=predicate,
                     operator=operator,
                     value=value,
+                    domain=domain,
                 )
             )
 
@@ -352,6 +395,16 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         """Determine the minimal set of predicates required for a column."""
         if len(occurrences) <= 1:
             return ColumnAnalysisResult(status="unchanged")
+
+        # Every comparison below (contradiction detection, bound selection,
+        # equality dedup) orders the literals by their RAW materialised values.
+        # That is only meaningful when all of them live in one numeric domain —
+        # a days-since-epoch DATE literal and a microseconds-since-epoch
+        # TIMESTAMP literal are not comparable as bare integers. Mixed domains:
+        # leave every predicate in place. Each compare then evaluates on its own
+        # through the unit-aware temporal compare routing.
+        if len({occ.domain for occ in occurrences}) > 1:
+            return ColumnAnalysisResult(status="unsupported")
 
         value_range = ValueRange()
         best_lower: Optional[BoundCandidate] = None
@@ -495,8 +548,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         col_id = node.left.schema_column.identity
         operator = node.value
         value = node.right.value
+        domain = _literal_domain_key(node.right)
 
-        return (col_id, operator, value)
+        return (col_id, operator, value, domain)
 
     def _map_operator(self, sql_operator: str) -> Optional[str]:
         """Map SQL operator to range operator."""

@@ -288,12 +288,18 @@ cdef class UnnestJoinNode(BasePlanNode):
 
     cdef public object left_readers
     cdef public object right_readers
+    cdef public list left_relation_names
+    cdef public list right_relation_names
     cdef public str join_type
     cdef public object _unnest_column
     cdef public object _unnest_target
     cdef public object _filters
     cdef public bint _distinct
     cdef public bint _single_column
+    # Identities still needed ABOVE this node (projection_pushdown liveness). The
+    # plan compiler reads it to decide whether the consumed source ARRAY column may
+    # be dropped from the unnest output. Empty = unknown -> keep everything.
+    cdef public object pre_update_columns
     cdef public CarcharSetWrapper hash_set
 
     cdef bint is_partition_parallel(self):
@@ -305,9 +311,15 @@ cdef class UnnestJoinNode(BasePlanNode):
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
-        # Initialize join interface (UnnestJoinNode is registered as a join node in catalog)
+        # Initialize join interface (UnnestJoinNode is registered as a join node in catalog).
+        # left/right_relation_names mirror the base JoinNode contract so plan machinery
+        # (e.g. physical_plan.label_join_legs) can inspect them uniformly; an UnnestJoinNode
+        # carries no reader UUIDs or relation names, so these stay empty and the leg-labelling
+        # guard skips it.
         self.left_readers = parameters.get("left_readers")
         self.right_readers = parameters.get("right_readers")
+        self.left_relation_names = parameters.get("left_relation_names") or []
+        self.right_relation_names = parameters.get("right_relation_names") or []
         self.join_type = "cross"
 
         # do we have unnest details?
@@ -326,7 +338,8 @@ cdef class UnnestJoinNode(BasePlanNode):
         ):
             self._unnest_column.value = tuple([self._unnest_column.value])
 
-        self._single_column = parameters.get("pre_update_columns", set()) == {
+        self.pre_update_columns = parameters.get("pre_update_columns") or set()
+        self._single_column = self.pre_update_columns == {
             self._unnest_target.identity,
         }
 

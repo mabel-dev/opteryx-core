@@ -34,6 +34,7 @@
 #include "native_join2.hpp"         // Join2BuildSink/Probe — multi-key, semi/anti/outer
 #include "native_parquet_scan_source.hpp"  // NativeParquetScanSource (zero-Python pull)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
+#include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
 #include "scan_aggregate_demo.hpp"  // NULL-aware agg helpers (agg_is_valid et al.)
 #include "scan_filter_demo.hpp"     // NumericFilterOperator, SimplePredicate, QueueSink/Global
@@ -394,6 +395,15 @@ public:
     }
     void add_limit(size_t p, int64_t offset, int64_t limit) {
         add_op_(p, std::make_unique<LimitOperator>(offset, limit, &pipelines[p]->halt));
+    }
+    void add_unnest(size_t p, uint32_t array_idx, std::string target_name,
+                    bool drop_source) {
+        add_op_(p, std::make_unique<UnnestOperator>(array_idx, std::move(target_name),
+                                                    drop_source));
+    }
+    void add_unnest_literal(size_t p, MorselPtr lit, std::string target_name) {
+        add_op_(p, std::make_unique<UnnestLiteralOperator>(std::move(lit),
+                                                           std::move(target_name)));
     }
     void add_buffer_morsel(size_t buf, MorselPtr m) {
         // Plan-time materialization edge: a virtual dataset's (plan-constant)

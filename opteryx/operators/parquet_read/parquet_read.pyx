@@ -44,9 +44,7 @@ from opteryx.connectors.parquet_io.pool_reader import open_pass2_source
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.models import QueryProperties
-from opteryx.utils import random_string
 from opteryx.types.logical_type import LogicalCategory
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
@@ -127,8 +125,6 @@ from opteryx.expression.evaluator import predicate_filter_and_mask_c_native as _
 from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr as _get_pass1_eval_fn_ptr
 from opteryx.expression.evaluator.evaluation import Pass1PredResolver as _Pass1PredResolver
 from opteryx.expression.evaluator.evaluation import filter_morsel_c_native as _filter_morsel_c_native
-from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
-from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
 from draken.vectors.vector cimport Vector as _DrakenShimVector
 
@@ -664,7 +660,12 @@ cdef class ParquetReadNode(ReaderNode):
     cdef dict _sp_string_type_by_name     # declared DrakenType (VARCHAR/NVARCHAR/VARBINARY), by physical column name
     cdef bint _sp_topn_active
     cdef bint _sp_two_pass_eligible
-    cdef CompiledBytecode _compiled_predicate
+    # Bytecode for the pushed predicate, LOWERED AT PLAN TIME by the compiler
+    # (`_compile_scan`) and handed to the scan. The scan never lowers an
+    # expression itself: doing so bypassed the plan-time rewrite chain
+    # (CASE->IF_THEN_ELSE, BETWEEN->compares, decimal-literal rescale) and
+    # silently produced wrong answers for off-scale decimal compares.
+    cdef public CompiledBytecode compiled_predicate
     cdef object _pass1_resolver           # Pass1PredResolver, kept alive for the scan
     # LIMIT counter for the source. Lives on the node (not a generator local) so
     # the single _commit_morsel mutation seam owns it — the granularity a future
@@ -705,7 +706,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._emitted_any = False
         self._empty_guard_done = False
         self._sp_claims_pending = 0
-        self._compiled_predicate = None  # CompiledBytecode, bound once at execute() time
+        self.compiled_predicate = None  # set at plan time by compiler._compile_scan
         self._pass1_resolver = None
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
@@ -810,26 +811,6 @@ cdef class ParquetReadNode(ReaderNode):
                     names.add(name)
         return names
 
-    @staticmethod
-    def _compose_predicates(predicates):
-        if not predicates:
-            return None
-
-        predicate_nodes = [predicate.copy() for predicate in predicates if predicate is not None]
-        if not predicate_nodes:
-            return None
-
-        root = predicate_nodes.pop()
-        while predicate_nodes:
-            right = predicate_nodes.pop()
-            root = Node(
-                NodeType.AND,
-                left=root,
-                right=right,
-                schema_column=Node("schema_column", identity=random_string()),
-            )
-        return root
-
     cdef shared_ptr[CxxMorsel] _cxx_apply_predicate(self, shared_ptr[CxxMorsel] m):
         """S-B.2 prereq #2: apply the compiled predicate to a CxxMorsel, returning the
         filtered NATIVE carrier (no PyObject column materialization).
@@ -840,12 +821,12 @@ cdef class ParquetReadNode(ReaderNode):
         The intermediate Morsels are Cxx-backed wrappers (no data copy); morsel_to_cxx
         is a shallow copy. Lets the scan filter without leaving the CxxMorsel substrate.
         """
-        if self._compiled_predicate is None:
+        if self.compiled_predicate is None:
             return m
         cdef Morsel shim = cxx_to_morsel(m)
-        cdef object res = _filter_morsel_c_native(self._compiled_predicate, shim)
+        cdef object res = _filter_morsel_c_native(self.compiled_predicate, shim)
         if res is None:
-            res = shim.filter_mask(execute_bytecode(self._compiled_predicate, shim))
+            res = shim.filter_mask(execute_bytecode(self.compiled_predicate, shim))
         return morsel_to_cxx(<Morsel>res)
 
     def _apply_predicates_to_morsel(self, morsel: Morsel):
@@ -855,7 +836,7 @@ cdef class ParquetReadNode(ReaderNode):
         substrate never materializes PyObject columns. The predicate is compiled once
         at execute() time; this just applies it.
         """
-        if self._compiled_predicate is None:
+        if self.compiled_predicate is None:
             return morsel, morsel.num_rows, morsel.num_rows
 
         cdef int64_t rows_before_filter = morsel.num_rows
@@ -1275,11 +1256,15 @@ cdef class ParquetReadNode(ReaderNode):
             if ct.logical is not None and ct.logical.unit is not None:
                 unit_str = _TS_UNIT_BY_NAME.get(ct.logical.unit.name, "us")
             self._sp_timestamp_unit_map[col.name.encode('utf-8')] = unit_str
-        predicate_root = self._compose_predicates(self.predicates or [])
-
-        # Compile the predicate to bytecode once per execute() call.
-        if self._compiled_predicate is None and predicate_root is not None:
-            self._compiled_predicate = _build_bytecode(_lower_expr(predicate_root))
+        # The compiler lowers the pushed predicate at PLAN time and hands it over.
+        # A scan carrying predicates with no bytecode would silently emit UNFILTERED
+        # rows — fail loud instead.
+        cdef bint has_predicates = bool(self.predicates)
+        if has_predicates and self.compiled_predicate is None:
+            raise RuntimeError(
+                "ParquetReadNode: pushed predicates present but no compiled_predicate "
+                "was bound at plan time (compiler._compile_scan must lower it)"
+            )
 
         # ── Two-pass late-materialization eligibility ─────────────────────────
         _filter_names = filter_column_names
@@ -1295,7 +1280,7 @@ cdef class ParquetReadNode(ReaderNode):
         _pass2_names = _projected_names - _pass1_only_names
         two_pass_eligible = (
             config.features.parquet_late_materialization
-            and bool(predicate_root)
+            and has_predicates
             and bool(_filter_names)
             and bool(_pass2_names)
         )
@@ -1415,11 +1400,11 @@ cdef class ParquetReadNode(ReaderNode):
             # runs in parallel there (nogil), not serially on this thread. Only when the
             # predicate is fully c-native (the worker VM requires it); rugo silently
             # falls back to serial for column shapes it can't view (survivor_mask empty).
-            if self._compiled_predicate is not None and self._compiled_predicate.is_all_c_native:
+            if self.compiled_predicate is not None and self.compiled_predicate.is_all_c_native:
                 identity_to_physical = {
                     ident: name for name, ident in self._sp_pass1_name_to_identity.items()
                 }
-                self._pass1_resolver = _Pass1PredResolver(self._compiled_predicate, identity_to_physical)
+                self._pass1_resolver = _Pass1PredResolver(self.compiled_predicate, identity_to_physical)
                 self._lm_pass1_src.set_pass1_predicate(
                     _get_pass1_eval_fn_ptr(),
                     self._pass1_resolver.ctx_ptr(),
@@ -1560,7 +1545,7 @@ cdef class ParquetReadNode(ReaderNode):
                 # Positional pairing: vectors order == column_names == identity order.
                 result_cxm = cxx_morsel_from_vectors_sp(vectors, self._sp_identity_names)
                 rows_before_filter = result_cxm.get().num_rows()
-                if self._compiled_predicate is not None:
+                if self.compiled_predicate is not None:
                     result_cxm = self._cxx_apply_predicate(result_cxm)
                 if self._sp_output_identity_order:
                     emit_cxm = cxx_select_sp(result_cxm, self._sp_output_identity_order)
@@ -1650,7 +1635,7 @@ cdef class ParquetReadNode(ReaderNode):
             # pulled[6] carries the worker-computed survivor mask (bytes) when the
             # pass-1 predicate was pushed to the decode workers, else None → serial eval.
             result = _evaluate_pass1_row_group(
-                path, rg_idx, row_group, self._compiled_predicate,
+                path, rg_idx, row_group, self.compiled_predicate,
                 self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
                 self._sp_timestamp_unit_map,

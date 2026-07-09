@@ -119,7 +119,9 @@ cdef enum BCOpcode:
     BC_DNF               = 9
     BC_CNF               = 10
     BC_COMPARE           = 11
-    BC_BETWEEN           = 12
+    # 12 was BC_BETWEEN — removed. `lower()` expands BETWEEN into two BC_COMPARE
+    # ops, so the range check goes through the unit-aware temporal compare routing
+    # instead of a raw PyObject-bounds comparison. Value left unused, not reissued.
     BC_BINARY_OP         = 13
     BC_UNARY_OP          = 14
     BC_FUNCTION          = 15
@@ -171,11 +173,10 @@ cdef enum BCInstrFlag:
 ctypedef struct BytecodeInstr:
     int opcode               # BCOpcode
     int arity                # for BC_DNF / BC_CNF / BC_FUNCTION
-    int op_code              # OP_EQ / OP_GT / ... for BC_COMPARE; lower_incl for BC_BETWEEN
-    int flags                # bitfield of BCCompareFlag; upper_incl for BC_BETWEEN
+    int op_code              # OP_EQ / OP_GT / ... for BC_COMPARE
+    int flags                # bitfield of BCCompareFlag
     int bool_value           # 0/1 for BC_LOAD_LIT_BOOL; 1 = is_nb_callable for BC_FUNCTION (legacy)
-    PyObject* literal_obj    # for BC_LOAD_LIT_SCALAR / BC_LOAD_LIT_SET; lower bound for BC_BETWEEN; key for BC_EXTRACTION
-    PyObject* literal_obj2   # upper bound scalar for BC_BETWEEN
+    PyObject* literal_obj    # for BC_LOAD_LIT_SCALAR / BC_LOAD_LIT_SET; key for BC_EXTRACTION
     PyObject* compare_op_str # for BC_COMPARE (AnyOp fallback); op string for BC_BINARY_OP / BC_EXTRACTION
     int16_t left_type_code   # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
     int16_t right_type_code  # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP

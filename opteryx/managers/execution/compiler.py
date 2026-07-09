@@ -244,47 +244,14 @@ class _Compiler:
     def _rewrite_between(self, expr):
         """PLAN-TIME tree rewrite: BETWEEN(operand; lower, upper) becomes
         AND(operand >= lower, operand <= upper) (bounds' inclusivity respected).
-        The optimizer produces BETWEEN from exactly this shape; un-rewriting it
-        lets the c-native ordinal-compare path run it — BC_BETWEEN itself carries
-        runtime PyObject bounds and can never be nogil. Non-mutating: parents of
-        a changed child are rebuilt via Node.copy()."""
-        from opteryx.compiled.structures.node import Node
 
-        if not isinstance(expr, Node):
-            return expr
-        if expr.node_type == NodeType.BETWEEN:
-            lower_incl, upper_incl = expr.value
-            operand = self._rewrite_between(expr.left)
-            lo = Node(NodeType.COMPARISON_OPERATOR,
-                      value=("GtEq" if lower_incl else "Gt"))
-            lo.left = operand
-            lo.right = expr.right      # the lower-bound literal node, reused as-is
-            hi = Node(NodeType.COMPARISON_OPERATOR,
-                      value=("LtEq" if upper_incl else "Lt"))
-            hi.left = operand
-            hi.right = expr.centre     # the upper-bound literal node
-            both = Node(NodeType.AND)
-            both.left = lo
-            both.right = hi
-            return both
-        rebuilt = None
-        for attr in ("left", "right", "centre"):
-            child = getattr(expr, attr)
-            if isinstance(child, Node):
-                new_child = self._rewrite_between(child)
-                if new_child is not child:
-                    if rebuilt is None:
-                        rebuilt = expr.copy()
-                    setattr(rebuilt, attr, new_child)
-        params = expr.parameters
-        if isinstance(params, list):
-            new_params = [self._rewrite_between(c) if isinstance(c, Node) else c
-                          for c in params]
-            if any(a is not b for a, b in zip(new_params, params)):
-                if rebuilt is None:
-                    rebuilt = expr.copy()
-                rebuilt.parameters = new_params
-        return rebuilt if rebuilt is not None else expr
+        Delegates to the canonical `expand_between` — `lower()` applies the same
+        rewrite unconditionally, so this call is only needed to run it BEFORE
+        `_rewrite_decimal_compares`, which must see the expanded compares to
+        rescale decimal bounds."""
+        from opteryx.compiled.expression.compiled_expression import expand_between
+
+        return expand_between(expr)
 
     def _rewrite_case(self, expr):
         """PLAN-TIME tree rewrite: CASE becomes a right-folded IF_THEN_ELSE
@@ -473,20 +440,34 @@ class _Compiler:
                 self._rewrite_case(expr)))))
 
     def _lower_expression(self, expr, what):
-        from opteryx.operators._operators import bytecode_is_all_c_native
+        # Every caller lowers a BOOLEAN predicate (WHERE / HAVING / nested-loop
+        # `on`) that is handed to add_expr_filter. Admit exactly what the engine's
+        # filter admits: bytecode_is_c_native_predicate — every op c-native AND a
+        # bool-mask-final program. That is STRICTLY broader than is_all_c_native,
+        # which additionally forbids BC_C_NATIVE_DESC (DECIMAL / TIMESTAMP64 cast)
+        # results because it ALSO gates the GIL evaluate_c_native path, which has no
+        # descriptor re-attachment point. Inside a predicate a DESC result is only
+        # consumed by a compare that folds it RAW and yields a bool mask — the
+        # descriptor is never surfaced — so `col::TIMESTAMP[s] >= <ts>` is safe and
+        # correct here even though it is not is_all_c_native. (The engine's own
+        # add_expr_filter enforces this same bytecode_is_c_native_predicate gate.)
+        from opteryx.operators._operators import bytecode_is_c_native_predicate
 
         bc = self._lower_bytecode(expr)
-        if not bytecode_is_all_c_native(bc):
+        if not bytecode_is_c_native_predicate(bc):
             _unsupported(f"{what} outside the c-native kernel set")
         return bc
 
     def _compose_predicate_nodes(self, predicates):
-        """AND-compose a list of pushed predicate nodes into one right-leaning
-        tree — the VERBATIM composition the trampoline scan uses to build
-        `_compiled_predicate` (opteryx/operators/parquet_read/parquet_read.pyx's
-        `_compose_predicates`). Lowering this same tree is what keeps the relocated
-        native filter byte-identical to the trampoline path. `predicates` is
-        non-empty (the caller guards)."""
+        """AND-compose a list of pushed predicate nodes into one right-leaning tree.
+
+        The SOLE composer for a pushed predicate: both the relocated native filter
+        (`_native_scan_plan`) and the trampoline scan's `compiled_predicate` (bound
+        in `_compile_scan`) lower this same tree through `_lower_bytecode`, so the
+        two paths run identical bytecode. The scan used to re-compose and re-lower
+        the predicate itself at execute() time, skipping the rewrite chain — which
+        silently returned wrong rows for off-scale decimal compares. `predicates`
+        is non-empty (the caller guards)."""
         from opteryx.compiled.structures.node import Node
         from opteryx.utils import random_string
 
@@ -888,6 +869,9 @@ class _Compiler:
             self.nplan.set_buffer_source(p2, buf)
             return p2, ids
 
+        if kind == "UnnestJoinNode":
+            return self._compile_unnest(in_edges, node)
+
         if getattr(node, "is_join", False):
             return self._compile_join(nid, node, in_edges)
 
@@ -1074,21 +1058,18 @@ class _Compiler:
                         # R5: BOOL column used as a predicate input (WP-11 fail-closed)
                         self.scan_residual_reasons[scan.identity] = "bool_predicate_input"
                         return None
-                    # A2 fail-closed: a DATE/TIMESTAMP column used as a predicate input
-                    # hits the same relocated-ExprFilter gap as BOOL — the kernel cannot
-                    # evaluate a DATE32/TIMESTAMP64 vector (err_op=11 at runtime),
-                    # pre-existing and unrelated to the zero-projection admission this
-                    # work package closes (it was simply unreachable in the corpus until
-                    # a COUNT(*) WHERE <date/timestamp col> query started routing here —
-                    # confirmed reproducible via `SELECT Mission FROM testdata.missions
-                    # WHERE Lauched_at >= '1957-10-04'::DATE`, a TIMESTAMP64 column,
-                    # independent of this A2 chip). DATE/TIMESTAMP columns that are only
-                    # PROJECTED are unaffected — they decode/retag natively via
-                    # `logical_coerce`. A native DATE/TIMESTAMP-comparison kernel is a
-                    # follow-on (R4/R5-adjacent).
-                    if _physical_type(sc) in (DrakenType.DATE32, DrakenType.TIMESTAMP64):
-                        self.scan_residual_reasons[scan.identity] = "temporal_predicate_input"
-                        return None
+                    # NOTE (was "A2 fail-closed"): a DATE32/TIMESTAMP64 predicate input
+                    # used to fail the scan closed here, on the premise that the
+                    # relocated ExprFilter's kernel could not evaluate a temporal
+                    # vector (err_op=11). That premise no longer holds —
+                    # draken_compare_dv handles DATE32 and TIMESTAMP64 (same-domain),
+                    # and draken_temporal_cmp handles the mixed DATE-vs-TIMESTAMP /
+                    # unit-mismatched cases by promoting both sides to nanoseconds. The
+                    # relocated filter runs the SAME bytecode VM, so temporal predicate
+                    # inputs are admitted. (Row-group PRUNING still declines a
+                    # cross-domain temporal compare — see `_temporal_domain_mismatch` in
+                    # connectors/parquet_io/predicates.py — so pruning stays sound and
+                    # the residual filter produces the answer.)
                     # A1: track predicate-input column names to fail closed below on an
                     # UNSIGNED integer input (see the footer probe after paths). The
                     # schema collapses every int width to canonical INT64, so the
@@ -1291,6 +1272,16 @@ class _Compiler:
                 self.nplan.add_select(p, emit_indices, emit_ids)
             return p, emit_ids
         self.scan_sources[scan.identity] = "StreamingScanSource"
+        # Lower the pushed predicate HERE, at plan time, and hand the bytecode to the
+        # scan. The scan used to lower it itself at execute() time, bypassing this
+        # rewrite chain: CASE stayed on the GIL BC_CASE VM, and a decimal-column
+        # compare reached the c-native kernel with an off-scale literal, violating
+        # its same-type/same-scale contract and silently dropping rows
+        # (`d > 1.49` lost `1.50`). One lowering, one rewrite chain.
+        if getattr(scan, "predicates", None):
+            scan.compiled_predicate = self._lower_bytecode(
+                self._compose_predicate_nodes(scan.predicates)
+            )
         p = self.nplan.new_pipeline()
         # A scan that is not concurrent-pull safe (two-pass latmat, fallback
         # generator) gets its pull mutex-serialised inside the Source; the rest of
@@ -1393,6 +1384,80 @@ class _Compiler:
             bc = self._lower_expression(residual, "a nested-loop join condition")
             self.nplan.add_expr_filter(pp, bc, out_layout)
         return pp, out_layout
+
+    def _compile_unnest(self, in_edges, node):
+        """CROSS JOIN UNNEST (single input): expand the source ARRAY column into one
+        row per element via the native UnnestOperator, which repeats each parent row
+        by its array length and appends the flattened element under the target
+        identity. NULL/empty array rows contribute no rows (INNER unnest semantics).
+
+        A pushed value-filter (`WHERE unnested IN (...)`, folded to `node.filters` by
+        predicate_pushdown) or pushed DISTINCT (`node.distinct`) are NOT yet folded
+        into the native operator — the optimizer is configured to leave them as
+        standalone FilterNode/DistinctNode operators after the unnest, which compile
+        natively already. If one is present here the plan is inconsistent; fail loud
+        rather than silently drop the filter/dedup."""
+        if getattr(node, "_filters", None):
+            _unsupported("a CROSS JOIN UNNEST with a value filter folded into the node")
+        if getattr(node, "_distinct", False):
+            _unsupported("a CROSS JOIN UNNEST with DISTINCT folded into the node")
+
+        source = node._unnest_column
+        if source is None:
+            _unsupported("a CROSS JOIN UNNEST without a source")
+        target_identity = node._unnest_target.identity
+
+        if source.node_type == NodeType.LITERAL:
+            return self._compile_unnest_literal(in_edges, node, source, target_identity)
+
+        source_sc = getattr(source, "schema_column", None)
+        if source_sc is None:
+            _unsupported("a CROSS JOIN UNNEST source column without a bound identity")
+
+        (p, layout) = self._compile_only_child(in_edges, "UnnestJoinNode", node)
+        array_identity = source_sc.identity
+        if array_identity not in layout:
+            _unsupported("a CROSS JOIN UNNEST source array the stream does not carry")
+        array_idx = layout.index(array_identity)
+
+        # Drop the consumed source array unless something ABOVE the unnest still
+        # reads it (`pre_update_columns` is projection_pushdown's liveness set).
+        # Dropping matters: a replicated ARRAY column cannot pass through a
+        # downstream gather_rows join/sort. Keeping it is required by `SELECT *`.
+        # An empty/absent liveness set means "unknown" — keep, never lose a column.
+        needed = getattr(node, "pre_update_columns", None) or set()
+        drop_source = bool(needed) and array_identity not in needed
+
+        self.nplan.add_unnest(p, array_idx, target_identity, drop_source)
+        new_layout = list(layout)
+        if drop_source:
+            new_layout[array_idx] = target_identity
+        else:
+            new_layout.append(target_identity)
+        return p, new_layout
+
+    def _compile_unnest_literal(self, in_edges, node, source, target_identity):
+        """CROSS JOIN UNNEST over a LITERAL array (`T CROSS JOIN UNNEST((a,b,c)) AS x`).
+        The literal is a PLAN CONSTANT: materialize its elements once, here, into a
+        one-column morsel (the same legitimacy as `_compile_materialized_source`'s
+        virtual datasets) and let the native operator tile it across the input rows.
+        Unlike the column form there is no source ARRAY column to consume, so the
+        target column is APPENDED to the layout."""
+        from draken.interop.vector_sequence import vector_from_sequence
+        from draken.morsels.morsel import Morsel
+
+        # UnnestJoinNode.__init__ has already wrapped a bare scalar into a tuple.
+        values = list(source.value)
+        physical = _physical_type(node._unnest_target)
+        if physical is None or physical == DrakenType.VARIANT:
+            _unsupported("a CROSS JOIN UNNEST over a literal array of untyped elements")
+
+        literal_morsel = Morsel.from_vectors(
+            [target_identity], [vector_from_sequence(values, dtype=physical)])
+
+        (p, layout) = self._compile_only_child(in_edges, "UnnestJoinNode", node)
+        self.nplan.add_unnest_literal(p, literal_morsel, target_identity)
+        return p, list(layout) + [target_identity]
 
     def _compile_asof_join(self, node, in_edges):
         """ASOF JOIN: LEFT-preserving nearest-match by the MATCH_CONDITION column
