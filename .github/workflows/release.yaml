@@ -119,8 +119,37 @@ jobs:
           name: dist-linux-${{ matrix.pybuild }}
           path: io/dist/*manylinux2014_x86_64*.whl
 
+  build-macos:
+    # macos-14 = Apple Silicon (arm64) only, Python 3.14 GIL build only (no
+    # free-threaded macOS build). Mirrors rugo's macOS build (release-rugo.yaml)
+    # but opteryx_core additionally needs Rust (opteryx.compute) and libcurl.
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Make build script executable
+        run: chmod +x dev/build-wheels-macos.sh
+
+      - name: Build wheel (macos-14, py 3.14)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          OPTERYX_ENABLE_LTO: "1"
+        run: ./dev/build-wheels-macos.sh
+
+      - name: Archive Wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-3.14
+          path: dist/delocated/*.whl
+
   upload:
-    needs: [build-manylinux]
+    needs: [build-manylinux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python
@@ -151,6 +180,13 @@ jobs:
           name: dist-linux-3.14
           path: dist-linux-3.14
       - run: mv -v dist-linux-3.14/* dist/
+
+      - name: Stage macos 3.14 (arm64, GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-macos-3.14
+          path: dist-macos-3.14
+      - run: mv -v dist-macos-3.14/* dist/
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

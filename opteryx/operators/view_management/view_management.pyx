@@ -86,8 +86,9 @@ class ViewManagementNode(BasePlanNode):
 
                 self.connector = connector_factory(self.view_name, telemetry=self.telemetry)
 
+            update_if_exists = self.or_replace or self.action == "alter_view"
             self.connector.create_view(
-                self.view_name, view_sql, update_if_exists=self.or_replace, owner="opteryx"
+                self.view_name, view_sql, update_if_exists=update_if_exists, owner="opteryx"
             )
 
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -108,6 +109,8 @@ class ViewManagementNode(BasePlanNode):
                     connector = connector_factory(vn, telemetry=self.telemetry)
 
                 if connector.locate_object(vn)[0] != TableType.View:
+                    if self.if_exists:
+                        continue
                     raise DatasetNotFoundError(connector=connector, dataset=vn)
 
                 connector.drop_view(vn)

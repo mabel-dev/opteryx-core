@@ -57,7 +57,7 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
 
         if node.node_type == LogicalPlanStepType.Scan and node.limit is not None:
-            if node.filters:
+            if node.predicates:
                 # We only optimize when there are no filters
                 return context
 

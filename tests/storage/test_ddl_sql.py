@@ -157,12 +157,91 @@ def test_drop_table_readonly_rejected(tmp_path):
         list(session.execute_to_morsels("DROP TABLE somefile.foo"))
 
 
+def test_create_view_basic(tmp_path):
+    """CREATE VIEW stores the view definition."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT * FROM ws.events"))
+
+    view_path = tmp_path / "ws" / "events_view" / "view.json"
+    assert view_path.exists()
+
+    with open(view_path) as f:
+        view_info = json.load(f)
+    assert view_info["name"] == "ws.events_view"
+    assert "events" in view_info["statement"]
+
+
+def test_create_view_duplicate_rejected(tmp_path):
+    """CREATE VIEW without OR REPLACE rejects an existing view name."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT * FROM ws.events"))
+
+    with pytest.raises(ValueError, match="view already exists"):
+        list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT * FROM ws.events"))
+
+
+def test_create_or_replace_view(tmp_path):
+    """CREATE OR REPLACE VIEW overwrites an existing view definition."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id FROM ws.events"))
+    list(
+        session.execute_to_morsels(
+            "CREATE OR REPLACE VIEW ws.events_view AS SELECT id, name FROM ws.events"
+        )
+    )
+
+    view_path = tmp_path / "ws" / "events_view" / "view.json"
+    with open(view_path) as f:
+        view_info = json.load(f)
+    assert "name" in view_info["statement"]
+
+
+def test_show_create_view(tmp_path):
+    """SHOW CREATE VIEW returns the stored view statement."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT * FROM ws.events"))
+
+    morsels = list(session.execute_to_morsels("SHOW CREATE VIEW ws.events_view"))
+    assert len(morsels) == 1
+
+
+def test_show_create_view_missing_raises(tmp_path):
+    """SHOW CREATE VIEW on a non-existent view raises DatasetNotFoundError."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("SHOW CREATE VIEW ws.nonexistent"))
+
+
 def test_drop_view_still_works(tmp_path):
-    """Verify existing DROP VIEW path is unchanged."""
-    # This test is skipped because LocalStoreConnector doesn't support views.
-    # Views are managed by filesystem connectors, not the local store connector.
-    # The DROP VIEW path is not directly testable with our current setup.
-    pytest.skip("LocalStoreConnector does not support views; DROP VIEW cannot be tested here")
+    """DROP VIEW removes the view definition."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT * FROM ws.events"))
+
+    view_dir = tmp_path / "ws" / "events_view"
+    assert (view_dir / "view.json").exists()
+
+    list(session.execute_to_morsels("DROP VIEW ws.events_view"))
+    assert not view_dir.exists()
+
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("DROP VIEW ws.events_view"))
 
 
 def test_truncate_creates_empty_snapshot(tmp_path):

@@ -1267,6 +1267,11 @@ class _Compiler:
                 "row_groups_read": splan.row_group_count,
                 # WP-02: pushed-predicate min/max + bloom pruning at plan time.
                 "row_groups_pruned": splan.pruned_row_group_count,
+                # Rows fed into this scan, i.e. across the surviving (non-pruned)
+                # row groups only — plan-time, before any relocated residual
+                # filter runs downstream (that filter's own records_in/out carry
+                # its selectivity; this scan node doesn't duplicate it).
+                "parquet_rows_before_filter": splan.surviving_row_count,
                 # Read-set width (projected ∪ role-3 filter-only), not just the
                 # projection — that is what the native Source actually decodes.
                 "columns_read": len(reloc[1]) if reloc is not None else len(scan.columns),

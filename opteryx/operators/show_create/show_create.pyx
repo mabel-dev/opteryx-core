@@ -43,20 +43,20 @@ class ShowCreateNode(BasePlanNode):
 
     def execute(self, morsel):
         if self.object_type == "VIEW":
-            from opteryx.planner.views import is_view
-            from opteryx.planner.views import view_as_sql
+            from opteryx.connectors import TableType, connector_factory
 
-            if is_view(self.object_name):
-                print("SHOW CREATE VIEW", self.object_name)
-                view_sql = view_as_sql(self.object_name)
-                vectors = [
-                    vector_from_sequence([self.object_name], dtype=_draken_native.DrakenType.VARCHAR),
-                    vector_from_sequence([view_sql], dtype=_draken_native.DrakenType.VARCHAR),
-                ]
-                morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
-                yield morsel
-                return
+            connector = connector_factory(self.object_name, telemetry=self.telemetry)
+            object_type, _ = connector.locate_object(self.object_name)
+            if object_type != TableType.View:
+                raise DatasetNotFoundError(dataset=self.object_name, connector="VIEW")
 
-            raise DatasetNotFoundError(dataset=self.object_name, connector="VIEW")
+            view_definition = connector.get_view(self.object_name)
+            vectors = [
+                vector_from_sequence([self.object_name], dtype=_draken_native.DrakenType.VARCHAR),
+                vector_from_sequence([view_definition.statement], dtype=_draken_native.DrakenType.VARCHAR),
+            ]
+            morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
+            yield morsel
+            return
 
         raise UnsupportedSyntaxError("Invalid SHOW statement")

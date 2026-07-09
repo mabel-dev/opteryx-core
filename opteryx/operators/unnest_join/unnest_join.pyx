@@ -59,7 +59,7 @@ cpdef tuple build_rows_indices_and_column_draken(Vector column_vector):
     cdef const int32_t* offsets = <const int32_t*>uv.data
     cdef uint8_t* validity = uv.validity
     cdef Py_ssize_t row_count = <Py_ssize_t>uv.length
-    cdef Vector child = <Vector>column_vector.array_child
+    cdef Vector child
     cdef Py_ssize_t i
     cdef int32_t start, end, run_len, k
     cdef IntBuffer indices_buf
@@ -73,8 +73,12 @@ cpdef tuple build_rows_indices_and_column_draken(Vector column_vector):
         total_size += <Py_ssize_t>(offsets[i + 1] - offsets[i])
 
     if total_size == 0:
+        # No elements anywhere in this vector — array_child is legitimately
+        # absent (draken_native.cpp: array_child raises when child_owner is
+        # unset), so it must not be touched here.
         return (_draken_native.vector_from_sequence([]), _draken_native.vector_from_sequence([]))
 
+    child = <Vector>column_vector.array_child
     indices_buf = IntBuffer(<size_t>total_size)
     child_idx_vec.reserve(<size_t>total_size)
 
@@ -109,7 +113,10 @@ cpdef tuple build_filtered_rows_indices_and_column_draken(Vector column_vector, 
     cdef const int32_t* offsets = <const int32_t*>uv.data
     cdef uint8_t* validity = uv.validity
     cdef Py_ssize_t row_count = <Py_ssize_t>uv.length
-    cdef Vector child = <Vector>column_vector.array_child
+    # array_child raises when the vector has zero elements everywhere (no
+    # child_owner); in that case every row's [start, end) span is empty below,
+    # so child is never dereferenced and can stay unset.
+    cdef Vector child = <Vector>column_vector.array_child if column_vector.array_child_type is not None else None
     cdef Py_ssize_t i
     cdef int32_t start, end, k
     cdef IntBuffer indices_buf = IntBuffer(<size_t>row_count)

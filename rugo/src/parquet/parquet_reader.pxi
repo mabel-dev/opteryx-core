@@ -557,6 +557,22 @@ def bloom_filter_maybe_contains(path, bloom_offset, bloom_length, bytes value):
     return bool(parquet_reader.TestBloomFilter(c_path, native_offset, native_length, c_value))
 
 
+def bloom_filter_bytes_maybe_contains(const uint8_t[::1] data, bytes value):
+    """In-memory sibling of bloom_filter_maybe_contains: probe a bloom filter
+    whose serialized bytes (header + bitset) are already in a buffer, rather than
+    reading them from a file. `data` spans exactly the bloom region. `value` is
+    the raw PLAIN-encoded candidate bytes (same encoding contract as
+    bloom_filter_maybe_contains). Returns False only if DEFINITELY absent.
+
+    This is the exact probe the remote decode-skip runs on the bloom bytes it
+    fetches contiguously in front of a column chunk.
+    """
+    cdef parquet_reader.string c_value = value
+    if data.shape[0] == 0:
+        return False
+    return bool(parquet_reader.TestBloomFilterBytes(&data[0], <size_t>data.shape[0], c_value))
+
+
 def can_decode_from_memory(data):
     """Check if parquet data in memory can be decoded with our limited decoder.
 

@@ -117,7 +117,8 @@ cdef inline string _to_std_string(object name):
 
 def write_parquet(Morsel morsel not None, str compression="zstd",
                   bloom_filters=True, bint dictionary=True,
-                  Py_ssize_t max_rows_per_row_group=500000):
+                  Py_ssize_t max_rows_per_row_group=500000,
+                  Py_ssize_t max_page_bytes=0):
     """Serialize a Morsel to a parquet file (bytes).
 
     compression: "zstd" (default) or "none". Anything else raises ValueError.
@@ -131,9 +132,14 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
         dictionary (zero re-hash); a low-cardinality dense column is
         auto-dictionaried; otherwise PLAIN. False forces PLAIN everywhere.
     max_rows_per_row_group: maximum rows per row group (default 500 000). Pass
-        0 to write a single row group regardless of size. Array columns are
-        not supported with splitting; if any column is an array type the value
-        is ignored and a single row group is written.
+        0 to write a single row group regardless of size. Array columns split
+        the same as scalar columns.
+    max_page_bytes: split each column chunk's PLAIN data into multiple pages
+        once its estimated size exceeds this many bytes (default 0 = single
+        page per chunk, unbounded). Independent per column — a narrow int
+        column may need one page while a wide VARCHAR/ARRAY column in the same
+        row group needs several. Dictionary-encoded chunks are unaffected
+        (single RLE_DICTIONARY page regardless of this setting).
 
     Supported column types: INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL,
     VARCHAR, NVARCHAR, VARBINARY, DATE32, TIMESTAMP64, TIME32/64, INTERVAL,
@@ -143,12 +149,13 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
     will be truncated.
     """
     return _encode(morsel, compression, False, bloom_filters, dictionary,
-                   max_rows_per_row_group)[0]
+                   max_rows_per_row_group, max_page_bytes)[0]
 
 
 def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
                               bloom_filters=True, bint dictionary=True,
-                              Py_ssize_t max_rows_per_row_group=500000):
+                              Py_ssize_t max_rows_per_row_group=500000,
+                              Py_ssize_t max_page_bytes=0):
     """Like write_parquet, but also returns per-column min/max bounds.
 
     Returns (data_bytes, bounds) where bounds is {col_index: (min, max)} of
@@ -157,11 +164,12 @@ def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
     Note: bounds are only populated for single-row-group files.
     """
     return _encode(morsel, compression, True, bloom_filters, dictionary,
-                   max_rows_per_row_group)
+                   max_rows_per_row_group, max_page_bytes)
 
 
 cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filters,
-             bint use_dict=True, Py_ssize_t max_rows_per_row_group=500000):
+             bint use_dict=True, Py_ssize_t max_rows_per_row_group=500000,
+             Py_ssize_t max_page_bytes=0):
     cdef int codec
     # Resolve the bloom-filter request: all-eligible / none / a name set.
     cdef bint bloom_all = (bloom_filters is True)
@@ -203,6 +211,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef vector[vector[uint8_t]] null_store  # synthesized all-null validity masks
     cdef vector[vector[uint8_t]] level_store # array rep/def level buffers
     cdef vector[vector[uint32_t]] codes_store # per-row dict codes (preserve path)
+    cdef vector[vector[uint32_t]] row_offset_store # row->level / row->element offset indexes (array cols)
     codes_store.reserve(ncols)
     i32_store.reserve(ncols)
     i64_store.reserve(ncols)
@@ -279,6 +288,10 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef uint32_t mp, lp
     cdef Py_ssize_t mi, li
     cdef bint first_in_record, first_in_mid
+    # Row-group splitting for arrays: row r's levels are
+    # [row_lvl_off[r], row_lvl_off[r+1]) and its elements are
+    # [row_elem_off[r], row_elem_off[r+1]) -- see ColumnInput comment.
+    cdef vector[uint32_t] row_lvl_off, row_elem_off
 
     # Keep every column Vector (and ARRAY child Vector) referenced until after
     # WriteParquet: StrSlice pointers and preserved dict buffers point into
@@ -639,6 +652,8 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             elem_f64 = vector[double]()
             elem_b = vector[uint8_t]()
             elem_s = vector[StrSlice]()
+            row_lvl_off = vector[uint32_t]()
+            row_elem_off = vector[uint32_t]()
 
             if ct == DRAKEN_ARRAY:
                 # depth-2 nested list: list<list<scalar>>. `child` is the middle
@@ -689,6 +704,15 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
 
                 with nogil:
                     for j in range(nrows):
+                        row_lvl_off.push_back(<uint32_t>rep_v.size())
+                        if elem_kind == 0:
+                            row_elem_off.push_back(<uint32_t>elem_i64.size())
+                        elif elem_kind == 1:
+                            row_elem_off.push_back(<uint32_t>elem_f64.size())
+                        elif elem_kind == 2:
+                            row_elem_off.push_back(<uint32_t>elem_b.size())
+                        else:
+                            row_elem_off.push_back(<uint32_t>elem_s.size())
                         p = sel[j]
                         if dv.validity != NULL and not ((dv.validity[j >> 3] >> (j & 7)) & 1):
                             rep_v.push_back(0); def_v.push_back(0)   # null outer list
@@ -759,6 +783,17 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                                     elem_s.push_back(ss)
                                 first_in_record = False
                                 first_in_mid = False
+                    # Sentinel: row_lvl_off[nrows]/row_elem_off[nrows] close the
+                    # final row's [start, end) range.
+                    row_lvl_off.push_back(<uint32_t>rep_v.size())
+                    if elem_kind == 0:
+                        row_elem_off.push_back(<uint32_t>elem_i64.size())
+                    elif elem_kind == 1:
+                        row_elem_off.push_back(<uint32_t>elem_f64.size())
+                    elif elem_kind == 2:
+                        row_elem_off.push_back(<uint32_t>elem_b.size())
+                    else:
+                        row_elem_off.push_back(<uint32_t>elem_s.size())
             else:
                 if ct in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
                     elem_kind = 0
@@ -787,6 +822,15 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                         % (<int>ct, names[i]))
                 with nogil:
                     for j in range(nrows):
+                        row_lvl_off.push_back(<uint32_t>rep_v.size())
+                        if elem_kind == 0:
+                            row_elem_off.push_back(<uint32_t>elem_i64.size())
+                        elif elem_kind == 1:
+                            row_elem_off.push_back(<uint32_t>elem_f64.size())
+                        elif elem_kind == 2:
+                            row_elem_off.push_back(<uint32_t>elem_b.size())
+                        else:
+                            row_elem_off.push_back(<uint32_t>elem_s.size())
                         p = sel[j]
                         if dv.validity != NULL and not ((dv.validity[p >> 3] >> (p & 7)) & 1):
                             rep_v.push_back(0); def_v.push_back(0)   # null list
@@ -833,12 +877,27 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                                 ss.ptr = str_data(child_slot, child_arena.arena)
                                 ss.len = str_length(child_slot)
                                 elem_s.push_back(ss)
+                    # Sentinel: row_lvl_off[nrows]/row_elem_off[nrows] close the
+                    # final row's [start, end) range.
+                    row_lvl_off.push_back(<uint32_t>rep_v.size())
+                    if elem_kind == 0:
+                        row_elem_off.push_back(<uint32_t>elem_i64.size())
+                    elif elem_kind == 1:
+                        row_elem_off.push_back(<uint32_t>elem_f64.size())
+                    elif elem_kind == 2:
+                        row_elem_off.push_back(<uint32_t>elem_b.size())
+                    else:
+                        row_elem_off.push_back(<uint32_t>elem_s.size())
 
             level_store.push_back(rep_v)
             ci.rep_levels = level_store.back().data()
             level_store.push_back(def_v)
             ci.def_levels = level_store.back().data()
             ci.num_levels = def_v.size()
+            row_offset_store.push_back(row_lvl_off)
+            ci.row_level_offsets = row_offset_store.back().data()
+            row_offset_store.push_back(row_elem_off)
+            ci.row_element_offsets = row_offset_store.back().data()
             ci.is_array = True
             ci.type = PT_BYTE_ARRAY  # placeholder; element type drives output
             if elem_kind == 0:
@@ -894,7 +953,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef vector[uint8_t] out
     with nogil:
         out = WriteParquet(cols, <size_t>nrows, codec, 3, &stats,
-                           <size_t>max_rows_per_row_group)
+                           <size_t>max_rows_per_row_group, <size_t>max_page_bytes)
     cdef bytes data = PyBytes_FromStringAndSize(<const char*>out.data(), out.size())
     if not want_bounds:
         return data, None

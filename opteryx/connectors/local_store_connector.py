@@ -17,7 +17,9 @@ from typing import Dict, List, Optional
 import opteryx
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
+from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Writable
+from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import ConcurrentModificationError, DatasetNotFoundError
 from opteryx.models.dataset_descriptor import DatasetDescriptor
 from opteryx.models.file_entry import FileEntry
@@ -38,16 +40,20 @@ def _ts_for_filename(iso: str) -> str:
     return iso.replace(":", "-").replace(".", "-")
 
 
-class LocalStoreConnector(BaseConnector, Writable):
+class LocalStoreConnector(BaseConnector, Writable, Eidetic):
     """Local file-based storage connector.
 
     Stores relations as JSON metadata + Parquet data files organized by relation name.
     Implements optimistic concurrency control for snapshot commits.
 
+    Views are stored as a single JSON definition file at the same directory
+    identity as a relation would use; a name is exclusively a table or a view.
+
     Filesystem layout:
         {store_root}/{schema}/{table}/dataset.json
         {store_root}/{schema}/{table}/snapshot-{ts}.json
         {store_root}/{schema}/{table}/data-{uuid}.parquet
+        {store_root}/{schema}/{view}/view.json
     """
 
     __mode__ = "Blob"
@@ -151,6 +157,8 @@ class LocalStoreConnector(BaseConnector, Writable):
 
         if os.path.isfile(os.path.join(relation_dir, "dataset.json")):
             raise ValueError(f"relation already exists: {relation_name}")
+        if os.path.isfile(os.path.join(relation_dir, "view.json")):
+            raise ValueError(f"view already exists: {relation_name}")
 
         os.makedirs(relation_dir, exist_ok=True)
 
@@ -217,10 +225,34 @@ class LocalStoreConnector(BaseConnector, Writable):
         relation_dir = self._relation_dir(relation_name)
         return os.path.isfile(os.path.join(relation_dir, "dataset.json"))
 
+    def _view_path(self, view_name: str) -> str:
+        """Compute path to a view's definition file.
+
+        Args:
+            view_name: Fully-qualified view name (e.g., "a.b.c.my_view")
+
+        Returns:
+            Absolute or relative path to the view's view.json
+        """
+        return os.path.join(self._relation_dir(view_name), "view.json")
+
+    def view_exists(self, view_name: str) -> bool:
+        """Check if a view exists.
+
+        Args:
+            view_name: Fully-qualified view name
+
+        Returns:
+            True if the view exists, False otherwise
+        """
+        return os.path.isfile(self._view_path(view_name))
+
     def locate_object(self, name: str):
-        """Determine if a name refers to a table managed by this connector."""
+        """Determine if a name refers to a table or view managed by this connector."""
         if self.relation_exists(name):
             return (TableType.Table, None)
+        if self.view_exists(name):
+            return (TableType.View, None)
         return (None, None)
 
     def table_engine(self, name: str, telemetry=None, **kwargs):
@@ -330,6 +362,113 @@ class LocalStoreConnector(BaseConnector, Writable):
         with open(dataset_tmp, "w") as f:
             json.dump(new_descriptor.to_dict(), f)
         os.replace(dataset_tmp, dataset_path)
+
+    # View operations (Eidetic capability)
+
+    def get_view(self, view_name: str) -> ViewDefinition:
+        """Retrieve the definition of the specified view."""
+        view_path = self._view_path(view_name)
+        if not os.path.isfile(view_path):
+            raise DatasetNotFoundError(dataset=view_name, connector=self.__class__.__name__)
+
+        with open(view_path, "r") as f:
+            data = json.load(f)
+        return ViewDefinition(
+            name=data["name"],
+            statement=data["statement"],
+            owner=data.get("owner"),
+            last_row_count=data.get("last_row_count"),
+            description=data.get("description"),
+            describer=data.get("describer"),
+        )
+
+    def list_views(self, prefix: Optional[str] = None) -> List[ViewDefinition]:
+        """List all views managed by this connector, optionally under a name prefix."""
+        search_root = self.store_root if not prefix else self._relation_dir(prefix)
+        if not os.path.isdir(search_root):
+            return []
+
+        views = []
+        for dirpath, _dirnames, filenames in os.walk(search_root):
+            if "view.json" not in filenames:
+                continue
+            with open(os.path.join(dirpath, "view.json"), "r") as f:
+                data = json.load(f)
+            views.append(
+                ViewDefinition(
+                    name=data["name"],
+                    statement=data["statement"],
+                    owner=data.get("owner"),
+                    last_row_count=data.get("last_row_count"),
+                    description=data.get("description"),
+                    describer=data.get("describer"),
+                )
+            )
+        return views
+
+    def create_view(
+        self,
+        view_name: str,
+        statement: str,
+        update_if_exists: bool = False,
+        owner: Optional[str] = None,
+    ) -> None:
+        """Create (or replace) a view definition.
+
+        Args:
+            view_name: Fully-qualified view name
+            statement: SQL statement defining the view
+            update_if_exists: If True, overwrite an existing view definition
+            owner: Optional owner attribution
+
+        Raises:
+            ValueError: If the name is already used by a relation, or the view
+                already exists and update_if_exists is False
+        """
+        self._validate_relation_name(view_name)
+        relation_dir = self._relation_dir(view_name)
+        view_path = os.path.join(relation_dir, "view.json")
+
+        if os.path.isfile(os.path.join(relation_dir, "dataset.json")):
+            raise ValueError(f"relation already exists: {view_name}")
+        if os.path.isfile(view_path) and not update_if_exists:
+            raise ValueError(f"view already exists: {view_name}")
+
+        os.makedirs(relation_dir, exist_ok=True)
+
+        definition = {
+            "format_version": 1,
+            "name": view_name,
+            "statement": statement,
+            "owner": owner,
+            "last_row_count": None,
+            "description": None,
+            "describer": None,
+            "created_at": _now_utc_iso(),
+        }
+
+        tmp_path = view_path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(definition, f)
+        os.replace(tmp_path, view_path)
+
+    def drop_view(self, view_name: str) -> None:
+        """Drop the specified view.
+
+        Args:
+            view_name: Fully-qualified view name
+
+        Raises:
+            ValueError: If the view doesn't exist
+        """
+        view_path = self._view_path(view_name)
+        if not os.path.isfile(view_path):
+            raise ValueError(f"view does not exist: {view_name}")
+
+        os.remove(view_path)
+        relation_dir = self._relation_dir(view_name)
+        if not os.listdir(relation_dir):
+            os.rmdir(relation_dir)
 
 
 class LocalStoreTable(BaseTable):

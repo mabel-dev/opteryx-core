@@ -68,6 +68,8 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         const uint8_t* def_levels
         size_t num_levels
         size_t num_elements
+        const uint32_t* row_level_offsets
+        const uint32_t* row_element_offsets
 
     cdef cppclass ColumnStats:
         bint has_minmax
@@ -79,4 +81,5 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
                                  size_t num_rows, int codec,
                                  int zstd_level,
                                  vector[ColumnStats]* out_stats,
-                                 size_t max_rows_per_rg) except + nogil
+                                 size_t max_rows_per_rg,
+                                 size_t max_page_bytes) except + nogil

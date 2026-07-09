@@ -278,7 +278,8 @@ def read_metadata(source: Source):
 
 def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                   dictionary: bool = True,
-                  max_rows_per_row_group: int = 262144) -> bytes:
+                  max_rows_per_row_group: int = 262144,
+                  max_page_bytes: int = 0) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
@@ -288,16 +289,22 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
         forces PLAIN everywhere.
     max_rows_per_row_group: maximum rows per row group (default 2^18 = 262144).
         Pass 0 to write a single row group regardless of size.
+    max_page_bytes: split each column chunk into multiple data pages once its
+        estimated size exceeds this many bytes (default 0 = single page per
+        chunk). Independent per column. Dictionary-encoded chunks are
+        unaffected.
     """
     return _native.write_parquet(morsel, compression=compression,
                                  bloom_filters=bloom_filters,
                                  dictionary=dictionary,
-                                 max_rows_per_row_group=max_rows_per_row_group)
+                                 max_rows_per_row_group=max_rows_per_row_group,
+                                 max_page_bytes=max_page_bytes)
 
 
 def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=True,
                               dictionary: bool = True,
-                              max_rows_per_row_group: int = 262144):
+                              max_rows_per_row_group: int = 262144,
+                              max_page_bytes: int = 0):
     """Like write_parquet but also returns {col_index: (min, max)} bounds.
 
     Note: bounds are only populated for single-row-group files.
@@ -305,4 +312,5 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
     return _native.write_parquet_with_bounds(morsel, compression=compression,
                                              bloom_filters=bloom_filters,
                                              dictionary=dictionary,
-                                             max_rows_per_row_group=max_rows_per_row_group)
+                                             max_rows_per_row_group=max_rows_per_row_group,
+                                             max_page_bytes=max_page_bytes)

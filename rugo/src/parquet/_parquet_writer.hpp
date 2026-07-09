@@ -199,6 +199,18 @@ struct ColumnInput {
   const uint8_t *def_levels = nullptr;
   size_t num_levels = 0;
   size_t num_elements = 0;
+  // Row-group splitting for arrays: rep/def levels and flat element values are
+  // NOT one-per-row (a row can expand into 0, 1, or many level/element entries
+  // via nesting/repetition), so a row-group's [rg_start, rg_start+rg_rows)
+  // window can't be pointer-sliced the way scalar per-row buffers are. These
+  // two arrays (size num_rows+1, monotonic) give, for each row, the starting
+  // index into rep_levels/def_levels and into the flat element buffer
+  // respectively — row r's levels are [row_level_offsets[r], row_level_offsets
+  // [r+1]) and its elements are [row_element_offsets[r], row_element_offsets
+  // [r+1]). Built once by the caller while it constructs rep_levels/def_levels/
+  // the elem_* buffers (it already walks rows in order to do so).
+  const uint32_t *row_level_offsets = nullptr;
+  const uint32_t *row_element_offsets = nullptr;
 };
 
 // Minimum bit width to hold values in [0, maxval]. bit_width(0)=0, (1)=1,
@@ -727,6 +739,150 @@ inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
   pb.bytes.insert(pb.bytes.end(), stored.begin(), stored.end());
   pb.uncompressed_total = h.buf.size() + uncompressed_body;
   return pb;
+}
+
+// ---- page splitting (byte-size-triggered, independent per column) ----
+//
+// A column chunk's ColumnMetaData fields (num_values, data_page_offset,
+// total_compressed/uncompressed_size) are CHUNK-level aggregates — how many
+// data pages compose the chunk is invisible at that level, so splitting here
+// needs no footer changes (unlike row-group splitting, where num_values is
+// itself a per-row-group value). The reader already loops page headers until
+// it has consumed total_compressed_size bytes (needed to read files written
+// by other tools, which always page-split), so an unmodified reader handles
+// multi-page chunks with zero changes on that side either.
+//
+// max_page_bytes == 0 disables splitting (single page per chunk, previous
+// behavior — the only path exercised before this feature existed). rows/page
+// is estimated from column-specific bytes/row (exact for fixed-width types,
+// measured for variable-width) and rounded up to a multiple of 8 so validity
+// byte offsets stay exact, mirroring row-group splitting's rounding.
+//
+// Dictionary-encoded chunks (build_dict_column) are a different code path
+// entirely (dict page + one RLE_DICTIONARY data page keyed by codes) and are
+// NOT covered by this — a column that gets auto-dict-encoded keeps a single
+// page regardless of max_page_bytes. Scope: PLAIN-encoded scalar and array
+// (never dict-encoded today) columns only.
+
+inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
+                                  int codec, int zstd_level,
+                                  size_t max_page_bytes) {
+  if (max_page_bytes == 0 || rg_rows <= 1)
+    return build_data_page(col, rg_rows, codec, zstd_level);
+
+  size_t rows_per_page;
+  if (col.type == PT_BYTE_ARRAY) {
+    // Variable width: measure actual encoded bytes (4-byte length + payload,
+    // present rows only) to get an honest average.
+    size_t total = 0;
+    for (size_t i = 0; i < rg_rows; i++)
+      if (is_valid(col.validity, i)) total += 4 + col.strs[i].len;
+    double bpr = rg_rows > 0 ? (double)total / (double)rg_rows : 1.0;
+    rows_per_page = (size_t)((double)max_page_bytes / std::max(1.0, bpr));
+  } else if (col.type == PT_FLBA) {
+    rows_per_page = max_page_bytes / (size_t)std::max(1, col.dec_width);
+  } else if (col.type == PT_BOOLEAN) {
+    rows_per_page = max_page_bytes * 8; // ~1 bit/row (def-level overhead ignored, small)
+  } else {
+    size_t width = (col.type == PT_INT32) ? 4 : 8; // INT32 vs INT64/DOUBLE
+    rows_per_page = max_page_bytes / width;
+  }
+  if (rows_per_page == 0) rows_per_page = 8;
+  rows_per_page = (rows_per_page + 7) & ~(size_t)7; // byte-aligned validity slicing
+
+  std::vector<uint8_t> out;
+  size_t total_uncompressed = 0;
+  for (size_t start = 0; start < rg_rows; start += rows_per_page) {
+    size_t count = std::min(rows_per_page, rg_rows - start);
+    ColumnInput sub = col;
+    if (col.i32)     sub.i32     = col.i32     + start;
+    if (col.i64)     sub.i64     = col.i64     + start;
+    if (col.f64)     sub.f64     = col.f64     + start;
+    if (col.boolean) sub.boolean = col.boolean + start;
+    if (col.strs)    sub.strs    = col.strs    + start;
+    if (col.dec_raw) sub.dec_raw = col.dec_raw + start * (size_t)col.dec_width;
+    if (col.validity) sub.validity = col.validity + (start >> 3);
+    PageBuild pb = build_data_page(sub, count, codec, zstd_level);
+    out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
+    total_uncompressed += pb.uncompressed_total;
+  }
+  PageBuild result;
+  result.bytes = std::move(out);
+  result.uncompressed_total = total_uncompressed;
+  return result;
+}
+
+inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
+                                        int zstd_level, size_t rg_rows,
+                                        size_t max_page_bytes) {
+  if (max_page_bytes == 0 || rg_rows <= 1)
+    return build_array_data_page(rg_col, codec, zstd_level);
+
+  // Derive this row group's own row->level and row->element boundaries by
+  // walking its rep/def streams once (rep==0 marks a new row; def==max_def
+  // marks a present leaf element, i.e. one consumed elem_* entry). Entirely
+  // local to rg_col's already row-group-scoped buffers — no dependency on
+  // the caller's global row_level_offsets/row_element_offsets.
+  const int max_def = 2 * rg_col.array_depth + 1;
+  std::vector<uint32_t> row_lvl(rg_rows + 1);
+  std::vector<uint32_t> row_elem(rg_rows + 1);
+  size_t row = 0, elem_count = 0;
+  row_lvl[0] = 0;
+  row_elem[0] = 0;
+  for (size_t i = 0; i < rg_col.num_levels; i++) {
+    if (rg_col.rep_levels[i] == 0 && i > 0) {
+      row++;
+      row_lvl[row] = (uint32_t)i;
+      row_elem[row] = (uint32_t)elem_count;
+    }
+    if (rg_col.def_levels[i] == max_def) elem_count++;
+  }
+  row++;
+  row_lvl[row] = (uint32_t)rg_col.num_levels;
+  row_elem[row] = (uint32_t)elem_count;
+
+  // Rough bytes/row estimate (levels are 1 byte each pre-RLE; element payload
+  // measured for strings, fixed-width otherwise) — good enough to pick a page
+  // boundary; RLE/zstd make the final byte size the authority, not this.
+  size_t elem_bytes;
+  if (rg_col.elem_type == PT_BYTE_ARRAY) {
+    size_t total_str = 0;
+    for (size_t i = 0; i < rg_col.num_elements; i++) total_str += 4 + rg_col.strs[i].len;
+    elem_bytes = total_str;
+  } else if (rg_col.elem_type == PT_BOOLEAN) {
+    elem_bytes = (rg_col.num_elements + 7) / 8;
+  } else {
+    elem_bytes = rg_col.num_elements * 8; // INT64/DOUBLE-widened leaves
+  }
+  size_t approx_bytes = rg_col.num_levels * 2 /* rep+def, pre-RLE */ + elem_bytes;
+  double bpr = rg_rows > 0 ? (double)approx_bytes / (double)rg_rows : 1.0;
+  size_t rows_per_page = (size_t)((double)max_page_bytes / std::max(1.0, bpr));
+  if (rows_per_page == 0) rows_per_page = 8;
+  rows_per_page = (rows_per_page + 7) & ~(size_t)7;
+
+  std::vector<uint8_t> out;
+  size_t total_uncompressed = 0;
+  for (size_t start = 0; start < rg_rows; start += rows_per_page) {
+    size_t count = std::min(rows_per_page, rg_rows - start);
+    uint32_t lvl_s = row_lvl[start],  lvl_e = row_lvl[start + count];
+    uint32_t el_s  = row_elem[start], el_e  = row_elem[start + count];
+    ColumnInput sub = rg_col;
+    sub.rep_levels   = rg_col.rep_levels + lvl_s;
+    sub.def_levels   = rg_col.def_levels + lvl_s;
+    sub.num_levels   = lvl_e - lvl_s;
+    sub.num_elements = el_e - el_s;
+    if (rg_col.i64)     sub.i64     = rg_col.i64     + el_s;
+    if (rg_col.f64)     sub.f64     = rg_col.f64     + el_s;
+    if (rg_col.boolean) sub.boolean = rg_col.boolean + el_s;
+    if (rg_col.strs)    sub.strs    = rg_col.strs    + el_s;
+    PageBuild pb = build_array_data_page(sub, codec, zstd_level);
+    out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
+    total_uncompressed += pb.uncompressed_total;
+  }
+  PageBuild result;
+  result.bytes = std::move(out);
+  result.uncompressed_total = total_uncompressed;
+  return result;
 }
 
 // ---- dictionary encoding ----
@@ -1424,12 +1580,23 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          int zstd_level = 3,
                                          std::vector<ColumnStats> *out_stats =
                                              nullptr,
-                                         size_t max_rows_per_rg = 0) {
-  // Disable splitting when any column uses the array path (rep/def levels
-  // are embedded in the page; pointer-slicing is not valid there).
+                                         size_t max_rows_per_rg = 0,
+                                         size_t max_page_bytes = 0) {
+  // Array columns need row_level_offsets/row_element_offsets to be sliceable
+  // per row group (see ColumnInput comment) — the caller must supply them
+  // whenever it wants row-group splitting for a schema containing an ARRAY
+  // column. Fail loud rather than silently degrading to a single row group:
+  // a caller that asked for N-row row groups and got one giant row group
+  // with no error is exactly the "hidden behaviour" this project forbids.
   if (max_rows_per_rg > 0) {
-    for (const auto &c : cols)
-      if (c.is_array) { max_rows_per_rg = 0; break; }
+    for (const auto &c : cols) {
+      if (c.is_array && (!c.row_level_offsets || !c.row_element_offsets)) {
+        throw std::invalid_argument(
+            "WriteParquet: max_rows_per_rg > 0 requires row_level_offsets/"
+            "row_element_offsets on every ARRAY column (needed to slice "
+            "rep/def levels and element values per row group)");
+      }
+    }
   }
   // Round up to nearest multiple of 8 so validity byte offset = start >> 3.
   if (max_rows_per_rg > 0)
@@ -1453,6 +1620,11 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     size_t total_byte_size = 0;
   };
   std::vector<RGMeta> rg_meta(n_rg);
+  // Per-row-group sliced ColumnInputs must stay alive until the footer is
+  // written: for an array column, num_levels/num_elements/rep_levels/
+  // def_levels are only correct for THIS row group's slice, not the global
+  // `cols[i]` — the footer loop below must read from here, never from `cols`.
+  std::vector<std::vector<ColumnInput>> all_rg_cols(n_rg);
 
   std::vector<uint8_t> file;
   file.reserve(1024);
@@ -1477,10 +1649,29 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     // the byte offset rg_start>>3 is exact.
     // PRESERVE-dict columns (codes!=nullptr): dict buffers (i32/i64/f64/strs)
     // point at dictionary values, NOT per-row data — do not offset them.
-    std::vector<ColumnInput> rg_cols(cols.size());
+    std::vector<ColumnInput> &rg_cols = all_rg_cols[rg];
+    rg_cols.resize(cols.size());
     for (size_t i = 0; i < cols.size(); i++) {
       rg_cols[i] = cols[i];
-      if (!cols[i].codes) {
+      if (cols[i].is_array) {
+        // Arrays aren't one-per-row in rep_levels/def_levels/elem_* — slice
+        // via the row->level and row->element offset indexes instead of a
+        // flat rg_start pointer add.
+        const uint32_t lvl_start = cols[i].row_level_offsets[rg_start];
+        const uint32_t lvl_end   = cols[i].row_level_offsets[rg_start + rg_rows];
+        const uint32_t el_start  = cols[i].row_element_offsets[rg_start];
+        const uint32_t el_end    = cols[i].row_element_offsets[rg_start + rg_rows];
+        rg_cols[i].rep_levels  = cols[i].rep_levels + lvl_start;
+        rg_cols[i].def_levels  = cols[i].def_levels + lvl_start;
+        rg_cols[i].num_levels  = lvl_end - lvl_start;
+        rg_cols[i].num_elements = el_end - el_start;
+        if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + el_start;
+        if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + el_start;
+        if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + el_start;
+        if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + el_start;
+        // Row-level validity bitmap (outer-list null/not-null) is still one
+        // bit per ROW like any scalar column — same rg_start>>3 slice below.
+      } else if (!cols[i].codes) {
         if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + rg_start;
         if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + rg_start;
         if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + rg_start;
@@ -1497,9 +1688,10 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 
     // Write all column chunks for this row group.
     for (size_t i = 0; i < rg_cols.size(); i++) {
-      int64_t page_start = (int64_t)file.size();
       if (rg_cols[i].is_array) {
-        PageBuild pb = build_array_data_page(rg_cols[i], codec, zstd_level);
+        int64_t page_start = (int64_t)file.size();
+        PageBuild pb = build_array_data_pages(rg_cols[i], codec, zstd_level,
+                                              rg_rows, max_page_bytes);
         meta.data_offsets[i] = page_start;
         meta.sizes[i]        = pb.bytes.size();
         meta.uncompressed[i] = pb.uncompressed_total;
@@ -1508,6 +1700,28 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
       }
 
       meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
+
+      // Bloom filter for this column, written immediately before its own data
+      // page so a single contiguous range read covers both bloom + data with
+      // no other column's bytes in between (bloom_filter_offset is just an
+      // absolute file pointer per spec — placement relative to the column's
+      // data is unconstrained). This lets a remote reader fetch bloom+data in
+      // one GET and use the bloom filter to skip decode, not skip the fetch.
+      if (rg_cols[i].bloom) {
+        std::vector<uint64_t> hashes = bloom_hashes(rg_cols[i], rg_rows);
+        if (!hashes.empty()) {
+          size_t ndv = bloom_ndv(hashes);
+          meta.stats[i].distinct_count = (int64_t)ndv;
+          BloomFilter bf = bloom_build(hashes, ndv, 0.01);
+          std::vector<uint8_t> hdr = build_bloom_header((int32_t)bf.bitset.size());
+          meta.bloom_offset[i] = (int64_t)file.size();
+          meta.bloom_length[i] = (int32_t)(hdr.size() + bf.bitset.size());
+          file.insert(file.end(), hdr.begin(), hdr.end());
+          file.insert(file.end(), bf.bitset.begin(), bf.bitset.end());
+        }
+      }
+
+      int64_t page_start = (int64_t)file.size();
 
       bool use_dict = false;
       DictColumnBuild dcb;
@@ -1567,7 +1781,8 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
         meta.uncompressed[i] = dcb.uncompressed_total;
         file.insert(file.end(), dcb.bytes.begin(), dcb.bytes.end());
       } else {
-        PageBuild pb = build_data_page(rg_cols[i], rg_rows, codec, zstd_level);
+        PageBuild pb = build_data_pages(rg_cols[i], rg_rows, codec, zstd_level,
+                                        max_page_bytes);
         meta.data_offsets[i] = page_start;
         meta.sizes[i]        = pb.bytes.size();
         meta.uncompressed[i] = pb.uncompressed_total;
@@ -1577,21 +1792,6 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 
     meta.total_byte_size = 0;
     for (size_t s : meta.uncompressed) meta.total_byte_size += s;
-
-    // Bloom filters for this row group.
-    for (size_t i = 0; i < rg_cols.size(); i++) {
-      if (!rg_cols[i].bloom) continue;
-      std::vector<uint64_t> hashes = bloom_hashes(rg_cols[i], rg_rows);
-      if (hashes.empty()) continue;
-      size_t ndv = bloom_ndv(hashes);
-      meta.stats[i].distinct_count = (int64_t)ndv;
-      BloomFilter bf = bloom_build(hashes, ndv, 0.01);
-      std::vector<uint8_t> hdr = build_bloom_header((int32_t)bf.bitset.size());
-      meta.bloom_offset[i] = (int64_t)file.size();
-      meta.bloom_length[i] = (int32_t)(hdr.size() + bf.bitset.size());
-      file.insert(file.end(), hdr.begin(), hdr.end());
-      file.insert(file.end(), bf.bitset.begin(), bf.bitset.end());
-    }
   } // end row group loop
 
   // FileMetaData.
@@ -1609,7 +1809,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     fm.writeFieldHeader(CT_LIST, 1);
     fm.writeListHeader(CT_STRUCT, (uint32_t)cols.size());
     for (size_t i = 0; i < cols.size(); i++)
-      write_column_chunk(fm, cols[i], meta.row_count, meta.data_offsets[i],
+      write_column_chunk(fm, all_rg_cols[rg][i], meta.row_count, meta.data_offsets[i],
                          meta.dict_offsets[i], meta.sizes[i], meta.uncompressed[i],
                          codec, meta.stats[i], meta.bloom_offset[i], meta.bloom_length[i]);
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size

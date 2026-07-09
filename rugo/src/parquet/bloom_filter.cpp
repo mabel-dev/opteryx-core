@@ -334,9 +334,18 @@ bool TestBloomFilter(const std::string& file_path, int64_t bloom_offset,
     }
   }
 
+  return TestBloomFilterBytes(buffer.data(), buffer.size(), value);
+}
+
+bool TestBloomFilterBytes(const uint8_t* data, size_t len,
+                          const std::string& value) {
+  if (data == nullptr || len == 0) {
+    return false;
+  }
+
   TInput in;
-  in.p = buffer.data();
-  in.end = buffer.data() + buffer.size();
+  in.p = data;
+  in.end = data + len;
 
   BloomFilterHeaderData header;
   std::vector<uint8_t> bitset;
@@ -354,9 +363,8 @@ bool TestBloomFilter(const std::string& file_path, int64_t bloom_offset,
     size_t expected = 0;
     if (header.num_bytes > 0) {
       expected = static_cast<size_t>(header.num_bytes);
-    } else if (bloom_length > 0 &&
-               static_cast<size_t>(bloom_length) > header.header_bytes) {
-      expected = static_cast<size_t>(bloom_length) - header.header_bytes;
+    } else if (len > header.header_bytes) {
+      expected = len - header.header_bytes;
     } else {
       expected = available;
     }

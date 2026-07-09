@@ -287,5 +287,6 @@ def do_sql_rewrite(statement):
 
     parts = sql_parts(statement)
     parts = rewrite_explain(parts)
-    parts = rewrite_comment(parts)
+    if statement.lstrip().upper().startswith("COMMENT"):
+        parts = rewrite_comment(parts)
     return " ".join(parts)

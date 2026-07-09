@@ -96,6 +96,7 @@ cdef extern from "metadata.hpp":
     FileStats ReadParquetMetadata(const string& path)
     FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size, const MetadataParseOptions& options)
     bint TestBloomFilter(const string& file_path, long long bloom_offset, long long bloom_length, const string& value) except +
+    bint TestBloomFilterBytes(const uint8_t* data, size_t length, const string& value) except +
 
     # Helper functions
     const char* EncodingToString(int32_t enc)

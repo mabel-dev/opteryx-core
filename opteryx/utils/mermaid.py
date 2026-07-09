@@ -199,6 +199,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                         node_stat["blobs_read"] = facts["files_read"]
                         node_stat["row_groups_read"] = facts["row_groups_read"]
                         node_stat["row_groups_pruned"] = facts["row_groups_pruned"]
+                        node_stat["parquet_rows_before_filter"] = facts["parquet_rows_before_filter"]
                         node_stat["columns_read"] = facts["columns_read"]
                         # No pushed predicates on the native path → every column
                         # read is a projection column, none read only for filtering.

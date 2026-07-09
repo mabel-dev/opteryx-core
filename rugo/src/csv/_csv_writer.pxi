@@ -77,7 +77,7 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
             sc = v._nb.logical_type_scale
             if sc is not None:
                 scales[c] = <int>sc
-            if dv.type == DRAKEN_ARRAY:
+            if dv.type == DRAKEN_ARRAY and v._nb.array_child_type is not None:
                 cv = Vector(v._nb.array_child)
                 child_vecs.append(cv)
                 child_dvs[c] = cv.unified()

@@ -215,8 +215,6 @@ cdef class ScanReadings:
     cdef public int64_t bytes_processed
     cdef public int64_t time_decoding_blobs
     cdef public int64_t parquet_rows_before_filter
-    cdef public int64_t parquet_rows_after_filter
-    cdef public double  parquet_filter_selectivity
     cdef public int64_t empty_datasets
 
     # ── Mutation API ─────────────────────────────────────────────────────────
@@ -349,13 +347,12 @@ cdef class ScanReadings:
     cpdef void record_decode_time(self, int64_t ns):
         self.time_decoding_blobs += ns
 
-    cpdef void record_filter_totals(self, int64_t rows_before, int64_t rows_after):
+    cpdef void record_filter_totals(self, int64_t rows_before):
+        # rows_after (post-relocated-filter survivor count) is intentionally not
+        # kept here — it duplicated the downstream ExprFilter operator's own
+        # records_in/out and confused rows-in-vs-rows-out readings across scan
+        # sources. This scan node tracks only rows fed into it.
         self.parquet_rows_before_filter += rows_before
-        self.parquet_rows_after_filter += rows_after
-        if self.parquet_rows_before_filter > 0:
-            self.parquet_filter_selectivity = (
-                <double>self.parquet_rows_after_filter / <double>self.parquet_rows_before_filter
-            )
 
     cpdef void flush_into(self, object readings):
         readings["parquet_row_groups_pruned"]          = self.parquet_row_groups_pruned
@@ -413,9 +410,6 @@ cdef class ScanReadings:
         readings["bytes_processed"]                    = self.bytes_processed
         readings["time_decoding_blobs"]                = self.time_decoding_blobs
         readings["parquet_rows_before_filter"]         = self.parquet_rows_before_filter
-        readings["parquet_rows_after_filter"]          = self.parquet_rows_after_filter
-        if self.parquet_rows_before_filter > 0:
-            readings["parquet_filter_selectivity"]     = self.parquet_filter_selectivity
         readings["empty_datasets"]                     = self.empty_datasets
 
 
@@ -639,7 +633,6 @@ cdef class ParquetReadNode(ReaderNode):
     cdef list _lm_pass2_names_bytes
     cdef int64_t _decode_start_ns
     cdef int64_t _total_rows_before_filter
-    cdef int64_t _total_rows_after_filter
     cdef bint _scan_finished              # decode-telemetry flushed once
     cdef bint _emitted_any                # any morsel returned (empty-result guard)
     cdef bint _empty_guard_done           # the single empty morsel already returned
@@ -708,7 +701,6 @@ cdef class ParquetReadNode(ReaderNode):
         self._lm_pass2_names_bytes = None
         self._decode_start_ns = 0
         self._total_rows_before_filter = 0
-        self._total_rows_after_filter = 0
         self._scan_finished = False
         self._emitted_any = False
         self._empty_guard_done = False
@@ -757,12 +749,6 @@ cdef class ParquetReadNode(ReaderNode):
             "parquet_projection_columns_read", 0
         )
         base["parquet_rows_before_filter"] = self.readings.get("parquet_rows_before_filter", 0)
-        base["parquet_rows_after_filter"] = self.readings.get("parquet_rows_after_filter", 0)
-        rows_before_filter = base["parquet_rows_before_filter"]
-        if rows_before_filter > 0:
-            base["parquet_filter_selectivity"] = (
-                base["parquet_rows_after_filter"] / rows_before_filter
-            )
         decode_ns = self.readings.get("time_decoding_blobs", 0)
         if decode_ns > 0 and base["row_groups_read"] > 0:
             base["rowgroups_completed_per_s"] = base["row_groups_read"] / (
@@ -1202,10 +1188,7 @@ cdef class ParquetReadNode(ReaderNode):
         docstring for why the hot loop itself never touches Python object state)."""
         cdef int64_t decode_ns = <int64_t>time.monotonic_ns() - self._decode_start_ns
         self.scan_readings.record_decode_time(decode_ns)
-        self.scan_readings.record_filter_totals(
-            self._total_rows_before_filter,
-            self._total_rows_after_filter,
-        )
+        self.scan_readings.record_filter_totals(self._total_rows_before_filter)
 
     cdef void _ensure_scan_started(self) except *:
         """Run the once-per-scan setup (schema resolution, identity maps, predicate
@@ -1408,7 +1391,6 @@ cdef class ParquetReadNode(ReaderNode):
 
         self._decode_start_ns = <int64_t>time.monotonic_ns()
         self._total_rows_before_filter = 0
-        self._total_rows_after_filter = 0
 
         if two_pass_eligible:
             # Native two-pass latmat: open the pass-1 (filter columns) source with
@@ -1526,7 +1508,7 @@ cdef class ParquetReadNode(ReaderNode):
         cdef object path
         cdef shared_ptr[CxxMorsel] result_cxm, emit_cxm
         cdef bint has_identity
-        cdef int64_t rows_before_filter, rows_after_filter, surviving_rows
+        cdef int64_t rows_before_filter, surviving_rows
         cdef int64_t bytes_fetched, read_ns, decode_ns
         cdef Morsel count_star
         while True:
@@ -1574,15 +1556,12 @@ cdef class ParquetReadNode(ReaderNode):
             has_identity = bool(self._sp_identity_names)
             emit_cxm.reset()
             rows_before_filter = 0
-            rows_after_filter = 0
             if has_identity:
                 # Positional pairing: vectors order == column_names == identity order.
                 result_cxm = cxx_morsel_from_vectors_sp(vectors, self._sp_identity_names)
                 rows_before_filter = result_cxm.get().num_rows()
-                rows_after_filter = rows_before_filter
                 if self._compiled_predicate is not None:
                     result_cxm = self._cxx_apply_predicate(result_cxm)
-                    rows_after_filter = result_cxm.get().num_rows()
                 if self._sp_output_identity_order:
                     emit_cxm = cxx_select_sp(result_cxm, self._sp_output_identity_order)
                 else:
@@ -1604,7 +1583,6 @@ cdef class ParquetReadNode(ReaderNode):
             self.scan_readings.time_parquet_decode_columns_ns += decode_ns
             if has_identity:
                 self._total_rows_before_filter += rows_before_filter
-                self._total_rows_after_filter += rows_after_filter
             self._sp_claims_pending -= 1
             if emit_cxm.get() != NULL:
                 emit_cxm = self._commit_morsel_cxx(emit_cxm, path)
@@ -1722,7 +1700,6 @@ cdef class ParquetReadNode(ReaderNode):
         cdef object path, rg_idx, identity, p1_filtered, p1_identity_names
         cdef dict row_group, p1_vectors_by_identity, p2_vectors_by_identity
         cdef Morsel result_morsel
-        cdef int64_t rows_after_filter
         cdef Py_ssize_t i, n
         if not self._lm_pass1_done:
             self._run_pass1()
@@ -1780,11 +1757,9 @@ cdef class ParquetReadNode(ReaderNode):
                 combined_vectors.extend(p2_vectors_by_identity.values())
 
             result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
-            rows_after_filter = result_morsel.num_rows
 
             with nogil:
                 self._scan_mtx.lock()
-            self._total_rows_after_filter += rows_after_filter
             # Already assembled in output_identity_order — no select() needed.
             result_morsel = self._commit_morsel(result_morsel, path)
             self._emitted_any = True

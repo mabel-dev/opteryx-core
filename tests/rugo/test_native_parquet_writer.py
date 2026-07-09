@@ -134,6 +134,47 @@ def test_bloom_probe_roundtrip(tmp_path):
     assert absent.count(True) == 0  # low FPP — no false positives on this sample
 
 
+def test_bloom_probe_bytes_matches_file(tmp_path):
+    """The in-memory bloom probe (TestBloomFilterBytes, used by the remote
+    decode-skip) is byte-identical to the file-based probe: slice the exact bloom
+    region out of a written file and confirm the bytes-probe agrees on every
+    present and absent candidate. Also confirms the new adjacent layout — the
+    bloom sits immediately before its column's data page."""
+    from rugo.rugo_native import (
+        read_rowgroup_stats,
+        bloom_filter_maybe_contains,
+        bloom_filter_bytes_maybe_contains,
+    )
+
+    vals = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]
+    sql = "SELECT s FROM (VALUES " + ",".join("('%s')" % v for v in vals) + ") AS t(s)"
+    data = _write(sql, compression="none")  # bloom_filters=True by default
+
+    c0 = read_rowgroup_stats(data)[0]["columns"][0]
+    off, length = c0["bloom_offset"], c0["bloom_length"]
+    assert off >= 0 and length > 0
+
+    # New layout: the bloom is written immediately after the 4-byte PAR1 magic,
+    # i.e. in front of this (only) column's data — not clustered at the row-group
+    # tail as the old layout did (which would put it at a high offset past the
+    # column data). This is what makes the adjacent single-fetch decode-skip work.
+    assert off == 4, off
+
+    bloom_bytes = data[off:off + length]
+
+    p = str(tmp_path / "b.parquet")
+    with open(p, "wb") as f:
+        f.write(data)
+
+    for v in vals + ["ZZZ", "nope", "missing", "xyzzy", "qux", "quux"]:
+        vb = v.encode("utf-8")
+        file_probe = bloom_filter_maybe_contains(p, off, length, vb)
+        bytes_probe = bloom_filter_bytes_maybe_contains(bloom_bytes, vb)
+        assert file_probe == bytes_probe, v
+    # And the semantic contract still holds on the bytes probe.
+    assert all(bloom_filter_bytes_maybe_contains(bloom_bytes, v.encode("utf-8")) for v in vals)
+
+
 def test_bloom_can_be_disabled():
     from rugo.rugo_native import read_rowgroup_stats
 
@@ -244,6 +285,198 @@ def test_array_roundtrip(compression):
     ty, vals = one("s", dn.vector_array_from_sequence([["x", "yy"], None, ["z"]]))
     assert ty == "list<element: string>"
     assert vals == [["x", "yy"], None, ["z"]]
+
+
+def test_array_column_row_group_splitting():
+    """max_rows_per_row_group must actually split a schema containing an ARRAY
+    column into multiple row groups, not silently collapse to one.
+
+    Regression test for two bugs found together: (1) WriteParquet used to zero
+    out max_rows_per_rg the instant any column was is_array, silently ignoring
+    the caller's request with no error; (2) once real per-row-group array
+    slicing was added, the footer writer read column metadata (num_levels /
+    num_elements) from the GLOBAL unsliced ColumnInput instead of the
+    per-row-group slice, so every row group's array column reported the
+    full-file element count -- rugo's own reader then failed to decode the
+    array column in ANY row group (PyArrow tolerated it; rugo did not).
+    """
+    import draken.draken_native as dn
+    from draken.vectors.vector import Vector
+    from draken.morsels.morsel import Morsel
+    from rugo.parquet import read_parquet
+    from rugo.rugo_native import read_rowgroup_stats
+
+    # 23 rows so requested rg=7 (rounds up to 8) produces an uneven 8/8/7 split,
+    # with nulls and empty lists straddling row-group boundaries.
+    data = ([[1, 2], [], None, [3]] * 5) + [[9, 9]] * 3
+    ids = list(range(len(data)))
+    m = Morsel.from_vectors(
+        ["id", "arr"],
+        [
+            Vector(dn.vector_from_sequence(ids)),
+            Vector(dn.vector_array_from_sequence(data)),
+        ],
+    )
+    buf = write_parquet(m, compression="zstd", max_rows_per_row_group=7)
+
+    n_rg = len(read_rowgroup_stats(buf))
+    assert n_rg == 3, f"expected 3 row groups (8/8/7), got {n_rg} -- splitting was silently ignored"
+
+    # rugo must be able to read back its own file, every row group present.
+    out_ids, out_arr = [], []
+    with read_parquet(buf) as reader:
+        for morsel in reader:
+            assert b"arr" in morsel.column_names, "array column missing from a row group"
+            out_ids.extend(morsel.column(b"id").to_pylist())
+            out_arr.extend(morsel.column(b"arr").to_pylist())
+    assert out_ids == ids
+    assert out_arr == data
+
+    # PyArrow must agree independently.
+    cols, _ = _read_pyarrow(buf)
+    assert cols["id"] == ids
+    assert cols["arr"] == data
+
+
+def _count_data_pages(buf: bytes, col_idx: int = 0, rg_idx: int = 0) -> int:
+    """Raw compact-protocol PageHeader walk within one column chunk's byte
+    range -- ground truth for how many data pages a chunk actually contains,
+    independent of rugo's own reader (used to verify max_page_bytes actually
+    split the chunk, not just silently produced one page)."""
+    import pyarrow.parquet as pq
+
+    def read_varint(b, p):
+        result, shift = 0, 0
+        while True:
+            byte = b[p]; p += 1
+            result |= (byte & 0x7F) << shift
+            if not (byte & 0x80):
+                return result, p
+            shift += 7
+
+    def zigzag(n):
+        return (n >> 1) ^ -(n & 1)
+
+    def skip_struct(b, p):
+        while True:
+            header = b[p]; p += 1
+            if header == 0:
+                return p
+            ftype = header & 0x0F
+            delta = (header >> 4) & 0x0F
+            if delta == 0:
+                _, p = read_varint(b, p)
+            if ftype in (4, 5, 6):
+                _, p = read_varint(b, p)
+            elif ftype == 7:
+                p += 8
+            elif ftype == 3:
+                p += 1
+            elif ftype == 8:
+                n, p = read_varint(b, p)
+                p += n
+            elif ftype == 12:
+                p = skip_struct(b, p)
+            elif ftype in (9, 10):
+                hdr = b[p]; p += 1
+                elem_type, size = hdr & 0x0F, (hdr >> 4) & 0x0F
+                if size == 15:
+                    size, p = read_varint(b, p)
+                for _ in range(size):
+                    if elem_type == 12:
+                        p = skip_struct(b, p)
+                    elif elem_type == 8:
+                        n, p = read_varint(b, p)
+                        p += n
+                    elif elem_type in (5, 6):
+                        _, p = read_varint(b, p)
+                    elif elem_type == 3:
+                        p += 1
+
+    pf = pq.ParquetFile(io.BytesIO(buf))
+    col = pf.metadata.row_group(rg_idx).column(col_idx)
+    start = col.dictionary_page_offset if col.has_dictionary_page else col.data_page_offset
+    end = start + col.total_compressed_size
+    pos = start
+    n_data_pages = 0
+    while pos < end:
+        page_start = pos
+        page_type = compressed_size = None
+        last_id = 0
+        p = pos
+        while True:
+            header = buf[p]; p += 1
+            if header == 0:
+                break
+            ftype = header & 0x0F
+            delta = (header >> 4) & 0x0F
+            if delta == 0:
+                zz, p = read_varint(buf, p)
+                fid = zigzag(zz)
+            else:
+                fid = last_id + delta
+            last_id = fid
+            if ftype in (4, 5, 6):
+                val, p = read_varint(buf, p)
+                val = zigzag(val)
+                if fid == 1:
+                    page_type = val
+                elif fid == 3:
+                    compressed_size = val
+            elif ftype == 12:
+                p = skip_struct(buf, p)
+            elif ftype == 8:
+                n, p = read_varint(buf, p)
+                p += n
+        if page_type == 0:
+            n_data_pages += 1
+        pos = p + compressed_size
+    return n_data_pages
+
+
+@pytest.mark.parametrize("compression", ["zstd", "none"])
+def test_page_splitting(compression):
+    """max_page_bytes must actually split a column chunk into multiple data
+    pages (verified via a raw page-header walk, independent of both writer
+    and reader code) as the threshold shrinks, for both scalar and array
+    columns, while every reader (rugo, PyArrow) still recovers exact data."""
+    import draken.draken_native as dn
+    from draken.vectors.vector import Vector
+    from draken.morsels.morsel import Morsel
+    from rugo.parquet import read_parquet
+
+    # Scalar INT64 column: unsplit vs. tightly page-split.
+    ints = list(range(10_000))
+    m = Morsel.from_vectors(["id"], [Vector(dn.vector_from_sequence(ints))])
+    buf_unsplit = write_parquet(m, compression=compression, max_page_bytes=0)
+    buf_split = write_parquet(m, compression=compression, max_page_bytes=500)
+
+    n_unsplit = _count_data_pages(buf_unsplit)
+    n_split = _count_data_pages(buf_split)
+    assert n_unsplit == 1
+    assert n_split > 10, f"expected many pages at a 500-byte threshold, got {n_split}"
+
+    with read_parquet(buf_split) as reader:
+        out = []
+        for morsel in reader:
+            out.extend(morsel.column(b"id").to_pylist())
+    assert out == ints
+    cols, _ = _read_pyarrow(buf_split)
+    assert cols["id"] == ints
+
+    # ARRAY column: same splitting behavior, independent of scalar columns.
+    data = [[i, i + 1, i + 2] for i in range(3_000)]
+    ma = Morsel.from_vectors(["arr"], [Vector(dn.vector_array_from_sequence(data))])
+    buf_arr_split = write_parquet(ma, compression=compression, max_page_bytes=500)
+    assert _count_data_pages(buf_arr_split) > 5
+
+    with read_parquet(buf_arr_split) as reader:
+        out_arr = []
+        for morsel in reader:
+            out_arr.extend(morsel.column(b"arr").to_pylist())
+    assert out_arr == data
+    cols_a, _ = _read_pyarrow(buf_arr_split)
+    assert cols_a["arr"] == data
 
 
 @pytest.mark.parametrize("compression", ["zstd", "none"])

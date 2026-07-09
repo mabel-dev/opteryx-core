@@ -1487,6 +1487,22 @@ cdef class NativeScanPlan:
         pruned_row_group_count` == every row group in the projected files."""
         return self.pruned_items
 
+    @property
+    def surviving_row_count(self):
+        """Total row count across the SURVIVING (non-pruned) work items — i.e. the
+        rows this scan will actually decode/emit before any relocated residual
+        filter runs downstream. Plan-time only (no runtime filter selectivity;
+        that lives on the downstream ExprFilter operator's own records_in/out)."""
+        cdef int64_t total = 0
+        cdef Py_ssize_t i, n = self.work_items.size()
+        cdef string path_bytes
+        cdef int rg_idx
+        for i in range(n):
+            path_bytes = self.work_items[i].first
+            rg_idx = self.work_items[i].second
+            total += self.footer_map[0][path_bytes].row_groups[rg_idx].num_rows
+        return total
+
     def diagnostics(self):
         """IO-pipeline counters for this native scan — the GCS/HTTP visibility the
         native path was previously missing (the trampoline path exposes the same via

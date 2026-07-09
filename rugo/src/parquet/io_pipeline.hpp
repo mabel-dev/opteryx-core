@@ -1078,6 +1078,52 @@ class ParquetIOPipeline {
         }, BS::pr::high);
     }
 
+    // Probe an in-memory bloom filter for every needle of a pushed equality/IN
+    // predicate. Returns true only when EVERY needle is provably absent — i.e.
+    // this row group cannot match the conjunct, so its decode can be skipped.
+    // `physical_type` encodes the needle bytes identically to the writer's
+    // bloom_hashes (int32=4 LE, int64=8 LE, byte_array=raw). Only kind 0 (int
+    // membership) and kind 1 (str membership) can consult a bloom; LIKE kinds
+    // and unencodable types return false (keep the row group). Any probe error
+    // fails OPEN (false) — a bloom must never drop a live row.
+    static bool bloom_needles_all_absent(
+            const uint8_t* bloom_data, size_t bloom_len, int kind,
+            const std::vector<int64_t>* int_vals,
+            const std::vector<std::string>* str_vals,
+            const std::string& physical_type) {
+        std::string vbytes;
+        try {
+            if (kind == 0 && int_vals != nullptr) {
+                if (int_vals->empty()) return false;
+                for (int64_t v : *int_vals) {
+                    if (physical_type == "int64") {
+                        vbytes.assign(reinterpret_cast<const char*>(&v), 8);
+                    } else if (physical_type == "int32") {
+                        int32_t v32 = static_cast<int32_t>(v);
+                        if (static_cast<int64_t>(v32) != v) return false;
+                        vbytes.assign(reinterpret_cast<const char*>(&v32), 4);
+                    } else {
+                        return false;  // unencodable physical type → keep
+                    }
+                    if (TestBloomFilterBytes(bloom_data, bloom_len, vbytes))
+                        return false;  // may be present → keep
+                }
+                return true;  // every needle provably absent
+            }
+            if (kind == 1 && str_vals != nullptr) {
+                if (str_vals->empty() || physical_type != "byte_array") return false;
+                for (const std::string& s : *str_vals) {
+                    if (TestBloomFilterBytes(bloom_data, bloom_len, s))
+                        return false;
+                }
+                return true;
+            }
+        } catch (...) {
+            return false;  // any parse/probe error → keep the row group
+        }
+        return false;  // LIKE / unknown kind → cannot prune
+    }
+
     void decode_row_group(const WorkItem& item) {
         // WP-8 cancel: a queued task whose work is no longer wanted bails here,
         // before any IO / decode / allocation. Nothing was reserved yet, so
@@ -1155,6 +1201,31 @@ class ParquetIOPipeline {
             base_offsets[i] = base;
         }
 
+        // Remote bloom decode-skip: for a column carrying a pushed equality/IN
+        // predicate whose bloom filter sits immediately before its column chunk
+        // (adjacent layout), extend that column's fetch backwards to swallow the
+        // bloom bytes. They ride in the same GET we already issue for the chunk,
+        // so testing them costs no extra round trip — a probe that proves the
+        // needle absent lets us skip the whole row group's decode. Gated on the
+        // three conditions: (1) bloom adjacent to the chunk, (2) a pushed =/IN
+        // predicate on the column, (3) the row group survived min/max (implicit —
+        // manifest pruning already dropped the rest). Remote-only: local files
+        // are bloom-pruned at manifest time and never reach here excluded. Not
+        // applied under a row_mask (pass-2 late materialization already has
+        // survivors). bloom_prefix[i] == 0 means "no bloom in column i's fetch".
+        std::vector<int64_t> bloom_prefix(item.column_stats.size(), 0);
+        if (!is_local && item.row_mask.empty() && !dict_preds_.empty()) {
+            for (size_t i = 0; i < item.column_stats.size(); ++i) {
+                const auto& cs = item.column_stats[i];
+                if (cs.bloom_offset < 0 || cs.bloom_length <= 0) continue;
+                if (cs.bloom_offset + cs.bloom_length != base_offsets[i]) continue;  // not adjacent
+                auto it = dict_preds_.find(cs.name);
+                if (it == dict_preds_.end()) continue;
+                if (it->second.kind != 0 && it->second.kind != 1) continue;  // only =/IN
+                bloom_prefix[i] = cs.bloom_length;
+            }
+        }
+
         // Remote batch prefetch: for HTTP/GCS, fetch every column chunk for
         // this row group concurrently in a single get_many() call rather than
         // one blocking GET per column (which serialized C round-trips per row
@@ -1176,7 +1247,12 @@ class ParquetIOPipeline {
                 reqs.reserve(item.column_stats.size());
                 for (size_t i = 0; i < item.column_stats.size(); ++i) {
                     int64_t chunk_size = item.column_stats[i].total_compressed_size;
-                    std::string range_hdr = "bytes=" + std::to_string(base_offsets[i]) +
+                    // Extend the start backwards by bloom_prefix[i] (0 unless this
+                    // column's adjacent bloom is being fetched for a decode-skip
+                    // probe). The chunk end is unchanged, so the bloom rides in
+                    // front of the chunk in the same range.
+                    int64_t fetch_start = base_offsets[i] - bloom_prefix[i];
+                    std::string range_hdr = "bytes=" + std::to_string(fetch_start) +
                         "-" + std::to_string(base_offsets[i] + chunk_size - 1);
                     reqs.emplace_back(url, std::map<std::string, std::string>{{"Range", range_hdr}});
                 }
@@ -1251,11 +1327,27 @@ class ParquetIOPipeline {
                     result.bytes_fetched += chunk_size;
                 } else if (remote) {
                     // Batch-prefetched above: decode straight from the buffer.
+                    // When bloom_prefix[i] > 0 the buffer carries the column's
+                    // adjacent bloom filter in front of the chunk (bpre bytes).
                     const std::vector<uint8_t>& raw = remote_buffers[i];
-                    result.bytes_fetched += chunk_size;
+                    const size_t bpre = static_cast<size_t>(bloom_prefix[i]);
+                    result.bytes_fetched += chunk_size + static_cast<int64_t>(bpre);
+                    // Bloom decode-skip: the adjacent bloom proves this row group
+                    // holds none of the pushed needles → zero surviving rows.
+                    // Skip decode of this and the remaining columns, exactly like
+                    // the dictionary decode-skip (dict_all_filtered) below.
+                    if (bpre > 0 && skip_ptr != nullptr &&
+                        bloom_needles_all_absent(raw.data(), bpre, skip.kind,
+                                                 skip.int_vals, skip.str_vals,
+                                                 col_stats.physical_type)) {
+                        result.empty_filtered = true;
+                        result.empty_rows =
+                            col_stats.num_values >= 0 ? col_stats.num_values : 0;
+                        break;
+                    }
                     auto t_dec = std::chrono::steady_clock::now();
                     decoded = DecodeColumnFromChunk(
-                        raw.data(), raw.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr);
+                        raw.data() + bpre, raw.size() - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {

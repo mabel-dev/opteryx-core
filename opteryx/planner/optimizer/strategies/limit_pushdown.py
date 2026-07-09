@@ -125,6 +125,13 @@ class LimitPushdownStrategy(OptimizationStrategy):
         if targets and targets.isdisjoint({name for name in relation_names if name}):
             return None
 
+        if getattr(scan_node, "predicates", None):
+            # A predicate has been pushed into this scan (predicate pushdown removes the
+            # Filter node from the plan, so it no longer acts as a barrier here). Limit
+            # pushdown must not apply on top of a predicate: the scan would cap rows read
+            # from source before filtering, changing which rows survive the LIMIT.
+            return False
+
         connector = getattr(scan_node, "connector", None)
         if connector and connector.supports_limit_pushdown:
             current_limit = getattr(scan_node, "limit", None)
