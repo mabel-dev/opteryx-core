@@ -206,16 +206,32 @@ VecResult draken_lower(void* /*ctx*/, const DrakenVector* const* args, uint32_t 
 }  // extern "C"
 
 // ---- numeric scalar functions -----------------------------------------------------
-// All accept INT8..64 / FLOAT32/64 operands, read uniformly via data[selection[i]],
-// and preserve the input's validity (copied). DECIMAL operands fail loud — raw-scale
-// math without the scale is a wrong answer, never a fallback.
+// All accept INT8..64 / UINT8..64 / FLOAT32/64 / DECIMAL operands, read uniformly via
+// data[selection[i]], and preserve the input's validity (copied).
+//
+// DECIMAL is an int64 unscaled value; the scale lives on the LogicalType descriptor,
+// not on DrakenVector (core/buffers.h freezes that layout). A kernel whose ANSWER or
+// whose RESULT DESCRIPTOR depends on the scale takes it from the bind-time
+// binary_op_ctx (left_scale / result_scale / result_precision) and fails loud without
+// one. A kernel that is scale-invariant end to end needs no ctx — SIGN is the only
+// one: sign(unscaled) == sign(value), and it returns INTEGER.
+//
+// DECIMAL128 is int128-backed and is NOT admitted — it has no reader below.
 
 namespace {
 
-inline bool fk_is_numeric(DrakenType t) {
+inline bool fk_is_signed_int(DrakenType t) {
     switch (t) {
         case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
-        case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool fk_is_unsigned_int(DrakenType t) {
+    switch (t) {
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
             return true;
         default:
             return false;
@@ -226,6 +242,17 @@ inline bool fk_is_float(DrakenType t) {
     return t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64;
 }
 
+inline bool fk_is_numeric(DrakenType t) {
+    return fk_is_signed_int(t) || fk_is_unsigned_int(t) || fk_is_float(t)
+        || t == DRAKEN_DECIMAL;
+}
+
+// Each reader enumerates EXACTLY the types it accepts. There is deliberately no
+// catch-all `default:` that casts v->data to the reader's own element type: the old
+// `default: static_cast<const double*>(...)` reinterpreted an int64/uint32 bit
+// pattern as an IEEE double for anything the entry guard admitted, which is a silent
+// wrong answer rather than a crash. Callers gate on the fk_is_* predicates above.
+
 inline double fk_read_double(const DrakenVector* v, uint32_t row) {
     uint32_t phys = v->selection[row];
     switch (v->type) {
@@ -233,19 +260,53 @@ inline double fk_read_double(const DrakenVector* v, uint32_t row) {
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[phys];
         case DRAKEN_INT32:   return static_cast<const int32_t*>(v->data)[phys];
         case DRAKEN_INT64:   return static_cast<double>(static_cast<const int64_t*>(v->data)[phys]);
+        case DRAKEN_UINT8:   return static_cast<const uint8_t*>(v->data)[phys];
+        case DRAKEN_UINT16:  return static_cast<const uint16_t*>(v->data)[phys];
+        case DRAKEN_UINT32:  return static_cast<const uint32_t*>(v->data)[phys];
+        case DRAKEN_UINT64:  return static_cast<double>(static_cast<const uint64_t*>(v->data)[phys]);
         case DRAKEN_FLOAT32: return static_cast<const float*>(v->data)[phys];
-        default:             return static_cast<const double*>(v->data)[phys];
+        case DRAKEN_FLOAT64: return static_cast<const double*>(v->data)[phys];
+        default:             return 0.0;   // unreachable: fk_is_* gates every caller
     }
 }
 
+// DECIMAL yields its raw int64 unscaled value. UINT64 is absent by design — it does
+// not fit int64; unsigned callers use fk_read_uint64.
 inline int64_t fk_read_int64(const DrakenVector* v, uint32_t row) {
     uint32_t phys = v->selection[row];
     switch (v->type) {
         case DRAKEN_INT8:    return static_cast<const int8_t*>(v->data)[phys];
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[phys];
         case DRAKEN_INT32:   return static_cast<const int32_t*>(v->data)[phys];
-        default:             return static_cast<const int64_t*>(v->data)[phys];
+        case DRAKEN_UINT8:   return static_cast<const uint8_t*>(v->data)[phys];
+        case DRAKEN_UINT16:  return static_cast<const uint16_t*>(v->data)[phys];
+        case DRAKEN_UINT32:  return static_cast<const uint32_t*>(v->data)[phys];
+        case DRAKEN_INT64:
+        case DRAKEN_DECIMAL: return static_cast<const int64_t*>(v->data)[phys];
+        default:             return 0;     // unreachable: fk_is_* gates every caller
     }
+}
+
+inline uint64_t fk_read_uint64(const DrakenVector* v, uint32_t row) {
+    uint32_t phys = v->selection[row];
+    switch (v->type) {
+        case DRAKEN_UINT8:   return static_cast<const uint8_t*>(v->data)[phys];
+        case DRAKEN_UINT16:  return static_cast<const uint16_t*>(v->data)[phys];
+        case DRAKEN_UINT32:  return static_cast<const uint32_t*>(v->data)[phys];
+        case DRAKEN_UINT64:  return static_cast<const uint64_t*>(v->data)[phys];
+        default:             return 0;     // unreachable: fk_is_unsigned_int gates it
+    }
+}
+
+// Rejection for an operand fk_is_numeric does not admit. DECIMAL128 IS numeric, it
+// simply has no int128 reader in this file, so saying "numeric input required" about
+// it would send the reader hunting for a type error that isn't there.
+inline VecResult fk_reject_operand(const DrakenVector* v, const char* who) {
+    if (v->type == DRAKEN_DECIMAL128) {
+        return draken_error_sentinel_fmt(
+            "%s: DECIMAL128 operand (precision > 18) is not supported by this kernel", who);
+    }
+    return draken_error_sentinel_fmt("%s: numeric input required", who);
 }
 
 // Shared dense-numeric result assembly (validity copied from the operand).
@@ -274,15 +335,34 @@ VecResult fk_numeric_result(const DrakenVector* src_validity_of, T* out, uint32_
     return r;
 }
 
+// Dense same-type gather: out[i] = data[selection[i]]. Used by ABS over an unsigned
+// operand, where |x| == x and the catalog's "same as `num`" return type must be kept
+// exactly (widening UINT64 to INT64 would corrupt values above INT64_MAX).
+template <typename T>
+VecResult fk_gather_dense(const DrakenVector* v, uint32_t n, DrakenType t) {
+    auto* out = static_cast<T*>(draken_malloc((n > 0 ? n : 1) * sizeof(T)));
+    if (out == nullptr) return draken_error_sentinel("allocation failed");
+    const T* src = static_cast<const T*>(v->data);
+    for (uint32_t i = 0; i < n; ++i) {
+        out[i] = fk_row_valid(v, i) ? src[v->selection[i]] : static_cast<T>(0);
+    }
+    return fk_numeric_result(v, out, n, t);
+}
+
 // Unary numeric kernel body: INT-family -> INT64 via `ifn`; floats -> FLOAT64 via
 // `ffn` (SIGN forces INT64 output for floats too via `force_int`).
+//
+// Callers must handle UNSIGNED and DECIMAL operands BEFORE delegating here, except
+// where the int64 path is provably right for them: fk_read_int64 reads a DECIMAL as
+// its unscaled int64, so SIGN(DECIMAL) is correct through this body. Unsigned never
+// is — fk_read_int64 has no UINT64 arm.
 template <typename IFn, typename FFn>
 VecResult fk_unary_numeric(const DrakenVector* const* args, uint32_t nargs,
                            const char* who, IFn ifn, FFn ffn, bool force_int) {
     if (nargs != 1) return draken_error_sentinel_fmt("%s: expected 1 argument", who);
     const DrakenVector* v = args[0];
     if (!fk_is_numeric(v->type))
-        return draken_error_sentinel_fmt("%s: numeric input required", who);
+        return fk_reject_operand(v, who);
     uint32_t n = v->length;
     if (fk_is_float(v->type) && !force_int) {
         auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
@@ -381,7 +461,7 @@ VecResult fk_round_family(void* ctx, const DrakenVector* const* args, uint32_t n
     }
 
     if (!fk_is_numeric(v->type))
-        return draken_error_sentinel_fmt("%s: numeric input required", who);
+        return fk_reject_operand(v, who);
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
     for (uint32_t i = 0; i < n; ++i) {
@@ -409,29 +489,106 @@ VecResult fk_round_family(void* ctx, const DrakenVector* const* args, uint32_t n
 
 extern "C" {
 
-VecResult draken_abs(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+// ABS(num) -> same as `num` (catalog contract).
+//   unsigned : |x| == x, so gather at the operand's own width — never widen.
+//   DECIMAL  : |unscaled| IS the unscaled |value|, so the arithmetic is scale-free,
+//              but the result must be tagged DECIMAL(p, s). VecResult carries the
+//              descriptor out; the kernel cannot read it off the input vector, so it
+//              comes from the bind-time ctx and a DECIMAL operand without one fails.
+VecResult draken_abs(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 1) return draken_error_sentinel("draken_abs: expected 1 argument");
+    const DrakenVector* v = args[0];
+    uint32_t n = v->length;
+
+    if (fk_is_unsigned_int(v->type)) {
+        switch (v->type) {
+            case DRAKEN_UINT8:  return fk_gather_dense<uint8_t>(v, n, DRAKEN_UINT8);
+            case DRAKEN_UINT16: return fk_gather_dense<uint16_t>(v, n, DRAKEN_UINT16);
+            case DRAKEN_UINT32: return fk_gather_dense<uint32_t>(v, n, DRAKEN_UINT32);
+            default:            return fk_gather_dense<uint64_t>(v, n, DRAKEN_UINT64);
+        }
+    }
+
+    if (v->type == DRAKEN_DECIMAL) {
+        if (ctx == nullptr) {
+            return draken_error_sentinel(
+                "draken_abs: DECIMAL operand needs its bind-time scale context");
+        }
+        const auto* c = static_cast<const binary_op_ctx*>(ctx);
+        auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+        if (out == nullptr) return draken_error_sentinel("allocation failed");
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
+            int64_t raw = fk_read_int64(v, i);
+            out[i] = raw < 0 ? -raw : raw;
+        }
+        VecResult r = fk_numeric_result(v, out, n, DRAKEN_DECIMAL);
+        if (r.data == nullptr) return r;
+        r.dec_precision = c->result_precision;
+        r.dec_scale = c->result_scale;
+        return r;
+    }
+
     return fk_unary_numeric(args, nargs, "draken_abs",
                             [](int64_t x) { return x < 0 ? -x : x; },
                             [](double x) { return std::fabs(x); }, false);
 }
 
+// SIGN(num) -> INTEGER (catalog contract). Scale-invariant for DECIMAL, so no ctx:
+// fk_read_int64 hands back the unscaled int64 and sign(unscaled) == sign(value).
+// Unsigned must not reach fk_unary_numeric (no UINT64 arm in fk_read_int64, so a
+// value above INT64_MAX would read negative and report -1).
 VecResult draken_sign(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 1) return draken_error_sentinel("draken_sign: expected 1 argument");
+    const DrakenVector* v = args[0];
+
+    if (fk_is_unsigned_int(v->type)) {
+        uint32_t n = v->length;
+        auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+        if (out == nullptr) return draken_error_sentinel("allocation failed");
+        for (uint32_t i = 0; i < n; ++i) {
+            out[i] = fk_row_valid(v, i) ? (fk_read_uint64(v, i) != 0u ? 1 : 0) : 0;
+        }
+        return fk_numeric_result(v, out, n, DRAKEN_INT64);
+    }
+
     return fk_unary_numeric(args, nargs, "draken_sign",
                             [](int64_t x) -> int64_t { return (x > 0) - (x < 0); },
                             [](double x) -> double { return (x > 0.0) - (x < 0.0); },
                             true);
 }
 
-VecResult draken_sqrt(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+// SQRT(num) -> FLOAT (catalog contract). DECIMAL needs the ACTUAL value, so unlike
+// SIGN it cannot work off the unscaled int64: sqrt(unscaled) != sqrt(value). The
+// operand's scale arrives via the bind-time ctx; without one it fails loud.
+VecResult draken_sqrt(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 1) return draken_error_sentinel("draken_sqrt: expected 1 argument");
     const DrakenVector* v = args[0];
     if (!fk_is_numeric(v->type))
-        return draken_error_sentinel("draken_sqrt: numeric input required");
+        return fk_reject_operand(v, "draken_sqrt");
     uint32_t n = v->length;
+
+    double dec_unscale = 1.0;
+    if (v->type == DRAKEN_DECIMAL) {
+        if (ctx == nullptr) {
+            return draken_error_sentinel(
+                "draken_sqrt: DECIMAL operand needs its bind-time scale context");
+        }
+        dec_unscale = std::pow(
+            10.0, -static_cast<double>(static_cast<const binary_op_ctx*>(ctx)->left_scale));
+    }
+
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
-    for (uint32_t i = 0; i < n; ++i) {
-        out[i] = fk_row_valid(v, i) ? std::sqrt(fk_read_double(v, i)) : 0.0;
+    if (v->type == DRAKEN_DECIMAL) {
+        for (uint32_t i = 0; i < n; ++i) {
+            out[i] = fk_row_valid(v, i)
+                ? std::sqrt(static_cast<double>(fk_read_int64(v, i)) * dec_unscale) : 0.0;
+        }
+    } else {
+        for (uint32_t i = 0; i < n; ++i) {
+            out[i] = fk_row_valid(v, i) ? std::sqrt(fk_read_double(v, i)) : 0.0;
+        }
     }
     return fk_numeric_result(v, out, n, DRAKEN_FLOAT64);
 }

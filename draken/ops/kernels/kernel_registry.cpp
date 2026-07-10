@@ -167,11 +167,11 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},
     {"draken_cast_timestamp_to_string", (kernel_fn_t)&draken_cast_timestamp_to_string},
-    // P9.0: draken_cast_date32_to_timestamp / draken_cast_timestamp_to_date32 removed —
-    // they are STUBS (cast_temporal.cpp returns "not yet implemented"). The registry
-    // holds ONLY real, nogil, byte-identical kernels; a registered stub is a trap (the
-    // binder would mark it BC_INSTR_C_NATIVE and dispatch an error sentinel). Re-add when
-    // implemented. Neutral today: neither is in casts.py `_c_native_cast`.
+    // P9.0: draken_cast_timestamp_to_date32 stays unregistered — it is still a STUB
+    // (cast_temporal.cpp returns "not yet implemented"). The registry holds ONLY real,
+    // nogil, byte-identical kernels; a registered stub is a trap (the binder would mark
+    // it BC_INSTR_C_NATIVE and dispatch an error sentinel). Re-add when implemented.
+    // Its sibling draken_cast_date32_to_timestamp is now real and registered above.
 
     // Dispatch helpers (any → target type)
     {"draken_cast_to_float64", (kernel_fn_t)&draken_cast_to_float64},

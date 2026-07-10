@@ -224,6 +224,66 @@ static VecResult bool_or(const DrakenVector& a, const DrakenVector& b) {
 }
 
 // ---------------------------------------------------------------------------
+// XOR — Kleene: no dominating value, so the result is known only when BOTH
+// operands are known.
+//   result_val  = aval ^ bval
+//   result_vld  = av & bv        (N on either side ⟹ N)
+// ---------------------------------------------------------------------------
+
+static VecResult bool_xor(const DrakenVector& a, const DrakenVector& b) {
+    const uint32_t n       = a.length;
+    const uint32_t bm      = (n + 7u) >> 3;
+    const uint8_t* adata   = static_cast<const uint8_t*>(a.data);
+    const uint8_t* bdata   = static_cast<const uint8_t*>(b.data);
+    const uint8_t* av      = a.validity;
+    const uint8_t* bv      = b.validity;
+
+    size_t val_alloc;
+    uint8_t* out_val = bool_alloc_buf(bm, val_alloc);
+
+    if (av == nullptr && bv == nullptr) {
+        if ((a.flags & DRAKEN_SEL_IDENTITY) && (b.flags & DRAKEN_SEL_IDENTITY)) {
+            for (uint32_t k = 0u; k < bm; ++k)
+                out_val[k] = adata[k] ^ bdata[k];
+            bool_mask_tail(out_val, bm, n);
+        } else {
+            for (uint32_t i = 0u; i < n; ++i) {
+                const uint8_t r = bool_get_val(adata, a.selection[i]) ^
+                                  bool_get_val(bdata, b.selection[i]);
+                if (r) out_val[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+            }
+        }
+        return bool_make_result(out_val, nullptr, n, true);
+    }
+
+    size_t vld_alloc;
+    uint8_t* out_vld = bool_alloc_buf(bm, vld_alloc);
+
+    if ((a.flags & DRAKEN_SEL_IDENTITY) && (b.flags & DRAKEN_SEL_IDENTITY)) {
+        for (uint32_t k = 0u; k < bm; ++k) {
+            const uint8_t av_b = av ? av[k] : 0xFFu;
+            const uint8_t bv_b = bv ? bv[k] : 0xFFu;
+            out_val[k] = adata[k] ^ bdata[k];
+            out_vld[k] = av_b & bv_b;
+        }
+        bool_mask_tail(out_val, bm, n);
+        bool_mask_tail(out_vld, bm, n);
+    } else {
+        for (uint32_t i = 0u; i < n; ++i) {
+            const uint8_t aval  = static_cast<uint8_t>(bool_get_val(adata, a.selection[i]));
+            const uint8_t bval  = static_cast<uint8_t>(bool_get_val(bdata, b.selection[i]));
+            const uint8_t av_b  = static_cast<uint8_t>(av ? bool_get_valid(av, i) : 1u);
+            const uint8_t bv_b  = static_cast<uint8_t>(bv ? bool_get_valid(bv, i) : 1u);
+            if (aval ^ bval) out_val[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+            if (av_b & bv_b) out_vld[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+    }
+
+    const bool all_set = bool_is_all_set(out_vld, n);
+    return bool_make_result(out_val, out_vld, n, all_set);
+}
+
+// ---------------------------------------------------------------------------
 // NOT — Kleene: ¬T=F, ¬F=T, ¬N=N (validity unchanged; value bits flipped).
 // ---------------------------------------------------------------------------
 

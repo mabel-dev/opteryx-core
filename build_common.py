@@ -324,12 +324,30 @@ if OPTERYX_ENABLE_ASAN and not is_win():
     C_FLAGS.extend(_asan_flags)
     LD_EXTRA.append("-fsanitize=address")
 
+# ThreadSanitizer (opt-in, dev only). Build the C/C++ extensions with TSAN to
+# diagnose DATA RACES on the concurrent native paths (executor fan-out, the
+# io_pipeline decode pool, the shared MemoryPool, grouped-agg combine) — races
+# ASAN cannot see. TSAN reports the racing accesses on ANY interleaving, whether
+# or not that run crashes, so it does not need the crash to reproduce. Run with
+# the TSAN runtime preloaded (macOS: DYLD_INSERT_LIBRARIES=<clang tsan dylib>).
+# CPython 3.14t itself is NOT tsan-instrumented, so use a suppressions file to
+# quiet Python-internal (refcount/dict) false positives and focus on opteryx/
+# rugo/draken/src frames. Mutually exclusive with ASAN. Never enabled for wheels.
+OPTERYX_ENABLE_TSAN = os.environ.get("OPTERYX_ENABLE_TSAN", "0").lower() in ("1", "true", "yes")
+if OPTERYX_ENABLE_TSAN and not OPTERYX_ENABLE_ASAN and not is_win():
+    _tsan_flags = ["-fsanitize=thread", "-fno-omit-frame-pointer", "-g"]
+    CPP_FLAGS.extend(_tsan_flags)
+    C_FLAGS.extend(_tsan_flags)
+    LD_EXTRA.append("-fsanitize=thread")
+
 # MSVC LTO linker flag when requested
 if is_win() and OPTERYX_ENABLE_LTO:
     # '/LTCG' enables link-time code generation on MSVC
     LD_EXTRA.append("/LTCG")
 
-if not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win():
+if (not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win()
+        and not OPTERYX_ENABLE_ASAN and not OPTERYX_ENABLE_TSAN):
+    # Sanitizer builds keep symbols so the race/leak reports are readable.
     CPP_FLAGS.append("-s")
     C_FLAGS.append("-s")
 

@@ -262,6 +262,17 @@ def rugo_to_relation_schema(
         from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
         if sql_type == LogicalCategory.DECIMAL and precision is not None and scale is not None:
             _ct = _lt.DECIMAL(precision, scale)
+        elif sql_type == LogicalCategory.ARRAY:
+            # ARRAY carries its element type in the logical string (e.g.
+            # "array<int64>"); _CATEGORY_TO_CANONICAL has no ARRAY entry because
+            # an ARRAY ColumnType is invalid without an `element`. Parse the full
+            # type so `list[i]` (MapAccess) can resolve the element ColumnType.
+            from opteryx.types.logical_type import parse_column_type
+            _ct = (
+                parse_column_type(_normalize_sql_type_aliases(logical_type.lower()))
+                if logical_type
+                else None
+            )
         else:
             _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
         from opteryx.types.schema import mint_column_identity

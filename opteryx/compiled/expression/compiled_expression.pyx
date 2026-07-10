@@ -22,6 +22,7 @@ list as instruction store, no method dispatch through PyObject during exec.
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from cpython.ref cimport PyObject, Py_INCREF
+from libc.stdlib cimport free
 from libc.string cimport memset
 
 import draken.draken_native as _draken_native
@@ -231,9 +232,13 @@ cdef class _KernelContextWrapper:
         self.ctx_ptr = ctx_ptr
 
     def __dealloc__(self):
+        # No Python here — __dealloc__ can run during interpreter shutdown when
+        # the import system is already torn down. Every kernel context is a single
+        # malloc block (see kernel_context.h / kernel_registry.cpp), so draken's
+        # kernel_free_context() is exactly free(ctx). Call libc free directly at
+        # the C level: no import, no cross-module linkage on the dealloc path.
         if self.ctx_ptr != 0:
-            from draken.ops.kernels._kernel_registry import free_context
-            free_context(self.ctx_ptr)
+            free(<void*>self.ctx_ptr)
 
     def __repr__(self):
         return f"<KernelContextWrapper {self.ctx_ptr}>"
@@ -1454,13 +1459,21 @@ cdef Py_ssize_t _linearize(
         # This is the intended behaviour while function kernels are being ported.
         func_name = func_val.upper() if func_val else None
         if func_name is not None:
-            # ROUND-family over a DECIMAL operand: the kernel rounds EXACTLY in the
-            # raw int64 domain, which needs the operand's scale — a LogicalType
-            # detail the DrakenVector cannot carry — passed via a bind-time ctx
-            # (binary_op_ctx.left_scale, the same vehicle the decimal binops use).
+            # Scalar functions over a DECIMAL operand need the operand's scale — a
+            # LogicalType detail the DrakenVector cannot carry — via a bind-time ctx
+            # (binary_op_ctx, the same vehicle the decimal binops use):
+            #   ROUND/FLOOR/CEILING/CEIL — round EXACTLY in the raw int64 domain.
+            #   SQRT                     — needs the VALUE, not the unscaled int64.
+            #   ABS                      — |unscaled| is scale-free arithmetic, but the
+            #                              result is DECIMAL(p, s) and the kernel stamps
+            #                              that descriptor onto the VecResult, so it has
+            #                              to be told (p, s). ABS returns "same as num",
+            #                              hence result == operand descriptor.
+            # SIGN is absent on purpose: it returns INTEGER and sign(unscaled) ==
+            # sign(value), so it is scale-invariant end to end and takes no ctx.
             _fn_ctx_alloc = None
             _fn_ctx_arg = None
-            if func_name in ("ROUND", "FLOOR", "CEILING", "CEIL") and n >= 1 \
+            if func_name in ("ROUND", "FLOOR", "CEILING", "CEIL", "SQRT", "ABS") and n >= 1 \
                     and node.parameters[0] != NULL \
                     and node.parameters[0].schema_column != NULL:
                 _fn_p0_sc = <object>node.parameters[0].schema_column
@@ -1469,7 +1482,12 @@ cdef Py_ssize_t _linearize(
                         and getattr(_fn_p0_ct.physical, "name", "") == "DECIMAL"):
                     from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
                     _fn_ctx_alloc = alloc_binary_op_ctx
-                    _fn_ctx_arg = (0, int(_fn_p0_ct.logical.scale), 0, 0, 0, 0, 0)
+                    _fn_dec_sc = _binop_dec_scale(_fn_p0_ct)
+                    if func_name == "ABS":
+                        _fn_ctx_arg = (0, _fn_dec_sc, 0,
+                                       _fn_dec_sc, _binop_dec_precision(_fn_p0_ct), 0, 0)
+                    else:
+                        _fn_ctx_arg = (0, _fn_dec_sc, 0, 0, 0, 0, 0)
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
                 f"draken_{func_name.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
             if fn_ptr is not None:

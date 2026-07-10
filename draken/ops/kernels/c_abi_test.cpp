@@ -405,7 +405,7 @@ void test_registry_honesty() {
         "draken_string_concat", "draken_ip_in_cidr",
         "draken_temporal_interval_op", "draken_date_minus_date",
         "draken_interval_interval_op",
-        "draken_cast_date32_to_timestamp", "draken_cast_timestamp_to_date32",
+        "draken_cast_timestamp_to_date32",
     };
     for (const char* name : removed_stubs) {
         fn = nullptr; ctx = nullptr;
@@ -418,6 +418,7 @@ void test_registry_honesty() {
         "draken_modulo", "draken_binary_arith",
         "draken_cast_int64_to_float64", "draken_cast_int64_to_string",
         "draken_cast_float64_to_string", "draken_cast_string_to_float64",
+        "draken_cast_date32_to_timestamp",
     };
     for (const char* name : real_kernels) {
         fn = nullptr; ctx = nullptr;

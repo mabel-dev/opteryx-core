@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import FunctionNotFoundError
 from opteryx.expression import NodeType
 from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -35,29 +35,29 @@ def _plan(sql: str):
 def test_bracket_access_on_function_expression_uses_map_access():
     expr = _first_projection_expression("SELECT SPLIT(name, ' ')[0] AS v FROM $planets")
 
-    assert expr.node_type == NodeType.BINARY_OPERATOR
+    assert expr.node_type == NodeType.EXTRACTION_OPERATOR
     assert expr.value == "MapAccess"
 
 
 def test_bracket_access_on_identifier_uses_map_access():
     expr = _first_projection_expression("SELECT missions[0] AS v FROM $astronauts")
 
-    assert expr.node_type == NodeType.BINARY_OPERATOR
+    assert expr.node_type == NodeType.EXTRACTION_OPERATOR
     assert expr.value == "MapAccess"
 
 
 def test_string_key_arrow_access_uses_arrow_operator():
     expr = _first_projection_expression("SELECT birth_place->'town' AS v FROM $planets")
 
-    assert expr.node_type == NodeType.BINARY_OPERATOR
+    assert expr.node_type == NodeType.EXTRACTION_OPERATOR
     assert expr.value == "Arrow"
 
 
-def test_get_integer_key_is_rejected_as_deprecated():
-    with pytest.raises(UnsupportedSyntaxError, match="Function 'GET' has been deprecated."):
+def test_get_integer_key_is_rejected_as_unknown_function():
+    with pytest.raises(FunctionNotFoundError, match="Unknown function 'GET'"):
         _plan("SELECT GET(SPLIT(name, ' '), 0) AS v FROM $planets")
 
 
-def test_get_string_key_is_rejected_as_deprecated():
-    with pytest.raises(UnsupportedSyntaxError, match="Function 'GET' has been deprecated."):
+def test_get_string_key_is_rejected_as_unknown_function():
+    with pytest.raises(FunctionNotFoundError, match="Unknown function 'GET'"):
         _plan("SELECT GET(birth_place, 'town') AS v FROM $planets")

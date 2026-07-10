@@ -62,7 +62,7 @@ def test_jsonl_decimal():
 
 
 def test_jsonl_date_timestamp_are_rfc3339():
-    """Date is ISO-8601 full-date; timestamp is RFC 3339 (T separator, Z zone)."""
+    """Date is ISO-8601 full-date; timestamp is RFC 3339 (T separator, +00:00 zone)."""
     import datetime
 
     m = _morsel(
@@ -71,10 +71,40 @@ def test_jsonl_date_timestamp_are_rfc3339():
     )
     row = json.loads(write_jsonl(m).decode().splitlines()[0])
     assert row["dt"] == "2020-01-01"
-    assert row["ts"] == "2020-01-01T00:00:00Z"
+    assert row["ts"] == "2020-01-01T00:00:00+00:00"
     # both parse with the stdlib ISO parser
     assert datetime.date.fromisoformat(row["dt"]) == datetime.date(2020, 1, 1)
     assert datetime.datetime.fromisoformat(row["ts"]).tzinfo is not None
+
+
+def test_jsonl_float_plain_decimal_not_scientific():
+    """Ordinary-magnitude floats render as plain decimal (5.5), not 5.5E0."""
+    m = _morsel(
+        "SELECT * FROM (VALUES (5.5), (100000000000.0), (0.0001), (-1.5)) AS t(v)"
+    )
+    values = write_jsonl(m).decode().splitlines()
+    assert values[0] == '{"v":5.5}'
+    assert values[1] == '{"v":100000000000.0}'
+    assert values[2] == '{"v":0.0001}'
+    assert values[3] == '{"v":-1.5}'
+
+
+def test_jsonl_nan_and_infinity_become_null():
+    m = _morsel(
+        "SELECT CAST(v AS DOUBLE) AS v FROM "
+        "(VALUES ('NaN'), ('Infinity'), ('-Infinity'), ('1.5')) AS t(v)"
+    )
+    rows = [json.loads(l) for l in write_jsonl(m).decode().splitlines()]
+    assert [r["v"] for r in rows] == [None, None, None, 1.5]
+
+
+def test_csv_nan_and_infinity_become_empty():
+    m = _morsel(
+        "SELECT CAST(v AS DOUBLE) AS v FROM "
+        "(VALUES ('NaN'), ('Infinity'), ('1.5')) AS t(v)"
+    )
+    out = write_csv(m).decode()
+    assert out == "v\n\n\n1.5\n"  # NaN/Infinity -> empty (blank) lines
 
 
 # ---------------- CSV ----------------
@@ -125,8 +155,11 @@ if __name__ == "__main__":
     test_jsonl_arrays()
     test_jsonl_decimal()
     test_jsonl_date_timestamp_are_rfc3339()
+    test_jsonl_float_plain_decimal_not_scientific()
+    test_jsonl_nan_and_infinity_become_null()
     test_csv_quoting_and_nulls()
     test_csv_no_header_and_delimiter()
     test_csv_array_renders_as_json()
     test_csv_roundtrips_through_rugo_reader()
+    test_csv_nan_and_infinity_become_empty()
     print("✅ okay")

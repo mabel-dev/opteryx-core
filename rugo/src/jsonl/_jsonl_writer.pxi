@@ -7,10 +7,11 @@
 from libc.stdint cimport uint8_t, uint32_t, int32_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 
 from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY
 from draken.morsels.morsel cimport Morsel
@@ -20,10 +21,11 @@ cdef extern from "_value_format.hpp" namespace "rugo_text":
     void json_string(string& out, const char* s, size_t n)
 
 cdef extern from "_text_render.hpp" namespace "rugo_text":
-    string jsonl_write(const DrakenVector** dvs, const DrakenVector** childs,
-                       const int* units, const int* scales,
-                       const int* cunits, const int* cscales,
-                       const string* prefixes, size_t ncols, size_t nrows) nogil
+    # Returns the rendered bytes as one buffer per worker (parallel render).
+    vector[string] jsonl_write(const DrakenVector** dvs, const DrakenVector** childs,
+                               const int* units, const int* scales,
+                               const int* cunits, const int* cscales,
+                               const string* prefixes, size_t ncols, size_t nrows) nogil
 
 
 cdef inline int _unit_code(object u):
@@ -53,8 +55,12 @@ def write_jsonl(Morsel morsel not None):
     cdef const DrakenVector* dv
     cdef Py_ssize_t c, i
     cdef object nm, u, sc
-    cdef string namebuf, out
+    cdef string namebuf
     cdef bytes nb_name
+    cdef vector[string] chunks
+    cdef size_t total = 0, off = 0, k
+    cdef bytes result
+    cdef char* dst
 
     try:
         for c in range(ncols):
@@ -88,9 +94,19 @@ def write_jsonl(Morsel morsel not None):
             prefixes.push_back(namebuf)
 
         with nogil:
-            out = jsonl_write(dvs, child_dvs, units, scales, cunits, cscales,
-                              prefixes.data(), <size_t>ncols, <size_t>nrows)
-        return PyBytes_FromStringAndSize(out.data(), out.size())
+            chunks = jsonl_write(dvs, child_dvs, units, scales, cunits, cscales,
+                                 prefixes.data(), <size_t>ncols, <size_t>nrows)
+        for k in range(chunks.size()):
+            total += chunks[k].size()
+        # Allocate the result bytes once and concatenate the per-worker chunks
+        # straight into it — the full output is never staged in a std::string.
+        result = PyBytes_FromStringAndSize(NULL, <Py_ssize_t>total)
+        dst = PyBytes_AS_STRING(result)
+        with nogil:
+            for k in range(chunks.size()):
+                memcpy(dst + off, chunks[k].data(), chunks[k].size())
+                off += chunks[k].size()
+        return result
     finally:
         free(dvs); free(child_dvs)
         free(units); free(scales); free(cunits); free(cscales)

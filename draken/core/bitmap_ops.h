@@ -87,3 +87,17 @@ void c_get_bitmap_ptrs(void* draken_vector);
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+// Kleene boolean ops for the bytecode VM — value-aware three-valued logic via
+// draken::ops::bool_*. Unlike the c_*_bitmap family above (value-blind null
+// merge), these produce correct SQL NULL semantics and safely accept a bare
+// DRAKEN_NULL literal operand. op: 0 = AND, 1 = OR, 2 = XOR.
+#include "ops/vec_result.h"
+#include "buffers.h"
+extern "C" {
+VecResult draken_vm_bool_binop(int op, const DrakenVector* a, const DrakenVector* b,
+                               uint32_t num_rows);
+VecResult draken_vm_bool_not(const DrakenVector* a, uint32_t num_rows);
+}
+#endif

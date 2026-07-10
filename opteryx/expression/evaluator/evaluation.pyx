@@ -660,6 +660,14 @@ cdef extern from "ops/vec_result.h":
         uint8_t           validity_embedded
         const char*       error_msg
 
+# Kleene boolean ops for the VM — value-aware 3VL via draken::ops::bool_*, exposed
+# as C-ABI shims in bitmap_ops.cpp (linked into draken_native.so, RTLD_GLOBAL). These
+# replace the value-blind c_*_bitmap null merge and safely accept a DRAKEN_NULL operand.
+cdef extern from "core/bitmap_ops.h" nogil:
+    VecResult draken_vm_bool_binop(int op, const DrakenVector* a, const DrakenVector* b,
+                                   uint32_t num_rows) nogil
+    VecResult draken_vm_bool_not(const DrakenVector* a, uint32_t num_rows) nogil
+
 # Function-pointer typedefs per Decision 3 (Phase 9 design, §Post-design)
 ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) nogil
 ctypedef VecResult (*cast_fn_t)(void* ctx, const DrakenVector* v) nogil
@@ -1278,47 +1286,20 @@ cdef inline int _dv_bool_binop_c(
     cdef Py_ssize_t sp = sp_io[0]
     cdef DrakenVector* dv_right_ptr
     cdef DrakenVector* dv_left_ptr
-    cdef uint8_t* left_data
-    cdef uint8_t* right_data
-    cdef void* result_data_ptr
-    cdef uint8_t* result_val_ptr
-    cdef int had_null
+    cdef VecResult vr
     sp -= 1
     dv_right_ptr = dv_stack[sp]
     sp -= 1
     dv_left_ptr = dv_stack[sp]
     if dv_left_ptr == NULL or dv_right_ptr == NULL:
         return 1
-    left_data  = _ensure_dense_bitmap_c(dv_left_ptr,  nbytes, num_rows, arena)
-    right_data = _ensure_dense_bitmap_c(dv_right_ptr, nbytes, num_rows, arena)
-    if left_data == NULL or right_data == NULL:
+    # Value-aware Kleene (draken::ops::bool_*), not the value-blind c_*_bitmap merge.
+    # The shim normalizes a DRAKEN_NULL operand to an all-null BOOL, so no crash.
+    vr = draken_vm_bool_binop(op, dv_left_ptr, dv_right_ptr, num_rows)
+    if vr.data == NULL:
         return 2
-    result_data_ptr = draken_frame_arena_alloc(arena, <size_t>nbytes)
-    result_val_ptr  = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
-    if result_data_ptr == NULL or result_val_ptr == NULL:
-        return 2
-    if op == 0:
-        had_null = c_and_bitmap(
-            <uint8_t*>result_data_ptr, result_val_ptr,
-            left_data, dv_left_ptr.validity, right_data, dv_right_ptr.validity,
-            <size_t>nbytes, num_rows)
-    elif op == 1:
-        had_null = c_or_bitmap(
-            <uint8_t*>result_data_ptr, result_val_ptr,
-            left_data, dv_left_ptr.validity, right_data, dv_right_ptr.validity,
-            <size_t>nbytes, num_rows)
-    else:
-        had_null = c_xor_bitmap(
-            <uint8_t*>result_data_ptr, result_val_ptr,
-            left_data, dv_left_ptr.validity, right_data, dv_right_ptr.validity,
-            <size_t>nbytes, num_rows)
-    dv_store[sp] = draken_vector_from_dense(
-        result_data_ptr, num_rows, DRAKEN_BOOL,
-        result_val_ptr if had_null else NULL)
-    dv_stack[sp] = &dv_store[sp]
-    sp += 1
-    sp_io[0] = sp
-    return 0
+    sp_io[0] = sp + 1
+    return _dv_vecresult_adopt_c(&vr, dv_store, dv_stack, sp, arena)
 
 
 cdef inline int _dv_not_c(
@@ -1331,31 +1312,17 @@ cdef inline int _dv_not_c(
 ) noexcept nogil:
     cdef Py_ssize_t sp = sp_io[0]
     cdef DrakenVector* dv_left_ptr
-    cdef uint8_t* left_data
-    cdef void* result_data_ptr
-    cdef uint8_t* result_val_ptr
-    cdef int had_null
+    cdef VecResult vr
     sp -= 1
     dv_left_ptr = dv_stack[sp]
     if dv_left_ptr == NULL:
         return 1
-    left_data = _ensure_dense_bitmap_c(dv_left_ptr, nbytes, num_rows, arena)
-    if left_data == NULL:
+    # Value-aware Kleene NOT (¬N = N); shim normalizes a DRAKEN_NULL operand.
+    vr = draken_vm_bool_not(dv_left_ptr, num_rows)
+    if vr.data == NULL:
         return 2
-    result_data_ptr = draken_frame_arena_alloc(arena, <size_t>nbytes)
-    result_val_ptr  = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
-    if result_data_ptr == NULL or result_val_ptr == NULL:
-        return 2
-    had_null = c_not_bitmap(
-        <uint8_t*>result_data_ptr, result_val_ptr,
-        left_data, dv_left_ptr.validity, <size_t>nbytes, num_rows)
-    dv_store[sp] = draken_vector_from_dense(
-        result_data_ptr, num_rows, DRAKEN_BOOL,
-        result_val_ptr if had_null else NULL)
-    dv_stack[sp] = &dv_store[sp]
-    sp += 1
-    sp_io[0] = sp
-    return 0
+    sp_io[0] = sp + 1
+    return _dv_vecresult_adopt_c(&vr, dv_store, dv_stack, sp, arena)
 
 
 cdef inline int _dv_unary_null_c(
@@ -1409,60 +1376,31 @@ cdef inline int _dv_variadic_bool_c(
     Py_ssize_t nbytes,
     uint32_t num_rows,
 ) noexcept nogil:
+    # DNF (op 0) folds terms with AND; CNF (op 1) with OR — the same op code the
+    # binary Kleene shim takes. Fold pairwise left-to-right, adopting each
+    # intermediate into the result slot and reusing it as the next left operand.
     cdef Py_ssize_t sp = sp_io[0]
     cdef Py_ssize_t base = sp - arity
     cdef Py_ssize_t j
-    cdef DrakenVector* dv_left_ptr = dv_stack[base]
-    cdef DrakenVector* dv_right_ptr
-    cdef uint8_t* cur_data
-    cdef uint8_t* cur_null
-    cdef uint8_t* right_data
-    cdef uint8_t* next_data
-    cdef uint8_t* next_null
-    cdef uint8_t* dense
-    cdef int had_null = 0
-    sp = base
-    if dv_left_ptr == NULL:
+    cdef VecResult vr
+    cdef int rc
+    if dv_stack[base] == NULL:
         return 1
-    # Accumulator: copy first operand's bitmap (+validity).
-    cur_data = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
-    cur_null = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
-    if cur_data == NULL or cur_null == NULL:
-        return 2
-    dense = _ensure_dense_bitmap_c(dv_left_ptr, nbytes, num_rows, arena)
-    if dense == NULL:
-        return 2
-    memcpy(cur_data, dense, <size_t>nbytes)
-    if dv_left_ptr.validity != NULL:
-        memcpy(cur_null, dv_left_ptr.validity, <size_t>nbytes)
-    else:
-        memset(cur_null, 0, <size_t>nbytes)
+    if arity == 1:
+        # Degenerate single-term DNF/CNF: the term is the result; leave it in place.
+        return 0
+    # left operand is always the base slot: term0 on the first pass, then the
+    # accumulator that each adopt writes back into dv_store[base]/dv_stack[base].
     for j in range(1, arity):
-        dv_right_ptr = dv_stack[base + j]
-        if dv_right_ptr == NULL:
+        if dv_stack[base + j] == NULL:
             return 1
-        right_data = _ensure_dense_bitmap_c(dv_right_ptr, nbytes, num_rows, arena)
-        if right_data == NULL:
+        vr = draken_vm_bool_binop(op, dv_stack[base], dv_stack[base + j], num_rows)
+        if vr.data == NULL:
             return 2
-        next_data = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
-        next_null = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
-        if next_data == NULL or next_null == NULL:
-            return 2
-        if op == 0:
-            had_null = c_and_bitmap(
-                next_data, next_null, cur_data, cur_null,
-                right_data, dv_right_ptr.validity, <size_t>nbytes, num_rows)
-        else:
-            had_null = c_or_bitmap(
-                next_data, next_null, cur_data, cur_null,
-                right_data, dv_right_ptr.validity, <size_t>nbytes, num_rows)
-        cur_data = next_data
-        cur_null = next_null
-    dv_store[sp] = draken_vector_from_dense(
-        cur_data, num_rows, DRAKEN_BOOL, cur_null if had_null else NULL)
-    dv_stack[sp] = &dv_store[sp]
-    sp += 1
-    sp_io[0] = sp
+        rc = _dv_vecresult_adopt_c(&vr, dv_store, dv_stack, base, arena)
+        if rc != 0:
+            return rc
+    sp_io[0] = base + 1
     return 0
 
 

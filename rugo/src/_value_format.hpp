@@ -4,8 +4,10 @@
 // render ISO-8601; decimals render with their scale.
 
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -25,11 +27,85 @@ inline void fmt_int64(std::string &out, int64_t v) {
   out.append(buf, r.ptr - buf);
 }
 
+// Fixed-width integer writers backed by a two-digit lookup table — the temporal
+// formatters below emit only zero-padded fields of known width, so this replaces
+// snprintf's format-string parsing / locale plumbing (~100-200ns/value) with a
+// handful of table loads. Callers guarantee the value is in the field's range.
+static constexpr char kTwoDigits[201] =
+    "0001020304050607080910111213141516171819"
+    "2021222324252627282930313233343536373839"
+    "4041424344454647484950515253545556575859"
+    "6061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+inline char *put2(char *p, int v) { // v in [0,99]
+  p[0] = kTwoDigits[2 * v];
+  p[1] = kTwoDigits[2 * v + 1];
+  return p + 2;
+}
+inline char *put4(char *p, int v) { // v in [0,9999]
+  put2(p, v / 100);
+  put2(p + 2, v % 100);
+  return p + 4;
+}
+inline char *put6(char *p, int v) { // v in [0,999999] (microseconds)
+  put2(p, v / 10000);
+  put2(p + 2, (v / 100) % 100);
+  put2(p + 4, v % 100);
+  return p + 6;
+}
+
+inline bool double_is_nan_or_inf(double v) { return std::isnan(v) || std::isinf(v); }
+
+// Render a finite double as Python-style decimal text: plain fixed-point for
+// ordinary magnitudes, scientific (lowercase e, signed 2+ digit exponent)
+// only outside that range -- the same threshold CPython's repr()/json.dumps
+// use (fixed for -4 <= exp < 16, scientific otherwise). ryu's d2s gives the
+// shortest round-trippable digits but always in scientific form ("5.5E0");
+// this reshapes those digits into the OData-compatible style.
 inline void fmt_double(std::string &out, double v) {
-  // shortest round-trippable via ryu
-  char buf[32];
-  int n = d2s_buffered_n(v, buf);
-  out.append(buf, n);
+  char sci[32];
+  int n = d2s_buffered_n(v, sci);
+  sci[n] = '\0'; // d2s_buffered_n does not null-terminate
+  bool neg = sci[0] == '-';
+  int p = neg ? 1 : 0;
+  std::string digits;
+  digits.push_back(sci[p++]);
+  if (p < n && sci[p] == '.') {
+    p++;
+    while (sci[p] != 'E') digits.push_back(sci[p++]);
+  }
+  p++; // skip 'E'
+  int exp = std::atoi(sci + p);
+
+  if (exp >= -4 && exp < 16) {
+    if (neg) out.push_back('-');
+    if (exp < 0) {
+      out.append("0.");
+      out.append((size_t)(-exp - 1), '0');
+      out.append(digits);
+    } else {
+      size_t intDigits = (size_t)exp + 1;
+      if (digits.size() <= intDigits) {
+        out.append(digits);
+        out.append(intDigits - digits.size(), '0');
+        out.append(".0");
+      } else {
+        out.append(digits, 0, intDigits);
+        out.push_back('.');
+        out.append(digits, intDigits, std::string::npos);
+      }
+    }
+  } else {
+    if (neg) out.push_back('-');
+    out.push_back(digits[0]);
+    if (digits.size() > 1) { out.push_back('.'); out.append(digits, 1, std::string::npos); }
+    out.push_back('e');
+    out.push_back(exp < 0 ? '-' : '+');
+    int aexp = exp < 0 ? -exp : exp;
+    char ebuf[8];
+    int en = std::snprintf(ebuf, sizeof(ebuf), "%02d", aexp);
+    out.append(ebuf, en);
+  }
 }
 
 // Howard Hinnant's civil-from-days (days since 1970-01-01).
@@ -48,7 +124,15 @@ inline void civil_from_days(int64_t z, int &y, int &m, int &d) {
 inline void fmt_date(std::string &out, int32_t days) {
   int y, m, d;
   civil_from_days(days, y, m, d);
-  char buf[16];
+  if (y >= 0 && y <= 9999) { // fast path covers every representable calendar date
+    char buf[10];
+    char *p = put4(buf, y);
+    *p++ = '-'; p = put2(p, m);
+    *p++ = '-'; p = put2(p, d);
+    out.append(buf, p - buf);
+    return;
+  }
+  char buf[16]; // years outside [0,9999]: keep snprintf's %04d/sign behaviour
   int n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
   out.append(buf, n);
 }
@@ -73,14 +157,28 @@ inline void fmt_timestamp(std::string &out, int64_t v, int unit) {
   int mi = (int)((tod / 60000000LL) % 60);
   int s = (int)((tod / 1000000LL) % 60);
   int frac = (int)(tod % 1000000LL);
+  // RFC 3339 / ISO 8601 extended: 'T' separator, '+00:00' (UTC) zone offset
+  // -- matches the OData sanitizer's prior output format.
+  if (y >= 0 && y <= 9999) { // table-driven fast path (see put2/put4)
+    char buf[40];
+    char *p = put4(buf, y);
+    *p++ = '-'; p = put2(p, mo);
+    *p++ = '-'; p = put2(p, d);
+    *p++ = 'T'; p = put2(p, h);
+    *p++ = ':'; p = put2(p, mi);
+    *p++ = ':'; p = put2(p, s);
+    if (frac) { *p++ = '.'; p = put6(p, frac); }
+    *p++ = '+'; *p++ = '0'; *p++ = '0'; *p++ = ':'; *p++ = '0'; *p++ = '0';
+    out.append(buf, p - buf);
+    return;
+  }
   char buf[40];
   int n;
-  // RFC 3339 / ISO 8601 extended: 'T' separator, 'Z' (UTC) zone designator.
   if (frac)
-    n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%06dZ",
+    n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%06d+00:00",
                       y, mo, d, h, mi, s, frac);
   else
-    n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+    n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d+00:00",
                       y, mo, d, h, mi, s);
   out.append(buf, n);
 }
@@ -91,6 +189,15 @@ inline void fmt_time(std::string &out, int64_t v, int unit) {
   int mi = (int)((us / 60000000LL) % 60);
   int s = (int)((us / 1000000LL) % 60);
   int frac = (int)(us % 1000000LL);
+  if (h >= 0 && h <= 99) { // TIME-of-day is [0,23]; guard covers the field width
+    char buf[24];
+    char *p = put2(buf, h);
+    *p++ = ':'; p = put2(p, mi);
+    *p++ = ':'; p = put2(p, s);
+    if (frac) { *p++ = '.'; p = put6(p, frac); }
+    out.append(buf, p - buf);
+    return;
+  }
   char buf[24];
   int n;
   if (frac)
@@ -211,8 +318,16 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
   case DRAKEN_INT32:  fmt_int64(out, ((const int32_t *)dv->data)[p]); break;
   case DRAKEN_INT16:  fmt_int64(out, ((const int16_t *)dv->data)[p]); break;
   case DRAKEN_INT8:   fmt_int64(out, ((const int8_t *)dv->data)[p]); break;
-  case DRAKEN_FLOAT64: fmt_double(out, ((const double *)dv->data)[p]); break;
-  case DRAKEN_FLOAT32: fmt_double(out, ((const float *)dv->data)[p]); break;
+  case DRAKEN_FLOAT64: {
+    double d = ((const double *)dv->data)[p];
+    if (double_is_nan_or_inf(d)) out.append("null"); else fmt_double(out, d);
+    break;
+  }
+  case DRAKEN_FLOAT32: {
+    double d = ((const float *)dv->data)[p];
+    if (double_is_nan_or_inf(d)) out.append("null"); else fmt_double(out, d);
+    break;
+  }
   case DRAKEN_BOOL:
     out.append((((const uint8_t *)dv->data)[p >> 3] >> (p & 7)) & 1 ? "true" : "false");
     break;

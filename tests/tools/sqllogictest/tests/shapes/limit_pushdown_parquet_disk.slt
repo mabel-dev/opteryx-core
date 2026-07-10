@@ -12,10 +12,10 @@ SELECT name FROM testdata.planets WHERE gravity > 1
 query shape 1
 SELECT name FROM testdata.planets WHERE gravity > 1 LIMIT 1
 
-query shape 9
-SELECT name FROM testdata.planets WHERE SIGNUM(gravity) > 1 LIMIT 1
+query shape 0
+SELECT name FROM testdata.planets WHERE SIGN(gravity) > 1 LIMIT 1
 
-query shape 9
+query shape 3 20
 SELECT * FROM testdata.planets ORDER BY name LIMIT 3
 
 query shape 3
