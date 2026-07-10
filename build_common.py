@@ -591,6 +591,8 @@ def draken_rugo_extensions(parquet_created_by):
                 "src/cpp/cpu_features.cpp",
                 "third_party/ulfjack/ryu/d2fixed.c",
                 "third_party/ulfjack/ryu/d2s.c",
+                # extraction.cpp's `->`/`->>` kernels parse with yyjson.
+                "third_party/yyjson/src/yyjson.c",
                 "third_party/nanobind/src/nb_combined.cpp",
             ],
             include_dirs=include_dirs
@@ -644,6 +646,8 @@ def draken_rugo_extensions(parquet_created_by):
                 "src/cpp/cpu_features.cpp",
                 "third_party/ulfjack/ryu/d2fixed.c",
                 "third_party/ulfjack/ryu/d2s.c",
+                # extraction.cpp's `->`/`->>` kernels parse with yyjson.
+                "third_party/yyjson/src/yyjson.c",
             ],
             include_dirs=include_dirs,
             extra_compile_args=CPP_FLAGS,
@@ -658,6 +662,10 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/cast_kernels.h",
                 "draken/ops/kernels/binary_op_kernels.h",
                 "draken/ops/kernels/extraction_kernels.h",
+                "draken/ops/json_extract.h",
+                "draken/ops/json_path.h",
+                "draken/ops/string_result.h",
+                "draken/ops/string_subscript.h",
             ],
         ),
         # E.24 Cython shims — real compiled extensions providing __pyx_vtable__

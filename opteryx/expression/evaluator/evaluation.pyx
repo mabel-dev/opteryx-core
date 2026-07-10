@@ -605,7 +605,7 @@ from libc.stdint cimport uint8_t, int8_t, int16_t, int32_t, int64_t, uintptr_t, 
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
-from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_VARIANT
 from draken.core.buffers cimport DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_TIMESTAMP64
 from draken.core.buffers cimport DRAKEN_INTERVAL
 from draken.core.buffers cimport DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_DATE32
@@ -1564,6 +1564,25 @@ cdef inline int _dv_function_kernel_c(
     return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
 
 
+cdef inline int _dv_extraction_kernel_c(
+    void* kernel_fn,
+    void* ctx_ptr,
+    const DrakenVector* operand,
+    DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
+    DrakenFrameArena* arena, VecResult* out_vr,
+) noexcept nogil:
+    """C-ABI BC_EXTRACTION dispatch (`->`, `->>`, str[i]) — called DIRECTLY from the
+    nogil VM. The path/index is bound into extraction_ctx, so the ABI's `key` operand
+    is NULL and exactly one vector is consumed. Every result is a canonical-block
+    string (VARCHAR/NVARCHAR/VARIANT), adopted into the frame arena. rc 0 = pushed;
+    rc 4 = kernel error sentinel (invalid JSON, bad operand type, OOM)."""
+    cdef VecResult vr = (<extr_fn_t>kernel_fn)(ctx_ptr, operand, NULL)
+    out_vr[0] = vr
+    if vr.data == NULL:
+        return 4
+    return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
+
+
 cdef inline int _dv_binop_kernel_c(
     void* kernel_fn,
     void* ctx_ptr,
@@ -1805,6 +1824,18 @@ cdef int c_execute_dv_inner(
             rc = _dv_function_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr, fargs,
                                        <uint32_t>arity, dv_store, dv_stack, sp,
                                        arena, &vr)
+            if rc == 0:
+                sp += 1
+        elif opcode == BC_EXTRACTION and (slot.flags & BC_INSTR_C_NATIVE) != 0:
+            # `->`, `->>`, str[i] — one operand in, canonical-block string out. The
+            # path/index rides in extraction_ctx (bound once), so no key is popped.
+            sp -= 1
+            dv_left_ptr = dv_stack[sp]
+            if dv_left_ptr == NULL:
+                err_op[0] = opcode
+                return 1
+            rc = _dv_extraction_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
+                                         dv_left_ptr, dv_store, dv_stack, sp, arena, &vr)
             if rc == 0:
                 sp += 1
         elif opcode == BC_BINARY_OP:
@@ -2360,8 +2391,10 @@ cdef int _dv_copy_result_dense(
     cdef uint32_t i, phys
     cdef void* data
 
+    # VARIANT is German-string storage (buffers.h) — same slot/arena layout as the
+    # VARCHAR family. It is the result type of `->`.
     if (src.type == DRAKEN_VARCHAR or src.type == DRAKEN_NVARCHAR
-            or src.type == DRAKEN_VARBINARY):
+            or src.type == DRAKEN_VARBINARY or src.type == DRAKEN_VARIANT):
         return _dv_copy_result_string(src, out_vec, out_data, out_validity, out_sel)
 
     if src.type == DRAKEN_NULL:

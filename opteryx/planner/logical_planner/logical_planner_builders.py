@@ -330,6 +330,55 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
     raise UnsupportedSyntaxError("Time-travel expression must resolve to a scalar value.")
 
 
+def _normalize_timetravel_value(value, value_type: Optional[ColumnType]):
+    """Coerce a resolved time-travel scalar into a real ``datetime``/``date``.
+
+    Literal DATE/TIMESTAMP values are constant-folded elsewhere into their
+    Draken-native physical representation (int days/microseconds since
+    epoch), and plain string literals are never parsed. Connectors need a
+    real Python temporal object (they call ``.timestamp()`` on it), so
+    normalize here based on the resolved ``ColumnType`` category.
+    """
+    if value is None or isinstance(value, (datetime.datetime, datetime.date)):
+        return value
+
+    cat = value_type.category if value_type is not None else None
+
+    if cat == LogicalCategory.TIMESTAMP:
+        if isinstance(value, str):
+            dt = dates.parse_iso(value)
+            if dt is None:
+                raise UnsupportedSyntaxError(
+                    "Unable to parse timestamp value in time-travel expression."
+                )
+            return dt
+        if isinstance(value, (int, float)):
+            return _EPOCH_DT + datetime.timedelta(microseconds=int(value))
+        return value
+
+    if cat == LogicalCategory.DATE:
+        if isinstance(value, str):
+            dt = dates.parse_iso(value)
+            if dt is None:
+                raise UnsupportedSyntaxError(
+                    "Unable to parse date value in time-travel expression."
+                )
+            return dt.date()
+        if isinstance(value, (int, float)):
+            return _EPOCH_DATE + datetime.timedelta(days=int(value))
+        return value
+
+    if isinstance(value, str):
+        dt = dates.parse_iso(value)
+        if dt is None:
+            raise UnsupportedSyntaxError(
+                "Unable to parse time-travel expression value."
+            )
+        return dt
+
+    return value
+
+
 def _extract_version_expression(version_clause):
     if "ForSystemTimeAsOf" in version_clause:
         raise UnsupportedSyntaxError(
@@ -397,14 +446,16 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
 
     expression_ast = _extract_version_expression(version_clause)
     expression_node = build(expression_ast)
-    value, _ = _evaluate_timetravel_expression(expression_node, apply_interval_literal_to_now=True)
+    value, value_type = _evaluate_timetravel_expression(
+        expression_node, apply_interval_literal_to_now=True
+    )
 
     if value is None:
         raise UnsupportedSyntaxError(
             "Time-travel expression must be `TIMESTAMP AS OF <expression>`."
         )
 
-    return value
+    return _normalize_timetravel_value(value, value_type)
 
 
 def any_op(branch, alias: Optional[List[str]] = None, key=None):

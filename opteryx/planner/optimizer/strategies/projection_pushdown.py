@@ -120,7 +120,15 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
 
         context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
         if context.parent_nid:
-            context.optimized_plan.add_edge(context.node_id, context.parent_nid)
+            # Re-adding the edge must preserve its relationship: a join leg label
+            # records which side of the parent join this branch feeds. Read it from
+            # the pre-optimized tree — `optimized_plan` is rebuilt top-down from
+            # empty, so the edge does not exist in it yet.
+            context.optimized_plan.add_edge(
+                context.node_id,
+                context.parent_nid,
+                context.pre_optimized_tree.relationship(context.node_id, context.parent_nid),
+            )
 
         return context
 

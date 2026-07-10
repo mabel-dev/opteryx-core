@@ -115,7 +115,13 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
             context.optimized_plan = context.pre_optimized_tree.copy()
         context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
         if context.parent_nid:
-            context.optimized_plan.add_edge(context.node_id, context.parent_nid)
+            # Re-adding the edge must preserve its relationship: a join leg label
+            # records which side of the parent join this branch feeds.
+            context.optimized_plan.add_edge(
+                context.node_id,
+                context.parent_nid,
+                context.pre_optimized_tree.relationship(context.node_id, context.parent_nid),
+            )
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

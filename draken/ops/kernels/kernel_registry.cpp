@@ -8,6 +8,7 @@
 
 #include "ops/kernels/kernel_registry.h"
 #include "ops/kernels/error_handling.h"
+#include "ops/json_path.h"   // dotpath_to_jsonptr — bind-time path normalization
 #include <cstring>
 #include <cstdlib>
 #include <map>
@@ -219,11 +220,15 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // null-correct replacement (no beside-fallback); these get re-added real then.
 
     // ========================================================================
-    // Extraction kernels (4) — KNOWN STUBS, intentionally still registered.
-    // extraction.cpp returns "not yet implemented", but the binder REQUIRES these
-    // entries (raises if absent) and the executor IGNORES kernel_fn for BC_EXTRACTION
-    // (hardcoded nanobind dispatch), so they never execute as C-native. Left in place
-    // pending the P9 extraction-flip decision; remove + make real together then.
+    // Extraction kernels (4). draken_json_extract (`->`/`->>`, sub-op in ctx),
+    // draken_map_access_string (str[i]) and draken_pointer_extract are REAL and
+    // dispatched by the nogil VM straight from kernel_fn.
+    //
+    // draken_array_map_access remains a stub and is deliberately unreachable: the
+    // ARRAY child vector hangs off the VectorOwner, not off DrakenVector, so this
+    // signature cannot reach it. The binder does not flag BC_EXTR_MAP_ARRAY as
+    // C-native, so it routes to the GIL VM. Making it real needs the
+    // BC_C_NATIVE_CHILD plumbing the ARRAY→VARCHAR cast uses.
     // ========================================================================
 
     {"draken_map_access_string", (kernel_fn_t)&draken_map_access_string},
@@ -283,11 +288,27 @@ binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
     return ctx;
 }
 
-extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code) {
-    auto* ctx = static_cast<extraction_ctx*>(malloc(sizeof(extraction_ctx)));
-    if (ctx) {
-        ctx->sub_op_code = sub_op_code;
+extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code, const char* nav,
+                                            size_t nav_len, int64_t index) {
+    // JSON sub-ops navigate by RFC 6901 pointer. Convert dot-notation ONCE here,
+    // at bind time, so the per-morsel kernel call is parse + navigate + serialise
+    // with no path work. Non-JSON sub-ops store the key bytes verbatim.
+    std::string converted;
+    if (sub_op_code == 3 /* BC_EXTR_JSON_PTR */ || sub_op_code == 4 /* BC_EXTR_JSON_KEY */) {
+        if (nav == nullptr) nav_len = 0u;
+        converted = draken::ops::dotpath_to_jsonptr(nav, nav_len);
+        nav = converted.data();
+        nav_len = converted.size();
     }
+    if (nav == nullptr) nav_len = 0u;
+
+    auto* ctx = static_cast<extraction_ctx*>(malloc(sizeof(extraction_ctx) + nav_len));
+    if (!ctx) return nullptr;
+    ctx->sub_op_code = static_cast<int32_t>(sub_op_code);
+    ctx->nav_len     = static_cast<int32_t>(nav_len);
+    ctx->index       = index;
+    if (nav_len > 0u)
+        memcpy(reinterpret_cast<unsigned char*>(ctx) + sizeof(extraction_ctx), nav, nav_len);
     return ctx;
 }
 

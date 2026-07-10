@@ -10,17 +10,24 @@ public CVE identifiers are used where the source data embeds a CVE in the
 finding title, since those are public vulnerability records, not customer
 data.
 
-Chunked/streamed generation so memory stays bounded regardless of total row
-count -- this is designed to scale from 10M rows today up to 100M/1B later
-by raising --rows (and optionally --max-rows-per-file / --row-group-size
-for file layout).
+Written with rugo's native Parquet writer (draken Vectors -> Morsel ->
+rugo.parquet.write_parquet), not PyArrow, so file layout (row groups, page
+splitting, dictionary/bloom encoding) matches what the rest of the engine
+actually produces. write_parquet serializes one Morsel to one complete file
+in a single call (no incremental row-group append), so generation is
+per-file: each file's rows are built in memory, then written once. Per-file
+row count is bounded by --max-rows-per-file to keep memory bounded
+regardless of total row count -- this is designed to scale from 10M rows
+today up to 100M/1B later by raising --rows (and --max-rows-per-file /
+--row-group-size to tune file layout at that scale).
 
 Usage:
     python dev/generate_signals_data.py --rows 10_000_000 --out scratch/signals_synthetic
     python dev/generate_signals_data.py --rows 1_000_000_000 --out scratch/signals_synthetic \
-        --max-rows-per-file 20_000_000 --row-group-size 250_000
+        --max-rows-per-file 2_000_000 --row-group-size 250_000
 
-This script uses pyarrow and numpy (dev/-only, not the engine).
+This script uses numpy (dev/-only, not the engine) plus draken/rugo (the
+real writer path -- no PyArrow).
 """
 
 from __future__ import annotations
@@ -31,41 +38,41 @@ from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.parquet as pq
+from draken.draken_native import DrakenType
+from draken.draken_native import vector_array_from_sequence
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
+from draken.vectors.vector import Vector
+from rugo.parquet import write_parquet
 
-SCHEMA = pa.schema(
-    [
-        ("finding_id", pa.int64()),
-        ("identifier", pa.string()),
-        ("finding_ref", pa.string()),
-        ("toolset", pa.string()),
-        ("priority", pa.string()),
-        ("is_open", pa.bool_()),
-        ("is_potential", pa.bool_()),
-        ("fix_due_at", pa.timestamp("us")),
-        ("first_seen_at", pa.timestamp("us")),
-        ("updated_at", pa.timestamp("us")),
-        ("status_at", pa.timestamp("us")),
-        ("is_risk_accepted", pa.bool_()),
-        ("is_tech_exception", pa.bool_()),
-        ("is_kyndryl_excepted", pa.bool_()),
-        ("ip", pa.string()),
-        ("application", pa.list_(pa.string())),
-        ("summary_text", pa.string()),
-        ("location", pa.string()),
-        ("mapped_report", pa.list_(pa.string())),
-        ("finding_subcategory", pa.string()),
-        ("type", pa.string()),
-        ("host_support_group", pa.string()),
-        ("environment", pa.string()),
-        ("area", pa.list_(pa.string())),
-        ("team", pa.list_(pa.string())),
-        ("platform", pa.string()),
-        ("resolved_at", pa.timestamp("us")),
-    ]
-)
+COLUMN_NAMES = [
+    "finding_id",
+    "identifier",
+    "finding_ref",
+    "toolset",
+    "priority",
+    "is_open",
+    "is_potential",
+    "fix_due_at",
+    "first_seen_at",
+    "updated_at",
+    "status_at",
+    "is_risk_accepted",
+    "is_tech_exception",
+    "ip",
+    "application",
+    "summary_text",
+    "location",
+    "mapped_report",
+    "finding_subcategory",
+    "type",
+    "host_support_group",
+    "environment",
+    "area",
+    "team",
+    "platform",
+    "resolved_at",
+]
 
 # --- toolsets -----------------------------------------------------------
 # name -> (identifier prefix, relative weight). Weight shape mirrors the
@@ -275,19 +282,30 @@ def _list_lengths(rng: np.random.Generator, n: int, min_len: int, lam: float) ->
     return lengths
 
 
-def _sample_list_column(rng: np.random.Generator, pool: np.ndarray, lengths: np.ndarray) -> pa.Array:
+def _sample_lists(rng: np.random.Generator, pool: np.ndarray, lengths: np.ndarray) -> list:
+    """Build a Python list[list[str]] by sampling `pool` according to
+    per-row `lengths` (0 -> empty list, never None)."""
     flat_idx = rng.integers(0, len(pool), size=int(lengths.sum()))
     flat_values = pool[flat_idx]
     offsets = np.zeros(len(lengths) + 1, dtype=np.int64)
     np.cumsum(lengths, out=offsets[1:])
-    values_array = pa.array(flat_values, type=pa.string())
-    return pa.ListArray.from_arrays(pa.array(offsets, type=pa.int32()), values_array)
+    return [flat_values[offsets[i]:offsets[i + 1]].tolist() for i in range(len(lengths))]
 
 
-def _random_timestamps(rng: np.random.Generator, n: int, start: datetime, end: datetime) -> np.ndarray:
+def _random_timestamps_us(rng: np.random.Generator, n: int, start: datetime, end: datetime) -> np.ndarray:
     start_us = np.int64(start.timestamp() * 1_000_000)
     end_us = np.int64(end.timestamp() * 1_000_000)
     return rng.integers(start_us, end_us, size=n, dtype=np.int64)
+
+
+def _timestamps_with_nulls(rng: np.random.Generator, micros: np.ndarray, null_rate: float) -> list:
+    """Vectorized int64-micros -> datetime conversion (numpy datetime64 cast,
+    not a per-row Python loop), with `null_rate` fraction set to None."""
+    dt_obj = micros.astype("datetime64[us]").astype(object)
+    if null_rate > 0:
+        mask = rng.random(len(micros)) < null_rate
+        dt_obj[mask] = None
+    return dt_obj.tolist()
 
 
 def _apply_nulls(rng: np.random.Generator, arr: np.ndarray, null_rate: float) -> np.ndarray:
@@ -299,7 +317,7 @@ def _apply_nulls(rng: np.random.Generator, arr: np.ndarray, null_rate: float) ->
     return out
 
 
-def generate_chunk(rng: np.random.Generator, n: int, row_offset: int, catalog: tuple[np.ndarray, np.ndarray], now: datetime) -> pa.RecordBatch:
+def generate_morsel(rng: np.random.Generator, n: int, row_offset: int, catalog: tuple[np.ndarray, np.ndarray], now: datetime) -> Morsel:
     cat_ids, cat_titles = catalog
     catalog_size = len(cat_ids)
     catalog_weights = _zipf_weights(rng, catalog_size)
@@ -321,13 +339,11 @@ def generate_chunk(rng: np.random.Generator, n: int, row_offset: int, catalog: t
     is_potential = rng.random(n) < 0.0022
     is_risk_accepted = rng.random(n) < 0.0176
     is_tech_exception = rng.random(n) < 0.0068
-    is_kyndryl_excepted = _apply_nulls(rng, rng.random(n) < 0.34, 0.4007)
 
-    fix_due_at = _random_timestamps(rng, n, datetime(2020, 1, 1), now).astype(object)
-    fix_due_at = _apply_nulls(rng, fix_due_at, 0.0632)
-    first_seen_at = _random_timestamps(rng, n, datetime(2017, 11, 3), now)
-    updated_at = _random_timestamps(rng, n, now - timedelta(days=180), now)
-    status_at = _random_timestamps(rng, n, now - timedelta(days=180), now)
+    fix_due_at = _timestamps_with_nulls(rng, _random_timestamps_us(rng, n, datetime(2020, 1, 1), now), 0.0632)
+    first_seen_at = _timestamps_with_nulls(rng, _random_timestamps_us(rng, n, datetime(2017, 11, 3), now), 0.0)
+    updated_at = _timestamps_with_nulls(rng, _random_timestamps_us(rng, n, now - timedelta(days=180), now), 0.0)
+    status_at = _timestamps_with_nulls(rng, _random_timestamps_us(rng, n, now - timedelta(days=180), now), 0.0)
 
     # 10.0.0.0/8, drawn from a bounded pool so hosts repeat like real scan data
     pool_size = max(1, n // 18)
@@ -343,7 +359,7 @@ def generate_chunk(rng: np.random.Generator, n: int, row_offset: int, catalog: t
     host_support_group = _apply_nulls(rng, rng.choice(HOST_SUPPORT_GROUPS, size=n), 0.0195)
     environment = _apply_nulls(rng, rng.choice(ENVIRONMENTS, size=n, p=ENVIRONMENT_WEIGHTS), 0.0245)
 
-    # fabricated hostnames: 3-4 lowercase letters + 4-6 alnum
+    # fabricated hostnames: 4 lowercase letters + 6 alnum
     letters = np.array(list("abcdefghijklmnopqrstuvwxyz"))
     alnum = np.array(list("abcdefghijklmnopqrstuvwxyz0123456789"))
     loc_letters = rng.choice(letters, size=(n, 4))
@@ -353,55 +369,56 @@ def generate_chunk(rng: np.random.Generator, n: int, row_offset: int, catalog: t
     )
 
     app_lengths = _list_lengths(rng, n, min_len=0, lam=1.8)
-    application = _sample_list_column(rng, APPLICATIONS, app_lengths)
+    application = _sample_lists(rng, APPLICATIONS, app_lengths)
     mr_lengths = _list_lengths(rng, n, min_len=1, lam=1.2)
-    mapped_report = _sample_list_column(rng, MAPPED_REPORTS, mr_lengths)
+    mapped_report = _sample_lists(rng, MAPPED_REPORTS, mr_lengths)
 
     area_lengths = _list_lengths(rng, n, min_len=0, lam=1.5)
-    area = _sample_list_column(rng, AREA_POOL, area_lengths)
+    area = _sample_lists(rng, AREA_POOL, area_lengths)
     team_lengths = _list_lengths(rng, n, min_len=0, lam=1.2)
-    team = _sample_list_column(rng, TEAM_POOL, team_lengths)
+    team = _sample_lists(rng, TEAM_POOL, team_lengths)
     area_null_mask = rng.random(n) < 0.1939
-    team_null_mask = area_null_mask  # area/team are null together in the source data
+    # area/team are null together in the source data
+    for i in np.flatnonzero(area_null_mask):
+        area[i] = None
+        team[i] = None
 
-    def _null_out(list_array: pa.Array, mask: np.ndarray) -> pa.Array:
-        idx = np.arange(len(mask))
-        keep = pa.array(~mask)
-        return pc.if_else(keep, list_array, pa.nulls(len(mask), type=list_array.type))
-
-    area = _null_out(area, area_null_mask)
-    team = _null_out(team, team_null_mask)
-
-    columns = {
-        "finding_id": pa.array(finding_id, type=pa.int64()),
-        "identifier": pa.array(identifiers, type=pa.string()),
-        "finding_ref": pa.array(finding_ref, type=pa.string()),
-        "toolset": pa.array(toolsets, type=pa.string()),
-        "priority": pa.array(priority, type=pa.string()),
-        "is_open": pa.array(is_open, type=pa.bool_()),
-        "is_potential": pa.array(is_potential, type=pa.bool_()),
-        "fix_due_at": pa.array(fix_due_at, type=pa.timestamp("us")),
-        "first_seen_at": pa.array(first_seen_at, type=pa.timestamp("us")),
-        "updated_at": pa.array(updated_at, type=pa.timestamp("us")),
-        "status_at": pa.array(status_at, type=pa.timestamp("us")),
-        "is_risk_accepted": pa.array(is_risk_accepted, type=pa.bool_()),
-        "is_tech_exception": pa.array(is_tech_exception, type=pa.bool_()),
-        "is_kyndryl_excepted": pa.array(is_kyndryl_excepted, type=pa.bool_()),
-        "ip": pa.array(ip, type=pa.string()),
-        "application": application,
-        "summary_text": pa.array(summary_text, type=pa.string()),
-        "location": pa.array(location, type=pa.string()),
-        "mapped_report": mapped_report,
-        "finding_subcategory": pa.array(finding_subcategory, type=pa.string()),
-        "type": pa.array(type_, type=pa.string()),
-        "host_support_group": pa.array(host_support_group, type=pa.string()),
-        "environment": pa.array(environment, type=pa.string()),
-        "area": area,
-        "team": team,
-        "platform": pa.nulls(n, type=pa.string()),
-        "resolved_at": pa.nulls(n, type=pa.timestamp("us")),
+    vectors = {
+        "finding_id": vector_from_sequence(finding_id.tolist(), DrakenType.INT64),
+        "identifier": vector_from_sequence(identifiers.tolist(), DrakenType.VARCHAR),
+        "finding_ref": vector_from_sequence(finding_ref.tolist(), DrakenType.VARCHAR),
+        "toolset": vector_from_sequence(toolsets.tolist(), DrakenType.VARCHAR),
+        "priority": vector_from_sequence(priority.tolist(), DrakenType.VARCHAR),
+        "is_open": vector_from_sequence(is_open.tolist(), DrakenType.BOOL),
+        "is_potential": vector_from_sequence(is_potential.tolist(), DrakenType.BOOL),
+        "fix_due_at": vector_from_sequence(fix_due_at, DrakenType.TIMESTAMP64),
+        "first_seen_at": vector_from_sequence(first_seen_at, DrakenType.TIMESTAMP64),
+        "updated_at": vector_from_sequence(updated_at, DrakenType.TIMESTAMP64),
+        "status_at": vector_from_sequence(status_at, DrakenType.TIMESTAMP64),
+        "is_risk_accepted": vector_from_sequence(is_risk_accepted.tolist(), DrakenType.BOOL),
+        "is_tech_exception": vector_from_sequence(is_tech_exception.tolist(), DrakenType.BOOL),
+        "ip": vector_from_sequence(ip.tolist(), DrakenType.VARCHAR),
+        "application": Vector(vector_array_from_sequence(
+            application, element_type=DrakenType.VARCHAR.value, nesting_depth=1)),
+        "summary_text": vector_from_sequence(summary_text.tolist(), DrakenType.VARCHAR),
+        "location": vector_from_sequence(location.tolist(), DrakenType.VARCHAR),
+        "mapped_report": Vector(vector_array_from_sequence(
+            mapped_report, element_type=DrakenType.VARCHAR.value, nesting_depth=1)),
+        "finding_subcategory": vector_from_sequence(finding_subcategory.tolist(), DrakenType.VARCHAR),
+        "type": vector_from_sequence(type_.tolist(), DrakenType.VARCHAR),
+        "host_support_group": vector_from_sequence(host_support_group.tolist(), DrakenType.VARCHAR),
+        "environment": vector_from_sequence(environment.tolist(), DrakenType.VARCHAR),
+        "area": Vector(vector_array_from_sequence(
+            area, element_type=DrakenType.VARCHAR.value, nesting_depth=1)),
+        "team": Vector(vector_array_from_sequence(
+            team, element_type=DrakenType.VARCHAR.value, nesting_depth=1)),
+        "platform": vector_from_sequence([None] * n, DrakenType.VARCHAR),
+        "resolved_at": vector_from_sequence([None] * n, DrakenType.TIMESTAMP64),
     }
-    return pa.RecordBatch.from_arrays([columns[name] for name in SCHEMA.names], schema=SCHEMA)
+    return Morsel.from_vectors(
+        [name.encode() for name in COLUMN_NAMES],
+        [vectors[name] for name in COLUMN_NAMES],
+    )
 
 
 def main() -> None:
@@ -409,9 +426,9 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=10_000_000, help="Total rows to generate (default 10,000,000)")
     parser.add_argument("--out", type=str, default="scratch/signals_synthetic", help="Output directory")
     parser.add_argument("--prefix", type=str, default="signals", help="Output filename prefix")
-    parser.add_argument("--chunk-size", type=int, default=500_000, help="Rows generated per in-memory chunk")
-    parser.add_argument("--row-group-size", type=int, default=250_000, help="Parquet row group size")
-    parser.add_argument("--max-rows-per-file", type=int, default=2_000_000, help="Rows per output file")
+    parser.add_argument("--row-group-size", type=int, default=250_000, help="Parquet max_rows_per_row_group")
+    parser.add_argument("--max-page-bytes", type=int, default=0, help="rugo write_parquet max_page_bytes (0 = single page per chunk)")
+    parser.add_argument("--max-rows-per-file", type=int, default=2_000_000, help="Rows per output file (built in memory, then written in one write_parquet call)")
     parser.add_argument("--catalog-size", type=int, default=6000, help="Distinct vulnerability catalog entries")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
@@ -426,30 +443,26 @@ def main() -> None:
     total_rows = args.rows
     rows_written = 0
     file_idx = 0
-    writer = None
-    rows_in_current_file = 0
 
     while rows_written < total_rows:
-        chunk_n = min(args.chunk_size, total_rows - rows_written)
+        file_n = min(args.max_rows_per_file, total_rows - rows_written)
+        fname = outdir / f"{args.prefix}-{file_idx:04d}.parquet"
+        print(f"writing {fname} ({file_n:,} rows)")
 
-        if writer is None:
-            fname = outdir / f"{args.prefix}-{file_idx:04d}.parquet"
-            writer = pq.ParquetWriter(fname, SCHEMA)
-            rows_in_current_file = 0
-            print(f"writing {fname}")
+        morsel = generate_morsel(rng, file_n, rows_written, catalog, now)
+        data = write_parquet(
+            morsel,
+            compression="zstd",
+            bloom_filters=True,
+            dictionary=True,
+            max_rows_per_row_group=args.row_group_size,
+            max_page_bytes=args.max_page_bytes,
+        )
+        with open(fname, "wb") as f:
+            f.write(data)
 
-        batch = generate_chunk(rng, chunk_n, rows_written, catalog, now)
-        table = pa.Table.from_batches([batch])
-        writer.write_table(table, row_group_size=args.row_group_size)
-
-        rows_written += chunk_n
-        rows_in_current_file += chunk_n
-
-        if rows_in_current_file >= args.max_rows_per_file or rows_written >= total_rows:
-            writer.close()
-            writer = None
-            file_idx += 1
-
+        rows_written += file_n
+        file_idx += 1
         print(f"  {rows_written:,}/{total_rows:,} rows")
 
     print("done")

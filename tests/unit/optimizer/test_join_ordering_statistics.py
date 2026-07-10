@@ -99,15 +99,20 @@ def _inner_join_node(left_size, right_size):
     n.right_columns = [SimpleNamespace(value="k")]
     n.left_column = SimpleNamespace(value="k")
     n.right_column = SimpleNamespace(value="k")
-    n.left_readers = None
-    n.right_readers = None
     n.left_relation_names = ["big"]
     n.right_relation_names = ["small"]
+    # left_readers/right_readers are attached by _build_join_plan, from the scans
+    # actually wired to each leg — `visit` gates the swap on both being present.
     return n
 
 
 def _build_join_plan(join_node, left_scan, right_scan):
     plan = LogicalPlan()
+    # The swap is gated on both legs carrying reader UUIDs, as the binder's
+    # join_leg_preprocess attaches for any join over real scans. Without them
+    # the strategy declines to reorder and no swap can ever be observed.
+    join_node.left_readers = [left_scan.uuid]
+    join_node.right_readers = [right_scan.uuid]
     plan.add_node("j", join_node)
     plan.add_node("l", left_scan)
     plan.add_node("r", right_scan)
@@ -118,6 +123,11 @@ def _build_join_plan(join_node, left_scan, right_scan):
     plan.add_node("e", exit_node)
     plan.add_edge("j", "e")
     return plan
+
+
+def _leg_labels(plan):
+    """The 'left'/'right' label on each edge feeding the join, keyed by source."""
+    return {source: relation for source, _target, relation in plan.ingoing_edges("j")}
 
 
 def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
@@ -141,6 +151,7 @@ def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
     # No swap: statistics show left already smallest. (Pre-filter sizes alone
     # would have forced a swap via the 3x rule.)
     assert after == before, "should not swap when post-filter stats show left is smaller"
+    assert _leg_labels(context.optimized_plan) == {"l": "left", "r": "right"}
 
 
 def test_visit_swaps_when_statistics_show_left_is_larger():
@@ -159,6 +170,9 @@ def test_visit_swaps_when_statistics_show_left_is_larger():
     after = strategy.telemetry.optimization_inner_join_smallest_table_left
 
     assert after == before + 1, "should swap when post-filter stats show left is larger"
+    # The swap must reach the edges: they are what the physical plan reads to
+    # choose the build side. Swapping only the node attributes loses the decision.
+    assert _leg_labels(context.optimized_plan) == {"l": "right", "r": "left"}
 
 
 def test_visit_falls_back_to_pre_filter_size_without_statistics():
@@ -182,6 +196,7 @@ def test_visit_falls_back_to_pre_filter_size_without_statistics():
 
     # left_size (100_000) > 3 * right_size (100) -> swap.
     assert after == before + 1
+    assert _leg_labels(context.optimized_plan) == {"l": "right", "r": "left"}
 
 
 if __name__ == "__main__":  # pragma: no cover

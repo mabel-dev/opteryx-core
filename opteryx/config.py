@@ -221,6 +221,16 @@ IO_POOL_SLOT_BYTES: int = int(get("IO_POOL_SLOT_BYTES", 32 * 1024 * 1024))
 IO_POOL_SLOT_COUNT: int = int(get("IO_POOL_SLOT_COUNT", 64))
 """Initial slot count for the MemoryPool used by the pool reader."""
 
+MANIFEST_CACHE_PATH: str = get("OPTERYX_MANIFEST_CACHE_PATH", "")
+"""Directory for the on-disk manifest cache. Empty disables the cache.
+
+Must name a real disk (e.g. a Cloud Run ephemeral volume). The container
+filesystem is otherwise RAM-backed, where caching would consume the memory it
+is meant to conserve, so this has no default path."""
+
+MANIFEST_CACHE_BYTES: int = int(get("OPTERYX_MANIFEST_CACHE_BYTES", 1024 * 1024 * 1024))
+"""Byte ceiling for the on-disk manifest cache."""
+
 LOCAL_STORE_ROOT: str = get("OPTERYX_LOCAL_STORE", "./.opteryx")
 """Root directory for LocalStoreConnector storage."""
 

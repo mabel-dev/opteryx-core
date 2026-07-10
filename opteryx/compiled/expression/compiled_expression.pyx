@@ -1739,20 +1739,27 @@ cdef Py_ssize_t _linearize(
         slot.op_code = sub_op
         slot.flags = BC_RESULT_NEEDS_NB_WRAP
 
-        # Phase 9b: Resolve C kernel function pointer for extraction operations.
+        # Resolve the C-ABI kernel. BC_EXTR_MAP_ARRAY is EXCLUDED: the ARRAY child
+        # vector hangs off the VectorOwner, not off DrakenVector, so no kernel with
+        # the (ctx, vec, key) signature can reach it. It stays on the GIL VM until
+        # the BC_C_NATIVE_CHILD plumbing (see the ARRAY→VARCHAR cast) is extended to
+        # extraction. Flagging it C-native here would dispatch into an error sentinel.
         _extr_kernel_names = {
             BC_EXTR_MAP_STRING: "draken_map_access_string",
-            BC_EXTR_MAP_ARRAY: "draken_array_map_access",
             BC_EXTR_JSON_PTR: "draken_json_extract",
             BC_EXTR_JSON_KEY: "draken_json_extract",
         }
         if sub_op in _extr_kernel_names:
             from draken.ops.kernels._kernel_registry import alloc_extraction_ctx
-            context_allocator = alloc_extraction_ctx
+            # The path/key and the subscript index are bind-time constants: they go
+            # into the ctx, so BC_EXTRACTION pops exactly one operand at run time.
+            # JSON paths are normalized to RFC 6901 inside the allocator.
+            ctx_nav = extr_literal if sub_op in (BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY) else None
+            ctx_index = int(extr_key) if sub_op == BC_EXTR_MAP_STRING else 0
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
                 _extr_kernel_names[sub_op],
-                context_allocator,
-                sub_op
+                alloc_extraction_ctx,
+                (sub_op, ctx_nav, ctx_index),
             )
             if fn_ptr is None:
                 raise ValueError(
@@ -1760,7 +1767,7 @@ cdef Py_ssize_t _linearize(
                     f"This is a supported extraction operation but kernel is missing."
                 )
 
-            slot.kernel_fn = <void*>fn_ptr
+            slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
             if ctx_wrapper is not None:
                 bc._hold(ctx_wrapper)
                 slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
@@ -1998,7 +2005,7 @@ _C_NATIVE_LOAD_OPCODES = frozenset({BC_LOAD_COL, BC_LOAD_LIT_CONST, BC_LOAD_LIT_
 _C_NATIVE_BOOL_OPCODES = frozenset({BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF})
 _C_NATIVE_COMPUTE_OPCODES = frozenset(
     _C_NATIVE_BOOL_OPCODES | {BC_COMPARE, BC_BINARY_OP, BC_CAST, BC_UNARY_OP,
-                              BC_FUNCTION})
+                              BC_FUNCTION, BC_EXTRACTION})
 
 def build_bytecode(CompiledExpressionHandle handle):
     """Linearise the lowered tree into a typed CompiledBytecode container."""
@@ -2020,8 +2027,8 @@ def build_bytecode(CompiledExpressionHandle handle):
     # result, and the LAST op is a compute op (arena result → no anchor tracking).
     # Enables evaluate_c_native (whole-bytecode single GIL release). Excludes:
     # inline-IN-list / non-ordinal compares (LIKE/IN — Python kernels), string-
-    # result binop/cast (need a Vector owner), and FUNCTION/EXTRACTION/UNARY/
-    # CASE/LIT_SET/LIT_SCALAR (GIL).
+    # result binop/cast (need a Vector owner), unresolved FUNCTION/EXTRACTION
+    # (Python callables), and CASE/LIT_SET/LIT_SCALAR (GIL).
     cdef int op, fl, opc
     bc.is_all_c_native = bc.count > 0
     for k in range(bc.count):
@@ -2054,6 +2061,14 @@ def build_bytecode(CompiledExpressionHandle handle):
         if op == BC_FUNCTION:
             # Phase 9a-fn: a resolved C-ABI kernel runs on the nogil DV* stack
             # (fixed or canonical-block string result); Python callables do not.
+            if (fl & BC_INSTR_C_NATIVE) != 0:
+                continue
+            bc.is_all_c_native = False
+            break
+        if op == BC_EXTRACTION:
+            # `->`, `->>` and str[i] resolve C-ABI kernels whose path/index is bound
+            # into extraction_ctx, so they pop one vector and produce a canonical-block
+            # string. BC_EXTR_MAP_ARRAY never carries the flag (no reachable child).
             if (fl & BC_INSTR_C_NATIVE) != 0:
                 continue
             bc.is_all_c_native = False

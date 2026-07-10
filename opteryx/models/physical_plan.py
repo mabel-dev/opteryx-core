@@ -12,6 +12,12 @@ from typing import Optional
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.third_party.travers import Graph
 
+# Traversal rank for an edge's relationship. Unlabelled edges (relationship is
+# None -- the `Graph.add_edge` default) rank last, so a join's left leg is always
+# traversed before its right leg.
+_LEG_ORDER = {"left": 0, "right": 1}
+_UNLABELLED_ORDER = 2
+
 
 class PhysicalPlan(Graph):
     """
@@ -45,8 +51,11 @@ class PhysicalPlan(Graph):
             )
         ]
 
-        # Sort neighbors based on relationship to ensure left, right, then unlabelled order
-        neighbors = sorted(self.ingoing_edges(node), key=lambda x: (x[2] == "right", x[2] == ""))
+        # Sort neighbors based on relationship to ensure left, right, then unlabelled order.
+        # The sort is stable, so unlabelled edges retain their insertion order.
+        neighbors = sorted(
+            self.ingoing_edges(node), key=lambda x: _LEG_ORDER.get(x[2], _UNLABELLED_ORDER)
+        )
 
         # left semi and anti joins we hash the right side first, usually we want the left side first
         if self[node].is_join and self[node].join_type in ("left anti", "left semi", "left anti null-aware"):
@@ -61,115 +70,116 @@ class PhysicalPlan(Graph):
         return traversal_list
 
     def label_join_legs(self):
-        # add the left/right labels to the edges coming into the joins
+        """Ensure every join's ingoing edges carry a left/right label.
+
+        A label already on an edge is authoritative. The logical planner sets it
+        when it builds the join, ``JoinOrderingStrategy`` flips it when it swaps
+        the build side, and ``remove_node(heal=True)`` carries it across removed
+        nodes. Labels are only *inferred* for edges an optimizer rewrite left
+        unlabelled — cross-join filter pushdown, cross-join chain reorder and
+        the set-op / IN-subquery rewrites rewire join inputs without naming the
+        sides.
+
+        Inference must never overrule an existing label: doing so discards the
+        swap decision and silently rebuilds the hash table on the larger leg.
+        """
         joins = ((nid, node) for nid, node in self.nodes(True) if node.is_join)
         for nid, join in joins:
-            if join.left_readers is None:
-                # No reader UUIDs. Joins synthesised from INTERSECT/EXCEPT/IN-
-                # subquery rewrites still carry left/right relation names — label
-                # each leg by the scan aliases reachable from it. This is robust
-                # to ingoing-edge ordering, which a redundant-operator removal
-                # (remove_node heal) can flip and which would otherwise silently
-                # swap the build/probe sides of a non-commutative anti/semi join.
-                # UnnestJoinNode has neither readers nor relation names → skip.
-                if join.left_relation_names and join.right_relation_names:
-                    self._label_join_legs_by_relation(nid, join)
-                continue
-
-            # Iterate through incoming edges and label them based on join sides.
-            # If left_readers contains ANY Scan node UUID that the provider
-            # reaches, label that provider edge as "left".
-            #
-            # First pass: assign every edge we can resolve by UUID. Second pass:
-            # assign the rest by complement (the side not already claimed),
-            # falling back to insertion order only when complement is ambiguous.
-            # Complement-before-position matters because join_ordering swaps the
-            # recorded left_readers/right_readers without reordering the physical
-            # ingoing edges: when one side is a derived relation (subquery / view)
-            # whose reader UUID is not BFS-reachable, blind positional order
-            # contradicts the swap and both edges collapse onto the same side.
             ingoing = list(self.ingoing_edges(nid))
-            assignments: list = [None] * len(ingoing)
-            for idx, (provider, provider_target, provider_relation) in enumerate(ingoing):
-                reader_edges = {
-                    (source, target, relation)
-                    for source, target, relation in self.breadth_first_search(
-                        provider, reverse=True
-                    )
-                }
-                if getattr(self[provider], "uuid", None) is not None:
-                    reader_edges.add((provider, provider_target, provider_relation))
+            assignments: list = [
+                relation if relation in ("left", "right") else None
+                for _source, _target, relation in ingoing
+            ]
 
-                for s, t, r in reader_edges:
-                    node = self[s]
-                    if getattr(node, "uuid", None) is None:
+            if any(side is None for side in assignments):
+                if join.left_readers is None:
+                    # No reader UUIDs. Joins synthesised from INTERSECT/EXCEPT/IN-
+                    # subquery rewrites still carry left/right relation names — resolve
+                    # each leg by the scan aliases reachable from it. UnnestJoinNode has
+                    # neither readers nor relation names, and only one leg → leave it.
+                    if not (join.left_relation_names and join.right_relation_names):
                         continue
-                    if node.uuid in join.left_readers:
-                        assignments[idx] = "left"
-                        break
-                    elif node.uuid in join.right_readers:
-                        assignments[idx] = "right"
-                        break
+                    self._assign_legs_by_relation(nid, join, ingoing, assignments)
+                else:
+                    self._assign_legs_by_reader(nid, join, ingoing, assignments)
 
-            claimed = {a for a in assignments if a is not None}
-            for idx, (provider, _pt, _pr) in enumerate(ingoing):
-                side = assignments[idx]
-                if side is None:
-                    # Complement: take the side no resolved edge has claimed.
-                    # Only one side claimed → this edge is the other side. This
-                    # honours a join_ordering swap that positional order would
-                    # contradict. If both or neither side is claimed, fall back
-                    # to insertion order.
-                    if claimed == {"left"}:
-                        side = "right"
-                    elif claimed == {"right"}:
-                        side = "left"
-                    else:
-                        side = "left" if idx == 0 else "right"
-                self.add_edge(provider, nid, side)
+                self._assign_legs_by_complement(assignments)
 
-            tester = self.breadth_first_search(nid, reverse=True)
-            if not any(r == "left" for s, t, r in tester):
-                raise InvalidInternalStateError("Unable to determine LEFT side of join.")
-            if not any(r == "right" for s, t, r in tester):
-                raise InvalidInternalStateError("Join has no RIGHT leg")
+                for (provider, _target, _relation), side in zip(ingoing, assignments):
+                    self.add_edge(provider, nid, side)
 
-    def _label_join_legs_by_relation(self, nid, join):
-        """Label a join's input edges using its left/right relation names.
+            if len(ingoing) > 1:
+                sides = sorted(side for side in assignments if side is not None)
+                if sides != ["left", "right"]:
+                    raise InvalidInternalStateError(
+                        f"Join legs are ambiguous: expected one LEFT and one RIGHT, got {sides or 'none'}."
+                    )
+
+    def _assign_legs_by_reader(self, nid, join, ingoing, assignments):
+        """Resolve unlabelled legs by the scan reader UUIDs each branch reaches."""
+        for idx, (provider, provider_target, provider_relation) in enumerate(ingoing):
+            if assignments[idx] is not None:
+                continue
+            reader_edges = set(self.breadth_first_search(provider, reverse=True))
+            reader_edges.add((provider, provider_target, provider_relation))
+
+            for source, _target, _relation in reader_edges:
+                uuid = self[source].uuid
+                if uuid is None:
+                    continue
+                if uuid in join.left_readers:
+                    assignments[idx] = "left"
+                    break
+                if uuid in join.right_readers:
+                    assignments[idx] = "right"
+                    break
+
+    def _assign_legs_by_relation(self, nid, join, ingoing, assignments):
+        """Resolve unlabelled legs by the scan aliases each branch reaches.
 
         For joins that have no reader UUIDs (set-operation / IN-subquery
-        rewrites) the leg of each input is determined by the scan aliases the
-        input branch reaches, not by ingoing-edge insertion order. Each branch
-        is expected to reach exactly one side's relations; when it cannot be
-        resolved unambiguously we fall back to insertion order.
+        rewrites) the leg of each input is determined by the relations the input
+        branch reaches. Each branch is expected to reach exactly one side's
+        relations; branches that hit both or neither stay unresolved.
         """
         left_rel = set(join.left_relation_names)
         right_rel = set(join.right_relation_names)
-        for idx, (provider, _target, _relation) in enumerate(self.ingoing_edges(nid)):
-            aliases = set()
-            alias = getattr(self[provider], "alias", None)
-            if alias is not None:
-                aliases.add(alias)
+        for idx, (provider, _target, _relation) in enumerate(ingoing):
+            if assignments[idx] is not None:
+                continue
+            # `alias` is declared by individual operators, not by BasePlanNode,
+            # so it is genuinely absent on most nodes rather than None.
+            aliases = {getattr(self[provider], "alias", None)}
             for source, _t, _r in self.breadth_first_search(provider, reverse=True):
-                alias = getattr(self[source], "alias", None)
-                if alias is not None:
-                    aliases.add(alias)
+                aliases.add(getattr(self[source], "alias", None))
+            aliases.discard(None)
 
             hits_left = bool(aliases & left_rel)
             hits_right = bool(aliases & right_rel)
             if hits_right and not hits_left:
-                self.add_edge(provider, nid, "right")
+                assignments[idx] = "right"
             elif hits_left and not hits_right:
-                self.add_edge(provider, nid, "left")
-            else:
-                # Ambiguous or undetermined — preserve historical positional rule.
-                self.add_edge(provider, nid, "left" if idx == 0 else "right")
+                assignments[idx] = "left"
 
-        tester = self.breadth_first_search(nid, reverse=True)
-        if not any(r == "left" for s, t, r in tester):
-            raise InvalidInternalStateError("Unable to determine LEFT side of join.")
-        if not any(r == "right" for s, t, r in tester):
-            raise InvalidInternalStateError("Join has no RIGHT leg")
+    @staticmethod
+    def _assign_legs_by_complement(assignments):
+        """Fill still-unresolved legs with the side no other edge has claimed.
+
+        Only one side claimed → the remaining edge is the other side. With both
+        or neither claimed there is nothing to deduce, so we fall back to
+        ingoing-edge order — the last resort, and the only step here that can
+        be wrong.
+        """
+        claimed = {side for side in assignments if side is not None}
+        for idx, side in enumerate(assignments):
+            if side is not None:
+                continue
+            if claimed == {"left"}:
+                assignments[idx] = "right"
+            elif claimed == {"right"}:
+                assignments[idx] = "left"
+            else:
+                assignments[idx] = "left" if idx == 0 else "right"
 
     def sensors(self):
         readings = {}

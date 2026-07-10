@@ -42,6 +42,48 @@ def _get_read_operation(telemetry: dict) -> dict:
     raise AssertionError("No ReadRel operation found in telemetry")
 
 
+class _Result:
+    """The drained result of a query: column names, values, and row count.
+
+    Two results compare equal when their column names, order, and every value
+    match — the property these tests assert when comparing two-pass ON vs OFF.
+    """
+
+    __slots__ = ("names", "columns", "num_rows")
+
+    def __init__(self, names, columns, num_rows):
+        self.names = names
+        self.columns = columns
+        self.num_rows = num_rows
+
+    @property
+    def num_columns(self):
+        return len(self.names)
+
+    def equals(self, other) -> bool:
+        return (
+            self.names == other.names
+            and self.num_rows == other.num_rows
+            and self.columns == other.columns
+        )
+
+
+def _execute(session, sql) -> _Result:
+    """Drain a query to a _Result. Morsel column names are bytes."""
+    names: list = []
+    columns: dict = {}
+    num_rows = 0
+    for morsel in session.execute_to_morsels(sql):
+        if not morsel.num_rows:
+            continue
+        if not names:
+            names = [n.decode() for n in morsel.column_names]
+        num_rows += morsel.num_rows
+        for name in morsel.column_names:
+            columns.setdefault(name.decode(), []).extend(morsel.column(name).to_pylist())
+    return _Result(names, columns, num_rows)
+
+
 def _latmat_sensors(session) -> dict:
     """Return latmat sensor values (defaulting to 0) from a session."""
     read_op = _get_read_operation(session.telemetry)
@@ -85,7 +127,8 @@ def test_q24_no_matching_rows_activates_skip_fast_path():
 
     session = opteryx.session()
     try:
-        result = session.execute_to_arrow(
+        result = _execute(
+            session,
             "SELECT * FROM testdata.clickbench_tiny"
             " WHERE URL LIKE '%google%'"
             " ORDER BY EventTime LIMIT 10"
@@ -120,7 +163,8 @@ def test_q24_pass1_only_reads_url_column():
 
     session = opteryx.session()
     try:
-        session.execute_to_arrow(
+        _execute(
+            session,
             "SELECT * FROM testdata.clickbench_tiny"
             " WHERE URL LIKE '%google%'"
             " ORDER BY EventTime LIMIT 10"
@@ -150,14 +194,14 @@ def test_assembly_correctness_matching_rows_yandex():
     config.features.parquet_late_materialization = True
     session_on = opteryx.session()
     try:
-        result_on = session_on.execute_to_arrow(sql)
+        result_on = _execute(session_on, sql)
     finally:
         session_on.close()
 
     config.features.parquet_late_materialization = False
     session_off = opteryx.session()
     try:
-        result_off = session_off.execute_to_arrow(sql)
+        result_off = _execute(session_off, sql)
     finally:
         session_off.close()
 
@@ -184,18 +228,18 @@ def test_assembly_correctness_select_star():
     config.features.parquet_late_materialization = True
     session_on = opteryx.session()
     try:
-        result_on = session_on.execute_to_arrow(sql)
+        result_on = _execute(session_on, sql)
     finally:
         session_on.close()
 
     config.features.parquet_late_materialization = False
     session_off = opteryx.session()
     try:
-        result_off = session_off.execute_to_arrow(sql)
+        result_off = _execute(session_off, sql)
     finally:
         session_off.close()
 
-    assert result_on.schema.names == result_off.schema.names, (
+    assert result_on.names == result_off.names, (
         "column order must be preserved when assembling Pass 1 + Pass 2 morsels"
     )
     assert result_on.equals(result_off), (
@@ -210,7 +254,8 @@ def test_pass2_row_groups_nonzero_when_rows_survive():
 
     session = opteryx.session()
     try:
-        result = session.execute_to_arrow(
+        result = _execute(
+            session,
             "SELECT URL, EventTime, UserID, SearchPhrase"
             " FROM testdata.clickbench_tiny"
             " WHERE URL LIKE '%yandex%'"
@@ -238,7 +283,7 @@ def test_two_pass_inactive_when_no_predicate():
 
     session = opteryx.session()
     try:
-        session.execute_to_arrow("SELECT URL, EventTime FROM testdata.clickbench_tiny LIMIT 5")
+        _execute(session, "SELECT URL, EventTime FROM testdata.clickbench_tiny LIMIT 5")
         lm = _latmat_sensors(session)
         assert lm["parquet_latmat_pass1_row_groups"] == 0, (
             "two-pass must not activate when there is no pushed-down predicate"
@@ -254,7 +299,8 @@ def test_two_pass_inactive_when_all_projected_columns_in_filter():
 
     session = opteryx.session()
     try:
-        session.execute_to_arrow(
+        _execute(
+            session,
             "SELECT URL FROM testdata.clickbench_tiny WHERE URL LIKE '%yandex%' LIMIT 5"
         )
         lm = _latmat_sensors(session)
@@ -272,7 +318,8 @@ def test_two_pass_inactive_when_feature_flag_disabled():
 
     session = opteryx.session()
     try:
-        session.execute_to_arrow(
+        _execute(
+            session,
             "SELECT * FROM testdata.clickbench_tiny"
             " WHERE URL LIKE '%google%'"
             " ORDER BY EventTime LIMIT 10"
@@ -301,7 +348,8 @@ def test_abandonment_fires_when_predicate_passes_all_rows():
     session = opteryx.session()
     try:
         # Fetch enough rows that at least one full row group is processed.
-        session.execute_to_arrow(
+        _execute(
+            session,
             "SELECT MobilePhoneModel, URL, EventTime"
             " FROM testdata.clickbench_tiny"
             " WHERE URL LIKE '%http%'"
@@ -332,14 +380,14 @@ def test_non_like_predicate_not_affected():
     config.features.parquet_late_materialization = True
     session_on = opteryx.session()
     try:
-        result_on = session_on.execute_to_arrow(sql)
+        result_on = _execute(session_on, sql)
     finally:
         session_on.close()
 
     config.features.parquet_late_materialization = False
     session_off = opteryx.session()
     try:
-        result_off = session_off.execute_to_arrow(sql)
+        result_off = _execute(session_off, sql)
     finally:
         session_off.close()
 
@@ -360,14 +408,14 @@ def test_aggregate_query_not_affected():
     config.features.parquet_late_materialization = True
     session_on = opteryx.session()
     try:
-        result_on = session_on.execute_to_arrow(sql)
+        result_on = _execute(session_on, sql)
     finally:
         session_on.close()
 
     config.features.parquet_late_materialization = False
     session_off = opteryx.session()
     try:
-        result_off = session_off.execute_to_arrow(sql)
+        result_off = _execute(session_off, sql)
     finally:
         session_off.close()
 
@@ -390,14 +438,14 @@ def test_q28_like_with_group_by_and_limit():
     config.features.parquet_late_materialization = True
     session_on = opteryx.session()
     try:
-        result_on = session_on.execute_to_arrow(sql)
+        result_on = _execute(session_on, sql)
     finally:
         session_on.close()
 
     config.features.parquet_late_materialization = False
     session_off = opteryx.session()
     try:
-        result_off = session_off.execute_to_arrow(sql)
+        result_off = _execute(session_off, sql)
     finally:
         session_off.close()
 

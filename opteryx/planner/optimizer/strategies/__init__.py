@@ -11,10 +11,10 @@ from .join_elimination import JoinEliminationStrategy
 from .join_ordering import JoinOrderingStrategy
 from .join_planning import JoinPlanningStrategy
 from .join_rewriter import JoinRewriteStrategy
+from .limit_elimination import LimitEliminationStrategy
 from .limit_files_pruning import LimitFilesPruningStrategy
 from .limit_pushdown import LimitPushdownStrategy
 from .manifest_pruning import ManifestPruningStrategy
-from .nullability_inference import NullabilityInferenceStrategy
 from .operator_fusion import OperatorFusionStrategy
 from .predicate_compaction import PredicateCompactionStrategy
 from .predicate_ordering import PredicateOrderingStrategy
@@ -45,10 +45,10 @@ __all__ = [
     "JoinOrderingStrategy",
     "JoinPlanningStrategy",
     "JoinRewriteStrategy",
+    "LimitEliminationStrategy",
     "LimitFilesPruningStrategy",
     "LimitPushdownStrategy",
     "ManifestPruningStrategy",
-    "NullabilityInferenceStrategy",
     "OperatorFusionStrategy",
     "PredicateCompactionStrategy",
     "PredicateOrderingStrategy",

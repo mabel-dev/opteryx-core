@@ -76,14 +76,17 @@ class _QueryTelemetry:
 
         readings_dict = dict(self._reading)
 
-        # Remove connector-level stats that should only appear in operation/sensor stats
+        # Remove connector-level stats that should only appear in operation/sensor stats.
+        # ``bytes_processed`` is deliberately NOT in this list: it is a query-wide total
+        # (bytes actually fetched from storage, summed across every scan) rather than a
+        # per-node reading, it is what the DATA_PROCESSED_BYTES billing event charges on,
+        # and popping it here is why the query report could only ever show 0 bytes.
         connector_only_keys = [
             "rows_read",
             "rows_seen",
             "blobs_read",
             "blobs_seen",
             "bytes_raw",
-            "bytes_processed",
             "columns_read",
             "bytes_read",
             # per-operator native readings — surfaced via the ``operations`` breakdown

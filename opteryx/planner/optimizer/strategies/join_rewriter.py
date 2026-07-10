@@ -37,6 +37,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from .join_elimination import _right_columns_used_above
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
+from .optimization_strategy import flip_join_leg_labels
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
@@ -164,6 +165,7 @@ class JoinRewriteStrategy(OptimizationStrategy):
                 left_readers = getattr(join_node, "left_readers", None)
                 right_readers = getattr(join_node, "right_readers", None)
                 join_node.left_readers, join_node.right_readers = right_readers, left_readers
+                flip_join_leg_labels(plan, join_nid)
 
             plan[join_nid] = join_node
 

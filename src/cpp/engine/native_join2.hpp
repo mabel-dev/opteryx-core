@@ -338,20 +338,37 @@ struct Join2ProbeOperator : Operator {
                 out->columns.push_back(std::move(c));
                 continue;
             }
-            void* data = draken_malloc(
-                static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
-            uint8_t* dst = static_cast<uint8_t*>(data);
-            for (uint32_t i = 0; i < n; ++i) {
-                if (matches[i].first == kNoBuildRow) {
-                    std::memset(dst + static_cast<size_t>(i) * col.elem_size, 0,
-                                col.elem_size);
-                    mark_null(i);
-                    continue;
+            void* data;
+            if (join_type_is_bool(col.type)) {
+                // Re-pack the row-store's unpacked bytes into the canonical bit
+                // layout. An unmatched row leaves its bit 0 and is marked NULL —
+                // the validity mask, not the bit, carries "no build row".
+                uint8_t* bits = join_alloc_bool_bits(n);
+                for (uint32_t i = 0; i < n; ++i) {
+                    if (matches[i].first == kNoBuildRow) {
+                        mark_null(i);
+                        continue;
+                    }
+                    if (col.raw[matches[i].first])
+                        bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
                 }
-                std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
-                            col.raw.data()
-                                + static_cast<size_t>(matches[i].first) * col.elem_size,
-                            col.elem_size);
+                data = bits;
+            } else {
+                data = draken_malloc(
+                    static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
+                uint8_t* dst = static_cast<uint8_t*>(data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    if (matches[i].first == kNoBuildRow) {
+                        std::memset(dst + static_cast<size_t>(i) * col.elem_size, 0,
+                                    col.elem_size);
+                        mark_null(i);
+                        continue;
+                    }
+                    std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
+                                col.raw.data()
+                                    + static_cast<size_t>(matches[i].first) * col.elem_size,
+                                col.elem_size);
+                }
             }
             uint32_t* sel = static_cast<uint32_t*>(
                 draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));

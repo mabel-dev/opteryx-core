@@ -109,6 +109,29 @@ def execute_and_get_arrow(sql: str, params: Optional[List] = None) -> pa.Table:
     return _morsels_to_arrow(morsels)
 
 
+def execute_on_session_and_get_arrow(session, sql: str, params: Optional[List] = None) -> pa.Table:
+    """Execute SQL on a caller-provided Session and return a PyArrow Table.
+
+    Replaces: session.execute_to_arrow(sql), for tests whose session carries
+    state execute_and_get_arrow can't reproduce (e.g. memberships) because
+    that helper always creates its own plain session.
+
+    Args:
+        session: an existing opteryx.session() (or opteryx.session(memberships=...))
+        sql: SQL query string
+        params: Optional query parameters
+
+    Returns:
+        PyArrow Table with all results
+
+    Example:
+        session = opteryx.session(memberships=["Apollo 11"])
+        table = execute_on_session_and_get_arrow(session, "SELECT * FROM $planets")
+    """
+    morsels = list(session.execute_to_morsels(sql, params=params))
+    return _morsels_to_arrow(morsels)
+
+
 def execute_and_get_morsels(sql: str, params: Optional[List] = None):
     """Execute SQL and return list of Morsel objects.
 

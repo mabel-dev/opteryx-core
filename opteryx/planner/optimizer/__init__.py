@@ -52,10 +52,10 @@ from opteryx.planner.optimizer.strategies import (
     JoinOrderingStrategy,
     JoinPlanningStrategy,
     JoinRewriteStrategy,
+    LimitEliminationStrategy,
     LimitFilesPruningStrategy,
     LimitPushdownStrategy,
     ManifestPruningStrategy,
-    NullabilityInferenceStrategy,
     OperatorFusionStrategy,
     PredicateCompactionStrategy,
     PredicateOrderingStrategy,
@@ -124,13 +124,16 @@ class OptimizerVisitor:
         self.telemetry = telemetry
         self.strategies = [
             ConstantFoldingStrategy(telemetry),
+            # Drops no-op LIMITs before StatisticsOnlyResponseStrategy runs, so
+            # e.g. `SELECT COUNT(*) FROM t LIMIT n` is answered from the
+            # manifest in this same pass instead of falling through to a scan.
+            LimitEliminationStrategy(telemetry),
             StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
             RedundantCastEliminationStrategy(telemetry),  # CAST(x AS T) where x is T -> x
             CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             DisjunctionSimplificationStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),
-            NullabilityInferenceStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
             FunctionRewriteStrategy(telemetry),
             GroupKeyReductionStrategy(telemetry),

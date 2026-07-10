@@ -40,6 +40,11 @@ class LimitPushdownStrategy(OptimizationStrategy):
         LogicalPlanStepType.Order,
         LogicalPlanStepType.Set,
         LogicalPlanStepType.Union,
+        # CROSS JOIN UNNEST compiles to an Unnest node, not a Join - it still
+        # multiplies rows (one row in can become N rows out), so pushing a
+        # LIMIT below it onto the scan caps the wrong side of the expansion.
+        # Same reasoning as the Join case below, just a different node type.
+        LogicalPlanStepType.Unnest,
     }
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:

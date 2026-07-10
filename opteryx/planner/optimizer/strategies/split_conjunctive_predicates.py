@@ -71,11 +71,26 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
         else:
             new_nodes = [node]
 
+        # Only the first new node attaches to the original parent, so only that
+        # edge carries the original relationship — a join leg label identifies
+        # which side of the parent join this branch feeds, and re-adding the
+        # edge without it would erase the build-side decision. The remaining
+        # edges chain the split predicates together and have no relationship.
+        # Read from the pre-optimized tree: `optimized_plan` is rebuilt top-down
+        # from empty, so this edge does not exist in it yet.
+        parent_relationship = (
+            context.pre_optimized_tree.relationship(context.node_id, context.parent_nid)
+            if context.parent_nid
+            else None
+        )
+
         for i, new_node in enumerate(new_nodes):
             nid = random_string() if (i + 1) < len(new_nodes) else context.node_id
             context.optimized_plan.add_node(nid, LogicalPlanNode(**new_node.properties))
             if context.parent_nid:
-                context.optimized_plan.add_edge(nid, context.parent_nid)
+                context.optimized_plan.add_edge(
+                    nid, context.parent_nid, parent_relationship if i == 0 else None
+                )
             context.parent_nid = nid
 
         return context

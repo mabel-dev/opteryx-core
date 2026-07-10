@@ -419,8 +419,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 # Add join node and wire it
                 join_step_id = random_string()
                 inner_plan.add_node(join_step_id, join_step)
-                inner_plan.add_edge(step_id, join_step_id)
-                inner_plan.add_edge(right_step_id, join_step_id)
+                inner_plan.add_edge(step_id, join_step_id, "left")
+                inner_plan.add_edge(right_step_id, join_step_id, "right")
 
                 # Update step_id for next iteration
                 step_id = join_step_id

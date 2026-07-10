@@ -18,6 +18,8 @@ from opteryx.connectors import TableType
 
 logger = logging.getLogger(__name__)
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
+from opteryx.connectors.manifest_disk_cache import DiskCachingFileIO
+from opteryx.connectors.manifest_disk_cache import shared_cache
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
@@ -378,6 +380,14 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         else:
             # Callable factory: call with workspace and let errors propagate
             instance = factory(workspace=catalog_name, **self.kwargs)
+
+        # Serve manifest reads from the instance's local disk when one is configured.
+        # We wrap the FileIO the catalog chose for itself rather than constructing one,
+        # so the gcs/no-gcs decision stays owned by the catalog. `io` is read when each
+        # Dataset is created, which happens after this, so wrapping here takes effect.
+        cache = shared_cache()
+        if cache is not None:
+            instance.io = DiskCachingFileIO(instance.io, cache)
 
         self._catalog_cache[catalog_name] = instance
         return instance

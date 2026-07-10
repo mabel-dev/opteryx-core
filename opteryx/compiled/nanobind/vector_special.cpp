@@ -30,28 +30,12 @@
 #include "core/string_slot.h"
 #include "core/vector_alloc.h"
 #include "core/draken_bridge.h"
+#include "ops/string_subscript.h"   // char_subscript_rows — shared with the C-ABI kernel
 
 namespace nb = nanobind;
 
-// ---------------------------------------------------------------------------
-// Shared validity helpers
-// ---------------------------------------------------------------------------
-
-static inline bool sv_row_valid(const DrakenVector* dv, uint32_t i) noexcept {
-    return (dv->validity == nullptr) || ((dv->validity[i >> 3] >> (i & 7u)) & 1u);
-}
-
-// Lazily allocate an all-valid validity bitmap for n logical rows, then
-// mark row i as null.
-static inline void sv_mark_null(uint8_t*& validity, uint32_t i, uint32_t n) {
-    if (!validity) {
-        const uint32_t nb_bytes = (n + 7u) >> 3;
-        validity = static_cast<uint8_t*>(draken_malloc(nb_bytes));
-        if (!validity) throw std::bad_alloc();
-        std::memset(validity, 0xFFu, nb_bytes);
-    }
-    validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
-}
+// Validity helpers now live in draken/ops/string_result.h (sr_row_is_valid /
+// sr_mark_null), shared with the C-ABI extraction kernels.
 
 // ---------------------------------------------------------------------------
 // vector_map_access_string
@@ -78,45 +62,15 @@ static nb::object impl_map_access_string(nb::object vec_obj, nb::object key_obj)
             "vector_map_access_string: key must be an Integer64Vector");
 
     const int64_t index = static_cast<const int64_t*>(kv->data)[kv->selection[0]];
-    const uint32_t n    = dv->length;
-    const DrakenStringArena* arena =
-        static_cast<const DrakenStringArena*>(dv->data);
 
-    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-    auto* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-    if (!slots) throw std::bad_alloc();
-    std::memset(slots, 0, slots_sz);
-
-    uint8_t* validity = nullptr;
-    bool any_null = false;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (!sv_row_valid(dv, i)) {
-            str_init_null(&slots[i]);
-            sv_mark_null(validity, i, n);
-            any_null = true;
-            continue;
-        }
-        const DrakenStringSlot* src_slot = &arena->slots[dv->selection[i]];
-        const uint8_t* sdata = str_data(src_slot, arena->arena);
-        const uint32_t slen  = str_length(src_slot);
-        int64_t pos = (index >= 0) ? index : (int64_t)slen + index;
-        if (pos < 0 || pos >= (int64_t)slen) {
-            str_init_null(&slots[i]);
-            sv_mark_null(validity, i, n);
-            any_null = true;
-        } else {
-            str_init_inline(&slots[i], sdata + (uint32_t)pos, 1u);
-        }
-    }
-
-    if (!any_null && validity) { draken_free(validity); validity = nullptr; }
+    // The row loop lives in draken/ops/string_subscript.h — the SAME code the
+    // C-ABI kernel (draken/ops/kernels/extraction.cpp) runs.
+    draken::ops::StringRows rows = draken::ops::char_subscript_rows(dv, index);
 
     PyObject* out = draken_vector_own_string(
-        slots, nullptr, 0u, validity, n, DRAKEN_VARCHAR);
+        rows.slots, rows.arena, rows.arena_len, rows.validity, rows.length, rows.type);
     if (!out) {
-        draken_free(slots);
-        if (validity) draken_free(validity);
+        draken::ops::sr_free(rows);
         throw nb::python_error();
     }
     return nb::steal<nb::object>(out);

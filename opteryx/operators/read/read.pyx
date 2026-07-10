@@ -242,7 +242,12 @@ cdef class ReaderNode(BasePlanNode):
             self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
             self.telemetry.blobs_read += 1
             self.telemetry.rows_read += result_morsel.num_rows
+            # Query-wide (billing) and per-node (sensors/mermaid) counters are
+            # distinct: the shared telemetry sums every scan in the query, this
+            # node's readings hold only its own bytes. Same split as
+            # function_dataset.pyx.
             self.telemetry.bytes_processed += result_morsel.nbytes
+            self.readings["bytes_processed"] += result_morsel.nbytes
 
             yield result_morsel
             start_clock = time.monotonic_ns()

@@ -63,7 +63,12 @@ binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
                                           unsigned char result_precision,
                                           unsigned char left_unit,
                                           unsigned char right_unit);
-extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code);
+// Allocate a BC_EXTRACTION context. `nav` (nav_len bytes, may be null) is the raw
+// path/key from the binder; for JSON sub-ops it is converted to an RFC 6901 pointer
+// here and the converted form is stored. `index` is the subscript for the MAP_*
+// sub-ops. Throws std::invalid_argument on a malformed JSON path.
+extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code, const char* nav,
+                                            size_t nav_len, int64_t index);
 
 // Free allocated context (called during bytecode cleanup)
 void kernel_free_context(void* ctx);

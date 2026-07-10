@@ -66,8 +66,15 @@ namespace opteryx::engine {
 // DrakenStringSlot is a 16-byte POD (draken/core/string_slot.h) — treating it
 // as "just another fixed-width element" lets the row-store be one generic
 // byte-vector implementation instead of one per type.
+// NOTE for DRAKEN_BOOL: this is the ROW-STORE stride, not the vector width. A
+// BOOL vector's `data` is bit-packed (one bit per element, see buffers.h), but
+// the row-store holds one unpacked 0/1 byte per row so the generic byte-vector
+// append and local->global merge work unchanged. `append_row` unpacks on the way
+// in and the emit paths re-pack on the way out; both go through
+// `join_type_is_bool`. Never memcpy a BOOL payload by `elem_size`.
 inline size_t join_elem_size(DrakenType t) {
     switch (t) {
+        case DRAKEN_BOOL:                           return 1;
         case DRAKEN_INT8:                          return 1;
         case DRAKEN_INT16:                          return 2;
         case DRAKEN_INT32: case DRAKEN_FLOAT32:      return 4;
@@ -112,6 +119,25 @@ inline bool join_type_is_string(DrakenType t) {
     return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY;
 }
 
+inline bool join_type_is_bool(DrakenType t) {
+    return t == DRAKEN_BOOL;
+}
+
+// Read the bit for physical element `phys` out of a bit-packed BOOL vector.
+inline uint8_t join_read_bool_bit(const DrakenVector& v, uint32_t phys) {
+    const uint8_t* d = static_cast<const uint8_t*>(v.data);
+    return static_cast<uint8_t>((d[phys >> 3] >> (phys & 7)) & 1u);
+}
+
+// Allocate a zeroed bit-packed BOOL data buffer for `n` elements.
+inline uint8_t* join_alloc_bool_bits(uint32_t n) {
+    size_t nbytes = (static_cast<size_t>(n) + 7u) / 8u;
+    if (nbytes == 0) nbytes = 1;
+    uint8_t* bits = static_cast<uint8_t*>(draken_malloc(nbytes));
+    std::memset(bits, 0, nbytes);
+    return bits;
+}
+
 // One materialized payload column: `raw` holds `elem_size` bytes per row,
 // densely packed in row-store order (NOT the original morsel's own row
 // order — rows are appended as build morsels stream in).
@@ -129,6 +155,11 @@ struct JoinPayloadColumn {
             return;
         }
         uint32_t phys = v.selection[row];
+        if (join_type_is_bool(type)) {
+            // Bit-packed on the way in, one unpacked 0/1 byte per row in the store.
+            raw.push_back(join_read_bool_bit(v, phys));
+            return;
+        }
         if (join_type_is_string(type)) {
             // CANONICAL layout (buffers.h): a string vector's `data` points at a
             // DrakenStringArena STRUCT — slots and arena resolve through it.
@@ -373,12 +404,23 @@ struct JoinProbeOperator : Operator {
                 out->columns.push_back(std::move(c));
                 continue;
             }
-            void* data = draken_malloc(static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
-            uint8_t* dst = static_cast<uint8_t*>(data);
-            for (uint32_t i = 0; i < n; ++i) {
-                uint32_t br = matches[i].first;
-                std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
-                           col.raw.data() + static_cast<size_t>(br) * col.elem_size, col.elem_size);
+            void* data;
+            if (join_type_is_bool(col.type)) {
+                // Re-pack the row-store's unpacked bytes into the canonical bit layout.
+                uint8_t* bits = join_alloc_bool_bits(n);
+                for (uint32_t i = 0; i < n; ++i) {
+                    if (col.raw[matches[i].first])
+                        bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+                }
+                data = bits;
+            } else {
+                data = draken_malloc(static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
+                uint8_t* dst = static_cast<uint8_t*>(data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    uint32_t br = matches[i].first;
+                    std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
+                               col.raw.data() + static_cast<size_t>(br) * col.elem_size, col.elem_size);
+                }
             }
             uint32_t* sel = static_cast<uint32_t*>(
                 draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));

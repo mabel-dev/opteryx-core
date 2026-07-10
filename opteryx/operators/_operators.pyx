@@ -47,6 +47,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_COMPARE, BC_BINARY_OP, BC_CAST,
     BC_CMP_INLIST_INLINE, BC_INSTR_C_NATIVE, BC_C_NATIVE_FIXED, BC_C_NATIVE_STRING,
     BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_UNARY_OP, UOP_IS_NULL, UOP_IS_NOT_NULL, BC_FUNCTION,
+    BC_EXTRACTION,
     BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_COMPARE,
 )
 from opteryx.expression.evaluator._impl cimport (
@@ -2034,6 +2035,14 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
                 continue
             return False
         if op == BC_FUNCTION:
+            if (fl & BC_INSTR_C_NATIVE) != 0:
+                continue
+            return False
+        if op == BC_EXTRACTION:
+            # `->`, `->>` and str[i] carry a resolved C-ABI kernel whose path/index is
+            # bound into extraction_ctx. BC_EXTR_MAP_ARRAY never sets the flag (its
+            # child vector is unreachable from a DrakenVector*), so it lands here as
+            # False and routes to the GIL VM.
             if (fl & BC_INSTR_C_NATIVE) != 0:
                 continue
             return False

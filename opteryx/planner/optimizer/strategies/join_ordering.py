@@ -27,6 +27,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
+from .optimization_strategy import flip_join_leg_labels
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 DISABLE_NESTED_LOOP_JOIN: bool = features.disable_nested_loop_join
@@ -105,10 +106,8 @@ class JoinOrderingStrategy(OptimizationStrategy):
         if node.node_type == LogicalPlanStepType.Join and node.type == "inner":
             # Only reorder joins whose legs carry reader UUIDs. Joins without
             # them (window-function partitions, set-op / IN-subquery rewrites)
-            # are leg-resolved by relation-name matching in
-            # physical_plan._label_join_legs_by_relation, which a swap would
-            # break — and one side is a synthetic relation ($win-*, derived)
-            # whose statistics are meaningless for build-side selection anyway.
+            # have a synthetic relation ($win-*, derived) on one side whose
+            # statistics are meaningless for build-side selection anyway.
             # The non-equi / nested-loop classification below still runs for
             # these joins (it's a correctness concern), only the swap is gated.
             can_reorder = bool(node.left_readers) and bool(node.right_readers)
@@ -141,6 +140,7 @@ class JoinOrderingStrategy(OptimizationStrategy):
                 node.left_readers, node.right_readers = node.right_readers, node.left_readers
                 node.left_relation_names, node.right_relation_names = node.right_relation_names, node.left_relation_names
                 # fmt:on
+                flip_join_leg_labels(context.optimized_plan, context.node_id)
                 self.telemetry.optimization_inner_join_smallest_table_left += 1
                 context.optimized_plan[context.node_id] = node
 

@@ -945,6 +945,15 @@ class ParquetIOPipeline {
     // waiting for the consumer to drain — the consumer-bound signal.
     // ipc_bytes_serialized_: bytes written by serialize_decoded_column — the
     // first of the handoff copies (serialize → pool commit → deserialize).
+    // Only the pool path serializes, so this stays 0 for a direct-path scan
+    // (WP-6b); it measures a handoff strategy, NOT the scan's IO volume.
+    // bytes_fetched_: the scan's true IO volume — compressed bytes actually
+    // pulled from storage (HTTP range GET / local pread), summed across every
+    // decoded row group. Unlike the engine's rows*cols*8 bytes_in/bytes_out
+    // estimate (src/cpp/engine/executor.hpp telem_nbytes), this is measured at
+    // the point of transfer and so is unaffected by downstream filtering or
+    // LIMIT truncation. Both scan paths (native + trampoline) route their row
+    // groups through decode_one_row_group, so both accrue here.
     static constexpr int kHttpLatBuckets = 9;
     static constexpr uint64_t kHttpLatBoundsMs[kHttpLatBuckets - 1] =
         {1, 10, 50, 100, 250, 500, 1000, 5000};
@@ -953,6 +962,7 @@ class ParquetIOPipeline {
     std::atomic<uint64_t> http_lat_buckets_[kHttpLatBuckets] = {};
     std::atomic<uint64_t> worker_blocked_ns_{0};
     std::atomic<uint64_t> ipc_bytes_serialized_{0};
+    std::atomic<uint64_t> bytes_fetched_{0};
 
     // Record one fetch operation covering n_requests byte ranges that took
     // elapsed_ns wall time. n_requests=1 for a single GET, N for a batch.
@@ -1506,6 +1516,13 @@ class ParquetIOPipeline {
 
         result.read_ns = total_read_ns;
         result.decode_ns = total_decode_ns;
+        // Accrue this row group's transferred bytes onto the pipeline. Done here,
+        // not by the consumer, because the native scan Source drops MorselRef's
+        // telemetry fields on the floor — accumulating at the producer keeps both
+        // scan paths honest with one counter.
+        if (result.bytes_fetched > 0)
+            bytes_fetched_.fetch_add(static_cast<uint64_t>(result.bytes_fetched),
+                                     std::memory_order_relaxed);
         // Q24 latmat: evaluate the pushed pass-1 predicate on this worker thread
         // (parallel across the decode pool) and attach the survivor bitmap. No-op if
         // no predicate pushed / unsupported shape → consumer falls back to serial.
@@ -1767,6 +1784,11 @@ class ParquetIOPipeline {
     }
     uint64_t ipc_bytes_serialized() const {
         return ipc_bytes_serialized_.load(std::memory_order_relaxed);
+    }
+    // Compressed bytes read from storage across every row group this pipeline
+    // decoded. The scan's real IO volume; see bytes_fetched_ above.
+    uint64_t bytes_fetched() const {
+        return bytes_fetched_.load(std::memory_order_relaxed);
     }
     // Process-cumulative count of range requests re-issued on transient failure
     // (WP-5). Global across all pipelines/workers; not per-query.

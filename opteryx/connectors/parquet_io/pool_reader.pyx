@@ -536,6 +536,9 @@ cdef class CppIOPipeline:
              "count": self.pipeline.http_latency_bucket(i)}
             for i in range(n_buckets)
         ]
+        # `bytes_fetched` is the scan's real IO volume. The two ipc_bytes_* counters
+        # are NOT: they measure the pool-path handoff strategy, and are both 0 on a
+        # direct-path scan by design (WP-6a/WP-6b) — do not read them as IO volume.
         return {
             "spin_iterations": self.pipeline.spin_iterations(),
             "enqueue_count": self.pipeline.enqueue_count(),
@@ -545,6 +548,7 @@ cdef class CppIOPipeline:
             "http_retries": self.pipeline.http_retries(),
             "http_latency_histogram_ms": latency_histogram,
             "worker_blocked_ns": self.pipeline.worker_blocked_ns(),
+            "bytes_fetched": self.pipeline.bytes_fetched(),
             "ipc_bytes_serialized": self.pipeline.ipc_bytes_serialized(),
             "ipc_bytes_committed": self.committed_bytes,
             "cancelled_skips": self.pipeline.cancelled_skips(),
@@ -1225,6 +1229,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     src.cpp_to_orig = cpp_to_orig
 
     cdef string path_bytes_cpp
+    cdef FileStats probe_fs
     cdef const uint8_t* footer_buf_ptr
     cdef size_t footer_buf_size
     cdef RowGroupStats* rgp
@@ -1248,7 +1253,12 @@ cpdef IpcRowGroupSource open_ipc_source(
                 or fetch_url.startswith("http://")
                 or fetch_url.startswith("https://")):
             continue
-        if _PARSED_FOOTER_CACHE.try_get(path, &src.footer_map[0][path.encode('utf-8')]):
+        # Probe into a local: passing &footer_map[key] would default-construct an
+        # empty FileStats in the map even on a cache miss, and the loop below would
+        # mistake it for a parsed footer (zero row groups → the file's rows silently
+        # skipped when the bytes cache hits but the parsed cache missed).
+        if _PARSED_FOOTER_CACHE.try_get(path, &probe_fs):
+            src.footer_map[0][path.encode('utf-8')] = probe_fs
             continue
         if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
             continue
@@ -1527,6 +1537,10 @@ cdef class NativeScanPlan:
             "worker_blocked_ns": self.pipeline_ptr.worker_blocked_ns(),
             "spin_iterations": self.pipeline_ptr.spin_iterations(),
             "enqueue_count": self.pipeline_ptr.enqueue_count(),
+            # The scan's real IO volume. The native engine's per-operator
+            # bytes_in/bytes_out are a rows*cols*8 estimate of the morsel that
+            # survived filtering and LIMIT, so they cannot report this.
+            "bytes_fetched": self.pipeline_ptr.bytes_fetched(),
         }
 
     cpdef void close(self):

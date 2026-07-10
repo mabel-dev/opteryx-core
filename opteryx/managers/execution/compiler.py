@@ -1845,6 +1845,17 @@ def execute_native(plan, telemetry=None):
                             _io_diags.append(_diag)
                 if _io_diags:
                     telemetry._reading["io_scan_diagnostics"] = _io_diags
+                    # The scan's true IO volume, measured at transfer by the rugo IO
+                    # pipeline. Accumulated (not assigned): virtual-dataset scans
+                    # (operators/read/read.pyx) add their own materialized bytes to
+                    # this same counter, and a query can mix the two. The native
+                    # engine's per-operator bytes_in/bytes_out cannot be used here —
+                    # they are a rows*cols*8 estimate of the post-filter, post-LIMIT
+                    # morsel, so on this query they read 7.6KB for a 309-blob scan.
+                    telemetry.increase(
+                        "bytes_processed",
+                        sum(d.get("bytes_fetched", 0) for d in _io_diags),
+                    )
                     telemetry._reading["io_http_request_count"] = sum(
                         d.get("http_request_count", 0) for d in _io_diags
                     )

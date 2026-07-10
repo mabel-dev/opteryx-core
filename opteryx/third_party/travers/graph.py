@@ -23,6 +23,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import MissingDependencyError
 from opteryx.third_party.yyjson import dumps as json_dumps
 
@@ -113,7 +114,7 @@ class Graph(object):
             for nid, attr in self.nodes(data=True):
                 node_file.write(json_dumps({"nid": nid, "attributes": attr}) + b"\n")
 
-    def add_edge(self, source: str, target: str, relationship: Optional[str] = None):
+    def add_edge(self, source: str, target: str, relationship: Optional[str] = None) -> None:
         """
         Add or update the relationship of an existing edge in the graph
 
@@ -124,10 +125,16 @@ class Graph(object):
                 The target node
             relationship: string
                 The relationship to be added or updated
+
+        Raises:
+            InvalidInternalStateError:
+                If either endpoint is None. An edge with an undefined endpoint
+                cannot be traversed, so accepting one would corrupt the graph.
         """
         if source is None or target is None:
-            print("Trying to update edge with undefined nodes")
-            return False
+            raise InvalidInternalStateError(
+                f"Cannot add edge with an undefined node: source={source!r}, target={target!r}."
+            )
 
         # Check if the edge exists
         existing_edges = list(self._edges.get(source, ()))
@@ -145,7 +152,20 @@ class Graph(object):
 
         self._edges[source] = tuple(existing_edges)
         self._invalidate_caches()
-        return True
+
+    def relationship(self, source: str, target: str) -> Optional[str]:
+        """
+        The relationship on the edge source -> target, or None when the edge
+        does not exist or carries no relationship.
+
+        Callers that re-add an existing edge must read its relationship first
+        and pass it back to `add_edge`; the `relationship=None` default
+        overwrites, it does not preserve.
+        """
+        for existing_target, existing_relationship in self._edges.get(source, ()):
+            if existing_target == target:
+                return existing_relationship
+        return None
 
     def add_node(self, nid: str, node):
         """
@@ -432,10 +452,14 @@ class Graph(object):
                 ]
             self._edges = {k: v for k, v in self._edges.items() if len(v) > 0}
 
-            # wire up the old incoming and outgoing nodes, cartesian style
+            # wire up the old incoming and outgoing nodes, cartesian style.
+            # A relationship describes an edge's role with respect to its TARGET
+            # (e.g. "left"/"right" identify which leg of the target join an edge
+            # feeds), so the healed edge inherits the outgoing edge's relationship
+            # -- the removed node's own role at the surviving target.
             for out_nid in out_going:
                 for in_nid in in_coming:
-                    self.add_edge(in_nid[0], out_nid[1], in_nid[2])  # type: ignore
+                    self.add_edge(in_nid[0], out_nid[1], out_nid[2])  # type: ignore
 
             self._invalidate_caches()
 

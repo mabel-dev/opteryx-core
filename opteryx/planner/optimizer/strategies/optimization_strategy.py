@@ -19,6 +19,26 @@ def get_nodes_of_type_from_logical_plan(plan: LogicalPlan, types: Tuple[LogicalP
     return matches
 
 
+def flip_join_leg_labels(plan: LogicalPlan, join_nid: str) -> None:
+    """Exchange the 'left'/'right' labels on a join's ingoing edges.
+
+    A strategy that swaps a join's left/right node attributes (readers, columns,
+    relation names) MUST also call this. The edge labels are what the physical
+    plan reads to decide which leg it builds the hash table from; swapping the
+    attributes alone leaves the two disagreeing, and the build side silently
+    reverts to the pre-swap leg.
+
+    Edges an optimizer rewrite left unlabelled are skipped — the physical plan
+    infers those from the (already swapped) reader UUIDs.
+    """
+    opposite = {"left": "right", "right": "left"}
+    # Materialise before mutating: add_edge invalidates the edge caches.
+    for provider, _target, relation in list(plan.ingoing_edges(join_nid)):
+        flipped = opposite.get(relation)
+        if flipped is not None:
+            plan.add_edge(provider, join_nid, flipped)
+
+
 class OptimizerContext:
     """Context object to carry state"""
 

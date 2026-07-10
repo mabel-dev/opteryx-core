@@ -168,6 +168,30 @@ def test_update_existing_edge():
     assert updated, "The edge relationship was not updated correctly"
 
 
+def test_heal_preserves_outgoing_relationship():
+    """
+    A relationship labels an edge's role at its target. When a node is removed
+    with heal, the healed edge lands on the removed node's target, so it must
+    carry the removed node's outgoing relationship, not its incoming one.
+
+    aggregate --(None)--> subquery --("left")--> join
+    becomes   aggregate --("left")--> join
+    """
+    from opteryx.third_party.travers import Graph
+
+    g = Graph()
+    g.add_node("aggregate", {})
+    g.add_node("subquery", {})
+    g.add_node("join", {})
+    g.add_edge("aggregate", "subquery", None)
+    g.add_edge("subquery", "join", "left")
+
+    g.remove_node("subquery", heal=True)
+
+    assert "subquery" not in g.nodes()
+    assert ("aggregate", "join", "left") in g.edges()
+
+
 if __name__ == "__main__":  # pragma: no cover
     test_graph()
     test_outgoing_edges()
@@ -178,4 +202,5 @@ if __name__ == "__main__":  # pragma: no cover
     test_edge_deletion()
     test_node_deletion()
     test_update_existing_edge()
+    test_heal_preserves_outgoing_relationship()
     print("okay")

@@ -71,11 +71,26 @@ struct binary_op_ctx {
 
 /**
  * Context for BC_EXTRACTION operations.
- * Stores the sub-operation code for map/array/JSON extraction variants.
+ *
+ * Carries everything the extraction kernels need that is known at bind time, so
+ * the C ABI's `key` operand is unused: BC_EXTRACTION pops exactly one vector.
+ *
+ * The navigation path is stored as `nav_len` bytes placed IMMEDIATELY AFTER this
+ * struct in the same malloc block (see kernel_alloc_extraction_ctx), which keeps
+ * the generic kernel_free_context() -> free(ctx) correct. For JSON sub-ops the
+ * bytes are the RFC 6901 pointer ALREADY converted from dot-notation, so
+ * dotpath_to_jsonptr runs once per bind rather than once per morsel.
  */
 struct extraction_ctx {
-    int sub_op_code;  // BC_EXTR_MAP_STRING, BC_EXTR_MAP_ARRAY, BC_EXTR_JSON_PTR, BC_EXTR_JSON_VALUE
+    int32_t sub_op_code;  // BC_EXTR_MAP_STRING, BC_EXTR_MAP_ARRAY, BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY
+    int32_t nav_len;      // bytes of path/key following this struct (0 = none)
+    int64_t index;        // subscript for BC_EXTR_MAP_STRING / BC_EXTR_MAP_ARRAY
 };
+
+/* Path/key bytes trailing the struct. NOT NUL-terminated — pair with nav_len. */
+static inline const char* extraction_ctx_nav(const struct extraction_ctx* c) {
+    return (const char*)((const unsigned char*)c + sizeof(struct extraction_ctx));
+}
 
 /**
  * Context for BC_CASE (not in 9a scope, but defined for completeness).

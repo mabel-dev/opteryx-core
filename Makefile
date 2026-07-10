@@ -185,6 +185,7 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    -I$(CURDIR)/third_party/fastfloat \
 	    -I$(CURDIR)/third_party/fastfloat/fast_float \
 	    -I$(CURDIR)/third_party/ulfjack/ryu \
+	    -I$(CURDIR)/third_party/yyjson/src \
 	    $(CURDIR)/draken/ops/kernels/c_abi_test.cpp \
 	    $(CURDIR)/draken/core/vector_alloc.cpp \
 	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
@@ -202,6 +203,7 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    $(CURDIR)/draken/ops/kernels/binop_dispatch.cpp \
 	    $(CURDIR)/third_party/ulfjack/ryu/d2fixed.c \
 	    $(CURDIR)/third_party/ulfjack/ryu/d2s.c \
+	    $(CURDIR)/third_party/yyjson/src/yyjson.c \
 	    -o c_abi_test
 	@/tmp/opteryx-tests/c_abi_test
 	$(call print_green,"✓ C ABI parity test passed")
@@ -259,6 +261,10 @@ h2o: ## Run H2O db-benchmark vs DuckDB (groupby + join, size=small)
 
 h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
 	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size small --workload both
+
+signals: ## Run signals benchmark suite (synthetic security-findings dataset, no DuckDB baseline)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/signals/runner.py
 
 medicare1-fetch: ## Download and convert Medicare1 benchmark data
 	@$(PYTHON) tests/performance/medicare1/fetch_data.py

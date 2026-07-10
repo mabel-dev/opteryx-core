@@ -277,10 +277,32 @@ void test_draken_temporal_interval_op() { int64_t d[] = {0}; DrakenVector* l = c
 void test_draken_date_minus_date() { DrakenVector* l = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); DrakenVector* r = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(l, 0, sizeof(DrakenVector)); memset(r, 0, sizeof(DrakenVector)); l->type = r->type = DRAKEN_DATE32; VecResult res = draken_date_minus_date(nullptr, l, r); free(l); free(r); }
 void test_draken_interval_interval_op() { int64_t d[] = {0}; DrakenVector* l = create_int64_vector(d, 1); DrakenVector* r = create_int64_vector(d, 1); VecResult res = draken_interval_interval_op(nullptr, l, r); free_vector(l); free_vector(r); }
 void test_draken_ip_in_cidr() { DrakenVector* l = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); DrakenVector* r = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(l, 0, sizeof(DrakenVector)); memset(r, 0, sizeof(DrakenVector)); VecResult res = draken_ip_in_cidr(nullptr, l, r); free(l); free(r); }
-void test_draken_map_access_string() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); DrakenVector* k = create_int64_vector(d, 1); VecResult r = draken_map_access_string(nullptr, v, k); free_vector(v); free_vector(k); }
-void test_draken_array_map_access() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); DrakenVector* k = create_int64_vector(d, 1); VecResult r = draken_array_map_access(nullptr, v, k); free_vector(v); free_vector(k); }
-void test_draken_json_extract() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); DrakenVector* k = create_int64_vector(d, 1); VecResult r = draken_json_extract(nullptr, v, k); free_vector(v); free_vector(k); }
-void test_draken_pointer_extract() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); DrakenVector* k = create_int64_vector(d, 1); VecResult r = draken_pointer_extract(nullptr, v, k); free_vector(v); free_vector(k); }
+// Extraction kernels take every bind-time parameter in extraction_ctx and ignore
+// the ABI's `key` operand. An INT64 operand is not a document/string column, so
+// each must FAIL LOUD (error sentinel), never silently produce a vector.
+static void assert_extr_rejects_int64(VecResult (*fn)(void*, const DrakenVector*, const DrakenVector*),
+                                      int32_t sub_op) {
+    int64_t d[] = {1};
+    DrakenVector* v = create_int64_vector(d, 1);
+    extraction_ctx* ctx = kernel_alloc_extraction_ctx(static_cast<uint16_t>(sub_op), "a", 1, 0);
+    assert(ctx != nullptr && "extraction ctx allocation must succeed");
+    VecResult r = fn(ctx, v, nullptr);
+    assert(r.data == nullptr && "extraction kernel must reject a non-string operand");
+    free(ctx);
+    free_vector(v);
+}
+void test_draken_map_access_string() { assert_extr_rejects_int64(draken_map_access_string, 1); }
+void test_draken_json_extract() { assert_extr_rejects_int64(draken_json_extract, 4); }
+void test_draken_pointer_extract() { assert_extr_rejects_int64(draken_pointer_extract, 3); }
+// draken_array_map_access is a deliberate stub: it must ALWAYS fail loud, whatever
+// it is handed, because the binder never flags BC_EXTR_MAP_ARRAY as C-native.
+void test_draken_array_map_access() {
+    int64_t d[] = {1};
+    DrakenVector* v = create_int64_vector(d, 1);
+    VecResult r = draken_array_map_access(nullptr, v, nullptr);
+    assert(r.data == nullptr && "ARRAY subscript kernel must never succeed");
+    free_vector(v);
+}
 
 // ── Shape-parity tests (WP-03 regression) ──────────────────────────────────
 // Binary arith writes a DENSE output buffer but historically returned the
@@ -402,10 +424,10 @@ void test_registry_honesty() {
         assert(kernel_registry_lookup(name, &fn, &ctx) && fn != nullptr
                && "P9.0: real kernel must stay registered");
     }
-    // NOTE: extraction kernels (draken_map_access_string / _array_map_access /
-    // _json_extract / _pointer_extract) are KNOWN stubs intentionally still
-    // registered (binder requires them; executor ignores kernel_fn for BC_EXTRACTION).
-    // They are not asserted here — pending the P9 extraction-flip decision.
+    // NOTE: draken_map_access_string / _json_extract / _pointer_extract are real
+    // kernels dispatched by the nogil VM. draken_array_map_access stays a stub (the
+    // ARRAY child is unreachable from a DrakenVector*) and the binder never flags
+    // BC_EXTR_MAP_ARRAY as C-native, so it is never dispatched.
 }
 
 // P9.1a — unified binop dispatch (draken_binop), integer arithmetic core.

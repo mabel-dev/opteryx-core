@@ -9,7 +9,8 @@ import opteryx  # noqa: E402
 def _materialize(query: str):
     session = opteryx.session()
     try:
-        session.execute_to_arrow(query)
+        for _ in session.execute_to_morsels(query):
+            pass
         return session
     except Exception:
         session.close()

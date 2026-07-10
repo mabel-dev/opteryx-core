@@ -100,12 +100,16 @@ extern "C" VecResult vecresult_from_string_buffers(
     // Validate before we commit to the consolidated allocation. On any early
     // return we must still free the caller's buffers (ownership is transferred
     // on entry, per the header contract).
-    if (type != DRAKEN_VARCHAR && type != DRAKEN_NVARCHAR && type != DRAKEN_VARBINARY) {
+    // VARIANT is admitted because it IS German-string storage (buffers.h) — it is
+    // the result type of `->`, whose payload is JSON text in the same slot/arena
+    // layout as any other string column.
+    if (type != DRAKEN_VARCHAR && type != DRAKEN_NVARCHAR && type != DRAKEN_VARBINARY
+            && type != DRAKEN_VARIANT) {
         draken_free(slots);
         draken_free(arena);
         draken_free(validity);
         return draken_error_sentinel(
-            "vecresult_from_string_buffers: type must be VARCHAR/NVARCHAR/VARBINARY");
+            "vecresult_from_string_buffers: type must be VARCHAR/NVARCHAR/VARBINARY/VARIANT");
     }
 
     // --- Compute single-block layout -----------------------------------------

@@ -1,11 +1,16 @@
+import os
+import sys
+
 import pytest
 
-import opteryx
+sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
+
 from opteryx.exceptions import UnsupportedSyntaxError
+from tests.helpers import execute_and_get_arrow
 
 
 def test_interval_prefix_literal_still_returns_interval_type():
-    arrow_result = opteryx.session().execute_to_arrow("SELECT INTERVAL '1' MONTH AS iv")
+    arrow_result = execute_and_get_arrow("SELECT INTERVAL '1' MONTH AS iv")
     assert arrow_result.num_rows == 1
     assert arrow_result.column(0)[0].as_py() == [1, 0]
 
@@ -25,4 +30,4 @@ def test_non_interval_prefix_typed_literals_are_rejected(query):
         UnsupportedSyntaxError,
         match="Type-prefixed string literals are no longer supported",
     ):
-        opteryx.session().execute_to_arrow(query)
+        execute_and_get_arrow(query)

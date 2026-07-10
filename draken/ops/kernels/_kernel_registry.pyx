@@ -20,7 +20,7 @@ Context allocation (for parameterized kernels):
   free_context(ctx) -> None
 """
 
-from libc.stdint cimport uint8_t, uint16_t, uint32_t
+from libc.stdint cimport uint8_t, uint16_t, uint32_t, int32_t, int64_t
 from libc.stddef cimport size_t
 from cpython.ref cimport PyObject
 
@@ -39,7 +39,9 @@ cdef extern from "ops/kernels/kernel_registry.h":
     ctypedef binary_op_ctx_ binary_op_ctx
 
     ctypedef struct extraction_ctx_:
-        uint16_t sub_op_code
+        int32_t sub_op_code
+        int32_t nav_len
+        int64_t index
     ctypedef extraction_ctx_ extraction_ctx
 
     cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit)
@@ -58,7 +60,8 @@ cdef extern from "ops/kernels/kernel_registry.h":
         int start
     ctypedef substring_ctx_ substring_ctx
 
-    extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code)
+    extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code, const char* nav,
+                                                size_t nav_len, int64_t index) except +
     in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len)
     substring_ctx* kernel_alloc_substring_ctx(int start, int count, uint8_t has_count)
     void kernel_free_context(void* ctx)
@@ -131,18 +134,35 @@ def alloc_binary_op_ctx(int op_code, int left_scale=0, int right_scale=0,
     return <unsigned long long>ctx
 
 
-def alloc_extraction_ctx(int sub_op_code):
+def alloc_extraction_ctx(int sub_op_code, bytes nav=None, long long index=0):
     """
     Allocate context for extraction operation with sub_op_code dispatch.
 
+    Everything the extraction kernels need is bound here, so the C ABI's `key`
+    operand goes unused and BC_EXTRACTION pops exactly one vector.
+
     Args:
         sub_op_code: BCExtractionOpCode (BC_EXTR_MAP_STRING=1, etc.)
+        nav: raw path/key bytes, or None. For the JSON sub-ops this is converted
+            to an RFC 6901 pointer here — once per bind, not once per morsel.
+        index: subscript for the MAP_* sub-ops.
 
     Returns:
         Opaque integer pointer to extraction_ctx struct
         Caller must free via free_context() when done
+
+    Raises:
+        ValueError (from C++ std::invalid_argument) on a malformed JSON path.
     """
-    cdef extraction_ctx* ctx = kernel_alloc_extraction_ctx(<uint16_t>sub_op_code)
+    cdef const char* nav_ptr = NULL
+    cdef size_t nav_len = 0
+    if nav is not None:
+        nav_ptr = <const char*>nav
+        nav_len = <size_t>len(nav)
+    cdef extraction_ctx* ctx = kernel_alloc_extraction_ctx(
+        <uint16_t>sub_op_code, nav_ptr, nav_len, <int64_t>index)
+    if ctx == NULL:
+        return None
     return <unsigned long long>ctx
 
 

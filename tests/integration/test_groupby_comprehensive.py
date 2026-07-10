@@ -17,7 +17,13 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
-from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
+from tests.helpers import (
+    execute_and_get_arrow,
+    execute_and_get_rowcount,
+    execute_and_get_shape,
+    execute_and_fetch_all,
+    execute_on_session_and_get_arrow,
+)
 
 
 @pytest.fixture
@@ -31,7 +37,7 @@ class TestBasicGroupBy:
 
     def test_groupby_single_column_simple_count(self, session):
         """GROUP BY single column with COUNT(*)."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, COUNT(*) as cnt FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
@@ -41,7 +47,7 @@ class TestBasicGroupBy:
 
     def test_groupby_single_column_multiple_aggregates(self, session):
         """GROUP BY single column with multiple aggregation functions."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -66,7 +72,7 @@ class TestBasicGroupBy:
 
     def test_groupby_two_columns(self, session):
         """GROUP BY multiple columns."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -84,7 +90,7 @@ class TestBasicGroupBy:
 
     def test_groupby_three_columns(self, session):
         """GROUP BY with three columns."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -102,7 +108,7 @@ class TestBasicGroupBy:
 
     def test_groupby_orderby_agg_column(self, session):
         """GROUP BY with ORDER BY on aggregation column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -120,7 +126,7 @@ class TestBasicGroupBy:
 
     def test_groupby_orderby_multiple_columns(self, session):
         """GROUP BY with ORDER BY on multiple columns."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -135,11 +141,11 @@ class TestBasicGroupBy:
 
     def test_groupby_limit(self, session):
         """GROUP BY with LIMIT."""
-        result_no_limit = session.execute_to_arrow(
+        result_no_limit = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, COUNT(*) as cnt FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
-        result_limit_3 = session.execute_to_arrow(
+        result_limit_3 = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, COUNT(*) as cnt FROM testdata.satellites GROUP BY planetId LIMIT 3"
         ).to_pylist()
 
@@ -148,11 +154,11 @@ class TestBasicGroupBy:
 
     def test_groupby_offset(self, session):
         """GROUP BY with OFFSET."""
-        result_no_offset = session.execute_to_arrow(
+        result_no_offset = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, COUNT(*) as cnt FROM testdata.satellites GROUP BY planetId ORDER BY planetId"
         ).to_pylist()
 
-        result_offset_2 = session.execute_to_arrow(
+        result_offset_2 = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, COUNT(*) as cnt FROM testdata.satellites GROUP BY planetId ORDER BY planetId OFFSET 2"
         ).to_pylist()
 
@@ -165,7 +171,7 @@ class TestGroupByWithWhereClause:
 
     def test_groupby_with_where_numeric(self, session):
         """GROUP BY with WHERE filtering on numeric column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -181,7 +187,7 @@ class TestGroupByWithWhereClause:
 
     def test_groupby_with_where_string(self, session):
         """GROUP BY with WHERE filtering on string column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -197,7 +203,7 @@ class TestGroupByWithWhereClause:
 
     def test_groupby_with_where_multiple_conditions(self, session):
         """GROUP BY with multiple WHERE conditions."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -216,7 +222,7 @@ class TestGroupByWithHavingClause:
 
     def test_groupby_having_count_greater(self, session):
         """GROUP BY with HAVING on COUNT."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -232,7 +238,7 @@ class TestGroupByWithHavingClause:
 
     def test_groupby_having_sum_condition(self, session):
         """GROUP BY with HAVING on SUM."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -247,7 +253,7 @@ class TestGroupByWithHavingClause:
 
     def test_groupby_having_avg_condition(self, session):
         """GROUP BY with HAVING on AVG."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -263,7 +269,7 @@ class TestGroupByWithHavingClause:
 
     def test_groupby_having_multiple_conditions(self, session):
         """GROUP BY with multiple HAVING conditions."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -283,7 +289,7 @@ class TestAggregationFunctions:
 
     def test_count_star(self, session):
         """Test COUNT(*)."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, COUNT(*) as cnt FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
@@ -291,7 +297,7 @@ class TestAggregationFunctions:
 
     def test_count_column(self, session):
         """Test COUNT(column) - excludes NULLs."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 Company,
@@ -308,7 +314,7 @@ class TestAggregationFunctions:
 
     def test_count_distinct(self, session):
         """Test COUNT(DISTINCT column)."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -324,7 +330,7 @@ class TestAggregationFunctions:
 
     def test_sum(self, session):
         """Test SUM aggregation."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, SUM(radius) as total_radius FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
@@ -332,7 +338,7 @@ class TestAggregationFunctions:
 
     def test_avg(self, session):
         """Test AVG aggregation."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, AVG(radius) as avg_radius FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
@@ -343,7 +349,7 @@ class TestAggregationFunctions:
 
     def test_min(self, session):
         """Test MIN aggregation."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, MIN(radius) as min_radius FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
@@ -351,7 +357,7 @@ class TestAggregationFunctions:
 
     def test_max(self, session):
         """Test MAX aggregation."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT planetId, MAX(radius) as max_radius FROM testdata.satellites GROUP BY planetId"
         ).to_pylist()
 
@@ -359,7 +365,7 @@ class TestAggregationFunctions:
 
     def test_min_max_ordering(self, session):
         """MIN should be <= MAX for each group."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -380,7 +386,7 @@ class TestNullHandling:
 
     def test_groupby_with_nullable_key(self, session):
         """GROUP BY on column that may contain NULLs."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 Company,
@@ -398,7 +404,7 @@ class TestNullHandling:
 
     def test_count_null_vs_nonnull(self, session):
         """COUNT(*) vs COUNT(column) with NULLs."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 Company,
@@ -416,7 +422,7 @@ class TestNullHandling:
 
     def test_sum_with_nulls_excludes_them(self, session):
         """SUM should ignore NULL values."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 Company,
@@ -436,7 +442,7 @@ class TestNullHandling:
 
     def test_avg_with_nulls(self, session):
         """AVG should ignore NULL values."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 Company,
@@ -457,7 +463,7 @@ class TestGroupByCardinality:
 
     def test_groupby_low_cardinality(self, session):
         """GROUP BY with low cardinality (few unique groups)."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -472,7 +478,7 @@ class TestGroupByCardinality:
 
     def test_groupby_high_cardinality_single_column(self, session):
         """GROUP BY with high cardinality (many unique values)."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 name,
@@ -487,7 +493,7 @@ class TestGroupByCardinality:
 
     def test_groupby_perfect_hash(self, session):
         """GROUP BY where each row is its own group."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 name,
@@ -505,7 +511,7 @@ class TestGroupByOrdering:
 
     def test_groupby_orderby_key_asc(self, session):
         """GROUP BY with ORDER BY key ascending."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -521,7 +527,7 @@ class TestGroupByOrdering:
 
     def test_groupby_orderby_key_desc(self, session):
         """GROUP BY with ORDER BY key descending."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -537,7 +543,7 @@ class TestGroupByOrdering:
 
     def test_groupby_orderby_agg_asc(self, session):
         """GROUP BY with ORDER BY aggregate ascending."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -553,7 +559,7 @@ class TestGroupByOrdering:
 
     def test_groupby_orderby_agg_desc(self, session):
         """GROUP BY with ORDER BY aggregate descending."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -573,7 +579,7 @@ class TestGlobalAggregation:
 
     def test_global_count(self, session):
         """SELECT COUNT(*) with no GROUP BY."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             "SELECT COUNT(*) as cnt FROM testdata.satellites"
         ).to_pylist()
 
@@ -582,7 +588,7 @@ class TestGlobalAggregation:
 
     def test_global_multiple_aggregates(self, session):
         """SELECT multiple aggregates with no GROUP BY."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 COUNT(*) as cnt,
@@ -601,7 +607,7 @@ class TestGlobalAggregation:
 
     def test_global_count_distinct(self, session):
         """SELECT COUNT(DISTINCT) with no GROUP BY."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 COUNT(DISTINCT planetId) as distinct_planets
@@ -618,7 +624,7 @@ class TestExpressionGroupBy:
 
     def test_groupby_expression_arithmetic(self, session):
         """GROUP BY on arithmetic expression."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId * 10 as planet_times_10,
@@ -633,7 +639,7 @@ class TestExpressionGroupBy:
 
     def test_groupby_string_length(self, session):
         """GROUP BY on string function result."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 CASE WHEN LENGTH(name) > 5 THEN 'long' ELSE 'short' END as name_len,
@@ -652,7 +658,7 @@ class TestComplexGroupBy:
 
     def test_groupby_three_aggs_two_keys(self, session):
         """GROUP BY with 2 keys and 3 aggregates."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -672,7 +678,7 @@ class TestComplexGroupBy:
 
     def test_groupby_with_alias_reference(self, session):
         """GROUP BY using computed column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId as planet,
@@ -692,7 +698,7 @@ class TestGroupByEdgeCases:
 
     def test_groupby_single_row_result(self, session):
         """GROUP BY that produces exactly one row."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 COUNT(*) as cnt
@@ -707,7 +713,7 @@ class TestGroupByEdgeCases:
 
     def test_groupby_empty_input(self, session):
         """GROUP BY on empty input."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -722,7 +728,7 @@ class TestGroupByEdgeCases:
 
     def test_groupby_all_same_key(self, session):
         """GROUP BY where all rows have same key (single group)."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 COUNT(*) as cnt,
@@ -735,7 +741,7 @@ class TestGroupByEdgeCases:
 
     def test_groupby_numeric_column_names(self, session):
         """GROUP BY with result aliasing."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId as pid,
@@ -753,7 +759,7 @@ class TestGroupByDataTypes:
 
     def test_groupby_integer_key(self, session):
         """GROUP BY on integer column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 planetId,
@@ -767,7 +773,7 @@ class TestGroupByDataTypes:
 
     def test_groupby_string_key(self, session):
         """GROUP BY on string column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 name,
@@ -781,7 +787,7 @@ class TestGroupByDataTypes:
 
     def test_groupby_year_key(self, session):
         """GROUP BY on year/date-like column."""
-        result = session.execute_to_arrow(
+        result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
                 yearDiscovered,
