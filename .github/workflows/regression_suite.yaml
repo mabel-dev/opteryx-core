@@ -17,6 +17,8 @@ jobs:
         python-version: ["3.14t"]
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    permissions:
+      pull-requests: write
     steps:
 
       - name: Checkout code
@@ -44,6 +46,7 @@ jobs:
           python -m uv pip install --upgrade numpy cython setuptools-rust
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+          python -m uv pip install --upgrade pytest-reportlog rugo
 
       - name: Compile
         run: make compile
@@ -68,7 +71,9 @@ jobs:
           credentials_json: '${{ secrets.GCP_KEY }}'
 
       - name: Run Regression Tests
-        run: python -m coverage run -m pytest --color=yes
+        id: run_tests
+        continue-on-error: true
+        run: python -m coverage run -m pytest --report-log=results.jsonl --color=yes
         env:
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;"
           MINIO_END_POINT: "s3.eu-west-2.amazonaws.com"
@@ -84,3 +89,61 @@ jobs:
 
       - name: Check Coverage
         run: python -m coverage report -m
+
+      - name: Build pytest report
+        if: matrix.os == 'ubuntu-latest'
+        run: python .github/scripts/pytest_report.py results.jsonl report.md
+
+      - name: Find associated pull request
+        if: matrix.os == 'ubuntu-latest'
+        id: find_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+            });
+            const open = prs.data.find(pr => pr.state === "open");
+            return open ? open.number : "";
+          result-encoding: string
+
+      - name: Post or update pytest report comment
+        if: matrix.os == 'ubuntu-latest' && steps.find_pr.outputs.result != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("report.md", "utf8");
+            const issue_number = Number(process.env.PR_NUMBER);
+            const marker = "<!-- pytest-report -->";
+
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
+        env:
+          PR_NUMBER: ${{ steps.find_pr.outputs.result }}
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: exit 1
