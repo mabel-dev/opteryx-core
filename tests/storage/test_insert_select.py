@@ -29,14 +29,13 @@ def _read_snapshot(tmp_path, relation):
 
 
 def _read_parquet(dataset_path, file_entry):
-    import rugo
+    from rugo import parquet
 
     parquet_file = dataset_path / file_entry["file_path"]
     with open(parquet_file, "rb") as f:
-        result = rugo.parquet_reader.read_parquet(f.read())
-    if isinstance(result, list):
-        return result[0]
-    return result
+        with parquet.read_parquet(f.read()) as reader:
+            morsels = list(reader)
+    return morsels[0]
 
 
 def test_insert_select_literal(tmp_path):

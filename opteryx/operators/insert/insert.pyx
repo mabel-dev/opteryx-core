@@ -103,7 +103,7 @@ class InsertNode(BasePlanNode):
 
         source_names = morsel.column_names  # list[bytes]
         ordered_source_names = [source_names[s] for s in src_for_target]
-        morsel.select(ordered_source_names)
-        morsel.rename([n.encode("utf-8") if isinstance(n, str) else n
-                       for n in self.target_column_names])
+        morsel = morsel.select(ordered_source_names)
+        morsel = morsel.rename([n.encode("utf-8") if isinstance(n, str) else n
+                                 for n in self.target_column_names])
         return morsel

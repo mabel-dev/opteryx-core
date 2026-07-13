@@ -1642,12 +1642,13 @@ def plan_create_table(statement, **kwargs):
         if type_key not in type_mapping:
             raise UnsupportedSyntaxError(f"unsupported column type in CREATE TABLE: {type_key}")
 
-        # Map to LogicalCategory then to canonical ColumnType
+        # Map sqloxide type key to canonical SQL name, then resolve via the
+        # single authoritative SQL-name-to-ColumnType table (logical_type.py
+        # §14 vocabulary — LogicalCategory has no alias members for DOUBLE/BLOB).
         sql_type_str = type_mapping[type_key]
-        from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
-        from opteryx.types.logical_type import LogicalCategory as _LC
+        from opteryx.types.logical_type import parse_column_type
 
-        sql_type_ct = _CATEGORY_TO_CANONICAL.get(_LC[sql_type_str])
+        sql_type_ct = parse_column_type(sql_type_str)
 
         # Check for NOT NULL constraint
         col_nullable = True
@@ -1728,11 +1729,18 @@ def plan_insert(statement, **kwargs):
     table_name_parts = insert_stmt["table"]["TableName"]
     relation_name = ".".join(logical_planner_builders.build(p).value for p in table_name_parts)
 
-    # Explicit column list (may be empty/None)
+    # Explicit column list (may be empty/None). sqloxide represents each column
+    # reference as a compound-identifier part list; a plain (non-dotted) column
+    # name is a single-element list wrapping an {"Identifier": {"value": ...}}.
     explicit_columns = []
     for col in insert_stmt.get("columns") or []:
-        if isinstance(col, dict) and "value" in col:
-            explicit_columns.append(col["value"])
+        if (
+            isinstance(col, list)
+            and len(col) == 1
+            and isinstance(col[0], dict)
+            and "Identifier" in col[0]
+        ):
+            explicit_columns.append(col[0]["Identifier"]["value"])
         else:
             raise UnsupportedSyntaxError(
                 f"Unsupported column reference in INSERT column list: {col}"

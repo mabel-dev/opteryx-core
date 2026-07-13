@@ -100,7 +100,7 @@ def execute(
         # Insert IS on the push pipeline (as a sink), but produces a
         # non-tabular result via its `result` attribute. Drive the pipeline
         # to completion, then return the result.
-        _drain_pipeline(plan, collect=False)
+        _drain_pipeline(plan)
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
@@ -234,11 +234,27 @@ def explain(
         _tree_rows(top, "", index == len(tops) - 1, True, op_rows)
 
     def _row_count(operator):
-        # Scan nodes report their output via telemetry.rows_read rather than
-        # records_out (mirrors the MERMAID renderer).
+        # Scan nodes report their output via rows_read rather than records_out
+        # (mirrors the MERMAID renderer's get_node_stats): a scan is PULLED by
+        # drive_scan (next_morsel), not pushed, so records_out is never
+        # incremented on the scan node itself. rows_read instead comes from
+        # sensors() — which surfaces the trampoline scan's own ScanReadings
+        # (self.readings, flushed by close_source() in the driver teardown) —
+        # and ONLY falls back to the query-wide telemetry singleton when
+        # sensors() has nothing (the native-engine compile path, where the
+        # Cython scan node itself never executes and its own counters stay
+        # zero). Reading telemetry.rows_read unconditionally was wrong for a
+        # scan driven directly by this push pipeline (EXPLAIN ANALYZE /
+        # INSERT ... SELECT with a pushed-down predicate): that path always
+        # left the query-wide telemetry's rows_read at 0, so every such scan
+        # reported 0 rows even though its actual output was correct.
         count = int(getattr(operator, "records_out", 0) or 0)
         if count == 0 and getattr(operator, "is_scan", False):
-            count = int(getattr(getattr(operator, "telemetry", None), "rows_read", 0) or 0)
+            get_sensors = getattr(operator, "sensors", None)
+            sensed = get_sensors() if get_sensors is not None else {}
+            count = int(sensed.get("rows_read", 0) or 0)
+            if count == 0:
+                count = int(getattr(getattr(operator, "telemetry", None), "rows_read", 0) or 0)
         return count
 
     def _self_ms(operator):

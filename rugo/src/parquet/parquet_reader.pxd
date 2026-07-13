@@ -154,6 +154,7 @@ cdef extern from "decode.hpp":
         vector[vector[DecodedColumn]] row_groups  # [row_group][column]
         vector[string] column_names
         bint success
+        string error
 
     bint CanDecode(const string& path)
     bint CanDecode(const uint8_t* data, size_t size)

@@ -1314,7 +1314,12 @@ cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_grou
     _TEL["calls"] += 1
 
     if not result.success:
-        return None
+        # Fail loud with the specific reason (decompression error, corruption,
+        # bad footer) the decoder captured. success==false now means a genuine
+        # error — an absent column keeps success true and yields an empty morsel.
+        if result.error.size() > 0:
+            raise RuntimeError("parquet decode failed: " + result.error.decode("utf-8"))
+        raise RuntimeError("parquet decode failed: unknown error")
 
     # Get column names for the Morsel
     cdef list col_names = [name.decode("utf-8") for name in result.column_names]
@@ -1448,7 +1453,10 @@ def read_parquet(data, column_names=None, row_group_mask=None):
             None decodes every row group.
 
     Returns:
-        list of Morsels (one per row group), or None if reading failed.
+        list of Morsels (one per row group). Returns None only when there is no
+        data to decode (empty file / all row groups pruned). A genuine decode
+        failure (decompression error, corruption, bad footer) raises RuntimeError
+        with the specific reason — it never degrades silently to None.
     """
     cdef const uint8_t[::1] mem_view
 

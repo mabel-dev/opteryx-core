@@ -69,9 +69,23 @@ def test_explain_lists_optimizations():
 
 def test_explain_analyze_adds_stats_columns():
     names, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
-    assert names == ["tree", "details", "rows", "time_ms"]
+    assert names == ["tree", "details", "rows", "time_ms", "self_ms"]
     # the single scan's row count surfaces (5 nations in region 1)
     assert max(data["rows"]) == 5, data["rows"]
+
+
+def test_explain_analyze_filter_applies_predicate():
+    # EXPLAIN ANALYZE drives the fallback push-pipeline (serial_engine /
+    # pipeline_compiler), which calls FilterNode._push_impl directly — the
+    # native engine's WHERE execution never touches it. Regression guard for
+    # a bug where FilterNode had no _push_impl and silently dropped every row.
+    names, data = _explain("EXPLAIN ANALYZE SELECT * FROM $planets WHERE id > 2")
+    tree = data["tree"]
+    rows = data["rows"]
+    filter_idx = next(i for i, line in enumerate(tree) if "Filter" in line)
+    reader_idx = next(i for i, line in enumerate(tree) if "Reader" in line)
+    assert rows[reader_idx] == 9, rows
+    assert rows[filter_idx] == 7, rows
 
 
 def test_explain_mermaid_unchanged():

@@ -511,7 +511,18 @@ struct NativeParquetScanSource : Source {
             }
             if (!result.success) {
                 err.code = 1;
-                err.msg = "NativeParquetScanSource: parquet pipeline decode error";
+                if (result.error.empty()) {
+                    err.msg = "NativeParquetScanSource: parquet pipeline decode error";
+                } else {
+                    // Surface the pipeline's specific reason (e.g. a decompression
+                    // error) verbatim. ErrCtx::msg is a bare const char* that must
+                    // outlive this call and `result` is local, so stash it in a
+                    // thread_local (not a member: pull() runs on every dop worker
+                    // concurrently — a member would race).
+                    static thread_local std::string decode_err_buf;
+                    decode_err_buf = "NativeParquetScanSource: " + result.error;
+                    err.msg = decode_err_buf.c_str();
+                }
                 return SourceResult::FINISHED;
             }
             if (result.empty_filtered) continue;  // Phase 2 dict-skip; no rows — pull again

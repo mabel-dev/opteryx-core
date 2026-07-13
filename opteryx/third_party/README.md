@@ -7,28 +7,33 @@ This directory contains third-party Python, Cython, and wrapper integrations use
 The third-party code is organized into two locations:
 
 1. **`/third_party/`** (repository root)
-   - Contains C/C++ source code for third-party libraries
-   - These are the original library implementations
-   - Example: `third_party/cyan4973/xxhash.c`
+   - The single canonical home for all vendored C/C++ source, including the
+     compression libraries (`zstd`, `lz4`, `snappy`) shared by both the
+     `opteryx_core` and standalone `rugo` wheels.
+   - These are the upstream library implementations.
+   - Example: `third_party/cyan4973/xxhash.h` (header + `xxhash.c` impl stub)
 
 2. **`/opteryx/third_party/`** (this directory)
-   - Contains Python wrappers and Cython interfaces
+   - Contains only Python wrappers and Cython interfaces over the C/C++ that
+     lives in `/third_party/` — bindings, not vendored source.
    - Includes `.pyx` (Cython implementation) and `.pxd` (Cython interface) files
    - Also contains pure Python third-party modules
-   - Example: `opteryx/third_party/cyan4973/xxhash.pyx`
+   - Example: `opteryx/third_party/cyan4973/xxhash.pyx` wraps `third_party/cyan4973`
 
 ## Current Third-Party Libraries
 
 ### Compiled Extensions and Native Wrappers
 
-- **cyan4973** - xxHash fast hashing
+- **cyan4973** - xxHash fast hashing (Cython wrapper; C source in `third_party/cyan4973`)
 - **fastfloat** - Fast float parsing
-- **lz4** - LZ4 compression wrappers
-- **mabel** - Base encoding helpers
+- **mabel** - Base encoding helpers (base16/base64/base85)
 - **mbleven** - Owned Cython implementation of modified Levenshtein distance
-- **tdigest-c** - t-digest quantile sketch
-- **ulfjack** - Ryu floating point to string conversion
-- **yyjson** - JSON parsing wrappers
+- **pcg** - `pcg.pxd` binding only; C++ headers in `third_party/pcg`
+- **yyjson** - JSON parsing wrapper (Cython; C source in `third_party/yyjson`)
+
+> Compression libraries (`zstd`, `lz4`, `snappy`) and Ryu (`ulfjack`) have **no**
+> wrapper here — they are compiled straight from `third_party/` by the shared
+> build (`build_common.py`). Do not re-add empty placeholder directories for them.
 
 ### Pure Python Libraries
 

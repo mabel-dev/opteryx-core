@@ -80,7 +80,7 @@ def test_insert_multiple_rows_one_statement(tmp_path):
 
 def test_insert_round_trip_via_rugo(tmp_path):
     """INSERT rows and verify parquet file is readable via rugo."""
-    import rugo
+    from rugo import parquet
 
     _setup_workspace(tmp_path)
     session = opteryx.session()
@@ -107,15 +107,11 @@ def test_insert_round_trip_via_rugo(tmp_path):
     with open(parquet_file, "rb") as f:
         data = f.read()
         # Just verify we can read the parquet data without error
-        result = rugo.parquet_reader.read_parquet(data)
-        assert result is not None
-        # Result is a list of morsels; get the first one
-        if isinstance(result, list):
-            morsel = result[0]
-        else:
-            morsel = result
+        with parquet.read_parquet(data) as reader:
+            morsels = list(reader)
+        assert morsels
         # Verify it has 2 rows
-        assert len(morsel) == 2
+        assert len(morsels[0]) == 2
 
 
 def test_insert_two_statements_chain_snapshots(tmp_path):

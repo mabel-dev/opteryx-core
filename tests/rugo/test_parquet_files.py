@@ -87,6 +87,12 @@ def check_data(path: Path, raw: bytes) -> None:
     try:
         morsels = rp.read_parquet(raw)
     except Exception as exc:
+        # rugo fails loud on parquet features it does not implement (e.g.
+        # DATA_PAGE_V2) rather than silently degrading. That is a clean,
+        # honest rejection — classify it as SKIP, not FAIL.
+        if "unsupported parquet page type" in str(exc):
+            record("DATA", path.name, SKIP, str(exc).splitlines()[0])
+            return
         tb_line = traceback.format_exc().splitlines()[-2].strip()
         record("DATA", path.name, FAIL, f"{type(exc).__name__}: {exc}\n         {tb_line}")
         return

@@ -23,7 +23,10 @@
 // ---------------------------------------------------------------------------
 
 static bool CheckColumnCompatibility(const ColumnStats &col) {
-  if (col.codec != 0 && col.codec != 1 && col.codec != 6) return false;
+  // Supported codecs: UNCOMPRESSED(0), SNAPPY(1), GZIP(2), ZSTD(6), LZ4_RAW(7).
+  if (col.codec != 0 && col.codec != 1 && col.codec != 2 &&
+      col.codec != 6 && col.codec != 7)
+    return false;
 
   if (col.physical_type != "int32"     && col.physical_type != "int64" &&
       col.physical_type != "byte_array" && col.physical_type != "boolean" &&
@@ -109,13 +112,29 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size,
       table.row_groups[rg_idx].resize(ncols);
 
       for (size_t col_idx = 0; col_idx < ncols; col_idx++) {
-        table.row_groups[rg_idx][col_idx] = DecodeColumnFromMemory(
+        DecodedColumn col = DecodeColumnFromMemory(
             data, size, column_names[col_idx], row_group, (int)rg_idx);
+        // A column that failed with a specific reason (decompression error,
+        // corruption) is a hard error — fail loud with that reason rather than
+        // reporting table success with a silently-dropped column. A reason-less
+        // success==false (e.g. a column absent from this row group) is an honest
+        // outcome this API tolerates, so it does not fail the table.
+        if (!col.success && !col.error_message.empty()) {
+          table.success = false;
+          table.error = "row group " + std::to_string(rg_idx) + ", column '" +
+                        column_names[col_idx] + "': " + col.error_message;
+          return table;
+        }
+        table.row_groups[rg_idx][col_idx] = std::move(col);
       }
     }
     table.success = true;
+  } catch (const std::exception &e) {
+    table.success = false;
+    table.error = e.what();
   } catch (...) {
     table.success = false;
+    table.error = "unknown error decoding parquet";
   }
   return table;
 }
@@ -131,8 +150,12 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size) {
       }
     }
     return ReadParquet(data, size, all_column_names);
+  } catch (const std::exception &e) {
+    table.success = false;
+    table.error = e.what();
   } catch (...) {
     table.success = false;
+    table.error = "unknown error decoding parquet";
   }
   return table;
 }

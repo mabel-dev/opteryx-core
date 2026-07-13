@@ -12,8 +12,9 @@ enum class CompressionCodec {
     GZIP = 2,
     LZO = 3,
     BROTLI = 4,
-    LZ4 = 5,
-    ZSTD = 6
+    LZ4 = 5,      // legacy Hadoop-framed LZ4 (deprecated; unsupported — see compression.cpp)
+    ZSTD = 6,
+    LZ4_RAW = 7   // raw LZ4 block — what modern writers (Arrow/parquet-cpp) emit
 };
 
 // In-place variant: writes into caller-supplied buffer, resizing as needed.

@@ -27,6 +27,7 @@ from build_common import (
     build_ext,
     detect_architecture,
     draken_rugo_extensions,
+    get_lz4_vendor_sources,
     get_parquet_vendor_sources,
     include_dirs,
     is_linux,
@@ -758,17 +759,6 @@ _curl_link_args: list[str] = []
 if not _skip_build and not _DRAKEN_BUILD:
     _curl_include_dirs, _curl_link_args = resolve_libcurl()
 
-    for ext in extensions:
-        if ext.name == "rugo.parquet_reader":
-            ext.sources = list(ext.sources) + ["src/cpp/http_client.cpp"]
-            ext.include_dirs = list(ext.include_dirs) + _curl_include_dirs
-            ext.extra_link_args = list(ext.extra_link_args) + _curl_link_args
-            # Enable the HTTP/GCS code in filesystem.hpp / io_pipeline.hpp. The
-            # standalone rugo wheel (rugo/setup.py) never defines this, so its
-            # build is local-filesystem only and pulls in no libcurl.
-            ext.define_macros = list(ext.define_macros) + [("RUGO_ENABLE_HTTP", "1")]
-            break
-
     # HTTP client extension - MANDATORY (only add if not cleaning)
     extensions.append(
         Extension(
@@ -1201,6 +1191,8 @@ extensions.append(
                 "rugo/src/parquet/decode_column.cpp",
                 "rugo/src/parquet/decode.cpp",
                 "rugo/src/parquet/compression.cpp",
+                # miniz raw-DEFLATE inflate for the parquet GZIP codec.
+                "third_party/miniz/miniz_tinfl.cpp",
                 "rugo/src/parquet/metadata.cpp",
                 "rugo/src/parquet/bloom_filter.cpp",
                 "rugo/src/parquet/decode_encodings.cpp",
@@ -1209,6 +1201,7 @@ extensions.append(
                 "src/cpp/http_client.cpp",
             ]
             + get_parquet_vendor_sources()
+            + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
         ),
         include_dirs=(
             include_dirs
@@ -1216,9 +1209,11 @@ extensions.append(
                 "src/cpp",
                 "rugo/src/parquet",
                 "third_party/snappy",
-                "rugo/src/parquet/vendor/zstd",
-                "rugo/src/parquet/vendor/zstd/common",
-                "rugo/src/parquet/vendor/zstd/decompress",
+                "third_party/zstd",
+                "third_party/zstd/common",
+                "third_party/zstd/decompress",
+                "third_party/lz4",              # lz4.h
+                "third_party/miniz",            # miniz_tinfl.h / miniz.h
                 "third_party/bshoshany",
                 "third_party/moodycamel",
             ]

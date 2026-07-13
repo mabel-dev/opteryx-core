@@ -340,14 +340,31 @@ if OPTERYX_ENABLE_TSAN and not OPTERYX_ENABLE_ASAN and not is_win():
     C_FLAGS.extend(_tsan_flags)
     LD_EXTRA.append("-fsanitize=thread")
 
+# DIAGNOSTIC-ONLY, TEMPORARY: allocator-scope measurement pass (opt-in, dev
+# only, throwaway branch). Defines OPTERYX_ALLOC_TRACE so draken/core/alloc.h
+# records every draken_malloc/draken_aligned_malloc/draken_free call, tagged
+# with the caller's return address (see draken/core/alloc_trace.h for why —
+# a propagated owner tag would need cross-.so state this build deliberately
+# avoids). -g and keeping symbols (below) are required for the offline
+# addr2line/atos symbolication step to resolve call sites to file:line.
+# Never enabled for wheels.
+OPTERYX_ENABLE_ALLOC_TRACE = os.environ.get("OPTERYX_ENABLE_ALLOC_TRACE", "0").lower() in (
+    "1", "true", "yes",
+)
+if OPTERYX_ENABLE_ALLOC_TRACE and not is_win():
+    CPP_FLAGS.extend(["-DOPTERYX_ALLOC_TRACE", "-g"])
+    C_FLAGS.append("-g")
+    LD_EXTRA.append("-ldl")
+
 # MSVC LTO linker flag when requested
 if is_win() and OPTERYX_ENABLE_LTO:
     # '/LTCG' enables link-time code generation on MSVC
     LD_EXTRA.append("/LTCG")
 
 if (not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win()
-        and not OPTERYX_ENABLE_ASAN and not OPTERYX_ENABLE_TSAN):
-    # Sanitizer builds keep symbols so the race/leak reports are readable.
+        and not OPTERYX_ENABLE_ASAN and not OPTERYX_ENABLE_TSAN
+        and not OPTERYX_ENABLE_ALLOC_TRACE):
+    # Sanitizer/trace builds keep symbols so the reports are readable.
     CPP_FLAGS.append("-s")
     C_FLAGS.append("-s")
 
@@ -444,22 +461,24 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
 
 
 def get_zstd_vendor_sources():
-    """Return the vendored zstd sources so other extensions can link to the same files."""
-    RUGO_PARQUET = "rugo/src/parquet"
+    """Return the vendored zstd sources so other extensions can link to the same files.
+
+    Canonical single copy lives under ``third_party/zstd`` (shared by both wheels)."""
+    ZSTD = "third_party/zstd"
     sources = [
-        f"{RUGO_PARQUET}/vendor/zstd/common/entropy_common.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/common/fse_decompress.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/common/zstd_common.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/common/xxhash.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/common/error_private.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/decompress/zstd_decompress.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/decompress/zstd_decompress_block.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/decompress/huf_decompress.cpp",
-        f"{RUGO_PARQUET}/vendor/zstd/decompress/zstd_ddict.cpp",
+        f"{ZSTD}/common/entropy_common.cpp",
+        f"{ZSTD}/common/fse_decompress.cpp",
+        f"{ZSTD}/common/zstd_common.cpp",
+        f"{ZSTD}/common/xxhash.cpp",
+        f"{ZSTD}/common/error_private.cpp",
+        f"{ZSTD}/decompress/zstd_decompress.cpp",
+        f"{ZSTD}/decompress/zstd_decompress_block.cpp",
+        f"{ZSTD}/decompress/huf_decompress.cpp",
+        f"{ZSTD}/decompress/zstd_ddict.cpp",
     ]
     machine = detect_architecture()
     if machine in ("x86_64", "amd64"):
-        sources.append(f"{RUGO_PARQUET}/vendor/zstd/decompress/huf_decompress_amd64.S")
+        sources.append(f"{ZSTD}/decompress/huf_decompress_amd64.S")
     return sources
 
 
@@ -479,8 +498,10 @@ def get_text_writer_cast_sources():
 def get_zstd_compress_sources():
     """Return the vendored zstd COMPRESSION sources (single-threaded; no zstdmt,
     so no pool/threading deps). Compiled as C++ — byte-identical to upstream
-    zstd 1.5.5 lib/compress/*.c, renamed .cpp like the decompress set."""
-    RUGO_PARQUET = "rugo/src/parquet"
+    zstd 1.5.5 lib/compress/*.c, renamed .cpp like the decompress set.
+
+    Canonical single copy lives under ``third_party/zstd`` (shared by both wheels)."""
+    ZSTD = "third_party/zstd"
     names = [
         "zstd_compress",
         "zstd_compress_literals",
@@ -495,13 +516,12 @@ def get_zstd_compress_sources():
         "zstd_ldm",
         "zstd_opt",
     ]
-    return [f"{RUGO_PARQUET}/vendor/zstd/compress/{n}.cpp" for n in names]
+    return [f"{ZSTD}/compress/{n}.cpp" for n in names]
 
 
 def get_lz4_vendor_sources():
-    """Return vendored lz4 block-codec sources."""
-    RUGO_PARQUET = "rugo/src/parquet"
-    return [f"{RUGO_PARQUET}/vendor/lz4/lz4.c"]
+    """Return vendored lz4 block-codec sources (canonical copy: third_party/lz4)."""
+    return ["third_party/lz4/lz4.c"]
 
 
 def get_parquet_vendor_sources():
@@ -703,6 +723,10 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet/decode_column.cpp",
                     "rugo/src/parquet/decode.cpp",
                     "rugo/src/parquet/compression.cpp",
+                    # miniz raw-DEFLATE inflate for the parquet GZIP codec.
+                    # tinfl_decompress_mem_to_mem is self-contained in this TU
+                    # (no malloc, no other miniz object needed).
+                    "third_party/miniz/miniz_tinfl.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
                     "src/cpp/cpu_features.cpp",
                     "src/cpp/disk_io.cpp",
@@ -722,6 +746,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/csv/core/csv_column_builder.cpp",
                 ]
                 + get_parquet_vendor_sources()
+                + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
                 + get_zstd_compress_sources()
                 + [s for s in get_text_writer_cast_sources()
                    if s not in {
@@ -739,10 +764,12 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/jsonl/core",
                     "rugo/src/csv/core",
                     "third_party/snappy",
-                    "rugo/src/parquet/vendor/zstd",
-                    "rugo/src/parquet/vendor/zstd/common",
-                    "rugo/src/parquet/vendor/zstd/decompress",
-                    "rugo/src/parquet/vendor/zstd/compress",
+                    "third_party/zstd",
+                    "third_party/zstd/common",
+                    "third_party/zstd/decompress",
+                    "third_party/zstd/compress",
+                    "third_party/lz4",              # lz4.h
+                    "third_party/miniz",            # miniz_tinfl.h / miniz.h
                 ]
             ),
             depends=[

@@ -31,7 +31,7 @@
 #include <vector>
 
 #ifdef HAVE_ZSTD
-#include "vendor/zstd/zstd.h"
+#include "zstd.h"           // canonical vendored copy: third_party/zstd
 #endif
 
 // `created_by` footer string. Baked at build time from the package version

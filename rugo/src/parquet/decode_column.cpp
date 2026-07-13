@@ -359,8 +359,18 @@ int32_t PreScanPages(
       continue;
     }
 
-    // Stop at non-data pages
-    if (page_header.page_type != 0) break;
+    // Fail loud on unsupported page types. rugo decodes DATA_PAGE v1 (type 0)
+    // and DICTIONARY_PAGE (type 2) only. DATA_PAGE_V2 (type 3) and INDEX_PAGE
+    // (type 1) are not supported — silently breaking here would drop the page's
+    // rows and report a short/empty column (a silent-degrade); throw instead so
+    // the reason surfaces to the caller (§ fail fast, fail clean).
+    if (page_header.page_type != 0) {
+      throw std::runtime_error(
+          "unsupported parquet page type " +
+          std::to_string(page_header.page_type) +
+          " (only DATA_PAGE v1 and DICTIONARY_PAGE are supported; "
+          "DATA_PAGE_V2 is not)");
+    }
 
     int32_t page_values = page_header.num_values;
     if (page_values <= 0) break;
@@ -449,8 +459,10 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
   try {
     // Guard: only supported codecs.
+    // UNCOMPRESSED(0), SNAPPY(1), GZIP(2), ZSTD(6), LZ4_RAW(7).
     if (target_col->codec != 0 && target_col->codec != 1 &&
-        target_col->codec != 6) {
+        target_col->codec != 2 && target_col->codec != 6 &&
+        target_col->codec != 7) {
       return result;
     }
 
@@ -566,6 +578,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _dc_t0); }
             dict_data_ptr  = dict_decompressed_data.data();
             dict_data_size = dict_decompressed_data.size();
+          } catch (const std::exception &e) {
+            // Fail loud: surface the specific decompression reason rather than
+            // collapsing to a generic "Decode failed" upstream.
+            result.error_message = e.what();
+            return result;
           } catch (...) {
             return result;
           }
@@ -1112,7 +1129,15 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         cursor += header_size + (size_t)page_header.compressed_page_size;
         continue;
       }
-      if (page_header.page_type != 0) break;  // Not a DATA_PAGE – stop
+      if (page_header.page_type != 0) {
+        // Unsupported page type (DATA_PAGE_V2 / INDEX_PAGE): fail loud rather
+        // than silently dropping rows. See PreScanPages for the rationale.
+        throw std::runtime_error(
+            "unsupported parquet page type " +
+            std::to_string(page_header.page_type) +
+            " (only DATA_PAGE v1 and DICTIONARY_PAGE are supported; "
+            "DATA_PAGE_V2 is not)");
+      }
 
       int32_t page_values = page_header.num_values;
       if (page_values <= 0) break;  // Corrupt or empty page
@@ -1182,7 +1207,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           data_ptr  = page_decompressed_data.data();
           data_size = page_decompressed_data.size();
         } catch (const std::exception &e) {
-          break;  // Decompression failure: stop page loop, report partial success
+          // Decompression failure: capture the specific reason and stop the page
+          // loop. total_rows_all_pages will fall short of total_needed, so the
+          // success gate below yields success=false — a partial column never
+          // reports success. The message is surfaced verbatim by the caller.
+          result.error_message = e.what();
+          break;
         }
       }
 
@@ -2429,6 +2459,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
   } catch (const std::exception &e) {
     result.success = false;
+    if (result.error_message.empty()) result.error_message = e.what();
   } catch (...) {
     result.success = false;
   }

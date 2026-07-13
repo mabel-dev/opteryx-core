@@ -53,6 +53,11 @@ struct DecodedColumn {
   std::vector<int32_t> rep_levels;  // one entry per logical value (all pages)
   std::vector<int32_t> def_levels;  // one entry per logical value (all pages)
   bool success = false;
+  // Specific, actionable failure reason (e.g. a decompression error). Empty when
+  // the column decoded, or when it was an "unsupported shape" honest rejection
+  // (those stay message-less so the caller reports its generic decode failure).
+  // A non-empty message means a genuine error the caller should surface verbatim.
+  std::string error_message;
 
   // Flat arena for byte_array dict strings — eliminates one heap allocation per
   // unique dictionary value (replaces the old std::vector<std::string> dict_string).
@@ -110,6 +115,11 @@ struct DecodedTable {
   std::vector<std::vector<DecodedColumn>> row_groups; // [row_group][column]
   std::vector<std::string> column_names;
   bool success = false;
+  // Specific, actionable failure reason when success == false and the failure is
+  // a genuine error (a decompression error, corruption, or a metadata read
+  // failure). Empty when the table decoded, or when success==false is only an
+  // honest per-column non-result (e.g. an absent column) the API tolerates.
+  std::string error;
 };
 
 // Check if a parquet file can be decoded with our limited decoder

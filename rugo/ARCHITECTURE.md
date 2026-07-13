@@ -10,7 +10,9 @@ Internal architecture reference for the Parquet, JSONL, and CSV readers.
 
 - Reads from in-memory buffer (bytes/memoryview). No file I/O inside the decoder.
 - Two-pass design: metadata (footer parse, no column data) and decode (targeted column-chunk decode).
-- Zero external dependencies — zstd and lz4 are vendored.
+- Zero external dependencies — zstd, lz4 and snappy are vendored at the repo-root
+  `third_party/` and compiled in by the shared `build_common.py` (same canonical
+  copy for both the `opteryx_core` and standalone `rugo` wheels).
 
 ### Supported subset
 
@@ -34,15 +36,15 @@ Internal architecture reference for the Parquet, JSONL, and CSV readers.
 
 | File | Purpose |
 |------|---------|
-| `parquet_reader.pyx` | Cython Python edge; orchestration only |
+| `parquet_reader.pxi` | Cython Python edge; orchestration only (compiled via `rugo_native.pyx`) |
 | `metadata.{hpp,cpp}` | Footer parse; no column data read |
 | `decode.{hpp,cpp}` | Top-level decode dispatch |
 | `decode_column.cpp` | Per-column-chunk decode coordinator |
 | `decode_encodings.{hpp,cpp}` | PLAIN, RLE_DICTIONARY, DELTA_BINARY_PACKED, DELTA_BYTE_ARRAY |
 | `decode_page.{hpp,cpp}` | DATA_PAGE (V1) framing and repetition/definition levels |
-| `compression.{hpp,cpp}` | UNCOMPRESSED / SNAPPY / ZSTD decompression |
+| `compression.{hpp,cpp}` | UNCOMPRESSED / SNAPPY / GZIP / ZSTD / LZ4_RAW decompression |
 | `bloom_filter.{hpp,cpp}` | Bloom filter probe for row-group skip |
-| `vendor/` | Vendored zstd and lz4 |
+| `../../third_party/{zstd,lz4,snappy}` | Vendored compression libs (repo-root; shared by both wheels) |
 
 ---
 

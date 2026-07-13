@@ -1374,7 +1374,16 @@ class ParquetIOPipeline {
 
                 if (!decoded.success) {
                     result.success = false;
-                    result.error = "Decode failed for column: " + col_stats.name;
+                    // Surface the specific reason (e.g. a decompression error)
+                    // verbatim when the decoder captured one; otherwise fall back
+                    // to the generic message for honest "unsupported shape"
+                    // rejections that carry no reason.
+                    if (!decoded.error_message.empty()) {
+                        result.error = "Decode failed for column '" + col_stats.name +
+                                       "': " + decoded.error_message;
+                    } else {
+                        result.error = "Decode failed for column: " + col_stats.name;
+                    }
                     break;
                 }
 

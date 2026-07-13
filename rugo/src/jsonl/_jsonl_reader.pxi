@@ -125,7 +125,7 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
 
 
 # Native mmap disk IO (src/cpp/disk_io.cpp) — same reader used by the Parquet path
-# (rugo/src/parquet/parquet_reader.pyx:read_parquet_from_path). Avoids materialising the
+# (rugo/src/parquet/parquet_reader.pxi:read_parquet_from_path). Avoids materialising the
 # whole file as a Python bytes object: the OS pages the mapping in on demand instead of an
 # eager read() copy, which matters at JSONBench's larger tiers (up to 425GB uncompressed).
 cdef extern from "disk_io.h" nogil:
