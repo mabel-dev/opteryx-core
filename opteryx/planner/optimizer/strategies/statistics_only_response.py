@@ -108,14 +108,13 @@ def is_simple_aggregate(aggregate_node) -> bool:
 
         agg_func = getattr(aggregate, "value", "").upper()
 
-        # COUNT(*) or COUNT(col) - must not be DISTINCT/FILTER.
+        # COUNT(*) / COUNT(col) / COUNT(DISTINCT col) - must not have FILTER.
         # COUNT(*) reads from manifest record count.
-        # COUNT(col) reads from manifest record count minus null_count;
-        # the null_count availability check happens in `complete()`.
+        # COUNT(col) reads from manifest record count minus null_count.
+        # COUNT(DISTINCT col) reads from the exact KMV sketch when the merged
+        # sketch is complete and the column is null-free.
+        # Every stats-availability check happens in `complete()`.
         if agg_func == "COUNT":
-            if aggregate.duplicate_treatment == "Distinct":
-                return False
-
             if aggregate.condition is not None:
                 return False
 
@@ -126,8 +125,12 @@ def is_simple_aggregate(aggregate_node) -> bool:
             param = parameters[0]
             param_kind = getattr(param, "node_type", None)
             if param_kind == NodeType.WILDCARD:
+                # COUNT(*): DISTINCT over the wildcard is not answerable from stats.
+                if aggregate.duplicate_treatment == "Distinct":
+                    return False
                 continue
-            # Column reference: must carry a resolvable schema column with a name
+            # Column reference (COUNT(col) or COUNT(DISTINCT col)): must carry a
+            # resolvable schema column with a name.
             if getattr(param, "schema_column", None) is None:
                 return False
             if not getattr(param, "source_column", None):
@@ -545,16 +548,27 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         for idx, (agg_func, column_name, agg_node) in enumerate(agg_metadata):
             # Get the aggregate value based on type
             if agg_func == "COUNT":
-                total_rows = get_count_from_manifest(manifest)
-                if column_name:
+                if getattr(agg_node, "duplicate_treatment", None) == "Distinct":
+                    # COUNT(DISTINCT col): answerable only when the merged KMV
+                    # sketch is complete (< K). exact_distinct_count strips the
+                    # null-row sentinel, so the result already has SQL
+                    # COUNT(DISTINCT) semantics (nulls excluded) with no separate
+                    # null-count dependency. Any gap → bail to execution.
+                    if not column_name:
+                        return plan
+                    exact_distinct = manifest.exact_distinct_count(column_name)
+                    if exact_distinct is None:
+                        return plan
+                    result_value = exact_distinct
+                elif column_name:
                     # COUNT(col) = total_rows - nulls(col); requires every file
                     # in the manifest to carry null counts for the column.
                     null_count = manifest.get_total_null_count(column_name)
                     if null_count is None:
                         return plan
-                    result_value = total_rows - null_count
+                    result_value = get_count_from_manifest(manifest) - null_count
                 else:
-                    result_value = total_rows
+                    result_value = get_count_from_manifest(manifest)
                 result_type = _CT_INT64
             elif agg_func in ("MIN", "MAX"):
                 if not column_name:

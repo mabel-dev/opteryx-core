@@ -16,18 +16,25 @@
 """
 Filter Node — a SQL Query Execution Plan Node.
 
-WHERE execution itself is 100% native (src/cpp/engine/engine.hpp's
+WHERE execution on the primary query path is 100% native (src/cpp/engine/engine.hpp's
 ExprFilterOperator — see opteryx/managers/execution/compiler.py's FilterNode
 branch, which reads `.filter`/`._const_replacements` off this class and compiles
-them straight into the engine). This class is PLANNING-ONLY: it holds the
-predicate and the plan-time-provable `IDENTIFIER = LITERAL` const-replacements
-for the compiler to read. It carries no push/execute machinery of its own —
-BasePlanNode's defaults are inert no-ops, matching every other planning-only
-attribute holder in this package.
+them straight into the engine); `_push_impl` below is never invoked on that path.
+
+It IS invoked on the fallback push-pipeline (opteryx/managers/execution/serial_engine.py
+-> pipeline_compiler.py), used for EXPLAIN ANALYZE and INSERT INTO ... SELECT.
+`_push_impl` compiles `.filter` to a `CompiledBytecode` and applies it through the
+same evaluator kernels ProjectionNode/ParquetReadNode already use for their own
+fallback-path predicate work (`build_bytecode`/`lower`, `filter_morsel_c_native`,
+`execute_bytecode` + `Morsel.filter_mask`) — no second predicate evaluator.
 """
 
+from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
+from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
+from opteryx.expression.evaluator import execute_bytecode
+from opteryx.expression.evaluator.evaluation import filter_morsel_c_native
 
 # BasePlanNode is defined at the top of _operators.pyx (the umbrella unit) and
 # is in scope here via textual include.
@@ -97,12 +104,16 @@ cdef class FilterNode(BasePlanNode):
     cdef public object filter
     cdef public object post_filter_columns
     cdef public list _const_replacements
+    cdef public CompiledBytecode _compiled_predicate
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.filter = parameters.get("filter")
         self.post_filter_columns = parameters.get("pre_update_columns")
         self._const_replacements = _extract_constant_replacements(self.filter)
+        self._compiled_predicate = (
+            build_bytecode(lower(self.filter)) if self.filter is not None else None
+        )
 
     @property
     def config(self):  # pragma: no cover
@@ -111,3 +122,26 @@ cdef class FilterNode(BasePlanNode):
     @property
     def name(self):  # pragma: no cover
         return "Filter"
+
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
+        # carrier (recovering the EOS sentinel) and calls this; it catches any
+        # exception and surfaces it via the ErrCtx status path.
+        if morsel is _EOS_SENTINEL:
+            self.emit(morsel)
+            return
+
+        if morsel.num_rows == 0:
+            return
+
+        if self._compiled_predicate is None:
+            self.emit(morsel)
+            return
+
+        filtered = filter_morsel_c_native(self._compiled_predicate, morsel)
+        if filtered is None:
+            mask = execute_bytecode(self._compiled_predicate, morsel)
+            filtered = morsel.filter_mask(mask)
+
+        if filtered.num_rows:
+            self.emit(filtered)

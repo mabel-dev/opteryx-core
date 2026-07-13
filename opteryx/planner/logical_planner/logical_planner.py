@@ -1611,16 +1611,16 @@ def plan_create_table(statement, **kwargs):
         "Text": "VARCHAR",
         "String": "VARCHAR",
         "Char": "VARCHAR",
-        "Double": "DOUBLE",
-        "Float": "DOUBLE",
-        "Real": "DOUBLE",
+        "Double": "FLOAT",
+        "Float": "FLOAT",
+        "Real": "FLOAT",
         "Boolean": "BOOLEAN",
         "Bool": "BOOLEAN",
         "Date": "DATE",
         "Timestamp": "TIMESTAMP",
-        "Blob": "BLOB",
-        "Bytea": "BLOB",
-        "Bytes": "BLOB",
+        "Blob": "VARBINARY",
+        "Bytea": "VARBINARY",
+        "Bytes": "VARBINARY",
     }
 
     for col_def in column_defs:
@@ -1728,11 +1728,14 @@ def plan_insert(statement, **kwargs):
     table_name_parts = insert_stmt["table"]["TableName"]
     relation_name = ".".join(logical_planner_builders.build(p).value for p in table_name_parts)
 
-    # Explicit column list (may be empty/None)
+    # Explicit column list (may be empty/None). Each entry is a compound
+    # identifier path (mirrors `table_name_parts` above) — a list of
+    # `{"Identifier": {"value": ...}}` parts. INSERT column refs are always
+    # a single unqualified identifier, never dotted.
     explicit_columns = []
     for col in insert_stmt.get("columns") or []:
-        if isinstance(col, dict) and "value" in col:
-            explicit_columns.append(col["value"])
+        if isinstance(col, list) and len(col) == 1 and "Identifier" in col[0]:
+            explicit_columns.append(logical_planner_builders.build(col[0]).value)
         else:
             raise UnsupportedSyntaxError(
                 f"Unsupported column reference in INSERT column list: {col}"

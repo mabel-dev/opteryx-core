@@ -34,8 +34,8 @@ import struct as _struct
 
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64
-from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
-from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64, DRAKEN_BOOL
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
@@ -162,6 +162,101 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         f"_materialise_constant_literal: cannot materialise constant for literal "
         f"{value!r} (type {type(value).__name__})"
     )
+
+
+cdef object _as_exact_int(object value):
+    """Return ``value`` as a Python int if it represents one exactly, else None.
+
+    Accepts int and integral floats (2.0 -> 2); rejects fractional floats and
+    non-finite values so a non-integer literal never matches an integer column's
+    hash.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value.is_integer():
+            return int(value)
+    return None
+
+
+cpdef object hash_literal_kmv(object value, int physical_type):
+    """Hash a scalar literal into the SAME 64-bit space draken ``Vector.hash()``
+    produces for a COLUMN of ``physical_type``. Plan-time only.
+
+    Used by MinHash/KMV file elimination (``Manifest.prune_files``): a predicate
+    literal is hashed here and tested for membership in a file's exact KMV
+    sketch. Correctness contract: the returned hash MUST equal the hash the
+    column's values carry, so the literal is materialised in the column's
+    physical type (not its natural Python type) — e.g. ``intcol = 2.0`` hashes as
+    the integer 2, never as a float, so a file that contains 2 is never wrongly
+    pruned.
+
+    Returns a Python int (uint64), or ``None`` when the value cannot be
+    represented in ``physical_type`` (caller then performs NO pruning — safe).
+    The integer hash is value-based and width-independent (an int64
+    materialisation collides with the column's narrow-int hash for the same
+    value), so integer families route through the int64/uint64 constructors and
+    never raise on narrow overflow. This deliberately mirrors the type dispatch
+    in ``_materialise_constant_literal`` above (see that function if the physical
+    type mapping changes).
+    """
+    cdef object iv
+    cdef object raw
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        if physical_type != <int>DRAKEN_BOOL:
+            return None
+        return _draken_native.vector_from_bool_constant(value, 1).hash()[0]
+
+    # Integer-family columns — value-based, width-independent hash.
+    if physical_type in (<int>DRAKEN_INT8, <int>DRAKEN_INT16, <int>DRAKEN_INT32, <int>DRAKEN_INT64):
+        iv = _as_exact_int(value)
+        if iv is None:
+            return None
+        return _draken_native.vector_from_constant(iv, 1).hash()[0]
+    if physical_type in (<int>DRAKEN_UINT8, <int>DRAKEN_UINT16, <int>DRAKEN_UINT32, <int>DRAKEN_UINT64):
+        iv = _as_exact_int(value)
+        if iv is None or iv < 0:
+            return None
+        if iv > 0x7FFFFFFFFFFFFFFF:
+            return _draken_native.vector_uint64_from_constant(iv, 1).hash()[0]
+        return _draken_native.vector_from_constant(iv, 1).hash()[0]
+
+    # Floating-point columns — match the column width; a float32 value and a
+    # float64 value of the same magnitude carry different bit patterns.
+    if physical_type == <int>DRAKEN_FLOAT64:
+        if not isinstance(value, (int, float)):
+            return None
+        return _draken_native.vector_float64_from_constant(float(value), 1).hash()[0]
+    if physical_type == <int>DRAKEN_FLOAT32:
+        if not isinstance(value, (int, float)):
+            return None
+        return _draken_native.vector_float32_from_constant(float(value), 1).hash()[0]
+
+    # String / binary families — bytewise; the subtype selects the constructor.
+    if physical_type in (<int>DRAKEN_VARCHAR, <int>DRAKEN_NVARCHAR, <int>DRAKEN_VARBINARY):
+        if isinstance(value, str):
+            raw = (<str>value).encode("utf-8")
+        elif isinstance(value, bytes):
+            raw = <bytes>value
+        else:
+            return None
+        if physical_type == <int>DRAKEN_NVARCHAR:
+            return _draken_native.vector_nvarchar_from_constant(raw, 1).hash()[0]
+        if physical_type == <int>DRAKEN_VARBINARY:
+            return _draken_native.vector_varbinary_from_constant(raw, 1).hash()[0]
+        return _draken_native.vector_varchar_from_constant(raw, 1).hash()[0]
+
+    # DECIMAL / DATE32 / TIMESTAMP64 / TIME / INTERVAL and anything else: not yet
+    # supported for MinHash literal pruning (the literal's representation at this
+    # plan stage is ambiguous). Return None so the caller skips pruning.
+    return None
 
 
 cdef bint _exact_as_float32(object v) except -1:

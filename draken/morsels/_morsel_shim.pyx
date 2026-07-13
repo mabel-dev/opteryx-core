@@ -1,6 +1,8 @@
 # cython: language_level=3
 # Cython shim for draken.morsels.morsel — E.24 vtable bridge.
 
+import collections
+
 from libc.stdint cimport int32_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, calloc, free
 from libc.string cimport memcpy, memset
@@ -175,6 +177,19 @@ cdef shared_ptr[CxxMorsel] cxx_select_sp(shared_ptr[CxxMorsel] m, list names):
 cpdef object _select_for_test(object morsel, list names):
     """Test seam: exercise cxx_select_sp from Python (Morsel in/out via the bridges)."""
     return cxx_to_morsel(cxx_select_sp(morsel_to_cxx(<Morsel>morsel), names))
+
+
+# __iter__ row-tuple type cache, keyed by sanitised field-name tuple — the
+# same field names recur across every morsel of a query, and
+# collections.namedtuple compiles+execs a new class each call.
+cdef dict _ROW_TYPE_CACHE = {}
+
+cdef object _row_type(tuple safe_names):
+    cdef object Row = _ROW_TYPE_CACHE.get(safe_names)
+    if Row is None:
+        Row = collections.namedtuple("Row", safe_names)
+        _ROW_TYPE_CACHE[safe_names] = Row
+    return Row
 
 
 cdef class Morsel:
@@ -359,19 +374,27 @@ cdef class Morsel:
 
     def __iter__(self):
         """Iterate rows as named tuples. Field names are the column names."""
-        import collections
+        cdef Py_ssize_t ncols = self._num_columns()
         names = self.column_names
         str_names = [
             (n.decode("utf-8") if isinstance(n, bytes) else n)
             for n in names
         ]
         # Sanitise: namedtuple field names must be valid identifiers
-        safe = [n.replace(".", "_").replace(" ", "_") or f"col{i}"
-                for i, n in enumerate(str_names)]
-        Row = collections.namedtuple("Row", safe)
-        columns = [self._get_column(i).to_pylist() for i in range(self._num_columns())]
-        for row_idx in range(self.num_rows):
-            yield Row(*[col[row_idx] for col in columns])
+        safe = tuple(n.replace(".", "_").replace(" ", "_") or f"col{i}"
+                      for i, n in enumerate(str_names))
+        Row = _row_type(safe)
+        make = Row._make
+        columns = [self._get_column(i).to_pylist() for i in range(ncols)]
+        if ncols == 0:
+            # No columns to zip over, but a morsel can still carry a row
+            # count (e.g. COUNT(*)-only staging) — emit that many empty rows.
+            empty = ()
+            for _ in range(self.num_rows):
+                yield make(empty)
+            return
+        for values in zip(*columns):
+            yield make(values)
 
     def to_arrow(self):
         """Return a pyarrow.Table. Requires pyarrow (not a rugo dependency)."""

@@ -318,12 +318,18 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     record_count = 0
                     column_stats = None
 
+                # Load the optional KMV sketch sidecar (positional, aligned with
+                # schema.columns). Feeds cardinality estimation and MinHash-based
+                # file elimination; absent/stale sidecars simply leave it None.
+                min_k_hashes = self._load_sidecar_min_k_hashes(blob_name, schema)
+
                 entry = FileEntry(
                     file_path=blob_name,
                     file_format=file_format,
                     record_count=record_count,
                     file_size_in_bytes=file_size,
                     column_stats=column_stats,
+                    min_k_hashes=min_k_hashes,
                 )
                 file_entries.append(entry)
 

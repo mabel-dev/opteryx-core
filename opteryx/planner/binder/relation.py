@@ -283,7 +283,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # names; the InsertNode will permute to schema order at write time.
     if values_node is not None:
         target_relation_name = values_node.alias
-        columns = tuple(
+        columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
                 source_column=col.name,
@@ -291,7 +291,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 schema_column=col,
             )
             for col in target_columns_in_order
-        )
+        ]
         values_node.columns = columns
         schema = RelationSchema(
             name=target_relation_name,

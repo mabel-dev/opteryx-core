@@ -5,6 +5,7 @@ from .correlated_filters import CorrelatedFiltersStrategy
 from .cross_join_chain_reorder import CrossJoinChainReorderStrategy
 from .cross_join_filter_pushdown import CrossJoinFilterPushdownStrategy
 from .disjunction_simplification import DisjunctionSimplificationStrategy
+from .distinct_limit_bound import DistinctLimitBoundStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
 from .hash_map_variant import HashMapVariantStrategy
 from .join_elimination import JoinEliminationStrategy
@@ -39,6 +40,7 @@ __all__ = [
     "CrossJoinChainReorderStrategy",
     "CrossJoinFilterPushdownStrategy",
     "DisjunctionSimplificationStrategy",
+    "DistinctLimitBoundStrategy",
     "DistinctPushdownStrategy",
     "HashMapVariantStrategy",
     "JoinEliminationStrategy",

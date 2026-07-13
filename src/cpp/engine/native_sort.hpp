@@ -197,6 +197,93 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
     return true;
 }
 
+// Vergesort: run-detection pre-pass for the full-sort path.
+//
+// Scans perm[] for ascending/descending runs using the SAME comparator as the
+// final sort. Descending runs are reversed in place with a strict `<` test (not
+// `<=`), so ties are excluded from the run and the reversal never disturbs the
+// relative order of equal keys — the pre-pass stays stable. If the run count is
+// within THRESHOLD, the runs are merged and this returns true (sorted, caller
+// skips std::stable_sort). Otherwise returns false and perm[] is left with
+// whatever runs were scanned/reversed so far — the caller's stable_sort still
+// produces a correct result over that state, just without the early exit.
+//
+// This exploits pre-existing order in time-series or nearly-sorted data, giving
+// O(n) best case instead of O(n log n) comparison sort. Generalized from the
+// retired opteryx/compiled/morsel_ops/sort.pyx `vergesort_u64` — which only
+// covered a single flattened uint64 numeric key per LSD radix pass — to run
+// against the engine's general multi-key comparator directly, so it also covers
+// string / DECIMAL128 / multi-column ORDER BY, not just single numeric keys.
+template <typename Cmp>
+inline bool vergesort_perm(std::vector<uint32_t>& perm, Cmp&& cmp) {
+    size_t n = perm.size();
+    if (n < 2) return true;
+
+    // DuckDB uses sqrt(n) because its fallback is pdqsort (O(n log n)). Our
+    // fallback is std::stable_sort (also O(n log n) here), but the merge itself
+    // costs ceil(log2(runs)) passes; k=32 keeps the pre-pass cheap relative to a
+    // full sort even when it ultimately falls through.
+    const uint32_t THRESHOLD = 32;
+    const uint32_t MAX_RUNS = THRESHOLD + 2;
+    // +1 for the sentinel slot — the retired vergesort.h sized this array as
+    // exactly MAX_RUNS and wrote runs[num_runs] with num_runs able to reach
+    // MAX_RUNS, a one-word stack OOB write. Fixed here, not carried over.
+    uint32_t runs[MAX_RUNS + 1];
+    uint32_t num_runs = 0;
+    uint32_t i = 0;
+    const uint32_t nn = static_cast<uint32_t>(n);
+
+    while (i < nn) {
+        uint32_t run_start = i;
+
+        if (i + 1 >= nn) {
+            if (num_runs < MAX_RUNS) runs[num_runs++] = run_start;
+            break;
+        }
+
+        if (cmp(perm[i + 1], perm[i])) {
+            while (i + 1 < nn && cmp(perm[i + 1], perm[i])) ++i;
+            uint32_t lo = run_start, hi = i;
+            while (lo < hi) { std::swap(perm[lo], perm[hi]); ++lo; --hi; }
+        } else {
+            while (i + 1 < nn && !cmp(perm[i + 1], perm[i])) ++i;
+        }
+
+        if (num_runs >= MAX_RUNS) return false;
+        runs[num_runs++] = run_start;
+        ++i;
+    }
+    runs[num_runs] = nn;   // sentinel — safe: runs[] has MAX_RUNS+1 slots
+
+    if (num_runs > THRESHOLD) return false;
+    if (num_runs == 1) return true;   // already fully sorted
+
+    // Bottom-up merge of run boundaries, using cmp for the tie-preferring-lo test.
+    std::vector<uint32_t> tmp(n);
+    while (num_runs > 1) {
+        uint32_t out = 0;
+        for (uint32_t r = 0; r < num_runs; r += 2) {
+            uint32_t lo  = runs[r];
+            uint32_t mid = (r + 1 < num_runs) ? runs[r + 1] : nn;
+            uint32_t hi  = (r + 2 < num_runs) ? runs[r + 2] : nn;
+            if (r + 1 < num_runs) {
+                uint32_t a = lo, b = mid, k = 0;
+                while (a < mid && b < hi) {
+                    if (!cmp(perm[b], perm[a])) tmp[k++] = perm[a++];
+                    else tmp[k++] = perm[b++];
+                }
+                while (a < mid) tmp[k++] = perm[a++];
+                while (b < hi)  tmp[k++] = perm[b++];
+                std::memcpy(&perm[lo], tmp.data(),
+                           static_cast<size_t>(hi - lo) * sizeof(uint32_t));
+            }
+            runs[out++] = lo;
+        }
+        num_runs = out;
+    }
+    return true;
+}
+
 // Stable multi-key permutation over `perm` (pre-filled with row ids).
 // `take_first`: rows actually consumed downstream. SIZE_MAX (full sort) keeps
 // the stable order; a real limit uses partial_sort — O(n log k) instead of
@@ -232,6 +319,7 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
                           perm.end(), cmp);
         return;
     }
+    if (vergesort_perm(perm, cmp)) return;
     std::stable_sort(perm.begin(), perm.end(), cmp);
 }
 

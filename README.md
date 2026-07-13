@@ -6,6 +6,8 @@ This library is designed for fast, read-heavy analytical queries over Parquet-ba
 
 This project is opinionated toward the needs of `opteryx.app`. It is still useful as a standalone library if you want to query local Parquet, NDJSON, and CSV datasets, embed SQL into a Python service or notebook, or experiment with engine internals directly.
 
+This is a single repository housing three projects: **Opteryx** (the SQL engine), **Rugo** (the Parquet/CSV/JSONL file engine), and **Draken** (the native columnar vector substrate). Rugo and Draken are also published as a standalone `rugo` wheel for users who want the file engine without the SQL layer; `opteryx-core` bundles all three.
+
 ## Requirements
 
 - Python 3.13
@@ -79,8 +81,8 @@ Do not use `pip install .` as the primary development build path; `make compile`
 | Path | Purpose |
 |------|---------|
 | `opteryx/` | Python package, planner, operators, connectors, expression evaluation, and Cython modules |
-| `draken/` | Native columnar vector substrate used by the execution engine |
-| `rugo/` | Internal Parquet and JSONL reader used by scans and metadata paths |
+| `draken/` | Native columnar vector substrate used by the execution engine; ships inside both the `opteryx-core` and `rugo` wheels |
+| `rugo/` | Parquet, CSV, and JSONL file engine used by scans and metadata paths; also published standalone as the `rugo` wheel |
 | `src/` | Rust extension code, currently including the SQL dialect integration |
 | `tests/` | Unit, integration, fuzzing, sqllogictest, and benchmark harnesses |
 | `testdata/` | Local datasets and benchmark fixtures |

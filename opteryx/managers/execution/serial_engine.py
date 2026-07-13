@@ -100,7 +100,7 @@ def execute(
         # Insert IS on the push pipeline (as a sink), but produces a
         # non-tabular result via its `result` attribute. Drive the pipeline
         # to completion, then return the result.
-        _drain_pipeline(plan, collect=False)
+        _drain_pipeline(plan)
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR

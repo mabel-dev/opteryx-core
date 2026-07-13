@@ -74,6 +74,16 @@ def test_explain_analyze_adds_stats_columns():
     assert max(data["rows"]) == 5, data["rows"]
 
 
+def test_explain_analyze_filter_node_emits_filtered_rows():
+    """FilterNode._push_impl (the fallback push-pipeline path EXPLAIN ANALYZE
+    drives) must apply the predicate itself, not silently drop every row.
+    $planets has 9 rows; id > 2 keeps 7."""
+    names, data = _explain("EXPLAIN ANALYZE SELECT * FROM $planets WHERE id > 2")
+    tree = data["tree"]
+    filter_idx = next(i for i, line in enumerate(tree) if "Filter" in line)
+    assert data["rows"][filter_idx] == 7, data["rows"]
+
+
 def test_explain_mermaid_unchanged():
     names, data = _explain("EXPLAIN ANALYZE FORMAT MERMAID SELECT name FROM $planets")
     assert names == ["plan"]

@@ -113,6 +113,67 @@ def test_write_planets_roundtrip():
     assert out.column(b"name").to_pylist()[0] == "Mercury"
 
 
+def _write_empty_parquet(path: str) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema(
+        [
+            ("customer_id", pa.int64()),
+            ("event_timestamp", pa.int64()),
+            ("label", pa.string()),
+        ]
+    )
+    table = pa.table(
+        {
+            "customer_id": pa.array([], type=pa.int64()),
+            "event_timestamp": pa.array([], type=pa.int64()),
+            "label": pa.array([], type=pa.string()),
+        },
+        schema=schema,
+    )
+    pq.write_table(table, path)
+
+
+def test_read_zero_row_file_with_projection_preserves_columns(tmp_path):
+    """A projected read of a zero-row file must not drop the projected columns.
+
+    Regression test: the native decoder used to treat a zero-row column chunk
+    (no data page written) as a decode failure, silently dropping it from the
+    Morsel — callers projecting columns got back column_names == [] and
+    morsel.column(name) raised KeyError instead of returning an empty column.
+    """
+    path = str(tmp_path / "empty.parquet")
+    _write_empty_parquet(path)
+
+    with parquet.read_parquet(
+        path, columns=["customer_id", "event_timestamp"]
+    ) as reader:
+        morsels = list(reader)
+
+    assert len(morsels) == 1
+    m = morsels[0]
+    assert m.column_names == [b"customer_id", b"event_timestamp"]
+    assert len(m) == 0
+    assert m.column(b"customer_id").to_pylist() == []
+    assert m.column(b"event_timestamp").to_pylist() == []
+
+
+def test_read_zero_row_file_without_projection_preserves_columns(tmp_path):
+    """Same as above but for columns=None (read-all-columns path)."""
+    path = str(tmp_path / "empty_all.parquet")
+    _write_empty_parquet(path)
+
+    with parquet.read_parquet(path) as reader:
+        morsels = list(reader)
+
+    assert len(morsels) == 1
+    m = morsels[0]
+    assert m.column_names == [b"customer_id", b"event_timestamp", b"label"]
+    assert len(m) == 0
+    assert m.column(b"label").to_pylist() == []
+
+
 if __name__ == "__main__":
     test_read_all_columns_match_pyarrow()
     test_read_from_bytes_and_path_agree()

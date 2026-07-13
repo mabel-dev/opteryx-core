@@ -22,6 +22,23 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram, load
 from opteryx.types.schema import RelationSchema
 
+# Hash a NULL row carries in a draken ``Vector.hash()`` sketch. It is a single
+# constant across every column type (all null rows hash through the same
+# NULL_HASH sentinel), so it can be stripped from a KMV set to recover the
+# distinct NON-null values — which is what SQL COUNT(DISTINCT) counts. Sketches
+# produced by the older null-skipping populator simply never contain it, so the
+# discard is a harmless no-op there.
+_NULL_ROW_HASH: Optional[int] = None
+
+
+def _null_row_hash() -> int:
+    global _NULL_ROW_HASH
+    if _NULL_ROW_HASH is None:
+        import draken.draken_native as _dn
+
+        _NULL_ROW_HASH = _dn.vector_null_from_length(1).hash()[0]
+    return _NULL_ROW_HASH
+
 
 class Manifest:
     """
@@ -42,11 +59,30 @@ class Manifest:
         self.files = files
         self.schema = schema
 
+        # Per-file sketch buffers (min_k_hashes, histograms, min/max lists) are
+        # POSITIONAL, aligned to the schema column order AT CONSTRUCTION time.
+        # The scan's `schema` is later projected down to just the referenced
+        # columns, so resolving a sketch index against `self.schema` at use time
+        # would desync (a projected 1-column schema maps every name to 0). Snapshot
+        # the load-time column order here and use it for all positional sketch
+        # lookups (KMV cardinality, MinHash pruning); it stays valid regardless of
+        # later projection.
+        self._sketch_col_index: Dict[str, int] = {
+            col.name: i for i, col in enumerate(schema.columns) if getattr(col, "name", None)
+        }
+
         # Lazy-computed mappings
         self._field_id_to_name: Optional[Dict[int, str]] = None
         self._name_to_field_id: Optional[Dict[str, int]] = None
         self._column_bounds_cache: Dict[str, Tuple[Any, Any]] = {}
         self._distogram_cache: Dict[str, Distogram] = {}
+
+    def _sketch_index(self, column) -> Optional[int]:
+        """Positional index of a column into the per-file sketch buffers, using
+        the load-time column order (see ``__init__``). Robust to later projection
+        of ``self.schema``."""
+        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+        return self._sketch_col_index.get(col_name)
 
     # ================================================================
     # Basic Aggregates
@@ -188,10 +224,164 @@ class Manifest:
                             skip_file = True
                             break
 
+            # MinHash/KMV elimination — exact-set membership for equality-family
+            # predicates. Only fires when a file carries an EXACT sketch for the
+            # column (a sketch below K holds every distinct value hash); does
+            # nothing otherwise, so files without stats are never wrongly pruned.
+            if not skip_file:
+                for predicate in predicates:
+                    if self._minhash_prune_file(file_entry, predicate):
+                        skip_file = True
+                        break
+
             if not skip_file:
                 kept_files.append(file_entry)
 
         self.files = kept_files
+
+    # ================================================================
+    # MinHash / KMV exact-set optimizations
+    # ================================================================
+
+    # A sketch strictly below K holds every distinct value hash in the file — the
+    # column is fully represented and membership tests are exact. At K the sketch
+    # is a saturated approximation and must not be used to eliminate anything.
+    _KMV_K = 32
+
+    @staticmethod
+    def _normalize_literal(value):
+        """Unwrap a numpy/native scalar to a plain Python value."""
+        item = getattr(value, "item", None)
+        if item is not None:
+            return value.item()
+        return value
+
+    def _column_physical_int(self, column_name: str) -> Optional[int]:
+        """Integer DrakenType tag for a column's physical type, or None."""
+        for col in self.schema.columns:
+            if col.name == column_name:
+                col_type = getattr(col, "column_type", None)
+                physical = getattr(col_type, "physical", None) if col_type is not None else None
+                if physical is None:
+                    return None
+                return int(physical.value)
+        return None
+
+    def _minhash_prune_file(self, file_entry, predicate) -> bool:
+        """Return True if ``file_entry`` cannot satisfy ``predicate``, proven via
+        the file's exact KMV sketch.
+
+        Handles the equality family only:
+          - ``col = v``      prune when v's hash is absent from the exact sketch.
+          - ``col IN (…)``   prune when no listed value's hash is in the sketch.
+          - ``col != v``     prune when the file's only distinct value is v.
+          - ``col NOT IN(…)``prune when every distinct value is in the excluded set.
+
+        Conservative throughout: any uncertainty (no sketch, saturated sketch,
+        un-hashable literal, non-identifier operand) returns False (keep file).
+        NULLs are safe — a file with nulls carries the null sentinel in its
+        sketch, which blocks the ``!=`` / ``NOT IN`` "all rows excluded" cases
+        (correctly, since a null row is neither included nor excluded) without
+        ever affecting the ``=`` / ``IN`` membership tests.
+        """
+        from opteryx.expression import NodeType
+        from opteryx.compiled.expression.compiled_expression import hash_literal_kmv
+
+        if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+            return False
+        op = predicate.value
+        if op not in ("Eq", "NotEq", "InList", "NotInList"):
+            return False
+        if (
+            predicate.left.node_type != NodeType.IDENTIFIER
+            or predicate.right.node_type != NodeType.LITERAL
+        ):
+            return False
+
+        column_name = predicate.left.source_column
+        field_id = self._sketch_index(column_name)
+        if field_id is None:
+            return False
+
+        if not file_entry.min_k_hashes or field_id >= len(file_entry.min_k_hashes):
+            return False
+        sketch = file_entry.min_k_hashes[field_id]
+        if sketch is None or len(sketch) >= self._KMV_K:
+            # Absent or saturated — not an exact representation.
+            return False
+        sketch_set = set(sketch)
+
+        physical = self._column_physical_int(column_name)
+        if physical is None:
+            return False
+
+        if op in ("Eq", "NotEq"):
+            values = [self._normalize_literal(predicate.right.value)]
+        else:
+            raw = predicate.right.value
+            if not isinstance(raw, (list, tuple, set, frozenset)):
+                return False
+            values = [self._normalize_literal(v) for v in raw]
+            if not values:
+                return False
+
+        hashes = []
+        for v in values:
+            if v is None:
+                # A NULL in an equality-family list can't be reasoned about via
+                # the value sketch — bail rather than risk an unsound prune.
+                return False
+            h = hash_literal_kmv(v, physical)
+            if h is None:
+                return False  # unsupported/non-representable literal — keep file
+            hashes.append(h)
+        hash_set = set(hashes)
+
+        if op == "Eq":
+            return hashes[0] not in sketch_set
+        if op == "InList":
+            return sketch_set.isdisjoint(hash_set)
+        if op == "NotEq":
+            return sketch_set == {hashes[0]}
+        # NotInList
+        return sketch_set.issubset(hash_set)
+
+    def exact_distinct_count(self, column, *, exclude_nulls: bool = True) -> Optional[int]:
+        """Exact number of distinct values for a column, or None if it can't be
+        proven exact.
+
+        Exact only when EVERY surviving file carries a KMV sketch for the column
+        and the merged distinct-hash set stays below K — a merged set below K is
+        complete (no file saturated, nothing truncated), so its size is the true
+        distinct count. At K or above the sketch is an approximation and this
+        returns None.
+
+        ``exclude_nulls`` (default True) strips the null-row sentinel, giving SQL
+        COUNT(DISTINCT) semantics (nulls excluded) with no reliance on separately
+        tracked null counts. Pass ``exclude_nulls=False`` for ``SELECT DISTINCT``
+        row-count semantics, where a NULL is one distinct row: the returned count
+        then equals exactly the number of rows ``SELECT DISTINCT col`` emits.
+        """
+        field_id = self._sketch_index(column)
+        if field_id is None:
+            return None
+        if not self.files:
+            return 0
+
+        merged: set = set()
+        for file_entry in self.files:
+            if not file_entry.min_k_hashes or field_id >= len(file_entry.min_k_hashes):
+                return None
+            file_hashes = file_entry.min_k_hashes[field_id]
+            if file_hashes is None:
+                return None
+            merged.update(file_hashes)
+            if len(merged) >= self._KMV_K:
+                # Merged set saturated — completeness can no longer be guaranteed.
+                return None
+        if exclude_nulls:
+            merged.discard(_null_row_hash())
+        return len(merged)
 
     # ================================================================
     # File Accessors
@@ -327,9 +517,8 @@ class Manifest:
         K = 32
         HASH_RANGE = 2**64
 
-        # identity may be bytes; resolve to str for field mapping
-        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
-        field_id = self._resolve_field_id(col_name)
+        # Sketch buffers are positional against the load-time schema.
+        field_id = self._sketch_index(column)
         if field_id is None:
             return None
 

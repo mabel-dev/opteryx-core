@@ -53,6 +53,7 @@ from opteryx.planner.optimizer.strategies import (
     JoinPlanningStrategy,
     JoinRewriteStrategy,
     LimitEliminationStrategy,
+    DistinctLimitBoundStrategy,
     LimitFilesPruningStrategy,
     LimitPushdownStrategy,
     ManifestPruningStrategy,
@@ -161,6 +162,10 @@ class OptimizerVisitor:
             TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
             LimitPushdownStrategy(telemetry),
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
+            # Inject an exact LIMIT above a single-column DISTINCT proven small by
+            # the KMV sketch, so the scan early-terminates once all distinct values
+            # are seen. After the limit-movement strategies so it isn't re-collected.
+            DistinctLimitBoundStrategy(telemetry),
             #            EmptyTableStrategy(telemetry),
             PredicateOrderingStrategy(telemetry),
             RedundantOperationsStrategy(telemetry),

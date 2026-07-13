@@ -2460,6 +2460,24 @@ DecodedColumn DecodeColumnFromMemory(const uint8_t *data, size_t size,
     }
     if (!target_col) return result;
 
+    // A genuinely empty column chunk (0 rows in this row group) may have no
+    // data page at all -- some writers omit the page entirely, leaving
+    // data_page_offset/total_compressed_size unset (<= 0). That's not a
+    // decode failure: return a successful, empty (0-row) column so a
+    // projected column survives with 0 rows instead of vanishing from the
+    // Morsel (which used to raise a confusing "column not found" on read).
+    if (target_col->num_values == 0) {
+      result.type = target_col->physical_type;
+      if (target_col->physical_type == "fixed_len_byte_array") {
+        result.type = (target_col->type_length > 8) ? "int128" : "int64";
+      }
+      result.max_rep_level = target_col->max_repetition_level;
+      result.max_def_level = target_col->max_definition_level;
+      result.num_rows = 0;
+      result.success = true;
+      return result;
+    }
+
     int64_t offset     = target_col->data_page_offset;
     int64_t total_size = target_col->total_compressed_size;
     if (offset < 0 || total_size <= 0) return result;
