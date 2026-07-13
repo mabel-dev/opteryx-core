@@ -514,11 +514,16 @@ class _Compiler:
             const_scalar_vecs.append(vec)
         return const_col_idx, const_scalar_vecs
 
-    def _add_computed(self, p, eval_nodes, layout):
+    def _add_computed(self, p, eval_nodes, layout, preserve_shape=False):
         """Append one ExprProject per computed expression (bind order preserved —
         later programs may reference earlier outputs). DECIMAL/TIMESTAMP results
         get their plan-declared logical descriptor re-attached natively at the
-        operator boundary. Returns the grown layout."""
+        operator boundary. Returns the grown layout.
+
+        ``preserve_shape`` keeps a compressed computed result's encoding at the
+        projection boundary (no force-densify). Set ONLY when every column added by
+        this call feeds a compression-aware consumer — currently just computed
+        GROUP BY / DISTINCT keys, whose sole consumer is the group/distinct sink."""
         from opteryx.expression.evaluator import compile_eval_nodes
         from opteryx.operators._operators import bytecode_ops_all_c_native
 
@@ -574,7 +579,8 @@ class _Compiler:
             if ct is not None:
                 self._types = getattr(self, "_types", None) or {}
                 self._types[identity] = ct.physical
-            self.nplan.add_expr_project(p, bc, layout, identity, logical)
+            self.nplan.add_expr_project(p, bc, layout, identity, logical,
+                                        preserve_shape=preserve_shape)
             layout.append(identity)
         return layout
 
@@ -723,7 +729,12 @@ class _Compiler:
                 if sc is not None and sc.identity is not None and sc.identity not in layout:
                     computed_keys.append(grp)
             if computed_keys:
-                layout = self._add_computed(p, computed_keys, layout)
+                # Computed GROUP BY keys feed ONLY the group/distinct sink, which is
+                # compression-aware (native_group_sinks.hpp keys each physical unique
+                # once) — keep the key column's compressed shape end-to-end instead of
+                # force-densifying at the projection boundary.
+                layout = self._add_computed(p, computed_keys, layout,
+                                            preserve_shape=True)
             key_idx = []
             for key_identity in group_cols:
                 if key_identity not in layout:

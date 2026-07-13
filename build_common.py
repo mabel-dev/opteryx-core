@@ -623,6 +623,10 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/binary_op_temporal.cpp",
                 "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
                 "draken/ops/kernels/function_kernels.cpp",  # Phase 9a-fn: scalar function kernels (C ABI)
+                "draken/ops/kernels/string_trim.cpp",  # Phase 9a-fn: TRIM/LTRIM/RTRIM (C ABI)
+                "draken/ops/kernels/string_reverse_initcap.cpp",  # Phase 9a-fn: REVERSE/INITCAP (C ABI)
+                "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
+                "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
                 # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
@@ -679,6 +683,10 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/binary_op_temporal.cpp",
                 "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
                 "draken/ops/kernels/function_kernels.cpp",  # Phase 9a-fn: scalar function kernels (C ABI)
+                "draken/ops/kernels/string_trim.cpp",  # Phase 9a-fn: TRIM/LTRIM/RTRIM (C ABI)
+                "draken/ops/kernels/string_reverse_initcap.cpp",  # Phase 9a-fn: REVERSE/INITCAP (C ABI)
+                "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
+                "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
                 "src/cpp/cpu_features.cpp",

@@ -1,5 +1,9 @@
 """
-Tests for distinct_with_draken function.
+Tests for the low-level distinct() morsel op (opteryx.compiled.morsel_ops.distinct).
+
+distinct() filters a draken Morsel to distinct rows IN PLACE, accumulating row
+hashes into a caller-supplied seen-set (Carchar/Parvi) across calls, and returns an
+overflow bool. Assertions therefore check the surviving rows of the mutated morsel.
 """
 
 import sys
@@ -8,187 +12,177 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pyarrow as pa
-from opteryx.compiled.morsel_ops.distinct import distinct
 
-import draken as draken
+import draken.draken_native as dn
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
+from opteryx.compiled.morsel_ops.distinct import distinct
+from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+
+_DT = dn.DrakenType
+
+
+def _from_arrow(table):
+    """Build a draken Morsel from a pyarrow.Table via the pyarrow-free vector path
+    (draken.Morsel.from_arrow was removed with draken's pyarrow purge — §4). pyarrow
+    is a test-only dependency here, used solely to read the fixture data + its type."""
+    names, vecs = [], []
+    for name in table.column_names:
+        col = table.column(name)
+        vals = col.to_pylist()
+        pat = col.type
+        if pa.types.is_boolean(pat):
+            dt = _DT.BOOL
+        elif pa.types.is_floating(pat):
+            dt = _DT.FLOAT64
+        elif pa.types.is_integer(pat):
+            dt = _DT.INT64
+        elif pa.types.is_string(pat) or pa.types.is_large_string(pat):
+            dt = _DT.VARCHAR
+            vals = [v.encode("utf-8") if isinstance(v, str) else v for v in vals]
+        elif pa.types.is_binary(pat) or pa.types.is_large_binary(pat):
+            dt = _DT.VARCHAR
+        else:
+            raise TypeError(f"_from_arrow: unsupported fixture type {pat}")
+        names.append(name.encode("utf-8") if isinstance(name, str) else name)
+        vecs.append(vector_from_sequence(vals, dtype=dt))
+    return Morsel.from_vectors(names, vecs)
 
 
 def test_distinct_with_draken_basic():
-    """Test basic distinct operation with draken morsel."""
-    table = pa.table(
-        {
-            "a": [1, 2, 1, 3, 2],
-            "b": [10, 20, 10, 30, 20],
-        }
-    )
-    morsel = draken.Morsel.from_arrow(table)
+    """Distinct over all columns keeps the first occurrence of each unique row."""
+    morsel = _from_arrow(pa.table({"a": [1, 2, 1, 3, 2], "b": [10, 20, 10, 30, 20]}))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    # Should keep rows 0, 1, 3 (unique combinations)
-    assert len(indices) == 3
-    assert list(indices) == [0, 1, 3]
+    # First occurrences are rows 0, 1, 3 → (1,10), (2,20), (3,30).
+    assert len(morsel) == 3
+    assert morsel.column(b"a").to_pylist() == [1, 2, 3]
+    assert morsel.column(b"b").to_pylist() == [10, 20, 30]
 
 
 def test_distinct_with_draken_single_column_bytes():
-    """Test distinct with single column specified as bytes."""
-    table = pa.table(
-        {
-            "a": [1, 2, 1, 3, 2],
-            "b": [10, 20, 30, 40, 50],
-        }
-    )
-    morsel = draken.Morsel.from_arrow(table)
+    """Distinct on a single column specified as bytes."""
+    morsel = _from_arrow(pa.table({"a": [1, 2, 1, 3, 2], "b": [10, 20, 30, 40, 50]}))
 
-    # Only distinct on column 'a' (as bytes)
-    indices, _hash_set = distinct(morsel, columns=[b"a"])
+    distinct(morsel, CarcharSetWrapper(), columns=[b"a"])
 
-    # Should keep rows 0, 1, 3 (first occurrence of 1, 2, 3)
-    assert len(indices) == 3
-    assert list(indices) == [0, 1, 3]
+    # First occurrence of 1, 2, 3 → rows 0, 1, 3.
+    assert len(morsel) == 3
+    assert morsel.column(b"a").to_pylist() == [1, 2, 3]
+    assert morsel.column(b"b").to_pylist() == [10, 20, 40]
 
 
 def test_distinct_with_draken_multiple_columns_bytes():
-    """Test distinct with multiple columns specified as bytes."""
-    table = pa.table(
-        {
-            "a": [1, 1, 2, 2],
-            "b": [10, 20, 10, 20],
-            "c": [100, 200, 300, 400],
-        }
-    )
-    morsel = draken.Morsel.from_arrow(table)
+    """Distinct on multiple columns specified as bytes; all combinations unique."""
+    morsel = _from_arrow(pa.table({
+        "a": [1, 1, 2, 2],
+        "b": [10, 20, 10, 20],
+        "c": [100, 200, 300, 400],
+    }))
 
-    # Distinct on columns 'a' and 'b' (as bytes)
-    indices, _hash_set = distinct(morsel, columns=[b"a", b"b"])
+    distinct(morsel, CarcharSetWrapper(), columns=[b"a", b"b"])
 
-    # All combinations are unique
-    assert len(indices) == 4
-    assert list(indices) == [0, 1, 2, 3]
+    assert len(morsel) == 4
 
 
 def test_distinct_with_draken_streaming():
-    """Test streaming distinct with seen_hashes."""
-    table1 = pa.table({"a": [1, 2, 3]})
-    table2 = pa.table({"a": [2, 3, 4]})
-    table3 = pa.table({"a": [4, 5, 6]})
+    """Seen hashes accumulate across morsels via the shared set (in-place)."""
+    seen = CarcharSetWrapper()
 
-    morsel1 = draken.Morsel.from_arrow(table1)
-    morsel2 = draken.Morsel.from_arrow(table2)
-    morsel3 = draken.Morsel.from_arrow(table3)
+    m1 = _from_arrow(pa.table({"a": [1, 2, 3]}))
+    distinct(m1, seen)
+    assert len(m1) == 3  # all new
+    assert m1.column(b"a").to_pylist() == [1, 2, 3]
 
-    # First batch
-    indices1, hash_set = distinct(morsel1)
-    assert len(indices1) == 3
-    assert list(indices1) == [0, 1, 2]
+    m2 = _from_arrow(pa.table({"a": [2, 3, 4]}))
+    distinct(m2, seen)
+    assert len(m2) == 1  # only 4 is new
+    assert m2.column(b"a").to_pylist() == [4]
 
-    # Second batch - 2 and 3 already seen
-    indices2, hash_set = distinct(morsel2, seen_hashes=hash_set)
-    assert len(indices2) == 1
-    assert list(indices2) == [2]  # Only 4 is new
-
-    # Third batch - 4 already seen
-    indices3, hash_set = distinct(morsel3, seen_hashes=hash_set)
-    assert len(indices3) == 2
-    assert list(indices3) == [1, 2]  # 5 and 6 are new
+    m3 = _from_arrow(pa.table({"a": [4, 5, 6]}))
+    distinct(m3, seen)
+    assert len(m3) == 2  # 5 and 6 are new
+    assert m3.column(b"a").to_pylist() == [5, 6]
 
 
 def test_distinct_with_draken_all_duplicates():
-    """Test distinct when all rows are duplicates."""
-    table = pa.table({"a": [1, 1, 1, 1]})
-    morsel = draken.Morsel.from_arrow(table)
+    """All rows identical: only the first survives."""
+    morsel = _from_arrow(pa.table({"a": [1, 1, 1, 1]}))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    assert len(indices) == 1
-    assert list(indices) == [0]
+    assert len(morsel) == 1
+    assert morsel.column(b"a").to_pylist() == [1]
 
 
 def test_distinct_with_draken_all_unique():
-    """Test distinct when all rows are unique."""
-    table = pa.table({"a": [1, 2, 3, 4, 5]})
-    morsel = draken.Morsel.from_arrow(table)
+    """All rows unique: morsel unchanged."""
+    morsel = _from_arrow(pa.table({"a": [1, 2, 3, 4, 5]}))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    assert len(indices) == 5
-    assert list(indices) == [0, 1, 2, 3, 4]
+    assert len(morsel) == 5
+    assert morsel.column(b"a").to_pylist() == [1, 2, 3, 4, 5]
 
 
 def test_distinct_with_draken_empty_morsel():
-    """Test distinct with empty morsel."""
-    table = pa.table({"a": pa.array([], type=pa.int64())})
-    morsel = draken.Morsel.from_arrow(table)
+    """Empty morsel stays empty."""
+    morsel = _from_arrow(pa.table({"a": pa.array([], type=pa.int64())}))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    assert len(indices) == 0
+    assert len(morsel) == 0
 
 
 def test_distinct_with_draken_with_nulls():
-    """Test distinct with null values."""
-    table = pa.table(
-        {
-            "a": [1, None, 1, None, 2],
-            "b": [10, 20, 10, 20, 30],
-        }
-    )
-    morsel = draken.Morsel.from_arrow(table)
+    """NULL participates in the row key: (1,10), (None,20), (2,30) are distinct."""
+    morsel = _from_arrow(pa.table({
+        "a": [1, None, 1, None, 2],
+        "b": [10, 20, 10, 20, 30],
+    }))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    # Should have 3 unique combinations: (1,10), (None,20), (2,30)
-    assert len(indices) == 3
+    assert len(morsel) == 3
+    assert morsel.column(b"a").to_pylist() == [1, None, 2]
+    assert morsel.column(b"b").to_pylist() == [10, 20, 30]
 
 
 def test_distinct_with_draken_column_names_as_strings():
-    """Test that column names as strings also work (morsel.hash accepts both)."""
-    table = pa.table(
-        {
-            "a": [1, 2, 1, 3, 2],
-            "b": [10, 20, 30, 40, 50],
-        }
-    )
-    morsel = draken.Morsel.from_arrow(table)
+    """Column names as str also work (distinct accepts str or bytes)."""
+    morsel = _from_arrow(pa.table({"a": [1, 2, 1, 3, 2], "b": [10, 20, 30, 40, 50]}))
 
-    # Column names as strings should also work
-    indices, _hash_set = distinct(morsel, columns=["a"])
+    distinct(morsel, CarcharSetWrapper(), columns=["a"])
 
-    assert len(indices) == 3
-    assert list(indices) == [0, 1, 3]
+    assert len(morsel) == 3
+    assert morsel.column(b"a").to_pylist() == [1, 2, 3]
 
 
 def test_distinct_with_draken_mixed_types():
-    """Test distinct with mixed column types."""
-    table = pa.table(
-        {
-            "int_col": [1, 2, 1, 3],
-            "str_col": ["a", "b", "a", "c"],
-            "float_col": [1.1, 2.2, 1.1, 3.3],
-            "bool_col": [True, False, True, False],
-        }
-    )
-    morsel = draken.Morsel.from_arrow(table)
+    """Mixed-type columns all contribute to the row hash; rows 0 and 2 are identical."""
+    morsel = _from_arrow(pa.table({
+        "int_col": [1, 2, 1, 3],
+        "str_col": ["a", "b", "a", "c"],
+        "float_col": [1.1, 2.2, 1.1, 3.3],
+        "bool_col": [True, False, True, False],
+    }))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    # Rows 0 and 2 are identical
-    assert len(indices) == 3
-    assert list(indices) == [0, 1, 3]
+    assert len(morsel) == 3
+    assert morsel.column(b"int_col").to_pylist() == [1, 2, 3]
 
 
 def test_distinct_with_draken_large_dataset():
-    """Test distinct with larger dataset."""
+    """50% duplicates: half the rows survive."""
     n = 10000
-    # Create dataset with 50% duplicates
     data = list(range(n // 2)) * 2
-    table = pa.table({"a": data})
-    morsel = draken.Morsel.from_arrow(table)
+    morsel = _from_arrow(pa.table({"a": data}))
 
-    indices, _hash_set = distinct(morsel)
+    distinct(morsel, CarcharSetWrapper())
 
-    # Should keep first n/2 unique values
-    assert len(indices) == n // 2
+    assert len(morsel) == n // 2
 
 
 if __name__ == "__main__":  # pragma: no cover

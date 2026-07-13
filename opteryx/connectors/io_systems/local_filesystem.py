@@ -162,7 +162,7 @@ class OpteryxLocalFileSystem:
         for path in paths:
             if os.path.isfile(path):
                 stat = os.stat(path)
-                infos.append(FileInfoLike(path=path, size=stat.st_size))
+                infos.append(FileInfoLike(path=path, size=stat.st_size, mtime=stat.st_mtime))
             else:
                 infos.append(FileInfoLike(path=path, size=0))
 

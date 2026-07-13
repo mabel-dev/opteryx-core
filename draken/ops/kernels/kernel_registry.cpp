@@ -58,6 +58,19 @@ VecResult draken_starts_with(void* ctx, const DrakenVector* const* args, uint32_
 VecResult draken_ends_with(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_bitwise_not(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: TRIM/LTRIM/RTRIM (string_trim.cpp)
+VecResult draken_trim(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_ltrim(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_rtrim(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: REVERSE/INITCAP (string_reverse_initcap.cpp)
+VecResult draken_reverse(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_initcap(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: LPAD/RPAD (string_pad.cpp)
+VecResult draken_lpad(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_rpad(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: REPLACE/SOUNDEX (string_replace_soundex.cpp)
+VecResult draken_replace(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_soundex(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +115,15 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_ends_with", (kernel_fn_t)&draken_ends_with},
     {"draken_date_trunc", (kernel_fn_t)&draken_date_trunc},
     {"draken_bitwise_not", (kernel_fn_t)&draken_bitwise_not},
+    {"draken_trim", (kernel_fn_t)&draken_trim},
+    {"draken_ltrim", (kernel_fn_t)&draken_ltrim},
+    {"draken_rtrim", (kernel_fn_t)&draken_rtrim},
+    {"draken_reverse", (kernel_fn_t)&draken_reverse},
+    {"draken_initcap", (kernel_fn_t)&draken_initcap},
+    {"draken_lpad", (kernel_fn_t)&draken_lpad},
+    {"draken_rpad", (kernel_fn_t)&draken_rpad},
+    {"draken_replace", (kernel_fn_t)&draken_replace},
+    {"draken_soundex", (kernel_fn_t)&draken_soundex},
 
     // ========================================================================
     // Cast kernels (43 total)

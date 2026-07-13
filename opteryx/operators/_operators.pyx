@@ -1938,10 +1938,27 @@ cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
                           uint8_t** out_validity, void** out_sel,
                           int* err_op, const char** err_msg) noexcept nogil:
     """Native entry (matches ExprEvalFn) for ExprProjectOperator — the pure-nogil
-    computed-column span in evaluation.pyx. No PyObject inside."""
+    computed-column span in evaluation.pyx. Force-densifies the result (the default
+    boundary). No PyObject inside."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, err_op, err_msg)
+                             out_validity, out_sel, err_op, err_msg, False)
+
+
+cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
+                                   int* col_idx, void** lit_dv,
+                                   DrakenVector* out_vec, void** out_data,
+                                   uint8_t** out_validity, void** out_sel,
+                                   int* err_op, const char** err_msg) noexcept nogil:
+    """Shape-PRESERVING ExprEvalFn twin of _expr_eval_tramp — keeps a compressed
+    result's encoding (dict/constant) instead of force-densifying. Selected by
+    add_expr_project(preserve_shape=True) for computed GROUP BY / DISTINCT keys, whose
+    only consumer (the group/distinct sink) is compression-aware. A distinct fn
+    pointer also keeps these columns from fusing with dense ExprProject columns in the
+    engine's ExprMultiProjectOperator (fusion requires an identical fn)."""
+    return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
+                             <DrakenVector**>lit_dv, out_vec, out_data,
+                             out_validity, out_sel, err_op, err_msg, True)
 
 
 cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
@@ -2305,11 +2322,17 @@ cdef class NativePlan:
                                 _expr_filter_tramp, c_const_col_idx, c_const_scalar_dv)
 
     def add_expr_project(self, size_t p, CompiledBytecode bc, list layout, name,
-                         logical=None):
+                         logical=None, bint preserve_shape=False):
         """Append ONE computed column (identity ``name``) evaluated by a plan-lowered,
         plan-resolved c-native program (load-ending programs allowed). ``logical`` =
         (kind, unit, precision, scale) ints for descriptor-carrying results
-        (DECIMAL/TIMESTAMP) — re-attached to the output column's owner natively."""
+        (DECIMAL/TIMESTAMP) — re-attached to the output column's owner natively.
+
+        ``preserve_shape`` keeps a compressed result's encoding (dict/constant) at the
+        projection boundary instead of force-densifying. The compiler sets it ONLY for
+        computed columns whose sole consumer is compression-aware (a GROUP BY / DISTINCT
+        key); it selects a distinct trampoline, which also prevents fusion with dense
+        ExprProject columns in the engine's ExprMultiProjectOperator."""
         if not bytecode_ops_all_c_native(bc):
             raise ValueError("native engine: add_expr_project requires a c-native "
                              "program — the compiler must reject this shape earlier")
@@ -2325,8 +2348,10 @@ cdef class NativePlan:
             lu = <int>logical[1]
             lp = <int>logical[2]
             lsc = <int>logical[3]
+        cdef ExprEvalFn fn = (_expr_eval_preserve_tramp if preserve_shape
+                              else _expr_eval_tramp)
         self._e.add_expr_project(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
-                                 _expr_eval_tramp, nm, lk, lu, lp, lsc)
+                                 fn, nm, lk, lu, lp, lsc)
 
     def add_limit(self, size_t p, offset, limit):
         """LIMIT/OFFSET on pipeline ``p``. ``limit`` None = unbounded (OFFSET-only)."""

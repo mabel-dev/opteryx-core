@@ -2308,6 +2308,160 @@ cdef int _dv_copy_result_string(
     return 0
 
 
+cdef int _dv_copy_result_string_preserve(
+    const DrakenVector* src,
+    DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+) noexcept nogil:
+    """SHAPE-PRESERVING twin of _dv_copy_result_string: deep-copy the src.data_length
+    PHYSICAL string values into a K-slot canonical block, then carry the input's
+    selection (length codes) and per-logical-row validity onto the result. Dense stays
+    dense (k == length), constant stays constant (k == 1), dict stays dict (k < length)
+    — no gather/force-expand. Used at the ExprProject boundary for computed columns
+    that feed a compression-aware consumer (GROUP BY / DISTINCT key)."""
+    cdef uint32_t n = src.length
+    cdef uint32_t k = src.data_length
+    cdef uint32_t alloc_k = k if k > 0 else 1
+    cdef uint32_t alloc_n = n if n > 0 else 1
+    cdef const DrakenStringArena* sa_in = <const DrakenStringArena*>src.data
+    cdef const DrakenStringSlot* slot
+    cdef size_t total_arena = 0
+    cdef uint32_t j, slen
+    for j in range(k):
+        slot = &sa_in.slots[j]
+        if not str_is_inline(slot):
+            total_arena += str_length(slot)
+    cdef size_t slots_off = sizeof(DrakenStringArena)
+    cdef size_t arena_off = slots_off + <size_t>alloc_k * sizeof(DrakenStringSlot)
+    cdef uint8_t* blk = <uint8_t*>draken_malloc(arena_off + total_arena)
+    if blk == NULL:
+        return -1
+    cdef DrakenStringArena* sa_out = <DrakenStringArena*>blk
+    cdef DrakenStringSlot* dst = <DrakenStringSlot*>(blk + slots_off)
+    cdef uint8_t* out_arena = blk + arena_off if total_arena > 0 else NULL
+    sa_out.slots = dst
+    sa_out.arena = out_arena
+    sa_out.length = k
+    sa_out.arena_used = total_arena
+    sa_out.arena_cap = total_arena
+    sa_out.null_bitmap = NULL
+    sa_out.owns_buffers = 0     # the ONE block is owned by the caller's VectorOwner
+    sa_out.type = src.type
+    cdef size_t arena_pos = 0
+    for j in range(k):
+        slot = &sa_in.slots[j]
+        if str_is_inline(slot):
+            memcpy(&dst[j], slot, sizeof(DrakenStringSlot))
+        else:
+            slen = str_length(slot)
+            memcpy(out_arena + arena_pos, str_data(slot, sa_in.arena), slen)
+            str_clone_with_offset(&dst[j], slot, <uint32_t>arena_pos)
+            arena_pos += slen
+    cdef size_t vbytes = (<size_t>n + 7) >> 3
+    cdef uint8_t* validity = NULL
+    if src.validity != NULL:
+        validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
+        if validity == NULL:
+            draken_free(blk)
+            return -1
+        memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
+    cdef uint32_t* sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
+    if sel == NULL:
+        draken_free(blk)
+        if validity != NULL:
+            draken_free(validity)
+        return -1
+    memcpy(sel, src.selection, <size_t>n * sizeof(uint32_t))
+    out_vec.data = blk
+    out_vec.selection = sel
+    out_vec.data_length = k
+    out_vec.length = n
+    out_vec.validity = validity
+    out_vec.type = src.type
+    # Trust the shape hint only for a genuinely dense result (k == n); otherwise 0 =
+    # "don't know" = uniform path (matches _dv_vecresult_adopt_c's flag discipline).
+    out_vec.flags = src.flags if k == n else 0
+    out_data[0] = blk
+    out_validity[0] = validity
+    out_sel[0] = sel
+    return 0
+
+
+cdef int _dv_copy_result_preserve_shape(
+    const DrakenVector* src,
+    DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+) noexcept nogil:
+    """SHAPE-PRESERVING twin of _dv_copy_result_dense: deep-copy the src.data_length
+    PHYSICAL values (NOT a per-logical-row gather) plus the input's selection and
+    validity into fresh caller-owned buffers, keeping the input's encoding. The arena
+    is destroyed right after this returns — nothing may alias it. Fixed-width + BOOL +
+    string/VARIANT only; returns -1 otherwise so the caller fails loud."""
+    cdef uint32_t n = src.length
+    cdef uint32_t k = src.data_length
+    cdef uint32_t alloc_k = k if k > 0 else 1
+    cdef uint32_t alloc_n = n if n > 0 else 1
+    cdef size_t es = _dv_result_elem_size(src.type)
+    cdef size_t kbytes = (<size_t>k + 7) >> 3
+    cdef size_t vbytes = (<size_t>n + 7) >> 3
+    cdef uint8_t* validity = NULL
+    cdef uint32_t* sel
+    cdef uint32_t i
+    cdef void* data
+
+    # VARIANT is German-string storage (buffers.h) — same slot/arena layout as the
+    # VARCHAR family. It is the result type of `->`.
+    if (src.type == DRAKEN_VARCHAR or src.type == DRAKEN_NVARCHAR
+            or src.type == DRAKEN_VARBINARY or src.type == DRAKEN_VARIANT):
+        return _dv_copy_result_string_preserve(src, out_vec, out_data, out_validity, out_sel)
+
+    if src.type == DRAKEN_NULL:
+        # Self-describing null (buffers.h): no data, no validity — nothing to copy.
+        data = NULL
+    elif src.type == DRAKEN_BOOL:
+        # Physical bits are indexed by physical position (selection[i]); copy the
+        # K-bit block verbatim so selection[i] still addresses the right bit.
+        data = draken_malloc(kbytes if kbytes > 0 else 1)
+        if data == NULL:
+            return -1
+        memcpy(data, src.data, kbytes if kbytes > 0 else 1)
+    else:
+        if es == 0:
+            return -1   # strings/arrays/decimal128 — not a c-native fixed result
+        data = draken_malloc(<size_t>alloc_k * es)
+        if data == NULL:
+            return -1
+        # Copy the K PHYSICAL values contiguously (no gather); selection maps rows.
+        memcpy(data, src.data, <size_t>k * es)
+
+    if src.validity != NULL:
+        validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
+        if validity == NULL:
+            if data != NULL:
+                draken_free(data)
+            return -1
+        memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
+
+    sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
+    if sel == NULL:
+        if data != NULL:
+            draken_free(data)
+        if validity != NULL:
+            draken_free(validity)
+        return -1
+    memcpy(sel, src.selection, <size_t>n * sizeof(uint32_t))
+
+    out_vec.data = data
+    out_vec.selection = sel
+    out_vec.data_length = k
+    out_vec.length = n
+    out_vec.validity = validity
+    out_vec.type = src.type
+    out_vec.flags = src.flags if k == n else 0
+    out_data[0] = data
+    out_validity[0] = validity
+    out_sel[0] = sel
+    return 0
+
+
 cdef int _dv_copy_result_dense(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
@@ -2393,7 +2547,7 @@ cdef int _dv_eval_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
-    int* err_op, const char** err_msg,
+    int* err_op, const char** err_msg, bint preserve_shape,
 ) noexcept nogil:
     """Pure-nogil expression span for a COMPUTED column (the projection twin of
     _dv_filter_span_cxx): evaluate the program over pre-resolved (col_idx, lit_dv)
@@ -2401,7 +2555,13 @@ cdef int _dv_eval_span_cxx(
     out_data/out_validity/out_sel filled (ownership transferred); 4 → kernel error
     (``*err_msg`` set, see c_execute_dv_inner); 98 → non-fixed-width result (fail
     loud upstream); 99 → arena OOM; other → the c_execute rc. No PyObject
-    anywhere — callable from the engine's worker threads."""
+    anywhere — callable from the engine's worker threads.
+
+    ``preserve_shape`` selects the boundary materialization: the default (0) force-
+    densifies to an identity-selection dense column (every downstream consumer sees a
+    plain dense column); 1 keeps the result's compressed encoding (dict/constant
+    stays compressed) and is set ONLY by the plan compiler for computed columns that
+    feed a compression-aware consumer (GROUP BY / DISTINCT key)."""
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
@@ -2417,8 +2577,14 @@ cdef int _dv_eval_span_cxx(
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
                             arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
     if rc == 0:
-        if _dv_copy_result_dense(dv_stack[0], out_vec, out_data, out_validity,
-                                 out_sel) != 0:
+        if preserve_shape:
+            if _dv_copy_result_preserve_shape(dv_stack[0], out_vec, out_data,
+                                              out_validity, out_sel) != 0:
+                err_op[0] = -98
+                err_msg[0] = NULL
+                rc = 98
+        elif _dv_copy_result_dense(dv_stack[0], out_vec, out_data, out_validity,
+                                   out_sel) != 0:
             err_op[0] = -98
             err_msg[0] = NULL
             rc = 98

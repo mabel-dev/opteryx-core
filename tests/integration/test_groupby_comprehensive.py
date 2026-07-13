@@ -95,10 +95,10 @@ class TestBasicGroupBy:
             SELECT
                 planetId,
                 name,
-                yearDiscovered,
+                radius,
                 COUNT(*) as cnt
             FROM testdata.satellites
-            GROUP BY planetId, name, yearDiscovered
+            GROUP BY planetId, name, radius
             """
         ).to_pylist()
 
@@ -209,7 +209,7 @@ class TestGroupByWithWhereClause:
                 planetId,
                 COUNT(*) as cnt
             FROM testdata.satellites
-            WHERE radius > 500 AND yearDiscovered > 1980
+            WHERE radius > 500 AND magnitude > 5
             GROUP BY planetId
             """
         ).to_pylist()
@@ -786,15 +786,15 @@ class TestGroupByDataTypes:
         assert all(isinstance(row["name"], (str, bytes)) or row["name"] is None for row in result)
 
     def test_groupby_year_key(self, session):
-        """GROUP BY on year/date-like column."""
-        result = execute_on_session_and_get_arrow(session, 
+        """GROUP BY on a numeric key column."""
+        result = execute_on_session_and_get_arrow(session,
             """
             SELECT
-                yearDiscovered,
+                magnitude,
                 COUNT(*) as cnt
             FROM testdata.satellites
-            GROUP BY yearDiscovered
-            ORDER BY yearDiscovered
+            GROUP BY magnitude
+            ORDER BY magnitude
             """
         ).to_pylist()
 

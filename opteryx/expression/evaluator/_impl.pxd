@@ -48,4 +48,5 @@ cdef int _dv_eval_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                            int* col_idx, DrakenVector** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
-                           int* err_op, const char** err_msg) noexcept nogil
+                           int* err_op, const char** err_msg,
+                           bint preserve_shape) noexcept nogil

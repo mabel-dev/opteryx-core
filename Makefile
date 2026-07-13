@@ -180,6 +180,7 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    -I$(CURDIR)/draken/core \
 	    -I$(CURDIR)/third_party/boost_math \
 	    -I$(CURDIR)/third_party/cyan4973 \
+	    -I$(CURDIR)/third_party/utf8h \
 	    -I$(CURDIR)/third_party/mabel/carchar \
 	    -I$(CURDIR)/third_party/mabel/parvi \
 	    -I$(CURDIR)/third_party/fastfloat \
@@ -197,6 +198,10 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    $(CURDIR)/draken/ops/kernels/cast_dispatch.cpp \
 	    $(CURDIR)/draken/ops/kernels/extraction.cpp \
 	    $(CURDIR)/draken/ops/kernels/function_kernels.cpp \
+	    $(CURDIR)/draken/ops/kernels/string_trim.cpp \
+	    $(CURDIR)/draken/ops/kernels/string_reverse_initcap.cpp \
+	    $(CURDIR)/draken/ops/kernels/string_pad.cpp \
+	    $(CURDIR)/draken/ops/kernels/string_replace_soundex.cpp \
 	    $(CURDIR)/draken/ops/kernels/binary_op_arithmetic.cpp \
 	    $(CURDIR)/draken/ops/kernels/binary_op_other.cpp \
 	    $(CURDIR)/draken/ops/kernels/binary_op_temporal.cpp \

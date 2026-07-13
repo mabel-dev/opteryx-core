@@ -54,11 +54,11 @@ Q42/41          35.19ms        34.88ms              -     35.03ms       34.88ms 
 Q43/42          50.63ms        50.12ms              -     50.38ms       50.12ms       50.63ms  [4.56x]
 --- ✅ done
 
-make clickbench (33.22 seconds) <- best ever on fixed rugo parquet files [256K rg] (13-JUL)
+make clickbench (14.16 seconds) <- best ever on rugo parquet files [256K rg] (13-JUL)
 
-(251.24 seconds) <- 0.26.8
-(48.96 seconds) <- best on clickbench parquet files (07-JUL)
-(21.60 seconds) <- DuckDB Baseline
+(125.62 seconds) <- 0.26.8
+(20.74 seconds) <- best on clickbench parquet files (13-JUL)
+(10.65 seconds) <- DuckDB Baseline
 
 make tpch - (4602.2ms) (26-JUN)
 make medicare1 - (4356.9ms) (30-JUN)

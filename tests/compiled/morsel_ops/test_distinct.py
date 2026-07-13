@@ -9,13 +9,41 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pyarrow as pa
 
-import draken as draken
+import draken.draken_native as dn
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
 from opteryx.compiled.morsel_ops.distinct import distinct
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 
+_DT = dn.DrakenType
 
-def _make(data: dict) -> draken.Morsel:
-    return draken.Morsel.from_arrow(pa.table(data))
+
+def _make(data: dict) -> Morsel:
+    """Build a draken Morsel via the pyarrow-free vector path (draken.Morsel.from_arrow
+    was removed with draken's pyarrow purge — §4). pyarrow is a test-only dependency
+    here, used to normalise the fixture data + infer each column's type."""
+    table = pa.table(data)
+    names, vecs = [], []
+    for name in table.column_names:
+        col = table.column(name)
+        vals = col.to_pylist()
+        pat = col.type
+        if pa.types.is_boolean(pat):
+            dt = _DT.BOOL
+        elif pa.types.is_floating(pat):
+            dt = _DT.FLOAT64
+        elif pa.types.is_integer(pat):
+            dt = _DT.INT64
+        elif pa.types.is_string(pat) or pa.types.is_large_string(pat):
+            dt = _DT.VARCHAR
+            vals = [v.encode("utf-8") if isinstance(v, str) else v for v in vals]
+        elif pa.types.is_binary(pat) or pa.types.is_large_binary(pat):
+            dt = _DT.VARCHAR
+        else:
+            raise TypeError(f"_make: unsupported fixture type {pat}")
+        names.append(name.encode("utf-8") if isinstance(name, str) else name)
+        vecs.append(vector_from_sequence(vals, dtype=dt))
+    return Morsel.from_vectors(names, vecs)
 
 
 def test_distinct_basic():

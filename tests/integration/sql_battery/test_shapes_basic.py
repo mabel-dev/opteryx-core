@@ -444,6 +444,41 @@ def test_sql_battery_pass2_sequence_regression():
         _assert_sql_battery_shape(statement, rows, columns, exception)
 
 
+def test_bool_group_by_key_values():
+    """
+    VALUE-level regression: BOOL GROUP BY keys must reconstruct with the
+    correct labels, not collapse to all-False.
+
+    The shape battery is deliberately shape-only, which is precisely why a
+    BOOL group-by key emitting the right COUNTs against the WRONG key values
+    (every group labelled False) went undetected. Guards
+    emit_fixed_column's DRAKEN_BOOL bit-packed arm in
+    src/cpp/engine/native_group_sinks.hpp.
+    """
+    from opteryx.connectors import DiskConnector
+
+    opteryx.register_workspace("testdata", DiskConnector)
+
+    statement = (
+        "SELECT user_verified, COUNT(*) AS c "
+        "FROM testdata.tweets GROUP BY user_verified"
+    )
+    session = opteryx.session(memberships=["Apollo 11", "opteryx"])
+    morsels = list(session.execute_to_morsels(statement))
+
+    counts = {}
+    for morsel in morsels:
+        keys = morsel.column("user_verified").to_pylist()
+        vals = morsel.column("c").to_pylist()
+        for key, val in zip(keys, vals):
+            counts[key] = counts.get(key, 0) + val
+
+    assert counts == {False: 99335, True: 665}, (
+        f"BOOL group-by keys reconstructed wrong: {counts} "
+        "(expected {False: 99335, True: 665})"
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
@@ -492,6 +527,20 @@ if __name__ == "__main__":  # pragma: no cover
             failures.append((statement, err))
 
     print("--- ✅ \033[0;32mdone\033[0m")
+
+    # VALUE-level regressions (the battery above is shape-only).
+    print("RUNNING VALUE-LEVEL REGRESSIONS")
+    for name, fn in (("bool group-by key values", test_bool_group_by_key_values),):
+        print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)
+        try:
+            fn()
+            print("✅")
+            passed += 1
+        except Exception as err:
+            failed += 1
+            print(f"\033[0;31m❌ {failed}\033[0m")
+            print(">", err)
+            failures.append((name, err))
 
     if failed > 0:
         print("\n\033[38;2;139;233;253m\033[3mFAILURES\033[0m")

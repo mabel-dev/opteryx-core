@@ -46,6 +46,15 @@ inline bool fk_is_string(DrakenType t) {
 }
 
 // Shared ASCII case transform (VARCHAR/VARBINARY only — see file header).
+//
+// SHAPE-PRESERVING (the string-CAST pattern, cast_string.cpp): the fold is a pure
+// per-value byte map that never changes a string's length, so it is computed ONCE
+// per data_length PHYSICAL unique value (a dict's K entries, a constant's single
+// value, or a dense column's `length` values), then kernel_preserve_shape carries
+// the input's selection + per-logical-row validity onto the result. Dense stays
+// dense, constant stays constant, dict stays dict — no force-expand to `length`.
+// Validity is per-logical-row, so the K-slot physical block carries none; the
+// preserved validity (copied from the input) is the sole null authority.
 VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char* who) {
     if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_VARBINARY) {
         return draken_error_sentinel_fmt(
@@ -54,36 +63,29 @@ VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char*
             "never wrong)", who);
     }
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
-    uint32_t n = v->length;
+    const uint32_t k = v->data_length;   // physical unique count
 
-    // Pass 1: exact long-form byte total (lengths are unchanged by casing).
+    // Pass 1: exact long-form byte total over the K physical values (lengths are
+    // unchanged by casing).
     size_t arena_len = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) continue;
-        const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
-        uint32_t len = str_length(slot);
+    for (uint32_t j = 0; j < k; ++j) {
+        uint32_t len = str_length(&sa->slots[j]);
         if (len > STR_INLINE_MAX) arena_len += len;
     }
-    int want_validity = (v->validity != nullptr) ? 1 : 0;
+
+    // K-slot physical string block, NO embedded validity — nulls live per-logical-
+    // row and are supplied by kernel_preserve_shape below.
     DrakenStringSlot* slots;
     uint8_t* arena;
-    uint8_t* validity;
-    uint8_t* block = vecresult_string_block_alloc(n, arena_len, want_validity,
-                                                  &slots, &arena, &validity);
+    uint8_t* validity_unused;
+    uint8_t* block = vecresult_string_block_alloc(k, arena_len, /*want_validity=*/0,
+                                                  &slots, &arena, &validity_unused);
     if (block == nullptr) return draken_error_sentinel("ascii_case: allocation failed");
-    if (want_validity) {
-        size_t vb = (static_cast<size_t>(n) + 7) / 8;
-        std::memcpy(validity, v->validity, vb > 0 ? vb : 1);
-    }
 
     uint8_t buf_inline[STR_INLINE_MAX];
     size_t arena_pos = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) {
-            std::memset(&slots[i], 0, sizeof(DrakenStringSlot));
-            continue;
-        }
-        const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
+    for (uint32_t j = 0; j < k; ++j) {
+        const DrakenStringSlot* slot = &sa->slots[j];
         uint32_t len = str_length(slot);
         const uint8_t* src = str_data(slot, sa->arena);
         if (len <= STR_INLINE_MAX) {
@@ -93,7 +95,7 @@ VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char*
                     ? ((c >= 'a' && c <= 'z') ? c - 32 : c)
                     : ((c >= 'A' && c <= 'Z') ? c + 32 : c);
             }
-            str_init_inline(&slots[i], buf_inline, len);
+            str_init_inline(&slots[j], buf_inline, len);
         } else {
             uint8_t* dst = arena + arena_pos;
             for (uint32_t b = 0; b < len; ++b) {
@@ -102,13 +104,27 @@ VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char*
                     ? ((c >= 'a' && c <= 'z') ? c - 32 : c)
                     : ((c >= 'A' && c <= 'Z') ? c + 32 : c);
             }
-            str_init_extern(&slots[i], dst, len,
+            str_init_extern(&slots[j], dst, len,
                             static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }
     }
-    return vecresult_from_string_block(block, n, arena_len, want_validity, v->type);
+
+    // vecresult_from_string_block hands back a dense K-shape (selection = non-owned
+    // global identity over K, validity NULL); kernel_preserve_shape then overrides
+    // selection/validity/length with the input's shape. The identity it replaces is
+    // shared/non-owned, so the override does not leak. kernel_preserve_shape may
+    // throw std::bad_alloc — catch it here (this kernel is not wrapped in
+    // DRAKEN_KERNEL_TRY) so nothing escapes into the nogil VM, and free the block.
+    VecResult r = vecresult_from_string_block(block, k, arena_len, /*has_validity=*/0, v->type);
+    try {
+        kernel_preserve_shape(r, v);   // r.validity = input copy (or NULL), non-embedded
+    } catch (const std::exception&) {
+        draken_free(block);
+        return draken_error_sentinel("ascii_case: shape-carry allocation failed");
+    }
+    return r;
 }
 
 }  // namespace
@@ -1662,51 +1678,62 @@ VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t 
     if (start0 > 0) start0 -= 1;
 
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
-    uint32_t n = v->length;
-    const int want_validity = (v->validity != nullptr) ? 1 : 0;
+    const uint32_t k = v->data_length;   // physical unique count
 
-    // Pass 1: total long-form bytes (results with len > STR_INLINE_MAX).
+    // SHAPE-PRESERVING (see ascii_case_transform): the substring range is a pure
+    // function of a physical value's bytes plus the bind-time start/count, so it is
+    // computed ONCE per data_length physical value, then kernel_preserve_shape
+    // carries the input's selection + per-logical-row validity onto the result.
+    // Substring changes lengths per value, so the arena is sized over the K outputs.
+
+    // Pass 1: total long-form bytes over the K physical substring outputs.
     size_t arena_len = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) continue;
-        const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
+    for (uint32_t j = 0; j < k; ++j) {
+        const DrakenStringSlot* slot = &sa->slots[j];
         uint32_t off, len;
         fk_substr_range(str_data(slot, sa->arena), str_length(slot), is_utf8,
                         start0, has_count, c->count, &off, &len);
         if (len > STR_INLINE_MAX) arena_len += len;
     }
 
+    // K-slot physical block, NO embedded validity (per-logical-row nulls come from
+    // kernel_preserve_shape).
     DrakenStringSlot* slots;
     uint8_t* arena;
-    uint8_t* validity;
-    uint8_t* block = vecresult_string_block_alloc(n, arena_len, want_validity,
-                                                  &slots, &arena, &validity);
+    uint8_t* validity_unused;
+    uint8_t* block = vecresult_string_block_alloc(k, arena_len, /*want_validity=*/0,
+                                                  &slots, &arena, &validity_unused);
     if (block == nullptr) return draken_error_sentinel("draken_substring: allocation failed");
-    if (want_validity) {
-        size_t vb = (static_cast<size_t>(n) + 7) / 8;
-        std::memcpy(validity, v->validity, vb > 0 ? vb : 1);
-    }
 
     size_t arena_pos = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) { std::memset(&slots[i], 0, sizeof(DrakenStringSlot)); continue; }
-        const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
+    for (uint32_t j = 0; j < k; ++j) {
+        const DrakenStringSlot* slot = &sa->slots[j];
         const uint8_t* src = str_data(slot, sa->arena);
         uint32_t off, len;
         fk_substr_range(src, str_length(slot), is_utf8, start0, has_count, c->count, &off, &len);
         const uint8_t* sub = src + off;
         if (len <= STR_INLINE_MAX) {
-            str_init_inline(&slots[i], sub, len);
+            str_init_inline(&slots[j], sub, len);
         } else {
             uint8_t* dst = arena + arena_pos;
             std::memcpy(dst, sub, len);
-            str_init_extern(&slots[i], dst, len,
+            str_init_extern(&slots[j], dst, len,
                             static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }
     }
-    return vecresult_from_string_block(block, n, arena_len, want_validity, v->type);
+
+    // Carry the input's shape onto the dense K-block (see ascii_case_transform for
+    // the identity-replacement and bad_alloc-containment rationale).
+    VecResult r = vecresult_from_string_block(block, k, arena_len, /*has_validity=*/0, v->type);
+    try {
+        kernel_preserve_shape(r, v);
+    } catch (const std::exception&) {
+        draken_free(block);
+        return draken_error_sentinel("draken_substring: shape-carry allocation failed");
+    }
+    return r;
 }
 
 VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs) {

@@ -27,6 +27,17 @@ PARQUET_SUFFIX = ".parquet"
 STATS_SIDECAR_SUFFIX = ".stats.json"
 STATS_SCHEMA_VERSION = 1
 
+# Process-global manifest cache: dataset -> (signature, schema, manifest).
+# The gateway connector is recreated per query, so the built manifest (list +
+# stat + per-file footer-stats parse, ~5ms on a 99-file dataset) would otherwise
+# be rebuilt every time. Keyed on a (name, size, mtime) file-set signature, so
+# any add/remove/resize/rewrite changes the signature and the entry is rebuilt —
+# a hit provably describes the current dataset, never a stale read. Bounded by
+# entry count (manifests can be large); FIFO eviction — the working set of
+# distinct datasets in a session is small.
+_MANIFEST_CACHE: dict = {}
+_MANIFEST_CACHE_MAX = 128
+
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     """
@@ -278,29 +289,39 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         from opteryx.models.file_entry import FileEntry
         from opteryx.models.manifest import Manifest
 
-        # Get the schema first
+        # Parquet files in the dataset, with size + mtime from a single stat pass.
+        blob_names = self.get_list_of_blob_names(self.dataset)
+        parquet_names = [b for b in blob_names if b.lower().endswith(PARQUET_SUFFIX)]
+        infos = self.filesystem.get_file_info(parquet_names)
+        sizes = {i.path: (getattr(i, "size", 0) or 0) for i in infos}
+
+        # File-set signature: any add/remove/resize/rewrite changes it, so a
+        # cache hit provably describes the current dataset (no stale reads).
+        signature = tuple(
+            (i.path, getattr(i, "size", 0) or 0, getattr(i, "mtime", 0.0) or 0.0)
+            for i in sorted(infos, key=lambda x: x.path)
+        )
+        # Schema is recomputed fresh every query (~0.5ms): downstream projection
+        # pushdown prunes columns on the returned schema, so a cached/shared
+        # schema would surface a ColumnNotFoundError on the next query. Only the
+        # expensive-to-build file entries (per-file footer-stats parse) are cached.
         schema = self.get_dataset_schema()
 
-        # Get list of files in the dataset
-        blob_names = self.get_list_of_blob_names(self.dataset)
+        cached = _MANIFEST_CACHE.get(self.dataset)
+        if cached is not None and cached[0] == signature:
+            # Fresh Manifest over a COPY of the cached file list — optimizer
+            # strategies reassign manifest.files (prune, limit, statistics-only
+            # COUNT(*) sets it to []), so the cached list is never handed out raw.
+            return schema, Manifest(list(cached[1]), schema)
 
+        # Miss (or first build): build the manifest from file metadata.
         # Build FileEntry objects from file metadata
         file_entries = []
-        for blob_name in blob_names:
-            # Only Parquet files are supported in external scans.
-            if not blob_name.lower().endswith(PARQUET_SUFFIX):
-                continue
-
+        for blob_name in parquet_names:
             try:
                 file_format = "PARQUET"
                 record_count = 0
-                file_size = 0
-
-                try:
-                    file_info = self.filesystem.get_file_info(blob_name)
-                    file_size = getattr(file_info, "size", 0) or 0
-                except Exception:
-                    pass
+                file_size = sizes.get(blob_name, 0)
 
                 column_stats = None
 
@@ -331,9 +352,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 # Skip files we can't read metadata from
                 continue
 
-        # Create and return manifest
-        manifest = Manifest(file_entries, schema)
-        return schema, manifest
+        # Cache an INDEPENDENT copy of the file list (the returned manifest below
+        # may be mutated by the optimizer); hand the caller its own Manifest.
+        if self.dataset not in _MANIFEST_CACHE and len(_MANIFEST_CACHE) >= _MANIFEST_CACHE_MAX:
+            # FIFO evict the oldest entry to bound memory.
+            _MANIFEST_CACHE.pop(next(iter(_MANIFEST_CACHE)), None)
+        _MANIFEST_CACHE[self.dataset] = (signature, list(file_entries))
+        return schema, Manifest(file_entries, schema)
 
 
     def _load_sidecar_min_k_hashes(self, blob_name: str, schema: RelationSchema):

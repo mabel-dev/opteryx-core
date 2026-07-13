@@ -221,6 +221,441 @@ bool vectors_equal_bool(const VecResult& result, const uint8_t* expected, uint32
     return true;
 }
 
+// ===========================================================================
+// String-vector helpers + REPLACE / SOUNDEX value+shape parity (func_fn_t ABI).
+// ===========================================================================
+#include "core/string_slot.h"   // str_init_inline / str_init_extern / str_data / str_length
+
+extern "C" {
+VecResult draken_replace(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_soundex(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_reverse(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_initcap(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+}
+
+// Build a string DrakenVector from `k` unique values + `codes[length]` into them.
+// Dense: pass codes = {0..length-1} with data_length == length and SEL_IDENTITY.
+// Constant: k == 1, codes all 0. Dict: 1 < k < length. Long values (> 12 bytes)
+// are packed into a heap arena; short values are inline (arena may stay unused).
+// A negative-length sentinel is not needed — pass nullptr in `uniques[j]` for a
+// NULL physical slot (only meaningful when a code points at it and validity clears
+// the row; here we keep it simple and only use non-null uniques).
+DrakenVector* make_string_vec(const char* const* uniques, uint32_t k,
+                              const uint32_t* codes, uint32_t length,
+                              uint8_t sel_identity, DrakenType type) {
+    auto* sa = static_cast<DrakenStringArena*>(malloc(sizeof(DrakenStringArena)));
+    memset(sa, 0, sizeof(DrakenStringArena));
+    auto* slots = static_cast<DrakenStringSlot*>(malloc((k ? k : 1) * sizeof(DrakenStringSlot)));
+    memset(slots, 0, (k ? k : 1) * sizeof(DrakenStringSlot));
+
+    size_t arena_len = 0;
+    for (uint32_t j = 0; j < k; ++j) {
+        uint32_t len = static_cast<uint32_t>(strlen(uniques[j]));
+        if (len > STR_INLINE_MAX) arena_len += len;
+    }
+    uint8_t* arena = arena_len ? static_cast<uint8_t*>(malloc(arena_len)) : nullptr;
+    size_t pos = 0;
+    for (uint32_t j = 0; j < k; ++j) {
+        const auto* s = reinterpret_cast<const uint8_t*>(uniques[j]);
+        uint32_t len = static_cast<uint32_t>(strlen(uniques[j]));
+        if (len <= STR_INLINE_MAX) {
+            str_init_inline(&slots[j], s, len);
+        } else {
+            memcpy(arena + pos, s, len);
+            str_init_extern(&slots[j], arena + pos, len, 0u, static_cast<uint32_t>(pos));
+            pos += len;
+        }
+    }
+    sa->slots = slots; sa->arena = arena; sa->length = k;
+    sa->arena_used = arena_len; sa->arena_cap = arena_len; sa->owns_buffers = 0; sa->type = type;
+
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));
+    memcpy(sel, codes, length * sizeof(uint32_t));
+    vec->data = sa; vec->selection = sel; vec->data_length = k; vec->length = length;
+    vec->validity = nullptr; vec->type = type;
+    vec->flags = sel_identity ? DRAKEN_SEL_IDENTITY : 0u;
+    return vec;
+}
+
+DrakenVector* make_string_dense(const char* const* vals, uint32_t n, DrakenType type) {
+    std::vector<uint32_t> codes(n);
+    for (uint32_t i = 0; i < n; ++i) codes[i] = i;
+    return make_string_vec(vals, n, codes.data(), n, /*sel_identity=*/1, type);
+}
+DrakenVector* make_string_constant(const char* v, uint32_t n, DrakenType type) {
+    const char* uniq[1] = {v};
+    std::vector<uint32_t> codes(n, 0u);
+    return make_string_vec(uniq, 1, codes.data(), n, /*sel_identity=*/0, type);
+}
+
+void free_string_vec(DrakenVector* v) {
+    if (!v) return;
+    auto* sa = static_cast<DrakenStringArena*>(v->data);
+    free(sa->arena); free(sa->slots); free(sa);
+    free((void*)v->selection); free(v->validity); free(v);
+}
+
+// Read result row i's bytes into std::string (uniform data[selection[i]] access).
+std::string res_row(const VecResult& r, uint32_t i) {
+    const auto* sa = static_cast<const DrakenStringArena*>(r.data);
+    const DrakenStringSlot* slot = &sa->slots[r.selection[i]];
+    return std::string(reinterpret_cast<const char*>(str_data(slot, sa->arena)), str_length(slot));
+}
+bool res_null(const VecResult& r, uint32_t i) {
+    if (!r.validity) return false;
+    return ((r.validity[i >> 3] >> (i & 7u)) & 1u) == 0u;
+}
+
+// --- SOUNDEX ---------------------------------------------------------------
+void test_soundex_values() {
+    const char* vals[] = {"Smith", "Robert", "Xi", "Wright", "Tymczak"};
+    DrakenVector* v = make_string_dense(vals, 5, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_soundex(nullptr, args, 1);
+    assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 5);
+    assert(res_row(r, 0) == "S530" && res_row(r, 1) == "R163" && res_row(r, 2) == "X000"
+           && res_row(r, 3) == "W623" && res_row(r, 4) == "T522");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_soundex_empty_and_nonalpha_null() {
+    const char* vals[] = {"Smith", "", "123", "Jones"};
+    DrakenVector* v = make_string_dense(vals, 4, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_soundex(nullptr, args, 1);
+    assert(!is_error(r) && r.length == 4);
+    assert(!res_null(r, 0) && res_null(r, 1) && res_null(r, 2) && !res_null(r, 3));
+    assert(res_row(r, 0) == "S530" && res_row(r, 3) == "J520");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_soundex_dict_shape_preserved() {
+    // 2 uniques, 5 logical rows → dict shape must survive (data_length == 2).
+    const char* uniq[] = {"Smith", "Jones"};
+    uint32_t codes[] = {0, 1, 0, 1, 1};
+    DrakenVector* v = make_string_vec(uniq, 2, codes, 5, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_soundex(nullptr, args, 1);
+    assert(!is_error(r) && r.length == 5 && r.data_length == 2);
+    const char* exp[] = {"S530", "J520", "S530", "J520", "J520"};
+    for (uint32_t i = 0; i < 5; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_soundex_constant_shape_preserved() {
+    DrakenVector* v = make_string_constant("Robert", 4, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_soundex(nullptr, args, 1);
+    assert(!is_error(r) && r.length == 4 && r.data_length == 1);
+    for (uint32_t i = 0; i < 4; ++i) assert(res_row(r, i) == "R163");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+
+// --- REPLACE ---------------------------------------------------------------
+void run_replace(const char* hay, const char* srch, const char* rep, const char* expect) {
+    DrakenVector* h = make_string_dense(&hay, 1, DRAKEN_VARCHAR);
+    DrakenVector* s = make_string_constant(srch, 1, DRAKEN_VARCHAR);
+    DrakenVector* p = make_string_constant(rep, 1, DRAKEN_VARCHAR);
+    const DrakenVector* args[3] = {h, s, p};
+    VecResult r = draken_replace(nullptr, args, 3);
+    assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1);
+    assert(res_row(r, 0) == std::string(expect));
+    free_string_vec(h); free_string_vec(s); free_string_vec(p);
+    draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_replace_multi_occurrence() { run_replace("hello world", "o", "0", "hell0 w0rld"); }
+void test_replace_overlap_avoidance() { run_replace("aaaa", "aa", "b", "bb"); }       // non-overlapping
+void test_replace_no_match() { run_replace("abc", "x", "yy", "abc"); }
+void test_replace_empty_search() { run_replace("abc", "", "yy", "abc"); }              // no-op
+void test_replace_shrink() { run_replace("mississippi", "ss", "S", "miSiSippi"); }     // 2->1 per hit
+void test_replace_growth_over_inline() {
+    // Output exceeds STR_INLINE_MAX (12) → exercises the result arena path.
+    run_replace("grow", "o", "OOOOOOOOOOOO", "grOOOOOOOOOOOOw");   // 2 + 12 + 1 = 15 bytes
+}
+void test_replace_dict_shape_preserved() {
+    const char* uniq[] = {"aXa", "bXb"};
+    uint32_t codes[] = {0, 1, 0};
+    DrakenVector* h = make_string_vec(uniq, 2, codes, 3, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    DrakenVector* s = make_string_constant("X", 3, DRAKEN_VARCHAR);
+    DrakenVector* p = make_string_constant("--", 3, DRAKEN_VARCHAR);
+    const DrakenVector* args[3] = {h, s, p};
+    VecResult r = draken_replace(nullptr, args, 3);
+    assert(!is_error(r) && r.length == 3 && r.data_length == 2);
+    const char* exp[] = {"a--a", "b--b", "a--a"};
+    for (uint32_t i = 0; i < 3; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(h); free_string_vec(s); free_string_vec(p);
+    draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_replace_nonscalar_search_fails_loud() {
+    // A per-row (dict) search must be rejected — REPLACE needs scalar literals.
+    const char* uniq[] = {"aa", "bb"};
+    uint32_t codes[] = {0, 1};
+    const char* hvals[] = {"aabb", "aabb"};
+    DrakenVector* h = make_string_dense(hvals, 2, DRAKEN_VARCHAR);
+    DrakenVector* s = make_string_vec(uniq, 2, codes, 2, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    DrakenVector* p = make_string_constant("X", 2, DRAKEN_VARCHAR);
+    const DrakenVector* args[3] = {h, s, p};
+    VecResult r = draken_replace(nullptr, args, 3);
+    assert(is_error(r));
+    free_string_vec(h); free_string_vec(s); free_string_vec(p);
+}
+
+// --- REVERSE ---------------------------------------------------------------
+// VARCHAR/VARBINARY reverse BYTES; NVARCHAR reverses CODEPOINTS (multibyte runs
+// stay intact). Length-preserving and shape-preserving.
+void test_reverse_ascii_bytes() {
+    const char* vals[] = {"hello", "abc", "", "x", "Racecar"};
+    DrakenVector* v = make_string_dense(vals, 5, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_reverse(nullptr, args, 1);
+    assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 5);
+    const char* exp[] = {"olleh", "cba", "", "x", "racecaR"};
+    for (uint32_t i = 0; i < 5; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_reverse_long_over_inline() {
+    // > STR_INLINE_MAX (12) forces the result arena path; length is preserved.
+    const char* vals[] = {"abcdefghijklmnop"};   // 16 bytes
+    DrakenVector* v = make_string_dense(vals, 1, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_reverse(nullptr, args, 1);
+    assert(!is_error(r) && res_row(r, 0) == "ponmlkjihgfedcba");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_reverse_nvarchar_codepoints() {
+    // é = C3 A9 (2 bytes), 😀 = F0 9F 98 80 (4 bytes), 日本語 = 3×3 bytes. The
+    // codepoint SEQUENCE reverses; each codepoint's bytes stay intact.
+    const char* vals[] = {"h\xC3\xA9llo", "a\xF0\x9F\x98\x80""b", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E"};
+    const char* exp[]  = {"oll\xC3\xA9h", "b\xF0\x9F\x98\x80""a", "\xE8\xAA\x9E\xE6\x9C\xAC\xE6\x97\xA5"};
+    DrakenVector* v = make_string_dense(vals, 3, DRAKEN_NVARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_reverse(nullptr, args, 1);
+    assert(!is_error(r) && r.type == DRAKEN_NVARCHAR && r.length == 3);
+    for (uint32_t i = 0; i < 3; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_reverse_varbinary() {
+    const char* vals[] = {"\x00\x01\x02", "raw"};
+    DrakenVector* v = make_string_dense(vals, 2, DRAKEN_VARBINARY);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_reverse(nullptr, args, 1);
+    assert(!is_error(r) && r.type == DRAKEN_VARBINARY);
+    // NOTE: "\x00\x01\x02" as a C string literal is length 0 (leading NUL) to the
+    // make helper's strlen — so it round-trips as empty; "raw" -> "war".
+    assert(res_row(r, 1) == "war");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_reverse_dict_shape_preserved() {
+    const char* uniq[] = {"abc", "wxyz"};
+    uint32_t codes[] = {0, 1, 0, 1, 1};
+    DrakenVector* v = make_string_vec(uniq, 2, codes, 5, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_reverse(nullptr, args, 1);
+    assert(!is_error(r) && r.length == 5 && r.data_length == 2);
+    const char* exp[] = {"cba", "zyxw", "cba", "zyxw", "zyxw"};
+    for (uint32_t i = 0; i < 5; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_reverse_constant_shape_preserved() {
+    DrakenVector* v = make_string_constant("stressed", 4, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_reverse(nullptr, args, 1);
+    assert(!is_error(r) && r.length == 4 && r.data_length == 1);
+    for (uint32_t i = 0; i < 4; ++i) assert(res_row(r, i) == "desserts");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+
+// --- INITCAP ---------------------------------------------------------------
+// ASCII title-case: first alnum of each word upper, rest lower. Word boundary =
+// any non-alphanumeric byte. VARCHAR/VARBINARY only; NVARCHAR fails loud.
+void test_initcap_word_boundaries() {
+    const char* vals[] = {
+        "the quick-brown fox",   // spaces + hyphen boundaries
+        "HELLO WORLD",           // downcase the tail of each word
+        "MiXeD cAsE",
+        "one,two;three",         // punctuation boundaries
+        "9to5 foo",              // digit is word-interior: '9to5' -> first LETTER not capped
+        "under_score",           // underscore is a boundary (non-alnum)
+        ""                       // empty
+    };
+    const char* exp[] = {
+        "The Quick-Brown Fox",
+        "Hello World",
+        "Mixed Case",
+        "One,Two;Three",
+        "9to5 Foo",
+        "Under_Score",
+        ""
+    };
+    DrakenVector* v = make_string_dense(vals, 7, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_initcap(nullptr, args, 1);
+    assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 7);
+    for (uint32_t i = 0; i < 7; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_initcap_long_over_inline() {
+    const char* vals[] = {"multiple longer words here"};   // > 12 bytes
+    DrakenVector* v = make_string_dense(vals, 1, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_initcap(nullptr, args, 1);
+    assert(!is_error(r) && res_row(r, 0) == "Multiple Longer Words Here");
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_initcap_dict_shape_preserved() {
+    const char* uniq[] = {"hello world", "FOO bar"};
+    uint32_t codes[] = {0, 1, 0};
+    DrakenVector* v = make_string_vec(uniq, 2, codes, 3, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_initcap(nullptr, args, 1);
+    assert(!is_error(r) && r.length == 3 && r.data_length == 2);
+    const char* exp[] = {"Hello World", "Foo Bar", "Hello World"};
+    for (uint32_t i = 0; i < 3; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_initcap_nvarchar_fails_loud() {
+    // NVARCHAR case mapping is not implemented natively — must return an error
+    // sentinel, matching draken_upper/lower's NVARCHAR contract.
+    const char* vals[] = {"h\xC3\xA9llo"};
+    DrakenVector* v = make_string_dense(vals, 1, DRAKEN_NVARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_initcap(nullptr, args, 1);
+    assert(is_error(r));
+    free_string_vec(v);
+}
+
+// --- LPAD / RPAD -----------------------------------------------------------
+// Pad a string to `width` units with a tiled `fill`, or truncate to the leftmost
+// `width` units when longer. Width/tiling/truncation are BYTES for VARCHAR/
+// VARBINARY, CODEPOINTS for NVARCHAR (multibyte never split). Shape-preserving.
+extern "C" {
+VecResult draken_lpad(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_rpad(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+}
+
+// Run LPAD/RPAD over a dense single-value string with scalar width/fill and check
+// the padded output. `type` selects byte vs codepoint semantics.
+void run_pad(bool is_lpad, const char* s, int64_t width, const char* fill,
+             const char* expected, DrakenType type) {
+    const char* sv[1] = {s};
+    DrakenVector* v = make_string_dense(sv, 1, type);
+    DrakenVector* w = create_int64_constant_vector(width, 1);
+    DrakenVector* f = make_string_constant(fill, 1, type);
+    const DrakenVector* args[3] = {v, w, f};
+    VecResult r = is_lpad ? draken_lpad(nullptr, args, 3)
+                          : draken_rpad(nullptr, args, 3);
+    assert(!is_error(r) && r.type == type && r.length == 1);
+    assert(res_row(r, 0) == std::string(expected));
+    free_string_vec(v); free_vector(w); free_string_vec(f);
+    draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+
+void test_lpad_basic()          { run_pad(true,  "abc", 5, "*",  "**abc",  DRAKEN_VARCHAR); }
+void test_rpad_basic()          { run_pad(false, "abc", 5, "*",  "abc**",  DRAKEN_VARCHAR); }
+void test_lpad_exact_noop()     { run_pad(true,  "abc", 3, "*",  "abc",    DRAKEN_VARCHAR); }
+void test_lpad_truncate()       { run_pad(true,  "abcdef", 3, "*", "abc",  DRAKEN_VARCHAR); }  // keep leftmost
+void test_rpad_truncate()       { run_pad(false, "abcdef", 3, "*", "abc",  DRAKEN_VARCHAR); }  // keep leftmost
+void test_lpad_zero_width()     { run_pad(true,  "abc", 0, "*",  "",       DRAKEN_VARCHAR); }
+void test_lpad_negative_width() { run_pad(true,  "abc", -4, "*", "",       DRAKEN_VARCHAR); }
+void test_lpad_multichar_tile() { run_pad(true,  "x", 5, "ab",  "ababx",   DRAKEN_VARCHAR); }
+void test_rpad_multichar_tile() { run_pad(false, "x", 5, "ab",  "xabab",   DRAKEN_VARCHAR); }
+void test_lpad_partial_tile()   { run_pad(true,  "x", 6, "ab",  "ababax",  DRAKEN_VARCHAR); }  // partial 'a' tail
+void test_lpad_empty_fill_pad() { run_pad(true,  "ab", 5, "",   "ab",      DRAKEN_VARCHAR); }  // no fill → unchanged
+void test_lpad_empty_fill_trunc(){ run_pad(true, "abcdef", 3, "", "abc",   DRAKEN_VARCHAR); }  // truncate, empty fill fine
+void test_lpad_long_over_inline() {
+    // Output > STR_INLINE_MAX (12) forces the result arena path.
+    run_pad(true, "abc", 20, "-", "-----------------abc", DRAKEN_VARCHAR);   // 17 pad + 3 = 20
+}
+void test_lpad_nvarchar_trunc_no_split() {
+    // 'αβγδ' = 4 codepoints (2 bytes each). Truncate to 2 codepoints → 'αβ',
+    // NEVER a mid-codepoint byte cut.
+    run_pad(true, "\xCE\xB1\xCE\xB2\xCE\xB3\xCE\xB4", 2, "x",
+            "\xCE\xB1\xCE\xB2", DRAKEN_NVARCHAR);
+}
+void test_lpad_nvarchar_multibyte_tile() {
+    // 'α' (1 cp) padded left to 4 cp with fill 'βγ' (2 cp): tile 'βγβ' (partial
+    // 'β' lands on a codepoint boundary) then the value → 'βγβα'.
+    run_pad(true, "\xCE\xB1", 4, "\xCE\xB2\xCE\xB3",
+            "\xCE\xB2\xCE\xB3\xCE\xB2\xCE\xB1", DRAKEN_NVARCHAR);
+}
+void test_rpad_nvarchar_multibyte_tile() {
+    run_pad(false, "\xCE\xB1", 4, "\xCE\xB2\xCE\xB3",
+            "\xCE\xB1\xCE\xB2\xCE\xB3\xCE\xB2", DRAKEN_NVARCHAR);
+}
+void test_lpad_varchar_byte_width() {
+    // VARCHAR is byte-oriented: 'αβ' is 4 bytes, LPAD to width 5 bytes with 'z'
+    // prepends exactly 1 byte → 'z' + 'αβ'.
+    run_pad(true, "\xCE\xB1\xCE\xB2", 5, "z", "z\xCE\xB1\xCE\xB2", DRAKEN_VARCHAR);
+}
+void test_lpad_dict_shape_preserved() {
+    const char* uniq[] = {"ab", "cdef"};
+    uint32_t codes[] = {0, 1, 0, 1, 1};
+    DrakenVector* v = make_string_vec(uniq, 2, codes, 5, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    DrakenVector* w = create_int64_constant_vector(5, 5);
+    DrakenVector* f = make_string_constant("-", 5, DRAKEN_VARCHAR);
+    const DrakenVector* args[3] = {v, w, f};
+    VecResult r = draken_lpad(nullptr, args, 3);
+    assert(!is_error(r) && r.length == 5 && r.data_length == 2);   // dict shape survives
+    const char* exp[] = {"---ab", "-cdef", "---ab", "-cdef", "-cdef"};
+    for (uint32_t i = 0; i < 5; ++i) assert(res_row(r, i) == exp[i]);
+    free_string_vec(v); free_vector(w); free_string_vec(f);
+    draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_rpad_constant_shape_preserved() {
+    DrakenVector* v = make_string_constant("hi", 4, DRAKEN_VARCHAR);
+    DrakenVector* w = create_int64_constant_vector(4, 4);
+    DrakenVector* f = make_string_constant(".", 4, DRAKEN_VARCHAR);
+    const DrakenVector* args[3] = {v, w, f};
+    VecResult r = draken_rpad(nullptr, args, 3);
+    assert(!is_error(r) && r.length == 4 && r.data_length == 1);   // constant shape survives
+    for (uint32_t i = 0; i < 4; ++i) assert(res_row(r, i) == "hi..");
+    free_string_vec(v); free_vector(w); free_string_vec(f);
+    draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_lpad_null_row_preserved() {
+    // A NULL string ROW must stay NULL (carried by preserve_shape), independent of
+    // padding. Row 1 is null.
+    const char* uniq[] = {"ab", "cd"};
+    uint32_t codes[] = {0, 1};
+    DrakenVector* v = make_string_vec(uniq, 2, codes, 2, /*sel_identity=*/0, DRAKEN_VARCHAR);
+    uint8_t valid[] = {1, 0};
+    set_validity(v, valid, 2);
+    DrakenVector* w = create_int64_constant_vector(4, 2);
+    DrakenVector* f = make_string_constant("*", 2, DRAKEN_VARCHAR);
+    const DrakenVector* args[3] = {v, w, f};
+    VecResult r = draken_lpad(nullptr, args, 3);
+    assert(!is_error(r) && r.length == 2);
+    assert(!res_null(r, 0) && res_row(r, 0) == "**ab");
+    assert(res_null(r, 1));
+    free_string_vec(v); free_vector(w); free_string_vec(f);
+    draken_free(r.data); draken_free(r.validity);
+    if (r.owns_selection) draken_free((void*)r.selection);
+}
+void test_lpad_bad_arity_fails_loud() {
+    const char* sv[1] = {"abc"};
+    DrakenVector* v = make_string_dense(sv, 1, DRAKEN_VARCHAR);
+    const DrakenVector* args[1] = {v};
+    VecResult r = draken_lpad(nullptr, args, 1);   // needs 3 args
+    assert(is_error(r));
+    free_string_vec(v);
+}
+
 void test_draken_add() { int64_t l[] = {1, 2, 3}, r[] = {10, 20, 30}, e[] = {11, 22, 33}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_add(nullptr, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 void test_draken_subtract() { int64_t l[] = {10, 20, 30}, r[] = {1, 2, 3}, e[] = {9, 18, 27}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_subtract(nullptr, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 void test_draken_multiply() { int64_t l[] = {2, 3, 4}, r[] = {5, 6, 7}, e[] = {10, 18, 28}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_multiply(nullptr, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
@@ -639,15 +1074,14 @@ void test_draken_binop_float() {
       assert(res.type==DRAKEN_FLOAT32 && binop_row_null(res,0) && !binop_row_null(res,1));
       free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
 
-    // still-deferred → loud error: DECIMAL operand (P9.1b)
-    { int64_t r[]={2}; auto* rv=create_int64_vector(r,1);
-      auto* lv=static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
-      auto* ld=static_cast<int64_t*>(malloc(sizeof(int64_t))); ld[0]=5;
-      auto* lsel=static_cast<uint32_t*>(malloc(sizeof(uint32_t))); lsel[0]=0;
-      lv->data=ld; lv->selection=lsel; lv->data_length=1; lv->length=1; lv->validity=nullptr;
-      lv->type=DRAKEN_DECIMAL; lv->flags=0;
-      VecResult res=draken_binop(&c_plus,lv,rv); assert(is_error(res));
-      free_vector(lv); free_vector(rv); }
+    // DECIMAL(int64) op INT64 → DECIMAL (S-A.3): the INT64 operand is a scale-0
+    // decimal, so DECIMAL(5,s0)+INT64(2,s0)=DECIMAL(7,s0). Formerly deferred (loud
+    // error, P9.1b); now handled by the same dec_* kernels — assert the real result.
+    { int64_t l[]={5}, r[]={2}; auto* lv=create_decimal_vector(l,1); auto* rv=create_int64_vector(r,1);
+      VecResult res=draken_binop(&c_plus,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL
+             && static_cast<const int64_t*>(res.data)[res.selection[0]]==7);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
 }
 
 // P9.1b-1 — draken_binop DECIMAL×DECIMAL (int64-backed), scale-aware via dec_*.
@@ -739,11 +1173,14 @@ void test_draken_binop_decimal() {
       assert(vectors_equal_float64(res,e,1));
       free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
 
-    // still-deferred → loud error: DECIMAL × INTEGER (P9.1b-rest later)
+    // DECIMAL × INTEGER (S-A.3): the INT64 operand is scale-0; DECIMAL 1.50 (150,s2)
+    // + INT64 5 (s0) aligns to scale 2 → 150+500=650 (6.50). Formerly deferred (loud
+    // error, P9.1b-rest); now handled by the shared dec_* kernels.
     { binary_op_ctx c{1,2,0,2}; int64_t r[]={5};
       auto* lv=create_decimal_vector(a,1); auto* rv=create_int64_vector(r,1);
-      VecResult res=draken_binop(&c,lv,rv); assert(is_error(res));
-      free_vector(lv); free_vector(rv); }
+      VecResult res=draken_binop(&c,lv,rv);
+      assert(!is_error(res) && res.type==DRAKEN_DECIMAL && dec_at(res,0)==650);
+      free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
 }
 
 // P9.1c — draken_binop bitwise OR/AND/XOR/SHL/SHR (int_bitwise; result = input type,
@@ -845,6 +1282,50 @@ int main() {
         {"arith_divide_dict_left", test_arith_divide_dict_left},
         {"arith_modulo_dict_left", test_arith_modulo_dict_left},
         {"arith_result_is_identity_shaped", test_arith_result_is_identity_shaped},
+        // REPLACE / SOUNDEX value + shape parity (func_fn_t string kernels).
+        {"soundex_values", test_soundex_values},
+        {"soundex_empty_nonalpha_null", test_soundex_empty_and_nonalpha_null},
+        {"soundex_dict_shape_preserved", test_soundex_dict_shape_preserved},
+        {"soundex_constant_shape_preserved", test_soundex_constant_shape_preserved},
+        {"replace_multi_occurrence", test_replace_multi_occurrence},
+        {"replace_overlap_avoidance", test_replace_overlap_avoidance},
+        {"replace_no_match", test_replace_no_match},
+        {"replace_empty_search", test_replace_empty_search},
+        {"replace_shrink", test_replace_shrink},
+        {"replace_growth_over_inline", test_replace_growth_over_inline},
+        {"replace_dict_shape_preserved", test_replace_dict_shape_preserved},
+        {"replace_nonscalar_search_fails_loud", test_replace_nonscalar_search_fails_loud},
+        {"reverse_ascii_bytes", test_reverse_ascii_bytes},
+        {"reverse_long_over_inline", test_reverse_long_over_inline},
+        {"reverse_nvarchar_codepoints", test_reverse_nvarchar_codepoints},
+        {"reverse_varbinary", test_reverse_varbinary},
+        {"reverse_dict_shape_preserved", test_reverse_dict_shape_preserved},
+        {"reverse_constant_shape_preserved", test_reverse_constant_shape_preserved},
+        {"initcap_word_boundaries", test_initcap_word_boundaries},
+        {"initcap_long_over_inline", test_initcap_long_over_inline},
+        {"initcap_dict_shape_preserved", test_initcap_dict_shape_preserved},
+        {"initcap_nvarchar_fails_loud", test_initcap_nvarchar_fails_loud},
+        {"lpad_basic", test_lpad_basic},
+        {"rpad_basic", test_rpad_basic},
+        {"lpad_exact_noop", test_lpad_exact_noop},
+        {"lpad_truncate", test_lpad_truncate},
+        {"rpad_truncate", test_rpad_truncate},
+        {"lpad_zero_width", test_lpad_zero_width},
+        {"lpad_negative_width", test_lpad_negative_width},
+        {"lpad_multichar_tile", test_lpad_multichar_tile},
+        {"rpad_multichar_tile", test_rpad_multichar_tile},
+        {"lpad_partial_tile", test_lpad_partial_tile},
+        {"lpad_empty_fill_pad", test_lpad_empty_fill_pad},
+        {"lpad_empty_fill_trunc", test_lpad_empty_fill_trunc},
+        {"lpad_long_over_inline", test_lpad_long_over_inline},
+        {"lpad_nvarchar_trunc_no_split", test_lpad_nvarchar_trunc_no_split},
+        {"lpad_nvarchar_multibyte_tile", test_lpad_nvarchar_multibyte_tile},
+        {"rpad_nvarchar_multibyte_tile", test_rpad_nvarchar_multibyte_tile},
+        {"lpad_varchar_byte_width", test_lpad_varchar_byte_width},
+        {"lpad_dict_shape_preserved", test_lpad_dict_shape_preserved},
+        {"rpad_constant_shape_preserved", test_rpad_constant_shape_preserved},
+        {"lpad_null_row_preserved", test_lpad_null_row_preserved},
+        {"lpad_bad_arity_fails_loud", test_lpad_bad_arity_fails_loud},
     };
 
     const int TOTAL = sizeof(tests) / sizeof(tests[0]);

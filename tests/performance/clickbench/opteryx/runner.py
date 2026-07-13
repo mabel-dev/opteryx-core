@@ -193,6 +193,8 @@ if __name__ == "__main__":  # pragma: no cover
     width = shutil.get_terminal_size((80, 20))[0] - 18
     passed: int = 0
     failed: int = 0
+    sum_min_ms: float = 0.0  # Σ per-query best (minimum) time — the headline total
+    sum_duckdb_min_ms: float = 0.0  # Σ DuckDB baseline over the same queries
     nl: str = "\n"
     failures = []
 
@@ -285,9 +287,11 @@ if __name__ == "__main__":  # pragma: no cover
                     duckdb_ms = duckdb_results[index] * 1000  # Convert from seconds to ms
                     ratio_str = format_ratio(min_time, duckdb_ms)
                     result_str += f"  {ratio_str}"
+                    sum_duckdb_min_ms += duckdb_ms
 
                 print(result_str)
 
+                sum_min_ms += min_time
                 passed += 1
         else:
             # Original single-run mode
@@ -398,8 +402,20 @@ if __name__ == "__main__":  # pragma: no cover
         for statement, err in failures:
             print(err)
 
+    # Headline total: the sum of each query's BEST (minimum) time — the
+    # ClickBench-style metric, insensitive to the wall-clock noise of cold start,
+    # GC pauses, and per-iteration session setup that the suite runtime includes.
+    if args.warm:
+        summary = f"\n\033[38;2;139;233;253m\033[3mSUM OF MINIMUMS\033[0m  {sum_min_ms / 1000:.2f}s ({sum_min_ms:.0f}ms)"
+        if sum_duckdb_min_ms > 0:
+            summary += (
+                f"\n  vs DuckDB {sum_duckdb_min_ms / 1000:.2f}s  "
+                f"{format_ratio(sum_min_ms, sum_duckdb_min_ms)}"
+            )
+        print(summary)
+
     print(
-        f"\n\033[38;2;139;233;253m\033[3mCOMPLETE\033[0m ({((time.monotonic_ns() - start_suite) / 1e9):.2f} seconds)\n"
+        f"\n\033[38;2;139;233;253m\033[3mCOMPLETE\033[0m ({((time.monotonic_ns() - start_suite) / 1e9):.2f} seconds wall)\n"
         f"  \033[38;2;26;185;67m{passed} passed ({(passed * 100) // (passed + failed)}%)\033[0m\n"
         f"  \033[38;2;255;121;198m{failed} failed\033[0m"
     )

@@ -441,6 +441,20 @@ def inner_binder(
     column_name = node.query_column or format_expression(node, True, format_cache)
     for schema in context.schemas.values():
         found_column = schema.find_column(column_name, case_insensitive=True)
+        # A literal's column_name is its own textual form, so the case-insensitive
+        # lookup above (correct for identifiers) would otherwise collapse two
+        # case-distinct string literals ('ss' and 'SS', REPLACE's needle and
+        # replacement) onto a single interned constant and hand the executor
+        # value == value. Reuse a constant for a literal only when the stored
+        # value is byte-identical; otherwise keep it distinct.
+        if (
+            found_column
+            and node_type == NodeType.LITERAL
+            and not (
+                isinstance(found_column, ConstantColumn) and found_column.value == node.value
+            )
+        ):
+            found_column = None
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
             # found_identity = found_column.identity
