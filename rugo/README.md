@@ -93,6 +93,48 @@ with parquet.read_parquet("planets.parquet") as reader:
 
 ---
 
+## Command-line interface
+
+Installing Rugo puts a `rugo` command on your `PATH` — the same reader and writer, driven from the shell. No Python required at the call site; it's the quickest way to inspect a file, convert between formats, or wire Parquet/CSV/JSONL into a shell pipeline.
+
+```bash
+rugo info space_missions.parquet          # rows, columns, size, format
+rugo schema space_missions.parquet        # column names, types, nullability
+rugo preview -n 5 space_missions.parquet  # first 5 rows as a table
+rugo convert space_missions.parquet out.jsonl   # format is inferred from the extension
+```
+
+Every verb takes `--json` to emit machine-readable output instead of a text table, so the CLI composes with `jq` and friends:
+
+```bash
+rugo count --json events.parquet | jq .num_rows
+rugo describe --json events.parquet | jq '.columns[] | select(.null_count > 0)'
+```
+
+### Verbs
+
+| Verb        | Purpose                                                                    | Example                                    |
+|-------------|----------------------------------------------------------------------------|--------------------------------------------|
+| `info`      | High-level metadata: rows, columns, size, format                           | `rugo info data.parquet`                   |
+| `schema`    | Column names, types, nullability                                           | `rugo schema data.parquet`                 |
+| `columns`   | Column names only (one per line)                                           | `rugo columns data.parquet`                |
+| `count`     | Row count (from metadata where available)                                  | `rugo count data.parquet`                  |
+| `preview`   | First N rows as a table (`-n`, `-c` to project columns)                    | `rugo preview -n 20 -c id,name data.parquet` |
+| `head`      | Unix-friendly alias for `preview`                                          | `rugo head data.parquet`                   |
+| `describe`  | Per-column summary stats: null counts, min/max, distinct *(Parquet only)*  | `rugo describe data.parquet`               |
+| `stats`     | Alias for `describe`                                                        | `rugo stats data.parquet`                  |
+| `inspect`   | Low-level footer / row-group / encoding dump *(Parquet only)*              | `rugo inspect data.parquet`                |
+| `diff`      | Compare two files' schemas: columns added, removed, type-changed           | `rugo diff before.parquet after.parquet`   |
+| `convert`   | Convert between Parquet, CSV, and JSONL (format inferred from extensions)   | `rugo convert data.parquet data.csv`       |
+| `merge`     | Concatenate multiple schema-identical files into one                       | `rugo merge part-*.parquet all.parquet`    |
+| `split`     | Split one file into row-count-bounded chunks (`--rows`, `--format`)        | `rugo split --rows 100000 big.parquet`     |
+
+`describe`, `stats`, and `inspect` read statistics from the Parquet footer, which CSV and JSONL don't carry — pointing them at a non-Parquet file is a clean error, not a crash. `merge` requires identical column names, order, and types across inputs and fails loud on a mismatch rather than coercing. `diff` reports schema differences only (column set and types), not row-level data changes.
+
+Verb names are stable: `info`, `schema`, `diff`, and `convert` mean what you'd expect and are safe to script against.
+
+---
+
 ## Parquet
 
 `rugo.parquet` is the recommended surface: one symmetric module for reading and writing that accepts a filename or an in-memory buffer, streams row-group Morsels, applies predicate pushdown, and writes Morsels back to bytes.
@@ -107,13 +149,13 @@ meta = parquet.read_metadata("planets.parquet")
 print(meta.num_rows)                      # 9
 print([c.name for c in meta.schema_columns])
 
-# Streaming read: one Morsel per row group. `columns` projects; `filters`
-# prune whole row groups via footer statistics (rows in surviving groups are
-# NOT filtered — apply row-level predicates downstream).
+# Streaming read: one Morsel per row group. `columns` projects; `predicates`
+# prune whole row groups via footer statistics, then filter surviving rows
+# exactly — the yielded morsels contain only rows that match.
 with parquet.read_parquet(
      "planets.parquet",
     columns=["id", "name"],
-    filters=[("id", ">", 4)],               # ops: = == != < <= > >= in "not in"
+    predicates=[("id", ">", 4)],            # ops: = == != < <= > >= in "not in"
 ) as reader:
     for morsel in reader:
         print(morsel.column(b"name").to_pylist())
@@ -128,12 +170,12 @@ with open("out.parquet", "wb") as f:
 
 | Function                                      | Returns                                                    |
 |-----------------------------------------------|------------------------------------------------------------|
-| `read_parquet(source, columns=None, filters=None)` | context manager yielding one Morsel per surviving row group |
+| `read_parquet(source, columns=None, predicates=None)` | context manager yielding one Morsel per surviving row group |
 | `read_metadata(source)`                      | `ParquetMetadata` (`num_rows`, `schema_columns`)           |
 | `write_parquet(morsel, compression="zstd")` | `bytes` (whole file)                                        |
 | `write_parquet_with_bounds(morsel)`         | `(bytes, {col_index: (min, max)})`                         |
 
-`source` is a filename (`str`) or `bytes`/`bytearray`/`memoryview`. `filters` is a list of `(column, op, value)`; pruning is at row-group granularity.
+`source` is a filename (`str`) or `bytes`/`bytearray`/`memoryview`. `predicates` is a list of `(column, op, value)`; row groups are pruned by footer statistics (and bloom filters for equality on file sources), then surviving rows are filtered exactly.
 
 ---
 
@@ -160,7 +202,7 @@ read_parquet(data, column_names=None, row_group_mask=None)
 
 - `data` — `bytes`, `bytearray`, or `memoryview` holding the full Parquet file.
 - `column_names` — `list[str]` to project, or `None` for all columns.
-- `row_group_mask` — optional iterable, one truthy/falsy entry per row group; a falsy entry skips decoding that row group (predicate pushdown). `rugo.parquet`'s `filters=` builds this from `read_rowgroup_stats`.
+- `row_group_mask` — optional iterable, one truthy/falsy entry per row group; a falsy entry skips decoding that row group (predicate pushdown). `rugo.parquet`'s `predicates=` builds this from `read_rowgroup_stats`.
 - Returns `list[Morsel]` (one per decoded row group), or `None` on failure. On partial decode failure an individual column within a Morsel may be `None`.
 
 #### Compatibility

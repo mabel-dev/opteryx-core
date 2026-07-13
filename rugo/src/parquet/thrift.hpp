@@ -111,7 +111,11 @@ inline void SkipBinary(TInput &in) {
   in.p += len;
 }
 
-static inline bool ReadBool(TInput &in) { return in.readByte() != 0; }
+// Thrift Compact Protocol inlines a struct-field bool's value into the field
+// header's type nibble itself (T_BOOL_TRUE=1 / T_BOOL_FALSE=2) — there is no
+// separate value byte on the wire for it (unlike list/set/map bool elements,
+// which are one byte each). Takes the field header's type, not the stream.
+static inline bool ReadBool(uint8_t field_type) { return field_type == T_BOOL_TRUE; }
 
 // ------------------- Compact Protocol Structs -------------------
 

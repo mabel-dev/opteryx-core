@@ -2860,6 +2860,83 @@ extern "C" PyObject* draken_vector_own_array(
     }
 }
 
+// draken_vector_own_array_numeric — wrap hand-allocated buffers in a DRAKEN_ARRAY[T]
+// Vector whose child is fixed-width numeric/bool. Sibling of draken_vector_own_array
+// (string-family only); see draken_bridge.h for the full contract. All four
+// caller buffers are transferred unconditionally on entry.
+extern "C" PyObject* draken_vector_own_array_numeric(
+    int32_t*   parent_offsets,
+    void*      child_data,
+    uint8_t*   child_validity,
+    uint32_t   child_length,
+    DrakenType child_type,
+    uint8_t*   parent_validity,
+    uint32_t   length)
+{
+    // Step 1: take ownership of all caller buffers immediately via RAII.
+    OwnedBuffer<void>    off_guard(static_cast<void*>(parent_offsets));
+    OwnedBuffer<void>    data_guard(child_data);
+    OwnedBuffer<uint8_t> cval_guard(child_validity);
+    OwnedBuffer<uint8_t> pval_guard(parent_validity);
+
+    try {
+        if (child_type != DRAKEN_INT32 && child_type != DRAKEN_INT64 &&
+            child_type != DRAKEN_FLOAT32 && child_type != DRAKEN_FLOAT64 &&
+            child_type != DRAKEN_BOOL) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_array_numeric: child_type must be DRAKEN_INT32, "
+                "DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, or DRAKEN_BOOL");
+            return nullptr;
+        }
+        if (child_length > 0u && !child_data) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_array_numeric: child_length > 0 but child_data is NULL");
+            return nullptr;
+        }
+        if (!parent_offsets && length > 0u) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_array_numeric: parent_offsets is NULL but length > 0");
+            return nullptr;
+        }
+
+        // Step 2: build child VectorOwner directly over the flat buffer — no
+        // arena/slot consolidation needed for fixed-width types.
+        void*    raw_data  = data_guard.release();
+        uint8_t* raw_cval  = cval_guard.release();
+        OwnedBuffer<void>    child_data_buf(raw_data);
+        OwnedBuffer<uint8_t> child_val_buf(raw_cval);
+
+        DrakenVector child_vec = draken_vector_from_dense(
+            raw_data, child_length, child_type, raw_cval);
+        VectorOwner child_owner(child_vec, std::move(child_data_buf), std::move(child_val_buf));
+
+        // Step 3: build parent VectorOwner (dense, DRAKEN_ARRAY, parent validity).
+        void*    raw_off  = off_guard.release();
+        uint8_t* raw_pval = pval_guard.release();
+        OwnedBuffer<void>    parent_data_buf(raw_off);
+        OwnedBuffer<uint8_t> parent_val_buf(raw_pval);
+
+        DrakenVector parent_vec = draken_vector_from_dense(
+            raw_off, length, DRAKEN_ARRAY, raw_pval);
+        VectorOwner owner(parent_vec, std::move(parent_data_buf), std::move(parent_val_buf));
+        owner.child_owner = std::make_unique<VectorOwner>(std::move(child_owner));
+
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
 // draken_vector_own_timestamp — wrap a hand-allocated int64 buffer as a DRAKEN_TIMESTAMP64 Vector.
 //
 // See draken_bridge.h for the contract. The "days" unit is special: the input data buffer

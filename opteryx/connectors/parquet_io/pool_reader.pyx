@@ -1710,6 +1710,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     lists dict+plain).
     """
     cdef FileStats fs
+    cdef const FileStats* fsp = NULL   # borrowed (cache) on hit, &fs on cold miss
     cdef const RowGroupStats* rgp
     cdef const ColumnStats* csp
     cdef size_t rg_i, ci, n_rg_cols
@@ -1762,7 +1763,11 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     for path in paths:
         if not _is_local_path(path):
             return False
-        if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+        # Borrow the parsed footer (no copy) on a hit; on a cold miss parse into
+        # the local and point at it. The pointer is only read within this loop
+        # iteration (never stashed, no put_fs on the hot path), so it stays valid.
+        fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
+        if fsp == NULL:
             envelope, _ = _read_footer_payload(
                 path, file_sizes.get(path, -1) if file_sizes else -1, None
             )
@@ -1770,8 +1775,9 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
             buf_size = <size_t>len(envelope)
             fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
             _PARSED_FOOTER_CACHE.put_fs(path, fs)
-        for rg_i in range(fs.row_groups.size()):
-            rgp = &fs.row_groups[rg_i]
+            fsp = &fs
+        for rg_i in range(fsp.row_groups.size()):
+            rgp = &fsp.row_groups[rg_i]
             n_rg_cols = rgp.columns.size()
             for k in range(ncols):
                 found = False
@@ -1870,6 +1876,7 @@ cpdef bint any_column_unsigned(paths, column_names, file_sizes=None):
     this probe rather than a schema-type check in the compiler.
     """
     cdef FileStats fs
+    cdef const FileStats* fsp = NULL   # borrowed (cache) on hit, &fs on cold miss
     cdef const RowGroupStats* rgp
     cdef const ColumnStats* csp
     cdef size_t rg_i, ci, n_rg_cols
@@ -1890,7 +1897,9 @@ cpdef bint any_column_unsigned(paths, column_names, file_sizes=None):
             # A remote scan never reaches the native Source anyway (footer gate rejects
             # non-local); treat as "cannot prove signed" → not flagged here.
             continue
-        if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+        # Borrow the parsed footer (no copy) on a hit; cold miss parses locally.
+        fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
+        if fsp == NULL:
             envelope, _ = _read_footer_payload(
                 path, file_sizes.get(path, -1) if file_sizes else -1, None
             )
@@ -1898,8 +1907,9 @@ cpdef bint any_column_unsigned(paths, column_names, file_sizes=None):
             buf_size = <size_t>len(envelope)
             fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
             _PARSED_FOOTER_CACHE.put_fs(path, fs)
-        for rg_i in range(fs.row_groups.size()):
-            rgp = &fs.row_groups[rg_i]
+            fsp = &fs
+        for rg_i in range(fsp.row_groups.size()):
+            rgp = &fsp.row_groups[rg_i]
             n_rg_cols = rgp.columns.size()
             for k in range(ncols):
                 for ci in range(n_rg_cols):

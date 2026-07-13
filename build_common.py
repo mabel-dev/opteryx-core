@@ -340,31 +340,14 @@ if OPTERYX_ENABLE_TSAN and not OPTERYX_ENABLE_ASAN and not is_win():
     C_FLAGS.extend(_tsan_flags)
     LD_EXTRA.append("-fsanitize=thread")
 
-# DIAGNOSTIC-ONLY, TEMPORARY: allocator-scope measurement pass (opt-in, dev
-# only, throwaway branch). Defines OPTERYX_ALLOC_TRACE so draken/core/alloc.h
-# records every draken_malloc/draken_aligned_malloc/draken_free call, tagged
-# with the caller's return address (see draken/core/alloc_trace.h for why —
-# a propagated owner tag would need cross-.so state this build deliberately
-# avoids). -g and keeping symbols (below) are required for the offline
-# addr2line/atos symbolication step to resolve call sites to file:line.
-# Never enabled for wheels.
-OPTERYX_ENABLE_ALLOC_TRACE = os.environ.get("OPTERYX_ENABLE_ALLOC_TRACE", "0").lower() in (
-    "1", "true", "yes",
-)
-if OPTERYX_ENABLE_ALLOC_TRACE and not is_win():
-    CPP_FLAGS.extend(["-DOPTERYX_ALLOC_TRACE", "-g"])
-    C_FLAGS.append("-g")
-    LD_EXTRA.append("-ldl")
-
 # MSVC LTO linker flag when requested
 if is_win() and OPTERYX_ENABLE_LTO:
     # '/LTCG' enables link-time code generation on MSVC
     LD_EXTRA.append("/LTCG")
 
 if (not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win()
-        and not OPTERYX_ENABLE_ASAN and not OPTERYX_ENABLE_TSAN
-        and not OPTERYX_ENABLE_ALLOC_TRACE):
-    # Sanitizer/trace builds keep symbols so the reports are readable.
+        and not OPTERYX_ENABLE_ASAN and not OPTERYX_ENABLE_TSAN):
+    # Sanitizer builds keep symbols so the race/leak reports are readable.
     CPP_FLAGS.append("-s")
     C_FLAGS.append("-s")
 

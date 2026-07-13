@@ -39,7 +39,7 @@ from cpython.object cimport PyObject
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, CppMemoryPool
 
 from draken.core.buffers cimport DrakenVector, DrakenType
-from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_DECIMAL128
+from draken.core.buffers cimport DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_DECIMAL128
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from draken.vectors.vector cimport dict_int64_from_decoded as _dict_i64_from_decoded
@@ -75,6 +75,11 @@ cdef extern from "core/draken_bridge.h":
         int32_t* parent_offsets, DrakenStringSlot* child_slots,
         uint8_t* child_arena, size_t child_arena_len,
         uint32_t child_length, DrakenType child_type,
+        uint8_t* parent_validity, uint32_t length)
+    PyObject* draken_vector_own_array_numeric(
+        int32_t* parent_offsets, void* child_data,
+        uint8_t* child_validity, uint32_t child_length,
+        DrakenType child_type,
         uint8_t* parent_validity, uint32_t length)
 
 
@@ -136,6 +141,14 @@ DEF TAG_UINT8_DICT  = 17
 DEF TAG_UINT16_DICT = 18
 DEF TAG_UINT32_DICT = 19
 DEF TAG_UINT64_DICT = 20
+
+# ARRAY child element type tags — must match CHILD_* in ipc_serialize.hpp.
+DEF CHILD_INT64   = 1
+DEF CHILD_INT32   = 2
+DEF CHILD_FLOAT32 = 3
+DEF CHILD_FLOAT64 = 4
+DEF CHILD_BOOL    = 5
+DEF CHILD_STRING  = 6
 
 # sizeof(DrakenStringSlot) == 16 always (16-byte fixed-width slot, documented in string_slot.h).
 DEF SLOT_BYTES = 16
@@ -816,9 +829,22 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
 
 cdef object _build_array_vector(const uint8_t* p, uint32_t num_rows,
                                 const uint8_t* list_null_bmap, uint32_t list_null_bmap_len):
-    """Deserialize TAG_ARRAY (11) into a DRAKEN_ARRAY[VARCHAR] Vector.
+    """Deserialize TAG_ARRAY (11): reads the child_type_tag byte written right
+    after the common IPC header (see ipc_serialize.hpp) and dispatches to the
+    string or numeric child builder.
+    """
+    cdef uint8_t child_type_tag = p[0]
+    p += 1
+    if child_type_tag == CHILD_STRING:
+        return _build_array_vector_string(p, num_rows, list_null_bmap, list_null_bmap_len)
+    return _build_array_vector_numeric(p, num_rows, list_null_bmap, list_null_bmap_len, child_type_tag)
 
-    Wire layout after the common IPC header:
+
+cdef object _build_array_vector_string(const uint8_t* p, uint32_t num_rows,
+                                const uint8_t* list_null_bmap, uint32_t list_null_bmap_len):
+    """Deserialize a CHILD_STRING TAG_ARRAY (11) into a DRAKEN_ARRAY[VARCHAR] Vector.
+
+    Wire layout after child_type_tag:
       uint32_t  child_count
       int32_t[(num_rows+1)]  offsets
       uint32_t  child_null_bmap_len
@@ -911,6 +937,101 @@ cdef object _build_array_vector(const uint8_t* p, uint32_t num_rows,
         parent_validity, num_rows)
     if raw == NULL:
         raise MemoryError("draken_vector_own_array failed")
+    return _wrap_raw_pyobj(raw)
+
+
+cdef object _build_array_vector_numeric(const uint8_t* p, uint32_t num_rows,
+                                        const uint8_t* list_null_bmap, uint32_t list_null_bmap_len,
+                                        uint8_t child_type_tag):
+    """Deserialize a fixed-width-child TAG_ARRAY (11) into a DRAKEN_ARRAY[T] Vector,
+    T in {INT32, INT64, FLOAT32, FLOAT64, BOOL}.
+
+    Wire layout after child_type_tag (see ipc_serialize.hpp for the writer side):
+      uint32_t  child_count
+      int32_t[(num_rows+1)]  offsets
+      uint32_t  child_null_bmap_len
+      uint8_t[child_null_bmap_len]  child_null_bmap
+      CHILD_BOOL: uint8_t[(child_count+7)/8]  bit-packed values, LSB-first
+      otherwise:  uint8_t[child_count * elem_size]  packed native-endian values
+    """
+    cdef uint32_t child_count
+    p = _read_u32(p, &child_count)
+
+    # parent_offsets — draken_malloc'd; transferred to draken_vector_own_array_numeric.
+    cdef uint32_t offsets_bytes = (num_rows + 1) * sizeof(int32_t)
+    cdef int32_t* parent_offsets = <int32_t*>draken_malloc(offsets_bytes)
+    if parent_offsets == NULL:
+        raise MemoryError()
+    memcpy(parent_offsets, p, offsets_bytes)
+    p += offsets_bytes
+
+    cdef uint32_t child_null_bmap_len
+    p = _read_u32(p, &child_null_bmap_len)
+    cdef const uint8_t* child_null_bmap_src = p
+    p += child_null_bmap_len
+
+    cdef DrakenType child_type
+    cdef uint32_t elem_size
+    if child_type_tag == CHILD_INT64:
+        child_type = DRAKEN_INT64
+        elem_size = 8
+    elif child_type_tag == CHILD_INT32:
+        child_type = DRAKEN_INT32
+        elem_size = 4
+    elif child_type_tag == CHILD_FLOAT32:
+        child_type = DRAKEN_FLOAT32
+        elem_size = 4
+    elif child_type_tag == CHILD_FLOAT64:
+        child_type = DRAKEN_FLOAT64
+        elem_size = 8
+    else:
+        child_type = DRAKEN_BOOL
+        elem_size = 0
+
+    cdef uint32_t data_bytes = (child_count + 7) // 8 if child_type_tag == CHILD_BOOL \
+        else child_count * elem_size
+
+    # child_data — draken_malloc'd; transferred to draken_vector_own_array_numeric.
+    cdef uint8_t* child_data = NULL
+    if data_bytes > 0:
+        child_data = <uint8_t*>draken_malloc(data_bytes)
+        if child_data == NULL:
+            draken_free(parent_offsets)
+            raise MemoryError()
+        memcpy(child_data, p, data_bytes)
+    p += data_bytes
+
+    # child_validity — draken_malloc'd; transferred to draken_vector_own_array_numeric.
+    cdef uint8_t* child_validity = NULL
+    if child_null_bmap_len > 0:
+        child_validity = <uint8_t*>draken_malloc(child_null_bmap_len)
+        if child_validity == NULL:
+            if child_data != NULL:
+                draken_free(child_data)
+            draken_free(parent_offsets)
+            raise MemoryError()
+        memcpy(child_validity, child_null_bmap_src, child_null_bmap_len)
+
+    # parent_validity — draken_malloc'd; transferred to draken_vector_own_array_numeric.
+    cdef uint8_t* parent_validity = NULL
+    if list_null_bmap_len > 0:
+        parent_validity = <uint8_t*>draken_malloc(list_null_bmap_len)
+        if parent_validity == NULL:
+            if child_validity != NULL:
+                draken_free(child_validity)
+            if child_data != NULL:
+                draken_free(child_data)
+            draken_free(parent_offsets)
+            raise MemoryError()
+        memcpy(parent_validity, list_null_bmap, list_null_bmap_len)
+
+    # All non-NULL buffers are draken_malloc'd and ownership is transferred
+    # to draken_vector_own_array_numeric unconditionally on call entry (even on failure).
+    cdef PyObject* raw = draken_vector_own_array_numeric(
+        parent_offsets, <void*>child_data, child_validity, child_count,
+        child_type, parent_validity, num_rows)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_array_numeric failed")
     return _wrap_raw_pyobj(raw)
 
 

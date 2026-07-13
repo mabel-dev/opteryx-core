@@ -339,12 +339,15 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     record_count = 0
                     column_stats = None
 
+                min_k_hashes = self._load_sidecar_min_k_hashes(blob_name, schema)
+
                 entry = FileEntry(
                     file_path=blob_name,
                     file_format=file_format,
                     record_count=record_count,
                     file_size_in_bytes=file_size,
                     column_stats=column_stats,
+                    min_k_hashes=min_k_hashes,
                 )
                 file_entries.append(entry)
 

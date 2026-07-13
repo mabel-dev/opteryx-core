@@ -328,11 +328,11 @@ def test_create_table_all_types(tmp_path):
     expected_cols = {
         "int_col": "INTEGER",
         "varchar_col": "VARCHAR",
-        "double_col": "DOUBLE",
+        "double_col": "FLOAT",
         "bool_col": "BOOLEAN",
         "date_col": "DATE",
         "timestamp_col": "TIMESTAMP",
-        "blob_col": "BLOB",
+        "blob_col": "VARBINARY",
     }
 
     for col in dataset_info["schema"]["columns"]:

@@ -1797,8 +1797,20 @@ def execute_native(plan, telemetry=None):
             # The driver is done, so every operator's counters are final: harvest the
             # per-operator telemetry and fold it onto the session telemetry, keyed by
             # plan-node identity (mermaid's get_node_stats reads it back for the
-            # ``operations`` breakdown). Several native operators can share one identity
-            # (a plan node lowered to multiple operators, operator fusion) — sum them.
+            # ``operations`` breakdown). Several native operators/sources/sinks can
+            # share one identity: either a sequential chain within one pipeline (a
+            # scan with its residual filter relocated onto it, WP-02 — source ->
+            # operator -> operator, each stage feeding the next), or independent
+            # pipelines fanning into a shared buffer (each UNION leg tags its own
+            # pipeline's select+append-sink with the union node's identity, then the
+            # buffer-reading pipeline that follows also carries it). In both shapes
+            # collect_op_stats (engine.hpp) emits rows in pipeline-creation / role
+            # order, so the LAST row for an identity is always the terminal stage —
+            # its records_in/records_out/bytes_in/bytes_out are the node's real
+            # input/output (summing them, as before, double-counts every
+            # intermediate stage's output as if it were additional data). calls/
+            # execution_time/cpu_time genuinely are additive work done across every
+            # stage (chain or fan-in), so those keep being summed.
             _th0 = _t.perf_counter_ns()
             if telemetry is not None:
                 op_stats: dict = {}
@@ -1818,10 +1830,10 @@ def execute_native(plan, telemetry=None):
                             "cpu_time": row["cpu_time"],
                         }
                     else:
-                        agg["records_in"] += row["records_in"]
-                        agg["records_out"] += row["records_out"]
-                        agg["bytes_in"] += row["bytes_in"]
-                        agg["bytes_out"] += row["bytes_out"]
+                        agg["records_in"] = row["records_in"]
+                        agg["records_out"] = row["records_out"]
+                        agg["bytes_in"] = row["bytes_in"]
+                        agg["bytes_out"] = row["bytes_out"]
                         agg["calls"] += row["calls"]
                         agg["execution_time"] += row["execution_time"]
                         agg["cpu_time"] += row["cpu_time"]

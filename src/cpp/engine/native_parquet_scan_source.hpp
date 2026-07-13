@@ -414,7 +414,8 @@ struct NativeParquetScanSource : Source {
             emit_dict_string_column(static_cast<DrakenStringSlot*>(slots), data_length,
                                     static_cast<uint8_t*>(arena), arena_len,
                                     static_cast<uint32_t*>(codes), length,
-                                    validity, string_type_for(i), out);
+                                    validity, string_type_for(i), out,
+                                    result.columns[i].dict_sorted);
             return true;
         }
         if (dk == rugo::DK_VARCHAR) {
@@ -455,6 +456,8 @@ struct NativeParquetScanSource : Source {
             rugo::morsel_take_string(result, i, &arena, &codes);  // codes only; arena unused (numeric dict)
             v = draken_vector_from_dict(data, data_length, static_cast<const uint32_t*>(codes),
                                         length, dtype, validity);
+            if (result.columns[i].dict_sorted && draken_is_dict(&v))
+                v.flags |= DRAKEN_DICT_KEYS_SORTED;
             codes_buf = OwnedBuffer<void>(codes);
         } else {
             v = draken_vector_from_dense(data, length, dtype, validity);

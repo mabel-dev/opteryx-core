@@ -1779,14 +1779,17 @@ def plan_insert(statement, **kwargs):
         plan.add_node(insert_id, insert_step)
         plan.add_edge(values_id, insert_id)
     else:
-        # SELECT source — plan the sub-query, strip its Exit node, then attach
-        # the Insert sink in the Exit's place.
+        # SELECT source — plan the sub-query and keep its Exit node (it already
+        # carries the correct final_columns/final_names from schema binding),
+        # attaching the Insert sink onto it rather than stripping it. This
+        # mirrors plan_explain's pattern and keeps the SELECT subplan genuinely
+        # Exit-headed, which execute_native requires to run it on the native
+        # engine instead of the legacy push-pipeline.
         source_plan = plan_query(insert_stmt["source"])
         exit_node_id = source_plan.get_exit_points()[0]
-        source_plan.remove_node(exit_node_id, heal=True)
 
         plan += source_plan
-        source_tail_id = source_plan.get_exit_points()[0]
+        source_tail_id = exit_node_id
 
         insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
         insert_step.relation_name = relation_name

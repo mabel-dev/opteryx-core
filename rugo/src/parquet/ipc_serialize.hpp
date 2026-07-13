@@ -598,13 +598,28 @@ static void serialize_string_plain(ByteSink& out, const DecodedColumn& col) {
 //   uint32_t  num_rows          (outer row count, e.g. 357)
 //   uint32_t  list_null_bmap_len
 //   uint8_t[list_null_bmap_len] list_null_bmap  (bit i=1: row i has non-null list)
+//   uint8_t   child_type_tag    (CHILD_STRING=6, CHILD_INT64=1, CHILD_INT32=2,
+//                                 CHILD_FLOAT32=3, CHILD_FLOAT64=4, CHILD_BOOL=5)
 //   uint32_t  child_count       (total child slots, e.g. 869)
 //   int32_t[(num_rows+1)]       offsets         (Arrow-style child start indices)
 //   uint32_t  child_null_bmap_len (0 if no null child elements)
 //   uint8_t[child_null_bmap_len]  child_null_bmap
-//   for each child slot i in 0..child_count-1:
-//     uint32_t len
-//     uint8_t[len]  bytes        (0 bytes for null elements; len field still present)
+//   child body, shape depends on child_type_tag:
+//     CHILD_STRING: for each child slot i in 0..child_count-1:
+//                     uint32_t len; uint8_t[len] bytes (0 bytes for null elements)
+//     CHILD_BOOL:   uint8_t[(child_count+7)/8]  bit-packed values, LSB-first
+//                     (matches DRAKEN_BOOL's in-memory contract directly; null
+//                      slots read as 0 but are masked out by child_null_bmap)
+//     otherwise (fixed-width numeric): uint8_t[child_count * elem_size]
+//                     packed native-endian values, one elem_size slot per child
+//                     (null slots are zero-filled but still occupy a slot)
+
+static const uint8_t CHILD_INT64   = 1;
+static const uint8_t CHILD_INT32   = 2;
+static const uint8_t CHILD_FLOAT32 = 3;
+static const uint8_t CHILD_FLOAT64 = 4;
+static const uint8_t CHILD_BOOL    = 5;
+static const uint8_t CHILD_STRING  = 6;
 
 static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx, uint8_t width) {
     if (width == 1) return static_cast<int32_t>(arr[idx]);
@@ -617,6 +632,29 @@ static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx
 static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
     int32_t max_def = col.max_def_level;
     size_t  n_levels = col.rep_levels.size();
+
+    // Determine the child element's wire shape up front — fail loud on
+    // anything not yet supported (decimal128, unsigned int family) rather
+    // than silently mis-encoding.
+    uint8_t child_type_tag;
+    if (col.type == "string" || col.type == "byte_array") {
+        child_type_tag = CHILD_STRING;
+    } else if (col.type == "int64" && !col.is_unsigned) {
+        child_type_tag = CHILD_INT64;
+    } else if (col.type == "int32" && !col.is_unsigned) {
+        child_type_tag = CHILD_INT32;
+    } else if (col.type == "float32") {
+        child_type_tag = CHILD_FLOAT32;
+    } else if (col.type == "float64") {
+        child_type_tag = CHILD_FLOAT64;
+    } else if (col.type == "boolean") {
+        child_type_tag = CHILD_BOOL;
+    } else {
+        throw std::runtime_error(
+            "ARRAY column with element type '" + col.type +
+            "' is not supported (only string/int32/int64/float32/float64/boolean "
+            "list elements can be read)");
+    }
 
     // Count outer rows and build list-level null bitmap + offsets.
     int32_t outer_rows = 0;
@@ -631,13 +669,32 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
     bool use_arena  = !col.string_dict_arena.empty();
     bool use_dix    = !col.dict_indices.empty();
 
+    if (child_type_tag == CHILD_BOOL && (use_codes || use_dix)) {
+        throw std::runtime_error("ARRAY<boolean> with dictionary-encoded child values is not supported");
+    }
+
     // Collect child strings in one pass.
     struct ChildEntry { const uint8_t* ptr; uint32_t len; bool valid; };
-    std::vector<ChildEntry> children;
-    children.reserve(n_levels);
+    std::vector<ChildEntry> children;      // CHILD_STRING only
+    std::vector<uint8_t>    num_bytes;     // CHILD_INT64/32/FLOAT32/64 only, elem_size bytes per child
+    std::vector<uint8_t>    bool_flags;    // CHILD_BOOL only, one 0/1 byte per child (packed at the end)
+    std::vector<uint8_t>    child_valid;   // 0/1 per child, parallel to the buffer actually used above
+    if (child_type_tag == CHILD_STRING) {
+        children.reserve(n_levels);
+    } else if (child_type_tag == CHILD_BOOL) {
+        bool_flags.reserve(n_levels);
+        child_valid.reserve(n_levels);
+    } else {
+        num_bytes.reserve(n_levels * 8);
+        child_valid.reserve(n_levels);
+    }
+
+    uint32_t elem_size = (child_type_tag == CHILD_INT64 || child_type_tag == CHILD_FLOAT64) ? 8
+                        : (child_type_tag == CHILD_INT32 || child_type_tag == CHILD_FLOAT32) ? 4
+                        : 0;
 
     int32_t row     = -1;
-    int32_t val_idx = 0;     // index into dict_indices / string_values
+    int32_t val_idx = 0;     // index into dict_indices / string_values / plain numeric values
     int32_t child_idx = 0;
 
     for (size_t i = 0; i < n_levels; ++i) {
@@ -653,47 +710,101 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
 
         if (def == max_def) {
             // Non-null child element.
-            ChildEntry ce;
-            ce.valid = true;
-            if (use_codes) {
-                int32_t code = _decode_packed_parquet_code(col.dict_codes_array.data(), i, col.code_width);
-                ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
-                ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
-            } else if (use_dix && use_arena) {
-                int32_t code = col.dict_indices[val_idx++];
-                ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
-                ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
-            } else if (use_dix) {
-                const auto& s = col.string_values[col.dict_indices[val_idx++]];
-                ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
-                ce.len = static_cast<uint32_t>(s.size());
+            if (child_type_tag == CHILD_STRING) {
+                ChildEntry ce;
+                ce.valid = true;
+                if (use_codes) {
+                    int32_t code = _decode_packed_parquet_code(col.dict_codes_array.data(), i, col.code_width);
+                    ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
+                    ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
+                } else if (use_dix && use_arena) {
+                    int32_t code = col.dict_indices[val_idx++];
+                    ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
+                    ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
+                } else if (use_dix) {
+                    const auto& s = col.string_values[col.dict_indices[val_idx++]];
+                    ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
+                    ce.len = static_cast<uint32_t>(s.size());
+                } else {
+                    const auto& s = col.string_values[val_idx++];
+                    ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
+                    ce.len = static_cast<uint32_t>(s.size());
+                }
+                children.push_back(ce);
+            } else if (child_type_tag == CHILD_BOOL) {
+                bool_flags.push_back(col.boolean_values[val_idx++] & 1);
+                child_valid.push_back(1);
             } else {
-                const auto& s = col.string_values[val_idx++];
-                ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
-                ce.len = static_cast<uint32_t>(s.size());
+                uint8_t raw[8];
+                if (use_codes) {
+                    int32_t code = _decode_packed_parquet_code(col.dict_codes_array.data(), i, col.code_width);
+                    switch (child_type_tag) {
+                        case CHILD_INT64:   std::memcpy(raw, &col.dict_int64_values[code], 8); break;
+                        case CHILD_INT32:   std::memcpy(raw, &col.dict_int32_values[code], 4); break;
+                        case CHILD_FLOAT32: std::memcpy(raw, &col.dict_float32_values[code], 4); break;
+                        default:            std::memcpy(raw, &col.dict_float64_values[code], 8); break;
+                    }
+                } else if (use_dix) {
+                    int32_t code = col.dict_indices[val_idx++];
+                    switch (child_type_tag) {
+                        case CHILD_INT64:   std::memcpy(raw, &col.dict_int64_values[code], 8); break;
+                        case CHILD_INT32:   std::memcpy(raw, &col.dict_int32_values[code], 4); break;
+                        case CHILD_FLOAT32: std::memcpy(raw, &col.dict_float32_values[code], 4); break;
+                        default:            std::memcpy(raw, &col.dict_float64_values[code], 8); break;
+                    }
+                } else {
+                    int32_t idx = val_idx++;
+                    switch (child_type_tag) {
+                        case CHILD_INT64:   std::memcpy(raw, &col.int64_values[idx], 8); break;
+                        case CHILD_INT32:   std::memcpy(raw, &col.int32_values[idx], 4); break;
+                        case CHILD_FLOAT32: std::memcpy(raw, &col.float32_values[idx], 4); break;
+                        default:            std::memcpy(raw, &col.float64_values[idx], 8); break;
+                    }
+                }
+                num_bytes.insert(num_bytes.end(), raw, raw + elem_size);
+                child_valid.push_back(1);
             }
-            children.push_back(ce);
             ++child_idx;
         } else if (def == max_def - 1) {
             // Null child element within a non-null list.
-            children.push_back({nullptr, 0, false});
-            if (!use_codes) ++val_idx;
+            if (child_type_tag == CHILD_STRING) {
+                children.push_back({nullptr, 0, false});
+                if (!use_codes) ++val_idx;
+            } else if (child_type_tag == CHILD_BOOL) {
+                bool_flags.push_back(0);
+                child_valid.push_back(0);
+                ++val_idx;
+            } else {
+                num_bytes.insert(num_bytes.end(), elem_size, 0);
+                child_valid.push_back(0);
+                if (!use_codes) ++val_idx;
+            }
             ++child_idx;
         }
         // def == 0 (null list) or def == 1 (empty list): no child entry.
     }
     if (row >= 0) offsets[row + 1] = child_idx;
 
-    uint32_t child_count = static_cast<uint32_t>(children.size());
+    uint32_t child_count = static_cast<uint32_t>(
+        child_type_tag == CHILD_STRING ? children.size() : child_valid.size());
 
     // Build child null bitmap only if there are null child elements.
     bool has_null_children = false;
-    for (const auto& ce : children) if (!ce.valid) { has_null_children = true; break; }
+    if (child_type_tag == CHILD_STRING) {
+        for (const auto& ce : children) if (!ce.valid) { has_null_children = true; break; }
+    } else {
+        for (uint8_t v : child_valid) if (!v) { has_null_children = true; break; }
+    }
     uint32_t child_bmap_bytes = has_null_children ? (child_count + 7) / 8 : 0;
     std::vector<uint8_t> child_bmap(child_bmap_bytes, 0);
     if (has_null_children) {
-        for (uint32_t i = 0; i < child_count; ++i)
-            if (children[i].valid) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+        if (child_type_tag == CHILD_STRING) {
+            for (uint32_t i = 0; i < child_count; ++i)
+                if (children[i].valid) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+        } else {
+            for (uint32_t i = 0; i < child_count; ++i)
+                if (child_valid[i]) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+        }
     }
 
     // Serialize.
@@ -701,13 +812,27 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
     write_u32(out, static_cast<uint32_t>(outer_rows));
     write_u32(out, bmap_bytes);
     write_bytes(out, list_bmap.data(), bmap_bytes);
+    write_u8(out, child_type_tag);
     write_u32(out, child_count);
     write_bytes(out, offsets.data(), static_cast<size_t>(outer_rows + 1) * sizeof(int32_t));
     write_u32(out, child_bmap_bytes);
     write_bytes(out, child_bmap.data(), child_bmap_bytes);
-    for (const auto& ce : children) {
-        write_u32(out, ce.len);
-        if (ce.len > 0) write_bytes(out, ce.ptr, ce.len);
+
+    if (child_type_tag == CHILD_STRING) {
+        for (const auto& ce : children) {
+            write_u32(out, ce.len);
+            if (ce.len > 0) write_bytes(out, ce.ptr, ce.len);
+        }
+    } else if (child_type_tag == CHILD_BOOL) {
+        uint32_t packed_bytes = (child_count + 7) / 8;
+        uint8_t* dst = out.advance(packed_bytes);
+        if (dst) {
+            std::memset(dst, 0, packed_bytes);
+            for (uint32_t i = 0; i < child_count; ++i)
+                if (bool_flags[i]) dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    } else {
+        write_bytes(out, num_bytes.data(), num_bytes.size());
     }
 }
 

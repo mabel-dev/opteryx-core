@@ -63,7 +63,7 @@ PageHeader ParsePageHeader(TInput &in) {
           } else if (dph_fh.type == T_BOOL_FALSE) {
             header.dictionary_is_sorted = false;
           } else {
-            header.dictionary_is_sorted = ReadBool(in);
+            header.dictionary_is_sorted = ReadBool(dph_fh.type);
           }
           break;
         default:

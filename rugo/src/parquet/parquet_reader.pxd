@@ -89,18 +89,41 @@ cdef extern from "metadata.hpp":
         vector[SchemaElement] schema
         vector[SchemaField] schema_columns
 
-    FileStats ReadParquetMetadataC(const char* path)
-    FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size)
-    FileStats ReadParquetMetadataC(const char* path, const MetadataParseOptions& options)
-    FileStats ReadParquetMetadata(const string& path, const MetadataParseOptions& options)
-    FileStats ReadParquetMetadata(const string& path)
-    FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size, const MetadataParseOptions& options)
+    FileStats ReadParquetMetadataC(const char* path) except +
+    FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size) except +
+    FileStats ReadParquetMetadataC(const char* path, const MetadataParseOptions& options) except +
+    FileStats ReadParquetMetadata(const string& path, const MetadataParseOptions& options) except +
+    FileStats ReadParquetMetadata(const string& path) except +
+    FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size, const MetadataParseOptions& options) except +
     bint TestBloomFilter(const string& file_path, long long bloom_offset, long long bloom_length, const string& value) except +
     bint TestBloomFilterBytes(const uint8_t* data, size_t length, const string& value) except +
 
     # Helper functions
     const char* EncodingToString(int32_t enc)
     const char* CompressionCodecToString(int32_t codec)
+
+    cdef cppclass AggColumnStat:
+        string name
+        string physical_type
+        string logical_type
+        string min_bytes
+        string max_bytes
+        int64_t null_count
+        bint has_min
+        bint has_max
+        bint null_count_complete
+
+    vector[AggColumnStat] AggregateColumnStats(const FileStats& fs)
+
+cdef extern from "filesystem.hpp" namespace "rugo":
+    cdef cppclass ParquetFooterResult:
+        vector[uint8_t] envelope
+        int64_t bytes_fetched
+
+    ParquetFooterResult FetchParquetFooter(const string& path, int64_t file_size) except + nogil
+    ParquetFooterResult FetchParquetFooter(const string& path) except + nogil
+    vector[ParquetFooterResult] FetchParquetFootersMany(
+        const vector[string]& paths, const vector[int64_t]& file_sizes) except + nogil
 
 cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:

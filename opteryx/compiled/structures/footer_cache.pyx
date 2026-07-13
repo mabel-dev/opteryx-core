@@ -27,7 +27,7 @@ from libcpp.unordered_map cimport unordered_map
 from libcpp.string cimport string
 from cython.operator cimport dereference as deref
 
-from opteryx.compiled.structures.lru_k cimport LRU_K
+from opteryx.compiled.structures.lru_k cimport LRU_K, CppLRU2
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from rugo.parquet_reader cimport FileStats
 
@@ -182,51 +182,101 @@ cdef class ParquetParsedFooterCache:
     def __cinit__(self, int max_entries=512):
         self.lru = LRU_K(k=1, max_memory=0, max_size=0)
         self._max_entries = max_entries
-        self._lock = threading.Lock()
+        # Native std::mutex (not a Python threading.Lock): it guards a C++
+        # unordered_map + the C++ LRU2, and every critical section below runs
+        # nogil. A Python lock here would force GIL-held access and give no
+        # protection once footer lookups move onto a GIL-free native path.
+        self._mutex = new cpp_mutex()
+
+    def __dealloc__(self):
+        if self._mutex != NULL:
+            del self._mutex
+            self._mutex = NULL
 
     cdef bint try_get(self, str path, FileStats* out):
-        """Return True and fill *out if path is cached, else return False."""
+        """Return True and copy the cached FileStats into *out, else False."""
         cdef string key = path.encode('utf-8')
         cdef unordered_map[string, FileStats].iterator it
-        with self._lock:
+        cdef CppLRU2* lru_ptr = self.lru._lru
+        cdef const char* od = NULL
+        cdef int64_t ol = 0
+        cdef bint found = False
+        with nogil:
+            self._mutex.lock()
             it = self._map.find(key)
-            if it == self._map.end():
-                return False
-            out[0] = deref(it).second
-            self.lru.get(key)
-            return True
+            if it != self._map.end():
+                out[0] = deref(it).second
+                lru_ptr.get_into(key.data(), <int64_t>key.size(), &od, &ol)
+                found = True
+            self._mutex.unlock()
+        return found
+
+    cdef const FileStats* try_get_ptr(self, str path):
+        """Borrow a pointer to the cached FileStats (NO copy), or NULL on miss.
+
+        The pointer is valid until this entry is EVICTED. It is safe for a
+        transient, synchronous read during planning: this call marks the entry
+        most-recently-used, so a concurrent put_fs evicts something else first,
+        and the caller does not insert (no eviction on its own thread). A borrow
+        that must survive query EXECUTION must copy (try_get) or be pinned —
+        see the Tier-2 pinning plan; do not stash this pointer past the read."""
+        cdef string key = path.encode('utf-8')
+        cdef unordered_map[string, FileStats].iterator it
+        cdef CppLRU2* lru_ptr = self.lru._lru
+        cdef const char* od = NULL
+        cdef int64_t ol = 0
+        cdef const FileStats* result = NULL
+        with nogil:
+            self._mutex.lock()
+            it = self._map.find(key)
+            if it != self._map.end():
+                result = &deref(it).second
+                lru_ptr.get_into(key.data(), <int64_t>key.size(), &od, &ol)
+            self._mutex.unlock()
+        return result
 
     cdef void put_fs(self, str path, const FileStats& fs):
         """Store a parsed FileStats under path, evicting LRU entries if full."""
         cdef string key = path.encode('utf-8')
-        cdef bytes evict_key
-        with self._lock:
-            # Already cached — refresh LRU position.
+        cdef string ek
+        cdef string ev
+        cdef CppLRU2* lru_ptr = self.lru._lru
+        cdef const char* od = NULL
+        cdef int64_t ol = 0
+        with nogil:
+            self._mutex.lock()
             if self._map.count(key):
+                # Already cached — overwrite value, refresh LRU position.
                 self._map[key] = fs
-                self.lru.get(key)
-                return
-            # Evict until under the entry cap.
-            while <int>self._map.size() >= self._max_entries:
-                evict_key_obj, _ = self.lru.evict(False)
-                if evict_key_obj is None:
-                    return
-                evict_key = <bytes>evict_key_obj
-                self._map.erase(<string>evict_key)
-            self._map[key] = fs
-            self.lru.set(key, b'', True)
+                lru_ptr.get_into(key.data(), <int64_t>key.size(), &od, &ol)
+            else:
+                # Evict LRU victims until under the entry cap.
+                while <int>self._map.size() >= self._max_entries:
+                    if not lru_ptr.evict_one_into(False, ek, ev):
+                        break
+                    self._map.erase(ek)
+                self._map[key] = fs
+                # Value is a dummy (real payload lives in _map); len 0.
+                lru_ptr.set(key.data(), <int64_t>key.size(), key.data(), 0, True)
+            self._mutex.unlock()
 
     cpdef void clear(self):
         """Evict all cached entries."""
-        with self._lock:
+        cdef CppLRU2* lru_ptr = self.lru._lru
+        with nogil:
+            self._mutex.lock()
             self._map.clear()
-            self.lru.clear(False)
+            lru_ptr.clear(False)
+            self._mutex.unlock()
 
     cpdef dict stats(self):
         """Return cache statistics."""
-        with self._lock:
-            lru_stats = self.lru.stats
-            count = self._map.size()
+        cdef int64_t count
+        with nogil:
+            self._mutex.lock()
+            count = <int64_t>self._map.size()
+            self._mutex.unlock()
+        lru_stats = self.lru.stats
         return {
             "cached_paths": count,
             "max_entries": self._max_entries,

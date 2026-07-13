@@ -75,10 +75,12 @@ def test_explain_analyze_adds_stats_columns():
 
 
 def test_explain_analyze_filter_applies_predicate():
-    # EXPLAIN ANALYZE drives the fallback push-pipeline (serial_engine /
-    # pipeline_compiler), which calls FilterNode._push_impl directly — the
-    # native engine's WHERE execution never touches it. Regression guard for
-    # a bug where FilterNode had no _push_impl and silently dropped every row.
+    # EXPLAIN ANALYZE runs the wrapped query on the native engine (the
+    # ExitNode ExplainNode wraps is extracted and handed to execute_native —
+    # see serial_engine.explain()), the same as any other SELECT; row counts
+    # come from telemetry._reading["native_op_stats"], keyed by node identity.
+    # Regression guard for a bug where FilterNode had no _push_impl and (on
+    # the legacy push-pipeline this used to run on) silently dropped every row.
     names, data = _explain("EXPLAIN ANALYZE SELECT * FROM $planets WHERE id > 2")
     tree = data["tree"]
     rows = data["rows"]

@@ -227,7 +227,7 @@ static std::string ParseLogicalType(TInput &in) {
         if (inner.type == 0)
           break;
         if (inner.id == 1)
-          isAdjustedToUTC = (ReadBool(in) != 0);
+          isAdjustedToUTC = ReadBool(inner.type);
         else if (inner.id == 2) { // unit
           int16_t unit_last = 0;
           while (true) {
@@ -252,7 +252,6 @@ static std::string ParseLogicalType(TInput &in) {
         }
       }
       result = "time[" + unit + (isAdjustedToUTC ? ",UTC" : "") + "]";
-      SkipStruct(in);
       break;
     }
     case 8: { // TIMESTAMP (TimestampType)
@@ -264,7 +263,7 @@ static std::string ParseLogicalType(TInput &in) {
         if (inner.type == 0)
           break;
         if (inner.id == 1)
-          isAdjustedToUTC = (ReadBool(in) != 0);
+          isAdjustedToUTC = ReadBool(inner.type);
         else if (inner.id == 2) { // unit
           int16_t unit_last = 0;
           while (true) {
@@ -289,7 +288,6 @@ static std::string ParseLogicalType(TInput &in) {
         }
       }
       result = "timestamp[" + unit + (isAdjustedToUTC ? ",UTC" : "") + "]";
-      SkipStruct(in);
       break;
     }
     case 10: { // INTEGER (IntType)
@@ -311,7 +309,7 @@ static std::string ParseLogicalType(TInput &in) {
           } else if (inner.type == T_BOOL_FALSE) {
             isSigned = false;
           } else {
-            isSigned = ReadBool(in);
+            isSigned = ReadBool(inner.type);
           }
         } else {
           SkipField(in, inner.type); // future-proof

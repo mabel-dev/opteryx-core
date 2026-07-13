@@ -119,17 +119,22 @@ inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t lengt
 }
 
 // Dict-shaped string column: value array of `data_length` unique slots + a per-row
-// `codes` selection (retained by the VectorOwner).
+// `codes` selection (retained by the VectorOwner). `sorted` carries the parquet
+// dictionary's on-disk is_sorted hint (rugo ColumnOut.dict_sorted) through to
+// DRAKEN_DICT_KEYS_SORTED.
 inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_length,
                                     uint8_t* src_arena, size_t arena_len,
                                     uint32_t* codes, uint32_t length,
-                                    uint8_t* validity, DrakenType type, CxxColumn& out) {
+                                    uint8_t* validity, DrakenType type, CxxColumn& out,
+                                    bool sorted = false) {
     DrakenStringArena* sa = nullptr;
     uint8_t* block = consolidate_string_block(src_slots, data_length, src_arena, arena_len,
                                               type, &sa);
     draken_free(src_slots);
     draken_free(src_arena);
     DrakenVector v = draken_vector_from_dict(sa, data_length, codes, length, type, validity);
+    if (sorted && draken_is_dict(&v))
+        v.flags |= DRAKEN_DICT_KEYS_SORTED;
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
                                             OwnedBuffer<uint8_t>(validity),
                                             OwnedBuffer<void>(codes));

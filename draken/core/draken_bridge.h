@@ -246,6 +246,41 @@ PyObject* draken_vector_own_array(
     uint8_t*          parent_validity,
     uint32_t          length);
 
+// draken_vector_own_array_numeric — wrap hand-allocated buffers in a DRAKEN_ARRAY[T]
+// Vector whose child is a fixed-width numeric/bool type (sibling of
+// draken_vector_own_array, which is string-family only).
+//
+// Parameters:
+//   parent_offsets  — int32_t[length+1]: child index range for each parent row.
+//                      Allocated with draken_malloc.
+//   child_data      — flat child buffer, draken_malloc'd: bit-packed (LSB-first)
+//                      when child_type == DRAKEN_BOOL, else child_length values of
+//                      the type's native width, native-endian. May be NULL only
+//                      when child_length == 0.
+//   child_validity  — 1-bit-per-child-element null bitmap (Arrow convention: bit
+//                      set = valid), or NULL if all child elements are valid.
+//   child_length    — total number of child elements across all parent rows.
+//   child_type      — DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64,
+//                      or DRAKEN_BOOL; ValueError otherwise.
+//   parent_validity — 1-bit-per-row null bitmap for the parent, or NULL if all
+//                      parent rows are valid.
+//   length          — parent logical row count.
+//
+// All caller buffers (parent_offsets, child_data, child_validity,
+// parent_validity) are transferred unconditionally on call entry — the caller
+// MUST NOT free them after calling this function.
+//
+// Returns a NEW reference to a Python Vector on success.
+// Returns NULL with a Python exception set on failure.
+PyObject* draken_vector_own_array_numeric(
+    int32_t*   parent_offsets,
+    void*      child_data,
+    uint8_t*   child_validity,
+    uint32_t   child_length,
+    DrakenType child_type,
+    uint8_t*   parent_validity,
+    uint32_t   length);
+
 // draken_vector_own_timestamp — wrap a hand-allocated int64 buffer as a DRAKEN_TIMESTAMP64 Vector.
 //
 // Mandatory LogicalType descriptor is constructed from unit_str:

@@ -97,10 +97,31 @@ def execute(
     if isinstance(head_node, (ViewManagementNode, TableManagementNode, RelationManagementNode)):
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, InsertNode):
-        # Insert IS on the push pipeline (as a sink), but produces a
-        # non-tabular result via its `result` attribute. Drive the pipeline
-        # to completion, then return the result.
-        _drain_pipeline(plan)
+        # INSERT ... SELECT: plan_insert keeps the sub-query's ExitNode instead
+        # of stripping it (see logical_planner.py), so the SELECT subplan is
+        # genuinely Exit-headed — run it on the native engine like any other
+        # SELECT. INSERT ... VALUES has no SELECT subplan at all (its source is
+        # a FunctionDatasetNode, never Exit-headed) and stays on the legacy
+        # push-pipeline. Strip InsertNode from a copy of the plan (heal=True
+        # re-exposes whatever sits below it as the sole exit point) and check
+        # which shape we actually have before picking an engine.
+        subplan = plan.copy()
+        subplan.remove_node(head_nodes[0], heal=True)
+        new_head = subplan[subplan.get_exit_points()[0]]
+        if type(new_head).__name__ == "ExitNode":
+            # Drive InsertNode's existing, tested write/commit logic directly
+            # from the native generator's morsels. This keeps a Python-driven
+            # per-morsel loop calling into `_push_impl` — interim debt per
+            # CLAUDE.md §2, accepted here rather than building a native write
+            # sink.
+            from opteryx.managers.execution.compiler import execute_native
+
+            generator, _ = execute_native(subplan, telemetry=telemetry)
+            for morsel in generator:
+                head_node._push_impl(morsel)
+            head_node._push_impl(EOS)
+        else:
+            _drain_pipeline(plan)
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
@@ -202,7 +223,7 @@ def explain(
         else:
             label = prefix + ("└─ " if is_last else "├─ ") + name
             child_prefix = prefix + ("   " if is_last else "│  ")
-        out.append((label, str(operator.config) if operator.config else "", operator))
+        out.append((label, str(operator.config) if operator.config else "", operator, node_id))
         children = _real_children(node_id)
         for index, child_id in enumerate(children):
             _tree_rows(child_id, child_prefix, index == len(children) - 1, False, out)
@@ -213,9 +234,23 @@ def explain(
 
     if analyze:
         # Drive the underlying query for telemetry but discard the result rows.
+        # The wrapped query is SELECT-shaped (an ExitNode still sits one edge
+        # below ExplainNode — see plan_explain) and must run on the native
+        # engine like any other SELECT, not the legacy push-pipeline. Strip
+        # ExplainNode from a copy of the plan (heal=True re-exposes the
+        # ExitNode as the sole exit point) and hand that to execute_native;
+        # native per-operator stats land in telemetry._reading["native_op_stats"],
+        # keyed by node identity, which _row_count/_self_ms below read via the
+        # same overlay mermaid.py already uses for the MERMAID format.
         query_head_edges = plan.ingoing_edges(head[0])
         if query_head_edges:
-            _drain_pipeline(plan, enable_tracing=True)
+            from opteryx.managers.execution.compiler import execute_native
+
+            subplan = plan.copy()
+            subplan.remove_node(head[0], heal=True)
+            generator, _ = execute_native(subplan, telemetry=telemetry)
+            for _ in generator:
+                pass
 
     if _format != "TEXT":
         explained = list(_inner_explain(head[0], 1))
@@ -233,48 +268,37 @@ def explain(
     for index, top in enumerate(tops):
         _tree_rows(top, "", index == len(tops) - 1, True, op_rows)
 
-    def _row_count(operator):
-        # Scan nodes report their output via rows_read rather than records_out
-        # (mirrors the MERMAID renderer's get_node_stats): a scan is PULLED by
-        # drive_scan (next_morsel), not pushed, so records_out is never
-        # incremented on the scan node itself. rows_read instead comes from
-        # sensors() — which surfaces the trampoline scan's own ScanReadings
-        # (self.readings, flushed by close_source() in the driver teardown) —
-        # and ONLY falls back to the query-wide telemetry singleton when
-        # sensors() has nothing (the native-engine compile path, where the
-        # Cython scan node itself never executes and its own counters stay
-        # zero). Reading telemetry.rows_read unconditionally was wrong for a
-        # scan driven directly by this push pipeline (EXPLAIN ANALYZE /
-        # INSERT ... SELECT with a pushed-down predicate): that path always
-        # left the query-wide telemetry's rows_read at 0, so every such scan
-        # reported 0 rows even though its actual output was correct.
-        count = int(getattr(operator, "records_out", 0) or 0)
-        if count == 0 and getattr(operator, "is_scan", False):
-            get_sensors = getattr(operator, "sensors", None)
-            sensed = get_sensors() if get_sensors is not None else {}
-            count = int(sensed.get("rows_read", 0) or 0)
-            if count == 0:
-                count = int(getattr(getattr(operator, "telemetry", None), "rows_read", 0) or 0)
-        return count
+    # The query now always runs on the native engine (see the `analyze` branch
+    # above) — per-operator stats live in telemetry._reading["native_op_stats"],
+    # keyed by node identity. Reuse mermaid.py's overlay (the same one the
+    # MERMAID format and the general `.telemetry` property already read)
+    # instead of re-deriving the lookup here.
+    node_stats_by_nid: dict = {}
+    if analyze:
+        from opteryx.utils import mermaid as _mermaid
 
-    def _self_ms(operator):
-        # SELF time = own work, excluding the downstream chain (execution_time is
-        # inclusive). Only meaningful under ANALYZE (tracing populates
-        # downstream_time). Fall back to execution_time when an operator's
-        # sensors() doesn't surface self_time (downstream_time is 0 for such
-        # nodes, so the two are equal).
-        get_sensors = getattr(operator, "sensors", None)
-        if get_sensors is not None:
-            sensed = get_sensors()
-            if "self_time" in sensed:
-                return round((sensed["self_time"] or 0) / 1e6, 3)
-        return round((getattr(operator, "execution_time", 0) or 0) / 1e6, 3)
+        node_stats_by_nid, _, _ = _mermaid._collect_node_stats(plan)
+
+    def _row_count(node_id):
+        stat = node_stats_by_nid.get(node_id)
+        return int(stat.get("records_out", 0) or 0) if stat else 0
+
+    def _time_ms(node_id):
+        stat = node_stats_by_nid.get(node_id)
+        return round((stat.get("execution_time", 0) or 0) / 1e6, 3) if stat else 0.0
+
+    def _self_ms(node_id):
+        # self_ms == time_ms on the native path — the executor times each
+        # operator's own call only, so there is no separate downstream
+        # component to subtract (see mermaid.py's get_node_stats).
+        stat = node_stats_by_nid.get(node_id)
+        return round((stat.get("self_time", 0) or 0) / 1e6, 3) if stat else 0.0
 
     tree_col = [row[0] for row in op_rows]
     details_col = [row[1] for row in op_rows]
-    rows_col = [_row_count(row[2]) for row in op_rows]
-    time_col = [round((getattr(row[2], "execution_time", 0) or 0) / 1e6, 3) for row in op_rows]
-    self_col = [_self_ms(row[2]) for row in op_rows]
+    rows_col = [_row_count(row[3]) for row in op_rows]
+    time_col = [_time_ms(row[3]) for row in op_rows]
+    self_col = [_self_ms(row[3]) for row in op_rows]
 
     # ── OPTIMIZATIONS: which optimizer rules fired, from telemetry counters ───
     readings = getattr(telemetry, "_reading", None) or {}

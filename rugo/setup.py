@@ -145,6 +145,9 @@ setup(
         # draken.preload_library_path); ships in the wheel, linked into nothing.
         "draken": ["libmimalloc.so", "libmimalloc.dylib"],
     },
+    entry_points={
+        "console_scripts": ["rugo=rugo.cli:main"],
+    },
     cmdclass={"build_ext": build_ext},
     # Isolate rugo's build artifacts from opteryx_core's shared ./build dir.
     # bdist_wheel archives <build_base>/lib/*, and the shared build/lib is

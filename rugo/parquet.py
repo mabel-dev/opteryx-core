@@ -37,6 +37,7 @@ surviving morsels.
 import struct
 from typing import List, Optional, Sequence, Tuple, Union
 
+import draken.draken_native as _draken_native
 from rugo import rugo_native as _native
 
 __all__ = [
@@ -203,6 +204,59 @@ def _row_filter(morsel, predicates: Sequence[Predicate]):
     return morsel.filter_mask(mask)
 
 
+def _parse_timestamp_unit(logical_type: str) -> Optional[str]:
+    """Return the draken unit string ("ms"/"us"/"ns") if `logical_type` denotes a
+    Parquet TIMESTAMP column, else None. Handles both the modern LogicalType
+    annotation ("timestamp[ms]" / "timestamp[us,UTC]") and the legacy
+    ConvertedType spelling ("TIMESTAMP_MILLIS" / "TIMESTAMP_MICROS")."""
+    if logical_type.startswith("timestamp["):
+        unit = logical_type[len("timestamp["):].split(",", 1)[0].rstrip("]")
+        return unit if unit in ("s", "ms", "us", "ns") else None
+    if logical_type == "TIMESTAMP_MILLIS":
+        return "ms"
+    if logical_type == "TIMESTAMP_MICROS":
+        return "us"
+    return None
+
+
+def _timestamp_unit_map(source: Source) -> dict:
+    """{column_name (bytes): unit_str} for every TIMESTAMP column in the file's
+    schema, read once per _ParquetReader from the footer metadata."""
+    meta = read_metadata(source)
+    units = {}
+    for col in meta.schema_columns:
+        unit = _parse_timestamp_unit(col.logical_type)
+        if unit is not None:
+            units[col.name.encode("utf-8")] = unit
+    return units
+
+
+def _coerce_timestamps(morsel, unit_map: dict):
+    """Retag INT64 columns that carry a Parquet TIMESTAMP annotation to
+    DRAKEN_TIMESTAMP64, mirroring the schema-driven coercion the SQL engine's own
+    scan applies (opteryx/operators/parquet_read/parquet_read.pyx). The IPC/direct
+    decode paths serialise DATE/TIMESTAMP as their bare physical INT64 stream —
+    the logical type never crosses the wire — so this reinterpret has to happen
+    here, against the file's own schema, once per morsel."""
+    if not unit_map:
+        return morsel
+    from draken.morsels import Morsel
+
+    names = list(morsel.column_names)
+    vectors = []
+    changed = False
+    for name in names:
+        v_nb = morsel.column(name)._nb
+        unit = unit_map.get(name)
+        if unit is not None and v_nb.type == _draken_native.DrakenType.INT64:
+            v_nb = _draken_native.vector_retag_int64_as_timestamp64(v_nb, unit)
+            changed = True
+        vectors.append(v_nb)
+    if not changed:
+        return morsel
+    return Morsel.from_vectors(names, vectors)
+
+
 class _ParquetReader:
     """Context-managed, streaming reader over row-group Morsels.
 
@@ -240,7 +294,10 @@ class _ParquetReader:
                 self._data, column_names=self._columns, row_group_mask=mask
             )
 
+        unit_map = _timestamp_unit_map(self._path if self._path is not None else self._data)
+
         for morsel in (morsels or []):
+            morsel = _coerce_timestamps(morsel, unit_map)
             if self._predicates:
                 morsel = _row_filter(morsel, self._predicates)
             if morsel is not None:
