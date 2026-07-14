@@ -48,11 +48,21 @@ jobs:
       - name: Compile
         run: make compile
 
-      - name: Print 'parquet' shared object dependencies
+      # Assert OpenSSL is linked into the extension that actually CALLS it:
+      # http_client statically links vendored libcurl, which needs -lssl
+      # -lcrypto supplied explicitly (resolve_libcurl in setup.py).
+      #
+      # This previously checked the shared rugo parquet object, which is built
+      # WITHOUT RUGO_ENABLE_HTTP and so references zero libcrypto symbols — it
+      # only passed because that object force-linked -lcrypto via
+      # --no-as-needed. That force-link is gone (it cost the standalone rugo
+      # wheel a vendored 2.6MB libcrypto and a hard OpenSSL dependency), so the
+      # check now targets the real consumer.
+      - name: Verify libcrypto is linked into the HTTP client
         if: matrix.os == 'ubuntu-latest'
         run: |
           set -eux
-          SO_FILE=$(ls -1 opteryx/rugo/parquet*.so | head -n1)
+          SO_FILE=$(ls -1 opteryx/compiled/http_client*.so | head -n1)
           echo "Located: $SO_FILE"
           echo "File type: $(file $SO_FILE)"
           echo "ldd output:"

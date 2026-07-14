@@ -219,26 +219,39 @@ def _parse_timestamp_unit(logical_type: str) -> Optional[str]:
     return None
 
 
-def _timestamp_unit_map(source: Source) -> dict:
-    """{column_name (bytes): unit_str} for every TIMESTAMP column in the file's
-    schema, read once per _ParquetReader from the footer metadata."""
+def _is_date_logical_type(logical_type: str) -> bool:
+    """True if `logical_type` denotes a Parquet DATE column. Handles both the
+    modern LogicalType annotation ("date32[day]") and the legacy ConvertedType
+    spelling ("DATE")."""
+    return logical_type == "date32[day]" or logical_type == "DATE"
+
+
+def _temporal_column_maps(source: Source):
+    """({timestamp_col: unit_str}, {date_col}) — column names (bytes) keyed by
+    their Parquet schema annotation, read once per _ParquetReader from the
+    footer metadata."""
     meta = read_metadata(source)
     units = {}
+    dates = set()
     for col in meta.schema_columns:
+        name = col.name.encode("utf-8")
         unit = _parse_timestamp_unit(col.logical_type)
         if unit is not None:
-            units[col.name.encode("utf-8")] = unit
-    return units
+            units[name] = unit
+        elif _is_date_logical_type(col.logical_type):
+            dates.add(name)
+    return units, dates
 
 
-def _coerce_timestamps(morsel, unit_map: dict):
-    """Retag INT64 columns that carry a Parquet TIMESTAMP annotation to
-    DRAKEN_TIMESTAMP64, mirroring the schema-driven coercion the SQL engine's own
-    scan applies (opteryx/operators/parquet_read/parquet_read.pyx). The IPC/direct
-    decode paths serialise DATE/TIMESTAMP as their bare physical INT64 stream —
-    the logical type never crosses the wire — so this reinterpret has to happen
+def _coerce_temporal_columns(morsel, unit_map: dict, date_set: set):
+    """Retag/reinterpret INT64 columns that carry a Parquet TIMESTAMP or DATE
+    annotation to DRAKEN_TIMESTAMP64/DATE32, mirroring the schema-driven
+    coercion the SQL engine's own scan applies
+    (opteryx/operators/parquet_read/parquet_read.pyx). The IPC/direct decode
+    paths serialise DATE/TIMESTAMP as their bare physical INT64 stream — the
+    logical type never crosses the wire — so this reinterpret has to happen
     here, against the file's own schema, once per morsel."""
-    if not unit_map:
+    if not unit_map and not date_set:
         return morsel
     from draken.morsels import Morsel
 
@@ -247,10 +260,14 @@ def _coerce_timestamps(morsel, unit_map: dict):
     changed = False
     for name in names:
         v_nb = morsel.column(name)._nb
-        unit = unit_map.get(name)
-        if unit is not None and v_nb.type == _draken_native.DrakenType.INT64:
-            v_nb = _draken_native.vector_retag_int64_as_timestamp64(v_nb, unit)
-            changed = True
+        if v_nb.type == _draken_native.DrakenType.INT64:
+            unit = unit_map.get(name)
+            if unit is not None:
+                v_nb = _draken_native.vector_retag_int64_as_timestamp64(v_nb, unit)
+                changed = True
+            elif name in date_set:
+                v_nb = _draken_native.vector_reinterpret_as_date32(v_nb)
+                changed = True
         vectors.append(v_nb)
     if not changed:
         return morsel
@@ -294,10 +311,10 @@ class _ParquetReader:
                 self._data, column_names=self._columns, row_group_mask=mask
             )
 
-        unit_map = _timestamp_unit_map(self._path if self._path is not None else self._data)
+        unit_map, date_set = _temporal_column_maps(self._path if self._path is not None else self._data)
 
         for morsel in (morsels or []):
-            morsel = _coerce_timestamps(morsel, unit_map)
+            morsel = _coerce_temporal_columns(morsel, unit_map, date_set)
             if self._predicates:
                 morsel = _row_filter(morsel, self._predicates)
             if morsel is not None:

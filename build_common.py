@@ -347,9 +347,13 @@ if is_win() and OPTERYX_ENABLE_LTO:
 
 if (not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win()
         and not OPTERYX_ENABLE_ASAN and not OPTERYX_ENABLE_TSAN):
-    # Sanitizer builds keep symbols so the race/leak reports are readable.
-    CPP_FLAGS.append("-s")
-    C_FLAGS.append("-s")
+    # Strip at LINK time. extra_compile_args never reaches the linker, so a `-s`
+    # on CPP_FLAGS/C_FLAGS is inert — the manylinux wheel shipped ~85% DWARF
+    # (`-g` arrives for free via CPython's sysconfig CFLAGS). Stripping here
+    # removes the debug sections and symbol table. gnu ld (manylinux, the wheel
+    # target) honours -s; ld64 (macOS dev) ignores -s but strips with -Wl,-x.
+    # Sanitizer builds are excluded above so race/leak reports stay readable.
+    LD_EXTRA.append("-s" if not is_mac() else "-Wl,-x")
 
 # SIMD-specific flags (deterministic baseline to avoid host-specific AVX512/etc.)
 if arch == "x86_64":
@@ -530,14 +534,21 @@ def get_parquet_vendor_sources():
     return vendor_sources
 
 
-# Link args for parquet extension - ensure libcrypto is linked on Linux so
-# the runtime 'ldd' check in CI can verify its presence. Don't add -lcrypto
-# on macOS where the system library naming differs.
+# The shared parquet extension links NOTHING beyond LD_EXTRA.
+#
+# It is built without RUGO_ENABLE_HTTP (only opteryx_core's own parquet/
+# http_client extensions define it), so the remote-read path — the only thing
+# that ever wanted OpenSSL — is compiled out here. This object references zero
+# libcrypto symbols in either wheel.
+#
+# It previously force-linked `-Wl,--no-as-needed -lcrypto` purely so a CI `ldd`
+# check could assert the library's presence. That made auditwheel vendor a 2.6MB
+# libcrypto into the standalone rugo wheel and gave it a hard OpenSSL runtime
+# dependency — for a library whose whole pitch is being small and dependency
+# free. opteryx_core's genuine crypto need is unaffected: it comes from
+# resolve_libcurl() (static libcurl + -lssl -lcrypto) on the extensions that
+# actually call it.
 parquet_link_args = []
-if not is_mac():
-    # Ensure libcrypto is added to the DT_NEEDED entries of the shared
-    # object even if no symbols are referenced (CI asserts its presence).
-    parquet_link_args.extend(["-Wl,--no-as-needed", "-lcrypto", "-Wl,--as-needed"])
 
 # E.24 — Cython shim layer: real Cython extensions at each draken vector/morsel
 # import path, providing __pyx_vtable__ so cimport consumers can load them.

@@ -1,21 +1,23 @@
 #!/bin/bash
 # Build manylinux wheels for the standalone `rugo` distribution.
 #
-# Unlike dev/build-wheels.sh (opteryx_core) this needs NO Rust and NO libcurl.
-# rugo's parquet sources reference http_client.hpp (remote footer/range reads),
-# but that whole path is gated on the RUGO_ENABLE_HTTP macro — defined ONLY by
-# the opteryx_core build. rugo/setup.py never defines it, so filesystem.hpp /
-# io_pipeline.hpp compile with the HTTP code (and the <curl/curl.h> include)
-# stripped out; remote paths fail loud at runtime. Hence no curl headers/lib are
-# needed here. It DOES need libcrypto, because rugo.parquet_reader links
-# -lcrypto on Linux (build_common.parquet_link_args), so openssl-devel is
-# installed for the headers/lib; auditwheel vendors it in.
+# Unlike dev/build-wheels.sh (opteryx_core) this needs NO Rust, NO libcurl and
+# NO OpenSSL. rugo's parquet sources reference http_client.hpp (remote footer/
+# range reads), but that whole path is gated on the RUGO_ENABLE_HTTP macro —
+# defined ONLY by the opteryx_core build. rugo/setup.py never defines it, so
+# filesystem.hpp / io_pipeline.hpp compile with the HTTP code (and the
+# <curl/curl.h> include) stripped out; remote paths fail loud at runtime.
+#
+# It follows that rugo references zero libcrypto symbols. It used to install
+# openssl-devel anyway, because the shared parquet extension force-linked
+# -lcrypto (--no-as-needed) to satisfy a CI ldd check — which made auditwheel
+# vendor a 2.6MB libcrypto into this wheel and saddle it with a hard OpenSSL
+# runtime dependency. The force-link is gone (build_common.parquet_link_args),
+# so rugo now links nothing beyond libc/libm/pthread.
 #
 # Invoked inside a manylinux container with PYTHON_VERSION set (e.g. "3.14" or
 # "3.14t"). Produces repaired manylinux wheels in dist/.
 set -ex
-
-yum install -y openssl-devel || dnf install -y openssl-devel
 
 # repo root = parent of this script's dir (dev/). rugo/setup.py self-roots here.
 cd "$(dirname "$0")/.."
