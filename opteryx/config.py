@@ -231,6 +231,25 @@ is meant to conserve, so this has no default path."""
 MANIFEST_CACHE_BYTES: int = int(get("OPTERYX_MANIFEST_CACHE_BYTES", 1024 * 1024 * 1024))
 """Byte ceiling for the on-disk manifest cache."""
 
+MANIFEST_REMOTE_LOCATION: str = str(get("OPTERYX_MANIFEST_CACHE_LOCATION", "")).strip()
+"""KV store backing the shared (remote) manifest cache, e.g. `valkey://host:6379`.
+
+Deliberately NOT `KVSTORE_LOCATION`/`KVSTORE_LAYERS`: those configure the per-query
+shuffle/spill store, whose keys are scoped by query and operator and whose contents
+are discarded when the query ends. The manifest cache is the opposite — content-
+addressed, shared across queries, and long-lived. They are different caches with
+different lifecycles and must be pointed at different places."""
+
+MANIFEST_REMOTE_MAX_VALUE_BYTES: int = int(
+    get("OPTERYX_MANIFEST_REMOTE_MAX_VALUE_BYTES", 64 * 1024 * 1024)
+)
+"""Largest manifest written to the remote manifest cache (`KVSTORE_LOCATION`).
+
+Manifest size scales with a dataset's file count, and the remote tier is reached
+over the network: past some size, shipping the payload to and from the cache costs
+more than the object-storage read it replaces. Oversized manifests are still served
+from origin and still cached on local disk — only the remote write is skipped."""
+
 LOCAL_STORE_ROOT: str = get("OPTERYX_LOCAL_STORE", "./.opteryx")
 """Root directory for LocalStoreConnector storage."""
 

@@ -24,6 +24,10 @@ from opteryx.managers.kvstores.valkey import ValkeyCache
 
 _REQUIRED_CONTEXT_FIELDS = ("query_id", "operator_id")
 
+# Distinguishes "caller said nothing" (scope by query, the safe default) from
+# "caller explicitly asked for no scoping" (a content-addressed store).
+_UNSET = object()
+
 
 def _parse_max_bytes(value: Any) -> int | None:
     if value is None or value == "":
@@ -258,14 +262,24 @@ def create_kv_store(
     Query-string options:
     - `max_bytes`: capacity threshold for layer placement
     - `key_prefix` / `prefix`: key namespace prefix for that store/layer
-    """
-    if isinstance(location, BaseKeyValueStore):
-        return _wrap_with_context_enforcement(location, _REQUIRED_CONTEXT_FIELDS)
 
+    `enforce_context_fields` selects the key-scoping policy. It defaults to
+    `_REQUIRED_CONTEXT_FIELDS`, which namespaces every key by query and operator --
+    correct for per-query scratch/spill, where one query must never read another's
+    bytes. Pass an empty value to opt out and get a *content-addressed* store, whose
+    keys are global: the caller is then asserting the key already identifies the
+    bytes uniquely and immutably, so a hit across queries is not a leak but the whole
+    point (see the manifest cache).
+    """
     create_kwargs = dict(kwargs)
+    enforced_context_fields = create_kwargs.pop("enforce_context_fields", _UNSET)
+    if enforced_context_fields is _UNSET:
+        enforced_context_fields = _REQUIRED_CONTEXT_FIELDS
+
+    if isinstance(location, BaseKeyValueStore):
+        return _wrap_with_context_enforcement(location, enforced_context_fields)
+
     query_id = create_kwargs.pop("query_id", None)
-    create_kwargs.pop("enforce_context_fields", None)
-    enforced_context_fields = _REQUIRED_CONTEXT_FIELDS
     root_prefix = _render_prefix_template(create_kwargs.pop("key_prefix", None), query_id=query_id)
 
     if not location:

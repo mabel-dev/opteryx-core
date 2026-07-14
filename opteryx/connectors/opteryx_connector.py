@@ -18,8 +18,8 @@ from opteryx.connectors import TableType
 
 logger = logging.getLogger(__name__)
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
-from opteryx.connectors.manifest_disk_cache import DiskCachingFileIO
-from opteryx.connectors.manifest_disk_cache import shared_cache
+from opteryx.connectors.manifest_disk_cache import CachingFileIO
+from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
@@ -381,13 +381,14 @@ class OpteryxConnector(Eidetic, PredicatePushable):
             # Callable factory: call with workspace and let errors propagate
             instance = factory(workspace=catalog_name, **self.kwargs)
 
-        # Serve manifest reads from the instance's local disk when one is configured.
-        # We wrap the FileIO the catalog chose for itself rather than constructing one,
-        # so the gcs/no-gcs decision stays owned by the catalog. `io` is read when each
-        # Dataset is created, which happens after this, so wrapping here takes effect.
-        cache = shared_cache()
-        if cache is not None:
-            instance.io = DiskCachingFileIO(instance.io, cache)
+        # Serve manifest reads from the configured cache tiers (local disk, shared KV)
+        # rather than re-fetching from object storage. We wrap the FileIO the catalog
+        # chose for itself rather than constructing one, so the gcs/no-gcs decision stays
+        # owned by the catalog. `io` is read when each Dataset is created, which happens
+        # after this, so wrapping here takes effect.
+        tiers = manifest_cache_tiers()
+        if tiers:
+            instance.io = CachingFileIO(instance.io, tiers)
 
         self._catalog_cache[catalog_name] = instance
         return instance

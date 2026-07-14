@@ -14,17 +14,28 @@ from opteryx.utils import single_item_cache
 
 
 @single_item_cache
-def _valkey_server(**kwargs):
-    valkey_config = kwargs.get("server", os.environ.get("VALKEY_CONNECTION"))
-    if valkey_config is None:
-        return None
+def _valkey_client(connection: str):
+    """One pooled client per connection string.
 
+    `single_item_cache` memoises on a single *positional* argument, so the connection
+    string is resolved by the caller and handed in as one. Decorating a `**kwargs`
+    function with it raises TypeError on every call ("unexpected keyword argument
+    'server'"), which is what made this store impossible to construct.
+    """
     try:
         import valkey
     except ImportError as err:  # pragma: no cover
         raise MissingDependencyError(err.name) from err
 
-    return valkey.from_url(valkey_config)
+    return valkey.from_url(connection)
+
+
+def _valkey_server(**kwargs):
+    connection = kwargs.get("server") or os.environ.get("VALKEY_CONNECTION")
+    if connection is None:
+        return None
+
+    return _valkey_client(connection)
 
 
 class ValkeyCache(BaseKeyValueStore):
