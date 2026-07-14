@@ -13,6 +13,16 @@ from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 from opteryx.utils import single_item_cache
 
 
+# A cache must never cost more than the thing it replaces. Without these, the client
+# inherits no timeout at all and an unreachable server falls back to the OS TCP connect
+# timeout (~130s on Linux) -- so a cache that cannot be reached would block every query
+# that consults it, on every process, turning an optimisation into an outage. These
+# bounds are generous for an in-region hop (~1ms RTT) and are overridden by any
+# `?socket_connect_timeout=`/`?socket_timeout=` given on the connection URL.
+_CONNECT_TIMEOUT_SECONDS = 0.25
+_OPERATION_TIMEOUT_SECONDS = 0.5
+
+
 @single_item_cache
 def _valkey_client(connection: str):
     """One pooled client per connection string.
@@ -27,7 +37,11 @@ def _valkey_client(connection: str):
     except ImportError as err:  # pragma: no cover
         raise MissingDependencyError(err.name) from err
 
-    return valkey.from_url(connection)
+    return valkey.from_url(
+        connection,
+        socket_connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=_OPERATION_TIMEOUT_SECONDS,
+    )
 
 
 def _valkey_server(**kwargs):

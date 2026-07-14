@@ -232,11 +232,6 @@ def render_subquery(node: LogicalPlanNode) -> str:
     return f"SUBQUERY{' AS ' + node.alias if node.alias else ''}"
 
 
-@register_render(LogicalPlanStepType.CTE)
-def render_cte(_: LogicalPlanNode) -> str:
-    return "CTE"
-
-
 @register_render(LogicalPlanStepType.Exit)
 def render_exit(_: LogicalPlanNode) -> str:
     return "EXIT"

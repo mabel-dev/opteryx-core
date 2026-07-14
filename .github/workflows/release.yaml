@@ -18,9 +18,6 @@ jobs:
       matrix:
         include:
           - runner-python: "3.14"
-            pybuild: "3.14t"
-            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
-          - runner-python: "3.14"
             pybuild: "3.14"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
     runs-on: ubuntu-latest
@@ -120,9 +117,9 @@ jobs:
           path: io/dist/*manylinux2014_x86_64*.whl
 
   build-macos:
-    # macos-14 = Apple Silicon (arm64) only, Python 3.14 GIL build only (no
-    # free-threaded macOS build). Mirrors rugo's macOS build (release-rugo.yaml)
-    # but opteryx_core additionally needs Rust (opteryx.compute) and libcurl.
+    # macos-14 = Apple Silicon (arm64) only, Python 3.14 GIL build only.
+    # Mirrors rugo's macOS build (release-rugo.yaml) but opteryx_core
+    # additionally needs Rust (opteryx.compute) and libcurl.
     runs-on: macos-14
     steps:
       - name: Check out repository
@@ -166,13 +163,6 @@ jobs:
 
       - name: Create source dist
         run: python setup.py sdist
-
-      - name: Stage linux 3.14t (free-threaded)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-3.14t
-          path: dist-linux-3.14t
-      - run: mv -v dist-linux-3.14t/* dist/
 
       - name: Stage linux 3.14 (GIL)
         uses: actions/download-artifact@v4.1.7

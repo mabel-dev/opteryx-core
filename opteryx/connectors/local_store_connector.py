@@ -40,7 +40,11 @@ def _ts_for_filename(iso: str) -> str:
     return iso.replace(":", "-").replace(".", "-")
 
 
-class LocalStoreConnector(BaseConnector, Writable, Eidetic):
+# Capability mixins come BEFORE BaseConnector: BaseConnector defines the capability flags
+# as False defaults, so a mixin listed after it is shadowed by MRO and its capability is
+# silently OFF. That is what disabled views on this connector — CREATE VIEW wrote a
+# view.json that could never be read back. See tests/unit/connectors/test_capability_flags.py.
+class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     """Local file-based storage connector.
 
     Stores relations as JSON metadata + Parquet data files organized by relation name.

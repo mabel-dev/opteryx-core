@@ -25,6 +25,7 @@ from opteryx.planner.binder import do_bind_phase
 from opteryx.planner.logical_planner import LogicalPlanStepType, do_logical_planning_phase
 from opteryx.planner.optimizer import do_optimizer
 from opteryx.planner.plan_rewriter import do_plan_rewrite
+from opteryx.planner.relation_resolver import do_resolve_relations
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
 
@@ -37,10 +38,11 @@ def _scan_physical(sql: str, column: str):
     plan, _, ctes = do_logical_planning_phase(
         do_ast_rewriter(sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[])[0]
     )
-    plan = do_plan_rewrite(plan, ctes, telemetry)
+    plan = do_resolve_relations(plan, ctes, telemetry)
+    plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(
         plan, execution_context=ctx, query_id=str(uuid.uuid4()),
-        common_table_expressions=ctes, telemetry=telemetry,
+        telemetry=telemetry,
     )
     opt = do_optimizer(bound, telemetry)
     out = []

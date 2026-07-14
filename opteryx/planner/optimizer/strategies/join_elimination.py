@@ -76,7 +76,6 @@ _UNIQUENESS_PRESERVING = {
     LogicalPlanStepType.Order,
     LogicalPlanStepType.HeapSort,
     LogicalPlanStepType.Limit,
-    LogicalPlanStepType.CTE,
     LogicalPlanStepType.Exit,
 }
 

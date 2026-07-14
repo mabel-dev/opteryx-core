@@ -24,8 +24,9 @@ CONNECTION = "valkey://10.0.0.1:6379"
 
 
 class FakeClient:
-    def __init__(self, url):
+    def __init__(self, url, **kwargs):
         self.url = url
+        self.kwargs = kwargs  # socket timeouts, etc.
         self.store = {}
 
     def get(self, key):
@@ -92,6 +93,28 @@ def test_round_trip_through_the_store(fake_valkey):
 
     assert store.get(b"manifest/abc") == b"PAR1payloadPAR1"
     assert store.get(b"manifest/missing") is None
+
+
+def test_client_is_given_bounded_timeouts(monkeypatch):
+    """An unreachable cache must fail fast, not block the query behind a TCP timeout."""
+    captured = {}
+
+    def from_url(url, **kwargs):
+        captured.update(kwargs)
+        return FakeClient(url)
+
+    module = types.ModuleType("valkey")
+    module.from_url = from_url
+    monkeypatch.setitem(sys.modules, "valkey", module)
+    _valkey_client.cache_clear()
+
+    _valkey_server(server=CONNECTION)
+
+    assert captured["socket_connect_timeout"] > 0
+    assert captured["socket_timeout"] > 0
+    # Anything near the OS default (~130s) would block every query on a dead cache.
+    assert captured["socket_connect_timeout"] < 5
+    _valkey_client.cache_clear()
 
 
 if __name__ == "__main__":  # pragma: no cover

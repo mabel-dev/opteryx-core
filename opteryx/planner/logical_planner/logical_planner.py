@@ -52,7 +52,6 @@ class LogicalPlanStepType(int, Enum):
     Exit = auto()
     HeapSort = auto()
 
-    CTE = auto()
     Subquery = auto()
     Window = auto()  # OVER (PARTITION BY ...) — rewritten to join by plan rewriter
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
@@ -177,15 +176,55 @@ CLAUSE PLANNERS
 """
 
 
+def _query_body(branch):
+    """Find the Query a statement runs, unwrapping the statements that wrap one.
+
+    A statement that wraps a query carries the WITH clause on the INNER query, not on
+    itself. Looking for `with` on the outer node found nothing, so the CTEs were silently
+    dropped and the query failed with "dataset '<cte name>' could not be found":
+
+        EXPLAIN WITH c AS (...) SELECT * FROM c     -- query is under Explain.statement
+        INSERT INTO t WITH c AS (...) SELECT * FROM c   -- query is under Insert.source
+    """
+    if "Explain" in branch:
+        branch = branch["Explain"]["statement"]
+    elif "Insert" in branch:
+        branch = branch["Insert"]["source"]
+    return branch.get("Query", branch)
+
+
 def extract_ctes(branch, planner):
     ctes = {}
-    if branch.get("Query", branch).get("with"):
-        for _ast in branch.get("Query", branch)["with"]["cte_tables"]:
+    with_clause = _query_body(branch).get("with")
+    if with_clause:
+        if with_clause.get("recursive"):
+            # A recursive CTE needs a fixpoint operator in the execution engine — the
+            # plan graph must stay acyclic, so the loop has to live inside an operator.
+            # That does not exist yet. Until it does, say so: previously the self-
+            # reference was re-expanded forever and hung the planner.
+            raise UnsupportedSyntaxError(
+                "WITH RECURSIVE is not supported. Rewrite the query without recursion."
+            )
+        for _ast in with_clause["cte_tables"]:
             alias = _ast.get("alias")["name"]["value"]
             logical_plan = planner(_ast["query"]["body"])
             # CTEs don't have an exit node
             plan_head = logical_plan.get_exit_points()[0]
             logical_plan.remove_node(plan_head, True)
+
+            # `WITH t(a, b) AS (...)` renames the CTE's output columns. The names were
+            # previously parsed and dropped, so the rename silently did nothing and the
+            # body's own column names leaked out. Carry them on the plan head; the
+            # Relation Resolver applies them when it splices the CTE in.
+            column_aliases = [
+                col["name"]["value"] for col in (_ast.get("alias").get("columns") or [])
+            ]
+            if column_aliases:
+                head_nid = logical_plan.get_exit_points()[0]
+                head = logical_plan[head_nid]
+                head.column_aliases = column_aliases
+                logical_plan[head_nid] = head
+
             ctes[alias] = logical_plan
     return ctes
 
@@ -1198,7 +1237,7 @@ def plan_query(statement: dict) -> LogicalPlan:
         head_nid = step_id
 
         left_plan = inner_query_planner(set_operation["left"])
-        from opteryx.planner.binder import rename_relations
+        from opteryx.planner.relation_resolver import rename_relations
 
         left_plan = rename_relations(left_plan, prefix="$union-")
         plan += left_plan

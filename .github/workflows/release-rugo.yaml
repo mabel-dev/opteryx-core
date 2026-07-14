@@ -7,7 +7,7 @@ name: Release rugo to PyPI
 # vice versa.
 #
 # Unlike opteryx_core (3.14 / x86-64 only), rugo targets a broad matrix:
-#   Python  : 3.11, 3.12, 3.13, 3.14 (GIL) + 3.14t (free-threaded)
+#   Python  : 3.11, 3.12, 3.13, 3.14 (GIL)
 #   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
 on:
   push:
@@ -34,9 +34,6 @@ jobs:
           - arch: x86_64
             runner: ubuntu-latest
             pybuild: "3.14"
-          - arch: x86_64
-            runner: ubuntu-latest
-            pybuild: "3.14t"
           # aarch64: native ARM runner — no QEMU needed
           - arch: aarch64
             runner: ubuntu-24.04-arm
@@ -50,9 +47,6 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
             pybuild: "3.14"
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            pybuild: "3.14t"
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out repository
@@ -87,7 +81,7 @@ jobs:
         # macos-14 = Apple Silicon (arm64) only. macos-13 (Intel x86_64) was
         # dropped — rugo publishes macOS arm64 wheels, not Intel.
         os: [macos-14]
-        pybuild: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
+        pybuild: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository

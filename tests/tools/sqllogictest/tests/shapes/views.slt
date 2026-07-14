@@ -19,6 +19,48 @@ CREATE OR REPLACE VIEW ws.views.test_02 (col1, col2, col3) AS SELECT name, mass,
 query shape 1 2
 SHOW CREATE VIEW ws.views.test_01
 
+# Read THROUGH the view. Until this was added, no test in the suite ever selected from a
+# view — only DDL and SHOW CREATE VIEW — which is why views being entirely unreadable on
+# this connector (a shadowed `eidetic` capability flag) went unnoticed.
+query shape 9 20
+SELECT * FROM ws.views.test_01
+
+query shape 4 20
+SELECT * FROM ws.views.test_01 WHERE id < 5
+
+# A view whose body carries a subquery. The subquery must be eliminated by the Plan
+# Rewriter; when view bodies were expanded after the rewriter had run, this reached the
+# expression compiler and died with "unsupported node type 39".
+statement ok
+CREATE OR REPLACE VIEW ws.views.test_03 AS SELECT id, name FROM $planets AS p WHERE p.id IN (SELECT q.id FROM $planets AS q WHERE q.id < 5)
+
+query shape 4 2
+SELECT * FROM ws.views.test_03
+
+# A view whose body carries a CTE — the view's own CTEs used to be discarded, leaving a
+# scan of a relation that did not exist.
+statement ok
+CREATE OR REPLACE VIEW ws.views.test_04 AS WITH small AS (SELECT id, name FROM $planets WHERE id < 5) SELECT * FROM small
+
+query shape 4 2
+SELECT * FROM ws.views.test_04
+
+# A view built on another view.
+statement ok
+CREATE OR REPLACE VIEW ws.views.test_05 AS SELECT name FROM ws.views.test_04
+
+query shape 4 1
+SELECT * FROM ws.views.test_05
+
+statement ok
+DROP VIEW ws.views.test_05
+
+statement ok
+DROP VIEW ws.views.test_04
+
+statement ok
+DROP VIEW ws.views.test_03
+
 statement ok
 ALTER VIEW ws.views.test_01 AS SELECT name, mass FROM $planets WHERE mass > 5e24
 

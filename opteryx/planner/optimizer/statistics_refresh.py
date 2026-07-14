@@ -71,7 +71,6 @@ _PASS_THROUGH_TYPES = {
     LogicalPlanStepType.HeapSort,
     LogicalPlanStepType.Exit,
     LogicalPlanStepType.Subquery,
-    LogicalPlanStepType.CTE,
     LogicalPlanStepType.Explain,
     LogicalPlanStepType.Show,
     LogicalPlanStepType.ShowColumns,

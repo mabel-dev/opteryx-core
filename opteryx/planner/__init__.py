@@ -235,6 +235,7 @@ def query_planner(
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
     from opteryx.planner.plan_rewriter import do_plan_rewrite
+    from opteryx.planner.relation_resolver import do_resolve_relations
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
@@ -272,9 +273,16 @@ def query_planner(
 
     logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement)  # type: ignore
 
-    # Plan Rewriter: structural rewrites on the unbound logical plan
+    # Relation Resolver: expand CTE and view references into the plan. Runs BEFORE the
+    # rewriter so the rewriter sees one fully-expanded plan — a subquery inside a view or
+    # CTE body is eliminated by the same pass that handles the main query.
     start = time.monotonic_ns()
-    logical_plan = do_plan_rewrite(logical_plan, ctes, telemetry)
+    logical_plan = do_resolve_relations(logical_plan, ctes, telemetry)
+    telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
+
+    # Plan Rewriter: structural rewrites on the unbound, fully-expanded logical plan
+    start = time.monotonic_ns()
+    logical_plan = do_plan_rewrite(logical_plan, telemetry)
     telemetry.time_planning_plan_rewriter += time.monotonic_ns() - start
 
     # check user has permission for this query type
@@ -291,7 +299,6 @@ def query_planner(
         logical_plan,
         execution_context=execution_context,
         query_id=query_id,
-        common_table_expressions=ctes,
         visibility_filters=visibility_filters,
         telemetry=telemetry,
     )
@@ -316,7 +323,6 @@ def execute_logical_plan(
     connection=None,
     query_id: Optional[str] = None,
     telemetry=None,
-    common_table_expressions=None,
     visibility_filters: Optional[Dict[str, Any]] = None,
     output_format: str = "physical",
 ):
@@ -333,6 +339,7 @@ def execute_logical_plan(
     from opteryx.planner.binder import do_bind_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
+    from opteryx.planner.relation_resolver import do_resolve_relations
     from opteryx.utils import random_string
 
     # Prepare query_id and telemetry defaults
@@ -349,13 +356,18 @@ def execute_logical_plan(
     else:
         conn_context = connection
 
+    # Externally-supplied logical plans still reference relations by name, so they go
+    # through the same resolver. They carry no CTEs — a CTE only exists in SQL text.
+    start = time.monotonic_ns()
+    logical_plan = do_resolve_relations(logical_plan, None, telemetry)
+    telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
+
     # The Binder adds schema information to the logical plan
     start = time.monotonic_ns()
     bound_plan = do_bind_phase(
         logical_plan,
         execution_context=conn_context,
         query_id=query_id,
-        common_table_expressions=None,  # executing logical plans: no CTEs
         visibility_filters=visibility_filters,
         telemetry=telemetry,
     )

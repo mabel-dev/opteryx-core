@@ -103,6 +103,7 @@ def test_real_optimized_plan_is_valid():
     from opteryx.planner.logical_planner import do_logical_planning_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.plan_rewriter import do_plan_rewrite
+    from opteryx.planner.relation_resolver import do_resolve_relations
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
@@ -120,12 +121,12 @@ def test_real_optimized_plan_is_valid():
             sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]
         )[0]
         plan, _, ctes = do_logical_planning_phase(ast)
-        plan = do_plan_rewrite(plan, ctes, telemetry)
+        plan = do_resolve_relations(plan, ctes, telemetry)
+        plan = do_plan_rewrite(plan, telemetry)
         bound = do_bind_phase(
             plan,
             execution_context=ctx,
             query_id=str(uuid.uuid4()),
-            common_table_expressions=ctes,
             telemetry=telemetry,
         )
         optimized = do_optimizer(bound, telemetry)

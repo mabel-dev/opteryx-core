@@ -387,7 +387,7 @@ class ExistsSubqueryToJoinStrategy(PlanRewriteStrategy):
             # This mirrors the view/CTE expansion path. Only Scan aliases are remapped —
             # the correlation columns reference the derived-table alias (a Subquery node),
             # which is left untouched, so inner_cols / the ON condition stay valid.
-            from opteryx.planner.binder import rename_relations
+            from opteryx.planner.relation_resolver import rename_relations
 
             rename_relations(subquery_plan)
 
