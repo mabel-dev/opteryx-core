@@ -339,6 +339,7 @@ def execute_logical_plan(
     from opteryx.planner.binder import do_bind_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
+    from opteryx.planner.plan_rewriter import do_plan_rewrite
     from opteryx.planner.relation_resolver import do_resolve_relations
     from opteryx.utils import random_string
 
@@ -361,6 +362,17 @@ def execute_logical_plan(
     start = time.monotonic_ns()
     logical_plan = do_resolve_relations(logical_plan, None, telemetry)
     telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
+
+    # Must run AFTER relation resolution and BEFORE the binder, exactly as query_planner
+    # orders it. An externally-supplied plan carries no subqueries of its own -- but once
+    # the resolver splices a VIEW body into it, it carries whatever SQL that view was
+    # written in. Constructs like IN (<subquery>) and INTERSECT/EXCEPT are *lowered* here
+    # (to semi/anti joins); nothing downstream can execute them un-lowered -- there is no
+    # physical operator for an InSubQuery -- so omitting this stage does not merely
+    # forfeit an optimisation, it makes any view containing one fail at execution.
+    start = time.monotonic_ns()
+    logical_plan = do_plan_rewrite(logical_plan, telemetry)
+    telemetry.time_planning_plan_rewriter += time.monotonic_ns() - start
 
     # The Binder adds schema information to the logical plan
     start = time.monotonic_ns()
