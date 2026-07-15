@@ -906,6 +906,7 @@ _vectors_op_cpp = [
     "opteryx/compiled/nanobind/vector_math.cpp",
     "opteryx/compiled/nanobind/vector_misc.cpp",
     "opteryx/compiled/nanobind/vector_selection_concat.cpp",
+    "opteryx/compiled/nanobind/vector_sketch_reduce.cpp",
     "opteryx/compiled/nanobind/vector_special.cpp",
     "opteryx/compiled/nanobind/vector_split_native.cpp",
     "opteryx/compiled/nanobind/vector_string_case.cpp",

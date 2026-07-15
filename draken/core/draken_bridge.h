@@ -70,6 +70,14 @@ int draken_vector_mark_dict_sorted(PyObject* obj);
 // child is absent. Returns a borrowed pointer valid ONLY while `obj` is kept alive.
 const DrakenVector* draken_array_child_unwrap(PyObject* obj);
 
+// draken_array_grandchild_unwrap — extract the leaf DrakenVector* two nesting
+// levels down from an array<array<T>> Vector. Mirrors draken_array_child_unwrap
+// for the second level; used by consumer-edge kernels that walk nested-array
+// offsets (outer via _unwrap, middle via _child_unwrap, leaf via this). Raises
+// TypeError/RuntimeError if obj is not a two-level DRAKEN_ARRAY. Borrowed pointer,
+// valid ONLY while `obj` is kept alive.
+const DrakenVector* draken_array_grandchild_unwrap(PyObject* obj);
+
 // draken_vector_own_raw — wrap hand-allocated (draken_malloc) buffers in a new Vector.
 //
 // Creates a dense (identity-selection) Vector with `length` logical rows.
@@ -213,7 +221,7 @@ PyObject* draken_vector_own_string_dict(
 // draken_vector_own_array — wrap hand-allocated buffers in a new DRAKEN_ARRAY[string] Vector.
 //
 // Constructs a DRAKEN_ARRAY whose child is a string-family Vector (VARCHAR, NVARCHAR,
-// or VARBINARY).  Ownership of ALL five caller buffers is transferred unconditionally
+// or VARBINARY).  Ownership of ALL six caller buffers is transferred unconditionally
 // on call entry — the caller MUST NOT free them after calling this function.
 //
 // Parameters:
@@ -227,11 +235,12 @@ PyObject* draken_vector_own_string_dict(
 //   child_arena_len  — number of valid bytes in child_arena (may be 0).
 //   child_length     — total number of child elements across all parent rows.
 //   child_type       — DRAKEN_VARCHAR, DRAKEN_NVARCHAR, or DRAKEN_VARBINARY; ValueError otherwise.
+//   child_validity   — 1-bit-per-child-element null bitmap (Arrow convention: bit set =
+//                      valid), or NULL if all child elements are valid.
 //   parent_validity  — 1-bit-per-row null bitmap for the parent (Arrow convention: bit set = valid).
 //                      May be NULL if all parent rows are valid.
 //   length           — parent logical row count.
 //
-// Child elements are assumed fully valid (no per-element null bitmap).
 // Parent null rows must have parent_offsets[i] == parent_offsets[i+1] (zero-length slice).
 //
 // Returns a NEW reference to a Python Vector on success.
@@ -243,6 +252,7 @@ PyObject* draken_vector_own_array(
     size_t            child_arena_len,
     uint32_t          child_length,
     DrakenType        child_type,
+    uint8_t*          child_validity,
     uint8_t*          parent_validity,
     uint32_t          length);
 
@@ -280,6 +290,29 @@ PyObject* draken_vector_own_array_numeric(
     DrakenType child_type,
     uint8_t*   parent_validity,
     uint32_t   length);
+
+// draken_vector_own_array_child — wrap hand-allocated offsets in a DRAKEN_ARRAY
+// Vector whose child is an ALREADY-BUILT Vector (nested arrays: the child is
+// itself a DRAKEN_ARRAY). Used by the IPC deserializer's CHILD_ARRAY path to
+// build list<list<...>> without materializing a Python nested list.
+//
+// Parameters:
+//   parent_offsets  — int32_t[length+1]: child index range per parent row.
+//                      Allocated with draken_malloc. Transferred on entry.
+//   child_obj       — a draken Vector (VectorOwner). Its owner is MOVED out
+//                      (carrying its child_owner subtree — arbitrary nesting),
+//                      leaving child_obj an empty husk the caller must drop.
+//   parent_validity — 1-bit-per-row null bitmap, or NULL if all rows valid.
+//                      Allocated with draken_malloc. Transferred on entry.
+//   length          — parent logical row count.
+//
+// Returns a NEW reference to a Python Vector on success; NULL + exception on
+// failure.
+PyObject* draken_vector_own_array_child(
+    int32_t*  parent_offsets,
+    PyObject* child_obj,
+    uint8_t*  parent_validity,
+    uint32_t  length);
 
 // draken_vector_own_timestamp — wrap a hand-allocated int64 buffer as a DRAKEN_TIMESTAMP64 Vector.
 //

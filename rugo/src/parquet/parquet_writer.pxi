@@ -373,8 +373,11 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             ci.i64 = i64_store.back().data()
 
         elif t == DRAKEN_UINT8 or t == DRAKEN_UINT16 or t == DRAKEN_UINT32 or t == DRAKEN_UINT64:
-            # Unsigned integers widen to INT64. Note: UINT64 values exceeding INT64_MAX
-            # are truncated (parquet has no native unsigned type).
+            # Unsigned integers widen to physical INT64 and carry the unsigned
+            # annotation (INTEGER(64, isSigned=false)) so a UINT64 > INT64_MAX is
+            # reinterpreted (not truncated) by readers — the bit pattern of the
+            # int64 slot IS the uint64 magnitude. Mirrors the array-leaf path;
+            # `ci.is_unsigned`/`int_bit_width` are set after the value copy below.
             tmp64 = vector[int64_t]()
             with nogil:
                 if dict_shape:
@@ -410,6 +413,8 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             i64_store.push_back(tmp64)
             ci.type = PT_INT64
             ci.i64 = i64_store.back().data()
+            ci.is_unsigned = True
+            ci.int_bit_width = 64
 
         elif t == DRAKEN_FLOAT64:
             tmpf = vector[double]()

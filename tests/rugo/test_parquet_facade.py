@@ -43,17 +43,9 @@ def test_read_all_columns_match_pyarrow():
     m = morsels[0]
     for name, col in schema_by_name.items():
         got = m.column(name.encode()).to_pylist()
-        # DECIMAL columns are physically stored as unscaled int64/int128 (see
-        # CLAUDE.md Type System: physical DrakenType is separate from logical
-        # scale/precision) — apply the logical scale before comparing against
-        # PyArrow's already-scaled Decimal values.
-        decimal_match = re.match(r"decimal\((\d+),\s*(\d+)\)", col.logical_type)
-        if decimal_match:
-            scale = int(decimal_match.group(2))
-            got = [
-                decimal.Decimal(v).scaleb(-scale) if v is not None else None
-                for v in got
-            ]
+        # DECIMAL columns now materialize as native DRAKEN_DECIMAL/DECIMAL128
+        # vectors, so to_pylist yields decimal.Decimal directly — compare against
+        # PyArrow's already-scaled Decimal values with no manual rescaling.
         assert got == truth[name], name
 
 

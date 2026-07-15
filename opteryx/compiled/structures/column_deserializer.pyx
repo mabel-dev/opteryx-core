@@ -75,11 +75,15 @@ cdef extern from "core/draken_bridge.h":
         int32_t* parent_offsets, DrakenStringSlot* child_slots,
         uint8_t* child_arena, size_t child_arena_len,
         uint32_t child_length, DrakenType child_type,
+        uint8_t* child_validity,
         uint8_t* parent_validity, uint32_t length)
     PyObject* draken_vector_own_array_numeric(
         int32_t* parent_offsets, void* child_data,
         uint8_t* child_validity, uint32_t child_length,
         DrakenType child_type,
+        uint8_t* parent_validity, uint32_t length)
+    PyObject* draken_vector_own_array_child(
+        int32_t* parent_offsets, PyObject* child_obj,
         uint8_t* parent_validity, uint32_t length)
 
 
@@ -149,6 +153,8 @@ DEF CHILD_FLOAT32 = 3
 DEF CHILD_FLOAT64 = 4
 DEF CHILD_BOOL    = 5
 DEF CHILD_STRING  = 6
+DEF CHILD_UINT64  = 7   # unsigned int leaf, widened to 64-bit
+DEF CHILD_ARRAY   = 8   # nested list child (recursive block)
 
 # sizeof(DrakenStringSlot) == 16 always (16-byte fixed-width slot, documented in string_slot.h).
 DEF SLOT_BYTES = 16
@@ -837,7 +843,67 @@ cdef object _build_array_vector(const uint8_t* p, uint32_t num_rows,
     p += 1
     if child_type_tag == CHILD_STRING:
         return _build_array_vector_string(p, num_rows, list_null_bmap, list_null_bmap_len)
+    if child_type_tag == CHILD_ARRAY:
+        return _build_array_vector_nested(p, num_rows, list_null_bmap, list_null_bmap_len)
     return _build_array_vector_numeric(p, num_rows, list_null_bmap, list_null_bmap_len, child_type_tag)
+
+
+cdef object _build_array_vector_nested(const uint8_t* p, uint32_t num_rows,
+                                       const uint8_t* list_null_bmap, uint32_t list_null_bmap_len):
+    """Deserialize a CHILD_ARRAY TAG_ARRAY (11): the child of this list level is
+    itself a list. Builds the child Vector recursively, then wraps it under this
+    level's offsets + validity — producing a native list<list<...>> Vector with
+    no Python nested list.
+
+    Wire layout after child_type_tag (see ipc_serialize.hpp for the writer side):
+      uint32_t  child_count
+      int32_t[(num_rows+1)]  offsets
+      uint32_t  inner_null_bmap_len
+      uint8_t[inner_null_bmap_len]  inner_null_bmap   (validity of the child level)
+      <child block, starting at its own child_type_tag; num_rows == child_count>
+    """
+    cdef uint32_t child_count
+    p = _read_u32(p, &child_count)
+
+    # parent_offsets — draken_malloc'd; transferred to draken_vector_own_array_child.
+    cdef uint32_t offsets_bytes = (num_rows + 1) * sizeof(int32_t)
+    cdef int32_t* parent_offsets = <int32_t*>draken_malloc(offsets_bytes)
+    if parent_offsets == NULL:
+        raise MemoryError()
+    memcpy(parent_offsets, p, offsets_bytes)
+    p += offsets_bytes
+
+    # Inner (child-level) validity bitmap, then the child block itself.
+    cdef uint32_t inner_null_bmap_len
+    p = _read_u32(p, &inner_null_bmap_len)
+    cdef const uint8_t* inner_null_bmap = p
+    p += inner_null_bmap_len
+
+    # Recurse: build the child list Vector (num_rows == child_count).
+    cdef Vector child_vec
+    try:
+        child_vec = _build_array_vector(p, child_count, inner_null_bmap, inner_null_bmap_len)
+    except BaseException:
+        draken_free(parent_offsets)
+        raise
+
+    # parent_validity — draken_malloc'd; transferred to draken_vector_own_array_child.
+    cdef uint8_t* parent_validity = NULL
+    if list_null_bmap_len > 0:
+        parent_validity = <uint8_t*>draken_malloc(list_null_bmap_len)
+        if parent_validity == NULL:
+            draken_free(parent_offsets)
+            raise MemoryError()
+        memcpy(parent_validity, list_null_bmap, list_null_bmap_len)
+
+    # draken_vector_own_array_child MOVES the child VectorOwner out of the child
+    # Vector's nanobind handle (leaving an empty husk) and takes ownership of
+    # parent_offsets/parent_validity.
+    cdef PyObject* raw = draken_vector_own_array_child(
+        parent_offsets, <PyObject*>child_vec._nb, parent_validity, num_rows)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_array_child failed")
+    return _wrap_raw_pyobj(raw)
 
 
 cdef object _build_array_vector_string(const uint8_t* p, uint32_t num_rows,
@@ -848,13 +914,13 @@ cdef object _build_array_vector_string(const uint8_t* p, uint32_t num_rows,
       uint32_t  child_count
       int32_t[(num_rows+1)]  offsets
       uint32_t  child_null_bmap_len
-      uint8_t[child_null_bmap_len]  child_null_bmap  (consumed but not passed to draken)
+      uint8_t[child_null_bmap_len]  child_null_bmap  (per-child-element validity)
       for i in 0..child_count-1:
         uint32_t len
         uint8_t[len] bytes
 
-    Note: draken_vector_own_array does not support per-child-element nullability.
-    The child_null_bmap is read from the stream (to advance p correctly) and discarded.
+    The child_null_bmap (Arrow convention, bit set = valid) is passed through to
+    draken so null string elements read back as None, not ''.
     """
     cdef uint32_t child_count
     p = _read_u32(p, &child_count)
@@ -867,10 +933,11 @@ cdef object _build_array_vector_string(const uint8_t* p, uint32_t num_rows,
     memcpy(parent_offsets, p, offsets_bytes)
     p += offsets_bytes
 
-    # Child null bitmap: read (advance p) and discard — bridge doesn't support it.
+    # Child null bitmap: capture (advance p); copied into an owned buffer below.
     cdef uint32_t child_null_bmap_len
     p = _read_u32(p, &child_null_bmap_len)
-    p += child_null_bmap_len   # skip child null bitmap bytes
+    cdef const uint8_t* child_null_bmap_src = p
+    p += child_null_bmap_len
 
     # First pass: compute total child arena size.
     cdef const uint8_t* scan = p
@@ -899,11 +966,26 @@ cdef object _build_array_vector_string(const uint8_t* p, uint32_t num_rows,
             draken_free(parent_offsets)
             raise MemoryError()
 
+    # child_validity — draken_malloc'd; transferred to draken_vector_own_array.
+    cdef uint8_t* child_validity = NULL
+    if child_null_bmap_len > 0:
+        child_validity = <uint8_t*>draken_malloc(child_null_bmap_len)
+        if child_validity == NULL:
+            if child_arena != NULL:
+                draken_free(child_arena)
+            if child_slots_buf != NULL:
+                draken_free(child_slots_buf)
+            draken_free(parent_offsets)
+            raise MemoryError()
+        memcpy(child_validity, child_null_bmap_src, child_null_bmap_len)
+
     # parent_validity — draken_malloc'd; transferred to draken_vector_own_array.
     cdef uint8_t* parent_validity = NULL
     if list_null_bmap_len > 0:
         parent_validity = <uint8_t*>draken_malloc(list_null_bmap_len)
         if parent_validity == NULL:
+            if child_validity != NULL:
+                draken_free(child_validity)
             if child_arena != NULL:
                 draken_free(child_arena)
             if child_slots_buf != NULL:
@@ -934,6 +1016,7 @@ cdef object _build_array_vector_string(const uint8_t* p, uint32_t num_rows,
         <DrakenStringSlot*>child_slots_buf,
         child_arena, child_arena_len,
         child_count, DRAKEN_VARCHAR,
+        child_validity,
         parent_validity, num_rows)
     if raw == NULL:
         raise MemoryError("draken_vector_own_array failed")
@@ -978,6 +1061,9 @@ cdef object _build_array_vector_numeric(const uint8_t* p, uint32_t num_rows,
     elif child_type_tag == CHILD_INT32:
         child_type = DRAKEN_INT32
         elem_size = 4
+    elif child_type_tag == CHILD_UINT64:
+        child_type = DRAKEN_UINT64
+        elem_size = 8
     elif child_type_tag == CHILD_FLOAT32:
         child_type = DRAKEN_FLOAT32
         elem_size = 4

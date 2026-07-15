@@ -31,6 +31,7 @@ void register_vector_json(nb::module_ &m);
 void register_vector_math(nb::module_ &m);
 void register_vector_misc(nb::module_ &m);
 void register_vector_selection_concat(nb::module_ &m);
+void register_vector_sketch_reduce(nb::module_ &m);
 void register_vector_special(nb::module_ &m);
 void register_vector_split_native(nb::module_ &m);
 void register_vector_string_case(nb::module_ &m);
@@ -54,6 +55,7 @@ NB_MODULE(vectors, m) {
     register_vector_math(m);
     register_vector_misc(m);
     register_vector_selection_concat(m);
+    register_vector_sketch_reduce(m);
     register_vector_special(m);
     register_vector_split_native(m);
     register_vector_string_case(m);

@@ -147,6 +147,9 @@ cdef extern from "decode.hpp":
         string type
         bint is_unsigned
         int32_t int_bit_width
+        bint is_decimal
+        uint8_t decimal_precision
+        uint8_t decimal_scale
         int32_t pages_skipped
         int32_t pages_decoded
         bint success

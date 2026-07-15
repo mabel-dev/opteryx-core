@@ -1797,6 +1797,17 @@ cdef void _scan_pull_run_inner(void* scan_ptr, shared_ptr[CxxMorsel]* out,
     except BaseException as exc:
         finished[0] = 1
         err_code[0] = 1
+        # Stash the real Python exception on the scan node so the consumer-side
+        # `build_terminal_exc` can re-raise it (rich traceback) instead of the
+        # synthetic "scan pull raised" RuntimeError. First exception wins; the
+        # `_ctx._exc` slot is preferred (matches `_take_exc`), else the node-local
+        # `_cxx_push_exc` fallback (a scan driven without a shared PipelineContext).
+        if scan_obj is not None:
+            if (<BasePlanNode>scan_obj)._ctx is not None:
+                if (<BasePlanNode>scan_obj)._ctx._exc is None:
+                    (<BasePlanNode>scan_obj)._ctx._exc = exc
+            elif (<BasePlanNode>scan_obj)._cxx_push_exc is None:
+                (<BasePlanNode>scan_obj)._cxx_push_exc = exc
 
 
 cdef void _scan_pull_trampoline(void* scan_ptr, shared_ptr[CxxMorsel]* out,

@@ -15,7 +15,56 @@ on:
       - 'rugo-*'
 
 jobs:
+  # ── Release floor: three parallel suites that MUST all pass before any wheel
+  # is built or published. This is the stable floor for rugo (our most
+  # marketable component): PyArrow-oracle conformance (read/write every type),
+  # the notebook's advertised public API, and the CLI. A red suite blocks the
+  # PyPI publish entirely (build-linux/build-macos `needs: floor`).
+  floor:
+    name: rugo floor (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [oracle, notebook, cli]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --upgrade numpy cython setuptools-rust pyarrow
+          python -m uv pip install --upgrade -r "$GITHUB_WORKSPACE/tests/requirements.txt"
+
+      - name: Compile extensions
+        run: make compile
+
+      - name: Run floor suite — ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.suite }}" in
+            oracle)   python -m pytest tests/rugo/test_oracle_conformance.py -q ;;
+            notebook) python -m pytest tests/rugo/test_notebook_actions.py -q ;;
+            cli)      python -m pytest tests/rugo/test_cli.py -q ;;
+          esac
+
   build-linux:
+    needs: floor
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -74,6 +123,7 @@ jobs:
           path: dist/*manylinux*.whl
 
   build-macos:
+    needs: floor
     strategy:
       fail-fast: false
       max-parallel: 8

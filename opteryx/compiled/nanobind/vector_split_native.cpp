@@ -201,6 +201,7 @@ static nb::object impl_split(nb::object vec_obj, nb::object delim_obj)
         arena_cursor,
         total_segments,
         DRAKEN_VARCHAR,
+        nullptr,           // child_validity — split segments are never null
         parent_validity,
         n);
     if (!out) throw nb::python_error();

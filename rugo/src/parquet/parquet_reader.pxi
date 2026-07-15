@@ -36,9 +36,12 @@
 # feeds the engine — it does not.
 # =============================================================================
 import datetime
+import decimal as _decimal
 import os
 import struct
 import time as _time
+
+_Decimal = _decimal.Decimal
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
@@ -671,6 +674,12 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
     cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
     cdef bint has_v = col.valid_bits.size() > 0
     cdef uint8_t cw
+    # Unsigned columns store the raw magnitude in signed int32/int64 slots. Emit
+    # NON-NEGATIVE Python ints (reinterpret the bits) so the caller can build a
+    # DRAKEN_UINT64 vector — a plain `<int64_t>` cast would sign-extend a uint32
+    # (4e9 -> -294967296) or hand back a negative int64 for a uint64 > 2**63.
+    # Mirrors the array leaf path (`_array_leaf_values`).
+    cdef bint uns = col.is_unsigned
     if _decoded_has_dictionary(col):
         if not col.dict_codes_array.empty():
             cw = col.code_width if col.code_width in (1, 2, 4) else 1
@@ -678,17 +687,29 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                 if has_v and not _row_valid(col, i):
                     continue
                 if from_int32:
-                    out[i] = <int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
+                    if uns:
+                        out[i] = <uint64_t><uint32_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
+                    else:
+                        out[i] = <int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
                 else:
-                    out[i] = col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
+                    if uns:
+                        out[i] = <uint64_t>col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
+                    else:
+                        out[i] = col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
         else:
             for i in range(num_rows):
                 if has_v and not _row_valid(col, i):
                     continue
                 if from_int32:
-                    out[i] = <int64_t>col.dict_int32_values[col.dict_indices[vi]]
+                    if uns:
+                        out[i] = <uint64_t><uint32_t>col.dict_int32_values[col.dict_indices[vi]]
+                    else:
+                        out[i] = <int64_t>col.dict_int32_values[col.dict_indices[vi]]
                 else:
-                    out[i] = col.dict_int64_values[col.dict_indices[vi]]
+                    if uns:
+                        out[i] = <uint64_t>col.dict_int64_values[col.dict_indices[vi]]
+                    else:
+                        out[i] = col.dict_int64_values[col.dict_indices[vi]]
                 vi += 1
         return out
     if col.rle_run_lengths.size() > 0:
@@ -696,18 +717,146 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
         for r in range(col.rle_run_lengths.size()):
             cnt = col.rle_run_lengths[r]
             for j in range(cnt):
-                out[off + j] = col.rle_int64_values[r]
+                if uns:
+                    out[off + j] = <uint64_t>col.rle_int64_values[r]
+                else:
+                    out[off + j] = col.rle_int64_values[r]
             off += cnt
         return out
     for i in range(num_rows):
         if has_v and not _row_valid(col, i):
             continue
         if from_int32:
-            out[i] = <int64_t>col.int32_values[vi]
+            if uns:
+                out[i] = <uint64_t><uint32_t>col.int32_values[vi]
+            else:
+                out[i] = <int64_t>col.int32_values[vi]
         else:
-            out[i] = col.int64_values[vi]
+            if uns:
+                out[i] = <uint64_t>col.int64_values[vi]
+            else:
+                out[i] = col.int64_values[vi]
         vi += 1
     return out
+
+
+cdef inline Vector _make_int_vector(parquet_reader.DecodedColumn& col,
+                                    int32_t num_rows, bint from_int32):
+    """Build an int Vector from the flattened list, picking the UINT64 builder for
+    unsigned columns (so values > INT64_MAX survive) and the signed INT64 builder
+    otherwise. `_int64_list` has already reinterpreted unsigned bits to
+    non-negative Python ints, which the UINT64 builder requires."""
+    cdef list vals = _int64_list(col, num_rows, from_int32)
+    if col.is_unsigned:
+        return Vector(_dn.vector_uint64_from_sequence(vals))
+    return Vector(_dn.vector_from_sequence(vals))
+
+
+# int128 → Python int. `DecodedColumn::int128_values` is a std::vector<__int128>
+# (compact: non-null values only), which Cython cannot represent — this tiny C++
+# shim reads each 16-byte little-endian signed value into a Python int, emitting
+# None for null rows. Defined inline (not in decode.hpp) so rugo's pure-C++ core
+# stays free of Python.h.
+cdef extern from *:
+    """
+    #include <Python.h>
+    #include <cstdint>
+    static inline PyObject* _rugo_int128_to_pylong(__int128 v) {
+        return _PyLong_FromByteArray(
+            reinterpret_cast<const unsigned char*>(&v), 16,
+            /*little_endian=*/1, /*is_signed=*/1);
+    }
+    static inline uint32_t _rugo_read_code(const std::vector<uint8_t>& arr,
+                                           size_t i, uint8_t width) {
+        size_t off = (size_t)i * width;
+        if (width == 1) return arr[off];
+        if (width == 2) return arr[off] | ((uint32_t)arr[off + 1] << 8);
+        return arr[off] | ((uint32_t)arr[off + 1] << 8)
+             | ((uint32_t)arr[off + 2] << 16) | ((uint32_t)arr[off + 3] << 24);
+    }
+    static PyObject* rugo_int128_unscaled_pylist(const DecodedColumn& col, int32_t num_rows) {
+        // Two shapes:
+        //   dict  — dict_int128_values holds the value table; per-row codes live in
+        //           dict_codes_array (nullable, packed by row) or dict_indices
+        //           (non-nullable, compact valid-only). Mirrors _int64_list exactly.
+        //   plain — int128_values is the compact (non-null) dense payload.
+        PyObject* out = PyList_New(num_rows);
+        if (!out) return NULL;
+        const bool has_v = !col.valid_bits.empty();
+        if (!col.dict_int128_values.empty()) {
+            const size_t dict_sz = col.dict_int128_values.size();
+            const bool use_codes = !col.dict_codes_array.empty();
+            const uint8_t cw = (col.code_width == 1 || col.code_width == 2 ||
+                                col.code_width == 4) ? col.code_width : 1;
+            size_t vi = 0;
+            for (int32_t i = 0; i < num_rows; ++i) {
+                bool valid = true;
+                if (has_v) valid = ((col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0;
+                if (!valid) { Py_INCREF(Py_None); PyList_SET_ITEM(out, i, Py_None); continue; }
+                uint32_t code = use_codes
+                    ? _rugo_read_code(col.dict_codes_array, (size_t)i, cw)
+                    : col.dict_indices[vi++];
+                if ((size_t)code >= dict_sz) {  // fail safe on a corrupt code
+                    Py_DECREF(out);
+                    PyErr_SetString(PyExc_ValueError,
+                        "int128 dict code out of range");
+                    return NULL;
+                }
+                PyObject* num = _rugo_int128_to_pylong(col.dict_int128_values[code]);
+                if (!num) { Py_DECREF(out); return NULL; }
+                PyList_SET_ITEM(out, i, num);
+            }
+            return out;
+        }
+        size_t vi = 0;
+        for (int32_t i = 0; i < num_rows; ++i) {
+            bool valid = true;
+            if (has_v) valid = ((col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0;
+            if (!valid) { Py_INCREF(Py_None); PyList_SET_ITEM(out, i, Py_None); continue; }
+            PyObject* num = _rugo_int128_to_pylong(col.int128_values[vi++]);
+            if (!num) { Py_DECREF(out); return NULL; }
+            PyList_SET_ITEM(out, i, num);
+        }
+        return out;
+    }
+    """
+    object rugo_int128_unscaled_pylist(parquet_reader.DecodedColumn& col, int32_t num_rows)
+
+
+cdef Vector _make_decimal_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
+    """Build a DECIMAL Vector from a decoded parquet DECIMAL column.
+
+    Parquet stores decimals as INT32/INT64/FIXED_LEN_BYTE_ARRAY; rugo's decoder
+    tiers by byte width into `int64_values` (width <= 8, `col.type` int64/int32)
+    or `int128_values` (width 9..16, `col.type` int128). Either way the value is
+    the SIGNED UNSCALED integer; we scale it by 10**-S into a decimal.Decimal and
+    build a native DRAKEN_DECIMAL (P<=18) / DRAKEN_DECIMAL128 vector carrying
+    precision+scale — instead of silently dropping the >64-bit tier (old
+    behaviour: no int128 branch → returned None) or handing back a bare unscaled
+    int with no decimal identity (old <=8 behaviour). Precision/scale come from
+    `col.decimal_precision`/`col.decimal_scale` (set in decode_column.cpp), so
+    this works on the morsel path where no per-column logical-type string exists.
+    """
+    cdef int precision = col.decimal_precision
+    cdef int scale = col.decimal_scale
+
+    cdef list unscaled
+    if col.type == b"int128":
+        unscaled = rugo_int128_unscaled_pylist(col, num_rows)
+    else:
+        unscaled = _int64_list(col, num_rows, col.type == b"int32")
+
+    cdef list decs = [None] * num_rows
+    cdef Py_ssize_t i
+    cdef object u
+    for i in range(num_rows):
+        u = unscaled[i]
+        if u is not None:
+            decs[i] = _Decimal(u).scaleb(-scale)
+
+    if precision <= 18:
+        return Vector(_dn.vector_decimal_from_sequence(decs, precision, scale))
+    return Vector(_dn.vector_decimal128_from_sequence(decs, precision, scale))
 
 
 cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
@@ -801,13 +950,13 @@ cdef list _bool_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
 cdef Vector _make_int64_from_int32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
+    return _make_int_vector(decoded_col, num_rows, True)
 
 
 cdef Vector _make_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, False)))
+    return _make_int_vector(decoded_col, num_rows, False)
 
 
 cdef Vector _make_float64_from_float32_vector(
@@ -819,7 +968,7 @@ cdef Vector _make_float64_from_float32_vector(
 cdef Vector _make_int32_as_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
+    return _make_int_vector(decoded_col, num_rows, True)
 
 
 cdef Vector _make_float64_vector(
@@ -999,13 +1148,13 @@ cdef int _fill_dict_codes_and_validity(
 cdef Vector _make_typed_int64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, False)))
+    return _make_int_vector(decoded_col, num_rows, False)
 
 
 cdef Vector _make_typed_int64_from_int32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
+    return _make_int_vector(decoded_col, num_rows, True)
 
 
 cdef Vector _make_typed_float64_dictionary_vector(
@@ -1061,9 +1210,9 @@ cdef Vector _make_typed_constant_vector(
     # A constant is just a dict of size 1; reuse the materializers (dense vector).
     cdef bytes col_type = decoded_col.type
     if col_type == b"int64":
-        return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, False)))
+        return _make_int_vector(decoded_col, num_rows, False)
     if col_type == b"int32":
-        return Vector(_dn.vector_from_sequence(_int64_list(decoded_col, num_rows, True)))
+        return _make_int_vector(decoded_col, num_rows, True)
     if col_type == b"float64":
         return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
     if col_type == b"float32":
@@ -1369,6 +1518,11 @@ cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_grou
                 if column.string_dict_lens.size() > 0:
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
+            elif column.is_decimal:
+                # DECIMAL (any tier): real DECIMAL/DECIMAL128 vector, not a bare
+                # int — and never drop the int128 tier.
+                vec = _make_decimal_vector(column, num_rows)
+                _TEL["cython_other_s"] += _time.perf_counter() - _t0
             elif column.type == b"int64":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
@@ -1801,7 +1955,13 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         # the scalar type branches so a nested column is never flattened.
         return _make_array_vector(result)
 
-    elif result.type == b"int32":
+    # DECIMAL (scalar): int64/int32-tier (width<=8) and int128-tier (width 9..16)
+    # both flagged is_decimal — materialize a real DECIMAL vector rather than a
+    # bare int (or, for int128, dropping the column).
+    if result.is_decimal:
+        return _make_decimal_vector(result, num_rows)
+
+    if result.type == b"int32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):

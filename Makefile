@@ -62,7 +62,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et q reference function-costs
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et q rugo-floor reference function-costs
 
 # Default target
 .DEFAULT_GOAL := help
@@ -158,6 +158,14 @@ test: ## Run full test suite with compiled extensions
 q:
 	@clear || true
 	@VALIDATE_OPTIMIZER_PLANS=1 $(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
+
+rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — gates the rugo wheel
+	$(call print_blue,"Running rugo release floor: oracle conformance...")
+	@$(PYTEST) tests/rugo/test_oracle_conformance.py -q
+	$(call print_blue,"Running rugo release floor: notebook actions...")
+	@$(PYTEST) tests/rugo/test_notebook_actions.py -q
+	$(call print_blue,"Running rugo release floor: cli...")
+	@$(PYTEST) tests/rugo/test_cli.py -q
 
 dt: ## Run draken unit tests
 	$(call print_blue,"Running draken unit tests...")

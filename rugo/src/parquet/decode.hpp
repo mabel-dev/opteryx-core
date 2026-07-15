@@ -33,6 +33,15 @@ struct DecodedColumnMeta {
   // `type` implies. 0 == not an integer column / no IntType annotation.
   bool is_unsigned = false;
   int32_t int_bit_width = 0;
+  // DECIMAL logical type. Set when the column carries a "decimal(P,S)" logical
+  // annotation, so the Cython layer can materialize a real DECIMAL/DECIMAL128
+  // vector regardless of the physical tier (`type` int32/int64 for width<=8,
+  // int128 for width 9..16) — the physical type alone can't distinguish a
+  // decimal from a plain int, and precision/scale live nowhere else on the
+  // decoded column.
+  bool is_decimal = false;
+  uint8_t decimal_precision = 0;
+  uint8_t decimal_scale = 0;
   int32_t num_rows = 0;  // total rows including nulls (= sum of page_values)
   int32_t pages_skipped = 0;  // pages skipped due to row_mask (no selected rows in page)
   int32_t pages_decoded = 0;  // pages that passed the row_mask check and were decompressed/decoded
@@ -64,8 +73,8 @@ struct DecodedColumnMeta {
 // Reuse contract: a DecodedColumn may be reused across column decodes via
 // reset() (retains vector capacity — the whole point). reset() MUST clear every
 // owning container below AND slice-assign the scalar base; the completeness test
-// test_decoded_column_reset_is_complete enforces this. 27 owning containers
-// (25 std::vector + `type` + `error_message`) + 18 scalars (in DecodedColumnMeta).
+// test_decoded_column_reset_is_complete enforces this. 28 owning containers
+// (26 std::vector + `type` + `error_message`) + scalars (in DecodedColumnMeta).
 struct DecodedColumn : DecodedColumnMeta {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
@@ -77,6 +86,7 @@ struct DecodedColumn : DecodedColumnMeta {
   std::vector<int32_t> dict_indices;      // non-empty → string_values is the dict; per-row indices
   std::vector<int32_t> dict_int32_values; // compact dictionary payload for int32 columns
   std::vector<int64_t> dict_int64_values; // compact dictionary payload for int64 columns
+  std::vector<__int128> dict_int128_values; // compact dictionary payload for int128 (DECIMAL128) columns
   std::vector<float> dict_float32_values; // compact dictionary payload for float32 columns
   std::vector<double> dict_float64_values; // compact dictionary payload for float64 columns
   std::vector<uint8_t> boolean_values;   // for boolean (using uint8_t instead of bool)
@@ -131,7 +141,8 @@ struct DecodedColumn : DecodedColumnMeta {
   void reset() {
     valid_bits.clear();          int32_values.clear();        int64_values.clear();
     int128_values.clear();       string_values.clear();       dict_indices.clear();
-    dict_int32_values.clear();   dict_int64_values.clear();    dict_float32_values.clear();
+    dict_int32_values.clear();   dict_int64_values.clear();    dict_int128_values.clear();
+    dict_float32_values.clear();
     dict_float64_values.clear(); boolean_values.clear();       float32_values.clear();
     float64_values.clear();      rep_levels.clear();           def_levels.clear();
     string_dict_arena.clear();   string_dict_offsets.clear();  string_dict_lens.clear();
@@ -139,7 +150,7 @@ struct DecodedColumn : DecodedColumnMeta {
     rle_run_lengths.clear();     rle_str_arena.clear();        rle_str_offsets.clear();
     rle_str_lens.clear();
     type.clear();                error_message.clear();
-    static_cast<DecodedColumnMeta&>(*this) = DecodedColumnMeta{};  // resets all 18 scalars
+    static_cast<DecodedColumnMeta&>(*this) = DecodedColumnMeta{};  // resets all meta scalars
   }
 };
 

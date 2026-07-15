@@ -620,6 +620,8 @@ static const uint8_t CHILD_FLOAT32 = 3;
 static const uint8_t CHILD_FLOAT64 = 4;
 static const uint8_t CHILD_BOOL    = 5;
 static const uint8_t CHILD_STRING  = 6;
+static const uint8_t CHILD_UINT64  = 7;   // unsigned int leaf, widened to 64-bit
+static const uint8_t CHILD_ARRAY   = 8;   // nested list child (recursive block)
 
 static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx, uint8_t width) {
     if (width == 1) return static_cast<int32_t>(arr[idx]);
@@ -629,88 +631,156 @@ static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx
                                 (static_cast<uint32_t>(arr[4*idx+3]) << 24));
 }
 
-static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
-    int32_t max_def = col.max_def_level;
-    size_t  n_levels = col.rep_levels.size();
+// Pack a 0/1-per-entry validity vector into an Arrow bitmap (bit set = valid)
+// and write it as [u32 byte-length][bytes]. Used for every list level's own
+// row/list validity.
+static inline void write_validity_bmap(ByteSink& out, const std::vector<uint8_t>& valid) {
+    uint32_t n     = static_cast<uint32_t>(valid.size());
+    uint32_t bytes = (n + 7) / 8;
+    std::vector<uint8_t> bmap(bytes, 0);
+    for (uint32_t i = 0; i < n; ++i)
+        if (valid[i]) bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+    write_u32(out, bytes);
+    if (bytes) write_bytes(out, bmap.data(), bytes);
+}
 
-    // Determine the child element's wire shape up front — fail loud on
-    // anything not yet supported (decimal128, unsigned int family) rather
-    // than silently mis-encoding.
-    uint8_t child_type_tag;
+// Serialize a list column of arbitrary nesting depth D (= max_rep_level) into
+// the recursive TAG_ARRAY wire format. Each nesting level is a block carrying
+// its own validity + offsets; a level whose children are themselves lists uses
+// CHILD_ARRAY and is followed by the child level's block (its num_rows equals
+// this level's child_count). The innermost level uses a scalar child tag and
+// carries the leaf body. Unsigned int leaves are widened to CHILD_UINT64.
+static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
+    const int32_t D        = col.max_rep_level;
+    const int32_t max_def  = col.max_def_level;
+    const size_t  n_levels = col.rep_levels.size();
+
+    // Leaf (innermost element) wire tag from the element's physical type. An
+    // unsigned int leaf is widened to 64-bit unsigned (CHILD_UINT64) so the full
+    // range survives — matching the Cython Path-A reader (_make_array_vector).
+    uint8_t leaf_tag;
     if (col.type == "string" || col.type == "byte_array") {
-        child_type_tag = CHILD_STRING;
-    } else if (col.type == "int64" && !col.is_unsigned) {
-        child_type_tag = CHILD_INT64;
-    } else if (col.type == "int32" && !col.is_unsigned) {
-        child_type_tag = CHILD_INT32;
+        leaf_tag = CHILD_STRING;
+    } else if ((col.type == "int64" || col.type == "int32") && col.is_unsigned) {
+        leaf_tag = CHILD_UINT64;
+    } else if (col.type == "int64") {
+        leaf_tag = CHILD_INT64;
+    } else if (col.type == "int32") {
+        leaf_tag = CHILD_INT32;
     } else if (col.type == "float32") {
-        child_type_tag = CHILD_FLOAT32;
+        leaf_tag = CHILD_FLOAT32;
     } else if (col.type == "float64") {
-        child_type_tag = CHILD_FLOAT64;
+        leaf_tag = CHILD_FLOAT64;
     } else if (col.type == "boolean") {
-        child_type_tag = CHILD_BOOL;
+        leaf_tag = CHILD_BOOL;
     } else {
         throw std::runtime_error(
             "ARRAY column with element type '" + col.type +
-            "' is not supported (only string/int32/int64/float32/float64/boolean "
-            "list elements can be read)");
+            "' is not supported (only string / (u)int32 / (u)int64 / float32 / "
+            "float64 / boolean list elements can be read)");
     }
 
-    // Count outer rows and build list-level null bitmap + offsets.
-    int32_t outer_rows = 0;
-    for (size_t i = 0; i < n_levels; ++i)
-        if (col.rep_levels[i] == 0) ++outer_rows;
+    if (D < 1) {
+        throw std::runtime_error(
+            "ARRAY column has max_rep_level=" + std::to_string(D) +
+            " (expected >= 1 for a list column)");
+    }
+    if (max_def != 2 * D + 1) {
+        throw std::runtime_error(
+            "ARRAY column has an unsupported list level scheme (max_rep_level=" +
+            std::to_string(D) + ", max_def_level=" + std::to_string(max_def) +
+            "; expected max_def_level=" + std::to_string(2 * D + 1) +
+            " for all-nullable nesting)");
+    }
 
-    uint32_t bmap_bytes = static_cast<uint32_t>((outer_rows + 7) / 8);
-    std::vector<uint8_t> list_bmap(bmap_bytes, 0);
-    std::vector<int32_t> offsets(outer_rows + 1, 0);
+    const bool use_codes = !col.dict_codes_array.empty();
+    const bool use_arena = !col.string_dict_arena.empty();
+    const bool use_dix   = !col.dict_indices.empty();
 
-    bool use_codes  = !col.dict_codes_array.empty();
-    bool use_arena  = !col.string_dict_arena.empty();
-    bool use_dix    = !col.dict_indices.empty();
-
-    if (child_type_tag == CHILD_BOOL && (use_codes || use_dix)) {
+    if (leaf_tag == CHILD_BOOL && (use_codes || use_dix)) {
         throw std::runtime_error("ARRAY<boolean> with dictionary-encoded child values is not supported");
     }
 
-    // Collect child strings in one pass.
+    // Per-level structural state (levels 1..D). level_offsets[k][p] is the start
+    // index of level-k entry p's children (into level k+1, or the leaf for k==D);
+    // level_valid[k][p] is 1 if that entry is a non-null list. level_valid[k].size()
+    // doubles as the running count of level-k entries created so far.
+    std::vector<std::vector<int32_t>> level_offsets(D + 1);
+    std::vector<std::vector<uint8_t>> level_valid(D + 1);
+
+    // Leaf value buffers (extraction identical to the flat/D==1 path).
     struct ChildEntry { const uint8_t* ptr; uint32_t len; bool valid; };
-    std::vector<ChildEntry> children;      // CHILD_STRING only
-    std::vector<uint8_t>    num_bytes;     // CHILD_INT64/32/FLOAT32/64 only, elem_size bytes per child
-    std::vector<uint8_t>    bool_flags;    // CHILD_BOOL only, one 0/1 byte per child (packed at the end)
-    std::vector<uint8_t>    child_valid;   // 0/1 per child, parallel to the buffer actually used above
-    if (child_type_tag == CHILD_STRING) {
-        children.reserve(n_levels);
-    } else if (child_type_tag == CHILD_BOOL) {
-        bool_flags.reserve(n_levels);
-        child_valid.reserve(n_levels);
-    } else {
-        num_bytes.reserve(n_levels * 8);
-        child_valid.reserve(n_levels);
-    }
+    std::vector<ChildEntry> children;    // CHILD_STRING
+    std::vector<uint8_t>    num_bytes;   // fixed-width numeric (incl widened uint64)
+    std::vector<uint8_t>    bool_flags;  // CHILD_BOOL
+    std::vector<uint8_t>    leaf_valid;  // 0/1 per leaf slot
 
-    uint32_t elem_size = (child_type_tag == CHILD_INT64 || child_type_tag == CHILD_FLOAT64) ? 8
-                        : (child_type_tag == CHILD_INT32 || child_type_tag == CHILD_FLOAT32) ? 4
-                        : 0;
+    const uint32_t elem_size = (leaf_tag == CHILD_INT64 || leaf_tag == CHILD_FLOAT64 ||
+                                leaf_tag == CHILD_UINT64) ? 8
+                             : (leaf_tag == CHILD_INT32 || leaf_tag == CHILD_FLOAT32) ? 4
+                             : 0;
 
-    int32_t row     = -1;
-    int32_t val_idx = 0;     // index into dict_indices / string_values / plain numeric values
-    int32_t child_idx = 0;
+    // Load one fixed-width leaf value into raw[0..elem_size). `idx` indexes the
+    // plain value stream (from_dict=false) or the dict value stream (true).
+    auto load_numeric = [&](uint8_t* raw, int32_t idx, bool from_dict) {
+        switch (leaf_tag) {
+            case CHILD_INT64:
+                std::memcpy(raw, from_dict ? &col.dict_int64_values[idx] : &col.int64_values[idx], 8);
+                break;
+            case CHILD_INT32:
+                std::memcpy(raw, from_dict ? &col.dict_int32_values[idx] : &col.int32_values[idx], 4);
+                break;
+            case CHILD_FLOAT32:
+                std::memcpy(raw, from_dict ? &col.dict_float32_values[idx] : &col.float32_values[idx], 4);
+                break;
+            case CHILD_UINT64: {
+                uint64_t u;
+                if (col.type == "int64") {
+                    int64_t v = from_dict ? col.dict_int64_values[idx] : col.int64_values[idx];
+                    std::memcpy(&u, &v, 8);          // reinterpret the 64 bits as unsigned
+                } else {                              // int32 physical → zero-extend
+                    int32_t v = from_dict ? col.dict_int32_values[idx] : col.int32_values[idx];
+                    u = static_cast<uint64_t>(static_cast<uint32_t>(v));
+                }
+                std::memcpy(raw, &u, 8);
+                break;
+            }
+            default: // CHILD_FLOAT64
+                std::memcpy(raw, from_dict ? &col.dict_float64_values[idx] : &col.float64_values[idx], 8);
+                break;
+        }
+    };
+
+    int32_t val_idx = 0;    // index into dict_indices / string / plain numeric streams
+    int32_t leaf_n  = 0;    // running count of leaf slots (present or null), all leaf types
 
     for (size_t i = 0; i < n_levels; ++i) {
-        int32_t rep = col.rep_levels[i];
-        int32_t def = col.def_levels[i];
+        const int32_t rep = col.rep_levels[i];
+        const int32_t def = col.def_levels[i];
 
-        if (rep == 0) {
-            ++row;
-            offsets[row] = child_idx;
-            if (def >= 1)
-                list_bmap[row >> 3] |= static_cast<uint8_t>(1 << (row & 7));
+        // Structural: open a new list at each depth from rep+1 downward, as deep
+        // as `def` defines. Record each new entry's child-start offset + validity.
+        bool has_leaf = true;
+        for (int32_t k = rep + 1; k <= D; ++k) {
+            const int32_t child_start =
+                (k < D) ? static_cast<int32_t>(level_valid[k + 1].size())
+                        : leaf_n;
+            level_offsets[k].push_back(child_start);
+            if (def >= 2 * k - 1) {          // list k present
+                level_valid[k].push_back(1);
+                if (def < 2 * k) { has_leaf = false; break; }   // present but empty
+            } else {                          // list k null
+                level_valid[k].push_back(0);
+                has_leaf = false;
+                break;
+            }
         }
+        if (!has_leaf) continue;
 
+        // Leaf element under the innermost (level-D) list: def==max_def present,
+        // def==max_def-1 null. (has_leaf implies def in {max_def-1, max_def}.)
         if (def == max_def) {
-            // Non-null child element.
-            if (child_type_tag == CHILD_STRING) {
+            if (leaf_tag == CHILD_STRING) {
                 ChildEntry ce;
                 ce.valid = true;
                 if (use_codes) {
@@ -731,108 +801,108 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
                     ce.len = static_cast<uint32_t>(s.size());
                 }
                 children.push_back(ce);
-            } else if (child_type_tag == CHILD_BOOL) {
+            } else if (leaf_tag == CHILD_BOOL) {
                 bool_flags.push_back(col.boolean_values[val_idx++] & 1);
-                child_valid.push_back(1);
+                leaf_valid.push_back(1);
             } else {
                 uint8_t raw[8];
                 if (use_codes) {
                     int32_t code = _decode_packed_parquet_code(col.dict_codes_array.data(), i, col.code_width);
-                    switch (child_type_tag) {
-                        case CHILD_INT64:   std::memcpy(raw, &col.dict_int64_values[code], 8); break;
-                        case CHILD_INT32:   std::memcpy(raw, &col.dict_int32_values[code], 4); break;
-                        case CHILD_FLOAT32: std::memcpy(raw, &col.dict_float32_values[code], 4); break;
-                        default:            std::memcpy(raw, &col.dict_float64_values[code], 8); break;
-                    }
+                    load_numeric(raw, code, true);
                 } else if (use_dix) {
-                    int32_t code = col.dict_indices[val_idx++];
-                    switch (child_type_tag) {
-                        case CHILD_INT64:   std::memcpy(raw, &col.dict_int64_values[code], 8); break;
-                        case CHILD_INT32:   std::memcpy(raw, &col.dict_int32_values[code], 4); break;
-                        case CHILD_FLOAT32: std::memcpy(raw, &col.dict_float32_values[code], 4); break;
-                        default:            std::memcpy(raw, &col.dict_float64_values[code], 8); break;
-                    }
+                    load_numeric(raw, col.dict_indices[val_idx++], true);
                 } else {
-                    int32_t idx = val_idx++;
-                    switch (child_type_tag) {
-                        case CHILD_INT64:   std::memcpy(raw, &col.int64_values[idx], 8); break;
-                        case CHILD_INT32:   std::memcpy(raw, &col.int32_values[idx], 4); break;
-                        case CHILD_FLOAT32: std::memcpy(raw, &col.float32_values[idx], 4); break;
-                        default:            std::memcpy(raw, &col.float64_values[idx], 8); break;
-                    }
+                    load_numeric(raw, val_idx++, false);
                 }
                 num_bytes.insert(num_bytes.end(), raw, raw + elem_size);
-                child_valid.push_back(1);
+                leaf_valid.push_back(1);
             }
-            ++child_idx;
-        } else if (def == max_def - 1) {
-            // Null child element within a non-null list.
-            if (child_type_tag == CHILD_STRING) {
+        } else {   // def == max_def - 1 : null leaf element within a present list
+            // A null leaf has NO slot in any decoded value stream — Parquet stores
+            // only defined values, so string_values / dict_indices / the numeric
+            // buffers contain non-null values only. val_idx must NOT advance here;
+            // advancing it consumes the next defined value's slot, shifting every
+            // subsequent element in the list.
+            if (leaf_tag == CHILD_STRING) {
                 children.push_back({nullptr, 0, false});
-                if (!use_codes) ++val_idx;
-            } else if (child_type_tag == CHILD_BOOL) {
+            } else if (leaf_tag == CHILD_BOOL) {
                 bool_flags.push_back(0);
-                child_valid.push_back(0);
-                ++val_idx;
+                leaf_valid.push_back(0);
             } else {
                 num_bytes.insert(num_bytes.end(), elem_size, 0);
-                child_valid.push_back(0);
-                if (!use_codes) ++val_idx;
+                leaf_valid.push_back(0);
             }
-            ++child_idx;
         }
-        // def == 0 (null list) or def == 1 (empty list): no child entry.
+        ++leaf_n;   // exactly one leaf slot (present or null) was appended above
     }
-    if (row >= 0) offsets[row + 1] = child_idx;
 
-    uint32_t child_count = static_cast<uint32_t>(
-        child_type_tag == CHILD_STRING ? children.size() : child_valid.size());
+    // Terminal offset per level.
+    for (int32_t k = 1; k <= D; ++k)
+        level_offsets[k].push_back(
+            (k < D) ? static_cast<int32_t>(level_valid[k + 1].size())
+                    : leaf_n);
 
-    // Build child null bitmap only if there are null child elements.
+    const uint32_t leaf_count = static_cast<uint32_t>(
+        leaf_tag == CHILD_STRING ? children.size() : leaf_valid.size());
+
+    // Leaf child null bitmap only when there are null leaf elements.
     bool has_null_children = false;
-    if (child_type_tag == CHILD_STRING) {
+    if (leaf_tag == CHILD_STRING) {
         for (const auto& ce : children) if (!ce.valid) { has_null_children = true; break; }
     } else {
-        for (uint8_t v : child_valid) if (!v) { has_null_children = true; break; }
-    }
-    uint32_t child_bmap_bytes = has_null_children ? (child_count + 7) / 8 : 0;
-    std::vector<uint8_t> child_bmap(child_bmap_bytes, 0);
-    if (has_null_children) {
-        if (child_type_tag == CHILD_STRING) {
-            for (uint32_t i = 0; i < child_count; ++i)
-                if (children[i].valid) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
-        } else {
-            for (uint32_t i = 0; i < child_count; ++i)
-                if (child_valid[i]) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
-        }
+        for (uint8_t v : leaf_valid) if (!v) { has_null_children = true; break; }
     }
 
-    // Serialize.
+    // Emit: outer generic header, then one block per nesting level.
     write_u8(out, 11);  // TAG_ARRAY
-    write_u32(out, static_cast<uint32_t>(outer_rows));
-    write_u32(out, bmap_bytes);
-    write_bytes(out, list_bmap.data(), bmap_bytes);
-    write_u8(out, child_type_tag);
-    write_u32(out, child_count);
-    write_bytes(out, offsets.data(), static_cast<size_t>(outer_rows + 1) * sizeof(int32_t));
-    write_u32(out, child_bmap_bytes);
-    write_bytes(out, child_bmap.data(), child_bmap_bytes);
+    write_u32(out, static_cast<uint32_t>(level_valid[1].size()));   // num_rows
+    write_validity_bmap(out, level_valid[1]);                       // list_null_bmap
 
-    if (child_type_tag == CHILD_STRING) {
-        for (const auto& ce : children) {
-            write_u32(out, ce.len);
-            if (ce.len > 0) write_bytes(out, ce.ptr, ce.len);
+    for (int32_t k = 1; k <= D; ++k) {
+        if (k < D) {
+            // This level's entries each hold a nested child list.
+            write_u8(out, CHILD_ARRAY);
+            write_u32(out, static_cast<uint32_t>(level_valid[k + 1].size()));   // child_count
+            write_bytes(out, level_offsets[k].data(), level_offsets[k].size() * sizeof(int32_t));
+            // Inner block header (its num_rows == child_count, known to the reader).
+            write_validity_bmap(out, level_valid[k + 1]);
+        } else {
+            // Innermost (leaf) level.
+            write_u8(out, leaf_tag);
+            write_u32(out, leaf_count);                                         // child_count
+            write_bytes(out, level_offsets[k].data(), level_offsets[k].size() * sizeof(int32_t));
+            if (has_null_children) {
+                uint32_t bmap_bytes = (leaf_count + 7) / 8;
+                std::vector<uint8_t> child_bmap(bmap_bytes, 0);
+                if (leaf_tag == CHILD_STRING) {
+                    for (uint32_t i = 0; i < leaf_count; ++i)
+                        if (children[i].valid) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+                } else {
+                    for (uint32_t i = 0; i < leaf_count; ++i)
+                        if (leaf_valid[i]) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+                }
+                write_u32(out, bmap_bytes);
+                write_bytes(out, child_bmap.data(), bmap_bytes);
+            } else {
+                write_u32(out, 0);
+            }
+            if (leaf_tag == CHILD_STRING) {
+                for (const auto& ce : children) {
+                    write_u32(out, ce.len);
+                    if (ce.len > 0) write_bytes(out, ce.ptr, ce.len);
+                }
+            } else if (leaf_tag == CHILD_BOOL) {
+                uint32_t packed_bytes = (leaf_count + 7) / 8;
+                uint8_t* dst = out.advance(packed_bytes);
+                if (dst) {
+                    std::memset(dst, 0, packed_bytes);
+                    for (uint32_t i = 0; i < leaf_count; ++i)
+                        if (bool_flags[i]) dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+                }
+            } else {
+                write_bytes(out, num_bytes.data(), num_bytes.size());
+            }
         }
-    } else if (child_type_tag == CHILD_BOOL) {
-        uint32_t packed_bytes = (child_count + 7) / 8;
-        uint8_t* dst = out.advance(packed_bytes);
-        if (dst) {
-            std::memset(dst, 0, packed_bytes);
-            for (uint32_t i = 0; i < child_count; ++i)
-                if (bool_flags[i]) dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
-    } else {
-        write_bytes(out, num_bytes.data(), num_bytes.size());
     }
 }
 

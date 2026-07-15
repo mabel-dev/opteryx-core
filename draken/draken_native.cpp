@@ -2297,6 +2297,51 @@ extern "C" const DrakenVector* draken_array_child_unwrap(PyObject* obj) {
     return &owner->child_owner->vec;
 }
 
+// draken_array_grandchild_unwrap — extract the leaf DrakenVector* two levels down
+// from an array<array<T>> Vector (i.e. owner->child_owner->child_owner->vec).
+//
+// Mirrors draken_array_child_unwrap but for the second nesting level. Needed by
+// consumer-edge kernels that walk nested-array offsets by hand: unwrap() gives
+// the outer offsets, array_child_unwrap() the middle offsets, and this the leaf
+// value buffer. Fails loud (TypeError/RuntimeError) if the vector is not a
+// two-level DRAKEN_ARRAY. Borrowed pointer; same lifetime contract as _unwrap.
+extern "C" const DrakenVector* draken_array_grandchild_unwrap(PyObject* obj) {
+    if (!obj || obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_array_grandchild_unwrap: expected array<array<T>> Vector, got None");
+        return nullptr;
+    }
+    nb::handle h(obj);
+    if (!nb::isinstance<VectorOwner>(h)) {
+        PyErr_Format(PyExc_TypeError,
+            "draken_array_grandchild_unwrap: expected DRAKEN_ARRAY Vector, got %.100s",
+            Py_TYPE(obj)->tp_name);
+        return nullptr;
+    }
+    const VectorOwner* owner = nb::inst_ptr<VectorOwner>(h);
+    if (owner->vec.type != DRAKEN_ARRAY) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_array_grandchild_unwrap: outer vector is not DRAKEN_ARRAY type");
+        return nullptr;
+    }
+    if (!owner->child_owner) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "draken_array_grandchild_unwrap: DRAKEN_ARRAY vector has no child");
+        return nullptr;
+    }
+    if (owner->child_owner->vec.type != DRAKEN_ARRAY) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_array_grandchild_unwrap: child is not DRAKEN_ARRAY (vector is not array<array<T>>)");
+        return nullptr;
+    }
+    if (!owner->child_owner->child_owner) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "draken_array_grandchild_unwrap: nested DRAKEN_ARRAY vector has no grandchild");
+        return nullptr;
+    }
+    return &owner->child_owner->child_owner->vec;
+}
+
 // draken_vector_own_raw — wrap hand-allocated (draken_malloc) buffers in a new Vector.
 //
 // Creates a dense (identity-selection) Vector. data and validity ownership
@@ -2752,6 +2797,7 @@ extern "C" PyObject* draken_vector_own_array(
     size_t            child_arena_len,
     uint32_t          child_length,
     DrakenType        child_type,
+    uint8_t*          child_validity,
     uint8_t*          parent_validity,
     uint32_t          length)
 {
@@ -2759,6 +2805,7 @@ extern "C" PyObject* draken_vector_own_array(
     OwnedBuffer<void>    off_guard(static_cast<void*>(parent_offsets));
     OwnedBuffer<void>    slots_guard(static_cast<void*>(child_slots));
     OwnedBuffer<void>    arena_guard(static_cast<void*>(child_arena));
+    OwnedBuffer<uint8_t> cval_guard(child_validity);
     OwnedBuffer<uint8_t> pval_guard(parent_validity);
 
     try {
@@ -2817,21 +2864,25 @@ extern "C" PyObject* draken_vector_own_array(
         draken_free(raw_slots);
         draken_free(raw_arena);
 
-        // Step 5: populate DrakenStringArena.
+        // Step 5: populate DrakenStringArena. The child null bitmap (Arrow
+        // convention, bit set = valid), if any, is borrowed by both the arena and
+        // the child DrakenVector; the child VectorOwner's validity_buf owns it.
+        uint8_t* raw_cval = cval_guard.release();
         sa->slots       = dslots;
         sa->arena       = darena;
         sa->length      = (size_t)child_length;
         sa->arena_used  = child_arena_len;
         sa->arena_cap   = child_arena_len;
-        sa->null_bitmap = nullptr;  // child elements are always valid
+        sa->null_bitmap = raw_cval;  // NULL = all child elements valid
         sa->owns_buffers = 0;
         sa->type        = child_type;
 
-        // Step 6: build child VectorOwner (dense, no validity — child elements always valid).
+        // Step 6: build child VectorOwner (dense; validity carried on the vector
+        // so row_is_valid gates null child elements to None on readback).
         DrakenVector child_vec = draken_vector_from_dense(
-            sa, child_length, child_type, nullptr);
+            sa, child_length, child_type, raw_cval);
         VectorOwner child_owner(child_vec, std::move(child_data_buf),
-                                OwnedBuffer<uint8_t>(nullptr));
+                                OwnedBuffer<uint8_t>(raw_cval));
 
         // Step 7: build parent VectorOwner (dense, DRAKEN_ARRAY, parent validity).
         void*    raw_off  = off_guard.release();
@@ -2882,10 +2933,10 @@ extern "C" PyObject* draken_vector_own_array_numeric(
     try {
         if (child_type != DRAKEN_INT32 && child_type != DRAKEN_INT64 &&
             child_type != DRAKEN_FLOAT32 && child_type != DRAKEN_FLOAT64 &&
-            child_type != DRAKEN_BOOL) {
+            child_type != DRAKEN_BOOL && child_type != DRAKEN_UINT64) {
             PyErr_SetString(PyExc_ValueError,
                 "draken_vector_own_array_numeric: child_type must be DRAKEN_INT32, "
-                "DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, or DRAKEN_BOOL");
+                "DRAKEN_INT64, DRAKEN_UINT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, or DRAKEN_BOOL");
             return nullptr;
         }
         if (child_length > 0u && !child_data) {
@@ -2920,6 +2971,71 @@ extern "C" PyObject* draken_vector_own_array_numeric(
             raw_off, length, DRAKEN_ARRAY, raw_pval);
         VectorOwner owner(parent_vec, std::move(parent_data_buf), std::move(parent_val_buf));
         owner.child_owner = std::make_unique<VectorOwner>(std::move(child_owner));
+
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
+// draken_vector_own_array_child — wrap a hand-allocated offsets buffer in a
+// DRAKEN_ARRAY Vector whose child is an ALREADY-BUILT Vector (the nested-array
+// case: child is itself a DRAKEN_ARRAY). The child's VectorOwner is MOVED out of
+// `child_obj` (carrying its own child_owner subtree, so nesting is arbitrary
+// depth), leaving `child_obj` an empty husk the caller must drop. `parent_offsets`
+// and `parent_validity` are transferred unconditionally on entry. See
+// draken_bridge.h for the contract.
+extern "C" PyObject* draken_vector_own_array_child(
+    int32_t*  parent_offsets,
+    PyObject* child_obj,
+    uint8_t*  parent_validity,
+    uint32_t  length)
+{
+    // Take ownership of the caller's raw buffers immediately via RAII.
+    OwnedBuffer<void>    off_guard(static_cast<void*>(parent_offsets));
+    OwnedBuffer<uint8_t> pval_guard(parent_validity);
+
+    try {
+        if (!child_obj || !nb::isinstance<VectorOwner>(nb::handle(child_obj))) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_array_child: child_obj must be a draken Vector");
+            return nullptr;
+        }
+        if (!parent_offsets && length > 0u) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_array_child: parent_offsets is NULL but length > 0");
+            return nullptr;
+        }
+
+        // Move the child VectorOwner (and its child_owner subtree) out of the
+        // Python handle; the husk is emptied so its destructor frees nothing and
+        // a stray read sees an empty vector rather than moved-away buffers.
+        VectorOwner* childp = nb::inst_ptr<VectorOwner>(nb::handle(child_obj));
+        auto child_owner = std::make_unique<VectorOwner>(std::move(*childp));
+        childp->vec.data     = nullptr;
+        childp->vec.validity = nullptr;
+        childp->vec.length   = 0;
+
+        // Build parent VectorOwner (dense, DRAKEN_ARRAY, parent validity).
+        void*    raw_off  = off_guard.release();
+        uint8_t* raw_pval = pval_guard.release();
+        OwnedBuffer<void>    parent_data_buf(raw_off);
+        OwnedBuffer<uint8_t> parent_val_buf(raw_pval);
+
+        DrakenVector parent_vec = draken_vector_from_dense(
+            raw_off, length, DRAKEN_ARRAY, raw_pval);
+        VectorOwner owner(parent_vec, std::move(parent_data_buf), std::move(parent_val_buf));
+        owner.child_owner = std::move(child_owner);
 
         nb::object obj = nb::cast(std::move(owner));
         PyObject* result = obj.ptr();

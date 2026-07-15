@@ -18,6 +18,7 @@
 #include "type_widening.hpp"
 #include "thread_pool.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -359,17 +360,25 @@ int32_t PreScanPages(
       continue;
     }
 
-    // Fail loud on unsupported page types. rugo decodes DATA_PAGE v1 (type 0)
-    // and DICTIONARY_PAGE (type 2) only. DATA_PAGE_V2 (type 3) and INDEX_PAGE
-    // (type 1) are not supported — silently breaking here would drop the page's
-    // rows and report a short/empty column (a silent-degrade); throw instead so
-    // the reason surfaces to the caller (§ fail fast, fail clean).
-    if (page_header.page_type != 0) {
+    // Fail loud on unsupported page types. rugo decodes DATA_PAGE v1 (type 0),
+    // DATA_PAGE_V2 (type 3) and DICTIONARY_PAGE (type 2). INDEX_PAGE (type 1) is
+    // not supported — silently breaking here would drop the page's rows and
+    // report a short/empty column (a silent-degrade); throw instead so the
+    // reason surfaces to the caller (§ fail fast, fail clean).
+    //
+    // The Tier-3 parallel path only reaches PreScanPages for non-nullable,
+    // non-nested, fixed-width columns (max_def_level == 0 && max_rep_level == 0),
+    // so any V2 page here carries no repetition/definition levels: its values
+    // region is the entire compressed payload and the page-boundary advance
+    // (compressed_data + compressed_size) is identical to V1. If a V2 page were
+    // ever marked is_compressed == false with a real codec, the parallel worker's
+    // decompress throws and the whole column falls back to the (V2-aware)
+    // sequential loop — never a wrong answer.
+    if (page_header.page_type != 0 && page_header.page_type != 3) {
       throw std::runtime_error(
           "unsupported parquet page type " +
           std::to_string(page_header.page_type) +
-          " (only DATA_PAGE v1 and DICTIONARY_PAGE are supported; "
-          "DATA_PAGE_V2 is not)");
+          " (only DATA_PAGE v1/v2 and DICTIONARY_PAGE are supported)");
     }
 
     int32_t page_values = page_header.num_values;
@@ -506,6 +515,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
     }
 
+    // DECIMAL: parse "decimal(P,S)" (built in metadata.cpp) so the Cython layer
+    // can build a real DECIMAL/DECIMAL128 vector carrying precision+scale. Applies
+    // to every physical tier (int32 / int64 / fixed_len_byte_array); the physical
+    // type alone cannot distinguish a decimal from a plain int.
+    if (target_col->logical_type.rfind("decimal", 0) == 0) {
+      int _p = 0, _s = 0;
+      if (std::sscanf(target_col->logical_type.c_str(), "decimal(%d,%d)", &_p, &_s) == 2) {
+        result.is_decimal        = true;
+        result.decimal_precision = static_cast<uint8_t>(_p);
+        result.decimal_scale     = static_cast<uint8_t>(_s);
+      }
+    }
+
     // FIXED_LEN_BYTE_ARRAY DECIMAL is decoded big-endian sign-extended:
     //   width <= 8  → int64   (DECIMAL,  precision <= 18)
     //   width 9..16 → int128  (DECIMAL128, precision > 18) — type "int128"
@@ -527,14 +549,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
     }
 
-    // DECIMAL128 (FLBA width 9..16) is only supported for PLAIN-encoded data today.
-    // A dictionary page would feed the int64 dict path (silent truncation) or an
-    // unhandled int128 dict path — fail loud instead. (Width<=8 dict decimals are
-    // unaffected.) The plain int128 path is handled in the serial decode below.
-    if (flba_int128 && target_col->dictionary_page_offset >= 0 &&
-        (uint64_t)target_col->dictionary_page_offset < file_size) {
-      return;  // success stays false → "Decode failed" (honest rejection)
-    }
+    // DECIMAL128 (FLBA width 9..16) dict pages are wired into the typed dict-code
+    // decode machinery below via int128_dict_mode: the dictionary page populates
+    // dict_int128_values, and per-row codes land in dict_codes_array (nullable) or
+    // dict_indices (non-nullable), exactly like the int64 FLBA-dict path. int128
+    // never takes the rle_path (there is no rle_int128 output) — the dense/dict
+    // shape is preserved end-to-end. (Width<=8 dict decimals ride the int64 path.)
+    (void)flba_int128;
 
     // -----------------------------------------------------------------
     // Step 1: Load dictionary page (if present)
@@ -641,6 +662,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           }
 #endif
           }
+        } else if (result.type == "int128") {
+          // FIXED_LEN_BYTE_ARRAY DECIMAL128 dict (width 9..16): each entry is
+          // `flba_byte_width` big-endian signed bytes → int128. Mirrors the
+          // int64 FLBA-dict branch above.
+          int32_t safe_count = std::min(
+              dict_size,
+              (int32_t)((dict_end - dict_data_ptr) / flba_byte_width));
+          result.dict_int128_values.reserve(safe_count);
+          for (int32_t i = 0; i < safe_count; i++) {
+            result.dict_int128_values.push_back(
+                ReadBESignExt128(dict_data_ptr, flba_byte_width));
+            dict_data_ptr += flba_byte_width;
+          }
         } else if (result.type == "byte_array") {
           // Build a flat arena: one allocation for all dict string bytes,
           // plus offset/length arrays — no per-entry std::string heap alloc.
@@ -687,6 +721,20 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         }
         RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _dp_t0);
       }
+    }
+
+    // Empty column (0 rows): a genuinely-empty parquet column carries
+    // num_values == 0 and, for some writers (e.g. pyarrow), NO data page at all
+    // — only a dictionary page. Short-circuit to a successful empty result;
+    // otherwise the data-page loop treats num_values == 0 as "unbounded",
+    // walks past the (absent) data page, and mis-parses the footer as a page
+    // (throwing "unsupported page type -1"). result.type is already set above.
+    // Guard on == 0 (not <= 0): ColumnStats::num_values defaults to -1 for the
+    // unparsed/unknown case, which must stay on the normal decode path.
+    if (target_col->num_values == 0) {
+      result.num_rows = 0;
+      result.success  = true;
+      return;
     }
 
     // -----------------------------------------------------------------
@@ -739,6 +787,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     bool int64_dict_mode = (result.type == "int64" && dict_size > 0);
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
+    bool int128_dict_mode = (result.type == "int128" && dict_size > 0);
 
     // ── Phase 2: dictionary-membership / per-value decode-skip ────────────────
     // Evaluate the pushed predicate against this dict-encoded column's dictionary
@@ -841,6 +890,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // entries exactly as they did through std::unordered_map.
     PrimitiveDictHashMap<uint32_t> float32_dict_map;
     PrimitiveDictHashMap<uint64_t> float64_dict_map;
+    PrimitiveDictHashMap<__int128> int128_dict_map;
 
     // ── RLE skip-dense path gate ────────────────────────────────────────────
     // For non-nullable dict columns (max_definition_level == 0) we bypass the
@@ -887,7 +937,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         result.rle_run_lengths.reserve(est_runs);
       } else if (dict_size > 0 && !rle_path &&
                  (int32_dict_mode || int64_dict_mode ||
-                  float32_dict_mode || float64_dict_mode) &&
+                  float32_dict_mode || float64_dict_mode || int128_dict_mode) &&
                  target_col->max_definition_level > 0 &&
                  result.ext_int64 == nullptr && result.ext_int32 == nullptr &&
                  result.ext_float64 == nullptr && result.ext_float32 == nullptr &&
@@ -1135,14 +1185,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         cursor += header_size + (size_t)page_header.compressed_page_size;
         continue;
       }
-      if (page_header.page_type != 0) {
-        // Unsupported page type (DATA_PAGE_V2 / INDEX_PAGE): fail loud rather
-        // than silently dropping rows. See PreScanPages for the rationale.
+      if (page_header.page_type != 0 && page_header.page_type != 3) {
+        // Unsupported page type (INDEX_PAGE): fail loud rather than silently
+        // dropping rows. See PreScanPages for the rationale. DATA_PAGE_V2
+        // (type 3) is handled below alongside V1.
         throw std::runtime_error(
             "unsupported parquet page type " +
             std::to_string(page_header.page_type) +
-            " (only DATA_PAGE v1 and DICTIONARY_PAGE are supported; "
-            "DATA_PAGE_V2 is not)");
+            " (only DATA_PAGE v1/v2 and DICTIONARY_PAGE are supported)");
       }
 
       int32_t page_values = page_header.num_values;
@@ -1194,95 +1244,163 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
       ++result.pages_decoded;  // this page survived the row_mask check (or no mask); will be decompressed
 
-      // Decompress if needed.
+      // Step 3: Decompress and decode repetition/definition levels.
+      //
+      // V1 and V2 differ only in (a) the level source and (b) the decompression
+      // scope; both paths leave data_ptr/data_size pointing at the decoded value
+      // stream and populate page_rep_levels / def_levels (accumulating into
+      // all_rep_levels / all_def_levels), so the value decode below is shared.
+      //   V1: whole page (levels + values) is one compressed block; each level
+      //       stream is RLE/bit-packed with a 4-byte LE length prefix.
+      //   V2: rep/def level regions sit UNCOMPRESSED at the front of the page
+      //       with EXPLICIT byte lengths (no prefix); only the values region is
+      //       compressed (iff is_compressed).
       const uint8_t *data_ptr;
       size_t         data_size;
+      std::vector<int32_t> page_rep_levels;
+      std::vector<int32_t> def_levels;
 
-      if (target_col->codec == 0) {
-        data_ptr  = compressed_data;
-        data_size = compressed_size;
+      // Level bit-widths (0 when the corresponding max level is 0 → not decoded).
+      int rep_bit_width = 0;
+      if (target_col->max_repetition_level > 0) {
+        int32_t m = target_col->max_repetition_level;
+        while (m > 0) { rep_bit_width++; m >>= 1; }
+      }
+      int def_bit_width = 0;
+      if (target_col->max_definition_level > 0) {
+        int32_t m = target_col->max_definition_level;
+        while (m > 0) { def_bit_width++; m >>= 1; }
+      }
+
+      if (!page_header.is_v2) {
+        // ── DATA_PAGE v1 ────────────────────────────────────────────────────
+        if (target_col->codec == 0) {
+          data_ptr  = compressed_data;
+          data_size = compressed_size;
+        } else {
+          try {
+            auto codec = rugo::compression::CodecFromInt(target_col->codec);
+            { RUGO_TEL_START(_pg_t0);
+              rugo::compression::DecompressInto(
+                  compressed_data, compressed_size,
+                  page_header.uncompressed_page_size, codec,
+                  page_decompressed_data);
+              RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pg_t0); }
+            data_ptr  = page_decompressed_data.data();
+            data_size = page_decompressed_data.size();
+          } catch (const std::exception &e) {
+            // Decompression failure: capture the specific reason and stop the
+            // page loop. total_rows_all_pages falls short of total_needed, so
+            // the success gate below yields success=false — a partial column
+            // never reports success. The message is surfaced verbatim.
+            result.error_message = e.what();
+            break;
+          }
+        }
+
+        // Repetition levels: RLE/bit-packed with a 4-byte LE length prefix.
+        if (target_col->max_repetition_level > 0) {
+          if (data_size < 4) return;
+          uint32_t rep_payload_bytes = ReadLE32(data_ptr);
+          size_t   rep_slice_size    = 4 + (size_t)rep_payload_bytes;
+          if (rep_slice_size > data_size) return;
+          size_t bytes_consumed_rep = 0;
+          int32_t decoded_rep = DecodeRLEBitPackedIndicesWithConsumption(
+              data_ptr, rep_slice_size,
+              page_values, rep_bit_width, page_rep_levels, bytes_consumed_rep);
+          if (decoded_rep != page_values) return;
+          data_ptr  += rep_slice_size;
+          data_size -= rep_slice_size;
+          all_rep_levels.insert(all_rep_levels.end(),
+                                page_rep_levels.begin(), page_rep_levels.end());
+        }
+
+        // Definition levels: RLE/bit-packed with a 4-byte LE length prefix.
+        if (target_col->max_definition_level > 0) {
+          if (data_size < 4) return;
+          uint32_t level_payload_bytes = ReadLE32(data_ptr);
+          size_t   level_slice_size    = 4 + (size_t)level_payload_bytes;
+          if (level_slice_size > data_size) return;
+          size_t bytes_consumed = 0;
+          int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
+              data_ptr, level_slice_size,
+              page_values, def_bit_width, def_levels, bytes_consumed);
+          if (decoded_levels != page_values) return;
+          data_ptr  += level_slice_size;
+          data_size -= level_slice_size;
+          all_def_levels.insert(all_def_levels.end(),
+                                def_levels.begin(), def_levels.end());
+        }
       } else {
-        try {
-          auto codec = rugo::compression::CodecFromInt(target_col->codec);
-          { RUGO_TEL_START(_pg_t0);
-            rugo::compression::DecompressInto(
-                compressed_data, compressed_size,
-                page_header.uncompressed_page_size, codec,
-                page_decompressed_data);
-            RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pg_t0); }
-          data_ptr  = page_decompressed_data.data();
-          data_size = page_decompressed_data.size();
-        } catch (const std::exception &e) {
-          // Decompression failure: capture the specific reason and stop the page
-          // loop. total_rows_all_pages will fall short of total_needed, so the
-          // success gate below yields success=false — a partial column never
-          // reports success. The message is surfaced verbatim by the caller.
-          result.error_message = e.what();
+        // ── DATA_PAGE_V2 ────────────────────────────────────────────────────
+        // Layout: [rep levels: rep_len bytes UNCOMPRESSED]
+        //         [def levels: def_len bytes UNCOMPRESSED]
+        //         [values: compressed iff is_compressed]
+        const int32_t rep_len = page_header.repetition_levels_byte_length;
+        const int32_t def_len = page_header.definition_levels_byte_length;
+        if (rep_len < 0 || def_len < 0) {
+          result.error_message =
+              "parquet DATA_PAGE_V2: negative level byte length";
           break;
         }
-      }
+        const size_t levels_len = (size_t)rep_len + (size_t)def_len;
+        if (levels_len > compressed_size) {
+          result.error_message =
+              "parquet DATA_PAGE_V2: level bytes exceed compressed page size";
+          break;
+        }
+        const uint8_t* rep_region    = compressed_data;
+        const uint8_t* def_region    = compressed_data + rep_len;
+        const uint8_t* values_region = compressed_data + levels_len;
+        const size_t   values_csize  = compressed_size - levels_len;
 
-      // Step 3: Decode repetition levels; decode definition levels.
+        // Repetition levels: raw RLE span, EXPLICIT byte count, no prefix.
+        if (target_col->max_repetition_level > 0) {
+          int32_t decoded_rep = DecodeRLEBitPackedIndicesNoPrefix(
+              rep_region, (size_t)rep_len, page_values, rep_bit_width,
+              page_rep_levels);
+          if (decoded_rep != page_values) return;
+          all_rep_levels.insert(all_rep_levels.end(),
+                                page_rep_levels.begin(), page_rep_levels.end());
+        }
 
-      // Repetition levels (V1 pages: 4-byte LE length prefix).
-      // Per the Parquet spec encoding.md table: Data page v1 repetition levels
-      // are RLE/bit-packed and prefixed with a 4-byte LE length.
-      std::vector<int32_t> page_rep_levels;
-      if (target_col->max_repetition_level > 0) {
-        int rep_bit_width = 0;
-        int32_t max_rep = target_col->max_repetition_level;
-        while (max_rep > 0) { rep_bit_width++; max_rep >>= 1; }
+        // Definition levels: raw RLE span, EXPLICIT byte count, no prefix.
+        if (target_col->max_definition_level > 0) {
+          int32_t decoded_levels = DecodeRLEBitPackedIndicesNoPrefix(
+              def_region, (size_t)def_len, page_values, def_bit_width,
+              def_levels);
+          if (decoded_levels != page_values) return;
+          all_def_levels.insert(all_def_levels.end(),
+                                def_levels.begin(), def_levels.end());
+        }
 
-        if (data_size < 4) return;
-        uint32_t rep_payload_bytes = ReadLE32(data_ptr);
-        size_t   rep_slice_size    = 4 + (size_t)rep_payload_bytes;
-        if (rep_slice_size > data_size) return;
-
-        size_t bytes_consumed_rep = 0;
-        int32_t decoded_rep = DecodeRLEBitPackedIndicesWithConsumption(
-            data_ptr, rep_slice_size,
-            page_values, rep_bit_width, page_rep_levels, bytes_consumed_rep);
-
-        if (decoded_rep != page_values) return;
-
-        data_ptr  += rep_slice_size;
-        data_size -= rep_slice_size;
-
-        all_rep_levels.insert(all_rep_levels.end(),
-                              page_rep_levels.begin(), page_rep_levels.end());
-      }
-
-      // Decode definition levels to build validity bitmap.
-      // Per the Parquet V1 spec, definition level data on disk is already
-      // prefixed with a 4-byte LE length.  Pass data_ptr directly — bounded
-      // to exactly 4 + real_length bytes — so DecodeRLEBitPackedIndices skips
-      // the real prefix and reads only the level bytes, not the value data.
-      std::vector<int32_t> def_levels;
-      if (target_col->max_definition_level > 0) {
-        // Compute bit-width needed to encode levels 0..max_definition_level
-        int def_bit_width = 0;
-        int32_t max_level = target_col->max_definition_level;
-        while (max_level > 0) { def_bit_width++; max_level >>= 1; }
-
-        // On-disk: [4-byte LE length][RLE level data …]
-        if (data_size < 4) return;
-        uint32_t level_payload_bytes = ReadLE32(data_ptr);
-        size_t   level_slice_size    = 4 + (size_t)level_payload_bytes;
-        if (level_slice_size > data_size) return;
-
-        size_t bytes_consumed = 0;
-        int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
-            data_ptr, level_slice_size,
-            page_values, def_bit_width, def_levels, bytes_consumed);
-
-        if (decoded_levels != page_values) return;
-
-        // Advance data_ptr past exactly the level bytes.
-        data_ptr  += level_slice_size;
-        data_size -= level_slice_size;
-
-        // Accumulate definition levels for later validity bitmap construction.
-        all_def_levels.insert(all_def_levels.end(), def_levels.begin(), def_levels.end());
+        // Values region only: decompress iff is_compressed (never the level
+        // prefix). The uncompressed values size excludes the level regions.
+        if (target_col->codec == 0 || !page_header.is_compressed) {
+          data_ptr  = values_region;
+          data_size = values_csize;
+        } else {
+          const int32_t values_usize =
+              page_header.uncompressed_page_size - rep_len - def_len;
+          if (values_usize < 0) {
+            result.error_message =
+                "parquet DATA_PAGE_V2: level bytes exceed uncompressed page size";
+            break;
+          }
+          try {
+            auto codec = rugo::compression::CodecFromInt(target_col->codec);
+            { RUGO_TEL_START(_pg_t0);
+              rugo::compression::DecompressInto(
+                  values_region, values_csize, values_usize, codec,
+                  page_decompressed_data);
+              RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pg_t0); }
+            data_ptr  = page_decompressed_data.data();
+            data_size = page_decompressed_data.size();
+          } catch (const std::exception &e) {
+            result.error_message = e.what();
+            break;
+          }
+        }
       }
 
       const uint8_t *data_end = data_ptr + data_size;
@@ -1632,6 +1750,17 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   return;
               }
             }
+          } else if (result.type == "int128") {
+            // DECIMAL128 dict. Nullable columns scatter codes into dict_codes_array
+            // (handled generically above); non-nullable columns keep per-row lookup
+            // indices in dict_indices. int128 never resolves to a values buffer here
+            // (no int128 gather path) — the pxi resolves code → dict_int128_values.
+            if (!result.dict_codes_array.empty()) {
+              // Codes already scattered into dict_codes_array; dict-only output.
+            } else if (int128_dict_mode) {
+              if (!batch_append_dict_indices(indices, (int32_t)result.dict_int128_values.size()))
+                return;
+            }
           }
         }  // end dense path
 
@@ -1939,11 +2068,33 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             }
           }
         } else if (result.type == "int128") {
-          // PLAIN FLBA width 9..16 → int128 (DECIMAL128). Dict pages are rejected at
-          // setup and there is no ext_int128 buffer, so only the dense path applies;
-          // values are appended compactly (present rows) exactly like the int64 dense
-          // FLBA path — the shared null-expansion step scatters them by def-level.
-          if (flba_byte_width > 0) {
+          // PLAIN FLBA width 9..16 → int128 (DECIMAL128).
+          //
+          // Mixed dict+PLAIN chunk (int128_dict_mode): the chunk opened with a
+          // dictionary page, so codes live in dict_codes_array/dict_indices and
+          // dict_int128_values is the value table. A PLAIN-fallback page's values
+          // are NOT in the dict — intern them (mirroring the int64 intern path) and
+          // place the resulting codes via place_plain_dict_codes so the shape stays
+          // dict end-to-end. There is no ext_int128 buffer and no DELTA encoding for
+          // FLBA decimals, so only the FLBA big-endian read applies.
+          if (int128_dict_mode && flba_byte_width > 0) {
+            if (int128_dict_map.empty()) {
+              SeedPrimitiveDictionaryMap(int128_dict_map, result.dict_int128_values);
+            }
+            std::vector<int32_t> _pd_codes;
+            _pd_codes.reserve(present_count);
+            for (int32_t i = 0;
+                 i < present_count && data_ptr + flba_byte_width <= data_end;
+                 i++) {
+              __int128 value = ReadBESignExt128(data_ptr, flba_byte_width);
+              data_ptr += flba_byte_width;
+              _pd_codes.push_back(InternPrimitiveToDictionary(
+                  value, int128_dict_map, result.dict_int128_values));
+            }
+            place_plain_dict_codes(_pd_codes);
+          } else if (flba_byte_width > 0) {
+            // Pure-PLAIN chunk (no dictionary page): dense append, present rows only.
+            // The shared null-expansion step scatters them by def-level.
             int32_t safe_count = std::min(
                 present_count,
                 (int32_t)((data_end - data_ptr) / flba_byte_width));
@@ -2432,6 +2583,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         result.code_width = CodeWidthForDictSize(result.dict_float32_values.size());
       } else if (result.type == "float64" && !result.dict_float64_values.empty()) {
         result.code_width = CodeWidthForDictSize(result.dict_float64_values.size());
+      } else if (result.type == "int128" && !result.dict_int128_values.empty()) {
+        result.code_width = CodeWidthForDictSize(result.dict_int128_values.size());
       }
     }
 
