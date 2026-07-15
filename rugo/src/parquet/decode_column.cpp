@@ -429,7 +429,13 @@ int32_t PreScanPages(
 // Decodes a single column starting at target_col->dictionary_page_offset (if
 // present) and target_col->data_page_offset inside the supplied memory region.
 
-DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
+// In-place (buffer-reusing) primary. Decodes into the caller-owned `result`,
+// resetting it at entry so a scratch reused across columns is laundered of any
+// prior column's state (see DecodedColumn::reset). reset() MUST precede the ext_*
+// re-stash below (it nulls them via the base default), else the zero-copy path
+// silently dies. The by-value overload is a thin shim (below).
+void DecodeColumnFromChunk(DecodedColumn &result,
+                                    const uint8_t *file_data,
                                     size_t file_size,
                                     const ColumnStats *target_col,
                                     int64_t* ext_int64,
@@ -439,7 +445,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                                     const uint8_t* row_mask,
                                     bool prefer_dict,
                                     const DictSkipPredicate* skip_pred) {
-  DecodedColumn result;
+  result.reset();
   result.ext_int64   = ext_int64;
   result.ext_float64 = ext_float64;
   result.ext_int32   = ext_int32;
@@ -463,7 +469,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     if (target_col->codec != 0 && target_col->codec != 1 &&
         target_col->codec != 2 && target_col->codec != 6 &&
         target_col->codec != 7) {
-      return result;
+      return;
     }
 
     // Guard: at least one supported encoding.
@@ -476,7 +482,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         break;
       }
     }
-    if (!has_supported_encoding) return result;
+    if (!has_supported_encoding) return;
 
     result.type = target_col->physical_type;
     result.max_rep_level = target_col->max_repetition_level;
@@ -510,7 +516,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       if (target_col->type_length <= 0 || target_col->type_length > 16 ||
           target_col->logical_type.rfind("decimal", 0) != 0) {
         // Caller should have been gated by CanDecode; defensive bail.
-        return result;
+        return;
       }
       flba_byte_width = target_col->type_length;
       if (flba_byte_width > 8) {
@@ -527,7 +533,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // unaffected.) The plain int128 path is handled in the serial decode below.
     if (flba_int128 && target_col->dictionary_page_offset >= 0 &&
         (uint64_t)target_col->dictionary_page_offset < file_size) {
-      return result;  // success stays false → "Decode failed" (honest rejection)
+      return;  // success stays false → "Decode failed" (honest rejection)
     }
 
     // -----------------------------------------------------------------
@@ -551,7 +557,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       if (dict_page_header.page_type == 2) {  // DICTIONARY_PAGE
         result.dict_ordered = dict_page_header.dictionary_is_sorted;
         size_t dict_header_size = dict_header_in.p - dict_ptr;
-        if (dict_header_size > (size_t)(dict_end_ptr - dict_ptr)) return result;
+        if (dict_header_size > (size_t)(dict_end_ptr - dict_ptr)) return;
 
         size_t dict_compressed_size = dict_page_header.compressed_page_size;
         const uint8_t *dict_compressed_data = dict_ptr + dict_header_size;
@@ -582,9 +588,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             // Fail loud: surface the specific decompression reason rather than
             // collapsing to a generic "Decode failed" upstream.
             result.error_message = e.what();
-            return result;
+            return;
           } catch (...) {
-            return result;
+            return;
           }
         }
 
@@ -688,7 +694,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // -----------------------------------------------------------------
     if (target_col->data_page_offset < 0 ||
         (uint64_t)target_col->data_page_offset >= file_size) {
-      return result;
+      return;
     }
 
     // Compute the end of the column chunk (upper bound for cursor).
@@ -823,7 +829,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         result.dict_all_filtered = true;
         result.num_rows = target_col->num_values;
         result.success = true;
-        return result;
+        return;
       }
     }
 
@@ -1227,17 +1233,17 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         int32_t max_rep = target_col->max_repetition_level;
         while (max_rep > 0) { rep_bit_width++; max_rep >>= 1; }
 
-        if (data_size < 4) return result;
+        if (data_size < 4) return;
         uint32_t rep_payload_bytes = ReadLE32(data_ptr);
         size_t   rep_slice_size    = 4 + (size_t)rep_payload_bytes;
-        if (rep_slice_size > data_size) return result;
+        if (rep_slice_size > data_size) return;
 
         size_t bytes_consumed_rep = 0;
         int32_t decoded_rep = DecodeRLEBitPackedIndicesWithConsumption(
             data_ptr, rep_slice_size,
             page_values, rep_bit_width, page_rep_levels, bytes_consumed_rep);
 
-        if (decoded_rep != page_values) return result;
+        if (decoded_rep != page_values) return;
 
         data_ptr  += rep_slice_size;
         data_size -= rep_slice_size;
@@ -1259,17 +1265,17 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         while (max_level > 0) { def_bit_width++; max_level >>= 1; }
 
         // On-disk: [4-byte LE length][RLE level data …]
-        if (data_size < 4) return result;
+        if (data_size < 4) return;
         uint32_t level_payload_bytes = ReadLE32(data_ptr);
         size_t   level_slice_size    = 4 + (size_t)level_payload_bytes;
-        if (level_slice_size > data_size) return result;
+        if (level_slice_size > data_size) return;
 
         size_t bytes_consumed = 0;
         int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
             data_ptr, level_slice_size,
             page_values, def_bit_width, def_levels, bytes_consumed);
 
-        if (decoded_levels != page_values) return result;
+        if (decoded_levels != page_values) return;
 
         // Advance data_ptr past exactly the level bytes.
         data_ptr  += level_slice_size;
@@ -1301,7 +1307,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       // null: dictionary page has 0 entries and present_count is 0.
       // This is valid because no dictionary indices are consumed.
       if (encoding_requires_dictionary && dict_size == 0 && present_count > 0) {
-        return result;
+        return;
       }
 
       if (page_uses_dictionary) {
@@ -1323,13 +1329,13 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             int32_t decoded = DecodeRLEBitPackedIndicesToRuns(
                 data_ptr, data_size, present_count, bit_width, run_codes, run_counts);
             RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
-            if (decoded != present_count) return result; }
+            if (decoded != present_count) return; }
 
           if (int64_dict_mode) {
             const int32_t dict_sz = (int32_t)result.dict_int64_values.size();
             for (size_t r = 0; r < run_codes.size(); ++r) {
               const int32_t code = run_codes[r];
-              if (code < 0 || code >= dict_sz) return result;
+              if (code < 0 || code >= dict_sz) return;
               const int64_t val = result.dict_int64_values[code];
               const int32_t cnt = run_counts[r];
               if (!result.rle_int64_values.empty() &&
@@ -1350,7 +1356,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             const int32_t dict_sz = (int32_t)result.dict_int32_values.size();
             for (size_t r = 0; r < run_codes.size(); ++r) {
               const int32_t code = run_codes[r];
-              if (code < 0 || code >= dict_sz) return result;
+              if (code < 0 || code >= dict_sz) return;
               const int64_t val = result.is_unsigned
                   ? (int64_t)(uint32_t)result.dict_int32_values[code]
                   : (int64_t)result.dict_int32_values[code];
@@ -1367,7 +1373,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             const int32_t dict_sz = (int32_t)result.dict_float64_values.size();
             for (size_t r = 0; r < run_codes.size(); ++r) {
               const int32_t code = run_codes[r];
-              if (code < 0 || code >= dict_sz) return result;
+              if (code < 0 || code >= dict_sz) return;
               const double  val  = result.dict_float64_values[code];
               const int32_t cnt  = run_counts[r];
               if (!result.rle_float64_values.empty() &&
@@ -1383,7 +1389,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             const int32_t dict_sz = (int32_t)result.dict_float32_values.size();
             for (size_t r = 0; r < run_codes.size(); ++r) {
               const int32_t code = run_codes[r];
-              if (code < 0 || code >= dict_sz) return result;
+              if (code < 0 || code >= dict_sz) return;
               const double  val  = (double)result.dict_float32_values[code];
               const int32_t cnt  = run_counts[r];
               if (!result.rle_float64_values.empty() &&
@@ -1399,7 +1405,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             const uint8_t* str_arena = result.string_dict_arena.data();
             for (size_t r = 0; r < run_codes.size(); ++r) {
               const int32_t code = run_codes[r];
-              if (code < 0 || code >= dict_sz) return result;
+              if (code < 0 || code >= dict_sz) return;
               const int32_t cnt  = run_counts[r];
               // Page-boundary merge via code comparison (avoids O(len) memcmp).
               if (!result.rle_str_lens.empty() && result.rle_last_code == code) {
@@ -1425,21 +1431,21 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
                 data_ptr, data_size, present_count, bit_width, indices);
             RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
-            if (decoded != present_count) { return result; } }
+            if (decoded != present_count) { return; } }
 
           // ── Scatter packed codes for nullable dict columns ──
           if (!result.dict_codes_array.empty() && page_uses_dictionary) {
             // Scatter sparse indices into full-width packed codes array
-            if (indices.size() != (size_t)present_count) return result;
+            if (indices.size() != (size_t)present_count) return;
             int32_t max_def = target_col->max_definition_level;
             int32_t code_idx = 0;
             int32_t row_offset = total_collected;
 
             for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
               if (def_levels[i] == max_def) {
-                if (code_idx >= (int32_t)indices.size()) return result;
+                if (code_idx >= (int32_t)indices.size()) return;
                 int32_t code = indices[code_idx++];
-                if (code < 0 || code >= (int32_t)dict_size) return result;
+                if (code < 0 || code >= (int32_t)dict_size) return;
                 WritePackedCode(result.dict_codes_array.data(), row_offset + i,
                                code, result.code_width);
               }
@@ -1529,7 +1535,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               // Codes already scattered into dict_codes_array; dict-only output.
             } else if (int32_dict_mode) {
               if (!batch_append_dict_indices(indices, (int32_t)result.dict_int32_values.size()))
-                return result;
+                return;
             } else {
               if (result.ext_int32) {
                 int32_t lo = indices.empty() ? 0 : indices[0];
@@ -1538,14 +1544,14 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   if (idx < lo) lo = idx;
                   if (idx > hi) hi = idx;
                 }
-                if (lo < 0 || hi >= (int32_t)result.dict_int32_values.size()) return result;
+                if (lo < 0 || hi >= (int32_t)result.dict_int32_values.size()) return;
                 size_t n = indices.size();
                 for (size_t i = 0; i < n; ++i)
                   result.ext_int32[result.ext_written + i] = result.dict_int32_values[indices[i]];
                 result.ext_written += n;
               } else {
                 if (!validate_and_gather_int32(indices, result.int32_values))
-                  return result;
+                  return;
               }
             }
           } else if (result.type == "int64") {
@@ -1553,7 +1559,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               // Codes already scattered into dict_codes_array; dict-only output.
             } else if (int64_dict_mode) {
               if (!batch_append_dict_indices(indices, (int32_t)result.dict_int64_values.size()))
-                return result;
+                return;
             } else {
               if (result.ext_int64) {
                 int32_t lo = indices.empty() ? 0 : indices[0];
@@ -1562,28 +1568,28 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   if (idx < lo) lo = idx;
                   if (idx > hi) hi = idx;
                 }
-                if (lo < 0 || hi >= (int32_t)result.dict_int64_values.size()) return result;
+                if (lo < 0 || hi >= (int32_t)result.dict_int64_values.size()) return;
                 size_t n = indices.size();
                 for (size_t i = 0; i < n; ++i)
                   result.ext_int64[result.ext_written + i] = result.dict_int64_values[indices[i]];
                 result.ext_written += n;
               } else {
                 if (!validate_and_gather_int64(indices, result.int64_values))
-                  return result;
+                  return;
               }
             }
           } else if (result.type == "byte_array") {
             if (result.dict_codes_array.empty()) {
               // Only append to dict_indices if not using packed codes
               if (!batch_append_dict_indices(indices, (int32_t)result.string_dict_lens.size()))
-                return result;
+                return;
             }
           } else if (result.type == "float32") {
             if (!result.dict_codes_array.empty()) {
               // Codes already scattered into dict_codes_array; dict-only output.
             } else if (float32_dict_mode) {
               if (!batch_append_dict_indices(indices, (int32_t)result.dict_float32_values.size()))
-                return result;
+                return;
             } else {
               if (result.ext_float32) {
                 int32_t lo = indices.empty() ? 0 : indices[0];
@@ -1592,14 +1598,14 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   if (idx < lo) lo = idx;
                   if (idx > hi) hi = idx;
                 }
-                if (lo < 0 || hi >= (int32_t)result.dict_float32_values.size()) return result;
+                if (lo < 0 || hi >= (int32_t)result.dict_float32_values.size()) return;
                 size_t n = indices.size();
                 for (size_t i = 0; i < n; ++i)
                   result.ext_float32[result.ext_written + i] = result.dict_float32_values[indices[i]];
                 result.ext_written += n;
               } else {
                 if (!validate_and_gather_float32(indices, result.float32_values))
-                  return result;
+                  return;
               }
             }
           } else if (result.type == "float64") {
@@ -1607,7 +1613,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               // Codes already scattered into dict_codes_array; dict-only output.
             } else if (float64_dict_mode) {
               if (!batch_append_dict_indices(indices, (int32_t)result.dict_float64_values.size()))
-                return result;
+                return;
             } else {
               if (result.ext_float64) {
                 int32_t lo = indices.empty() ? 0 : indices[0];
@@ -1616,14 +1622,14 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   if (idx < lo) lo = idx;
                   if (idx > hi) hi = idx;
                 }
-                if (lo < 0 || hi >= (int32_t)result.dict_float64_values.size()) return result;
+                if (lo < 0 || hi >= (int32_t)result.dict_float64_values.size()) return;
                 size_t n = indices.size();
                 for (size_t i = 0; i < n; ++i)
                   result.ext_float64[result.ext_written + i] = result.dict_float64_values[indices[i]];
                 result.ext_written += n;
               } else {
                 if (!validate_and_gather_float64(indices, result.float64_values))
-                  return result;
+                  return;
               }
             }
           }
@@ -1771,7 +1777,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               std::vector<int32_t> page_ints;
               int32_t decoded =
                   DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
-              if (decoded != present_count) return result;
+              if (decoded != present_count) return;
               for (int32_t value : page_ints)
                 _pd_codes.push_back(InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values));
             } else {
@@ -1786,7 +1792,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (page_encoding == 5) {
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.ext_int32 + result.ext_written);
-              if (decoded != present_count) return result;
+              if (decoded != present_count) return;
               result.ext_written += decoded;
             } else {
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
@@ -1813,7 +1819,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   data_ptr, data_size, present_count, result.int32_values.data() + old_sz);
               if (decoded != present_count) {
                 result.int32_values.resize(old_sz);
-                return result;
+                return;
               }
             } else {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -1842,7 +1848,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               std::vector<int64_t> page_ints;
               int32_t decoded =
                   DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
-              if (decoded != present_count) return result;
+              if (decoded != present_count) return;
               for (int64_t value : page_ints)
                 _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
             } else if (flba_byte_width > 0) {
@@ -1865,7 +1871,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (page_encoding == 5) {
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.ext_int64 + result.ext_written);
-              if (decoded != present_count) return result;
+              if (decoded != present_count) return;
               result.ext_written += decoded;
             } else if (flba_byte_width > 0) {
               int32_t safe_count = std::min(
@@ -1903,7 +1909,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   data_ptr, data_size, present_count, result.int64_values.data() + old_sz);
               if (decoded != present_count) {
                 result.int64_values.resize(old_sz);
-                return result;
+                return;
               }
             } else if (flba_byte_width > 0) {
               int32_t safe_count = std::min(
@@ -1985,7 +1991,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
                                                     present_count, page_strs);
-            if (decoded != present_count) return result;
+            if (decoded != present_count) return;
             result.string_values.insert(result.string_values.end(),
                                          page_strs.begin(), page_strs.end());
           } else {
@@ -2005,7 +2011,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             std::vector<int32_t> rle_vals;
             int32_t decoded = DecodeRLEBitPackedIndices(
                 data_ptr, data_size, present_count, 1, rle_vals);
-            if (decoded != present_count) return result;
+            if (decoded != present_count) return;
             for (auto v : rle_vals)
               result.boolean_values.push_back((uint8_t)(v & 1));
           } else {
@@ -2464,6 +2470,26 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.success = false;
   }
 
+  return;
+}
+
+// By-value overload — thin shim over the in-place primary. Kept for legacy
+// callers (the standalone rugo Cython endpoint via parquet_reader.pxd, and
+// DecodeColumnFromMemory below), which construct a fresh DecodedColumn per call.
+DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
+                                    size_t file_size,
+                                    const ColumnStats *target_col,
+                                    int64_t* ext_int64,
+                                    double*  ext_float64,
+                                    int32_t* ext_int32,
+                                    float*   ext_float32,
+                                    const uint8_t* row_mask,
+                                    bool prefer_dict,
+                                    const DictSkipPredicate* skip_pred) {
+  DecodedColumn result;
+  DecodeColumnFromChunk(result, file_data, file_size, target_col,
+                        ext_int64, ext_float64, ext_int32, ext_float32,
+                        row_mask, prefer_dict, skip_pred);
   return result;
 }
 

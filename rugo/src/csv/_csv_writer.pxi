@@ -2,7 +2,7 @@
 # distutils: language = c++
 #
 # Native CSV writer: Morsel -> bytes (RFC 4180). No pyarrow; all value
-# formatting is in C++ (_value_format.hpp).
+# formatting is in C++ (draken/interop/value_format.hpp).
 
 from libc.stdint cimport uint8_t, uint32_t, int32_t
 from libc.stddef cimport size_t

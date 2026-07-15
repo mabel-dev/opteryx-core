@@ -570,7 +570,16 @@ def draken_rugo_extensions(parquet_created_by):
     Returns un-cythonized Extension objects; the caller runs ``cythonize``.
     """
     shim_extensions = [
-        make_draken_extension("vectors.vector", "vectors/_vector_shim.pyx"),
+        make_draken_extension(
+            "vectors.vector",
+            "vectors/_vector_shim.pyx",
+            # Vector._to_json() includes the shared native JSON renderer.
+            depends=[
+                "draken/core/buffers.h",
+                "draken/core/vector_alloc.h",
+                "draken/interop/value_format.hpp",
+            ],
+        ),
         make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
         make_draken_extension("morsels.morsel", "morsels/_morsel_shim.pyx"),
     ]
@@ -621,6 +630,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/string_reverse_initcap.cpp",  # Phase 9a-fn: REVERSE/INITCAP (C ABI)
                 "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
                 "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
+                "draken/ops/kernels/string_humanize.cpp",  # Phase 9a-fn: HUMANIZE (C ABI)
                 # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
@@ -681,6 +691,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/string_reverse_initcap.cpp",  # Phase 9a-fn: REVERSE/INITCAP (C ABI)
                 "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
                 "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
+                "draken/ops/kernels/string_humanize.cpp",  # Phase 9a-fn: HUMANIZE (C ABI)
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
                 "src/cpp/cpu_features.cpp",
@@ -775,7 +786,7 @@ def draken_rugo_extensions(parquet_created_by):
                 ]
             ),
             depends=[
-                "rugo/src/_value_format.hpp",
+                "draken/interop/value_format.hpp",
                 "rugo/src/_text_render.hpp",
                 "rugo/src/jsonl/core/markers.hpp",
                 "rugo/src/jsonl/core/parse_context.hpp",

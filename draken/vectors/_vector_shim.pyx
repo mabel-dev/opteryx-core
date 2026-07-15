@@ -3,10 +3,29 @@
 # E.24: _nb holds the nanobind handle; _dv is a borrowed pointer into it.
 
 from cpython.object cimport PyObject
+from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
+from libc.stddef cimport size_t
+from libcpp.string cimport string
 
 from draken.core.buffers cimport DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_ARRAY, DRAKEN_NULL, DRAKEN_VECTOR_FP16
+
+# Shared native value renderer (draken/interop/value_format.hpp) — the SAME
+# per-value formatting rugo's write_jsonl uses, so Vector._to_json() output
+# matches the /download JSON format. Resolved via -I draken.
+cdef extern from "interop/value_format.hpp" namespace "rugo_text" nogil:
+    void render_json_column(string& out, const DrakenVector* dv,
+                            const DrakenVector* child, int unit, int scale,
+                            int cunit, int cscale, size_t nrows)
+
+
+cdef inline int _unit_code(object u):
+    # Temporal unit → code understood by the renderer (s=0, ms=1, us=2, ns=3).
+    if u == "s": return 0
+    if u == "ms": return 1
+    if u == "ns": return 3
+    return 2  # us / default
 
 # Native row-hash kernel (header-only static inline in ops/hash.h). Used by
 # c_hash_single to fill a caller buffer with zero Python object creation.
@@ -198,6 +217,44 @@ cdef class Vector:
 
     def to_pylist(self):
         return self._nb.to_pylist()
+
+    def _to_json(self):
+        """Serialize this column's values to a JSON array as one ``bytes``.
+
+        Returns ``b"[v0,v1,…]"`` rendered natively, with no per-value Python
+        object creation. The per-value formatting is the SAME code rugo's
+        ``write_jsonl`` uses (``render_json_scalar``), so the output matches the
+        ``/download`` JSON format: timestamps as RFC-3339 ``+00:00``, decimals
+        scaled by the column's ``logical_type_scale``, NaN/Inf and nulls as
+        ``null``. Honours the ``data[selection[i]]`` indirection, so dense,
+        dict, constant and sliced columns all render correctly.
+        """
+        cdef const DrakenVector* dv = self._dv
+        if dv == NULL:
+            return b"[]"
+        cdef const DrakenVector* child = NULL
+        cdef int unit = 0, scale = 0, cunit = 0, cscale = 0
+        cdef Vector cv
+        cdef string out
+        # unit/scale live on the nanobind logical descriptor, not the
+        # DrakenVector ABI (see rugo _jsonl_writer.pyx for the same reads).
+        u = self._nb.logical_type_unit
+        if u is not None:
+            unit = _unit_code(u)
+        sc = self._nb.logical_type_scale
+        if sc is not None:
+            scale = <int>sc
+        if dv.type == DRAKEN_ARRAY and self._nb.array_child_type is not None:
+            cv = Vector(self._nb.array_child)
+            child = cv._dv
+            cu = cv._nb.logical_type_unit
+            if cu is not None:
+                cunit = _unit_code(cu)
+            csc = cv._nb.logical_type_scale
+            if csc is not None:
+                cscale = <int>csc
+        render_json_column(out, dv, child, unit, scale, cunit, cscale, <size_t>dv.length)
+        return PyBytes_FromStringAndSize(out.data(), out.size())
 
     def to_arrow(self):
         """Convert this Vector to a pyarrow.Array via the Arrow C Data Interface.

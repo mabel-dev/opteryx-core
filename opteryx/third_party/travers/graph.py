@@ -59,6 +59,23 @@ def print_tree_inner(
         yield from print_tree_inner(child, prefix, last, ascii_safe)
 
 
+# Whether a type's `.copy()` accepts a `memo` kwarg, cached by type — node payloads
+# are typically one class repeated across every graph node, so this collapses to one
+# signature lookup per Graph.copy() call rather than one per node.
+_COPY_ACCEPTS_MEMO_CACHE: dict = {}
+
+
+def _copy_accepts_memo(bound_copy_method) -> bool:
+    cls = type(bound_copy_method.__self__)
+    accepts = _COPY_ACCEPTS_MEMO_CACHE.get(cls)
+    if accepts is None:
+        import inspect
+
+        accepts = "memo" in inspect.signature(bound_copy_method).parameters
+        _COPY_ACCEPTS_MEMO_CACHE[cls] = accepts
+    return accepts
+
+
 class Graph(object):
     """
     Graph object, optimized for traversal.
@@ -586,6 +603,16 @@ class Graph(object):
         """
         import copy
 
+        # One memo for the whole copy: a node value reachable from two different
+        # graph nodes (or twice within one node's own property tree) must copy to
+        # the SAME new object both times, or the two copies silently diverge — e.g.
+        # a logical plan step that intentionally reuses one expression-node object
+        # across two plan nodes (GROUP BY ALL reuses the SELECT list's expression as
+        # the aggregate's group-by key) ends up with two independent copies, and a
+        # later pass that mutates one (the binder resolving a function's catalog
+        # entry) leaves the other looking unbound.
+        memo: dict = {}
+
         def _inner_copy(obj: Any) -> Any:
             obj_type = type(obj)
             if obj_type is list:
@@ -596,8 +623,11 @@ class Graph(object):
                 return {_inner_copy(item) for item in obj}
             if obj_type is dict:
                 return {key: _inner_copy(value) for key, value in obj.items()}
-            if getattr(obj, "copy", None) is not None:
-                return obj.copy()
+            copy_method = getattr(obj, "copy", None)
+            if copy_method is not None:
+                if _copy_accepts_memo(copy_method):
+                    return copy_method(memo)
+                return copy_method()
             try:
                 return copy.deepcopy(obj)
             except Exception:

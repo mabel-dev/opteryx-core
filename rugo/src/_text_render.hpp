@@ -8,7 +8,7 @@
 // std::to_chars (shortest round-trip — the cast kernel is 6-dp display only),
 // decimal/time use the dedicated formatters, strings/arrays render directly.
 
-#include "_value_format.hpp"
+#include "interop/value_format.hpp"  // moved into draken; resolved via -I draken
 
 #include "core/alloc.h"          // draken_free
 #include "ops/vec_result.h"      // VecResult

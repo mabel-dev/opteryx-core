@@ -15,8 +15,17 @@ from opteryx.types.schema import RelationSchema
 
 
 def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    # clear the derived schema
-    context.schemas.pop("$derived", None)
+    # The derived schema is cleared at the END of this visitor, not the start.
+    #
+    # It used to be popped here, before the columns below were bound. That is exactly the
+    # schema an EXIT column may need: an aggregate registers itself in `$derived` (see
+    # binder.visit_aggregate), and binding an unbound expression column appends to it (see
+    # binder.inner_binder). Clearing it first meant such a column could neither be resolved
+    # against it nor added to it -- it died with `KeyError: '$derived'`.
+    #
+    # SQL never hit this: the SQL planner's EXIT columns are already-bound identifiers, so
+    # they short-circuit. A plan built directly against the logical planner -- which is what
+    # the OData service does -- can carry a raw aggregate node on the EXIT, and does.
 
     def _output_name_for_projection(proj_col, schema_col):
         """User-visible name for an explicitly-projected column."""
@@ -58,9 +67,14 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                             )
                             seen_identities.add(schema_col.identity)
             else:
-                # Bare wildcard: every column from every schema (deduped by identity).
+                # Bare wildcard: every column from every relation schema (deduped by
+                # identity). `$derived` is excluded — it's scratch space for computed
+                # expressions bound elsewhere (e.g. ORDER BY LENGTH(name) with no
+                # explicit Project step), never a real relation `*` should expand into.
                 seen_identities = set()
-                for schema in context.schemas.values():
+                for name, schema in context.schemas.items():
+                    if name == "$derived":
+                        continue
                     for schema_col in schema.columns:
                         if schema_col.identity in seen_identities:
                             continue

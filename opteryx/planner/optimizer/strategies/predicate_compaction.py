@@ -258,6 +258,12 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         filter_chain_roots[context.node_id] = chain_root
 
         predicates = self._extract_and_predicates(node.condition)
+
+        # Each AND-ed atom may itself be an OR of same-column ranges — try to
+        # collapse those before they're fed into the AND-side occurrence tracking
+        # below. See `_try_collapse_or_range` for the union-of-ranges algorithm.
+        predicates = [self._try_collapse_or_range(predicate) or predicate for predicate in predicates]
+
         state["filters"][context.node_id] = {"predicates": predicates}
 
         for predicate in predicates:
@@ -563,6 +569,274 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             "LtEq": "<=",
         }
         return mapping.get(sql_operator)
+
+    # -- OR-range union -----------------------------------------------------
+    #
+    # `col < 4 OR (col >= 4 AND col < 7) OR (col >= 7 AND col < 9)` is a union
+    # of contiguous ranges on one column and is equivalent to `col < 9`. The
+    # AND-side of this strategy already tracks the tightest lower/upper bound
+    # across predicates ANDed together (`ValueRange`); this reuses the same
+    # machinery per OR-branch, then merges the resulting ranges.
+
+    def _split_or_unwrap(self, node: Optional[Node]) -> list:
+        """Split an OR (and NESTED-OR) node into its flat list of branches."""
+        if node is None:
+            return []
+        if node.node_type == NodeType.NESTED:
+            return self._split_or_unwrap(node.centre)
+        if node.node_type != NodeType.OR:
+            return [node]
+        return self._split_or_unwrap(node.left) + self._split_or_unwrap(node.right)
+
+    def _split_and_unwrap(self, node: Optional[Node]) -> list:
+        """Split an AND (and NESTED-AND) node into its flat list of conjuncts.
+
+        Distinct from `_extract_and_predicates`: that one is only ever handed the
+        top-level filter condition (never NESTED at the root in practice here),
+        this one is handed individual OR-branches, which commonly arrive
+        parenthesised — e.g. the `(col >= 4 AND col < 7)` branch above — so it
+        must see through NESTED wrappers to find the AND underneath.
+        """
+        if node is None:
+            return []
+        if node.node_type == NodeType.NESTED:
+            return self._split_and_unwrap(node.centre)
+        if node.node_type != NodeType.AND:
+            return [node]
+        return self._split_and_unwrap(node.left) + self._split_and_unwrap(node.right)
+
+    def _branch_range(self, branch: Node) -> Dict[str, Any]:
+        """Reduce one OR-branch to a range on a single column.
+
+        Returns a dict with "status" of:
+          - "ok": branch is a clean same-column range; lower/upper/col_* set.
+          - "contradiction": branch's own bounds can never be satisfied (e.g.
+            `col > 10 AND col < 5`) — col_id/domain/col_node are still set so
+            the caller can confirm this branch belongs to the same column
+            before dropping it.
+          - "unsupported": branch isn't a clean single-column range predicate
+            (different columns, non-numeric domain, NotEq/LIKE/etc).
+        """
+        predicates = self._split_and_unwrap(branch)
+        value_range = ValueRange()
+        col_id = None
+        domain = None
+        col_node = None
+        lower_node = None
+        upper_node = None
+
+        for predicate in predicates:
+            info = self._extract_comparison_info(predicate)
+            if info is None:
+                return {"status": "unsupported"}
+            p_col_id, operator, value, p_domain = info
+            if col_id is None:
+                col_id, domain, col_node = p_col_id, p_domain, predicate.left
+            elif p_col_id != col_id or p_domain != domain:
+                return {"status": "unsupported"}
+
+            mapped = self._map_operator(operator)
+            if mapped is None:
+                return {"status": "unsupported"}
+
+            prev_lower, prev_upper = value_range.lower, value_range.upper
+            if not value_range.update_with_predicate(mapped, value):
+                return {
+                    "status": "contradiction",
+                    "col_id": col_id,
+                    "domain": domain,
+                    "col_node": col_node,
+                }
+            if value_range.untrackable:
+                return {"status": "unsupported"}
+            if value_range.lower is not prev_lower:
+                lower_node = predicate.right
+            if value_range.upper is not prev_upper:
+                upper_node = predicate.right
+
+        if col_id is None:
+            return {"status": "unsupported"}
+
+        return {
+            "status": "ok",
+            "col_id": col_id,
+            "domain": domain,
+            "col_node": col_node,
+            "lower": value_range.lower,
+            "lower_node": lower_node,
+            "upper": value_range.upper,
+            "upper_node": upper_node,
+        }
+
+    @staticmethod
+    def _ranges_touch(last_upper: Optional[Limit], next_lower: Optional[Limit]) -> bool:
+        """Whether two sorted ranges overlap or are adjacent with no gap between them."""
+        if last_upper is None or next_lower is None:
+            return True
+        if next_lower.value < last_upper.value:
+            return True
+        if next_lower.value == last_upper.value:
+            return last_upper.inclusive or next_lower.inclusive
+        return False
+
+    @staticmethod
+    def _is_bigger_upper(candidate: Optional[Limit], current: Optional[Limit]) -> bool:
+        if current is None:
+            return False
+        if candidate is None:
+            return True
+        if candidate.value != current.value:
+            return candidate.value > current.value
+        return candidate.inclusive and not current.inclusive
+
+    def _merge_branch_ranges(self, ranges: list) -> list:
+        """Merge overlapping/adjacent same-column ranges into the minimal covering set."""
+
+        def sort_key(r):
+            lower = r["lower"]
+            if lower is None:
+                return (0, 0, 0)
+            return (1, lower.value, 0 if lower.inclusive else 1)
+
+        ordered = sorted(ranges, key=sort_key)
+        merged = [dict(ordered[0])]
+        for current in ordered[1:]:
+            last = merged[-1]
+            if self._ranges_touch(last["upper"], current["lower"]):
+                if self._is_bigger_upper(current["upper"], last["upper"]):
+                    last["upper"] = current["upper"]
+                    last["upper_node"] = current["upper_node"]
+            else:
+                merged.append(dict(current))
+        return merged
+
+    def _build_range_node(
+        self,
+        col_node: Node,
+        lower: Optional[Limit],
+        lower_node: Optional[Node],
+        upper: Optional[Limit],
+        upper_node: Optional[Node],
+    ) -> Node:
+        """Build a comparison or BETWEEN node from a merged (lower, upper) range.
+
+        Caller guarantees not both bounds are None (see `_try_collapse_or_range`).
+        """
+        col = col_node.copy()
+        if lower is not None and upper is not None and lower.value == upper.value:
+            return Node(NodeType.COMPARISON_OPERATOR, value="Eq", left=col, right=lower_node.copy())
+        if lower is None:
+            op = "LtEq" if upper.inclusive else "Lt"
+            return Node(NodeType.COMPARISON_OPERATOR, value=op, left=col, right=upper_node.copy())
+        if upper is None:
+            op = "GtEq" if lower.inclusive else "Gt"
+            return Node(NodeType.COMPARISON_OPERATOR, value=op, left=col, right=lower_node.copy())
+        return Node(
+            NodeType.BETWEEN,
+            left=col,
+            right=lower_node.copy(),
+            centre=upper_node.copy(),
+            value=(lower.inclusive, upper.inclusive),
+        )
+
+    def _try_collapse_or_range(self, node: Node) -> Optional[Node]:
+        """Collapse an OR of same-column ranges into a single range predicate (or
+        a smaller OR of disjoint ranges), when every branch is a clean range on
+        the same column in the same numeric domain.
+
+        e.g. col<4 OR (col>=4 AND col<7) OR (col>=7 AND col<9)  =>  col<9
+
+        Bails (returns None, leaving the OR node untouched) rather than guessing
+        when:
+          - any branch touches a different column, mixes numeric domains, or
+            contains a non-range predicate (NotEq, LIKE, ...) — including a
+            "contradiction" branch (self-impossible bounds) that turns out to be
+            on a different column: dropping it is only NULL-safe when every
+            branch shares one column (see below), so a mismatch bails entirely
+            rather than dropping it unchecked.
+          - the merged ranges would cover the entire numeric domain. That case
+            is semantically `col IS NOT NULL`, not TRUE — collapsing to TRUE
+            would wrongly match rows where col IS NULL (the original OR
+            evaluates NULL there, because every branch does), so it is left
+            alone rather than risk it.
+
+        Dropping a self-contradictory branch (e.g. `col > 10 AND col < 5`) is
+        NULL-safe specifically because every surviving branch is on the same
+        column: when col IS NULL, the dropped branch would have evaluated to
+        NULL (not FALSE), but every remaining branch also evaluates to NULL for
+        the same NULL column — so the OR's result (NULL) is unchanged either way.
+        """
+        unwrapped = node
+        while unwrapped is not None and unwrapped.node_type == NodeType.NESTED:
+            unwrapped = unwrapped.centre
+        if unwrapped is None:
+            return None
+
+        # DisjunctionSimplificationStrategy (runs earlier in the pipeline) flattens
+        # 3+-branch ORs into a NodeType.CNF node (`.parameters` = flat branch list)
+        # for efficient n-ary evaluation; 2-branch ORs are left as plain OR nodes.
+        if unwrapped.node_type == NodeType.CNF:
+            branches = list(unwrapped.parameters)
+        elif unwrapped.node_type == NodeType.OR:
+            branches = self._split_or_unwrap(unwrapped)
+        else:
+            return None
+
+        if len(branches) < 2:
+            return None
+
+        ranges = []
+        col_id = None
+        domain = None
+        col_node = None
+        for branch in branches:
+            result = self._branch_range(branch)
+            if result["status"] == "unsupported":
+                return None
+            if col_id is None:
+                col_id, domain, col_node = result["col_id"], result["domain"], result["col_node"]
+            elif result["col_id"] != col_id or result["domain"] != domain:
+                return None
+            if result["status"] == "contradiction":
+                continue
+            ranges.append(result)
+
+        if not ranges:
+            return None
+
+        merged = self._merge_branch_ranges(ranges)
+
+        if not (len(ranges) < len(branches) or len(merged) < len(ranges)):
+            return None  # nothing dropped, nothing merged -- no improvement
+
+        new_nodes = []
+        for merged_range in merged:
+            if merged_range["lower"] is None and merged_range["upper"] is None:
+                return None
+            new_nodes.append(
+                self._build_range_node(
+                    col_node,
+                    merged_range["lower"],
+                    merged_range["lower_node"],
+                    merged_range["upper"],
+                    merged_range["upper_node"],
+                )
+            )
+
+        removed = len(branches) - len(new_nodes)
+        self.telemetry.optimization_predicate_compaction += removed
+        self.telemetry.optimization_predicate_compaction_range_simplified += 1
+
+        if len(new_nodes) == 1:
+            return new_nodes[0]
+        if len(new_nodes) == 2:
+            return Node(NodeType.OR, left=new_nodes[0], right=new_nodes[1])
+
+        # 3+ surviving branches: match DisjunctionSimplificationStrategy's
+        # flattened n-ary representation rather than a nested binary OR tree.
+        cnf = Node(node_type=NodeType.CNF)
+        cnf.parameters = new_nodes
+        return cnf
 
     def _rebuild_filter(self, predicates: list) -> LogicalPlanNode:
         """

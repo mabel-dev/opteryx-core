@@ -566,6 +566,8 @@ class Session(DataFrame):
 
         pending = []
         pending_rows = 0
+        last_empty_morsel = None
+        saw_nonzero_rows = False
 
         for item in result_data if getattr(result_data, "__iter__", None) is not None else [result_data]:
             if item is None or item is EOS:
@@ -578,9 +580,16 @@ class Session(DataFrame):
                 morsels = [item]
 
             for morsel in morsels:
+                if morsel.num_rows == 0:
+                    # The engine's courtesy empty-result morsel (engine.hpp's
+                    # `run()`): a query that legitimately returns zero rows still
+                    # carries its output schema on one such morsel. Hold onto it
+                    # in case the whole result turns out empty -- don't yield it
+                    # if real data shows up later in the stream.
+                    last_empty_morsel = morsel
+                    continue
+                saw_nonzero_rows = True
                 for chunk in _split_morsel(morsel):
-                    if chunk.num_rows == 0:
-                        continue
                     if pending_rows + chunk.num_rows <= max_size:
                         pending.append(chunk)
                         pending_rows += chunk.num_rows
@@ -600,6 +609,10 @@ class Session(DataFrame):
 
         if pending:
             yield from _flush_buffer(pending)
+        elif not saw_nonzero_rows and last_empty_morsel is not None:
+            yield from _yield_morsel(last_empty_morsel)
+        elif not saw_nonzero_rows and last_empty_morsel is not None:
+            yield from _yield_morsel(last_empty_morsel)
 
         self._executed = True
         elapsed = time.time_ns() - start

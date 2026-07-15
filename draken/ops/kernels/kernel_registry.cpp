@@ -71,6 +71,8 @@ VecResult draken_rpad(void* ctx, const DrakenVector* const* args, uint32_t nargs
 // Phase 9a-fn: REPLACE/SOUNDEX (string_replace_soundex.cpp)
 VecResult draken_replace(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_soundex(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: HUMANIZE (string_humanize.cpp)
+VecResult draken_humanize(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_rpad", (kernel_fn_t)&draken_rpad},
     {"draken_replace", (kernel_fn_t)&draken_replace},
     {"draken_soundex", (kernel_fn_t)&draken_soundex},
+    {"draken_humanize", (kernel_fn_t)&draken_humanize},
 
     // ========================================================================
     // Cast kernels (43 total)

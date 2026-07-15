@@ -74,10 +74,19 @@ class LogicalPlan(Graph):
 
 
 class LogicalPlanNode(Node):
-    def copy(self) -> "Node":
-        parent_copy = super().copy()
+    def copy(self, memo=None) -> "Node":
+        if memo is None:
+            memo = {}
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        parent_copy = super().copy(memo)
         new_node = LogicalPlanNode(**parent_copy.properties)
         new_node.uuid = parent_copy.uuid
+        # super().copy() registered id(self) -> the plain-Node intermediate;
+        # replace it with the correctly-typed LogicalPlanNode so any other
+        # reference to this same node (via the shared memo) lands here too.
+        memo[id(self)] = new_node
         return new_node
 
     def __str__(self):  # pragma: no cover

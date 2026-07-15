@@ -1276,6 +1276,11 @@ class ParquetIOPipeline {
             }
 #endif
 
+            // Reused across the columns of this row group: DecodeColumnFromChunk
+            // resets it at entry and retains its vector capacity, so per-column
+            // decode stops re-mallocing the DecodedColumn's ~25 buffers. Function-
+            // local → one per worker invocation, no cross-thread sharing.
+            DecodedColumn scratch;
             for (size_t i = 0; i < item.column_stats.size(); ++i) {
                 const auto& col_stats = item.column_stats[i];
 
@@ -1324,13 +1329,13 @@ class ParquetIOPipeline {
                     }
                 }
 
-                DecodedColumn decoded;
+                DecodedColumn& decoded = scratch;   // reused; reset at decode entry
                 if (mmap_base != MAP_FAILED) {
                     // Zero-copy: slice directly into the mmap — no heap allocation.
                     const uint8_t* chunk_ptr =
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
-                    decoded = DecodeColumnFromChunk(
+                    DecodeColumnFromChunk(scratch,
                         chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
@@ -1356,7 +1361,7 @@ class ParquetIOPipeline {
                         break;
                     }
                     auto t_dec = std::chrono::steady_clock::now();
-                    decoded = DecodeColumnFromChunk(
+                    DecodeColumnFromChunk(scratch,
                         raw.data() + bpre, raw.size() - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
@@ -1366,7 +1371,7 @@ class ParquetIOPipeline {
                     result.bytes_fetched += chunk_size;
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
-                    decoded = DecodeColumnFromChunk(
+                    DecodeColumnFromChunk(scratch,
                         raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();

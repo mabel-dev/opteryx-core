@@ -91,17 +91,17 @@ _OPERATOR_LABELS = {
 }
 
 # OuterJoinNode/FilterJoinNode carry their variant in a dynamic self.join_type
-# instead of a fixed class-level one — abbreviated to match the parenthetical
-# convention (e.g. "OUTER JOIN (L)", "FILTER JOIN (LANA)").
+# instead of a fixed class-level one — spelled out to match the parenthetical
+# convention (e.g. "OUTER JOIN (LEFT OUTER)", "FILTER JOIN (LEFT ANTI NULL-AWARE)").
 _OUTER_JOIN_DIRECTIONS = {
-    "left outer": "L",
-    "right outer": "R",
-    "full outer": "O",
+    "left outer": "LEFT OUTER",
+    "right outer": "RIGHT OUTER",
+    "full outer": "FULL OUTER",
 }
 _FILTER_JOIN_DIRECTIONS = {
-    "left semi": "LS",
-    "left anti": "LA",
-    "left anti null-aware": "LANA",
+    "left semi": "LEFT SEMI",
+    "left anti": "LEFT ANTI",
+    "left anti null-aware": "LEFT ANTI NULL-AWARE",
 }
 
 

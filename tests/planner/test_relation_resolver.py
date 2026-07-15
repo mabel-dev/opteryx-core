@@ -89,6 +89,8 @@ def views():
         "CREATE VIEW ws.cycle_a AS SELECT id FROM ws.cycle_b",
         "CREATE VIEW ws.cycle_b AS SELECT id FROM ws.cycle_a",
         "CREATE VIEW ws.wants_outer_cte AS SELECT id FROM some_outer_cte",
+        "CREATE VIEW ws.group_by_all AS SELECT UPPER(name) AS n, COUNT(*) AS total "
+        "  FROM $planets GROUP BY ALL",
     ):
         list(session.execute_to_morsels(statement))
 
@@ -119,6 +121,29 @@ def test_view_on_a_view_resolves(views):
 def test_same_view_twice_in_one_query(views):
     """Each expansion gets fresh node ids — otherwise the second overwrites the first."""
     assert len(_rows("SELECT a.id FROM ws.in_sq a JOIN ws.in_sq b ON a.id = b.id")) == 4
+
+
+# ---------------------------------------------------------------------------
+# 1b. GROUP BY ALL keeps its function binding through view expansion
+#
+# GROUP BY ALL reuses the SAME expression-node object from the SELECT list as the
+# aggregate's group-by key (see logical_planner.py) — the binder relies on that
+# sharing to resolve a FUNCTION node's catalog entry once and have it apply
+# wherever the node appears. Copying a plan (LogicalPlan.copy(), used by every
+# view/CTE expansion) used to copy each graph node's property tree independently
+# with no memo, silently splitting that one shared node into two copies. Only one
+# got bound, so `SELECT * FROM a_view_using_group_by_all` died at physical planning
+# with "FUNCTION 'UPPER' has no function_ref — not bound" while the view's own SQL,
+# run directly, worked fine.
+# ---------------------------------------------------------------------------
+
+
+def test_view_with_group_by_all_computed_key_resolves(views):
+    # SELECT * column order isn't pinned to the view body's — select explicitly so
+    # this only checks the values, not wildcard-expansion ordering.
+    assert _rows("SELECT n, total FROM ws.group_by_all") == _rows(
+        "SELECT UPPER(name) AS n, COUNT(*) AS total FROM $planets GROUP BY ALL"
+    )
 
 
 # ---------------------------------------------------------------------------

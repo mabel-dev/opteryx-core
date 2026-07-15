@@ -13,17 +13,7 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.expression.functions.implementations.logical import (
-    array_contains as _lf_array_contains,
-)
 from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
-from opteryx.expression.functions.implementations.utility import (
-    cosine_similarity as _lf_cosine_similarity,
-)
-from opteryx.expression.functions.implementations.utility import humanize as _lf_humanize
-from opteryx.expression.functions.implementations.utility import (
-    jsonb_object_keys as _lf_jsonb_object_keys,
-)
 
 
 
@@ -41,11 +31,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
 
     # Small adapter object bundling kernels implemented elsewhere
     class other_functions:
-        array_contains = staticmethod(_lf_array_contains)
         null_if = staticmethod(_lf_null_if)
-        cosine_similarity = staticmethod(_lf_cosine_similarity)
-        humanize = staticmethod(_lf_humanize)
-        jsonb_object_keys = staticmethod(_lf_jsonb_object_keys)
 
     _coalesce_kernel = _vector_coalesce
     _iif_kernel = _vector_iif

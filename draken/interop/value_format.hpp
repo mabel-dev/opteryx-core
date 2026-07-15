@@ -1,5 +1,7 @@
 #pragma once
-// Shared value -> text formatting for the rugo CSV / JSON(L) writers.
+// Shared value -> text formatting for the draken Vector JSON serializer and the
+// rugo CSV / JSON(L) morsel writers. Lives in draken because it is the shared,
+// pure renderer both sides depend on (rugo -> draken; never the reverse).
 // Pure C++; no Python. Doubles use ryu (shortest round-trip); dates/timestamps
 // render ISO-8601; decimals render with their scale.
 
@@ -14,7 +16,7 @@
 
 #include "core/buffers.h"
 #include "core/string_slot.h"
-#include "../../third_party/ulfjack/ryu/ryu.h"
+#include "ryu.h"  // third_party/ulfjack/ryu is on every consuming extension's include path
 
 namespace rugo_text {
 
@@ -360,5 +362,36 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
 
 // render_json_scalar (above) is reused for ARRAY elements by the fast writer
 // in _text_render.hpp; top-level cell rendering lives there.
+
+// Append the JSON array  [v0,v1,…,v(nrows-1)]  for every logical row of `dv`.
+// This is the column-oriented analogue of the row-oriented morsel writers in
+// _text_render.hpp; it backs draken's Vector._to_json() so a single column can
+// serialize itself to JSON bytes with the SAME per-value rendering the rugo
+// JSONL writer uses (matching /download output). `child`, `cunit`, `cscale`
+// are consulted only when `dv->type == DRAKEN_ARRAY` (they describe the array's
+// element vector, mirroring _text_render.hpp::ej_array).
+inline void render_json_column(std::string &out, const DrakenVector *dv,
+                               const DrakenVector *child, int unit, int scale,
+                               int cunit, int cscale, size_t nrows) {
+  out.push_back('[');
+  for (size_t i = 0; i < nrows; i++) {
+    if (i) out.push_back(',');
+    if (dv->type == DRAKEN_ARRAY) {
+      if (!row_valid(dv->validity, i)) { out.append("null"); continue; }
+      const int32_t *offs = (const int32_t *)dv->data;
+      uint32_t p = dv->selection[i];
+      int32_t s = offs[p], e = offs[p + 1];
+      out.push_back('[');
+      for (int32_t k = s; k < e; k++) {
+        if (k > s) out.push_back(',');
+        render_json_scalar(out, child, (size_t)k, cunit, cscale);
+      }
+      out.push_back(']');
+    } else {
+      render_json_scalar(out, dv, i, unit, scale);
+    }
+  }
+  out.push_back(']');
+}
 
 } // namespace rugo_text

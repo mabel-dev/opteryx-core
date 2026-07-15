@@ -284,7 +284,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             "HUMANIZE",
             other_functions.humanize,
             _CT_VARCHAR,
-            (ParameterSpec(name="val", type_family="any"),),
+            (ParameterSpec(name="val", type_family="numeric"),),
             cost=775947.17,
             summary="Format number in human-readable form.",
         ),

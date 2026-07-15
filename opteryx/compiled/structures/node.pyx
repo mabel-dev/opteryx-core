@@ -39,18 +39,25 @@ from cpython cimport dict
 from opteryx.compiled.functions.random_helper import random_string_c
 
 
-cdef inline object _inner_copy(object obj):
+cdef inline object _inner_copy(object obj, dict memo):
     cdef type obj_type = type(obj)
 
     # Pointer-equality checks avoid tuple allocation of the original `in (...)` form.
     if obj_type is int or obj_type is float or obj_type is str or obj_type is bool or obj is None:
         return obj
     if obj_type is list:
-        return [_inner_copy(i) for i in obj]
+        return [_inner_copy(i, memo) for i in obj]
     if obj_type is tuple:
-        return tuple(_inner_copy(i) for i in obj)
+        return tuple(_inner_copy(i, memo) for i in obj)
     if obj_type is dict:
-        return {k: _inner_copy(v) for k, v in obj.items()}
+        return {k: _inner_copy(v, memo) for k, v in obj.items()}
+    # A Node reachable from two different property slots (e.g. GROUP BY ALL reuses
+    # the SELECT list's expression node as the aggregate's group-by key) must copy
+    # to the SAME new object in both places, or a downstream pass that mutates one
+    # copy (e.g. the binder resolving a FUNCTION's catalog entry) leaves the other
+    # looking unbound. Route through the memo so both slots land on one copy.
+    if isinstance(obj, Node):
+        return (<Node>obj).copy(memo)
     # hasattr is intentional here: _inner_copy handles arbitrary user objects
     # stored in node properties that implement .copy() (e.g. custom attribute types).
     # No known type can be checked statically, so this is an approved exception to §9.
@@ -137,12 +144,28 @@ cdef class Node:
             node_type_str = node_type_str[20:]
         return f"<Node type={node_type_str}>"
 
-    cpdef Node copy(self):
-        cdef Node new_node = Node(self.node_type)
+    cpdef Node copy(self, dict memo=None):
+        """
+        Deep-copy the node. `memo` maps id(original) -> copy and must be threaded
+        through a whole copy operation (e.g. Graph.copy() copying every node in a
+        plan) so a Node referenced from more than one place is copied once and
+        both places get the SAME new object — see `_inner_copy`.
+        """
+        cdef Node new_node
         cdef object key, value
+        cdef object obj_id
+
+        if memo is None:
+            memo = {}
+        obj_id = id(self)
+        if obj_id in memo:
+            return memo[obj_id]
+
+        new_node = Node(self.node_type)
+        memo[obj_id] = new_node
 
         for key, value in self._properties.items():
-            new_node._properties[key] = _inner_copy(value)
+            new_node._properties[key] = _inner_copy(value, memo)
 
         new_node.uuid = self.uuid
         return new_node

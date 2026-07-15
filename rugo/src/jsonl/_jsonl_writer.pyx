@@ -2,7 +2,7 @@
 # distutils: language = c++
 #
 # Native JSONL writer: Morsel -> bytes (one JSON object per line).
-# No pyarrow; all value formatting is in C++ (_value_format.hpp).
+# No pyarrow; all value formatting is in C++ (draken/interop/value_format.hpp).
 
 from libc.stdint cimport uint8_t, uint32_t, int32_t
 from libc.stddef cimport size_t
@@ -16,7 +16,7 @@ from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
 
-cdef extern from "_value_format.hpp" namespace "rugo_text":
+cdef extern from "interop/value_format.hpp" namespace "rugo_text":
     void json_string(string& out, const char* s, size_t n)
 
 cdef extern from "_text_render.hpp" namespace "rugo_text":
