@@ -16,9 +16,10 @@
 #if defined(__riscv) && defined(__riscv_vector)
 #include <riscv_vector.h>
 
-char* bintob16_rvv(char* restrict dest, const void* restrict src, size_t size) {
+char* bintob16_rvv_lut(char* restrict dest, const void* restrict src, size_t size,
+                       const char* restrict lut) {
     if (size < 16) {
-        return bintob16_scalar(dest, src, size);
+        return bintob16_scalar_lut(dest, src, size, lut);
     }
 
     const uint8_t* in  = (const uint8_t*)src;
@@ -32,8 +33,8 @@ char* bintob16_rvv(char* restrict dest, const void* restrict src, size_t size) {
         vuint8m1_t lo = __riscv_vand_vx_u8m1(v, 0x0F, vl);        /* low  nibble: 0..15 */
 
         /* Gather ASCII hex digit for each nibble from the 16-entry LUT. */
-        vuint8m1_t hi_ascii = __riscv_vloxei8_v_u8m1((const uint8_t*)B16_ENCODE_LUT, hi, vl);
-        vuint8m1_t lo_ascii = __riscv_vloxei8_v_u8m1((const uint8_t*)B16_ENCODE_LUT, lo, vl);
+        vuint8m1_t hi_ascii = __riscv_vloxei8_v_u8m1((const uint8_t*)lut, hi, vl);
+        vuint8m1_t lo_ascii = __riscv_vloxei8_v_u8m1((const uint8_t*)lut, lo, vl);
 
         /* Interleaved store: out[2i] = hi_ascii[i], out[2i+1] = lo_ascii[i] */
         vuint8m1x2_t outv = __riscv_vundefined_u8m1x2();
@@ -46,7 +47,11 @@ char* bintob16_rvv(char* restrict dest, const void* restrict src, size_t size) {
         size -= vl;
     }
 
-    return bintob16_scalar((char*)out, in, size);
+    return bintob16_scalar_lut((char*)out, in, size, lut);
+}
+
+char* bintob16_rvv(char* restrict dest, const void* restrict src, size_t size) {
+    return bintob16_rvv_lut(dest, src, size, B16_ENCODE_LUT);
 }
 
 void* b16tobin_rvv(void* restrict dest, const char* restrict src, size_t len) {
@@ -96,6 +101,10 @@ void* b16tobin_rvv(void* restrict dest, const char* restrict src, size_t len) {
 
 #else  /* no __riscv_vector */
 
+char* bintob16_rvv_lut(char* restrict dest, const void* restrict src, size_t size,
+                       const char* restrict lut) {
+    return bintob16_scalar_lut(dest, src, size, lut);
+}
 char* bintob16_rvv(char* restrict dest, const void* restrict src, size_t size) {
     return bintob16_scalar(dest, src, size);
 }

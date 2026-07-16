@@ -67,6 +67,11 @@ extern "C" void draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr) {
     }
 }
 
+extern "C" int draken_frame_arena_contains(const DrakenFrameArena* arena, const void* ptr) {
+    if (arena == nullptr || ptr == nullptr) return 0;
+    return std::find(arena->ptrs.begin(), arena->ptrs.end(), ptr) != arena->ptrs.end() ? 1 : 0;
+}
+
 extern "C" size_t draken_frame_arena_size(const DrakenFrameArena* arena) {
     if (arena == nullptr) return 0;
     return arena->ptrs.size();

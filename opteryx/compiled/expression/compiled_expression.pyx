@@ -33,7 +33,7 @@ import decimal as _decimal
 import struct as _struct
 
 from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 
@@ -150,6 +150,15 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         # INTERVAL Vector so the temporal arithmetic kernels receive a real vector
         # rather than a raw Python tuple.
         return Vector(_draken_native.vector_interval_from_constant(value, 1))
+    if physical_type == <int>DRAKEN_VECTOR_FP16:
+        # CAST(<array literal> AS VECTOR(n)) folds to a VECTOR-typed literal whose
+        # value is the element list — a genuine scalar (ONE vector), not an in-list
+        # collection, exactly like INTERVAL's tuple above. One row in, so the result is
+        # the constant-shape (data_length==1) vector the cosine kernels read via the
+        # uniform data[selection[i]]. The width is the row's own length: the fold in
+        # _cast_literal_value already checked it against the DECLARED VECTOR(n).
+        return Vector(
+            _draken_native.vector_fp16_from_sequence([list(value)], len(value)))
     if isinstance(value, _datetime.date) and not isinstance(value, _datetime.datetime):
         ordinal = (value - _EPOCH_DATE).days
         int_vec = _draken_native.vector_from_constant(ordinal, 1)
@@ -342,36 +351,100 @@ cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr"
 cdef dict _TRUNC_PARTS = {"SECOND": 1, "MINUTE": 2, "HOUR": 3, "DAY": 4,
                           "WEEK": 5, "MONTH": 6, "QUARTER": 7, "YEAR": 8}
 
+# draken_datediff/draken_timediff bind-time diff-kind ids (kernel contract —
+# date_diff_batch, draken/ops/temporal_arith.h; singular/plural, case-insensitive).
+cdef dict _DIFF_PARTS = {
+    "MICROSECOND": 0, "MICROSECONDS": 0, "MILLISECOND": 1, "MILLISECONDS": 1,
+    "SECOND": 2, "SECONDS": 2, "MINUTE": 3, "MINUTES": 3, "HOUR": 4, "HOURS": 4,
+    "DAY": 5, "DAYS": 5, "WEEK": 6, "WEEKS": 6, "MONTH": 7, "MONTHS": 7,
+    "QUARTER": 8, "QUARTERS": 8, "YEAR": 9, "YEARS": 9,
+}
+# TIMEDIFF hardcodes 'hours' (matches the nanobind dispatch_time_diff reference).
+DEF _TIMEDIFF_DIFF_KIND = 4
+
+# draken_time_bucket bind-time unit-kind ids (kernel contract — function_temporal.cpp).
+cdef dict _BUCKET_UNITS = {
+    "SECOND": 1, "SECONDS": 1, "MINUTE": 2, "MINUTES": 2,
+    "HOUR": 3, "HOURS": 3, "DAY": 4, "DAYS": 4,
+}
+
+
+def _pack_membership_blob(vals, int kind, int negate):
+    """Serialize a value collection into the in_list_ctx blob — the kernel contract
+    in kernel_context.h: [u32 count][u8 kind][u8 negate][u16 pad][payload].
+
+    kind 0 payload is int64 SORTED ASCENDING (draken_in_list binary-searches it, so
+    the sortedness is load-bearing, not cosmetic); kind 1 is (u32 len + bytes)
+    entries. Shared by the IN-list lowering and the ARRAY_CONTAINS_ANY/ALL lowering
+    so the two cannot drift on either the byte format or that sort invariant.
+    Duplicates are collapsed (set()) — membership is unaffected, and for
+    ARRAY_CONTAINS_ALL a de-duplicated needle set is exactly the subset test.
+    """
+    import struct as _struct
+
+    if kind == 0:
+        items = sorted(set(int(v) for v in vals))
+        blob = _struct.pack("<IBBH", len(items), 0, negate, 0)
+        return blob + b"".join(_struct.pack("<q", v) for v in items)
+    entries = sorted(set(
+        v.encode("utf-8") if isinstance(v, str) else bytes(v) for v in vals))
+    blob = _struct.pack("<IBBH", len(entries), 1, negate, 0)
+    for e in entries:
+        blob += _struct.pack("<I", len(e)) + e
+    return blob
+
+
+def _membership_values(values):
+    """Common shape gate for both membership blob builders: a plain literal
+    collection, non-empty, no NULLs (three-valued semantics the blob cannot
+    carry). Returns the value list, or None to keep the caller on the Python path.
+    CarcharSet / PerfectHashSet wrappers are not literal collections → None."""
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return None
+    vals = list(values)
+    if len(vals) == 0 or any(v is None for v in vals):
+        return None
+    return vals
+
 
 def _build_in_list_blob(values, left_type, int negate):
     """Serialize a literal IN-list into the in_list_ctx blob (kernel contract —
     kernel_context.h). Returns None when the list shape is outside the kernel's
     contract (NULL entries, mixed/unsupported types) — caller falls through."""
-    import struct as _struct
-
-    if isinstance(values, (list, tuple, set, frozenset)):
-        vals = list(values)
-    else:
-        return None   # CarcharSet / PerfectHashSet wrappers stay on the Python path
-    if len(vals) == 0 or any(v is None for v in vals):
+    vals = _membership_values(values)
+    if vals is None:
         return None
     phys = ""
     if left_type is not None and left_type.physical is not None:
         phys = getattr(left_type.physical, "name", "")
     if phys in ("INT8", "INT16", "INT32", "INT64") and all(
             isinstance(v, int) and not isinstance(v, bool) for v in vals):
-        items = sorted(set(int(v) for v in vals))
-        blob = _struct.pack("<IBBH", len(items), 0, negate, 0)
-        return blob + b"".join(_struct.pack("<q", v) for v in items)
+        return _pack_membership_blob(vals, 0, negate)
     if phys in ("VARCHAR", "NVARCHAR") and all(
             isinstance(v, (str, bytes)) for v in vals):
-        entries = sorted(set(
-            v.encode("utf-8") if isinstance(v, str) else bytes(v) for v in vals))
-        blob = _struct.pack("<IBBH", len(entries), 1, negate, 0)
-        for e in entries:
-            blob += _struct.pack("<I", len(e)) + e
-        return blob
+        return _pack_membership_blob(vals, 1, negate)
     return None
+
+
+def _build_array_membership_blob(values):
+    """ARRAY_CONTAINS_ANY/ALL needle set → in_list_ctx blob (negate always 0; the
+    ANY/ALL distinction is the KERNEL, not a blob flag).
+
+    Unlike _build_in_list_blob there is no column type to gate on: the binder
+    leaves ARRAY columns UNTYPED (schema_column.column_type is None — see the
+    ARRAY->VARCHAR cast's comment), so the element type is simply not knowable
+    here. The blob kind is therefore inferred from the LITERAL values, and the
+    kernel verifies it against the actual child element type at RUN time, failing
+    loud on a mismatch (e.g. ARRAY_CONTAINS_ANY(int_array, ('a','b'))) rather
+    than silently answering false."""
+    vals = _membership_values(values)
+    if vals is None:
+        return None
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in vals):
+        return _pack_membership_blob(vals, 0, 0)
+    if all(isinstance(v, (str, bytes)) for v in vals):
+        return _pack_membership_blob(vals, 1, 0)
+    return None   # mixed / unsupported literal types stay on the Python path
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
 
@@ -557,8 +630,22 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
     # String concat over SAME-type string columns (VARCHAR/NVARCHAR/VARBINARY).
     # Mixed/non-string operands stay on the closure (which coerces) — the kernel
     # only sees string||string of one type, result type = that type.
+    #
+    # An untyped NULL operand (`x || NULL`, `NULL || x`) is also C-native: the
+    # kernel short-circuits it to an all-NULL column of the string operand's type
+    # (DuckDB semantics), which is what the binder now types the result as. This
+    # MUST be admitted rather than left to the closure — the closure is not a
+    # fallback the hard-cutover native engine can reach, so refusing it here is a
+    # plan-time NotSupportedError, not a slow path. NULL || NULL is NOT admitted:
+    # there is no string operand whose type the result could adopt.
     if op_code == BOP_STRING_CONCAT:
-        return left_phys in _BINOP_NATIVE_STRING and left_phys == right_phys
+        if left_phys in _BINOP_NATIVE_STRING and left_phys == right_phys:
+            return True
+        if left_phys == "NULL" and right_phys in _BINOP_NATIVE_STRING:
+            return True
+        if right_phys == "NULL" and left_phys in _BINOP_NATIVE_STRING:
+            return True
+        return False
     return False
 
 # Unary op string → BCUnaryOpCode. Built once at module load.
@@ -754,6 +841,15 @@ cdef Py_ssize_t _linearize(
                 slot.opcode = BC_LOAD_LIT_SET
                 bc._hold(value_obj)
                 slot.literal_obj = <PyObject*>value_obj
+            elif node.physical_type == <int>DRAKEN_VECTOR_FP16:
+                # A VECTOR literal's value is a list of floats, but it is ONE vector,
+                # not a membership set — it must precede the list/tuple in-list branch
+                # below for the same reason INTERVAL does, or it would be pushed as a
+                # raw Python object and fall out of the c-native set.
+                const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                slot.opcode = BC_LOAD_LIT_CONST
+                bc._hold(const_lit)
+                slot.literal_obj = <PyObject*>const_lit
             elif node.physical_type == <int>DRAKEN_INTERVAL:
                 # INTERVAL literal — its value is a (months, microseconds) tuple,
                 # but it is a genuine scalar, not an in-list collection. Materialise
@@ -1262,6 +1358,13 @@ cdef Py_ssize_t _linearize(
             )
         callable_obj = func_ref_meta.selected_overload.kernel.callable_ref
 
+        # Every arm below keys off the function name — kernel lookup by
+        # `draken_{name}`, and the _sub_/_affix_/_tr_/_extr_ lowering maps. node.value is
+        # the name as parsed, so an alias (CEIL, SUBSTR, UCASE, ...) misses every one of
+        # them and silently takes the Python callable_ref. The catalog canonicalised the
+        # name during resolution; take it from there.
+        func_val = func_ref_meta.function_definition.name
+
         # SUBSTRING(str, start[, count]) / LEFT(str, n) / RIGHT(str, n) — all lower to
         # the one draken_substring kernel (LEFT = start 1 count n; RIGHT = start -n to
         # end). start/count are LITERALS consumed into a substring_ctx; only the string
@@ -1427,6 +1530,238 @@ cdef Py_ssize_t _linearize(
                     # gate on BC_INSTR_C_NATIVE before reading callable_ref).
                     return sub_depth   # operand pushed, fn pops 1 pushes 1 — net +1
 
+        # DATEDIFF(part, start, end) / DATE_DIFF — bind-time lowering to the C-ABI
+        # draken_datediff kernel. `part` is a LITERAL, consumed HERE (never
+        # pushed); diff-kind id + BOTH operands' TimestampUnit travel in a
+        # binary_op_ctx (op_code=diff_kind, left_unit/right_unit — the same
+        # vehicle draken_date_part/draken_date_trunc use). start/end are pushed.
+        _dd_func = func_val.upper() if func_val else ""
+        if _dd_func == "DATEDIFF" and n == 3 \
+                and node.parameters[0] != NULL \
+                and node.parameters[0].node_type == _NT_LITERAL \
+                and node.parameters[1] != NULL and node.parameters[2] != NULL \
+                and node.parameters[1].schema_column != NULL \
+                and node.parameters[2].schema_column != NULL:
+            _dd_part_val = <object>node.parameters[0].value
+            if isinstance(_dd_part_val, bytes):
+                _dd_part_val = _dd_part_val.decode("utf-8")
+            _dd_kind = _DIFF_PARTS.get(str(_dd_part_val).upper(), -1) if isinstance(_dd_part_val, str) else -1
+            _dd_s_sc = <object>node.parameters[1].schema_column
+            _dd_e_sc = <object>node.parameters[2].schema_column
+            _dd_s_ct = getattr(_dd_s_sc, "column_type", None)
+            _dd_e_ct = getattr(_dd_e_sc, "column_type", None)
+            _dd_s_phys = getattr(getattr(_dd_s_ct, "physical", None), "name", "")
+            _dd_e_phys = getattr(getattr(_dd_e_ct, "physical", None), "name", "")
+            if _dd_kind >= 0 and _dd_s_phys in ("DATE32", "TIMESTAMP64") \
+                    and _dd_e_phys in ("DATE32", "TIMESTAMP64"):
+                _dd_lu = _binop_ts_unit(_dd_s_ct)
+                _dd_ru = _binop_ts_unit(_dd_e_ct)
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _dd_alloc
+                _dd_fn, _dd_ctx = _resolve_kernel_and_context(
+                    "draken_datediff", _dd_alloc, (_dd_kind, 0, 0, 0, 0, _dd_lu, _dd_ru))
+                if _dd_fn is not None:
+                    sub_depth = _linearize(node.parameters[1], bc, depth)
+                    sub_depth = _linearize(node.parameters[2], bc, sub_depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 2
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE
+                    slot.kernel_fn = <void*>(<unsigned long long>_dd_fn)
+                    if _dd_ctx is not None:
+                        bc._hold(_dd_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_dd_ctx.ctx_ptr)
+                    return sub_depth - 2 + 1
+
+        # TIMEDIFF(time1, time2) / TIME_DIFF — DATEDIFF with diff-kind hardcoded to
+        # hours at bind time (same binary_op_ctx vehicle; see the nanobind
+        # dispatch_time_diff reference this mirrors).
+        _td_func = func_val.upper() if func_val else ""
+        if _td_func == "TIMEDIFF" and n == 2 \
+                and node.parameters[0] != NULL and node.parameters[1] != NULL \
+                and node.parameters[0].schema_column != NULL \
+                and node.parameters[1].schema_column != NULL:
+            _td_1_sc = <object>node.parameters[0].schema_column
+            _td_2_sc = <object>node.parameters[1].schema_column
+            _td_1_ct = getattr(_td_1_sc, "column_type", None)
+            _td_2_ct = getattr(_td_2_sc, "column_type", None)
+            _td_1_phys = getattr(getattr(_td_1_ct, "physical", None), "name", "")
+            _td_2_phys = getattr(getattr(_td_2_ct, "physical", None), "name", "")
+            if _td_1_phys in ("DATE32", "TIMESTAMP64") and _td_2_phys in ("DATE32", "TIMESTAMP64"):
+                _td_lu = _binop_ts_unit(_td_1_ct)
+                _td_ru = _binop_ts_unit(_td_2_ct)
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _td_alloc
+                _td_fn, _td_ctx = _resolve_kernel_and_context(
+                    "draken_timediff", _td_alloc, (_TIMEDIFF_DIFF_KIND, 0, 0, 0, 0, _td_lu, _td_ru))
+                if _td_fn is not None:
+                    sub_depth = _linearize(node.parameters[0], bc, depth)
+                    sub_depth = _linearize(node.parameters[1], bc, sub_depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 2
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE
+                    slot.kernel_fn = <void*>(<unsigned long long>_td_fn)
+                    if _td_ctx is not None:
+                        bc._hold(_td_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_td_ctx.ctx_ptr)
+                    return sub_depth - 2 + 1
+
+        # UNIXTIME(date) / TO_UNIXTIME — bind-time lowering to the C-ABI
+        # draken_unixtime kernel. ctx = binary_op_ctx{left_unit=operand
+        # TimestampUnit} (op_code unused) — NOT cast_timestamp_ctx, whose `unit`
+        # field uses a different numbering (see function_temporal.cpp header).
+        _ut_func = func_val.upper() if func_val else ""
+        if _ut_func == "UNIXTIME" and n == 1 \
+                and node.parameters[0] != NULL and node.parameters[0].schema_column != NULL:
+            _ut_sc = <object>node.parameters[0].schema_column
+            _ut_ct = getattr(_ut_sc, "column_type", None)
+            _ut_phys = getattr(getattr(_ut_ct, "physical", None), "name", "")
+            if _ut_phys in ("DATE32", "TIMESTAMP64"):
+                _ut_unit = _binop_ts_unit(_ut_ct)
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _ut_alloc
+                _ut_fn, _ut_ctx = _resolve_kernel_and_context(
+                    "draken_unixtime", _ut_alloc, (0, 0, 0, 0, 0, _ut_unit, 0))
+                if _ut_fn is not None:
+                    sub_depth = _linearize(node.parameters[0], bc, depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 1
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE
+                    slot.kernel_fn = <void*>(<unsigned long long>_ut_fn)
+                    if _ut_ctx is not None:
+                        bc._hold(_ut_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_ut_ctx.ctx_ptr)
+                    return sub_depth
+
+        # TIME_BUCKET(magnitude, units, date) — bind-time lowering to the C-ABI
+        # draken_time_bucket kernel. `magnitude` and `units` are effectively
+        # bind-time (only lowered when magnitude is ALSO a literal — the
+        # ParameterSpec allows a column, matching the SUBSTRING(start,...)
+        # precedent of only lowering the literal-args case); both are consumed
+        # into a time_bucket_ctx (kernel_context.h) — only `date` is pushed.
+        # TIME_BUCKET's catalog return type is TIMESTAMP-only (no DATE32 input).
+        _tb_func = func_val.upper() if func_val else ""
+        if _tb_func == "TIME_BUCKET" and n == 3 \
+                and node.parameters[0] != NULL and node.parameters[1] != NULL \
+                and node.parameters[2] != NULL \
+                and node.parameters[0].node_type == _NT_LITERAL \
+                and node.parameters[1].node_type == _NT_LITERAL \
+                and node.parameters[2].schema_column != NULL:
+            _tb_mag_val = <object>node.parameters[0].value
+            _tb_units_val = <object>node.parameters[1].value
+            if isinstance(_tb_units_val, bytes):
+                _tb_units_val = _tb_units_val.decode("utf-8")
+            # Only lower an exactly-integral magnitude — a fractional float would
+            # silently truncate under int() here while the Python reference path
+            # (nb::cast<int64_t>) rejects it outright; don't drift from that.
+            _tb_mag_ok = (isinstance(_tb_mag_val, int) and not isinstance(_tb_mag_val, bool)) \
+                or (isinstance(_tb_mag_val, float) and _tb_mag_val.is_integer())
+            _tb_kind = (_BUCKET_UNITS.get(str(_tb_units_val).upper(), 0)
+                        if isinstance(_tb_units_val, str) else 0)
+            if _tb_mag_ok and int(_tb_mag_val) > 0 and _tb_kind != 0:
+                _tb_sc = <object>node.parameters[2].schema_column
+                _tb_ct = getattr(_tb_sc, "column_type", None)
+                _tb_phys = getattr(getattr(_tb_ct, "physical", None), "name", "")
+                if _tb_phys == "TIMESTAMP64" and _tb_ct.logical is not None:
+                    _tb_unit = int(_tb_ct.logical.unit.value)
+                    from draken.ops.kernels._kernel_registry import alloc_time_bucket_ctx as _tb_alloc
+                    _tb_fn, _tb_ctx = _resolve_kernel_and_context(
+                        "draken_time_bucket", _tb_alloc, (int(_tb_mag_val), _tb_kind, _tb_unit))
+                    if _tb_fn is not None:
+                        sub_depth = _linearize(node.parameters[2], bc, depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 1
+                        slot.bool_value = 0
+                        slot.flags = BC_INSTR_C_NATIVE
+                        slot.kernel_fn = <void*>(<unsigned long long>_tb_fn)
+                        if _tb_ctx is not None:
+                            bc._hold(_tb_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_tb_ctx.ctx_ptr)
+                        return sub_depth
+
+        # DATE_FORMAT(date, pattern) — bind-time lowering to the C-ABI
+        # draken_date_format kernel. `pattern` is a LITERAL, consumed HERE (never
+        # pushed) into a format_ctx (kernel_context.h: ts_unit + pattern bytes
+        # trailing the struct) — only `date` is pushed. Reuses the SAME compiled
+        # token-program formatter as the nanobind DATE_FORMAT path
+        # (draken/ops/temporal_format.h) — one formatter, not two.
+        _fmt_func = func_val.upper() if func_val else ""
+        if _fmt_func == "DATE_FORMAT" and n == 2 \
+                and node.parameters[0] != NULL and node.parameters[1] != NULL \
+                and node.parameters[0].schema_column != NULL \
+                and node.parameters[1].node_type == _NT_LITERAL:
+            _fmt_pat_val = <object>node.parameters[1].value
+            if isinstance(_fmt_pat_val, str):
+                _fmt_pat_val = _fmt_pat_val.encode("utf-8")
+            if isinstance(_fmt_pat_val, bytes):
+                _fmt_sc = <object>node.parameters[0].schema_column
+                _fmt_ct = getattr(_fmt_sc, "column_type", None)
+                _fmt_phys = getattr(getattr(_fmt_ct, "physical", None), "name", "")
+                if _fmt_phys in ("DATE32", "TIMESTAMP64"):
+                    _fmt_unit = _binop_ts_unit(_fmt_ct)
+                    from draken.ops.kernels._kernel_registry import alloc_format_ctx as _fmt_alloc
+                    _fmt_fn, _fmt_ctx = _resolve_kernel_and_context(
+                        "draken_date_format", _fmt_alloc, (_fmt_unit, _fmt_pat_val))
+                    if _fmt_fn is not None:
+                        sub_depth = _linearize(node.parameters[0], bc, depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 1
+                        slot.bool_value = 0
+                        slot.flags = BC_INSTR_C_NATIVE
+                        slot.kernel_fn = <void*>(<unsigned long long>_fmt_fn)
+                        if _fmt_ctx is not None:
+                            bc._hold(_fmt_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_fmt_ctx.ctx_ptr)
+                        return sub_depth
+
+        # ARRAY_CONTAINS_ANY / ARRAY_CONTAINS_ALL(arr, needles) — bind-time lowering.
+        #
+        # The needle set is a LITERAL, baked into an in_list_ctx blob exactly as the
+        # IN-list lowering does — so it is NOT a second vector operand, and there is
+        # no second ARRAY child to resolve. That matters: the array operand's child
+        # element vector rides the BC_C_NATIVE_CHILD path (same as SORT / the
+        # ARRAY->VARCHAR cast), whose encoding carries exactly ONE column_identity.
+        # Only arity 1 is pushed (the array); the needles reach the kernel via ctx.
+        #
+        # Eligibility is tested BEFORE linearizing: a non-column array operand has no
+        # resolvable child, and once parameters have been linearized there is no
+        # clean way to un-emit them and fall through to the generic path below.
+        # _NT_IDENTIFIER/_NT_EVALUATED/_NT_AGGREGATOR are exactly the node types that
+        # lower to BC_LOAD_COL.
+        _acm_func = func_val.upper() if func_val else ""
+        if _acm_func in ("ARRAY_CONTAINS_ANY", "ARRAY_CONTAINS_ALL") and n == 2 \
+                and node.parameters[0] != NULL and node.parameters[1] != NULL \
+                and node.parameters[1].node_type == _NT_LITERAL \
+                and (node.parameters[0].node_type == _NT_IDENTIFIER
+                     or node.parameters[0].node_type == _NT_EVALUATED
+                     or node.parameters[0].node_type == _NT_AGGREGATOR):
+            _acm_blob = _build_array_membership_blob(<object>node.parameters[1].value)
+            if _acm_blob is not None:
+                from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _acm_alloc
+                _acm_fn, _acm_ctx = _resolve_kernel_and_context(
+                    f"draken_{_acm_func.lower()}", _acm_alloc, _acm_blob)
+                if _acm_fn is not None:
+                    sub_depth = _linearize(node.parameters[0], bc, depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 1
+                    slot.bool_value = 0
+                    slot.flags = (BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                                  | BC_C_NATIVE_CHILD)
+                    slot.kernel_fn = <void*>(<unsigned long long>_acm_fn)
+                    # The child is resolved per morsel from THIS instruction's
+                    # identity; bc.count - 2 is the BC_LOAD_COL just linearized.
+                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                    if _acm_ctx is not None:
+                        bc._hold(_acm_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_acm_ctx.ctx_ptr)
+                    # No callable_ref: c-native, no Python fallback.
+                    return sub_depth   # operand pushed, fn pops 1 pushes 1 — net +1
+
         sub_depth = depth
         for i in range(n):
             if node.parameters[i] == NULL:
@@ -1453,6 +1788,20 @@ cdef Py_ssize_t _linearize(
             if _irt is not None and _irt.category is _LogicalCategory_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
+        # A VECTOR result's byte width is dimension*2 — per-column metadata, not a
+        # function of DrakenType, so the span's fixed-width table cannot size it.
+        # Record the bind-time declared width here; _dv_eval_span_cxx reads it off the
+        # root instruction to materialize the result. Any VECTOR-returning kernel gets
+        # this for free — nothing here is EMBED-specific.
+        _fn_vec_dim = 0
+        _fn_rt = func_ref_meta.inferred_return_type
+        if _fn_rt is not None and _fn_rt.logical is not None \
+                and getattr(_fn_rt.physical, "name", "") == "VECTOR_FP16":
+            _fn_rt_dim = getattr(_fn_rt.logical, "dimension", None)
+            if _fn_rt_dim is not None and int(_fn_rt_dim) > 0:
+                _fn_vec_dim = int(_fn_rt_dim)
+                slot.vec_dimension = <int32_t>_fn_vec_dim
+
         # Phase 9b: Resolve C kernel function pointer for function calls.
         # Function kernels (Phase 9a-fn) are under development; resolution is optional.
         # If a C kernel exists, use it; otherwise, fall back to Python callable_ref.
@@ -1462,8 +1811,9 @@ cdef Py_ssize_t _linearize(
             # Scalar functions over a DECIMAL operand need the operand's scale — a
             # LogicalType detail the DrakenVector cannot carry — via a bind-time ctx
             # (binary_op_ctx, the same vehicle the decimal binops use):
-            #   ROUND/FLOOR/CEILING/CEIL — round EXACTLY in the raw int64 domain.
-            #   SQRT                     — needs the VALUE, not the unscaled int64.
+            #   ROUND/FLOOR/CEILING/CEIL/TRUNC — round/truncate EXACTLY in the raw
+            #                              int64 domain.
+            #   SQRT/POWER/LOG           — need the VALUE, not the unscaled int64.
             #   ABS                      — |unscaled| is scale-free arithmetic, but the
             #                              result is DECIMAL(p, s) and the kernel stamps
             #                              that descriptor onto the VecResult, so it has
@@ -1471,9 +1821,13 @@ cdef Py_ssize_t _linearize(
             #                              hence result == operand descriptor.
             # SIGN is absent on purpose: it returns INTEGER and sign(unscaled) ==
             # sign(value), so it is scale-invariant end to end and takes no ctx.
+            # POWER/LOG take a SECOND operand (exponent/base); this ctx only ever
+            # carries parameters[0]'s scale (left_scale) — a DECIMAL second operand
+            # still has no scale to read and the kernel fails loud on it.
             _fn_ctx_alloc = None
             _fn_ctx_arg = None
-            if func_name in ("ROUND", "FLOOR", "CEILING", "CEIL", "SQRT", "ABS") and n >= 1 \
+            if func_name in ("ROUND", "FLOOR", "CEILING", "CEIL", "SQRT", "ABS",
+                              "TRUNC", "POWER", "LOG") and n >= 1 \
                     and node.parameters[0] != NULL \
                     and node.parameters[0].schema_column != NULL:
                 _fn_p0_sc = <object>node.parameters[0].schema_column
@@ -1488,8 +1842,150 @@ cdef Py_ssize_t _linearize(
                                        _fn_dec_sc, _binop_dec_precision(_fn_p0_ct), 0, 0)
                     else:
                         _fn_ctx_arg = (0, _fn_dec_sc, 0, 0, 0, 0, 0)
-            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
-                f"draken_{func_name.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
+            # TRUNC is overloaded in the catalog — TRUNC_numeric (kernel id "numeric",
+            # draken_trunc), TRUNC_date and TRUNC_timestamp (kernel ids "date"/
+            # "timestamp", still Python-only) all share the name "TRUNC". The registry
+            # lookup below resolves by NAME ("draken_trunc"), which cannot distinguish
+            # overloads, so a bare name check would wrongly mark the temporal overloads
+            # C-native too and defer their (currently unavoidable) failure from PLAN
+            # time to RUN time. Gate on the bind-time-selected overload's kernel id so
+            # only TRUNC_numeric is ever offered to the registry.
+            _fn_skip_lookup = (
+                func_name == "TRUNC"
+                and getattr(func_ref_meta.selected_overload.kernel, "id", None) != "numeric"
+            )
+            # DATEDIFF/TIMEDIFF/UNIXTIME/TIME_BUCKET/DATE_FORMAT are ONLY ever
+            # correct via their dedicated lowering arms above (binary_op_ctx/
+            # time_bucket_ctx/format_ctx built from the operands' TimestampUnit —
+            # a days-vs-micros mixup is a wrong-answer bug, not a missing
+            # optimization). Their kernel names now exist in the registry, so
+            # this generic name-only lookup would otherwise ALSO match them —
+            # with no ctx and arity=n (all params, including the part/pattern
+            # LITERAL the dedicated arm consumes) — and either crash
+            # ("expected N arguments") or read ctx==NULL. When the dedicated arm
+            # didn't fire (its eligibility check failed — e.g. a NULL/untyped
+            # operand), fall through to the Python callable_ref, never here.
+            if func_name in ("DATEDIFF", "TIMEDIFF", "UNIXTIME", "TIME_BUCKET", "DATE_FORMAT"):
+                _fn_skip_lookup = True
+            # SORT(arr): the elements live in the column owner's child vector
+            # (draken_sort reads it exactly like draken_cast_array_to_varchar —
+            # same ARRAY-elements-unreachable-from-DrakenVector* wall). Only a
+            # DIRECT column load has a child to resolve, so an indirect/computed
+            # array argument (e.g. SORT(some_function(x))) is NOT eligible —
+            # force it down the Python callable_ref path rather than dispatch a
+            # kernel that cannot see its own input. bc.instrs[bc.count - 2] is
+            # the arg's terminal instruction (this FUNCTION slot was just
+            # pushed as bc.instrs[bc.count - 1]) — same indexing CAST's
+            # BC_C_NATIVE_CHILD check above uses.
+            _sort_child_eligible = (
+                func_name == "SORT" and n == 1 and bc.count >= 2
+                and bc.instrs[bc.count - 2].opcode == BC_LOAD_COL
+            )
+            if func_name == "SORT" and not _sort_child_eligible:
+                _fn_skip_lookup = True
+            # SORT over ARRAY<TIMESTAMP>: the sorted CHILD is itself a TIMESTAMP64
+            # vector, and a TIMESTAMP64 with no unit descriptor is a hard error
+            # (vector_owner.h). draken_sort cannot read the unit off a
+            # DrakenVector — it is a LogicalType detail — so hand it over at bind
+            # time in binary_op_ctx.left_unit, the same vehicle the temporal binops
+            # use. Element type comes from the schema (ARRAY<TIMESTAMP> since the
+            # _rugo_schema container fix).
+            if _sort_child_eligible and node.parameters[0].schema_column != NULL:
+                _sort_p0_ct = getattr(
+                    <object>node.parameters[0].schema_column, "column_type", None)
+                _sort_el = getattr(_sort_p0_ct, "element", None) if _sort_p0_ct is not None else None
+                if (_sort_el is not None
+                        and getattr(getattr(_sort_el, "physical", None), "name", "") == "TIMESTAMP64"
+                        and _sort_el.logical is not None
+                        and _sort_el.logical.unit is not None):
+                    from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
+                    _fn_ctx_alloc = alloc_binary_op_ctx
+                    _fn_ctx_arg = (0, 0, 0, 0, 0, int(_sort_el.logical.unit.value), 0)
+            # COSINE_SIMILARITY/COSINE_DISTANCE over VECTOR operands: the kernel needs
+            # the operands' VECTOR width. A vector's dimension is a LogicalType detail
+            # and is NOT on the physical DrakenVector, so — exactly like the DECIMAL
+            # scales above — the binder has to hand it over in a ctx. Only the _VECTOR
+            # overload takes one; the _TEXT overload embeds its operands and knows its
+            # own width. Mismatched widths are rejected here, at PLAN time, rather than
+            # producing a garbage score per row.
+            _fn_overload_id = getattr(func_ref_meta.selected_overload, "id", None)
+            if (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
+                    and _fn_overload_id is not None and _fn_overload_id.endswith("_VECTOR")
+                    and n == 2):
+                _cos_dims = []
+                for _cos_i in range(2):
+                    if node.parameters[_cos_i] == NULL \
+                            or node.parameters[_cos_i].schema_column == NULL:
+                        _cos_dims = []
+                        break
+                    _cos_ct = getattr(
+                        <object>node.parameters[_cos_i].schema_column, "column_type", None)
+                    _cos_lg = getattr(_cos_ct, "logical", None) if _cos_ct is not None else None
+                    _cos_d = getattr(_cos_lg, "dimension", None) if _cos_lg is not None else None
+                    if _cos_d is None or int(_cos_d) < 1:
+                        _cos_dims = []
+                        break
+                    _cos_dims.append(int(_cos_d))
+                if len(_cos_dims) == 2 and _cos_dims[0] == _cos_dims[1]:
+                    from draken.ops.kernels._kernel_registry import alloc_vector_dim_ctx
+                    _fn_ctx_alloc = alloc_vector_dim_ctx
+                    _fn_ctx_arg = _cos_dims[0]
+                else:
+                    # No usable width (untyped/mismatched operands) — the kernel cannot
+                    # run without one, and there is no Python fallback on the native
+                    # engine, so let it surface as an unsupported expression.
+                    _fn_skip_lookup = True
+            # The _TEXT overload is "embed both operands, then compare" — the same
+            # question as COSINE_SIMILARITY(EMBED(a), EMBED(b)). It must therefore use
+            # the SAME embedder, so hand it the resolved draken_embed rather than let it
+            # embed for itself: an embedder of its own would be duplicated logic that
+            # silently diverges the moment a capability replaces the core one (observed
+            # with MiniLM installed: the text overload answered 'dog'/'puppy' 0.0
+            # lexically while the EMBED composition answered 0.80).
+            elif (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
+                    and _fn_overload_id is not None and _fn_overload_id.endswith("_TEXT")):
+                from draken.ops.kernels._kernel_registry import (
+                    alloc_cosine_text_ctx, lookup_kernel as _lk_embed)
+                from opteryx.types.vectors.embedding_capability import embedding_dimensions
+                _emb_fn, _emb_unused = _lk_embed("draken_embed")
+                if _emb_fn is None:
+                    # draken_embed is core and always registered; its absence means the
+                    # registry is broken, not that this expression is unsupported.
+                    raise ValueError(
+                        "compiled_expression: draken_embed is not registered — "
+                        "COSINE_SIMILARITY over text cannot be lowered")
+                _fn_ctx_alloc = alloc_cosine_text_ctx
+                _fn_ctx_arg = (int(embedding_dimensions()), _emb_fn)
+            # Any VECTOR-returning function (EMBED today) is TOLD the width the plan
+            # declared for it, and must produce exactly that. The declaration is the
+            # single source of truth: the projection boundary copies rows at the
+            # declared stride, so a kernel-side width constant that drifted from it
+            # would read the wrong bytes rather than fail. This is also the seam a
+            # registered capability plugs into — it declares a width, the binder
+            # records it, and the kernel is handed it.
+            elif _fn_vec_dim > 0:
+                from draken.ops.kernels._kernel_registry import alloc_vector_dim_ctx
+                _fn_ctx_alloc = alloc_vector_dim_ctx
+                _fn_ctx_arg = _fn_vec_dim
+            if _fn_skip_lookup:
+                fn_ptr, ctx_wrapper = None, None
+            else:
+                # Signature-aware resolution: probe the bind-time-selected OVERLOAD's
+                # kernel (draken_{overload_id}) before the bare draken_{name}. A bare
+                # name cannot distinguish overloads, so a name-only registry (the
+                # original scheme) forced every overload of a function onto one kernel —
+                # fine while each ported function had a single native overload, wrong as
+                # soon as two overloads take different operand types and need different
+                # kernels (COSINE_SIMILARITY over VECTOR vs over VARCHAR). Functions with
+                # one overload, or whose overloads genuinely share a kernel, register the
+                # bare name and are unaffected.
+                fn_ptr, ctx_wrapper = None, None
+                if _fn_overload_id:
+                    fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                        f"draken_{_fn_overload_id.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
+                if fn_ptr is None:
+                    fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                        f"draken_{func_name.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
             if fn_ptr is not None:
                 # fn_ptr is a Python int carrying the C address — cast its VALUE,
                 # not the PyObject's address (a bare <void*> on the object stored
@@ -1501,6 +1997,14 @@ cdef Py_ssize_t _linearize(
                     slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
                 # Function kernels generally don't need context structs
                 slot.flags |= BC_INSTR_C_NATIVE
+                if _sort_child_eligible:
+                    # VM resolves the child per morsel via the identity stored on
+                    # THIS instruction (mirrors the ARRAY->VARCHAR cast) and
+                    # appends it as a synthetic extra fargs[] entry — draken_sort
+                    # keeps the plain func_fn_t(ctx, args[], nargs) shape, reading
+                    # args[0]=parent (offsets) / args[1]=child (elements).
+                    slot.flags |= BC_C_NATIVE_CHILD
+                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
             # else: kernel not available yet (pending Phase 9a-fn); callable_ref path remains
 
         bc._hold(callable_obj)
@@ -1640,6 +2144,14 @@ cdef Py_ssize_t _linearize(
                     raise ValueError("CAST to DECIMAL requires (precision, scale)")
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
                 _cn_arg = (0, 0, 0, int(cast_params[1]), int(cast_params[0]), 0, 0)
+            elif _cn[0] in ("draken_cast_decimal_to_string",
+                            "draken_cast_decimal128_to_string"):
+                # DECIMAL → VARCHAR: the SOURCE scale (LogicalType, absent from the
+                # runtime vector) rides in binary_op_ctx.left_scale. Read it off the
+                # bound source ColumnType (source_sql is set for any typed decimal
+                # source — the only way _cn selected this kernel).
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
+                _cn_arg = (0, _binop_dec_scale(source_sql), 0, 0, 0, 0, 0)
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(_cn[0], _cn_alloc, _cn_arg)
             if fn_ptr is not None:
                 slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
@@ -1678,6 +2190,44 @@ cdef Py_ssize_t _linearize(
                 slot.flags |= (BC_INSTR_C_NATIVE | BC_C_NATIVE_STRING
                                | BC_C_NATIVE_CHILD)
                 slot.column_identity = bc.instrs[bc.count - 2].column_identity
+        elif (not cast_is_try and cast_target_type == "VECTOR"
+                and (source_phys_name is None or source_phys_name == "ARRAY")
+                and bc.count >= 2
+                and bc.instrs[bc.count - 2].opcode == BC_LOAD_COL):
+            # CAST(array_column AS VECTOR(n)) — the mirror of the ARRAY->VARCHAR arm
+            # above: the elements hang off the column owner's child vector, reachable
+            # only from a DIRECT column load (hence the preceding-LOAD requirement), so
+            # an indirect/computed array is not eligible and falls out of the c-native
+            # set rather than dispatching a kernel that cannot see its own input.
+            # ARRAY columns are left UNTYPED by the binder, so source None is accepted
+            # and the kernel fails loud on a non-ARRAY parent.
+            #
+            # The width is a plan-time constant the physical vector cannot carry, so it
+            # goes down in a vector_dim_ctx AND onto slot.vec_dimension (which the span
+            # boundary reads off the root instruction to size the result copy). The
+            # binder guarantees it: a bare VECTOR never reaches here.
+            _cv_dim = 0
+            _cv_sc = getattr(cast_py_node, "schema_column", None)
+            _cv_ct = getattr(_cv_sc, "column_type", None) if _cv_sc is not None else None
+            _cv_lg = getattr(_cv_ct, "logical", None) if _cv_ct is not None else None
+            if _cv_lg is not None and getattr(_cv_lg, "dimension", None):
+                _cv_dim = int(_cv_lg.dimension)
+            if _cv_dim > 0:
+                from draken.ops.kernels._kernel_registry import alloc_vector_dim_ctx as _cv_alloc
+                fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                    "draken_cast_array_to_vector", _cv_alloc, _cv_dim)
+                if fn_ptr is not None:
+                    slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
+                    if ctx_wrapper is not None:
+                        bc._hold(ctx_wrapper)
+                        slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
+                    # DESC: VECTOR carries a descriptor (its width) that the arena DV*
+                    # cannot hold; the plan re-attaches it at the projection boundary,
+                    # exactly as DECIMAL/TIMESTAMP results do.
+                    slot.flags |= (BC_INSTR_C_NATIVE | BC_C_NATIVE_DESC
+                                   | BC_C_NATIVE_CHILD)
+                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                    slot.vec_dimension = <int32_t>_cv_dim
 
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel

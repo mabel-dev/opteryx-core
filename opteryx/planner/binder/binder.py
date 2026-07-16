@@ -14,6 +14,7 @@ from opteryx.exceptions import (
     IncompatibleTypesError,
     InvalidInternalStateError,
     UnexpectedDatasetReferenceError,
+    UnsupportedSyntaxError,
 )
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
@@ -691,6 +692,22 @@ def inner_binder(
                 _ct = _lt.DECIMAL(precision, scale)
             elif target_type_name == "ARRAY":
                 _ct = _lt.ARRAY(element_type if element_type is not None else _lt.VARIANT)
+            elif target_type_name == "VECTOR":
+                # CAST(expr AS VECTOR(n)): the width comes from the TYPE's parenthesized
+                # argument, carried in node.parameters (same channel as DECIMAL's
+                # precision/scale). It cannot be inferred: an ARRAY column's row lengths
+                # vary per row and are unknown at bind time, while the plan must fix the
+                # result type — and the projection boundary copies rows at exactly that
+                # stride. So a bare VECTOR is rejected here rather than guessed.
+                _vec_dim = None
+                if node.parameters and node.parameters[0].node_type == NodeType.LITERAL:
+                    _vec_dim = node.parameters[0].value
+                if _vec_dim is None:
+                    raise UnsupportedSyntaxError(
+                        "CAST to VECTOR requires a dimension, e.g. CAST(x AS VECTOR(384)) — "
+                        "a vector's width cannot be inferred from an array column."
+                    )
+                _ct = _lt.VECTOR(int(_vec_dim))
             else:
                 _ct = parse_column_type(target_type_name)
             schema_column = FunctionColumn(

@@ -2211,6 +2211,29 @@ static VectorOwner vecresult_to_owner(VecResult r) {
         lt.scale     = r.dec_scale;
         owner.logical_type = logical_type_intern(lt);
     }
+    // Vector results: attach the width descriptor the kernel set. Mirrors the two
+    // blocks above. A VECTOR_FP16 with no dimension is a hard error downstream
+    // (make_fp16_* enforce dimension >= 1), so fail here — where the producing
+    // kernel is still named — rather than at an opaque readback.
+    if (r.type == DRAKEN_VECTOR_FP16) {
+        if (r.vec_dimension == 0u)
+            throw std::invalid_argument(
+                "vecresult_to_owner: VECTOR_FP16 result requires vec_dimension >= 1");
+        LogicalType lt;
+        lt.kind      = LogicalKind::VECTOR;
+        lt.dimension = r.vec_dimension;
+        owner.logical_type = logical_type_intern(lt);
+    }
+    // ARRAY results: adopt the owned child element VecResult into child_owner.
+    // `data` above owns only the int32_t offsets[length+1]; the elements are the
+    // child. Recursive, so ARRAY<ARRAY<T>> chains; VectorOwner's destructor then
+    // frees the whole subtree. `new`-allocated by the kernel, deleted here — the
+    // VecResult is consumed exactly once, on this path only.
+    if (r.child) {
+        owner.child_owner =
+            std::make_unique<VectorOwner>(vecresult_to_owner(*r.child));
+        delete r.child;
+    }
     return owner;
 }
 
@@ -3220,6 +3243,20 @@ PyObject* draken_vector_own(VecResult res) {
 // unmangled symbol across the .so boundary. Behaviour is identical.
 extern "C" PyObject* draken_vecresult_own_c(VecResult res) {
     return draken_vector_own(res);
+}
+
+// draken_vecresult_child_owner_new_c — see draken_bridge.h. Delegates to the SAME
+// vecresult_to_owner used by draken_vector_own, so a child gets identical
+// TIMESTAMP64/DECIMAL descriptor handling and recursive child adoption — just
+// without the Python-wrapping step.
+extern "C" VectorOwner* draken_vecresult_child_owner_new_c(VecResult res) {
+    return new VectorOwner(vecresult_to_owner(res));
+}
+
+extern "C" void draken_vecresult_discard_c(VecResult* res) {
+    if (res == nullptr) return;
+    { VectorOwner tmp = vecresult_to_owner(*res); }   // RAII frees data/validity/selection/child
+    delete res;
 }
 
 // ---------------------------------------------------------------------------
@@ -4364,10 +4401,27 @@ static nb::object child_elem_to_py(const VectorOwner& child, uint32_t child_idx)
         return nb::none();
     if (child.vec.type == DRAKEN_ARRAY)
         return row_array_to_pylist(child, child_idx);
-    if (child.vec.type == DRAKEN_VARCHAR || child.vec.type == DRAKEN_NVARCHAR)
+    // VARIANT (polymorphic JSON value; German-string storage, buffers.h) renders
+    // to Python as str — same as the top-level scalar `->`/`->>` path (see the
+    // `v.vec.type == DRAKEN_VARIANT -> row_string` case elsewhere in this file).
+    // Pre-existing gap: this array-child renderer had no VARIANT case at all, so
+    // it fell through to row_narrow_int — reinterpreting German-string slot bytes
+    // as a raw int64. Only reachable once an ARRAY<VARIANT> kernel existed
+    // (JSONB_OBJECT_KEYS), so it was dormant rather than previously exercised.
+    if (child.vec.type == DRAKEN_VARCHAR || child.vec.type == DRAKEN_NVARCHAR
+            || child.vec.type == DRAKEN_VARIANT)
         return row_string(child.vec, child_idx);
     if (child.vec.type == DRAKEN_VARBINARY)
         return row_bytes(child.vec, child_idx);
+    // Temporal children render exactly like their scalar counterparts (see the
+    // top-level `v.vec.type == DRAKEN_TIMESTAMP64` case elsewhere in this file).
+    // `child` is a VectorOwner, so the unit descriptor is reachable —
+    // instant_to_py_datetime needs it, and the parquet reader's array-child retag
+    // (vector_retag_array_child_as_timestamp64) is what attaches it.
+    if (child.vec.type == DRAKEN_TIMESTAMP64)
+        return instant_to_py_datetime(row_int64(child.vec, child_idx), child.logical_type);
+    if (child.vec.type == DRAKEN_DATE32)
+        return days_to_py_date(static_cast<int32_t>(row_narrow_int(child.vec, child_idx)));
     if (is_float_type(child.vec.type))
         return nb::cast(row_float(child.vec, child_idx));
     if (child.vec.type == DRAKEN_BOOL)
@@ -9324,6 +9378,112 @@ NB_MODULE(draken_native, m) {
         "(\"s\"/\"ms\"/\"us\"/\"ns\"). MOVES the source's buffers — the source "
         "Vector is emptied and must not be used afterwards; caller must hold the "
         "sole reference.");
+
+    // vector_retag_array_child_as_timestamp64 — the ARRAY twin of the retag above.
+    //
+    // Parquet stores a list<timestamp> leaf as physical int64, and neither the
+    // decoder nor the IPC format carries the logical type, so rugo hands back an
+    // ARRAY whose child is plain INT64 — the timestamp-ness is lost, and the
+    // elements render as raw micros. The scalar case is fixed by the retag above;
+    // this does the same for the CHILD, driven by the same schema-sourced unit.
+    //
+    // IN-PLACE, unlike the scalar retag: only the child's type tag and descriptor
+    // change — the parent's offsets, the child's data/validity/selection and every
+    // ownership edge are untouched, so there is nothing to move and no husk to
+    // empty. The caller keeps the SAME Vector rather than rebinding a new one.
+    m.def("vector_retag_array_child_as_timestamp64",
+        [](nb::object obj, const std::string& unit) {
+            if (obj.is_none() || !nb::isinstance<VectorOwner>(obj))
+                throw std::invalid_argument(
+                    "vector_retag_array_child_as_timestamp64: expected draken Vector");
+            VectorOwner* src = nb::inst_ptr<VectorOwner>(obj);
+            if (src->vec.type != DRAKEN_ARRAY)
+                throw std::invalid_argument(
+                    "vector_retag_array_child_as_timestamp64: requires an ARRAY vector");
+            if (!src->child_owner)
+                throw std::invalid_argument(
+                    "vector_retag_array_child_as_timestamp64: ARRAY has no child vector");
+            // INT64 is the only shape the parquet list decoder produces for a
+            // timestamp leaf. Anything else means the caller's schema and the
+            // decoded data disagree — fail loud rather than mislabel real values.
+            if (src->child_owner->vec.type != DRAKEN_INT64)
+                throw std::invalid_argument(
+                    "vector_retag_array_child_as_timestamp64: requires an INT64 child");
+            src->child_owner->vec.type = DRAKEN_TIMESTAMP64;
+            LogicalType lt;
+            lt.kind = LogicalKind::TIMESTAMP;
+            lt.unit = str_to_unit(unit);
+            lt.offset_minutes = 0;
+            // MANDATORY for TIMESTAMP64 (vector_owner.h): a timestamp vector with
+            // logical_type == nullptr is a hard error downstream.
+            src->child_owner->logical_type = logical_type_intern(lt);
+        },
+        nb::arg("vec"), nb::arg("unit") = std::string("us"),
+        "In-place retag of an ARRAY Vector's INT64 child to TIMESTAMP64 with the "
+        "given unit (\"s\"/\"ms\"/\"us\"/\"ns\"). Mutates the vector passed in; "
+        "returns None.");
+
+    // vector_attach_logical_type — attach a LogicalType descriptor to a vector
+    // whose physical type is ALREADY the target parameterized type (TIMESTAMP64 /
+    // DECIMAL / DECIMAL128 / TIME32 / TIME64), in place. Unlike the retag helpers
+    // above (which also change the physical type tag, INT64 -> X), this is for a
+    // producer that already emits the right physical type but couldn't carry the
+    // descriptor across a boundary that doesn't understand LogicalType — e.g. a
+    // C-ABI function kernel's VecResult (raw domain int64 + descriptor fields),
+    // adopted into a bare DrakenVector* that has no logical_type slot at all (see
+    // _dv_vecresult_adopt_c in evaluation.pyx). The one Python-visible place that
+    // gap surfaces is constant-folding a plan-known expression down to a literal
+    // (constant_folding.py): the fold executes off the DV*/bytecode path and reads
+    // the result back out as a Vector, at a boundary where the schema-declared
+    // ColumnType.logical is already known — exactly the plan-known re-attach point
+    // ExprProjectOperator uses on the runtime path (its `logical` param). Fails
+    // loud on a kind/physical-type mismatch: a mismatched attach would silently
+    // mislabel raw values (the days-vs-micros class of bug), never happen quietly.
+    m.def("vector_attach_logical_type",
+        [](nb::object obj, const LogicalType& lt) {
+            if (obj.is_none() || !nb::isinstance<VectorOwner>(obj))
+                throw std::invalid_argument(
+                    "vector_attach_logical_type: expected draken Vector");
+            VectorOwner* v = nb::inst_ptr<VectorOwner>(obj);
+            switch (lt.kind) {
+                case LogicalKind::TIMESTAMP:
+                    if (v->vec.type != DRAKEN_TIMESTAMP64)
+                        throw std::invalid_argument(
+                            "vector_attach_logical_type: TIMESTAMP descriptor requires "
+                            "a TIMESTAMP64 vector");
+                    break;
+                case LogicalKind::DECIMAL:
+                    if (v->vec.type != DRAKEN_DECIMAL && v->vec.type != DRAKEN_DECIMAL128)
+                        throw std::invalid_argument(
+                            "vector_attach_logical_type: DECIMAL descriptor requires a "
+                            "DECIMAL/DECIMAL128 vector");
+                    break;
+                case LogicalKind::TIME:
+                    if (v->vec.type != DRAKEN_TIME32 && v->vec.type != DRAKEN_TIME64)
+                        throw std::invalid_argument(
+                            "vector_attach_logical_type: TIME descriptor requires a "
+                            "TIME32/TIME64 vector");
+                    break;
+                case LogicalKind::VECTOR:
+                    if (v->vec.type != DRAKEN_VECTOR_FP16)
+                        throw std::invalid_argument(
+                            "vector_attach_logical_type: VECTOR descriptor requires a "
+                            "VECTOR_FP16 vector");
+                    if (lt.dimension < 1)
+                        throw std::invalid_argument(
+                            "vector_attach_logical_type: VECTOR descriptor requires "
+                            "dimension >= 1");
+                    break;
+                default:
+                    throw std::invalid_argument(
+                        "vector_attach_logical_type: unsupported LogicalKind for attach");
+            }
+            v->logical_type = logical_type_intern(lt);
+        },
+        nb::arg("vec"), nb::arg("logical_type"),
+        "Attach a LogicalType descriptor to a vector whose physical type already "
+        "matches the descriptor's kind, in place (mutates; returns None). Fails "
+        "loud on a kind/physical-type mismatch.");
 
     // vector_reinterpret_as_time32 — INT64 vector → TIME32 (int32, unit-tagged).
     // Values are cast to int32 (counts-since-midnight in `unit`).

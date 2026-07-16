@@ -385,6 +385,11 @@ include_dirs = [
     "src/c",
     "draken",  # new draken C++-first headers (quote-include "core/buffers.h")
     "draken/core",  # draken C++ headers, quote-include form (e.g. #include "buffers.h")
+    "third_party/mabel",  # base64.pxd's quote-include form ("base64/_base64.h")
+    "third_party/mabel/base16",  # vendored mabel codecs: the C libraries live at the
+    "third_party/mabel/base64",  # repo root (opteryx-free, so draken kernels and the
+    "third_party/mabel/base85",  # standalone rugo wheel can use them); opteryx's own
+                                 # Cython wrappers stay under opteryx/third_party/mabel.
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
     "third_party/mabel/perfect_hash",
@@ -402,6 +407,7 @@ include_dirs = [
     "third_party/moodycamel",
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
     "third_party/utf8h",  # E.26: sheredom/utf8.h single-header UTF-8 library
+    "third_party/pcg",  # vendored PCG PRNG — RANDOM/NORMAL native kernels
 ]
 
 # Common SIMD / environment C++ sources used by multiple extensions
@@ -631,6 +637,37 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
                 "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
                 "draken/ops/kernels/string_humanize.cpp",  # Phase 9a-fn: HUMANIZE (C ABI)
+                "draken/ops/kernels/function_hash_encoding.cpp",  # Phase 9a-fn: MD5/SHA* (C ABI)
+                "draken/ops/kernels/function_codec.cpp",  # Phase 9a-fn: HEX/BASE64/BASE85 ENCODE/DECODE (C ABI)
+                "draken/ops/kernels/function_array_json.cpp",  # Phase 9a-fn: JSONB_OBJECT_KEYS (C ABI)
+                "draken/ops/kernels/function_temporal.cpp",  # Phase 9a-fn: FROM_UNIXTIME (C ABI)
+                "draken/ops/kernels/function_numeric.cpp",  # Phase 9a-fn: POWER/LOG/TRUNC (C ABI)
+                "draken/ops/kernels/function_string_extra.cpp",  # Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII (C ABI)
+                "draken/ops/kernels/function_null_conditional.cpp",  # Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (C ABI)
+                "draken/ops/kernels/function_vector_distance.cpp",  # Phase 9a-fn: EMBED/COSINE_SIMILARITY/COSINE_DISTANCE (C ABI)
+                # Vendored digest cores backing function_hash_encoding.cpp. Headers are
+                # already on include_dirs ("third_party/crypto"); the impls must be
+                # listed here or the kernels fail to link.
+                "third_party/crypto/md5.cpp",
+                "third_party/crypto/sha1.cpp",
+                "third_party/crypto/sha2.cpp",
+                "third_party/crypto/sha512.cpp",
+                # Vendored mabel base16 (digest->hex via bintob16_lower, and
+                # function_codec.cpp's HEX_ENCODE/DECODE; unity build, _base16.c
+                # #includes the dispatch + per-arch SIMD sources — only _base16.c
+                # goes on the source list, see third_party/mabel/base16/_base16.c).
+                "third_party/mabel/base16/_base16.c",
+                # Vendored mabel base64 backing function_codec.cpp's BASE64_ENCODE/
+                # DECODE (NOT a unity build: list every per-arch source, matching
+                # setup.py's opteryx.third_party.mabel.base64 extension).
+                "third_party/mabel/base64/_base64.c",
+                "third_party/mabel/base64/_base64_dispatch.c",
+                "third_party/mabel/base64/_base64_neon.c",
+                "third_party/mabel/base64/_base64_avx2.c",
+                "third_party/mabel/base64/_base64_rvv.c",
+                # Vendored mabel base85 (scalar-only by design) backing
+                # function_codec.cpp's BASE85_ENCODE/DECODE.
+                "third_party/mabel/base85/_base85.c",
                 # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
@@ -692,6 +729,27 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
                 "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
                 "draken/ops/kernels/string_humanize.cpp",  # Phase 9a-fn: HUMANIZE (C ABI)
+                "draken/ops/kernels/function_hash_encoding.cpp",  # Phase 9a-fn: MD5/SHA* (C ABI)
+                "draken/ops/kernels/function_codec.cpp",  # Phase 9a-fn: HEX/BASE64/BASE85 ENCODE/DECODE (C ABI)
+                "draken/ops/kernels/function_array_json.cpp",  # Phase 9a-fn: JSONB_OBJECT_KEYS (C ABI)
+                "draken/ops/kernels/function_temporal.cpp",  # Phase 9a-fn: FROM_UNIXTIME (C ABI)
+                "draken/ops/kernels/function_numeric.cpp",  # Phase 9a-fn: POWER/LOG/TRUNC (C ABI)
+                "draken/ops/kernels/function_string_extra.cpp",  # Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII (C ABI)
+                "draken/ops/kernels/function_null_conditional.cpp",  # Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (C ABI)
+                "draken/ops/kernels/function_vector_distance.cpp",  # Phase 9a-fn: EMBED/COSINE_SIMILARITY/COSINE_DISTANCE (C ABI)
+                # Vendored digest cores backing function_hash_encoding.cpp (see above).
+                "third_party/crypto/md5.cpp",
+                "third_party/crypto/sha1.cpp",
+                "third_party/crypto/sha2.cpp",
+                "third_party/crypto/sha512.cpp",
+                "third_party/mabel/base16/_base16.c",
+                # Vendored mabel base64/base85 backing function_codec.cpp (see above).
+                "third_party/mabel/base64/_base64.c",
+                "third_party/mabel/base64/_base64_dispatch.c",
+                "third_party/mabel/base64/_base64_neon.c",
+                "third_party/mabel/base64/_base64_avx2.c",
+                "third_party/mabel/base64/_base64_rvv.c",
+                "third_party/mabel/base85/_base85.c",
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
                 "src/cpp/cpu_features.cpp",
@@ -700,7 +758,13 @@ def draken_rugo_extensions(parquet_created_by):
                 # extraction.cpp's `->`/`->>` kernels parse with yyjson.
                 "third_party/yyjson/src/yyjson.c",
             ],
-            include_dirs=include_dirs,
+            include_dirs=include_dirs
+            + [
+                # function_vector_distance.cpp -> core/fp16.h -> <fp16/fp16.h>.
+                # draken_native already carries this; the two extensions compile the
+                # same kernel sources, so they need the same include set.
+                "third_party/usearch/fp16/include",
+            ],
             extra_compile_args=CPP_FLAGS,
             extra_link_args=LD_EXTRA,
             language="c++",

@@ -137,6 +137,83 @@ struct substring_ctx {
 struct substring_ctx* kernel_alloc_substring_ctx(int32_t start, int32_t count,
                                                  uint8_t has_count);
 
+/**
+ * Context for draken_time_bucket — TIME_BUCKET(magnitude, units, date).
+ * magnitude/units are bind-time (literal) operands, consumed here rather than
+ * pushed as vector operands; only the `date` operand is pushed. unit_kind
+ * selects the calendar-free bucket period (seconds/minutes/hours/days — the
+ * same subset vector_floor_temporal supports); ts_unit is the TIMESTAMP64
+ * operand's TimestampUnit (0=s,1=ms,2=us,3=ns), a LogicalType detail not
+ * carried on DrakenVector.
+ */
+struct time_bucket_ctx {
+    int64_t magnitude;
+    uint8_t unit_kind;   // 1=second 2=minute 3=hour 4=day
+    uint8_t ts_unit;
+};
+
+struct time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude,
+                                                      uint8_t unit_kind,
+                                                      uint8_t ts_unit);
+
+/**
+ * Context for draken_date_format — DATE_FORMAT(date, pattern). `pattern` is a
+ * LITERAL, consumed here (not pushed); only the `date` operand is pushed.
+ * ts_unit: TimestampUnit of a TIMESTAMP64 operand (0=s,1=ms,2=us,3=ns); DATE32
+ * operands pass 2 (unused by the kernel, which switches on the operand's
+ * DrakenType directly). fmt_len bytes of the pattern trail this struct
+ * (same layout technique as extraction_ctx's nav bytes) — NOT NUL-terminated.
+ */
+struct format_ctx {
+    uint8_t ts_unit;
+    int32_t fmt_len;
+};
+
+static inline const char* format_ctx_fmt(const struct format_ctx* c) {
+    return (const char*)((const unsigned char*)c + sizeof(struct format_ctx));
+}
+
+struct format_ctx* kernel_alloc_format_ctx(uint8_t ts_unit, const char* fmt,
+                                           size_t fmt_len);
+
+/**
+ * Context for the VECTOR_FP16 cosine kernels (draken_cosine_{similarity,distance}_vector).
+ *
+ * dimension: width of both operands, supplied by the binder. A VECTOR's width is a
+ * LogicalType detail and is NOT on the physical DrakenVector, so the kernel has no way
+ * to recover it from its operands — exactly the wall binary_op_ctx's scale/unit fields
+ * exist to cross. Deliberately its own struct rather than a reused binary_op_ctx field:
+ * a dimension is neither a scale nor a TimestampUnit, and overloading one of those
+ * would be a silent misread waiting to happen.
+ */
+struct vector_dim_ctx {
+    uint32_t dimension;
+};
+
+struct vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension);
+
+/**
+ * Context for the TEXT overloads (draken_cosine_{similarity,distance}_text).
+ *
+ * COSINE_SIMILARITY(a, b) over strings means "embed both, then compare" — the same
+ * question as COSINE_SIMILARITY(EMBED(a), EMBED(b)). So it must use the SAME embedder,
+ * and `embed_fn` is the bind-time-resolved `draken_embed` — whichever kernel the active
+ * EMBED capability registered. The text kernel does not embed for itself: a second
+ * embedding implementation here would be duplicated logic that silently disagrees the
+ * moment a capability replaces the core one (observed: with MiniLM installed,
+ * COSINE_SIMILARITY('dog','puppy') answered 0.0 lexically while the EMBED composition
+ * answered 0.80).
+ *
+ * `dimension` is the active capability's width, passed to embed_fn in a stack-local
+ * vector_dim_ctx — no nested ctx ownership, so kernel_free_context stays a single free().
+ */
+struct cosine_text_ctx {
+    uint32_t dimension;
+    void*    embed_fn;   /* func_fn_t: VecResult (*)(void*, const DrakenVector* const*, uint32_t) */
+};
+
+struct cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* embed_fn);
+
 #ifdef __cplusplus
 }
 #endif

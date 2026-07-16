@@ -7,12 +7,14 @@
 ANALYZE / DROP STATISTICS orchestration for filesystem datasets.
 
 ``ANALYZE TABLE t [FOR COLUMNS …]`` computes a per-file KMV sketch for the named
-columns (or all columns) and writes the ``.stats.json`` sidecar the scan loads.
+columns (or all columns) and writes them into the dataset's single manifest — the
+same Parquet manifest format the catalog and LocalStore use (see
+``opteryx.models.manifest_io``). One manifest per dataset, one format everywhere.
 ``DROP STATISTICS ON t [FOR COLUMNS …]`` removes those sketches.
 
 This is admin orchestration, not a hot path — plain Python is appropriate. The
-sketch contract and sidecar format live in ``opteryx.utils.kmv``; reading is via
-the native rugo reader (no pyarrow in the engine).
+sketch contract lives in ``opteryx.utils.kmv``; reading is via the native rugo
+reader (no pyarrow in the engine).
 
 Scope: local filesystem datasets. Remote/object-store writes are a separate
 increment; an unsupported backend fails loudly rather than silently no-op'ing.
@@ -20,7 +22,6 @@ increment; an unsupported backend fails loudly rather than silently no-op'ing.
 
 from __future__ import annotations
 
-import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
@@ -31,9 +32,13 @@ from typing import Sequence
 from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.utils.kmv import STATS_SIDECAR_SUFFIX
+from opteryx.models.file_entry import FileEntry
+from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
+from opteryx.models.manifest_io import is_dataset_manifest
+from opteryx.models.manifest_io import read_manifest_file_entries
+from opteryx.models.manifest_io import read_manifest_sketches
+from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.utils.kmv import ColumnSketch
-from opteryx.utils.kmv import merge_into_sidecar
 
 _PARQUET_SUFFIX = ".parquet"
 
@@ -47,8 +52,18 @@ def _require_local(table_engine) -> None:
 
 
 def _parquet_blobs(table_engine) -> List[str]:
+    """The dataset's data files. Excludes the dataset manifest, which is itself a
+    parquet file in the same tree — analyzing it would be nonsense."""
     blobs = table_engine.get_list_of_blob_names(table_engine.dataset)
-    return [b for b in blobs if b.lower().endswith(_PARQUET_SUFFIX)]
+    return [
+        b
+        for b in blobs
+        if b.lower().endswith(_PARQUET_SUFFIX) and not is_dataset_manifest(b)
+    ]
+
+
+def _manifest_path(table_engine) -> str:
+    return os.path.join(table_engine.dataset, DATASET_MANIFEST_NAME)
 
 
 def _field_ids(table_engine) -> Dict[str, int]:
@@ -67,27 +82,27 @@ def _resolve_targets(field_ids: Dict[str, int], columns: Optional[Sequence[str]]
     return targets
 
 
-def _read_sidecar(sidecar_path: str) -> Optional[dict]:
-    if not os.path.exists(sidecar_path):
-        return None
-    try:
-        with open(sidecar_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, dict) else None
-    except (ValueError, OSError):
-        return None
+def _read_existing_sketches(manifest_path: str, column_count: int) -> Dict[str, List[List[int]]]:
+    """Existing per-file sketches from the dataset manifest, as {file_path: positional list}.
+
+    Sketches whose width no longer matches the schema are dropped: they were
+    computed against a different column set, so their positional field_ids are
+    meaningless now (the same staleness rule the previous sidecar format applied).
+    """
+    if not os.path.exists(manifest_path):
+        return {}
+    with open(manifest_path, "rb") as handle:
+        data = handle.read()
+    return {
+        path: sketch
+        for path, sketch in read_manifest_sketches(data).items()
+        if len(sketch) == column_count
+    }
 
 
-def _write_sidecar_atomic(sidecar_path: str, payload: dict) -> None:
-    tmp = sidecar_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, separators=(",", ":"))
-    os.replace(tmp, sidecar_path)
-
-
-def _analyze_one_file(blob: str, field_ids: Dict[str, int], targets: List[str]) -> None:
-    """Compute and persist the sidecar for a single parquet file. Self-contained
-    (own reader, own sidecar) so files analyze concurrently with no shared state."""
+def _sketch_one_file(blob: str, targets: List[str]) -> Dict[str, List[int]]:
+    """Compute this file's KMV sketch for each target column. Self-contained (own
+    reader, no shared state) so files sketch concurrently."""
     import rugo.parquet as rugo_parquet
 
     sketches = {name: ColumnSketch() for name in targets}
@@ -97,83 +112,121 @@ def _analyze_one_file(blob: str, field_ids: Dict[str, int], targets: List[str]) 
                 # Native vector hash over the whole column — no per-value Python
                 # hashing. Same hash space as the canonical catalog.
                 sketches[name].update(morsel.column(name).hash())
-
-    new_hashes = {field_ids[name]: sketches[name].min_k() for name in targets}
-    sidecar_path = blob + STATS_SIDECAR_SUFFIX
-    payload = merge_into_sidecar(_read_sidecar(sidecar_path), field_ids, new_hashes)
-    _write_sidecar_atomic(sidecar_path, payload)
+    return {name: sketches[name].min_k() for name in targets}
 
 
 def _worker_count(n_files: int) -> int:
     return max(1, min(n_files, (os.cpu_count() or 1)))
 
 
+def _write_manifest_atomic(manifest_path: str, entries: List[FileEntry], schema, sketches) -> None:
+    data = write_manifest_parquet(entries, schema, sketches=sketches)
+    tmp = manifest_path + ".tmp"
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+    os.replace(tmp, manifest_path)
+
+
 def analyze_table(table_engine, columns: Optional[Sequence[str]]) -> int:
     """Compute KMV sketches for ``columns`` (or all columns) over every parquet
-    file of the dataset and write/merge the per-file ``.stats.json`` sidecar.
+    file of the dataset and write them into the dataset's single manifest.
 
-    Files are analyzed concurrently — on the free-threaded build this is real
-    parallelism across cores; each file is independent (own reader, own sidecar).
+    Files are sketched concurrently — on the free-threaded build this is real
+    parallelism across cores; each file is independent (own reader). The manifest
+    is then written once, atomically.
 
-    Returns the number of sidecar files written.
+    A column-subset ANALYZE merges: previously-analyzed columns of a file survive,
+    and files not re-analyzed keep their existing sketches.
+
+    Returns the number of files analyzed.
     """
     _require_local(table_engine)
+    schema = table_engine.get_dataset_schema()
     field_ids = _field_ids(table_engine)
     targets = _resolve_targets(field_ids, columns)
     blobs = _parquet_blobs(table_engine)
     if not blobs:
         return 0
 
+    manifest_path = _manifest_path(table_engine)
+    existing = _read_existing_sketches(manifest_path, len(schema.columns))
+
     workers = _worker_count(len(blobs))
     if workers == 1:
-        for blob in blobs:
-            _analyze_one_file(blob, field_ids, targets)
+        results = [_sketch_one_file(blob, targets) for blob in blobs]
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             # Surface any per-file exception by consuming the results.
-            list(pool.map(lambda b: _analyze_one_file(b, field_ids, targets), blobs))
+            results = list(pool.map(lambda b: _sketch_one_file(b, targets), blobs))
 
+    entries: List[FileEntry] = []
+    sketches: Dict[str, List[List[int]]] = {}
+    for blob, new_hashes in zip(blobs, results):
+        # Start from this file's existing sketches so a column-subset ANALYZE
+        # preserves columns analyzed earlier; overwrite only the targets.
+        positional = existing.get(blob) or [[] for _ in schema.columns]
+        for name in targets:
+            positional[field_ids[name]] = list(new_hashes[name])
+        sketches[blob] = positional
+        entries.append(
+            FileEntry(
+                file_path=blob,
+                file_format="PARQUET",
+                record_count=0,
+                file_size_in_bytes=os.path.getsize(blob),
+            )
+        )
+
+    _write_manifest_atomic(manifest_path, entries, schema, sketches)
     return len(blobs)
 
 
 def drop_statistics(table_engine, columns: Optional[Sequence[str]]) -> int:
-    """Remove statistics sidecars for the dataset.
+    """Remove statistics from the dataset's manifest.
 
-    No column list → delete the whole sidecar per file. With a column list →
-    drop only those columns' sketches, deleting the file when nothing remains.
-    Idempotent: absent sidecars are not an error. Returns the number of sidecar
-    files modified or removed. Never touches the parquet data files.
+    No column list → delete the manifest entirely. With a column list → clear only
+    those columns' sketches, deleting the manifest when nothing remains. Idempotent:
+    an absent manifest is not an error. Returns the number of files whose sketches
+    were modified (or, for a whole-manifest delete, the file count it described).
+    Never touches the parquet data files.
     """
     _require_local(table_engine)
-    blobs = _parquet_blobs(table_engine)
-    drop_ids: Optional[set] = None
-    if columns:
-        field_ids = _field_ids(table_engine)
-        drop_ids = {str(field_ids[name]) for name in _resolve_targets(field_ids, columns)}
+    manifest_path = _manifest_path(table_engine)
+    if not os.path.exists(manifest_path):
+        return 0
+
+    schema = table_engine.get_dataset_schema()
+
+    if not columns:
+        touched = len(_read_existing_sketches(manifest_path, len(schema.columns)))
+        os.remove(manifest_path)
+        return touched
+
+    field_ids = _field_ids(table_engine)
+    drop_ids = {field_ids[name] for name in _resolve_targets(field_ids, columns)}
+
+    with open(manifest_path, "rb") as handle:
+        data = handle.read()
+    entries, _native = read_manifest_file_entries(data)
+    stored = read_manifest_sketches(data)
 
     touched = 0
-    for blob in blobs:
-        sidecar_path = blob + STATS_SIDECAR_SUFFIX
-        if not os.path.exists(sidecar_path):
-            continue
-        if drop_ids is None:
-            os.remove(sidecar_path)
+    kept: Dict[str, List[List[int]]] = {}
+    for entry in entries:
+        sketch = stored.get(entry.file_path)
+        if sketch is None or len(sketch) != len(schema.columns):
+            # Width mismatch — stale against the current schema; the reader would
+            # drop them anyway, so don't carry them forward.
             touched += 1
             continue
-        payload = _read_sidecar(sidecar_path)
-        if payload is None or not isinstance(payload.get("min_k_hashes"), dict):
-            # Malformed/unreadable — treat the whole sidecar as droppable.
-            os.remove(sidecar_path)
+        cleared = [[] if idx in drop_ids else list(col) for idx, col in enumerate(sketch)]
+        if cleared != sketch:
             touched += 1
-            continue
-        remaining = {k: v for k, v in payload["min_k_hashes"].items() if k not in drop_ids}
-        if remaining == payload["min_k_hashes"]:
-            continue  # nothing dropped from this file
-        if remaining:
-            payload["min_k_hashes"] = remaining
-            _write_sidecar_atomic(sidecar_path, payload)
-        else:
-            os.remove(sidecar_path)
-        touched += 1
+        kept[entry.file_path] = cleared
+
+    if any(any(col for col in sketch) for sketch in kept.values()):
+        _write_manifest_atomic(manifest_path, entries, schema, kept)
+    else:
+        os.remove(manifest_path)
 
     return touched

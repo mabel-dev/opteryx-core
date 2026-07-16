@@ -60,16 +60,25 @@ void* b16tobin(void* restrict dest, const char* restrict src) {
     return b16tobin_len(dest, src, strlen(src));
 }
 
-char* bintob16(char* restrict dest, const void* restrict src, size_t size) {
+char* bintob16_lut(char* restrict dest, const void* restrict src, size_t size,
+                   const char* restrict lut) {
     detect();
 #ifdef __x86_64__
-    if (has_avx2 && size >= 16) return bintob16_avx2(dest, src, size);
+    if (has_avx2 && size >= 16) return bintob16_avx2_lut(dest, src, size, lut);
 #endif
 #if B16_HAVE_NEON
-    if (size >= 16) return bintob16_neon(dest, src, size);
+    if (size >= 16) return bintob16_neon_lut(dest, src, size, lut);
 #endif
 #if B16_HAVE_RVV
-    if (size >= 16) return bintob16_rvv(dest, src, size);
+    if (size >= 16) return bintob16_rvv_lut(dest, src, size, lut);
 #endif
-    return bintob16_scalar(dest, src, size);
+    return bintob16_scalar_lut(dest, src, size, lut);
+}
+
+char* bintob16(char* restrict dest, const void* restrict src, size_t size) {
+    return bintob16_lut(dest, src, size, B16_ENCODE_LUT);
+}
+
+char* bintob16_lower(char* restrict dest, const void* restrict src, size_t size) {
+    return bintob16_lut(dest, src, size, B16_ENCODE_LUT_LC);
 }

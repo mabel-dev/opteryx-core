@@ -2,11 +2,15 @@
 Tests for Manifest.estimate_selectivity.
 
 Covers each predicate kind across three tiers:
-  1. Histogram-backed (real Distogram via FileEntry.histogram_counts).
-  2. NDV / null-fraction (no histogram, but min_k_hashes / null_value_counts).
+  1. Histogram-backed (real Distogram folded from the native histogram vector).
+  2. NDV / null-fraction (no histogram, but a native min-k vector / null_value_counts).
   3. Textbook fallback (no per-column stats at all).
 
 Plus compound predicates (AND / OR / NOT) and clamping.
+
+Sketches live only as whole-column native draken vectors on the Manifest (one
+outer row per file, one middle row per column) — never boxed onto FileEntry — so
+the helpers below build those vectors directly.
 """
 
 from __future__ import annotations
@@ -41,22 +45,38 @@ def _schema(*names: str) -> RelationSchema:
 def _file(
     *,
     record_count: int = 0,
-    histogram_counts: Optional[List[List[int]]] = None,
     min_values: Optional[List] = None,
     max_values: Optional[List] = None,
     null_value_counts: Optional[dict] = None,
-    min_k_hashes: Optional[List[List[int]]] = None,
 ) -> FileEntry:
     return FileEntry(
         file_path="x",
         file_format="PARQUET",
         record_count=record_count,
         file_size_in_bytes=0,
-        histogram_counts=histogram_counts,
         min_values=min_values,
         max_values=max_values,
         null_value_counts=null_value_counts,
-        min_k_hashes=min_k_hashes,
+    )
+
+
+def _histogram_vector(per_file_counts: List[List[List[int]]]):
+    """array<array<int64>> histogram vector: [file][column][bin]."""
+    from draken.interop.vector_sequence import vector_from_sequence
+
+    return vector_from_sequence(per_file_counts, dtype="ARRAY")
+
+
+def _min_k_vector(per_file_hashes: List[List[List[int]]]):
+    """array<array<uint64>> min-k vector: [file][column][hash].
+
+    UINT64 leaf — hashes span the full unsigned range, and a signed leaf would
+    read back negative above INT64_MAX and corrupt min-k ordering.
+    """
+    from draken import draken_native as _dn
+
+    return _dn.vector_array_from_sequence(
+        per_file_hashes, element_type=_dn.DrakenType.UINT64.value, nesting_depth=2
     )
 
 
@@ -133,12 +153,15 @@ def _histogram_manifest(
     rc = record_count if record_count is not None else sum(counts) + null_count
     file = _file(
         record_count=rc,
-        histogram_counts=[counts],
         min_values=[col_min],
         max_values=[col_max],
         null_value_counts={0: null_count} if null_count else {0: 0},
     )
-    return Manifest(files=[file], schema=_schema(column))
+    return Manifest(
+        files=[file],
+        schema=_schema(column),
+        histogram_vector=_histogram_vector([[counts]]),  # one file, one column
+    )
 
 
 def _bare_manifest(column: str = "x", *, record_count: int = 100) -> Manifest:
@@ -150,10 +173,10 @@ def _bare_manifest(column: str = "x", *, record_count: int = 100) -> Manifest:
 def _ndv_manifest(
     column: str = "x", *, ndv: int, record_count: int = 1000, null_count: int = 0
 ) -> Manifest:
-    """Manifest with NDV (via min_k_hashes) but no histogram."""
+    """Manifest with NDV (via a native min-k vector) but no histogram."""
     K = 32
-    # Build a deterministic min_k_hashes vector that the KMV estimator will turn
-    # back into ~ndv. Cheaper: when ndv < K, store exactly ndv hashes (exact path).
+    # Build a deterministic min-k sketch that the KMV estimator will turn back
+    # into ~ndv. Cheaper: when ndv < K, store exactly ndv hashes (exact path).
     if ndv <= K:
         hashes = list(range(1, ndv + 1))
     else:
@@ -162,10 +185,13 @@ def _ndv_manifest(
         hashes = list(range(1, K)) + [kth]
     file = _file(
         record_count=record_count,
-        min_k_hashes=[hashes],
         null_value_counts={0: null_count},
     )
-    return Manifest(files=[file], schema=_schema(column))
+    return Manifest(
+        files=[file],
+        schema=_schema(column),
+        min_k_vector=_min_k_vector([[hashes]]),  # one file, one column
+    )
 
 
 # ---------------------------------------------------------------------------

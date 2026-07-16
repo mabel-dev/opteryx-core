@@ -1021,7 +1021,10 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
     throw std::runtime_error("Not a parquet file");
 
   uint32_t footer_len = ReadLE32(trailer);
-  if (footer_len + 8 > size)
+  // Widen before adding: footer_len is uint32 and a crafted footer_len near
+  // UINT32_MAX would wrap the sum, pass the check, and underflow footer_start
+  // below into a wild pointer. Matches the file-path variant's guard.
+  if (static_cast<uint64_t>(footer_len) + 8 > static_cast<uint64_t>(size))
     throw std::runtime_error("Footer length invalid");
 
   const uint8_t *footer_start = buf + size - 8 - footer_len;

@@ -13,6 +13,7 @@ from opteryx.expression.functions import (
 # LogicalCategory imported via __init__.pyx (textually included); canonical ColumnTypes also in scope.
 
 
+
 def get_builtin_utility_functions() -> List[FunctionDefinition]:
     """Utility functions: array ops, subscript, element access, and array constructors.
 
@@ -240,9 +241,15 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     _any = ParameterSpec(name="val", type_family="any")
 
     def _embed_return_type(_arg_nodes):
-        # EMBED returns a VECTOR; dimensions are not known at bind time.
-        # VARIANT is a safe placeholder — executor produces the real vector type.
-        return _CT_VARIANT
+        # EMBED's real type IS known at bind time — the active capability declares the
+        # width, and the binder hands that same number to the kernel in a
+        # vector_dim_ctx, so the plan's type and the kernel's output cannot disagree.
+        # The old VARIANT placeholder was not merely imprecise: it made EMBED
+        # uncomposable, because COSINE_SIMILARITY's NUMERIC_VECTOR parameters reject
+        # VARIANT, so COSINE_SIMILARITY(EMBED(a), EMBED(b)) failed to bind at all.
+        from opteryx.types.vectors.embedding_capability import embedding_dimensions
+
+        return _CT_VECTOR(embedding_dimensions())
 
     return [
         _make(
@@ -250,7 +257,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             other_functions.array_contains,
             _CT_BOOLEAN,
             (_arr, _item),
-            null_policy="passthru",
             summary="Test if array contains item.",
             cost=1.19,
         ),
@@ -259,7 +265,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             other_functions.array_contains_any,
             _CT_BOOLEAN,
             (_arr, _set),
-            null_policy="passthru",
             summary="Test if array contains any item from set.",
             cost=1.02,
         ),
@@ -268,7 +273,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             other_functions.array_contains_all,
             _CT_BOOLEAN,
             (_arr, _set),
-            null_policy="passthru",
             summary="Test if array contains all items from set.",
             cost=1.21,
         ),
@@ -306,7 +310,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.embed,
-                        null_policy="compress",
                         cost_us_per_million=1_000_000.0,
                     ),
                 ),
@@ -333,7 +336,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
-                        null_policy="compress",
                         cost_us_per_million=1.33,
                     ),
                 ),
@@ -348,7 +350,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
-                        null_policy="compress",
                         cost_us_per_million=1.33,
                     ),
                 ),
@@ -375,7 +376,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
-                        null_policy="compress",
                         cost_us_per_million=1.17,
                     ),
                 ),
@@ -390,7 +390,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
-                        null_policy="compress",
                         cost_us_per_million=1.17,
                     ),
                 ),

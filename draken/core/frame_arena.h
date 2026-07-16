@@ -57,6 +57,17 @@ void draken_frame_arena_release(DrakenFrameArena* arena, void* ptr);
 // `ptr` is NULL.
 void draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr);
 
+// Non-zero when `ptr` is currently tracked by the arena. This is the ONLY way a
+// consumer can tell an INDEPENDENTLY-allocated buffer (adopted → tracked → the
+// consumer may take ownership of it) from an INTERIOR pointer into another
+// tracked block (never adopted → never tracked → freeing it is a heap abort).
+// A DrakenVector cannot answer this: it carries no `validity_embedded` flag —
+// only VecResult does, and that flag is gone once the result is adopted. See
+// _slot_to_pyobj (evaluation.pyx), which uses this to decide whether a string
+// result's validity is embedded in its data block. `arena == NULL` or
+// `ptr == NULL` → 0.
+int draken_frame_arena_contains(const DrakenFrameArena* arena, const void* ptr);
+
 // Test-only introspection: number of pointers currently tracked.
 // Used by native tests to verify create/alloc/release/destroy semantics.
 size_t draken_frame_arena_size(const DrakenFrameArena* arena);

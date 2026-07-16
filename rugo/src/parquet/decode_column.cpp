@@ -1770,6 +1770,32 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         // PLAIN or DELTA encoding
         int32_t page_encoding = page_header.encoding;
 
+        // Reject value encodings this branch cannot decode. Everything below
+        // either dispatches on a known encoding or falls through to the PLAIN
+        // reader, so an unhandled encoding is not a no-op — its bytes would be
+        // read as PLAIN and produce plausible garbage with success=true.
+        //   6 = DELTA_LENGTH_BYTE_ARRAY, 9 = BYTE_STREAM_SPLIT: real encodings
+        //       we do not implement; a chunk listing RLE(3) for its def levels
+        //       clears the chunk-level gate, so they reach here.
+        //   1 = GROUP_VAR_INT (obsolete), 4 = BIT_PACKED (deprecated, levels
+        //       only): never valid as a data-page value encoding.
+        // 2/8 reach here only for the all-null dictionary page shape handled
+        // above (dict_size == 0, present_count == 0), so they stay admitted.
+        if (page_encoding != 0 && page_encoding != 2 && page_encoding != 3 &&
+            page_encoding != 5 && page_encoding != 7 && page_encoding != 8) {
+          const char *enc_name =
+              page_encoding == 6   ? "DELTA_LENGTH_BYTE_ARRAY"
+              : page_encoding == 9 ? "BYTE_STREAM_SPLIT"
+              : page_encoding == 1 ? "GROUP_VAR_INT"
+              : page_encoding == 4 ? "BIT_PACKED"
+                                   : "unknown";
+          result.error_message = "unsupported page encoding " +
+                                 std::to_string(page_encoding) + " (" +
+                                 enc_name + ") for column '" +
+                                 target_col->name + "'";
+          return;
+        }
+
         // Place a page's worth of dict codes (one per present value, in order)
         // into the active code representation.  When dict_codes_array is in use
         // (nullable numeric dict columns), codes must be written at their DENSE

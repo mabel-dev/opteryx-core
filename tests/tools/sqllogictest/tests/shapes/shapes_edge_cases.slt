@@ -735,7 +735,7 @@ SELECT name FROM (SELECT name, UNIXTIME('1970-01-01'::DATE) AS ts FROM $planets)
 query error io failed
 SELECT name FROM testdata.astronauts WHERE UNIXTIME(birth_date) = UNIXTIME('1961-11-05'::DATE)
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets WHERE '2020-01-01T00:00:00'::TIMESTAMP = FROM_UNIXTIME(1577836800)
 
 query error io failed

@@ -1,8 +1,43 @@
 # NDV (Distinct-Count) Statistics for Production — Design & Decision (WP-8)
 
-**Status:** Awaiting architect decision. Design-only; no engine code proposed here.
+**Status:** SUPERSEDED (2026-07-16). Kept for historical context; do not follow §5/§6 below.
 **Author:** optimizer review work package WP-8.
 **Date:** 2026-06-12.
+
+---
+
+## Resolution (2026-07-16)
+
+The architect decided **against Option A as written**. `.stats.json` sidecars — and
+`dev/populate_stats.py`, the offline populator this doc recommended productionizing —
+are **deleted**. What shipped instead:
+
+- `ANALYZE TABLE … [FOR COLUMNS …]` computes the same K=32 KMV sketch (still
+  `opteryx/utils/kmv.py::ColumnSketch`, still draken `Vector.hash()` — no PyArrow) but
+  writes it into **one Parquet manifest per dataset**
+  (`<dataset>/_opteryx_manifest.parquet`), not a per-file JSON sidecar. This is the
+  same manifest format the Iceberg catalog and LocalStore use — see
+  `opteryx/models/manifest_io.py` — so there is exactly one stats format across every
+  connector, not a fourth format layered on top of catalog/LocalStore/filesystem.
+- The sketches are read back **only** as native draken vectors
+  (`array<array<uint64>>`), never boxed onto `FileEntry` — `estimate_cardinality`
+  reduces them with a native kernel (`kmv_ndv`), not the Python merge this doc's
+  "already built and working" claim (§1) was describing.
+- `FileSystemConnector.get_list_of_blob_names` excludes the dataset manifest from
+  data-file discovery (it's a `.parquet` living inside the tree it describes); sketches
+  are only trusted when the manifest's file set exactly matches the current glob —
+  a drifted manifest is dropped rather than served, because `estimate_cardinality`
+  returns an *exact* count under K, so a partial file set would be a wrong answer.
+- §6's open questions are resolved: sidecar generation is `ANALYZE`, run explicitly by
+  the user (not a pipeline hook or backfill job); no separate `populate_stats` tool
+  survives; K stayed 32; Option C (dictionary-size proxy) was not built; Option D
+  (catalog-native) is what the Iceberg/LocalStore paths already do via the same
+  manifest format, so it's not a separate track.
+
+The rest of this document (§1–§6) describes the abandoned sidecar design and is
+**inaccurate as a description of the current system** — kept only so the "why not
+Option B" reasoning (runtime C++ collection is unsafe in the nogil decode path) and
+Option C/D tradeoffs remain available if raised again.
 
 ---
 
@@ -27,7 +62,7 @@ enhancements/fallbacks, not prerequisites.
 
 ---
 
-## 1. Current state (what already exists)
+## 1. Current state as of this doc's writing (2026-06-12) — see Resolution above for what's true NOW
 
 | Component | Location | Status |
 |---|---|---|
@@ -36,6 +71,10 @@ enhancements/fallbacks, not prerequisites.
 | Offline populator | `dev/populate_stats.py` | ✅ single-pass scan, K=32 sketch per column, atomic write; CLI `python dev/populate_stats.py <dir> [--force] [--dry-run]` |
 | Sidecar format v1 | `{schema_version, field_ids, min_k_hashes{col→[sorted u64]}}` | ✅ defined, round-trip tested (`tests/unit/dev/test_populate_stats.py`) |
 | Catalog NDV | `FileEntry.from_datafile` (Iceberg path) | ✅ carries bounds; can carry NDV if the catalog provides it |
+
+**None of the row names above exist anymore.** The sidecar loader, offline populator,
+and sidecar format were all deleted 2026-07-16 — see Resolution above for the actual
+current mechanism (`ANALYZE` + `manifest_io.py`).
 
 **The gap is purely operational.** Sidecar coverage today is ad-hoc:
 
@@ -117,7 +156,7 @@ For catalog-backed tables, populate NDV from the catalog's own sketch mechanism
 | Coverage | all FS Parquet | only scanned files | all Parquet | catalog tables only |
 | Risk | low | high | low | low |
 
-## 5. Recommendation
+## 5. Recommendation (SUPERSEDED — see Resolution at top of doc)
 
 1. **Adopt Option A** as the production path: move `populate_stats.py` into the supported
    tooling and run it (a) as a write-side step in the data pipeline and (b) as a one-off
@@ -131,17 +170,13 @@ This sequencing means the highest-value win (A) needs essentially no engine risk
 recent optimizer WPs (5/7/11) start paying off on real data immediately on the tables we
 choose to populate.
 
-## 6. Decision needed
+## 6. Decision needed (SUPERSEDED — see Resolution at top of doc)
 
-1. **Approve Option A** as the primary path, and decide **who owns sidecar generation** —
-   write-side pipeline hook vs. scheduled backfill vs. both?
-2. **Where does `populate_stats` live** once productionized — stays a `dev/` CLI invoked by
-   the pipeline, or promoted to a supported maintenance command?
-3. **K value:** keep K=32, or raise to 64/128 to cut high-cardinality error (still < ~120 KB
-   per wide file)?
-4. **Option C fallback:** want the low-confidence dictionary proxy for sidecar-less files,
-   or prefer the planner stay honest (NDV = None → constants) until a sidecar exists?
-5. **Option D:** is the Iceberg/catalog path in scope now, or later?
+All five questions below were answered 2026-07-16, not as Option A proposed. See
+Resolution at the top of this document for what actually shipped.
 
-Once 1–5 are answered, the implementation is a small, well-bounded follow-up package
-(mostly packaging + a pipeline hook), not an engine change.
+1. ~~Approve Option A... who owns sidecar generation~~ → `ANALYZE`, user-run, no pipeline hook.
+2. ~~Where does `populate_stats` live~~ → deleted; superseded by `ANALYZE` + `manifest_io.py`.
+3. **K value:** kept K=32.
+4. ~~Option C fallback~~ → not built.
+5. ~~Option D~~ → not a separate track; catalog/LocalStore/filesystem all share one manifest format.

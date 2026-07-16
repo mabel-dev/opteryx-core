@@ -50,6 +50,7 @@
 #include "core/string_slot.h"
 #include "logical_type.h"   // TimestampUnit
 #include "ops/temporal_arith.h"
+#include "ops/temporal_format.h"   // shared compiled-token DATE_FORMAT formatter
 
 namespace nb = nanobind;
 
@@ -198,30 +199,23 @@ static int parse_diff_kind(const char* part) {
 
 // ---------------------------------------------------------------------------
 // date_format — format string validation
-// Whitelists all POSIX/C99 strftime specifiers. Raises on unknown %X tokens.
+// Whitelists all POSIX/C99 strftime specifiers (tf_validate, temporal_format.h).
+// Raises on unknown %X tokens / a trailing '%'.
 // ---------------------------------------------------------------------------
 
 static void validate_date_format(const char* fmt) {
-    // MySQL DATE_FORMAT specifiers (superset of the POSIX tokens we expose).
-    // %i = minutes (MySQL); the rest are POSIX/C99 aliases with MySQL semantics.
-    static const char* known = "YymdHIMSpjAaBbZenwtuVUWcxXFTRzGgklPqri";
-    for (const char* p = fmt; *p; ++p) {
-        if (*p != '%') continue;
-        ++p;
-        if (!*p) {
-            PyErr_SetString(PyExc_ValueError,
-                "vector_date_format: trailing '%' in format string");
-            throw nb::python_error();
-        }
-        if (*p == '%' || *p == 'n' || *p == 't') continue;  // %% %n %t always ok
-        if (!std::strchr(known, *p)) {
-            PyErr_Format(PyExc_ValueError,
-                "vector_date_format: unsupported format token '%%%c'; "
-                "use standard strftime specifiers (%%Y, %%m, %%d, %%H, %%M, %%S, etc.)",
-                (unsigned char)*p);
-            throw nb::python_error();
-        }
+    char bad_spec = 0;
+    if (tf_validate(fmt, &bad_spec)) return;
+    if (bad_spec == '\0') {
+        PyErr_SetString(PyExc_ValueError,
+            "vector_date_format: trailing '%' in format string");
+    } else {
+        PyErr_Format(PyExc_ValueError,
+            "vector_date_format: unsupported format token '%%%c'; "
+            "use standard strftime specifiers (%%Y, %%m, %%d, %%H, %%M, %%S, etc.)",
+            (unsigned char)bad_spec);
     }
+    throw nb::python_error();
 }
 
 // ---------------------------------------------------------------------------
@@ -534,202 +528,8 @@ static nb::object impl_date_trunc(nb::object v_obj, const char* unit_str) {
 //   %q → quarter (1-4)         (Opteryx extension; %q is not a real strftime spec)
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// C-locale English names, UTC.  Index by wday (0=Sunday) / month-1.
-static const char* const DF_WDAY_ABBR[7] =
-    {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-static const char* const DF_WDAY_FULL[7] =
-    {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
-static const char* const DF_MON_ABBR[12] =
-    {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-static const char* const DF_MON_FULL[12] =
-    {"January","February","March","April","May","June",
-     "July","August","September","October","November","December"};
-static const char DF_NL  = '\n';
-static const char DF_TAB = '\t';
-
-// Broken-down UTC fields for one row.
-struct DfFields {
-    int64_t days;     // days since 1970-01-01
-    int year, month, day;
-    int hour, minute, second;
-    int yday0;        // 0-based day of year
-    int wday;         // 0=Sunday … 6=Saturday
-};
-
-// A compiled token: a literal run (spec==0) or a single specifier.
-struct DfToken {
-    const char* lit;      // literal bytes (point into fmt buffer or a static char)
-    uint32_t    lit_len;
-    char        spec;     // 0 → literal; else the specifier character
-};
-
-// --- direct digit writers (no snprintf) ------------------------------------
-static inline char* df_put2(char* p, int v) {
-    *p++ = static_cast<char>('0' + (v / 10) % 10);
-    *p++ = static_cast<char>('0' + v % 10);
-    return p;
-}
-static inline char* df_put2sp(char* p, int v) {  // space-padded 2-wide
-    const int t = v / 10;
-    *p++ = t ? static_cast<char>('0' + t) : ' ';
-    *p++ = static_cast<char>('0' + v % 10);
-    return p;
-}
-static inline char* df_put3(char* p, int v) {    // zero-padded 3-wide
-    *p++ = static_cast<char>('0' + (v / 100) % 10);
-    *p++ = static_cast<char>('0' + (v / 10) % 10);
-    *p++ = static_cast<char>('0' + v % 10);
-    return p;
-}
-// Year, sign for negatives, zero-padded to at least minw (glibc pads %Y to 4).
-static char* df_put_year(char* p, int y, int minw) {
-    if (y < 0) { *p++ = '-'; y = -y; }
-    char tmp[16];
-    int  k = 0;
-    if (y == 0) tmp[k++] = '0';
-    while (y) { tmp[k++] = static_cast<char>('0' + y % 10); y /= 10; }
-    while (k < minw) tmp[k++] = '0';
-    while (k) *p++ = tmp[--k];
-    return p;
-}
-static inline char* df_puts(char* p, const char* s) {
-    while (*s) *p++ = *s++;
-    return p;
-}
-
-// ISO-8601 week date: the week's Thursday determines the ISO year.
-static void df_iso_week(int64_t days, int wday, int* iso_year, int* iso_week) {
-    const int iso_dow = (wday == 0) ? 7 : wday;        // Mon=1 … Sun=7
-    const int64_t thu = days - (iso_dow - 4);
-    int y, m, d; ta_days_to_ymd(thu, &y, &m, &d);
-    *iso_year = y;
-    *iso_week = static_cast<int>((thu - ta_ymd_to_days(y, 1, 1)) / 7) + 1;
-}
-
-// MySQL %X: year for the week where Sunday is the first day (mode 2).
-// The week year is determined by which calendar year contains the Wednesday
-// of the Sunday-start week (day 3 of 0=Sun…6=Sat), mirroring how ISO uses
-// Thursday for Monday-start weeks.
-static int df_sunday_week_year(int64_t days, int wday) {
-    const int64_t wed = days + 3 - static_cast<int64_t>(wday);
-    int y, m, d; ta_days_to_ymd(wed, &y, &m, &d);
-    return y;
-}
-
-// Emit one specifier; returns the advanced write pointer.
-static char* df_emit_spec(char* p, char c, const DfFields& f) {
-    switch (c) {
-        case 'Y': return df_put_year(p, f.year, 4);
-        case 'y': return df_put2(p, ((f.year % 100) + 100) % 100);
-        case 'm': return df_put2(p, f.month);
-        case 'd': return df_put2(p, f.day);
-        case 'e': return df_put2sp(p, f.day);
-        case 'H': return df_put2(p, f.hour);
-        case 'k': return df_put2sp(p, f.hour);
-        case 'I': return df_put2(p, ((f.hour + 11) % 12) + 1);
-        case 'l': return df_put2sp(p, ((f.hour + 11) % 12) + 1);
-        case 'M': return df_puts(p, DF_MON_FULL[f.month - 1]);   // MySQL: month name
-        case 'i': return df_put2(p, f.minute);                   // MySQL: minutes 00-59
-        case 'S': return df_put2(p, f.second);
-        case 'p': return df_puts(p, f.hour < 12 ? "AM" : "PM");
-        case 'P': return df_puts(p, f.hour < 12 ? "am" : "pm");
-        case 'j': return df_put3(p, f.yday0 + 1);
-        case 'a': return df_puts(p, DF_WDAY_ABBR[f.wday]);
-        case 'A': return df_puts(p, DF_WDAY_FULL[f.wday]);
-        case 'b': return df_puts(p, DF_MON_ABBR[f.month - 1]);
-        case 'B': return df_puts(p, DF_MON_FULL[f.month - 1]);
-        case 'w': *p++ = static_cast<char>('0' + f.wday); return p;
-        case 'u': return df_put2(p, (f.yday0 - (f.wday + 6) % 7 + 7) / 7); // MySQL: week 00-53, Monday-first
-        case 'q': *p++ = static_cast<char>('0' + (f.month - 1) / 3 + 1); return p;
-        case 'Z': return df_puts(p, "GMT");
-        case 'z': return df_puts(p, "+0000");
-        case 'U': return df_put2(p, (f.yday0 - f.wday + 7) / 7);
-        case 'W': return df_puts(p, DF_WDAY_FULL[f.wday]);        // MySQL: weekday name
-        case 'V': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);
-                    return df_put2(p, iw); }
-        case 'G': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);
-                    return df_put_year(p, iy, 4); }
-        case 'g': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);
-                    return df_put2(p, ((iy % 100) + 100) % 100); }
-        // Composite specifiers (C locale).
-        case 'F': p = df_put_year(p, f.year, 4); *p++ = '-';
-                  p = df_put2(p, f.month); *p++ = '-';
-                  return df_put2(p, f.day);
-        case 'T': p = df_put2(p, f.hour); *p++ = ':';
-                  p = df_put2(p, f.minute); *p++ = ':';
-                  return df_put2(p, f.second);
-        case 'R': p = df_put2(p, f.hour); *p++ = ':';
-                  return df_put2(p, f.minute);
-        case 'r': p = df_put2(p, ((f.hour + 11) % 12) + 1); *p++ = ':';
-                  p = df_put2(p, f.minute); *p++ = ':';
-                  p = df_put2(p, f.second); *p++ = ' ';
-                  return df_puts(p, f.hour < 12 ? "AM" : "PM");
-        case 'x': { int iy, iw; df_iso_week(f.days, f.wday, &iy, &iw);  // MySQL: year for Monday-first week (= %G)
-                    return df_put_year(p, iy, 4); }
-        case 'X': return df_put_year(p, df_sunday_week_year(f.days, f.wday), 4); // MySQL: year for Sunday-first week
-        case 'c': {                                                       // MySQL: month number 0-12 (no zero-pad)
-                    const int mo = f.month;
-                    if (mo >= 10) *p++ = static_cast<char>('0' + mo / 10);
-                    *p++ = static_cast<char>('0' + mo % 10);
-                    return p; }
-        default:  *p++ = c; return p;   // unreachable after validation
-    }
-}
-
-// Worst-case bytes a single specifier can emit (used to size the row buffer).
-static uint32_t df_spec_max_width(char c) {
-    switch (c) {
-        case 'Y': case 'G': case 'X': case 'x': return 12;  // sign + large year
-        case 'A': case 'B': case 'M': case 'W': return 9;   // "Wednesday" / "September"
-        case 'F': return 20;       // year(≤12) + "-MM-DD"
-        case 'r': return 12;
-        case 'T': return 10;
-        case 'z': return 5;
-        case 'a': case 'b': case 'Z': case 'j': return 3;
-        case 'R': return 5;
-        case 'c': case 'w': case 'q': return 2;  // %c = month num 1-12, %w/%q = 1 digit (2 is safe)
-        default:  return 2;                // numeric 2-wide fields
-    }
-}
-
-// Compile the (validated) format string into a token program; returns the
-// worst-case output length via *max_len.
-static std::vector<DfToken> df_compile(const char* fmt, size_t* max_len) {
-    std::vector<DfToken> prog;
-    size_t width = 1;  // slack
-    const char* run = fmt;
-    for (const char* p = fmt; *p; ) {
-        if (*p != '%') { ++p; continue; }
-        if (p > run) {
-            prog.push_back({run, static_cast<uint32_t>(p - run), 0});
-            width += static_cast<size_t>(p - run);
-        }
-        const char spec = p[1];
-        if (spec == '%') {
-            prog.push_back({p + 1, 1, 0}); width += 1;       // literal '%'
-        } else if (spec == 'n') {
-            prog.push_back({&DF_NL, 1, 0}); width += 1;
-        } else if (spec == 't') {
-            prog.push_back({&DF_TAB, 1, 0}); width += 1;
-        } else {
-            prog.push_back({nullptr, 0, spec});
-            width += df_spec_max_width(spec);
-        }
-        p += 2;
-        run = p;
-    }
-    if (*run) {  // trailing literal run
-        const uint32_t len = static_cast<uint32_t>(std::strlen(run));
-        prog.push_back({run, len, 0});
-        width += len;
-    }
-    *max_len = width;
-    return prog;
-}
-
-}  // namespace
+// Token program (TfFields/TfToken/tf_compile/tf_emit_spec/tf_decompose) lives in
+// draken/ops/temporal_format.h — shared with the C-ABI draken_date_format kernel.
 
 // ---------------------------------------------------------------------------
 // impl_date_format
@@ -756,7 +556,7 @@ static nb::object impl_date_format(nb::object v_obj, const char* fmt) {
     // Compile the constant format string once into a token program; size the
     // per-row scratch buffer to its worst-case output.
     size_t max_row_len = 0;
-    const std::vector<DfToken> prog = df_compile(fmt, &max_row_len);
+    const std::vector<TfToken> prog = tf_compile(fmt, &max_row_len);
     std::vector<char> row_vec(max_row_len);
     char* const row_buf = row_vec.data();
 
@@ -800,22 +600,15 @@ static nb::object impl_date_format(nb::object v_obj, const char* fmt) {
             secs_in_day = sec - days * 86400LL;  // always [0, 86400)
         }
 
-        DfFields f;
-        ta_days_to_ymd(days, &f.year, &f.month, &f.day);
-        f.days   = days;
-        f.hour   = static_cast<int>(secs_in_day / 3600LL);
-        f.minute = static_cast<int>((secs_in_day % 3600LL) / 60LL);
-        f.second = static_cast<int>(secs_in_day % 60LL);
-        f.yday0  = static_cast<int>(days - ta_ymd_to_days(f.year, 1, 1));
-        f.wday   = static_cast<int>(((days % 7) + 7 + 4) % 7);  // 1970-01-01 = Thu
+        const TfFields f = tf_decompose(days, secs_in_day);
 
         char* p = row_buf;
-        for (const DfToken& tok : prog) {
+        for (const TfToken& tok : prog) {
             if (tok.spec == 0) {
                 std::memcpy(p, tok.lit, tok.lit_len);
                 p += tok.lit_len;
             } else {
-                p = df_emit_spec(p, tok.spec, f);
+                p = tf_emit_spec(p, tok.spec, f);
             }
         }
         const uint32_t slen = static_cast<uint32_t>(p - row_buf);

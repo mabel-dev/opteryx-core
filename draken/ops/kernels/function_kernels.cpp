@@ -779,7 +779,15 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
         (void)sub_ticks;
         out[i] = tsecs * sub;   // back into the operand's unit; sub-second dropped
     }
-    return fk_numeric_result(v, out, n, DRAKEN_TIMESTAMP64);
+    VecResult r = fk_numeric_result(v, out, n, DRAKEN_TIMESTAMP64);
+    // fk_numeric_result leaves ts_unit at its VecResult default (0xFF = unset),
+    // which vecresult_to_owner() (draken_native.cpp) reads as "no LogicalType" —
+    // the result would silently lose its logical_type_unit descriptor (a hard
+    // error the next time anything reads TimestampUnit off it, e.g. a further
+    // DATE_TRUNC/EXTRACT/DATEDIFF). The trunc preserves the operand's unit
+    // (see the comment above: `out[i] = tsecs * sub` stays in that unit).
+    if (r.data != nullptr) r.ts_unit = c->left_unit;
+    return r;
 }
 
 }  // extern "C"

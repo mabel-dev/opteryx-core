@@ -357,7 +357,8 @@ public:
     }
     void add_expr_project(size_t p, void* instrs, int count, std::vector<int> col_idx,
                           std::vector<void*> lit_dv, ExprEvalFn fn, std::string name,
-                          int lt_kind, int lt_unit, int lt_precision, int lt_scale) {
+                          int lt_kind, int lt_unit, int lt_precision, int lt_scale,
+                          int lt_dimension) {
         ExprProgram prog;
         prog.instrs = instrs;
         prog.count = count;
@@ -370,6 +371,11 @@ public:
             lt.unit = static_cast<TimestampUnit>(lt_unit);
             lt.precision = static_cast<uint8_t>(lt_precision);
             lt.scale = static_cast<uint8_t>(lt_scale);
+            // VECTOR's width. Zero for every other kind — the descriptor channel
+            // carried (kind, unit, precision, scale) only, so a computed VECTOR
+            // column reached the engine with dimension 0 and every downstream
+            // reader (take, to_pylist) rejected it.
+            lt.dimension = static_cast<uint32_t>(lt_dimension);
             logical = logical_type_intern(lt);
         }
         // Fuse consecutive computed columns into ONE operator: a 90-projection

@@ -54,6 +54,7 @@ from opteryx.expression.evaluator._impl cimport (
     _dv_filter_span_cxx,
     _dv_filter_span_with_consts_cxx,
     _dv_eval_span_cxx,
+    VecResult,
 )
 from opteryx.compiled.morsel_queue cimport PyMorselQueue, MorselQueue
 from libcpp.vector cimport vector as cppvector
@@ -208,7 +209,8 @@ ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                            int* col_idx, void** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
-                           int* err_op, const char** err_msg) noexcept nogil
+                           int* err_op, const char** err_msg,
+                           VecResult** out_child) noexcept nogil
 
 cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nogil:
     cdef enum class AggFn "opteryx::engine::AggFn":
@@ -259,7 +261,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                              cppvector[int] const_col_idx, cppvector[void*] const_scalar_dv)
         void add_expr_project(size_t p, void* instrs, int count, cppvector[int] col_idx,
                               cppvector[void*] lit_dv, ExprEvalFn fn, string name,
-                              int lt_kind, int lt_unit, int lt_precision, int lt_scale)
+                              int lt_kind, int lt_unit, int lt_precision, int lt_scale,
+                              int lt_dimension)
         void add_limit(size_t p, int64_t offset, int64_t limit)
         void add_unnest(size_t p, uint32_t array_idx, string target_name, bint drop_source)
         void add_unnest_literal(size_t p, shared_ptr[CxxMorsel] lit, string target_name)
@@ -1947,29 +1950,33 @@ cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
                           uint8_t** out_validity, void** out_sel,
-                          int* err_op, const char** err_msg) noexcept nogil:
+                          int* err_op, const char** err_msg,
+                          VecResult** out_child) noexcept nogil:
     """Native entry (matches ExprEvalFn) for ExprProjectOperator — the pure-nogil
     computed-column span in evaluation.pyx. Force-densifies the result (the default
     boundary). No PyObject inside."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, err_op, err_msg, False)
+                             out_validity, out_sel, err_op, err_msg, False, out_child)
 
 
 cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
                                    int* col_idx, void** lit_dv,
                                    DrakenVector* out_vec, void** out_data,
                                    uint8_t** out_validity, void** out_sel,
-                                   int* err_op, const char** err_msg) noexcept nogil:
+                                   int* err_op, const char** err_msg,
+                                   VecResult** out_child) noexcept nogil:
     """Shape-PRESERVING ExprEvalFn twin of _expr_eval_tramp — keeps a compressed
     result's encoding (dict/constant) instead of force-densifying. Selected by
     add_expr_project(preserve_shape=True) for computed GROUP BY / DISTINCT keys, whose
     only consumer (the group/distinct sink) is compression-aware. A distinct fn
     pointer also keeps these columns from fusing with dense ExprProject columns in the
-    engine's ExprMultiProjectOperator (fusion requires an identical fn)."""
+    engine's ExprMultiProjectOperator (fusion requires an identical fn). ARRAY results
+    are NOT supported on this path (_dv_copy_result_preserve_shape rejects DRAKEN_ARRAY,
+    matching today's behaviour) — *out_child always comes back NULL here."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, err_op, err_msg, True)
+                             out_validity, out_sel, err_op, err_msg, True, out_child)
 
 
 cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
@@ -1990,9 +1997,11 @@ cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
         ci = -1
         lit_dv.push_back(NULL)
         if slot.opcode == BC_LOAD_COL or (
-                slot.opcode == BC_CAST and (slot.flags & BC_C_NATIVE_CHILD) != 0):
-            # BC_C_NATIVE_CHILD casts carry the ARRAY operand's identity — the
-            # eval span resolves the owner-held child element vector through it.
+                (slot.opcode == BC_CAST or slot.opcode == BC_FUNCTION)
+                and (slot.flags & BC_C_NATIVE_CHILD) != 0):
+            # BC_C_NATIVE_CHILD instructions (ARRAY->VARCHAR cast, SORT) carry
+            # the ARRAY operand's identity — the eval span resolves the
+            # owner-held child element vector through it.
             ident = <bytes>slot.column_identity
             try:
                 ci = <int>layout.index(ident)
@@ -2336,8 +2345,8 @@ cdef class NativePlan:
                          logical=None, bint preserve_shape=False):
         """Append ONE computed column (identity ``name``) evaluated by a plan-lowered,
         plan-resolved c-native program (load-ending programs allowed). ``logical`` =
-        (kind, unit, precision, scale) ints for descriptor-carrying results
-        (DECIMAL/TIMESTAMP) — re-attached to the output column's owner natively.
+        (kind, unit, precision, scale, dimension) ints for descriptor-carrying results
+        (DECIMAL/TIMESTAMP/VECTOR) — re-attached to the output column's owner natively.
 
         ``preserve_shape`` keeps a compressed result's encoding (dict/constant) at the
         projection boundary instead of force-densifying. The compiler sets it ONLY for
@@ -2353,16 +2362,17 @@ cdef class NativePlan:
         self.held.append(bc)
         cdef string nm = <string>(name if isinstance(name, bytes)
                                   else (<str>name).encode("utf-8"))
-        cdef int lk = 0, lu = 0, lp = 0, lsc = 0
+        cdef int lk = 0, lu = 0, lp = 0, lsc = 0, ld = 0
         if logical is not None:
             lk = <int>logical[0]
             lu = <int>logical[1]
             lp = <int>logical[2]
             lsc = <int>logical[3]
+            ld = <int>logical[4]
         cdef ExprEvalFn fn = (_expr_eval_preserve_tramp if preserve_shape
                               else _expr_eval_tramp)
         self._e.add_expr_project(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
-                                 fn, nm, lk, lu, lp, lsc)
+                                 fn, nm, lk, lu, lp, lsc, ld)
 
     def add_limit(self, size_t p, offset, limit):
         """LIMIT/OFFSET on pipeline ``p``. ``limit`` None = unbounded (OFFSET-only)."""

@@ -8,8 +8,32 @@
 
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode, BytecodeInstr
 from draken.morsels.cxx_morsel cimport CxxMorsel
-from draken.core.buffers cimport DrakenVector
-from libc.stdint cimport int32_t, uint32_t
+from draken.core.buffers cimport DrakenVector, DrakenType
+from libc.stdint cimport int32_t, uint32_t, uint8_t
+
+# SINGLE SOURCE for this extern type: declaring it again (even opaquely) inside
+# evaluation.pyx — which is textually `include`d into _impl.pyx, this .pxd's own
+# implementation — creates a conflicting duplicate cdef-extern-type declaration in
+# the same compilation unit. Cython resolves that by keeping whichever declaration
+# it sees first (this .pxd's, processed before the .pyx body), so a duplicate
+# elsewhere silently degrades every `VecResult` use in evaluation.pyx to an
+# untyped Python object — every `vr.data == NULL` etc. Field list must stay in
+# sync with the real C++ struct (ops/vec_result.h); Cython only needs the fields
+# actually dereferenced from Cython, not every field.
+cdef extern from "ops/vec_result.h":
+    ctypedef struct VecResult:
+        void*             data
+        uint8_t*          validity
+        const uint32_t*   selection
+        bint              owns_selection
+        uint32_t          data_length
+        uint32_t          length
+        DrakenType        type
+        uint8_t           flags
+        uint8_t           validity_embedded
+        const char*       error_msg
+        void*             child   # VecResult* — void* here, self-reference breaks
+                                   # ctypedef-struct parsing; cast at use sites.
 
 # GIL: resolve LOAD_COL identity → column index in the CxxMorsel and LOAD_LIT_CONST
 # → DV*. Stable for a fixed pipeline schema → resolve once, reuse. 0 ok, -1 column
@@ -49,4 +73,5 @@ cdef int _dv_eval_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
                            int* err_op, const char** err_msg,
-                           bint preserve_shape) noexcept nogil
+                           bint preserve_shape,
+                           VecResult** out_child) noexcept nogil

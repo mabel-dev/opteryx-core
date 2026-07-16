@@ -389,6 +389,115 @@ VecResult draken_cast_float64_to_string(void* ctx, const DrakenVector* v) {
     });
 }
 
+// --- DECIMAL → VARCHAR --------------------------------------------------------
+//
+// A DECIMAL vector stores the UNSCALED integer (int64 for DRAKEN_DECIMAL p≤18,
+// __int128 for DRAKEN_DECIMAL128 p≤38); the decimal point position is the
+// LogicalType `scale`, which the DrakenVector does NOT carry (§11/§14). The
+// binder therefore hands the source scale in a binary_op_ctx.left_scale at bind
+// time (see the `_to_string` DECIMAL arm in compiled_expression.pyx), same
+// mechanism the DECIMAL binop/function kernels use.
+//
+// Text follows SQL DECIMAL semantics: EXACTLY `scale` fractional digits, trailing
+// zeros preserved (DECIMAL(3,1) 30 → "3.0", not "3"), matching Python str(Decimal).
+
+// Format a signed unscaled decimal `value` at `scale` into `buf`; returns byte
+// length. Magnitude fits: |value| < 10^38 < 2^127, so -value is never UB and the
+// digit buffer never exceeds 39 digits (+ sign + point).
+static int decimal_to_ascii(__int128 value, uint32_t scale, char* buf) noexcept {
+    const bool neg = value < 0;
+    unsigned __int128 u = neg ? static_cast<unsigned __int128>(-value)
+                              : static_cast<unsigned __int128>(value);
+    char digits[48];
+    int nd = 0;
+    if (u == 0) { digits[nd++] = '0'; }
+    else { while (u) { digits[nd++] = static_cast<char>('0' + static_cast<int>(u % 10u)); u /= 10u; } }
+    // digits[] holds least-significant digit first.
+
+    int p = 0;
+    if (neg) buf[p++] = '-';
+    if (scale == 0u) {
+        for (int i = nd - 1; i >= 0; --i) buf[p++] = digits[i];
+        return p;
+    }
+    const int int_digits = nd - static_cast<int>(scale);
+    if (int_digits <= 0) {
+        buf[p++] = '0';
+        buf[p++] = '.';
+        for (int z = 0; z < -int_digits; ++z) buf[p++] = '0';  // leading fractional zeros
+        for (int i = nd - 1; i >= 0; --i) buf[p++] = digits[i];
+    } else {
+        for (int i = nd - 1; i >= nd - int_digits; --i) buf[p++] = digits[i];
+        buf[p++] = '.';
+        for (int i = nd - int_digits - 1; i >= 0; --i) buf[p++] = digits[i];
+    }
+    return p;
+}
+
+// Shared DECIMAL/DECIMAL128 → VARCHAR core. Compression-aware like
+// int_to_string_core: format the data_length PHYSICAL unscaled values (1 for a
+// constant, K for a dict, length for dense) into a K-slot value block, then carry
+// the input's selection + validity through. Formatting never fails (no
+// null-introduction), so validity is preserved 1:1.
+static VecResult decimal_to_string_core(void* ctx, const DrakenVector* v, bool is128) {
+    if (!v) return draken_error_sentinel("Input vector is null");
+    const DrakenType want = is128 ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+    if (v->type != want)
+        return draken_error_sentinel_fmt("cast decimal->string: expected %d, got %d", want, v->type);
+    // Scale is mandatory for a correct answer; a missing ctx is a bind bug — fail
+    // loud rather than silently emit an unscaled integer.
+    if (!ctx) return draken_error_sentinel("cast decimal->string: missing scale context");
+    const uint32_t scale = static_cast<const binary_op_ctx*>(ctx)->left_scale;
+
+    const uint32_t k = v->data_length;
+    const int64_t*   src64  = static_cast<const int64_t*>(v->data);
+    const __int128*  src128 = static_cast<const __int128*>(v->data);
+
+    char tmp[48];
+    size_t total_extern = 0u;
+    for (uint32_t j = 0u; j < k; ++j) {
+        const __int128 val = is128 ? src128[j] : static_cast<__int128>(src64[j]);
+        const int len = decimal_to_ascii(val, scale, tmp);
+        if (static_cast<uint32_t>(len) > STR_INLINE_MAX) total_extern += static_cast<size_t>(len);
+    }
+
+    DrakenStringSlot* slots;
+    uint8_t* arena;
+    uint8_t* vunused;
+    uint8_t* block = vecresult_string_block_alloc(k, total_extern, 0, &slots, &arena, &vunused);
+    if (!block) return draken_error_sentinel("Allocation failed");
+    (void)vunused;
+
+    size_t arena_used = 0u;
+    for (uint32_t j = 0u; j < k; ++j) {
+        const __int128 val = is128 ? src128[j] : static_cast<__int128>(src64[j]);
+        const int len = decimal_to_ascii(val, scale, tmp);
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(tmp);
+        if (static_cast<uint32_t>(len) > STR_INLINE_MAX) {
+            const uint32_t off = static_cast<uint32_t>(arena_used);
+            std::memcpy(arena + off, tmp, static_cast<size_t>(len));
+            draken_build_string_slot(&slots[j], bytes, static_cast<uint32_t>(len), off);
+            arena_used += static_cast<size_t>(len);
+        } else {
+            draken_build_string_slot(&slots[j], bytes, static_cast<uint32_t>(len), 0u);
+        }
+    }
+
+    VecResult r = vecresult_from_string_block(block, k, total_extern, 0, DRAKEN_VARCHAR);
+    kernel_preserve_shape(r, v);
+    return r;
+}
+
+// DECIMAL (int64-backed, p≤18) → VARCHAR.
+VecResult draken_cast_decimal_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return decimal_to_string_core(ctx, v, /*is128=*/false); });
+}
+
+// DECIMAL128 (int128-backed, p≤38) → VARCHAR.
+VecResult draken_cast_decimal128_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return decimal_to_string_core(ctx, v, /*is128=*/true); });
+}
+
 // INTEGER (INT32/INT16/INT8) → FLOAT64: lossless widening.
 VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({

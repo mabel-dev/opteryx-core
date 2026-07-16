@@ -91,8 +91,23 @@ _KEYWORDS_REGEX = re.compile(
 
 # Match ", ', b", b', `
 # We match b prefixes separately after the non-prefix versions
+#
+# A literal ends at the first quote that is NOT doubled: SQL escapes a quote by
+# doubling it ('don''t'), so `'[^']*'` cannot express one — it ended the literal at the
+# first inner quote, and `SELECT 'don''t'` tokenised as 'don' + 't', which the parts are
+# then rejoined with a space between ('a''b''c' -> 'a' 'b' 'c'). The statement never
+# reached the parser intact, so this looked like missing parser support for standard SQL
+# escaping. `(?:[^']|'')*` consumes a doubled quote as one unit instead. The two
+# alternatives are disjoint (the first cannot match a quote, the second only matches a
+# pair), so there is no ambiguity for the engine to backtrack over.
 _QUOTED_STRINGS_REGEX = re.compile(
-    r'("[^"]*"|\'[^\']*\'|\b[bB]"[^"]*"|\b[bB]\'[^\']*\'|\b[rR]"[^"]*"|\b[rR]\'[^\']*\'|`[^`]*`)'
+    r'("(?:[^"]|"")*"'
+    r'|\'(?:[^\']|\'\')*\''
+    r'|\b[bB]"(?:[^"]|"")*"'
+    r'|\b[bB]\'(?:[^\']|\'\')*\''
+    r'|\b[rR]"(?:[^"]|"")*"'
+    r'|\b[rR]\'(?:[^\']|\'\')*\''
+    r"|`[^`]*`)"
 )
 
 
@@ -118,7 +133,10 @@ def sql_parts(string):
                 # plan as the encoded string and let the engine decode it
                 from opteryx.third_party.mabel import base64
 
-                encoded_part = base64.encode(part[2:-1].encode()).decode()
+                # part[2:-1] is the literal's VALUE, not SQL text — the parser never
+                # sees it to un-escape, so undouble here. (A b-string's payload goes
+                # back out as SQL, so its escapes stay doubled for the parser.)
+                encoded_part = base64.encode(part[2:-1].replace("''", "'").encode()).decode()
                 # if there's no alias, we should add one to preserve the input
                 parts.append(f"BASE64_DECODE('{encoded_part}')")
                 if len(quoted_strings) > i + 1:

@@ -60,44 +60,21 @@ _UNSET = object()
 class KernelSpec:
     """Specification for a function kernel implementation."""
 
+    # NOTE: no null_policy. It was declared here (compress/passthru/bypass/...),
+    # validated, normalized, and exported into reference/function_signatures.json —
+    # and read by NOTHING. It described no behaviour: every kernel's real null
+    # semantics live in the kernel itself, so a declaration that disagreed with its
+    # kernel (as ARRAY_CONTAINS_ANY/ALL's "passthru" did — the kernel answers FALSE
+    # for a null row, not null) was silently misleading rather than wrong-in-a-way-
+    # anything-would-catch. Removed 2026-07-16 (architect).
     id: str  # kernel identifier, e.g., "integer_integer" or "polymorphic"
     callable_ref: Callable
     engine: Literal["draken"] | object = _UNSET
-    null_policy: Literal[
-        "compress",
-        "passthru",
-        "bypass",
-        "strict",
-        "passthrough",
-        "custom",
-    ] = "compress"
     cost_us_per_million: float = 0.0  # measured cost per million rows
 
     def __post_init__(self):
         if self.engine is _UNSET:
             raise ValueError("KernelSpec.engine is required and must be one of ('draken').")
-
-        if self.null_policy not in (
-            "compress",
-            "passthru",
-            "bypass",
-            "strict",
-            "passthrough",
-            "custom",
-        ):
-            raise ValueError(
-                "KernelSpec.null_policy must be one of "
-                "('compress','passthru','bypass','strict','passthrough','custom')."
-            )
-
-        # Normalize legacy null policy names to canonical ones.
-        normalized = {
-            "strict": "compress",
-            "passthrough": "passthru",
-            "custom": "bypass",
-        }
-        if self.null_policy in normalized:
-            object.__setattr__(self, "null_policy", normalized[self.null_policy])
 
 
 @dataclass(frozen=True)

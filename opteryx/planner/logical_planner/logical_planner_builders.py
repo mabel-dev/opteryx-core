@@ -10,6 +10,7 @@ a function and a reference to it in the dictionary.
 """
 
 import datetime
+import decimal
 from typing import List, Optional
 
 from opteryx.compiled.expression.compiled_expression import _BOP_CODE
@@ -37,6 +38,9 @@ from opteryx.types.logical_type import (
     DATE as _CT_DATE,
 )
 from opteryx.types.logical_type import (
+    DECIMAL as _CT_DECIMAL,
+)
+from opteryx.types.logical_type import (
     FLOAT64 as _CT_FLOAT64,
 )
 from opteryx.types.logical_type import (
@@ -62,9 +66,6 @@ from opteryx.types.logical_type import (
 )
 from opteryx.types.logical_type import (
     VARIANT as _CT_VARIANT,
-)
-from opteryx.types.logical_type import (
-    VECTOR as _CT_VECTOR,
 )
 from opteryx.types.logical_type import (
     ColumnType,
@@ -634,7 +635,7 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
         "NVARCHAR",
         "DECIMAL",
     ):
-        return _cast_literal_value(source_expr, normalized_type, kind, alias)
+        return _cast_literal_value(source_expr, normalized_type, kind, alias, cast_parameters)
 
     # For non-literals, return a CAST node that will be evaluated at runtime
     # CAST nodes have the source in 'left', target type in 'value', and optional params in 'parameters'
@@ -663,7 +664,19 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
 
     # Handle custom types
     if "Custom" in data_type:
-        data_type = branch["data_type"]["Custom"][0][0]["Identifier"]["value"].upper()
+        # Custom is [ObjectName, args]: `VECTOR(384)` parses as
+        # [[{Identifier: VECTOR}], ["384"]]. Only the NAME was read, so every
+        # parenthesised argument on a custom type was silently dropped and
+        # `CAST(x AS VECTOR(384))` arrived at the binder as a bare "VECTOR" — which
+        # parse_column_type rejects, since a VECTOR has no meaning without a width.
+        # Carry the args through the same channel DECIMAL's precision/scale use.
+        _custom = branch["data_type"]["Custom"]
+        data_type = _custom[0][0]["Identifier"]["value"].upper()
+        for _param in (_custom[1] if len(_custom) > 1 else []):
+            # sqlparser hands these back as strings; keep an integral one integral so
+            # the binder can read a dimension without re-parsing.
+            _p = str(_param)
+            args.append(build_literal_node(int(_p) if _p.lstrip("-").isdigit() else _p))
 
     # Handle DECIMAL precision and scale
     if "decimal" in data_type.lower() and "PrecisionAndScale" in branch["data_type"].get(
@@ -754,8 +767,14 @@ def _normalize_cast_type(data_type: str) -> str:
     raise SqlError(f"Unsupported type for CAST - '{data_type}'.")
 
 
-def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
-    """Cast a literal value at compile time."""
+def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params=()):
+    """Cast a literal value at compile time.
+
+    `params` carries the TYPE's parenthesized arguments (VECTOR's width today). Folding
+    otherwise drops them, which for a parameterized target means folding to a constant
+    that has lost its declared type — the reason NVARCHAR/DECIMAL are routed to the
+    runtime CAST node instead.
+    """
     from opteryx.expression.casts import parse_timestamp_value
     from opteryx.types.timestamps._datetime_conversion import (
         date_to_int64_days,
@@ -784,6 +803,35 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")
+
+    if base_type == "VECTOR":
+        # CAST(<array literal> AS VECTOR(n)): the values are known here, so fold to a
+        # VECTOR-typed literal rather than emit a runtime CAST. The runtime cast reads
+        # its elements from the column owner's CHILD vector, which only a real column
+        # has — a literal array has no child, so the kernel could not see its own input.
+        # Folding is not an optimization here; it is the only way this shape can run.
+        from opteryx.types.logical_type import VECTOR as _CT_VECTOR
+
+        if not params or params[0].node_type != NodeType.LITERAL:
+            raise UnsupportedSyntaxError(
+                "CAST to VECTOR requires a dimension, e.g. CAST([1.0, 0.0] AS VECTOR(2))."
+            )
+        _dims = int(params[0].value)
+        _vals = literal_node.value
+        if not isinstance(_vals, (list, tuple)):
+            raise UnsupportedSyntaxError("CAST to VECTOR expects an array literal.")
+        if len(_vals) != _dims:
+            raise UnsupportedSyntaxError(
+                f"CAST to VECTOR({_dims}) got a {len(_vals)}-element array literal."
+            )
+        _floats = []
+        for _v in _vals:
+            if _v is None or isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                raise UnsupportedSyntaxError(
+                    "CAST to VECTOR expects an array literal of numbers with no nulls."
+                )
+            _floats.append(float(_v))
+        return Node(NodeType.LITERAL, value=_floats, type=_CT_VECTOR(_dims), alias=alias)
 
     # Extract unit from internal temporal type forms
     unit = None
@@ -1329,10 +1377,30 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
     try:
         # Try converting to int first
         value = int(value)
+        if -(2**63) <= value <= 2**63 - 1:
+            return Node(
+                NodeType.LITERAL,
+                type=_CT_INT64,
+                value=value,
+                alias=alias,
+            )
+        # Overflows INT64 (e.g. CAST(12345678901234567890 AS DECIMAL(38,3))) — the
+        # engine's only wider native numeric tier is DECIMAL128 (int128-backed,
+        # max 38 digits). Materialise as an exact DECIMAL(precision, 0) literal
+        # instead of silently truncating or reaching _materialise_constant_literal's
+        # generic INT64 fallback, which nb::cast<int64_t>()s and throws std::bad_cast
+        # for out-of-range values.
+        decimal_value = decimal.Decimal(value)
+        precision = len(decimal_value.as_tuple().digits)
+        if precision > 38:
+            raise SqlError(
+                f"Integer literal {value} has {precision} digits; the maximum "
+                "supported precision is 38."
+            )
         return Node(
             NodeType.LITERAL,
-            type=_CT_INT64,
-            value=value,
+            type=_CT_DECIMAL(precision, 0),
+            value=decimal_value,
             alias=alias,
         )
     except ValueError:
@@ -1466,13 +1534,19 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     node_types = {t.type for t in node_values}
     element_ct = node_types.pop() if len(node_types) == 1 else None
 
-    # element_ct is ColumnType from literal builders; extract category for dispatch
-    elem_cat = element_ct.category if isinstance(element_ct, ColumnType) else element_ct
-    if elem_cat in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL):
-        # Numeric-homogeneous tuple → fixed-size float vector
-        literal_type = _CT_VECTOR(len(values))
-    else:
-        literal_type = _CT_ARRAY(element_ct if element_ct is not None else _CT_VARIANT)
+    # ALWAYS an ARRAY — a literal is never a VECTOR (architect, 2026-07-16).
+    #
+    # A numeric-homogeneous tuple previously became _CT_VECTOR(len(values)), which
+    # made `(1,2)` and `('a','b')` bind to different type families for no reason the
+    # rest of the system honours. It bought nothing and actively hurt: it let
+    # COSINE_SIMILARITY((1.0,2.0),(1.0,2.0)) PASS the binder's NUMERIC_VECTOR check
+    # and then die at run time inside draken_vector_unwrap ("expected Vector, got
+    # tuple") — strictly worse than the bracket form `[1.0,2.0]`, which is an ARRAY
+    # and fails cleanly at bind time. Nothing constructs a VECTOR_FP16 column, so no
+    # reachable path consumed this. Both literal syntaxes now agree, and a numeric
+    # tuple can reach the ARRAY-typed functions (ARRAY_CONTAINS_ANY/ALL) that a
+    # VECTOR-typed one was rejected by.
+    literal_type = _CT_ARRAY(element_ct if element_ct is not None else _CT_VARIANT)
 
     if values and isinstance(values[0], dict):
         values = [build(val["Identifier"]).value for val in values]

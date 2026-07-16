@@ -45,8 +45,16 @@ static bool CheckColumnCompatibility(const ColumnStats &col) {
     if (col.logical_type.rfind("decimal", 0) != 0) return false;
   }
 
+  // Encodings we can actually decode, using Parquet spec IDs:
+  //   0 PLAIN, 2 PLAIN_DICTIONARY, 3 RLE (boolean values / levels),
+  //   5 DELTA_BINARY_PACKED, 7 DELTA_BYTE_ARRAY, 8 RLE_DICTIONARY.
+  // The previous list {0,2,4,6,7} predates the ZigZag-decode fix in
+  // metadata.cpp and was never renumbered: it advertised BIT_PACKED(4) and
+  // DELTA_LENGTH_BYTE_ARRAY(6) — neither of which decodes — while omitting
+  // DELTA_BINARY_PACKED(5) and RLE_DICTIONARY(8), which do.
   for (int32_t enc : col.encodings) {
-    if (enc == 0 || enc == 2 || enc == 4 || enc == 6 || enc == 7) return true;
+    if (enc == 0 || enc == 2 || enc == 3 || enc == 5 || enc == 7 || enc == 8)
+      return true;
   }
   return false;
 }

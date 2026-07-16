@@ -14,24 +14,25 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 
-char* bintob16_avx2(char* restrict dest, const void* restrict src, size_t size) {
+char* bintob16_avx2_lut(char* restrict dest, const void* restrict src, size_t size,
+                        const char* restrict lut) {
     if (size < 32) {
-        return bintob16_scalar(dest, src, size);
+        return bintob16_scalar_lut(dest, src, size, lut);
     }
 
     const uint8_t* in = (const uint8_t*)src;
     char* out = dest;
 
-    const __m128i lut128 = _mm_loadu_si128((const __m128i*)B16_ENCODE_LUT);
-    const __m256i lut    = _mm256_broadcastsi128_si256(lut128);
+    const __m128i lut128 = _mm_loadu_si128((const __m128i*)lut);
+    const __m256i lutv   = _mm256_broadcastsi128_si256(lut128);
     const __m256i mask0f = _mm256_set1_epi8(0x0F);
 
     while (size >= 32) {
         __m256i v        = _mm256_loadu_si256((const __m256i*)in);
         __m256i hi       = _mm256_and_si256(_mm256_srli_epi16(v, 4), mask0f);
         __m256i lo       = _mm256_and_si256(v, mask0f);
-        __m256i hi_ascii = _mm256_shuffle_epi8(lut, hi);
-        __m256i lo_ascii = _mm256_shuffle_epi8(lut, lo);
+        __m256i hi_ascii = _mm256_shuffle_epi8(lutv, hi);
+        __m256i lo_ascii = _mm256_shuffle_epi8(lutv, lo);
 
         /*
          * Per-lane interleave gives, for lane 0:
@@ -57,7 +58,11 @@ char* bintob16_avx2(char* restrict dest, const void* restrict src, size_t size) 
     }
 
     /* Scalar handles 0..31 trailing bytes and the null terminator. */
-    return bintob16_scalar(out, in, size);
+    return bintob16_scalar_lut(out, in, size, lut);
+}
+
+char* bintob16_avx2(char* restrict dest, const void* restrict src, size_t size) {
+    return bintob16_avx2_lut(dest, src, size, B16_ENCODE_LUT);
 }
 
 void* b16tobin_avx2(void* restrict dest, const char* restrict src, size_t len) {
@@ -130,6 +135,10 @@ void* b16tobin_avx2(void* restrict dest, const char* restrict src, size_t len) {
 }
 
 #else
+char* bintob16_avx2_lut(char* restrict dest, const void* restrict src, size_t size,
+                        const char* restrict lut) {
+    return bintob16_scalar_lut(dest, src, size, lut);
+}
 char* bintob16_avx2(char* restrict dest, const void* restrict src, size_t size) {
     return bintob16_scalar(dest, src, size);
 }

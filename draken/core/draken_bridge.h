@@ -47,6 +47,7 @@
 
 #ifdef __cplusplus
 #include "ops/vec_result.h"
+struct VectorOwner;   // full definition: core/vector_owner.h (included by callers)
 extern "C" {
 #endif
 
@@ -391,6 +392,34 @@ void* draken_arrow_varlen_to_string_block(
 // Returns a NEW reference to a Python Vector on success.
 // Returns NULL with a Python exception set on failure.
 PyObject* draken_vecresult_own_c(VecResult res);
+
+// draken_vecresult_child_owner_new_c — heap-allocate a VectorOwner from a VecResult,
+// with NO Python object created (unlike draken_vecresult_own_c). For embedding as
+// ANOTHER VectorOwner's child_owner (an ARRAY result's element vector), where a
+// Python handle would be wasted and wrong — child_owner wants sole C++ ownership,
+// not a refcounted Python wrapper.
+//
+// A raw pointer (not VectorOwner by value) crosses this C-linkage boundary
+// deliberately: VectorOwner is move-only (unique_ptr members), and a non-trivial
+// C++ type returned by value through `extern "C"` is compiler-ABI-dependent, not a
+// portable C contract — see draken_vecresult_own_c's comment on why VecResult
+// (also a C++ struct) gets a dedicated C-linkage alias instead of relying on the
+// mangled C++ symbol resolving cross-.so. A pointer has no such ambiguity.
+//
+// MOVES ownership from res, identical to draken_vecresult_own_c. Recurses through
+// res.child (freed after adoption — same contract as vecresult_to_owner).
+// Returns a NEW heap allocation; the caller adopts it into a
+// std::unique_ptr<VectorOwner> (default `delete` is correct — allocated with
+// plain `new`, both sides are C++ compiled by the same toolchain).
+VectorOwner* draken_vecresult_child_owner_new_c(VecResult res);
+
+// draken_vecresult_discard_c — free a heap-boxed child VecResult* (as produced by
+// a kernel's `new VecResult(...)`, e.g. VecResult::child) WITHOUT adopting it
+// anywhere. For error paths that received a valid ARRAY result but cannot use it
+// (see evaluation.pyx's evaluate_c_native) — frees data/validity/selection/nested
+// child correctly via the same vecresult_to_owner RAII teardown, then the box
+// itself. `res` may be NULL (no-op). Safe to call exactly once per pointer.
+void draken_vecresult_discard_c(VecResult* res);
 
 #ifdef __cplusplus
 }  // extern "C"

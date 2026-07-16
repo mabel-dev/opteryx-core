@@ -399,6 +399,9 @@ _SQL_TO_LC: Dict[OT, LC] = {
     OT.NULL: LC.NULL,
 }
 
+# The string family, for the StringConcat NULL-operand rule in determine_type.
+_STRING_CATEGORIES = frozenset({LC.VARCHAR, LC.NVARCHAR, LC.VARBINARY})
+
 
 def _is_internal_operator(operator: str) -> bool:
     return operator.startswith(("AnyOp", "AllOp")) or operator in {
@@ -473,6 +476,20 @@ def determine_type(node):
     operator = node.value
     if not is_known_operator(operator) and not _is_internal_operator(operator):
         raise UnsupportedSyntaxError(f"Unsupported operator \'{operator}\'.")
+
+    # StringConcat with an untyped NULL operand. `x || NULL` (and `NULL || x`) is
+    # NULL for every row, but it is still a STRING-typed expression — the result
+    # adopts the string operand's type. Without this, the generic NULL early-return
+    # below leaves the column untyped (None). The old Python concat closure got away
+    # with that (it emitted VARCHAR data under an untyped column), but the native
+    # kernel cannot: an untyped result gives it no type to stamp on the output, and
+    # the closure is not a fallback the native engine can reach.
+    # NULL || NULL stays untyped — there is no string operand whose type to adopt.
+    if operator == "StringConcat":
+        if left_lc == OT.NULL and right_lc in _STRING_CATEGORIES:
+            return right_ct
+        if right_lc == OT.NULL and left_lc in _STRING_CATEGORIES:
+            return left_ct
 
     if left_lc is None or left_lc == OT.NULL:
         return None

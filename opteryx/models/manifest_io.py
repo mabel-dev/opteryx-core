@@ -50,6 +50,23 @@ _MANIFEST_COLUMNS = {
 # native kernels (KMV NDV, histogram fold) rather than the boxed per-file lists.
 _SKETCH_VECTOR_COLUMNS = ("min_k_hashes", "histogram_counts")
 
+# The per-dataset manifest ANALYZE writes for a plain filesystem dataset, stored
+# alongside the data files it describes.
+#
+# It is itself a Parquet file living inside a directory whose data files are
+# discovered by a RECURSIVE listing filtered on the `.parquet` suffix — so it
+# would be read back as a data file unless explicitly excluded. `is_dataset_manifest`
+# is that exclusion and MUST be applied by every parquet-discovery path (the
+# scan's and ANALYZE's own — otherwise ANALYZE analyzes its own manifest).
+# A reserved, opteryx-prefixed basename is matched exactly, so the guard can
+# never subtract a real data file from a dataset.
+DATASET_MANIFEST_NAME = "_opteryx_manifest.parquet"
+
+
+def is_dataset_manifest(path: str) -> bool:
+    """True when `path` is a dataset manifest, not a data file. See DATASET_MANIFEST_NAME."""
+    return path.replace("\\", "/").rsplit("/", 1)[-1] == DATASET_MANIFEST_NAME
+
 
 def _decode_bound(raw: bytes, physical):
     """Reverse opteryx.connectors.parquet_io.parquet_writer._serialize_bound.
@@ -115,7 +132,7 @@ def _file_entry_bounds_as_values(file_entry: FileEntry, schema) -> Tuple[List, L
     return min_values, max_values
 
 
-def _file_entry_to_manifest_dict(file_entry: FileEntry, schema) -> dict:
+def _file_entry_to_manifest_dict(file_entry: FileEntry, schema, sketch: Optional[List]) -> dict:
     min_values, max_values = _file_entry_bounds_as_values(file_entry, schema)
     return {
         "file_path": file_entry.file_path,
@@ -125,9 +142,9 @@ def _file_entry_to_manifest_dict(file_entry: FileEntry, schema) -> dict:
         "uncompressed_size_in_bytes": file_entry.uncompressed_size_in_bytes,
         "column_uncompressed_sizes_in_bytes": file_entry.column_uncompressed_sizes_in_bytes or [],
         "null_counts": [],
-        "min_k_hashes": file_entry.min_k_hashes or [],
-        "histogram_counts": file_entry.histogram_counts or [],
-        "histogram_bins": file_entry.histogram_bins or 0,
+        "min_k_hashes": sketch or [],
+        "histogram_counts": [],
+        "histogram_bins": 0,
         "min_values": min_values,
         "max_values": max_values,
         "min_values_display": [],
@@ -137,20 +154,32 @@ def _file_entry_to_manifest_dict(file_entry: FileEntry, schema) -> dict:
     }
 
 
-def write_manifest_parquet(file_entries: List[FileEntry], schema) -> bytes:
+def write_manifest_parquet(
+    file_entries: List[FileEntry], schema, sketches: Optional[Dict[str, List]] = None
+) -> bytes:
     """Serialize a list of FileEntry into one manifest Parquet file (bytes).
 
     Same schema/nested-array encoding as the catalog's write_parquet_manifest —
     ported without any catalog import (draken + rugo only). `schema` supplies
     per-field physical types for decoding serialized-bytes bounds (see
     _decode_bound); pass the relation's RelationSchema.
+
+    `sketches` carries the KMV min-k hashes as ``{file_path: positional list}``,
+    positional against `schema.columns`. They are passed explicitly rather than
+    read off FileEntry: on the read side sketches live only as native vectors
+    (the kernels consume those), so FileEntry does not carry them and there is
+    no boxed copy to drift. Producers that compute sketches (ANALYZE) supply this;
+    everyone else omits it and the column is written empty.
     """
     from draken import draken_native as _dn
     from draken.interop.vector_sequence import vector_from_sequence
     from draken.morsels.morsel import Morsel
     from rugo.parquet import write_parquet
 
-    normalized = [_file_entry_to_manifest_dict(fe, schema) for fe in file_entries]
+    sketches = sketches or {}
+    normalized = [
+        _file_entry_to_manifest_dict(fe, schema, sketches.get(fe.file_path)) for fe in file_entries
+    ]
 
     morsel = Morsel()
     for name, dtype in _MANIFEST_COLUMNS.items():
@@ -226,6 +255,12 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
     lower_bounds/upper_bounds are rebuilt as int-keyed dicts of the SAME decoded
     values as min_values/max_values (matching FileEntry.from_datafile's
     dict-path convention), so Manifest.prune_files compares like-for-like.
+
+    Sketches are returned ONLY as the native vectors (second element) — the
+    planner's kernels read those directly. They are deliberately not boxed onto
+    FileEntry: one representation, no per-file Python copy to fall out of step
+    with the vector. The vectors' rows are positional to this entry list, so
+    callers must keep the two in the same order.
     """
     columns, row_count, native = read_manifest_columns(data, keep_native=_SKETCH_VECTOR_COLUMNS)
     if row_count == 0:
@@ -246,9 +281,6 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
                 uncompressed_size_in_bytes=columns["uncompressed_size_in_bytes"][i],
                 lower_bounds=lower_bounds,
                 upper_bounds=upper_bounds,
-                min_k_hashes=columns["min_k_hashes"][i] or None,
-                histogram_counts=columns["histogram_counts"][i] or None,
-                histogram_bins=columns["histogram_bins"][i] or None,
                 min_values=min_values or None,
                 max_values=max_values or None,
                 column_uncompressed_sizes_in_bytes=columns["column_uncompressed_sizes_in_bytes"][i]
@@ -256,3 +288,20 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
             )
         )
     return entries, native
+
+
+def read_manifest_sketches(data: bytes) -> Dict[str, List]:
+    """Boxed per-file min-k sketches as ``{file_path: positional list}``.
+
+    The write-side counterpart of write_manifest_parquet's `sketches` argument,
+    for producers that must merge with what is already stored (ANALYZE preserving
+    columns it isn't re-analyzing). Boxing is fine here: this is admin-path, not
+    the planner's hot path — which reads the native vectors instead.
+    """
+    columns, row_count, _native = read_manifest_columns(data)
+    if row_count == 0:
+        return {}
+    return {
+        columns["file_path"][i]: [list(col or []) for col in (columns["min_k_hashes"][i] or [])]
+        for i in range(row_count)
+    }

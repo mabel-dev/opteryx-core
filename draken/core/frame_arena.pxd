@@ -35,6 +35,11 @@ cdef extern from "core/frame_arena.h":
     # No-op when `ptr` is NULL or not tracked.
     void draken_frame_arena_release(DrakenFrameArena* arena, void* ptr) nogil
 
+    # Non-zero when `ptr` is currently tracked. The only way to distinguish an
+    # independently-allocated (adopted) buffer from an interior pointer into
+    # another tracked block — see frame_arena.h.
+    int draken_frame_arena_contains(const DrakenFrameArena* arena, const void* ptr) nogil
+
     # Take ownership of an already-allocated (draken_malloc'd) pointer.
     # The arena will draken_free it on destroy unless release()'d first.
     # Used to fold the results of existing kernels (which allocate via

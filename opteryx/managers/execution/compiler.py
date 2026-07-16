@@ -46,17 +46,6 @@ _COMPARE_OPS = {"Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq"}
 _oversubscribe_warned = False
 
 
-def _connector_type(scan) -> str:
-    """Storage backend for ``scan``'s connector — mirrors the trampoline path's
-    resolution in parquet_read.pyx (``_sp_connector_type``), so the native path
-    picks the same IO-worker budget for the same connector."""
-    connector = getattr(scan, "connector", None)
-    filesystem = getattr(connector, "filesystem", None)
-    if filesystem is not None:
-        return getattr(connector, "storage_type", None) or connector.__type__
-    return "FILESYSTEM"
-
-
 def resolve_worker_count(requested) -> int:
     """Effective degree of parallelism. Unset/"auto" is softcoded (cpu-2, capped);
     an explicit positive request is HONOURED EXACTLY (warned if oversubscribed,
@@ -574,8 +563,13 @@ class _Compiler:
             ct = ct_by_identity.get(identity)
             if ct is not None and ct.logical is not None:
                 lg = ct.logical
+                # dimension completes the descriptor channel: a computed VECTOR column
+                # (EMBED) carries its width here and nowhere else — the physical
+                # DrakenVector has no field for it, and a VECTOR_FP16 whose owner has
+                # no width is a hard error at the first read.
                 logical = (int(lg.kind.value), int(getattr(lg.unit, "value", 0)),
-                           int(lg.precision), int(lg.scale))
+                           int(lg.precision), int(lg.scale),
+                           int(getattr(lg, "dimension", 0) or 0))
             if ct is not None:
                 self._types = getattr(self, "_types", None) or {}
                 self._types[identity] = ct.physical
@@ -1166,8 +1160,11 @@ class _Compiler:
                 if isinstance(size, int) and size > 0:
                     file_sizes.setdefault(entry.file_path, size)
         if not native_scan_supported(paths, names, kinds, file_sizes or None):
-            # R7b: the footer gate (native_scan_supported) rejected the scan —
-            # schema evolution / a row group whose types are not all eligible.
+            # R7b: the footer gate (native_scan_supported) rejected the scan — a REMOTE
+            # (gs://, s3://, http(s)://) path, which this path does not support at all and
+            # rejects before any footer fetch; schema evolution; or a row group whose types
+            # are not all eligible. The remote case is by far the most common in a cloud
+            # deployment, so do not read this reason as implying a schema/type problem.
             self.scan_residual_reasons[scan.identity] = "footer_gate"
             return None
         if predicate_input_names:
@@ -1187,13 +1184,15 @@ class _Compiler:
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
         pruning = extract_predicate_stats(predicates) if predicates else None
-        connector_type = _connector_type(scan)
         splan = open_native_scan_plan(
             paths,
             names,
-            decode_workers=config.PARQUET_GCS_IO_WORKERS
-            if connector_type in ("GCS", "GS")
-            else config.PARQUET_LOCAL_IO_WORKERS,
+            # Always the LOCAL worker budget: `native_scan_supported` above has already
+            # proven every path is local (`_is_local_path`, its first per-path check), so
+            # a remote connector can never reach here. This used to branch to a GCS budget
+            # on the connector type — unreachable, and it advertised a remote capability
+            # this path structurally does not have.
+            decode_workers=config.PARQUET_LOCAL_IO_WORKERS,
             predicates=pruning or None,
             file_sizes=file_sizes or None,
             string_types=string_types,
@@ -1889,6 +1888,20 @@ def execute_native(plan, telemetry=None):
                     telemetry._reading["time_engine_io_worker_blocked"] = sum(
                         d.get("worker_blocked_ns", 0) for d in _io_diags
                     )
+                    # Remote footer cache (see footer_remote_cache.py): only surfaced when
+                    # at least one scan this query actually consulted the tier — its
+                    # `footer_cache_hits`/`_misses` keys are absent entirely otherwise (the
+                    # -1 sentinel in IpcRowGroupSource.diagnostics()/NativeScanPlan is
+                    # dropped, not summed as 0), so an unconfigured or all-local-file query
+                    # doesn't misreport "0 hits" as a failing cache.
+                    _footer_diags = [d for d in _io_diags if "footer_cache_hits" in d]
+                    if _footer_diags:
+                        telemetry._reading["footer_cache_hits"] = sum(
+                            d["footer_cache_hits"] for d in _footer_diags
+                        )
+                        telemetry._reading["footer_cache_misses"] = sum(
+                            d["footer_cache_misses"] for d in _footer_diags
+                        )
             _tc0 = _t.perf_counter_ns()
             nplan.close_scan_plans()
             _close_scans_ns = _t.perf_counter_ns() - _tc0

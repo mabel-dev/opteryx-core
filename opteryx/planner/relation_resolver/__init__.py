@@ -48,6 +48,7 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -287,27 +288,51 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> Logical
     return join_leg_preprocess(plan)
 
 
-def do_resolve_relations(
+def _expression_subqueries(node) -> list:
+    """
+    Every NodeType.SUBQUERY expression node hanging off a plan node's properties.
+
+    A subquery in an expression (`WHERE x IN (SELECT ...)`) carries its sub-plan as the
+    `value` of an expression node, NOT as a member of the plan graph — the Plan Rewriter
+    is what later splices it in. So the graph walk cannot see the Scans inside it and the
+    sub-plan needs resolving in its own right.
+    """
+    from opteryx.expression import NodeType
+    from opteryx.expression import get_all_nodes_of_type
+
+    roots = []
+    for key, value in node.properties.items():
+        if key in ("node_type", "uuid"):
+            continue
+        if isinstance(value, (Node, LogicalColumn)):
+            roots.append(value)
+        elif isinstance(value, (list, tuple, set)):
+            roots.extend(v for v in value if isinstance(v, (Node, LogicalColumn)))
+
+    return get_all_nodes_of_type(roots, (NodeType.SUBQUERY,))
+
+
+def _resolve(
     plan: LogicalPlan,
-    common_table_expressions: Optional[Dict[str, LogicalPlan]],
+    root_scope: Dict[str, LogicalPlan],
+    root_path: Tuple[str, ...],
     telemetry,
 ) -> LogicalPlan:
     """
-    Expand every CTE and view reference in the plan until only real datasets remain.
-
-    Returns the expanded plan. Fails loud on relation cycles and on runaway nesting.
+    Expand every CTE and view reference in one plan, then recurse into the sub-plans of
+    any subquery expressions it carries. `root_scope`/`root_path` are the scope and
+    expansion trail this plan is being resolved under.
     """
-    from opteryx.expression import NodeType
     from opteryx.managers.views import resolve_relation
-
-    root_scope: Dict[str, LogicalPlan] = common_table_expressions or {}
 
     # nid -> (scope, expansion path). Held here rather than on the nodes: node properties
     # are deep-copied and walked by rename_relations, and a scope holds whole sub-plans.
+    # Tracked for EVERY node, not just Scans: a Filter carrying an IN-subquery needs the
+    # scope of the body it was spliced in from, so its sub-plan resolves against the same
+    # CTEs the surrounding relation sees.
     scopes: Dict[str, Tuple[Dict[str, LogicalPlan], Tuple[str, ...]]] = {}
-    for nid, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Scan:
-            scopes[nid] = (root_scope, ())
+    for nid in plan.nodes():
+        scopes[nid] = (root_scope, root_path)
 
     settled = set()  # scans known to be real datasets — never probed again
 
@@ -323,7 +348,7 @@ def do_resolve_relations(
                 settled.add(nid)
                 continue
 
-            scope, path = scopes.get(nid, (root_scope, ()))
+            scope, path = scopes.get(nid, (root_scope, root_path))
 
             if relation in scope:
                 if relation in path:
@@ -354,13 +379,35 @@ def do_resolve_relations(
                 )
 
             child_path = path + (relation,)
-            for sub_nid, sub_node in sub_plan.nodes(True):
-                if sub_node.node_type == LogicalPlanStepType.Scan:
-                    scopes[sub_nid] = (child_scope, child_path)
+            for sub_nid in sub_plan.nodes():
+                scopes[sub_nid] = (child_scope, child_path)
 
             plan = _splice(plan, nid, node, sub_plan)
             expanded = True
             break  # topology changed — restart the scan
 
         if not expanded:
-            return plan
+            break
+
+    # Every relation NAMED IN THE GRAPH is now real. Expression subqueries hold their own
+    # plans off to the side, so resolve each against the scope of the node carrying it.
+    # Done after the fixpoint above: splicing a CTE body in can introduce more of them.
+    for nid, node in list(plan.nodes(True)):
+        scope, path = scopes.get(nid, (root_scope, root_path))
+        for subquery in _expression_subqueries(node):
+            subquery.value = _resolve(subquery.value, scope, path, telemetry)
+
+    return plan
+
+
+def do_resolve_relations(
+    plan: LogicalPlan,
+    common_table_expressions: Optional[Dict[str, LogicalPlan]],
+    telemetry,
+) -> LogicalPlan:
+    """
+    Expand every CTE and view reference in the plan until only real datasets remain.
+
+    Returns the expanded plan. Fails loud on relation cycles and on runaway nesting.
+    """
+    return _resolve(plan, common_table_expressions or {}, (), telemetry)

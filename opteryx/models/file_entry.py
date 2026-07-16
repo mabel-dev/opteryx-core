@@ -34,10 +34,14 @@ class FileEntry:
     upper_bounds: Optional[Dict[int, bytes]] = None
     null_value_counts: Optional[Dict[int, int]] = None
 
-    # Extended statistics - may be None for bulk-loaded data
-    min_k_hashes: Optional[List[List[int]]] = None
-    histogram_counts: Optional[List[List[int]]] = None
-    histogram_bins: Optional[int] = None
+    # NOTE: min-k hash / histogram sketches are deliberately NOT held here. They
+    # live only as whole-column native draken vectors on the Manifest, which the
+    # planner's kernels read directly (see Manifest._min_k_vector). A boxed
+    # per-file copy would be a second representation to keep in step — and the
+    # vectors' rows are positional to the file list, so a copy that drifted would
+    # read another file's sketch. Producers pass sketches explicitly to
+    # manifest_io.write_manifest_parquet(sketches=...).
+    #
     # raw min/max lists (for direct access if needed)
     min_values: Optional[List] = None
     max_values: Optional[List] = None
@@ -85,10 +89,6 @@ class FileEntry:
             if max_values and isinstance(max_values, list):
                 upper_bounds = {i: val for i, val in enumerate(max_values) if val is not None}
 
-            min_k_hashes = entry.get("min_k_hashes")
-            histogram_counts = entry.get("histogram_counts")
-            histogram_bins = entry.get("histogram_bins")
-
         else:
             # Fallback: try direct attribute access
             file_path = getattr(datafile, "file_path", None)
@@ -113,10 +113,6 @@ class FileEntry:
             if upper_bounds and not isinstance(upper_bounds, dict):
                 upper_bounds = dict(upper_bounds) if getattr(upper_bounds, "__iter__", None) is not None else None
 
-            min_k_hashes = getattr(datafile, "min_k_hashes", None)
-            histogram_counts = getattr(datafile, "histogram_counts", None)
-            histogram_bins = getattr(datafile, "histogram_bins", None)
-
             # If we have raw min_values/max_values but no lower_bounds/upper_bounds,
             # convert them to bounds mapping for backward compatibility
             if (lower_bounds is None or upper_bounds is None) and isinstance(min_values, list):
@@ -135,9 +131,6 @@ class FileEntry:
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
             null_value_counts=None,  # Not available in this format
-            min_k_hashes=min_k_hashes,
-            histogram_counts=histogram_counts,
-            histogram_bins=histogram_bins,
             column_uncompressed_sizes_in_bytes=column_uncompressed_sizes,
             min_values=min_values,
             max_values=max_values,
@@ -157,6 +150,4 @@ class FileEntry:
             "has_bounds": self.lower_bounds is not None or self.upper_bounds is not None,
             "has_null_counts": self.null_value_counts is not None or (self.column_stats is not None and self.column_stats.has_any_null_counts()),
             "has_column_stats": self.column_stats is not None and self.column_stats.has_stats(),
-            "has_k_hashes": self.min_k_hashes is not None,
-            "has_histograms": self.histogram_counts is not None,
         }

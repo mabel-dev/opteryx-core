@@ -319,7 +319,7 @@ SELECT HASH(name || varchar(id)) FROM $planets GROUP BY name, id
 statement ok
 SELECT LEVENSHTEIN(name, 'zeus') FROM $planets
 
-statement error TypeError
+statement ok
 SELECT FROM_UNIXTIME(0)
 
 statement ok

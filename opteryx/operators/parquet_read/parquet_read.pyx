@@ -56,6 +56,9 @@ _int64_to_date32   = _draken_native_parquet.vector_reinterpret_as_date32
 # Safe here because the decoded column is exclusively owned by the reader and is
 # immediately replaced by the retagged result — no other reference survives.
 _int64_to_timestamp = _draken_native_parquet.vector_retag_int64_as_timestamp64
+# ARRAY<TIMESTAMP> child retag — IN-PLACE (mutates the vector, returns None),
+# unlike the scalar retags above which return a new Vector to rebind.
+_array_child_to_timestamp = _draken_native_parquet.vector_retag_array_child_as_timestamp64
 
 # TimestampUnit enum name -> the unit string vector_reinterpret_as_timestamp64
 # expects. Used to retag int64-stored timestamp columns with the schema's unit
@@ -236,6 +239,7 @@ cdef inline void _coerce_logical_types(
     set date_col_set,
     set timestamp_col_set,
     dict timestamp_unit_map,
+    dict array_ts_unit_map,
 ):
     """Coerce Integer64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
 
@@ -277,6 +281,16 @@ cdef inline void _coerce_logical_types(
             v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
             if v_nb.type == _draken_native_parquet.INT64:
                 row_group[col_name] = _int64_to_timestamp(v_nb, timestamp_unit_map.get(col_name, "us"))
+    if array_ts_unit_map:
+        # ARRAY<TIMESTAMP>: retag the CHILD in place — no rebind, the parent Vector
+        # is unchanged (see vector_retag_array_child_as_timestamp64).
+        for col_name, unit_str in array_ts_unit_map.items():
+            v = row_group.get(col_name)
+            if v is None:
+                continue
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            if v_nb.type == _draken_native_parquet.ARRAY:
+                _array_child_to_timestamp(v_nb, unit_str)
 
 
 cdef list _set_bit_positions(bytes mask_bytes):
@@ -332,6 +346,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     set date_col_set,
     set timestamp_col_set,
     dict timestamp_unit_map,
+    dict array_ts_unit_map,
     list pass1_column_names,
     bytes precomputed_mask=None,
 ):
@@ -352,7 +367,8 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     result.empty = False
     result.rows_before_filter = 0
 
-    _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set, timestamp_unit_map)
+    _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set,
+                          timestamp_unit_map, array_ts_unit_map)
 
     # Positional pairing: column order in the data dict matches pass1_column_names order.
     # C++ preserves column order; dict keys (bytes) are not used for identity lookup.
@@ -472,6 +488,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef set _sp_date_col_set
     cdef set _sp_timestamp_col_set
     cdef dict _sp_timestamp_unit_map
+    cdef dict _sp_array_ts_unit_map   # ARRAY<TIMESTAMP> cols -> unit, for the child retag
     cdef object _sp_predicate_stats
     cdef list _sp_pass1_column_names
     cdef list _sp_pass2_column_names
@@ -1067,6 +1084,21 @@ cdef class ParquetReadNode(ReaderNode):
             if ct.logical is not None and ct.logical.unit is not None:
                 unit_str = _TS_UNIT_BY_NAME.get(ct.logical.unit.name, "us")
             self._sp_timestamp_unit_map[col.name.encode('utf-8')] = unit_str
+        # ARRAY<TIMESTAMP> columns need the same retag applied to their CHILD: the
+        # list decoder yields an INT64 leaf (physical), and IPC carries no logical
+        # type, so without this the elements stay raw micros. Keyed like the scalar
+        # map; the unit comes from the ELEMENT's descriptor.
+        self._sp_array_ts_unit_map = {}
+        for col in base_schema.columns:
+            ct = col.column_type
+            if ct is None or ct.category != _LC.ARRAY or ct.element is None:
+                continue
+            if ct.element.category != _LC.TIMESTAMP:
+                continue
+            unit_str = "us"
+            if ct.element.logical is not None and ct.element.logical.unit is not None:
+                unit_str = _TS_UNIT_BY_NAME.get(ct.element.logical.unit.name, "us")
+            self._sp_array_ts_unit_map[col.name.encode('utf-8')] = unit_str
         # The compiler lowers the pushed predicate at PLAN time and hands it over.
         # A scan carrying predicates with no bytecode would silently emit UNFILTERED
         # rows — fail loud instead.
@@ -1180,6 +1212,8 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_coerce_ops.append((2, None))
             elif col_b in self._sp_timestamp_col_set:
                 self._sp_coerce_ops.append((3, self._sp_timestamp_unit_map.get(col_b, "us")))
+            elif col_b in self._sp_array_ts_unit_map:
+                self._sp_coerce_ops.append((4, self._sp_array_ts_unit_map[col_b]))
             else:
                 self._sp_coerce_ops.append((0, None))
         self._sp_needs_coerce = any(op[0] != 0 for op in self._sp_coerce_ops)
@@ -1256,6 +1290,13 @@ cdef class ParquetReadNode(ReaderNode):
                 continue
             v = vectors[i]
             v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            if kind == 4:
+                # ARRAY<TIMESTAMP>: the vector is an ARRAY, not an INT64, so this
+                # must be handled BEFORE the INT64 guard below — and it retags the
+                # child in place rather than rebinding vectors[i].
+                if v_nb.type == _draken_native_parquet.ARRAY:
+                    _array_child_to_timestamp(v_nb, op[1])
+                continue
             if v_nb.type != _draken_native_parquet.INT64:
                 continue
             if kind == 1:
@@ -1450,6 +1491,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
                 self._sp_timestamp_unit_map,
+                self._sp_array_ts_unit_map,
                 self._sp_pass1_column_names,
                 <bytes>pulled[6] if pulled[6] is not None else None,
             )
@@ -1521,7 +1563,7 @@ cdef class ParquetReadNode(ReaderNode):
             _coerce_logical_types(
                 row_group, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
-                self._sp_timestamp_unit_map,
+                self._sp_timestamp_unit_map, self._sp_array_ts_unit_map,
             )
 
             p1_filtered, p1_identity_names = self._lm_p1_cache.pop((path, rg_idx))

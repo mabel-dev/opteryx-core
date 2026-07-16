@@ -168,6 +168,70 @@ class OpteryxGcsFileSystem:
             "identity after refresh."
         )
 
+    def list_files(self, base_dir: str, recursive: bool = True) -> list:
+        """Return the objects under ``base_dir`` as ``gs://bucket/name`` paths.
+
+        ``base_dir`` is ``<bucket>/<prefix...>``, with or without a ``gs://`` scheme —
+        the first path component is the bucket, matching every other method here.
+
+        Returns FULLY-SCHEMED (``gs://``) paths, which is load-bearing, not cosmetic:
+        downstream, `_is_local_path` (pool_reader) decides a file is local purely from the
+        absence of a scheme. Bare ``bucket/object`` paths would be classed as local, admit
+        the local-only native scan path, and have the C++ reader ``pread()`` them as
+        on-disk files. Everything that consumes these paths (`get_file_info`,
+        `rewrite_to_signed_url`, `GcsFile`) already strips ``gs://`` itself.
+
+        The prefix is always terminated with ``/`` before listing: GCS prefix matching is
+        a plain string match, so listing ``space_missions`` would also return
+        ``space_missions_backup/...``, silently pulling a sibling dataset's blobs into
+        this one. This mirrors the local filesystem's directory semantics.
+
+        Paginates: a dataset can exceed the API's 1000-object page limit, and a truncated
+        listing would silently under-read a dataset rather than fail.
+        """
+        import json
+
+        path = base_dir[5:] if base_dir.startswith("gs://") else base_dir
+        path = path.strip("/")
+        if not path:
+            raise ValueError("list_files: a GCS path must include a bucket")
+
+        bucket, _, object_prefix = path.partition("/")
+        # Trailing slash = directory semantics (see docstring). An empty object_prefix
+        # means the whole bucket, where no prefix filter is correct.
+        prefix = f"{object_prefix}/" if object_prefix else ""
+
+        api = f"https://storage.googleapis.com/storage/v1/b/{urllib.parse.quote(bucket, safe='')}/o"
+        bearer = self._bearer
+        blobs: List[str] = []
+        page_token = None
+
+        while True:
+            params = {"prefix": prefix, "fields": "items(name),nextPageToken"}
+            if not recursive:
+                # GCS is flat; a delimiter is what makes a listing non-recursive.
+                params["delimiter"] = "/"
+            if page_token:
+                params["pageToken"] = page_token
+
+            url = f"{api}?{urllib.parse.urlencode(params)}"
+            try:
+                raw = self.http_client.get(url, headers={"Authorization": bearer})
+            except RuntimeError as err:
+                raise DatasetReadError(f"Unable to list '{base_dir}' - {err}") from err
+
+            payload = json.loads(raw) if raw else {}
+            for item in payload.get("items", ()):
+                name = item.get("name")
+                # Skip the zero-byte placeholder objects the console creates for "folders" —
+                # they are not readable data files.
+                if name and not name.endswith("/"):
+                    blobs.append(f"gs://{bucket}/{name}")
+
+            page_token = payload.get("nextPageToken")
+            if not page_token:
+                return blobs
+
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
         from dataclasses import dataclass

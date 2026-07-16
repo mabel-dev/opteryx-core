@@ -1,10 +1,5 @@
 from typing import List
 
-# Local implementation imports (kept as late imports inside function if heavy)
-from opteryx.compiled.nanobind.vectors import vector_coalesce as _vector_coalesce
-from opteryx.compiled.nanobind.vectors import vector_iif as _vector_iif
-from opteryx.compiled.nanobind.vectors import vector_ifnull as _vector_ifnull
-from opteryx.compiled.nanobind.vectors import vector_ifnotnull as _vector_ifnotnull
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -33,9 +28,11 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
     class other_functions:
         null_if = staticmethod(_lf_null_if)
 
-    _coalesce_kernel = _vector_coalesce
-    _iif_kernel = _vector_iif
-
+    # COALESCE/IFNULL/IFNOTNULL/IIF are c-native: the bytecode builder resolves
+    # draken_{name} from the kernel registry and sets BC_INSTR_C_NATIVE, and every
+    # VM arm gates on that flag before reading callable_ref. There is no Python
+    # fallback (and never a silent one — an unsupported operand type fails loud in
+    # the kernel), so callable_ref is None rather than a dead nanobind binding.
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),
         ParameterSpec(name="args", type_family="any", variadic=True, optional=True),
@@ -59,8 +56,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_coalesce_kernel,
-                        null_policy="passthru",
+                        callable_ref=None,   # c-native: draken_coalesce
                         cost_us_per_million=3386.42,
                     ),
                 ),
@@ -86,8 +82,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_vector_ifnull,
-                        null_policy="passthru",
+                        callable_ref=None,   # c-native: draken_ifnull
                         cost_us_per_million=3737.57,
                     ),
                 ),
@@ -113,8 +108,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_vector_ifnotnull,
-                        null_policy="passthru",
+                        callable_ref=None,   # c-native: draken_ifnotnull
                         cost_us_per_million=3782.80,
                     ),
                 ),
@@ -167,8 +161,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_iif_kernel,
-                        null_policy="bypass",
+                        callable_ref=None,   # c-native: draken_iif
                         cost_us_per_million=3689.18,
                     ),
                 ),

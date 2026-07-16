@@ -602,7 +602,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
 )
 from libc.stdint cimport uint8_t, int8_t, int16_t, int32_t, int64_t, uintptr_t, uint32_t
 
-from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
+from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, DRAKEN_ARRAY, DRAKEN_VECTOR_FP16, draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_VARIANT
@@ -642,23 +642,17 @@ from draken.core.frame_arena cimport (
     draken_frame_arena_alloc,
     draken_frame_arena_release,
     draken_frame_arena_adopt,
+    draken_frame_arena_contains,
 )
 from draken.ops.compare_dv cimport draken_compare_dv
 from draken.ops.arithmetic_dv cimport draken_arithmetic_dv
 
 # Phase 9c: C kernel ABI — function-pointer signatures for binary ops, casts, extractions
-cdef extern from "ops/vec_result.h":
-    ctypedef struct VecResult:
-        void*             data
-        uint8_t*          validity
-        const uint32_t*   selection
-        bint              owns_selection
-        uint32_t          data_length
-        uint32_t          length
-        DrakenType        type
-        uint8_t           flags
-        uint8_t           validity_embedded
-        const char*       error_msg
+# VecResult itself is declared in _impl.pxd (this file's own .pxd, implicitly
+# visible here) — NOT redeclared in this .pyx. A second `cdef extern from
+# "ops/vec_result.h"` block here previously conflicted with the .pxd's and
+# silently degraded every `VecResult` use in this file to an untyped Python
+# object (Cython keeps whichever cdef-extern-type declaration it sees first).
 
 # Kleene boolean ops for the VM — value-aware 3VL via draken::ops::bool_*, exposed
 # as C-ABI shims in bitmap_ops.cpp (linked into draken_native.so, RTLD_GLOBAL). These
@@ -683,6 +677,7 @@ ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) nogil
 # bare arena DV* cannot carry (string consolidated block / timestamp unit descriptor).
 cdef extern from "core/draken_bridge.h":
     object draken_vecresult_own_c(VecResult res)
+    void draken_vecresult_discard_c(VecResult* res) noexcept nogil
 
 
 # ---------------------------------------------------------------------------
@@ -1621,9 +1616,35 @@ cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena
         return anc
     cdef void*    dp = dv.data
     cdef uint8_t* vp = dv.validity
-    draken_frame_arena_release(arena, dp)
-    if vp != NULL:
+    cdef size_t   vbytes
+    cdef uint8_t* vcopy
+    # from_decoded / vec_from_decoded hand BOTH buffers to draken_vector_own_raw,
+    # which takes ownership of each as an INDEPENDENT draken_malloc'd allocation
+    # and frees them when the Vector dies. That holds for a dense kernel result
+    # (data + separately-malloc'd validity), but NOT for a canonical-block string
+    # result (binop_string_concat and the *_to_string casts, via
+    # vecresult_from_string_buffers): those embed the null bitmap INSIDE the data
+    # block, so `vp` is an interior pointer. Freeing it aborts the process with
+    # POINTER_BEING_FREED_WAS_NOT_ALLOCATED once the Vector is collected.
+    #
+    # The VecResult's validity_embedded flag is gone by here (a DrakenVector has
+    # no such field), but the arena still knows: _dv_vecresult_adopt_c adopts
+    # validity ONLY when it is independently allocated. So "tracked by the arena"
+    # is exactly "safe to own"; anything else is embedded and must be COPIED out
+    # rather than adopted — passing NULL instead would drop the nulls and silently
+    # return wrong answers.
+    if vp != NULL and not draken_frame_arena_contains(arena, vp):
+        vbytes = <size_t>((((dv.length + 7u) >> 3) + 7u) & ~<size_t>7u)
+        if vbytes == 0:
+            vbytes = 8
+        vcopy = <uint8_t*>draken_malloc(vbytes)
+        if vcopy == NULL:
+            raise MemoryError("_slot_to_pyobj: validity copy alloc failed")
+        memcpy(vcopy, vp, vbytes)
+        vp = vcopy
+    else:
         draken_frame_arena_release(arena, vp)
+    draken_frame_arena_release(arena, dp)
     if dv.type == DRAKEN_BOOL:
         return from_decoded(dp, vp, <size_t>dv.length)
     return vec_from_decoded(dp, vp, dv.length, dv.type)
@@ -1666,6 +1687,7 @@ cdef int c_execute_dv_inner(
     Py_ssize_t nbytes, uint32_t num_rows,
     int* err_op,
     const char** err_msg,
+    VecResult** out_child,
 ) noexcept nogil:
     """Nogil DV* VM inner loop for is_all_c_native bytecodes.
 
@@ -1677,18 +1699,38 @@ cdef int c_execute_dv_inner(
     thread's error_handling.cpp buffer, valid until the next kernel call on
     this thread; NULL otherwise). No PyObject, no anchor — the GIL caller
     materializes dv_stack[0] (an arena result) and maps any error.
+
+    *out_child is set to NULL, then to a BC_FUNCTION kernel's VecResult.child
+    (see vec_result.h) whenever one is produced — currently only possible for
+    an ARRAY-returning kernel (JSONB_OBJECT_KEYS). Ownership is NOT arena-
+    managed (the kernel draken_malloc'd it standalone, matching the
+    VectorOwner-adoption contract) — it is caller's to adopt or, if the
+    caller cannot use an ARRAY result, to fail loud over. No kernel today
+    reads an ARRAY operand (draken_length et al. reject it explicitly), so an
+    ARRAY value can only ever be the PROGRAM's final result — never consumed
+    by a later instruction — meaning *out_child, if set, always corresponds
+    to dv_stack[0] on a rc==0 return. This is a standing invariant, not
+    something this function re-verifies per call.
     """
     cdef Py_ssize_t sp = 0
     cdef Py_ssize_t i
     cdef int opcode, rc, dv_op
     cdef int arity, j
     cdef const DrakenVector* fargs[16]
+    # Row-count carrier for arity-0 C-native functions (RANDOM/NORMAL): the func_fn_t
+    # ABI passes only operand vectors, so a nullary kernel cannot learn the morsel row
+    # count. We synthesize a length-only operand whose `length` IS num_rows; the kernel
+    # reads ONLY .length (data/selection/validity are NULL — safe because this is
+    # confined to the arity-0 path, and RANDOM/NORMAL are the only nullary C-natives).
+    cdef DrakenVector _zeroarg_rowcount
+    cdef uint32_t _eff_nargs
     cdef BytecodeInstr* slot
     cdef DrakenVector* dv_left_ptr
     cdef DrakenVector* dv_right_ptr
     cdef void* result_data_ptr
     cdef VecResult vr
     err_msg[0] = NULL
+    out_child[0] = NULL
     for i in range(n_instrs):
         slot = &instrs[i]
         opcode = slot.opcode
@@ -1759,11 +1801,40 @@ cdef int c_execute_dv_inner(
                     err_op[0] = opcode
                     return 1
                 fargs[j] = dv_stack[sp + j]
+            _eff_nargs = <uint32_t>arity
+            if arity == 0:
+                # Nullary C-native (RANDOM/NORMAL): hand the kernel a synthetic
+                # length-only operand carrying num_rows so it can size its output.
+                _zeroarg_rowcount.data = NULL
+                _zeroarg_rowcount.selection = NULL
+                _zeroarg_rowcount.validity = NULL
+                _zeroarg_rowcount.data_length = num_rows
+                _zeroarg_rowcount.length = num_rows
+                _zeroarg_rowcount.type = DRAKEN_FLOAT64
+                fargs[0] = &_zeroarg_rowcount
+                _eff_nargs = 1
+            elif (slot.flags & BC_C_NATIVE_CHILD) != 0:
+                # SORT(arr): the element vector hangs off the column owner, not
+                # reachable from the parent DrakenVector* (same wall CAST's
+                # ARRAY->VARCHAR hits). dv_cache[i] holds it — resolved the SAME
+                # way BC_CAST's BC_C_NATIVE_CHILD case is (_dv_fill_cache_cxx),
+                # via this instruction's own column_identity (set at bind time
+                # only when the arg is a direct column load — see
+                # compiled_expression.pyx). Append as a synthetic extra arg
+                # rather than a new kernel signature — draken_sort keeps the
+                # plain func_fn_t(ctx, args[], nargs) shape.
+                if dv_cache[i] == NULL:
+                    err_op[0] = opcode
+                    return 4
+                fargs[arity] = dv_cache[i]
+                _eff_nargs = <uint32_t>(arity + 1)
             rc = _dv_function_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr, fargs,
-                                       <uint32_t>arity, dv_store, dv_stack, sp,
+                                       _eff_nargs, dv_store, dv_stack, sp,
                                        arena, &vr)
             if rc == 0:
                 sp += 1
+                if vr.child != NULL:
+                    out_child[0] = <VecResult*>vr.child
         elif opcode == BC_EXTRACTION and (slot.flags & BC_INSTR_C_NATIVE) != 0:
             # `->`, `->>`, str[i] — one operand in, canonical-block string out. The
             # path/index rides in extraction_ctx (bound once), so no key is popped.
@@ -1852,6 +1923,7 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
     cdef int rc
     cdef bint use_substrate = (m != NULL)
     cdef object err_msg
+    cdef VecResult* child_vr = NULL
     # GIL prepass: resolve loads. When the morsel is Cxx-backed, resolve columns
     # straight from the substrate (columns[idx].view) — no per-column Vector build;
     # otherwise the Morsel path (_cxx_column). Unresolved identity → Morsel path.
@@ -1869,8 +1941,18 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
                 _dv_fill_cache_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, dv_cache)
             rc = c_execute_dv_inner(
                 bc.instrs, bc.count, dv_cache, dv_stack, dv_store,
-                arena, nbytes, <uint32_t>num_rows, &err_op, &err_msg_ptr)
+                arena, nbytes, <uint32_t>num_rows, &err_op, &err_msg_ptr, &child_vr)
         if rc == 0:
+            if child_vr != NULL:
+                # ARRAY result (e.g. JSONB_OBJECT_KEYS) — this legacy Python-Vector
+                # materialization path (_slot_to_pyobj) has no child-adoption wired
+                # up. Fail loud rather than silently drop the element data; the
+                # engine's ExprMultiProjectOperator path (native_expression.hpp)
+                # is where ARRAY results are actually supported.
+                draken_vecresult_discard_c(child_vr)
+                raise NotImplementedError(
+                    "evaluate_c_native: ARRAY function results are not supported "
+                    "on the legacy Python-Vector evaluation path")
             # Gate guarantees the last op is a compute op → arena result, anchor None.
             return _slot_to_pyobj(dv_stack[0], None, arena)
         if rc == 4:
@@ -1915,9 +1997,11 @@ cdef void _dv_fill_cache_cxx(
             dv_cache[k] = <DrakenVector*>&m.columns[col_idx[k]].view
         elif opcode == BC_LOAD_LIT_CONST:
             dv_cache[k] = lit_dv[k]
-        elif opcode == BC_CAST and (instrs[k].flags & BC_C_NATIVE_CHILD) != 0:
+        elif ((opcode == BC_CAST or opcode == BC_FUNCTION)
+                and (instrs[k].flags & BC_C_NATIVE_CHILD) != 0):
             # ARRAY child element vector, held by the column's VectorOwner —
             # NULL when the column has no child (kernel then fails loud).
+            # BC_FUNCTION here is SORT's single-array-arg case (compiled_expression.pyx).
             dv_cache[k] = <DrakenVector*>cxx_column_child_vec(m, <uint32_t>col_idx[k])
         else:
             dv_cache[k] = NULL
@@ -1943,9 +2027,11 @@ cdef int _dv_cxx_resolve_caches(
         col_idx[k] = -1
         lit_dv[k] = NULL
         if slot.opcode == BC_LOAD_COL or (
-                slot.opcode == BC_CAST and (slot.flags & BC_C_NATIVE_CHILD) != 0):
-            # BC_C_NATIVE_CHILD casts carry the ARRAY operand's identity so the
-            # cache fill can resolve the owner-held child element vector.
+                (slot.opcode == BC_CAST or slot.opcode == BC_FUNCTION)
+                and (slot.flags & BC_C_NATIVE_CHILD) != 0):
+            # BC_C_NATIVE_CHILD instructions (ARRAY->VARCHAR cast, SORT) carry
+            # the ARRAY operand's identity so the cache fill can resolve the
+            # owner-held child element vector.
             ident = <bytes>slot.column_identity
             for ci in range(nn):
                 nm = m.names[ci]          # libcpp string → bytes (auto-convert)
@@ -1981,14 +2067,23 @@ cdef int _dv_filter_span_cxx(
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef int rc
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    cdef VecResult* child_vr = NULL
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
-    if rc == 0:
+                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg, &child_vr)
+    if rc == 0 and child_vr != NULL:
+        # Structurally unreachable: the binder only admits this span for a
+        # BOOL-final predicate, and no kernel reads an ARRAY operand, so a
+        # non-NULL child here means that invariant broke. Fail loud, don't leak.
+        draken_vecresult_discard_c(child_vr)
+        err_op[0] = -97
+        err_msg[0] = NULL
+        rc = 97
+    elif rc == 0:
         out_filtered[0] = cxx_mask_c(m, dv_stack[0])
     draken_frame_arena_destroy(arena)
     return rc
@@ -2014,14 +2109,21 @@ cdef int _dv_filter_span_with_consts_cxx(
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef int rc
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    cdef VecResult* child_vr = NULL
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
-    if rc == 0:
+                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg, &child_vr)
+    if rc == 0 and child_vr != NULL:
+        # See _dv_filter_span_cxx — structurally unreachable, fail loud not leak.
+        draken_vecresult_discard_c(child_vr)
+        err_op[0] = -97
+        err_msg[0] = NULL
+        rc = 97
+    elif rc == 0:
         out_filtered[0] = cxx_mask_with_consts_c(
             m, dv_stack[0], const_col_idx, <const DrakenVector* const*>const_scalar_dv, n_consts)
     draken_frame_arena_destroy(arena)
@@ -2048,14 +2150,21 @@ cdef int _dv_filter_and_mask_span_cxx(
     cdef uint8_t* dense
     cdef Py_ssize_t bi
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    cdef VecResult* child_vr = NULL
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, num_rows, err_op, err_msg)
-    if rc == 0:
+                            arena, nbytes, num_rows, err_op, err_msg, &child_vr)
+    if rc == 0 and child_vr != NULL:
+        # See _dv_filter_span_cxx — structurally unreachable, fail loud not leak.
+        draken_vecresult_discard_c(child_vr)
+        err_op[0] = -97
+        err_msg[0] = NULL
+        rc = 97
+    elif rc == 0:
         mask_dv = dv_stack[0]
         dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
         if dense == NULL:
@@ -2116,6 +2225,7 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
     cdef Py_ssize_t bi = 0
     cdef Py_ssize_t k = 0
     cdef DrakenFrameArena* arena = NULL
+    cdef VecResult* child_vr = NULL
     if count > 256 or num_rows == 0:
         return -1
     arena = draken_frame_arena_create()
@@ -2130,7 +2240,12 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
         else:
             dv_cache[k] = NULL
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, num_rows, &err_op, &err_msg)
+                            arena, nbytes, num_rows, &err_op, &err_msg, &child_vr)
+    if rc == 0 and child_vr != NULL:
+        # See _dv_filter_span_cxx — structurally unreachable, fail loud not leak.
+        draken_vecresult_discard_c(child_vr)
+        draken_frame_arena_destroy(arena)
+        return 97
     if rc == 0:
         mask_dv = dv_stack[0]
         dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
@@ -2389,6 +2504,7 @@ cdef int _dv_copy_result_string_preserve(
 cdef int _dv_copy_result_preserve_shape(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    uint32_t vec_dim = 0,
 ) noexcept nogil:
     """SHAPE-PRESERVING twin of _dv_copy_result_dense: deep-copy the src.data_length
     PHYSICAL values (NOT a per-logical-row gather) plus the input's selection and
@@ -2400,6 +2516,12 @@ cdef int _dv_copy_result_preserve_shape(
     cdef uint32_t alloc_k = k if k > 0 else 1
     cdef uint32_t alloc_n = n if n > 0 else 1
     cdef size_t es = _dv_result_elem_size(src.type)
+    # See _dv_copy_result_dense: a VECTOR_FP16 value is a dim-wide fp16 row whose
+    # width only the plan knows.
+    if src.type == DRAKEN_VECTOR_FP16:
+        if vec_dim == 0:
+            return -1
+        es = <size_t>vec_dim * 2
     cdef size_t kbytes = (<size_t>k + 7) >> 3
     cdef size_t vbytes = (<size_t>n + 7) >> 3
     cdef uint8_t* validity = NULL
@@ -2462,9 +2584,60 @@ cdef int _dv_copy_result_preserve_shape(
     return 0
 
 
+cdef int _dv_copy_result_array_offsets(
+    const DrakenVector* src,
+    DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+) noexcept nogil:
+    """DRAKEN_ARRAY twin of the fixed-width copy in _dv_copy_result_dense, for the
+    identity-selection shape only (see caller). offsets[length+1] copies verbatim —
+    row i's span is unaffected by re-densifying since selection is already
+    i -> i. The CHILD element vector is NOT this function's concern: the caller
+    (_dv_eval_span_cxx) forwards VecResult.child separately, unrelated to this
+    parent-offsets buffer."""
+    cdef uint32_t n = src.length
+    cdef uint32_t alloc_n = n if n > 0 else 1
+    cdef size_t vbytes = (<size_t>n + 7) >> 3
+    cdef uint8_t* validity = NULL
+    cdef uint32_t* sel
+    cdef uint32_t i
+    cdef int32_t* data = <int32_t*>draken_malloc((<size_t>alloc_n + 1) * sizeof(int32_t))
+    if data == NULL:
+        return -1
+    memcpy(data, src.data, (<size_t>n + 1) * sizeof(int32_t))
+
+    if src.validity != NULL:
+        validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
+        if validity == NULL:
+            draken_free(data)
+            return -1
+        memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
+
+    sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
+    if sel == NULL:
+        draken_free(data)
+        if validity != NULL:
+            draken_free(validity)
+        return -1
+    for i in range(n):
+        sel[i] = i
+
+    out_vec.data = data
+    out_vec.selection = sel
+    out_vec.data_length = n
+    out_vec.length = n
+    out_vec.validity = validity
+    out_vec.type = DRAKEN_ARRAY
+    out_vec.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION
+    out_data[0] = data
+    out_validity[0] = validity
+    out_sel[0] = sel
+    return 0
+
+
 cdef int _dv_copy_result_dense(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    uint32_t vec_dim = 0,
 ) noexcept nogil:
     """Deep-copy an (arena-owned) expression result into fresh draken_malloc'd DENSE
     buffers the caller takes ownership of (data / validity / identity selection).
@@ -2478,6 +2651,14 @@ cdef int _dv_copy_result_dense(
     cdef size_t vbytes = (<size_t>n + 7) >> 3
     cdef uint8_t* data8
     cdef const uint8_t* sbits
+    # A VECTOR_FP16 "value" is a whole dim-wide fp16 row, so its width is not a
+    # function of DrakenType and _dv_result_elem_size returns 0 for it. The width is
+    # plan-time metadata, handed in by the caller off the root instruction. The gather
+    # below is otherwise identical — one es-byte value per logical row.
+    if src.type == DRAKEN_VECTOR_FP16:
+        if vec_dim == 0:
+            return -1   # VECTOR result with no declared width — fail loud
+        es = <size_t>vec_dim * 2
     cdef uint8_t* validity = NULL
     cdef uint32_t* sel
     cdef uint32_t i, phys
@@ -2488,6 +2669,19 @@ cdef int _dv_copy_result_dense(
     if (src.type == DRAKEN_VARCHAR or src.type == DRAKEN_NVARCHAR
             or src.type == DRAKEN_VARBINARY or src.type == DRAKEN_VARIANT):
         return _dv_copy_result_string(src, out_vec, out_data, out_validity, out_sel)
+
+    if src.type == DRAKEN_ARRAY:
+        # data is int32_t offsets[length+1] (buffers.h) — NOT one value per row
+        # the way every other fixed type is, so the generic elem_size gather
+        # below cannot apply. Only the IDENTITY-selection shape is handled: a
+        # true force-dense copy under a dict/constant ARRAY selection would need
+        # to re-flatten the child in row order (the same gather make_array_take
+        # does in draken_native.cpp) — genuinely unreachable today (the only
+        # ARRAY-producing kernel, JSONB_OBJECT_KEYS, always emits identity), so
+        # fail loud rather than build unexercised gather logic for it.
+        if (src.flags & DRAKEN_SEL_IDENTITY) == 0:
+            return -1
+        return _dv_copy_result_array_offsets(src, out_vec, out_data, out_validity, out_sel)
 
     if src.type == DRAKEN_NULL:
         # Self-describing null (buffers.h): type==NULL means every row is null,
@@ -2548,6 +2742,7 @@ cdef int _dv_eval_span_cxx(
     int* col_idx, DrakenVector** lit_dv,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
     int* err_op, const char** err_msg, bint preserve_shape,
+    VecResult** out_child,
 ) noexcept nogil:
     """Pure-nogil expression span for a COMPUTED column (the projection twin of
     _dv_filter_span_cxx): evaluate the program over pre-resolved (col_idx, lit_dv)
@@ -2561,33 +2756,57 @@ cdef int _dv_eval_span_cxx(
     densifies to an identity-selection dense column (every downstream consumer sees a
     plain dense column); 1 keeps the result's compressed encoding (dict/constant
     stays compressed) and is set ONLY by the plan compiler for computed columns that
-    feed a compression-aware consumer (GROUP BY / DISTINCT key)."""
+    feed a compression-aware consumer (GROUP BY / DISTINCT key).
+
+    ``*out_child`` is set to NULL, then forwarded verbatim from c_execute_dv_inner
+    on rc 0 — non-NULL only for an ARRAY result (out_vec.type == DRAKEN_ARRAY),
+    where it is the owned VecResult* for the element vector (vec_result.h). Not
+    arena-owned (the producing kernel draken_malloc'd it standalone) — the C++
+    caller (ExprMultiProjectOperator) adopts it into VectorOwner.child_owner via
+    draken_vecresult_child_owner_new_c. preserve_shape's ARRAY path is NOT wired
+    (its _dv_copy_result_preserve_shape branch still returns -1/rc98 for ARRAY —
+    an ARRAY feeding a GROUP BY/DISTINCT key is unreached today); *out_child stays
+    NULL whenever rc != 0."""
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef Py_ssize_t num_rows = m.num_rows()
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef int rc
+    cdef VecResult* child_local = NULL
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
+    out_child[0] = NULL
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg)
+                            arena, nbytes, <uint32_t>num_rows, err_op, err_msg, &child_local)
     if rc == 0:
+        # The program is postfix, so instrs[count-1] is the ROOT — the instruction
+        # whose result dv_stack[0] holds. Its bind-time-declared VECTOR width (0 for
+        # every non-VECTOR result) is the one piece of plan metadata the boundary
+        # materialization cannot recover from the DrakenVector itself.
         if preserve_shape:
-            if _dv_copy_result_preserve_shape(dv_stack[0], out_vec, out_data,
-                                              out_validity, out_sel) != 0:
+            if _dv_copy_result_preserve_shape(
+                    dv_stack[0], out_vec, out_data, out_validity, out_sel,
+                    <uint32_t>instrs[count - 1].vec_dimension) != 0:
                 err_op[0] = -98
                 err_msg[0] = NULL
                 rc = 98
-        elif _dv_copy_result_dense(dv_stack[0], out_vec, out_data, out_validity,
-                                   out_sel) != 0:
+        elif _dv_copy_result_dense(
+                dv_stack[0], out_vec, out_data, out_validity, out_sel,
+                <uint32_t>instrs[count - 1].vec_dimension) != 0:
             err_op[0] = -98
             err_msg[0] = NULL
             rc = 98
+    if rc == 0 and child_local != NULL:
+        out_child[0] = child_local
+    elif child_local != NULL:
+        # copy_result rejected this program's ARRAY shape (rc 98 above) — the
+        # child is now orphaned; discard rather than leak.
+        draken_vecresult_discard_c(child_local)
     draken_frame_arena_destroy(arena)
     return rc
 
@@ -2763,6 +2982,13 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef const DrakenVector* cfargs[16]   # C-native BC_FUNCTION operand scratch
     cdef Py_ssize_t _fj
     cdef object cast_err_msg
+    # Row-count carrier for arity-0 C-native functions (RANDOM/NORMAL): the func_fn_t
+    # ABI passes only operand vectors, so a nullary kernel has no way to learn the
+    # morsel row count. We hand it a synthetic length-only operand whose `length` IS
+    # num_rows; the kernel reads ONLY .length (never .data/.selection/.validity — all
+    # NULL here, which is why this stays confined to the arity-0 path).
+    cdef DrakenVector _zeroarg_rowcount
+    cdef uint32_t _eff_nargs
     cdef int dv_op
     cdef int had_null
     cdef int rc
@@ -3159,9 +3385,23 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                             raise ValueError("BC_FUNCTION: NULL operand for C-native kernel")
                         cfargs[_fj] = dv_stack[func_base + _fj]
                     sp = func_base
+                    _eff_nargs = <uint32_t>arity
+                    if arity == 0:
+                        # Nullary C-native function (RANDOM/NORMAL): synthesize a
+                        # length-only operand carrying num_rows so the kernel can size
+                        # its output. data/selection/validity stay NULL — the kernel
+                        # contract for arity-0 functions is to read ONLY .length.
+                        _zeroarg_rowcount.data = NULL
+                        _zeroarg_rowcount.selection = NULL
+                        _zeroarg_rowcount.validity = NULL
+                        _zeroarg_rowcount.data_length = num_rows
+                        _zeroarg_rowcount.length = num_rows
+                        _zeroarg_rowcount.type = DRAKEN_FLOAT64
+                        cfargs[0] = &_zeroarg_rowcount
+                        _eff_nargs = 1
                     rc = _dv_function_kernel_c(
                         slot.kernel_fn, <void*>slot.ctx_ptr, cfargs,
-                        <uint32_t>arity, dv_store, dv_stack, sp, arena, &binop_vr)
+                        _eff_nargs, dv_store, dv_stack, sp, arena, &binop_vr)
                     if rc == 4:
                         cast_err_msg = (
                             binop_vr.error_msg.decode("utf-8", "replace")

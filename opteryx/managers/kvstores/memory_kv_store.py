@@ -101,7 +101,7 @@ class MemoryPoolKeyValueStore(BaseKeyValueStore):
                 return None
             ref_id, _size = ref_meta
         try:
-            value = self._pool.read(ref_id, zero_copy=False, latch=False)
+            value = self._pool.py_read(ref_id, zero_copy=False, latch=False)
             return bytes(value)
         except ValueError:
             with self._state.lock:
@@ -111,7 +111,7 @@ class MemoryPoolKeyValueStore(BaseKeyValueStore):
     def set(self, key: bytes, value: bytes) -> None:
         normalized_key = self._normalize_key(key)
         payload = bytes(value)
-        ref_id = self._pool.commit(payload)
+        ref_id = self._pool.py_commit(payload)
         if ref_id == -1:
             raise MemoryError(f"memory kv store '{self._pool_name}' is out of space")
 
@@ -121,7 +121,7 @@ class MemoryPoolKeyValueStore(BaseKeyValueStore):
 
         if existing is not None:
             try:
-                self._pool.release(existing[0])
+                self._pool.py_release(existing[0])
             except ValueError:
                 pass
 
@@ -137,7 +137,7 @@ class MemoryPoolKeyValueStore(BaseKeyValueStore):
             existing = self._state.refs.pop(normalized_key, None)
         if existing is not None:
             try:
-                self._pool.release(existing[0])
+                self._pool.py_release(existing[0])
             except ValueError:
                 pass
 

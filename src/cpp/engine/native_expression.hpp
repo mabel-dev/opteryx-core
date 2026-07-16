@@ -21,6 +21,7 @@
 
 #include "operator.hpp"
 #include "core/vector_owner.h"
+#include "core/draken_bridge.h"   // draken_vecresult_child_owner_new_c — ARRAY child adoption
 #include "logical_type.h"   // LogicalType / logical_type_intern — descriptor re-attachment
 
 namespace opteryx::engine {
@@ -47,11 +48,16 @@ typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                             int* const_col_idx, void** const_scalar_dv, int n_consts,
                             CxxMorsel** out_filtered, int* err_op,
                             const char** err_msg);
+// `out_child` (VecResult**) is set to NULL, or to an OWNED VecResult* for an
+// ARRAY result's element vector — non-null only when out_vec->type ==
+// DRAKEN_ARRAY (see evaluation.pyx's _dv_eval_span_cxx). The span-side kernel
+// draken_malloc'd it standalone (not arena-owned), matching the ownership
+// contract draken_vecresult_child_owner_new_c (draken_bridge.h) expects.
 typedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
                           uint8_t** out_validity, void** out_sel, int* err_op,
-                          const char** err_msg);
+                          const char** err_msg, VecResult** out_child);
 
 // One plan-resolved expression program. `instrs` is BORROWED — the NativePlan
 // holds the CompiledBytecode (and thereby the instruction array and every literal
@@ -158,9 +164,10 @@ struct ExprMultiProjectOperator : Operator {
             void* sel = nullptr;
             int err_op = 0;
             const char* kernel_msg = nullptr;
+            VecResult* child = nullptr;
             int rc = fn(progs[k].instrs, progs[k].count, m.get(),
                         progs[k].col_idx.data(), progs[k].lit_dv.data(),
-                        &v, &data, &validity, &sel, &err_op, &kernel_msg);
+                        &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
             if (rc != 0) {
                 err.code = 1;
                 err.msg = (rc == 98)
@@ -175,6 +182,16 @@ struct ExprMultiProjectOperator : Operator {
             nc.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
                                                    OwnedBuffer<uint8_t>(validity),
                                                    OwnedBuffer<void>(sel));
+            // ARRAY result (v.type == DRAKEN_ARRAY): `child` is the owned element
+            // vector the span could not carry any other way (see ExprEvalFn's
+            // out_child doc above) — adopt it as this column's child_owner, the
+            // SAME field make_array_from_sequence's ARRAY construction populates
+            // (vector_owner.h), so every downstream ARRAY consumer sees an
+            // identically-shaped owner regardless of which path built it.
+            if (child != nullptr) {
+                nc.own->child_owner.reset(draken_vecresult_child_owner_new_c(*child));
+                delete child;
+            }
             nc.own->logical_type = out_logicals[k];
             nc.view = nc.own->vec;
             m->columns.push_back(std::move(nc));

@@ -6,6 +6,18 @@
 
 #include <onnxruntime_cxx_api.h>
 
+// Draken vector ABI — this file produces a DrakenVector result for the EMBED capability
+// kernel below. The symbols (draken_malloc / draken_identity_sel) live in draken's
+// extension and resolve at load time, the same way opteryx.compiled.vector_ops'
+// draken__dfa_extract kernel reaches them.
+#include "core/alloc.h"
+#include "core/buffers.h"
+#include "core/fp16.h"
+#include "core/string_slot.h"
+#include "core/vector_alloc.h"
+#include "ops/kernels/kernel_context.h"
+#include "ops/vec_result.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -514,7 +526,142 @@ class MiniLMEmbedder {
     std::vector<char const*> output_name_ptrs_;
 };
 
+
+// ---------------------------------------------------------------------------
+// EMBED capability kernel — draken_embed_minilm
+// ---------------------------------------------------------------------------
+// An INSTALLABLE capability (opteryx/types/vectors/embedding_capability.py): when
+// registered it replaces the core static-hash draken_embed, so EMBED means real
+// semantic embeddings instead of lexical n-gram overlap. It is not part of the
+// zero-dependency core and cannot be — it needs ONNX Runtime and a 90MB model, and the
+// extension only builds under OPTERYX_BUILD_EMBEDDINGS=1. That is exactly why EMBED's
+// core kernel is the static hash: the engine must never fail to plan an EMBED because
+// an optional dependency is absent.
+//
+// The embedder is a process-lifetime singleton: the kernel is a bare C function pointer
+// with nowhere to hold a session, and an ORT session is expensive and thread-safe to
+// share. Installed once, never replaced (the registry refuses a width change once EMBED
+// has been planned).
+std::unique_ptr<MiniLMEmbedder> g_capability_embedder;
+std::size_t g_capability_dims = 0;
+
+// Error VecResult. NOT draken_error_sentinel: that writes a thread_local buffer owned by
+// whichever copy of error_handling.cpp is linked into the caller, and this kernel lives
+// in a different extension. A static literal outlives every reader, which is strictly
+// stronger than the sentinel's contract.
+inline VecResult minilm_kernel_error(const char* msg) {
+    VecResult r{};
+    r.data = nullptr;
+    r.error_msg = msg;
+    return r;
+}
+
 }  // namespace
+
+extern "C" VecResult draken_embed_minilm(void* ctx, const DrakenVector* const* args,
+                                         uint32_t nargs) {
+    if (nargs != 1u) return minilm_kernel_error("draken_embed: expected 1 argument");
+    if (g_capability_embedder == nullptr)
+        return minilm_kernel_error("draken_embed: minilm capability is not installed");
+
+    const DrakenVector* v = args[0];
+    if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+        return minilm_kernel_error("draken_embed: string operand required");
+
+    // The binder declared EMBED's width from THIS capability's `dimensions`, so a
+    // mismatch means the plan was built against a different capability. Unlike the
+    // hashed projection, a model's width is not negotiable — reject rather than return
+    // a differently-shaped vector than the plan's type promises.
+    if (ctx == nullptr)
+        return minilm_kernel_error("draken_embed: missing vector dimension context");
+    const uint32_t dims = static_cast<const struct vector_dim_ctx*>(ctx)->dimension;
+    if (dims != static_cast<uint32_t>(g_capability_dims))
+        return minilm_kernel_error(
+            "draken_embed: plan declared a width this minilm capability cannot produce");
+
+    const uint32_t n = v->length;
+    const uint32_t k = v->data_length;
+    const auto* sa = static_cast<const DrakenStringArena*>(v->data);
+
+    try {
+        // Embed the K PHYSICAL values, then gather through selection — the uniform
+        // data[selection[i]] read. A constant operand embeds ONCE rather than n times,
+        // which for a model this size is the difference between one inference and n.
+        std::vector<std::string> texts;
+        texts.reserve(k);
+        for (uint32_t j = 0; j < k; ++j) {
+            const DrakenStringSlot* slot = &sa->slots[j];
+            texts.emplace_back(reinterpret_cast<const char*>(str_data(slot, sa->arena)),
+                               str_length(slot));
+        }
+        // Mean-pooled and L2-normalised fp32 rows.
+        const std::vector<std::vector<float>> rows = g_capability_embedder->embed_texts(texts);
+        if (rows.size() != texts.size())
+            return minilm_kernel_error("draken_embed: minilm returned the wrong batch size");
+
+        const size_t row_cells = static_cast<size_t>(dims);
+        uint16_t* phys = static_cast<uint16_t*>(
+            draken_malloc((k > 0u ? k : 1u) * row_cells * sizeof(uint16_t)));
+        if (!phys) return minilm_kernel_error("draken_embed: allocation failed");
+        for (uint32_t j = 0; j < k; ++j) {
+            if (rows[j].size() != row_cells) {
+                draken_free(phys);
+                return minilm_kernel_error("draken_embed: minilm returned an unexpected width");
+            }
+            uint16_t* dst = phys + static_cast<size_t>(j) * row_cells;
+            for (size_t d = 0; d < row_cells; ++d)
+                dst[d] = fp16_ieee_from_fp32_value(rows[j][d]);
+        }
+
+        const size_t row_bytes = row_cells * sizeof(uint16_t);
+        uint16_t* data = static_cast<uint16_t*>(
+            draken_malloc((n > 0u ? n : 1u) * row_bytes));
+        if (!data) { draken_free(phys); return minilm_kernel_error("draken_embed: allocation failed"); }
+
+        uint8_t* validity = nullptr;
+        if (v->validity != nullptr) {
+            const uint32_t bm = (n + 7u) >> 3;
+            const uint32_t padded = (bm + 7u) & ~7u;
+            validity = static_cast<uint8_t*>(draken_malloc(padded > 0u ? padded : 8u));
+            if (!validity) {
+                draken_free(phys); draken_free(data);
+                return minilm_kernel_error("draken_embed: allocation failed");
+            }
+            std::memcpy(validity, v->validity, bm);
+            if (n & 7u) validity[bm - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+            for (uint32_t b = bm; b < padded; ++b) validity[b] = 0u;
+        }
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const bool valid = (v->validity == nullptr)
+                             || ((v->validity[i >> 3] >> (i & 7u)) & 1u);
+            // Null in -> null out; the row is zeroed rather than left uninitialised.
+            if (!valid) std::memset(data + static_cast<size_t>(i) * row_cells, 0, row_bytes);
+            else        std::memcpy(data + static_cast<size_t>(i) * row_cells,
+                                    phys + static_cast<size_t>(v->selection[i]) * row_cells,
+                                    row_bytes);
+        }
+        draken_free(phys);
+
+        VecResult r{};
+        r.data           = data;
+        r.validity       = validity;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_VECTOR_FP16;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        r.vec_dimension  = static_cast<uint16_t>(dims);
+        return r;
+    } catch (const std::exception&) {
+        // embed_texts throws std::runtime_error on a malformed model output. Swallowing
+        // the text keeps this nogil-safe (no Python object is constructed on this path).
+        return minilm_kernel_error("draken_embed: minilm inference failed");
+    } catch (...) {
+        return minilm_kernel_error("draken_embed: minilm inference failed (unknown)");
+    }
+}
 
 NB_MODULE(minilm_native, m) {
     nb::class_<MiniLMEmbedder>(m, "MiniLMEmbedder")
@@ -531,4 +678,25 @@ NB_MODULE(minilm_native, m) {
             nb::arg("row_count")
         )
         .def_prop_ro("dimensions", &MiniLMEmbedder::dimensions);
+
+    // Construct the process-lifetime embedder and hand back (kernel_ptr, dimensions) for
+    // embedding_capability.register_embedding_capability(). Returning the address rather
+    // than self-registering keeps the policy (what EMBED means) in Python, where the
+    // width is declared, instead of hidden in a module import side effect.
+    m.def(
+        "install_embed_capability",
+        [](std::string model_path, std::string vocab_path, std::size_t max_length) {
+            if (g_capability_embedder == nullptr) {
+                g_capability_embedder = std::make_unique<MiniLMEmbedder>(
+                    std::move(model_path), std::move(vocab_path), max_length);
+                g_capability_dims = g_capability_embedder->dimensions();
+            }
+            return nb::make_tuple(
+                reinterpret_cast<std::uintptr_t>(&draken_embed_minilm),
+                g_capability_dims);
+        },
+        nb::arg("model_path"), nb::arg("vocab_path"), nb::arg("max_length") = 256,
+        "Install the MiniLM EMBED kernel. Returns (kernel_ptr, dimensions) to pass to "
+        "opteryx.types.vectors.embedding_capability.register_embedding_capability."
+    );
 }

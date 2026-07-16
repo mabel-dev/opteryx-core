@@ -10,23 +10,24 @@
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 
-char* bintob16_neon(char* restrict dest, const void* restrict src, size_t size) {
+char* bintob16_neon_lut(char* restrict dest, const void* restrict src, size_t size,
+                        const char* restrict lut) {
     if (size < 16) {
-        return bintob16_scalar(dest, src, size);
+        return bintob16_scalar_lut(dest, src, size, lut);
     }
 
     const uint8_t* in = (const uint8_t*)src;
     uint8_t* out = (uint8_t*)dest;
 
-    const uint8x16_t lut    = vld1q_u8((const uint8_t*)B16_ENCODE_LUT);
+    const uint8x16_t lutv   = vld1q_u8((const uint8_t*)lut);
     const uint8x16_t mask0f = vdupq_n_u8(0x0F);
 
     while (size >= 16) {
         uint8x16_t v        = vld1q_u8(in);
         uint8x16_t hi       = vshrq_n_u8(v, 4);
         uint8x16_t lo       = vandq_u8(v, mask0f);
-        uint8x16_t hi_ascii = vqtbl1q_u8(lut, hi);
-        uint8x16_t lo_ascii = vqtbl1q_u8(lut, lo);
+        uint8x16_t hi_ascii = vqtbl1q_u8(lutv, hi);
+        uint8x16_t lo_ascii = vqtbl1q_u8(lutv, lo);
 
         /* zip interleaves: result.val[0] = [h0,l0,h1,l1,...,h7,l7]
          *                  result.val[1] = [h8,l8,...,h15,l15]    */
@@ -39,7 +40,11 @@ char* bintob16_neon(char* restrict dest, const void* restrict src, size_t size) 
         size -= 16;
     }
 
-    return bintob16_scalar((char*)out, in, size);
+    return bintob16_scalar_lut((char*)out, in, size, lut);
+}
+
+char* bintob16_neon(char* restrict dest, const void* restrict src, size_t size) {
+    return bintob16_neon_lut(dest, src, size, B16_ENCODE_LUT);
 }
 
 void* b16tobin_neon(void* restrict dest, const char* restrict src, size_t len) {
@@ -109,6 +114,10 @@ void* b16tobin_neon(void* restrict dest, const char* restrict src, size_t len) {
 }
 
 #else
+char* bintob16_neon_lut(char* restrict dest, const void* restrict src, size_t size,
+                        const char* restrict lut) {
+    return bintob16_scalar_lut(dest, src, size, lut);
+}
 char* bintob16_neon(char* restrict dest, const void* restrict src, size_t size) {
     return bintob16_scalar(dest, src, size);
 }

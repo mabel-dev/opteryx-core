@@ -13,6 +13,7 @@ const uint8_t B16_DECODE_LUT[256] = {
 };
 
 const char B16_ENCODE_LUT[16] = "0123456789ABCDEF";
+const char B16_ENCODE_LUT_LC[16] = "0123456789abcdef";
 
 #define DIGIT(x) B16_DECODE_LUT[(uint8_t)(x)]
 #define NOT_BASE16 255
@@ -25,19 +26,25 @@ size_t b16_decoded_size(size_t b16_len) {
     return b16_len / 2;
 }
 
-// Scalar implementation for HEX encode
-char* bintob16_scalar(char* restrict dest, const void* restrict src, size_t size) {
+// Scalar implementation for HEX encode, parameterized by the 16-char nibble
+// alphabet so the uppercase and lowercase encoders share one implementation.
+char* bintob16_scalar_lut(char* restrict dest, const void* restrict src, size_t size,
+                          const char* restrict lut) {
     const uint8_t* in = (const uint8_t*)src;
     size_t i = 0;
 
     while (i < size) {
-        *dest++ = B16_ENCODE_LUT[in[i] >> 4];
-        *dest++ = B16_ENCODE_LUT[in[i] & 0x0F];
+        *dest++ = lut[in[i] >> 4];
+        *dest++ = lut[in[i] & 0x0F];
         i++;
     }
 
     *dest = '\0';
     return dest;
+}
+
+char* bintob16_scalar(char* restrict dest, const void* restrict src, size_t size) {
+    return bintob16_scalar_lut(dest, src, size, B16_ENCODE_LUT);
 }
 
 // Scalar implementation for HEX decode

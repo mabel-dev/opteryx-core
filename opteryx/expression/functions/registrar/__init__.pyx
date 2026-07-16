@@ -45,6 +45,7 @@ from opteryx.types.logical_type import (
     TIMESTAMP as _CT_TIMESTAMP,  # factory: _CT_TIMESTAMP() → ColumnType
     TIME as _CT_TIME,            # factory: _CT_TIME() → ColumnType
     ARRAY as _CT_ARRAY,          # factory: _CT_ARRAY(element) → ColumnType
+    VECTOR as _CT_VECTOR,        # factory: _CT_VECTOR(dimensions) → ColumnType
 )
 
 
@@ -103,7 +104,6 @@ def _make(
     engine: Any = "draken",
     kernel_id: str = "default",
     id_suffix: str = "default",
-    null_policy: Any = "compress",
     cost: float = 1.0,
     summary: str = "",
     documentation: str | None = None,
@@ -159,7 +159,6 @@ def _make(
                     engine=engine,
                     id=kernel_id or "default",
                     callable_ref=callable_ref,
-                    null_policy=null_policy,
                     cost_us_per_million=cost,
                 ),
             ),

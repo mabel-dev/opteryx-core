@@ -16,34 +16,14 @@ MorselRef destructor frees them again unless they are nulled on transfer). The
 re-implementation gate is therefore correct buffer ownership, not a draken change.
 """
 
-import glob
-import importlib.util
 import os
 import sys
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
 
-import pytest
-
 import draken.draken_native as dn
 
 LONG = "this is a long string well over twelve bytes"  # forces the arena (>12)
-
-
-def _load_concat_ext():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "../../..",
-        "opteryx", "compiled", "nanobind", "vectors*.so",
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        pytest.skip("vector_selection_concat extension not built")
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _dense(values):
@@ -73,18 +53,19 @@ def test_concat_dict_then_dense_varchar():
     assert out.to_pylist() == [LONG, "a", LONG, "b", "c"]
 
 
-def test_iif_mixes_dense_and_dict_varchar():
-    # Q40-style: a CASE/iif whose branches are a dense and a dict VARCHAR.
-    vector_iif = _load_concat_ext().vector_iif
-    cond = dn.vector_from_bool_sequence([True, False, True])
-    out = vector_iif(cond, _dense(["aaa", LONG, "ccc"]), _dict(["xxx", "xxx", LONG]))
-    assert out.to_pylist() == ["aaa", "xxx", "ccc"]
-    out2 = vector_iif(cond, _dict([LONG, "p", LONG]), _dense(["q", "q", "q"]))
-    assert out2.to_pylist() == [LONG, "q", LONG]
+# The Q40-style `test_iif_mixes_dense_and_dict_varchar` that lived here is gone: it
+# called the nanobind `vector_iif`, which was deleted when IIF became a C-ABI kernel
+# (draken/ops/kernels/function_null_conditional.cpp). A C-ABI kernel has no
+# Python-callable entry point, so the mixed dense/dict branches cannot be built by
+# hand here any more; IIF is now covered end-to-end through the engine
+# (tests/unit/functions/test_null_aware.py and the SQL battery). The property this
+# asserted still holds by construction: that kernel reads every branch through the
+# uniform data[selection[i]] path and never discriminates on encoding shape (§11).
+# The concat half of the question — the part this file is named for — is unchanged
+# and still covered above.
 
 
 if __name__ == "__main__":
     test_concat_dense_then_dict_varchar()
     test_concat_dict_then_dense_varchar()
-    test_iif_mixes_dense_and_dict_varchar()
-    print("✅ dense + dict VARCHAR are concat/CASE interchangeable")
+    print("✅ dense + dict VARCHAR are concat interchangeable")

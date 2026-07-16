@@ -250,24 +250,26 @@ over the network: past some size, shipping the payload to and from the cache cos
 more than the object-storage read it replaces. Oversized manifests are still served
 from origin and still cached on local disk — only the remote write is skipped."""
 
-FOOTER_REMOTE_LOCATION: str = str(
-    get("OPTERYX_FOOTER_CACHE_LOCATION", MANIFEST_REMOTE_LOCATION)
-).strip()
-"""KV store backing the shared (remote) Parquet footer cache, e.g. `valkey://host:6379`.
+FOOTER_REMOTE_LOCATION: str = str(get("OPTERYX_FOOTER_CACHE_LOCATION", "")).strip()
+"""KV store backing the shared (remote) Parquet footer cache, e.g. `valkey://host:6376`.
 
-Defaults to `OPTERYX_MANIFEST_CACHE_LOCATION`: a deployment that already runs a shared
-Valkey for manifests gets footer caching on the same server for free, kept apart by a
-distinct key prefix. Empty disables the tier. Same lifecycle as the manifest cache —
-content-addressed by data-file path (a Parquet data file is write-once, so a cached
-footer can never be stale), shared across queries, long-lived — and deliberately NOT
-`KVSTORE_LOCATION`, which is the per-query spill store.
+Independently configured — deliberately NOT defaulted from `OPTERYX_MANIFEST_CACHE_LOCATION`.
+The two caches have different key-population growth rates (footers are per-data-file, a much
+larger and faster-growing population than per-snapshot manifests — see below) and a
+deployment may legitimately want them on separate Valkey instances with separate eviction
+budgets, or even separate infrastructure entirely. Defaulting one from the other would mean
+configuring the manifest cache silently also turns on a second, differently-shaped write
+load against the same server. Empty disables the tier. Same lifecycle as the manifest cache —
+content-addressed by data-file path (a Parquet data file is write-once, so a cached footer can
+never be stale), shared across queries, long-lived — and deliberately NOT `KVSTORE_LOCATION`,
+which is the per-query spill store.
 
-Entries are written without a TTL and are never invalidated (they cannot go stale), so the
-key population grows with every data file ever scanned, including files later removed by
+Entries are written without a TTL and are never invalidated (they cannot go stale), so the key
+population grows with every data file ever scanned, including files later removed by
 compaction. The deployment is expected to bound it at the server — `maxmemory` with an
-`allkeys-lru`/`allkeys-lfu` policy — exactly as for the shared manifest cache it shares by
-default. Footers are per-data-file, a much larger key population than per-snapshot manifests,
-so size the eviction budget with that in mind."""
+`allkeys-lru`/`allkeys-lfu` policy. Size that budget for a per-data-file key population, not
+a per-snapshot one — if this points at the same server as the manifest cache, the two policies
+must both account for the combined load."""
 
 FOOTER_REMOTE_MAX_VALUE_BYTES: int = int(
     get("OPTERYX_FOOTER_REMOTE_MAX_VALUE_BYTES", 4 * 1024 * 1024)

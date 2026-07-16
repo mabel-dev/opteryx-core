@@ -9,7 +9,7 @@
 # PyObject. See CLAUDE.md §2/§3.
 
 from cpython.ref cimport PyObject
-from libc.stdint cimport int16_t
+from libc.stdint cimport int16_t, int32_t
 from libcpp.vector cimport vector
 
 
@@ -187,6 +187,13 @@ ctypedef struct BytecodeInstr:
     # Phase 9b: C function ABI fields (zero if legacy Python path)
     void* kernel_fn          # C function pointer: VecResult (*)(void* ctx, ...) for BC_FUNCTION/EXTRACTION/CAST/BINARY_OP
     void* ctx_ptr            # context struct pointer (op_code/unit/sub_op_code, etc.) or NULL
+    # Width of a VECTOR result, from the bind-time declared return type; 0 = not a
+    # VECTOR. Every other result type has a width that is a function of DrakenType
+    # alone (_dv_result_elem_size), but a VECTOR's is per-column metadata that the
+    # 40-byte DrakenVector ABI has nowhere to hold — so the span boundary reads the
+    # width off the ROOT instruction (postfix: instrs[count-1]) instead. C++ treats
+    # `instrs` as an opaque void*, so this field is Cython-side only.
+    int32_t vec_dimension
 
 
 cdef class CompiledBytecode:

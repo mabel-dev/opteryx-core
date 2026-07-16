@@ -2,6 +2,7 @@ import sys
 from typing import Dict
 
 from opteryx.managers.kvstores import create_kv_store
+from opteryx.managers.kvstores.gcs_kv_store import _gcs_client
 
 _CTX = {"query_id": "q1", "operator_id": "op1"}
 
@@ -118,6 +119,11 @@ def test_gcs_kv_store_with_fake_client():
     sys.modules["google"] = fake_pkg
     sys.modules["google.cloud"] = fake_cloud
     sys.modules["google.cloud.storage"] = fake_storage
+    # _gcs_client() is a process-wide singleton (one real client per process, by
+    # design — see its docstring), so a stale client from an earlier test/call must
+    # be evicted before this fake module can take effect; same discipline as
+    # test_kvstores_valkey.py's fake_valkey fixture for the identical cache shape.
+    _gcs_client.cache_clear()
 
     try:
         store = create_kv_store("gs://bucket/pfx")
@@ -133,6 +139,7 @@ def test_gcs_kv_store_with_fake_client():
         del sys.modules["google.cloud.storage"]
         del sys.modules["google.cloud"]
         del sys.modules["google"]
+        _gcs_client.cache_clear()
 
 
 def test_s3_kv_store_with_fake_client_and_s3error_class():
@@ -176,6 +183,7 @@ def test_gcs_kv_store_with_fake_client_and_googleapierror_class():
         pass
     fake_exceptions.GoogleAPIError = GoogleErr
     sys.modules["google.api_core.exceptions"] = fake_exceptions
+    _gcs_client.cache_clear()
     try:
         store = create_kv_store("gs://bucket/pfx")
         key = b"0x1"
@@ -185,3 +193,4 @@ def test_gcs_kv_store_with_fake_client_and_googleapierror_class():
         del sys.modules["google.cloud.storage"]
         del sys.modules["google.cloud"]
         del sys.modules["google"]
+        _gcs_client.cache_clear()

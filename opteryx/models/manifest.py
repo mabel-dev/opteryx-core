@@ -17,10 +17,43 @@ execution follows those decisions deterministically.
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models.file_entry import FileEntry
-from opteryx.third_party.maki_nage.distogram import Distogram, load, merge
+from opteryx.third_party.maki_nage.distogram import Distogram, merge
 from opteryx.types.schema import RelationSchema
+
+
+def _comparable_literal(literal_value: Any, bound_sample: Any) -> Optional[Any]:
+    """Coerce a predicate literal into the representation a stored bound uses.
+
+    File bounds are native decoded values (int/float/datetime/Decimal) or, for
+    strings, raw utf-8 bytes (see ``parquet_writer._serialize_bound`` /
+    ``manifest_io._decode_bound``) - never a separately-encoded integer. A
+    literal must be compared in that SAME representation; returns None when
+    the literal can't be safely coerced, so the caller skips pruning instead
+    of comparing incompatible types (which is either a wrong prune or a
+    TypeError, depending on what the two sides happen to be).
+    """
+    if isinstance(bound_sample, (bytes, bytearray)):
+        if isinstance(literal_value, str):
+            return literal_value.encode("utf-8")
+        if isinstance(literal_value, (bytes, bytearray)):
+            return bytes(literal_value)
+        return None
+
+    if isinstance(bound_sample, bool):
+        return literal_value if isinstance(literal_value, bool) else None
+
+    if isinstance(bound_sample, (int, float)):
+        if isinstance(literal_value, bool):
+            return None
+        if isinstance(literal_value, (int, float)):
+            return literal_value
+        return None
+
+    if isinstance(literal_value, type(bound_sample)) or isinstance(bound_sample, type(literal_value)):
+        return literal_value
+
+    return None
 
 
 class Manifest:
@@ -46,10 +79,10 @@ class Manifest:
             schema: Table schema (RelationSchema)
             min_k_vector: optional native draken ``array<array<uint64>>`` Vector
                 holding every file's min-k sketch (one outer row per file, one
-                middle row per column). When present, sketch reductions run as
-                native kernels over this vector instead of the per-file Python
-                ``FileEntry.min_k_hashes`` lists. None on paths that don't supply
-                it (e.g. LocalStore), which fall back to the Python merge.
+                middle row per column). This is the ONLY representation of the
+                sketches — reductions run as native kernels over it. None when the
+                relation has no sketches, in which case sketch-derived statistics
+                (NDV, membership pruning) are simply unavailable.
             histogram_vector: optional native ``array<array<int64>>`` Vector of
                 per-file, per-column histogram bins, used the same way.
         """
@@ -63,12 +96,28 @@ class Manifest:
         # (pruned) file list — matching the Python paths that iterate self.files.
         # None means "no pruning yet": row i of the vectors == self.files[i].
         self._live_rows: Optional[List[int]] = None
+        # Sketches are POSITIONAL against the schema as it was at load time, but
+        # projection pushdown later prunes `self.schema` down to the referenced
+        # columns — so resolving a sketch's column via the (possibly projected)
+        # schema would silently read a different column's sketch. Snapshot the
+        # load-time order and index sketches through it. See _sketch_index.
+        self._sketch_columns: Dict[str, int] = {
+            col.name: idx for idx, col in enumerate(schema.columns)
+        }
 
         # Lazy-computed mappings
         self._field_id_to_name: Optional[Dict[int, str]] = None
         self._name_to_field_id: Optional[Dict[str, int]] = None
         self._column_bounds_cache: Dict[str, Tuple[Any, Any]] = {}
         self._distogram_cache: Dict[str, Distogram] = {}
+
+    def _sketch_index(self, column_name: str) -> Optional[int]:
+        """Positional index of `column_name` in the sketch vectors' column axis.
+
+        Resolved against the load-time schema snapshot, never the live (projected)
+        schema — the sketch vectors' middle dimension is fixed at load-time width.
+        """
+        return self._sketch_columns.get(column_name)
 
     # ================================================================
     # Basic Aggregates
@@ -162,9 +211,6 @@ class Manifest:
                     if getattr(literal_value, "item", None) is not None:
                         literal_value = literal_value.item()
 
-                    p = literal_value
-                    literal_value = to_int(literal_value)
-
                     # Get field_id for this column from schema
                     # Bounds are indexed by field_id (int)
                     field_id = None
@@ -187,9 +233,16 @@ class Manifest:
                     max_value = file_entry.upper_bounds.get(field_id)
 
                     if min_value is not None and max_value is not None:
+                        comparable_value = _comparable_literal(literal_value, min_value)
+                        if comparable_value is None:
+                            # Bound is stored in a representation this literal can't
+                            # be safely compared against (e.g. a string literal
+                            # against non-string bounds) - skip pruning rather than
+                            # risk comparing incompatible types.
+                            continue
                         # Check if file can be pruned
                         prune_func = handlers.get(predicate.value)
-                        if prune_func and prune_func(literal_value, min_value, max_value):
+                        if prune_func and prune_func(comparable_value, min_value, max_value):
                             skip_file = True
                             break
 
@@ -223,7 +276,11 @@ class Manifest:
                     max_value = file_entry.upper_bounds.get(field_id)
 
                     if min_value is not None and max_value is not None:
-                        if max_value < lower or min_value > upper:
+                        comparable_lower = _comparable_literal(lower, min_value)
+                        comparable_upper = _comparable_literal(upper, min_value)
+                        if comparable_lower is None or comparable_upper is None:
+                            continue
+                        if max_value < comparable_lower or min_value > comparable_upper:
                             skip_file = True
                             break
 
@@ -305,67 +362,20 @@ class Manifest:
         if field_id is None:
             return None
 
-        # Native path: gather the column's per-file histogram slices from the whole
-        # column vector (no boxing) and fold them with the native load_counts_i64 +
-        # merge. Same bin math as the Python fold below (load_counts_i64 reproduces
-        # the (bin_idx + 0.5) center and min==max single-bin case exactly).
-        if self._histogram_vector is not None:
-            combined = self._native_distogram(field_id)
-            if combined is not None:
-                self._distogram_cache[column] = combined
-            return combined
+        # Histograms live only as the whole-column native vector; gather this
+        # column's per-file bin slices from it (no boxing) and fold them with the
+        # native load_counts_i64 + merge. No vector => no histogram for this
+        # relation (nothing has ANALYZE'd/produced one).
+        if self._histogram_vector is None:
+            return None
 
-        combined: Optional[Distogram] = None
+        sketch_id = self._sketch_index(column)
+        if sketch_id is None:
+            return None
 
-        for file_entry in self.files:
-            # Ensure histograms and min/max are present and aligned
-            if not file_entry.histogram_counts:
-                continue
-            if file_entry.min_values is None or file_entry.max_values is None:
-                continue
-            if field_id >= len(file_entry.histogram_counts):
-                continue
-            if field_id >= len(file_entry.min_values) or field_id >= len(file_entry.max_values):
-                continue
-
-            col_hist = file_entry.histogram_counts[field_id]
-            col_min = file_entry.min_values[field_id]
-            col_max = file_entry.max_values[field_id]
-
-            if col_hist is None or col_min is None or col_max is None:
-                continue
-
-            if getattr(col_hist, "__iter__", None) is None:
-                continue
-            counts = list(col_hist)
-
-            if not counts:
-                continue
-
-            col_min_f = float(col_min)
-            col_max_f = float(col_max)
-
-            bins: List[Tuple[float, int]] = []
-            if col_min_f == col_max_f:
-                bins = [(col_min_f, sum(counts))]
-            else:
-                num_bins = len(counts)
-                span = col_max_f - col_min_f
-                for bin_idx, count in enumerate(counts):
-                    if count == 0:
-                        continue
-                    center = col_min_f + (bin_idx + 0.5) * span / num_bins
-                    bins.append((center, int(count)))
-
-            if not bins:
-                continue
-
-            dgram = load(bins, col_min_f, col_max_f)
-            combined = dgram if combined is None else merge(combined, dgram)
-
+        combined = self._native_distogram(sketch_id)
         if combined is not None:
             self._distogram_cache[column] = combined
-
         return combined
 
     def _membership_keep_masks(self, predicates: List) -> List:
@@ -411,11 +421,12 @@ class Manifest:
                 continue
 
             column_name = predicate.left.source_column
-            field_id = None
+            # Sketch index, not the live schema position: the vector's column axis
+            # is fixed at load-time width and projection may have pruned the schema.
+            field_id = self._sketch_index(column_name)
             physical = None
-            for idx, col in enumerate(self.schema.columns):
+            for col in self.schema.columns:
                 if col.name == column_name:
-                    field_id = idx
                     physical = col.column_type.physical if col.column_type is not None else None
                     break
             if field_id is None or physical not in integer_physical:
@@ -436,19 +447,27 @@ class Manifest:
     def _native_handle(vector):
         """Underlying draken_native.Vector handle for a sketch vector.
 
-        Sketch vectors arriving from the catalog are draken ``Vector`` wrappers;
-        the native kernels take the wrapped ``_nb`` handle. Accessed directly (not
-        probed) so a broken contract fails loud rather than silently degrading.
+        A sketch vector legitimately arrives as either of two types: a draken
+        ``Vector`` wrapper (what ``Morsel.column()`` yields — the manifest read
+        path) or an already-native ``draken_native.Vector`` (what the array
+        constructors yield). Dispatch is on the concrete type, not a probe for
+        an attribute, so anything else fails loud rather than degrading silently.
         """
+        import draken.draken_native as _dn
+
+        if isinstance(vector, _dn.Vector):
+            return vector
         return vector._nb
 
     def _native_distogram(self, field_id: int) -> Optional[Distogram]:
         """Fold the column's per-file histograms into one Distogram natively.
 
-        Gathers the field_id bin-count slices from the whole-column histogram
-        vector (no boxing) and folds them with load_counts_i64 + ``+``. Per-file
-        min/max come from the (cheap, flat) FileEntry lists, exactly as the Python
-        path indexes them. Produces the same Distogram as the Python fold.
+        `field_id` is a SKETCH index (see _sketch_index) — the histogram vector's
+        column axis and FileEntry.min_values/max_values are both positional against
+        the load-time schema, so the same index addresses all three. Gathers the
+        bin-count slices from the whole-column histogram vector (no boxing) and
+        folds them with load_counts_i64 + merge. Produces the same Distogram as the
+        Python fold.
         """
         from opteryx.compiled.nanobind.vectors import histogram_field_slices
         from opteryx.third_party.maki_nage.distogram import load_counts_i64
@@ -483,49 +502,24 @@ class Manifest:
         """
         Estimate distinct values in column using K-Minimum Values (KMV).
 
-        Uses min-k hashes from file entries if available, otherwise returns None.
-        Merges min-k hashes across all files and applies KMV estimator formula.
+        Merges each file's min-k sketch for the column and applies the KMV
+        estimator (exact count when the merged sketch is under K). Reduced
+        natively over the whole-column sketch vector — no boxing. Returns None
+        when the relation carries no sketches (nothing produced them).
         """
-        K = 32
-        HASH_RANGE = 2**64
-
         # identity may be bytes; resolve to str for field mapping
         col_name = column.decode("utf-8") if isinstance(column, bytes) else column
-        field_id = self._resolve_field_id(col_name)
-        if field_id is None:
+        if self._min_k_vector is None:
             return None
 
-        # Native path: KMV union over the whole-column sketch vector, no boxing.
-        # Same field_id semantics as the Python merge below (positional index into
-        # each file's per-column sketch), so this is behaviour-preserving.
-        if self._min_k_vector is not None:
-            from opteryx.compiled.nanobind.vectors import kmv_ndv
+        from opteryx.compiled.nanobind.vectors import kmv_ndv
 
-            # _live_rows (None until first prune) keeps the merge over the same
-            # surviving files the Python fallback below would iterate.
-            return kmv_ndv(self._native_handle(self._min_k_vector), field_id, self._live_rows)
-
-        # Fallback (no native vector, e.g. LocalStore): per-file Python merge.
-        # Merge min-k hashes from all files
-        min_k_hashes = []
-
-        for file_entry in self.files:
-            if file_entry.min_k_hashes and field_id < len(file_entry.min_k_hashes):
-                file_hashes = file_entry.min_k_hashes[field_id]
-                if file_hashes:
-                    # Merge keeping k smallest distinct hashes
-                    min_k_hashes = sorted(set(min_k_hashes + file_hashes))[:K]
-
-        if not min_k_hashes:
+        sketch_id = self._sketch_index(col_name)
+        if sketch_id is None:
             return None
-
-        # Apply KMV estimator formula
-        if len(min_k_hashes) < K:
-            # Exact count when we have fewer than K distinct values
-            return len(min_k_hashes)
-
-        # Estimate: (k-1) * hash_range / kth_smallest_hash
-        return int((K - 1) * HASH_RANGE / min_k_hashes[K - 1])
+        # _live_rows (None until first prune) keeps the merge over the surviving
+        # files only, matching the file set the rest of the plan will read.
+        return kmv_ndv(self._native_handle(self._min_k_vector), sketch_id, self._live_rows)
 
     def get_total_null_count(self, column) -> Optional[int]:
         """Total nulls for a column across all files.
@@ -697,7 +691,8 @@ class Manifest:
                 self.get_total_size() / self.get_file_count() if self.get_file_count() > 0 else 0
             ),
             "files_with_bounds": sum(1 for f in self.files if f.lower_bounds or f.upper_bounds),
-            "files_with_k_hashes": sum(1 for f in self.files if f.min_k_hashes),
-            "files_with_histograms": sum(1 for f in self.files if f.histogram_counts),
+            # Sketches are whole-relation native vectors, not per-file lists.
+            "has_k_hashes": self._min_k_vector is not None,
+            "has_histograms": self._histogram_vector is not None,
         }
 

@@ -246,18 +246,25 @@ extensions = [
         parquet_created_by="opteryx-rugo version %s (build %s)"
         % (__version__, __build__)
     ),
-    # Third-party libraries
+    # Third-party libraries.
+    #
+    # The mabel codec C libraries live at the repo root (third_party/mabel/base*):
+    # they are opteryx-free vendored code, and draken's kernels — which ship in the
+    # standalone rugo wheel — compile them via build_common's draken_rugo_extensions.
+    # Only the Cython wrappers below (opteryx's Python-visible base16/base64/base85
+    # modules) stay under opteryx/. Include dirs for the moved headers come from
+    # build_common's include_dirs.
     Extension(
         "opteryx.third_party.mabel.base64",
         sources=[
             "opteryx/third_party/mabel/base64/base64.pyx",
-            "opteryx/third_party/mabel/base64/_base64.c",
-            "opteryx/third_party/mabel/base64/_base64_dispatch.c",
-            "opteryx/third_party/mabel/base64/_base64_neon.c",
-            "opteryx/third_party/mabel/base64/_base64_avx2.c",
-            "opteryx/third_party/mabel/base64/_base64_rvv.c",
+            "third_party/mabel/base64/_base64.c",
+            "third_party/mabel/base64/_base64_dispatch.c",
+            "third_party/mabel/base64/_base64_neon.c",
+            "third_party/mabel/base64/_base64_avx2.c",
+            "third_party/mabel/base64/_base64_rvv.c",
         ],
-        include_dirs=include_dirs + ["opteryx/third_party/mabel"],
+        include_dirs=include_dirs,
         extra_compile_args=C_FLAGS + ["-std=c99", "-DBASE64_IMPLEMENTATION"],
     ),
     Extension(
@@ -265,18 +272,18 @@ extensions = [
         sources=[
             "opteryx/third_party/mabel/base16/base16.pyx",
             # Unity build — _base16.c #includes the dispatch + per-arch SIMD sources.
-            "opteryx/third_party/mabel/base16/_base16.c",
+            "third_party/mabel/base16/_base16.c",
         ],
-        include_dirs=include_dirs + ["opteryx/third_party/mabel"],
+        include_dirs=include_dirs,
         extra_compile_args=C_FLAGS + ["-std=c99"],
     ),
     Extension(
         "opteryx.third_party.mabel.base85",
         sources=[
             "opteryx/third_party/mabel/base85/base85.pyx",
-            "opteryx/third_party/mabel/base85/_base85.c",
+            "third_party/mabel/base85/_base85.c",
         ],
-        include_dirs=include_dirs + ["opteryx/third_party/mabel"],
+        include_dirs=include_dirs,
         extra_compile_args=C_FLAGS + ["-std=c99"],
     ),
     Extension(
@@ -921,12 +928,12 @@ _vectors_op_cpp = [
 # Vendored sources pulled in by individual kernels — compiled ONCE for the module.
 _vectors_extra_sources = [
     # vector_codec — mabel base64 / base85 (base64 is NOT a unity build: list all)
-    "opteryx/third_party/mabel/base64/_base64.c",
-    "opteryx/third_party/mabel/base64/_base64_dispatch.c",
-    "opteryx/third_party/mabel/base64/_base64_neon.c",
-    "opteryx/third_party/mabel/base64/_base64_avx2.c",
-    "opteryx/third_party/mabel/base64/_base64_rvv.c",
-    "opteryx/third_party/mabel/base85/_base85.c",
+    "third_party/mabel/base64/_base64.c",
+    "third_party/mabel/base64/_base64_dispatch.c",
+    "third_party/mabel/base64/_base64_neon.c",
+    "third_party/mabel/base64/_base64_avx2.c",
+    "third_party/mabel/base64/_base64_rvv.c",
+    "third_party/mabel/base85/_base85.c",
     # vector_hash_codec — vendored crypto digests + mabel base16 (unity build:
     # _base16.c #includes the dispatch + per-arch SIMD sources, which self-guard so
     # all variants compile on every platform — b16tobin_len/bintob16 come in via
@@ -936,7 +943,7 @@ _vectors_extra_sources = [
     "third_party/crypto/sha1.cpp",
     "third_party/crypto/sha2.cpp",
     "third_party/crypto/sha512.cpp",
-    "opteryx/third_party/mabel/base16/_base16.c",
+    "third_party/mabel/base16/_base16.c",
     # vector_json — yyjson (compiled as C11 by build_extension's .c handling)
     "third_party/yyjson/src/yyjson.c",
     # vector_string_case — SIMD string ops (+ cpu_features dep)
@@ -964,9 +971,8 @@ extensions.append(
         ),
         include_dirs=include_dirs
         + [
-            "opteryx/third_party/mabel/base64",
-            "opteryx/third_party/mabel/base85",
-            "opteryx/third_party/mabel/base16",
+            # mabel base16/base64/base85 include dirs now come from build_common's
+            # include_dirs (the C libraries moved to the repo root).
             "third_party/yyjson/src",
             "third_party/usearch/fp16/include",
             "third_party/nanobind",
@@ -1161,6 +1167,9 @@ if BUILD_EMBEDDINGS:
                     "third_party/nanobind",
                     "third_party/nanobind/src",
                     "third_party/nanobind/ext/robin_map/include",
+                    # draken/core/fp16.h -> <fp16/fp16.h>: the EMBED capability kernel
+                    # packs its fp32 rows to fp16 to build a VECTOR_FP16 result.
+                    "third_party/usearch/fp16/include",
                 ],
                 extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
                 extra_link_args=LD_EXTRA

@@ -349,6 +349,13 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
             return ("draken_cast_timestamp_to_string", 0)
         if s == "DATE32":
             return ("draken_cast_date_to_string", 0)
+        # DECIMAL → VARCHAR. The source scale (LogicalType, not on the vector)
+        # is loaded into a binary_op_ctx by the lowering (see the decimal-source
+        # `_to_string` arm in compiled_expression.pyx). Two physical tiers.
+        if s == "DECIMAL":
+            return ("draken_cast_decimal_to_string", 0)
+        if s == "DECIMAL128":
+            return ("draken_cast_decimal128_to_string", 0)
         return None
     return None
 
@@ -574,10 +581,34 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_date_to_string, True, True
         if s == "ARRAY":
             return _build_array_to_json, False, True
+        if s in ("DECIMAL", "DECIMAL128"):
+            # DECIMAL → VARCHAR is native-only: correct text needs the source
+            # scale, which lives on the bind-time ColumnType, NOT the runtime
+            # vector — so no correct scale-less Python closure can exist. The
+            # C-native kernel (draken_cast_decimal{,128}_to_string) always handles
+            # this pair via BC_INSTR_C_NATIVE; this callable_ref is dead there. It
+            # fails loud rather than silently emit an unscaled integer if the
+            # native kernel is ever absent.
+            return _decimal_to_string_native_only, False, False
         raise NotImplementedError(f"No native CAST {source_physical} → VARCHAR")
 
     raise NotImplementedError(
         f"No native CAST kernel for {source_physical} → {target_type}"
+    )
+
+
+def _decimal_to_string_native_only(arr):
+    """callable_ref for DECIMAL → VARCHAR: native-only, no Python fallback.
+
+    The C-native kernel always services this cast (the source scale is threaded
+    into a binary_op_ctx at bind time). This is only reached if that kernel is
+    somehow absent from the registry — in which case fail loud, never silently
+    emit an unscaled integer.
+    """
+    raise NotImplementedError(
+        "CAST DECIMAL → VARCHAR requires the native draken_cast_decimal_to_string "
+        "kernel; there is no Python fallback (the source scale is not carried on "
+        "the runtime vector)."
     )
 
 

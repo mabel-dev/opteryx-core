@@ -7,19 +7,24 @@ The key provided will be the filename portion of the object key.
 
 from __future__ import annotations
 
+import functools
 import importlib
 from typing import Iterable, Union
 from urllib.parse import urlparse
 
 from opteryx.exceptions import MissingDependencyError
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
-from opteryx.utils import single_item_cache
 
 GoogleAPIError = Exception
 
 
-@single_item_cache
-def _gcs_client(**_kwargs):
+@functools.lru_cache(maxsize=1)
+def _gcs_client():
+    """One client per process. `google.cloud.storage.Client()` takes its config from
+    Application Default Credentials, not from arguments, so there is nothing to key a
+    cache on — `single_item_cache` (used elsewhere for this exact "construct once"
+    need) requires exactly one positional argument and does not fit a zero-argument
+    singleton; `lru_cache(maxsize=1)` does."""
     try:
         storage = importlib.import_module("google.cloud.storage")
     except ImportError as err:  # pragma: no cover - optional dependency
@@ -40,7 +45,7 @@ class GCSKeyValueStore(BaseKeyValueStore):
 
         self._bucket_name = parsed.netloc
         self._prefix = parsed.path.lstrip("/")
-        self._client = _gcs_client(**_kwargs)
+        self._client = _gcs_client()
         self._bucket = self._client.bucket(self._bucket_name)
         super().__init__(location, key_prefix=key_prefix)
 

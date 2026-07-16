@@ -46,6 +46,13 @@ struct VecResult {
     uint8_t           dec_precision    = 0u;      // DECIMAL/DECIMAL128 result precision;
                                                   // 0 = no descriptor (carries scale too).
     uint8_t           dec_scale        = 0u;      // DECIMAL/DECIMAL128 result scale.
+    uint16_t          vec_dimension    = 0u;      // VECTOR_FP16 result width; 0 = no
+                                                  // descriptor. VECTOR_FP16 REQUIRES one
+                                                  // (vecresult_to_owner rejects a fp16
+                                                  // result without it), so a producer of
+                                                  // that type must set this — the
+                                                  // dimension lives on the VectorOwner's
+                                                  // LogicalType, never on DrakenVector.
     // On error (data == nullptr), points at the SAME thread's error_handling.cpp
     // thread_local message buffer that draken_error_sentinel[_fmt] just formatted
     // into. NOT a caller-owned string: valid only until the next kernel call on
@@ -56,4 +63,19 @@ struct VecResult {
     // the failing kernel actually wrote (silently returning an empty message). This
     // field is the explicit, ABI-carried fix for that — nullptr on success.
     const char*       error_msg        = nullptr;
+    // --- ARRAY results ---
+    // OWNED child element VecResult; non-null ONLY when type == DRAKEN_ARRAY.
+    //
+    // An ARRAY vector's elements do not live in `data` — `data` holds only the
+    // int32_t offsets[length+1]. The elements hang off VectorOwner::child_owner
+    // (vector_owner.h), which no DrakenVector/VecResult field could previously
+    // reach, so an ARRAY was not an expressible kernel RESULT at all. This is
+    // the mirror of that ownership edge: vecresult_to_owner consumes it
+    // recursively into child_owner, so freeing the parent frees the subtree.
+    //
+    // Allocated with `new VecResult` and consumed (deleted) by vecresult_to_owner.
+    // Nesting is arbitrary-depth (ARRAY<ARRAY<T>>) — the child may itself carry a
+    // child. nullptr for every non-ARRAY result, which is why every existing
+    // producer stays correct without touching this field.
+    VecResult*        child            = nullptr;
 };

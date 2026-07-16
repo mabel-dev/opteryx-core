@@ -19,6 +19,7 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
+from draken.draken_native import vector_attach_logical_type
 from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import execute_bytecode
@@ -325,11 +326,39 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         and _root_cat != LC.NVARCHAR
         and _root_cat != LC.VARIANT
         and _root_cat != LC.ARRAY
+        # A VECTOR is a wide fp16 row, not a scalar — literal materialisation has no
+        # form for it, so folding EMBED('literal') produced a constant the compiler
+        # could not push and the whole expression fell out of the c-native set.
+        # (EMBED was shielded by the VARIANT arm until its return type became the
+        # real VECTOR(n) it always was.)
+        and _root_cat != LC.VECTOR
     ):
         table = no_table_data.read()
         bc = build_bytecode(lower(root))
         result_vector = execute_bytecode(bc, table)
-        result = result_vector.to_pylist()[0]
+        # execute_bytecode returns a Vector for native kernels, but a BARE LIST for
+        # a function still on the Python callable_ref path: the VM flags those
+        # BC_RESULT_NO_DV and pushes the callable's raw return value (see the
+        # BC_FUNCTION arm in evaluation.pyx). Those impls return plain lists (e.g.
+        # text.pyx::to_char -> [chr(a) for a in arr]), and constant folding is the
+        # ONE place they still run — the native engine refuses an unported function
+        # at plan time rather than falling back. Assuming a Vector here crashed
+        # `SELECT CHR(200)` with AttributeError: 'list' has no attribute 'to_pylist'.
+        if not isinstance(result_vector, list):
+            target_ct = root.schema_column.column_type
+            if target_ct is not None and target_ct.logical is not None:
+                # A C-ABI kernel's VecResult carries a descriptor-bearing result
+                # (TIMESTAMP64 unit, DECIMAL precision/scale) in the raw domain —
+                # the nogil VM's arena adoption has nowhere to hold it (a bare
+                # DrakenVector* has no logical_type slot) and re-attaches only at
+                # the runtime plan-known boundary, ExprProjectOperator (see
+                # _dv_vecresult_adopt_c in evaluation.pyx). Constant folding is the
+                # OTHER plan-known boundary: the target descriptor is already known
+                # here (root.schema_column.column_type), so re-attach it before
+                # to_pylist() reads the value back out, exactly like
+                # ExprProjectOperator's `logical` param does at runtime.
+                vector_attach_logical_type(result_vector._nb, target_ct.logical)
+        result = result_vector[0] if isinstance(result_vector, list) else result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
         return build_literal_node(result, root, root.schema_column.column_type)
 

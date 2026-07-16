@@ -39,6 +39,13 @@ VecResult draken_cast_float64_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float64_to_string(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float64_to_bool(void* ctx, const DrakenVector* vector);
 
+// DECIMAL → VARCHAR. Source scale (LogicalType, not on the vector) rides in a
+// binary_op_ctx.left_scale supplied by the binder. Two physical tiers:
+// draken_cast_decimal_to_string    — DRAKEN_DECIMAL    (int64 unscaled, p≤18)
+// draken_cast_decimal128_to_string — DRAKEN_DECIMAL128 (int128 unscaled, p≤38)
+VecResult draken_cast_decimal_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_string(void* ctx, const DrakenVector* vector);
+
 VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* vector);

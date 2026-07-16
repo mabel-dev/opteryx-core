@@ -73,6 +73,58 @@ VecResult draken_replace(void* ctx, const DrakenVector* const* args, uint32_t na
 VecResult draken_soundex(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // Phase 9a-fn: HUMANIZE (string_humanize.cpp)
 VecResult draken_humanize(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: MD5/SHA-1/SHA-224/SHA-256/SHA-384/SHA-512 (function_hash_encoding.cpp)
+VecResult draken_hash(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_md5(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sha1(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sha224(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sha256(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sha384(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sha512(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: HEX/BASE64/BASE85 ENCODE/DECODE (function_codec.cpp)
+VecResult draken_hex_encode(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_hex_decode(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_base64_encode(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_base64_decode(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_base85_encode(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_base85_decode(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: FROM_UNIXTIME (function_temporal.cpp)
+VecResult draken_from_unixtime(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: POWER/LOG/TRUNC/RANDOM/NORMAL (function_numeric.cpp). RANDOM/NORMAL are
+// nullary in SQL; the VM's arity-0 C-native arm hands them a synthetic length-only
+// operand carrying num_rows (the func_fn_t ABI has no other row-count channel).
+VecResult draken_power(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_log(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_random(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_normal(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII (function_string_extra.cpp).
+// CONCAT/CONCAT_WS/SPLIT/REGEXP_REPLACE/MATCH/RANDOM_STRING are absent by design —
+// see that file's header and the report to the architect.
+VecResult draken_octet_length(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_position(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_levenshtein(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_to_ascii(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (function_null_conditional.cpp).
+// NULLIF is absent by design — the logical planner lowers it to IIF(a = b, NULL, a)
+// before binding, so a draken_nullif entry would be unreachable. GREATEST/LEAST are
+// absent because they reduce over an ARRAY, whose child hangs off VectorOwner and is
+// unreachable on this signature — see that file's header and the report to the architect.
+VecResult draken_coalesce(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_ifnull(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_ifnotnull(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_iif(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// ARRAY & JSON kernels (function_array_json.cpp)
+VecResult draken_jsonb_object_keys(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_sort(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_array_contains_any(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Phase 9a-fn: DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
+VecResult draken_datediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_timediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_date_format(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_unixtime(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +180,23 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_soundex", (kernel_fn_t)&draken_soundex},
     {"draken_humanize", (kernel_fn_t)&draken_humanize},
 
+    // Cryptographic digests (function_hash_encoding.cpp)
+    {"draken_hash", (kernel_fn_t)&draken_hash},
+    {"draken_md5", (kernel_fn_t)&draken_md5},
+    {"draken_sha1", (kernel_fn_t)&draken_sha1},
+    {"draken_sha224", (kernel_fn_t)&draken_sha224},
+    {"draken_sha256", (kernel_fn_t)&draken_sha256},
+    {"draken_sha384", (kernel_fn_t)&draken_sha384},
+    {"draken_sha512", (kernel_fn_t)&draken_sha512},
+
+    // HEX/BASE64/BASE85 encode+decode (function_codec.cpp)
+    {"draken_hex_encode", (kernel_fn_t)&draken_hex_encode},
+    {"draken_hex_decode", (kernel_fn_t)&draken_hex_decode},
+    {"draken_base64_encode", (kernel_fn_t)&draken_base64_encode},
+    {"draken_base64_decode", (kernel_fn_t)&draken_base64_decode},
+    {"draken_base85_encode", (kernel_fn_t)&draken_base85_encode},
+    {"draken_base85_decode", (kernel_fn_t)&draken_base85_decode},
+
     // ========================================================================
     // Cast kernels (43 total)
     // ========================================================================
@@ -142,6 +211,8 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_float64_to_int64", (kernel_fn_t)&draken_cast_float64_to_int64},
     {"draken_cast_float64_to_string", (kernel_fn_t)&draken_cast_float64_to_string},
     {"draken_cast_float64_to_bool", (kernel_fn_t)&draken_cast_float64_to_bool},
+    {"draken_cast_decimal_to_string", (kernel_fn_t)&draken_cast_decimal_to_string},
+    {"draken_cast_decimal128_to_string", (kernel_fn_t)&draken_cast_decimal128_to_string},
 
     // Narrow-integer widening (INT32/INT16/INT8 → FLOAT64 / INT64) + direct → string
     {"draken_cast_integer_to_float64", (kernel_fn_t)&draken_cast_integer_to_float64},
@@ -260,6 +331,134 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_array_map_access", (kernel_fn_t)&draken_array_map_access},
     {"draken_json_extract", (kernel_fn_t)&draken_json_extract},
     {"draken_pointer_extract", (kernel_fn_t)&draken_pointer_extract},
+
+    // ========================================================================
+    // Temporal function kernels (Phase 9a-fn, function_temporal.cpp)
+    // draken_from_unixtime is REAL and verified (native column path matches the
+    // Python impl for DATE/TIMESTAMP/NULL/negative inputs). The rest of the
+    // family needs the input operand's TimestampUnit, which DrakenVector does not
+    // carry — see the scope note at the top of function_temporal.cpp.
+    {"draken_from_unixtime", (kernel_fn_t)&draken_from_unixtime},
+
+    // ========================================================================
+    // Numeric function kernels (Phase 9a-fn, function_numeric.cpp)
+    // POWER/LOG/TRUNC. DECIMAL on the FIRST operand (base/value/num) works via the
+    // bind-time binary_op_ctx compiled_expression.pyx allocates for this name list.
+    // DECIMAL on the SECOND operand (exponent/base/digits) fails loud — no scale
+    // vehicle exists for it on this call path. See function_numeric.cpp's header.
+    //
+    // RANDOM/NORMAL are nullary in SQL. The C ABI hands a kernel only operand
+    // vectors, so the VM's arity-0 C-native arm synthesizes a length-only operand
+    // carrying num_rows (evaluation.pyx); the kernel reads that .length. PCG-backed,
+    // thread_local engine per worker (see function_numeric.cpp's fn_thread_rng).
+    // ========================================================================
+    {"draken_power", (kernel_fn_t)&draken_power},
+    {"draken_log", (kernel_fn_t)&draken_log},
+    {"draken_trunc", (kernel_fn_t)&draken_trunc},
+    {"draken_random", (kernel_fn_t)&draken_random},
+    {"draken_normal", (kernel_fn_t)&draken_normal},
+
+    // ========================================================================
+    // Fixed-result string function kernels (Phase 9a-fn, function_string_extra.cpp)
+    //
+    // The rest of the string group is absent DELIBERATELY, not pending:
+    //   CONCAT / CONCAT_WS — the optimizer rewrites both to `||` (StringConcat)
+    //       chains, which are already native. A kernel here would be shadowed.
+    //   SPLIT          — returns ARRAY; VecResult has no array-ownership contract.
+    //   REGEXP_REPLACE — needs RE2, which is not compiled into draken/rugo.
+    //   MATCH          — `_MATCH_AGAINST` raises NotImplementedError; no semantics
+    //                    to port.
+    //   RANDOM_STRING  — volatile, and its declared arity does not match its
+    //                    callable; semantics undefined.
+    // Each is explained in function_string_extra.cpp's header and was raised with
+    // the architect rather than guessed at.
+    // ========================================================================
+    {"draken_octet_length", (kernel_fn_t)&draken_octet_length},
+    {"draken_position", (kernel_fn_t)&draken_position},
+    {"draken_levenshtein", (kernel_fn_t)&draken_levenshtein},
+    {"draken_to_ascii", (kernel_fn_t)&draken_to_ascii},
+
+    // ========================================================================
+    // Null & conditional kernels (function_null_conditional.cpp)
+    //
+    // Before these entries existed the plan compiler REFUSED every query using
+    // COALESCE/IFNULL/IFNOTNULL/IIF ("outside the c-native kernel set") — they had
+    // no C kernel, and the nanobind bindings they nominally bound to were
+    // unreachable from the engine. Registering them is what admits the functions.
+    //
+    // Absent by design:
+    //   NULLIF          — lowered to IIF(a = b, NULL, a) by the logical planner
+    //                     before binding; an entry here would never be dispatched.
+    //   GREATEST/LEAST  — reduce over an ARRAY, whose child vector hangs off
+    //                     VectorOwner rather than DrakenVector and so cannot be
+    //                     reached on this signature (the same wall extraction.cpp's
+    //                     `arr[i]` documents). Needs the BC_C_NATIVE_CHILD plumbing;
+    //                     raised with the architect rather than guessed at.
+    // ========================================================================
+    {"draken_coalesce", (kernel_fn_t)&draken_coalesce},
+    {"draken_ifnull", (kernel_fn_t)&draken_ifnull},
+    {"draken_ifnotnull", (kernel_fn_t)&draken_ifnotnull},
+    {"draken_iif", (kernel_fn_t)&draken_iif},
+
+    // ========================================================================
+    // ARRAY & JSON kernels (function_array_json.cpp)
+    //
+    // JSONB_OBJECT_KEYS is the first kernel to return a DRAKEN_ARRAY: its
+    // elements ride out on VecResult::child, which vecresult_to_owner adopts
+    // into child_owner. Before that field existed an ARRAY result was not
+    // expressible on this ABI at all.
+    //
+    // SORT, ARRAY_CONTAINS_ANY and ARRAY_CONTAINS_ALL all READ an ARRAY. They
+    // reuse the ARRAY->VARCHAR cast's BC_C_NATIVE_CHILD mechanism, extended to
+    // BC_FUNCTION (compiled_expression.pyx / evaluation.pyx): the VM appends the
+    // column-resolved child element vector as a SYNTHETIC extra arg, so each still
+    // fits the plain func_fn_t(ctx, args[], nargs) shape (nargs==2). That encoding
+    // carries exactly ONE column_identity, so all three take their array from a
+    // DIRECT column load; a computed array argument is not bind-time eligible and
+    // is refused at plan time (this engine has no Python fallback).
+    //
+    // ARRAY_CONTAINS_ANY/ALL fit that one-child budget because their needle set is
+    // a LITERAL, baked into an in_list_ctx blob at bind time (the same vehicle
+    // draken_in_list uses) rather than passed as a second vector operand — so
+    // there is no second child to resolve. The blob's kind is inferred from the
+    // literal (ARRAY columns are untyped at bind time) and verified against the
+    // real element type at run time, failing loud on a mismatch.
+    //
+    // SORT's order is Draken's own engine order — architect decision 2026-07-16,
+    // NOT Python's sorted(): fp_total_lt for floats (NaN highest), str_compare for
+    // strings (the engine's own GT/LT comparator), false<true for BOOL.
+    //
+    // Absent by design:
+    //   GREATEST/LEAST  — see the null-conditional block above; they reduce over an
+    //                     ARRAY and could now plausibly use this same mechanism,
+    //                     but that is a separate port, not assumed here.
+    //   ARRAY_CONTAINS  — lowered to `item = ANY(arr)` (AnyOpEq) at plan-build
+    //                     time; already native. Its Python impl is a fail-loud
+    //                     guard for a bypassed rewrite, so an entry here would
+    //                     silence that guard, not accelerate anything.
+    // ========================================================================
+    {"draken_jsonb_object_keys", (kernel_fn_t)&draken_jsonb_object_keys},
+    {"draken_sort", (kernel_fn_t)&draken_sort},
+    {"draken_array_contains_any", (kernel_fn_t)&draken_array_contains_any},
+    {"draken_array_contains_all", (kernel_fn_t)&draken_array_contains_all},
+
+    // DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
+    {"draken_datediff", (kernel_fn_t)&draken_datediff},
+    {"draken_timediff", (kernel_fn_t)&draken_timediff},
+    {"draken_date_format", (kernel_fn_t)&draken_date_format},
+    {"draken_unixtime", (kernel_fn_t)&draken_unixtime},
+    {"draken_time_bucket", (kernel_fn_t)&draken_time_bucket},
+
+    // EMBED / COSINE_SIMILARITY / COSINE_DISTANCE (function_vector_distance.cpp).
+    // Keyed by catalog OVERLOAD id, not by function name — see kernel_registry.h.
+    {"draken_embed", (kernel_fn_t)&draken_embed},
+    {"draken_cosine_similarity_vector", (kernel_fn_t)&draken_cosine_similarity_vector},
+    {"draken_cosine_distance_vector", (kernel_fn_t)&draken_cosine_distance_vector},
+    {"draken_cosine_similarity_text", (kernel_fn_t)&draken_cosine_similarity_text},
+    {"draken_cosine_distance_text", (kernel_fn_t)&draken_cosine_distance_text},
+    // Two-vector cast (parent+child); cast dispatch casts the fn ptr to its own
+    // signature, exactly as draken_cast_array_to_varchar is registered.
+    {"draken_cast_array_to_vector", (kernel_fn_t)&draken_cast_array_to_vector},
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +547,24 @@ in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len) {
 substring_ctx* kernel_alloc_substring_ctx(int32_t start, int32_t count, uint8_t has_count) {
     auto* ctx = static_cast<substring_ctx*>(malloc(sizeof(substring_ctx)));
     if (ctx) { ctx->start = start; ctx->count = count; ctx->has_count = has_count; }
+    return ctx;
+}
+
+time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude, unsigned char unit_kind,
+                                              unsigned char ts_unit) {
+    auto* ctx = static_cast<time_bucket_ctx*>(malloc(sizeof(time_bucket_ctx)));
+    if (ctx) { ctx->magnitude = magnitude; ctx->unit_kind = unit_kind; ctx->ts_unit = ts_unit; }
+    return ctx;
+}
+
+format_ctx* kernel_alloc_format_ctx(unsigned char ts_unit, const char* fmt, size_t fmt_len) {
+    if (fmt == nullptr) fmt_len = 0u;
+    auto* ctx = static_cast<format_ctx*>(malloc(sizeof(format_ctx) + fmt_len));
+    if (!ctx) return nullptr;
+    ctx->ts_unit = ts_unit;
+    ctx->fmt_len = static_cast<int32_t>(fmt_len);
+    if (fmt_len > 0u)
+        memcpy(reinterpret_cast<unsigned char*>(ctx) + sizeof(format_ctx), fmt, fmt_len);
     return ctx;
 }
 

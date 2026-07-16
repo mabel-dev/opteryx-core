@@ -903,6 +903,12 @@ cdef class IpcRowGroupSource:
     cdef bint _closed
     cdef list masks                      # pass-2: bit-packed survival mask per work item (else None)
     cdef cpp_mutex* _mtx                  # guards the cursor under concurrent pull
+    # Remote footer cache visibility for this scan's telemetry (see `diagnostics`).
+    # -1 means "the remote tier was not consulted at all" (not configured, or this
+    # scan had no remote-scheme files) — distinct from 0, which means "consulted and
+    # found nothing". A caller must not conflate "not applicable" with "always misses".
+    cdef int footer_cache_hits
+    cdef int footer_cache_misses
 
     def __cinit__(self):
         self.footer_map = NULL
@@ -916,6 +922,8 @@ cdef class IpcRowGroupSource:
         self.in_flight_limit = 0
         self.masks = None
         self._mtx = new cpp_mutex()
+        self.footer_cache_hits = -1
+        self.footer_cache_misses = -1
 
     def __dealloc__(self):
         if self.footer_map != NULL:
@@ -929,10 +937,20 @@ cdef class IpcRowGroupSource:
         """IO-pipeline counters (GCS/HTTP request count, retries, latency
         histogram, worker_blocked_ns) for this trampoline scan — the same surface
         NativeScanPlan.diagnostics() exposes on the native path. Returns {} once the
-        pipeline is gone. Read BEFORE close() drops the pipeline reference."""
+        pipeline is gone. Read BEFORE close() drops the pipeline reference.
+
+        Includes `footer_cache_hits`/`footer_cache_misses` — how many of this
+        scan's remote-file footers were served from the shared Valkey tier versus
+        fetched from origin — ONLY when the tier was actually consulted (configured
+        AND this scan had at least one remote-scheme file). Omitted otherwise, so a
+        caller cannot mistake "not applicable" for "always misses"."""
         if self.pipeline is None:
             return {}
-        return self.pipeline.diagnostics()
+        diag = self.pipeline.diagnostics()
+        if self.footer_cache_hits >= 0:
+            diag["footer_cache_hits"] = self.footer_cache_hits
+            diag["footer_cache_misses"] = self.footer_cache_misses
+        return diag
 
     cdef void _submit_one(self, int idx):
         """Submit one work item to the C++ pipeline. Called OUTSIDE the cursor
@@ -1294,6 +1312,11 @@ cpdef IpcRowGroupSource open_ipc_source(
         for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
             footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
             probe_hits.add(path)
+        # Telemetry: only recorded when the tier was actually consulted this scan (see
+        # `diagnostics`'s -1 sentinel), so a query that never touched a remote file — or
+        # ran with no tier configured — doesn't misreport "0 hits" as "cache is failing".
+        src.footer_cache_hits = len(probe_hits)
+        src.footer_cache_misses = len(remote_candidates) - len(probe_hits)
 
     # Step 3: fetch the residual from origin in one concurrent batch, then write back once.
     batch_orig = []

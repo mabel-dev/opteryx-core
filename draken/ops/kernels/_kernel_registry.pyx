@@ -64,6 +64,31 @@ cdef extern from "ops/kernels/kernel_registry.h":
                                                 size_t nav_len, int64_t index) except +
     in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len)
     substring_ctx* kernel_alloc_substring_ctx(int start, int count, uint8_t has_count)
+
+    ctypedef struct time_bucket_ctx_:
+        pass
+    ctypedef time_bucket_ctx_ time_bucket_ctx
+
+    ctypedef struct format_ctx_:
+        pass
+    ctypedef format_ctx_ format_ctx
+
+    time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude, uint8_t unit_kind,
+                                                  uint8_t ts_unit)
+    format_ctx* kernel_alloc_format_ctx(uint8_t ts_unit, const char* fmt, size_t fmt_len)
+
+    ctypedef struct vector_dim_ctx_:
+        pass
+    ctypedef vector_dim_ctx_ vector_dim_ctx
+
+    vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension)
+
+    ctypedef struct cosine_text_ctx_:
+        pass
+    ctypedef cosine_text_ctx_ cosine_text_ctx
+
+    cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* embed_fn)
+
     void kernel_free_context(void* ctx)
 
 
@@ -196,6 +221,67 @@ def alloc_substring_ctx(int start, int count, int has_count):
     """
     cdef substring_ctx* ctx = kernel_alloc_substring_ctx(
         <int>start, <int>count, <uint8_t>has_count)
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_time_bucket_ctx(long long magnitude, int unit_kind, int ts_unit):
+    """Allocate context for the TIME_BUCKET kernel (draken_time_bucket).
+
+    Args:
+        magnitude: bind-time TIME_BUCKET magnitude literal (e.g. 5 for '5 minutes').
+        unit_kind: 1=second, 2=minute, 3=hour, 4=day.
+        ts_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of the `date` operand.
+    """
+    cdef time_bucket_ctx* ctx = kernel_alloc_time_bucket_ctx(
+        <int64_t>magnitude, <uint8_t>unit_kind, <uint8_t>ts_unit)
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_format_ctx(int ts_unit, bytes fmt):
+    """Allocate context for the DATE_FORMAT kernel (draken_date_format).
+
+    Args:
+        ts_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of the `date` operand; DATE32
+            operands pass 2 (unused by the kernel).
+        fmt: the bind-time pattern LITERAL, UTF-8 encoded.
+    """
+    cdef const char* fmt_ptr = <const char*>fmt
+    cdef size_t fmt_len = <size_t>len(fmt)
+    cdef format_ctx* ctx = kernel_alloc_format_ctx(<uint8_t>ts_unit, fmt_ptr, fmt_len)
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_vector_dim_ctx(int dimension):
+    """Allocate context for the fp16 cosine kernels.
+
+    Args:
+        dimension: VECTOR width of both operands, read off the bind-time LogicalType.
+            The physical DrakenVector carries no width, so the kernel cannot recover it.
+    """
+    cdef vector_dim_ctx* ctx = kernel_alloc_vector_dim_ctx(<uint32_t>dimension)
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_cosine_text_ctx(int dimension, unsigned long long embed_fn):
+    """Allocate context for the TEXT cosine overloads.
+
+    Args:
+        dimension: the active EMBED capability's width.
+        embed_fn: address of the resolved `draken_embed` kernel. The text overloads
+            delegate BOTH operands to it rather than embedding themselves, so
+            COSINE_SIMILARITY(a, b) and COSINE_SIMILARITY(EMBED(a), EMBED(b)) cannot
+            drift apart when a capability replaces the core embedder.
+    """
+    cdef cosine_text_ctx* ctx = kernel_alloc_cosine_text_ctx(
+        <uint32_t>dimension, <void*><unsigned long long>embed_fn)
     if ctx == NULL:
         return None
     return <unsigned long long>ctx

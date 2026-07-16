@@ -378,16 +378,25 @@ class _HybridEmbeddingProvider:
         return (positions, final_scores)
 
 
+def _minilm_model_dir() -> Path:
+    """Directory holding the vendored all-MiniLM-L6-v2 model.
+
+    `third_party/` is at the REPO ROOT (CLAUDE.md §5) — `opteryx/third_party/` holds
+    only opteryx's own Cython wrappers, and nothing copies the model under it. This file
+    is opteryx/types/vectors/embeddings.py, so the root is four parents up, not three.
+    Deriving it in one place: the same expression was written out twice and both copies
+    were one level short, which silently disabled the MiniLM provider entirely —
+    `_load_default_embedding_provider` saw no model.onnx and returned None, so EMBED
+    reported "embeddings unavailable" with a 90MB model sitting in the tree.
+    """
+    return Path(__file__).resolve().parents[3] / "third_party" / "models" / "all-MiniLM-L6-v2"
+
+
 class _MiniLMNativeEmbeddingProvider:
     def __init__(self):
         from opteryx.compiled.nanobind import minilm_native
 
-        model_dir = (
-            Path(__file__).resolve().parent.parent.parent
-            / "third_party"
-            / "models"
-            / "all-MiniLM-L6-v2"
-        )
+        model_dir = _minilm_model_dir()
         model_path = model_dir / "model.onnx"
         vocab_path = model_dir / "vocab.txt"
         self._embedder = minilm_native.MiniLMEmbedder(str(model_path), str(vocab_path), 256)
@@ -450,12 +459,7 @@ def _load_default_embedding_provider():
         _default_embedding_provider = _HybridEmbeddingProvider()
         return _default_embedding_provider
 
-    model_dir = (
-        Path(__file__).resolve().parent.parent.parent
-        / "third_party"
-        / "models"
-        / "all-MiniLM-L6-v2"
-    )
+    model_dir = _minilm_model_dir()
     if not (model_dir / "model.onnx").exists() or not (model_dir / "vocab.txt").exists():
         return None
 

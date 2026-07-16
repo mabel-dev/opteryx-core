@@ -24,10 +24,8 @@ from opteryx.types.schema import RelationSchema
 
 OS_SEP = os.sep
 PARQUET_SUFFIX = ".parquet"
-STATS_SIDECAR_SUFFIX = ".stats.json"
-STATS_SCHEMA_VERSION = 1
 
-# Process-global manifest cache: dataset -> (signature, schema, manifest).
+# Process-global manifest cache: dataset -> (signature, file_entries, min_k, histogram).
 # The gateway connector is recreated per query, so the built manifest (list +
 # stat + per-file footer-stats parse, ~5ms on a 99-file dataset) would otherwise
 # be rebuilt every time. Keyed on a (name, size, mtime) file-set signature, so
@@ -122,14 +120,28 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         """
         Get list of blob names (file paths) matching the prefix.
 
+        Excludes the dataset manifest. It is itself a `.parquet` sitting in the
+        tree it describes, and every discovery path here filters on that suffix —
+        so without this it would be read back as a DATA file: its columns would
+        become the dataset's schema, and its rows would be returned as results.
+        This is the single funnel all discovery goes through (schema reads, the
+        executor's file list, ANALYZE), so the exclusion lives here rather than
+        being re-derived — and missed — at each call site.
+
         Args:
             prefix: Directory/path prefix to list files from
             predicates: Optional predicates (not used for file listing)
 
         Returns:
-            List of file paths
+            List of file paths, manifest excluded
         """
-        return self.filesystem.list_files(prefix, recursive=True)
+        from opteryx.models.manifest_io import is_dataset_manifest
+
+        return [
+            name
+            for name in self.filesystem.list_files(prefix, recursive=True)
+            if not is_dataset_manifest(name)
+        ]
 
     def read_blob(self, *, blob_name: str, just_schema=False, projection=None, selection=None):
         """
@@ -288,11 +300,18 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         """
         from opteryx.models.file_entry import FileEntry
         from opteryx.models.manifest import Manifest
+        from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
 
-        # Parquet files in the dataset, with size + mtime from a single stat pass.
+        # Parquet data files. get_list_of_blob_names already excludes the dataset
+        # manifest, so this is data only; the manifest is addressed by its known
+        # path instead of being fished back out of the listing.
         blob_names = self.get_list_of_blob_names(self.dataset)
         parquet_names = [b for b in blob_names if b.lower().endswith(PARQUET_SUFFIX)]
-        infos = self.filesystem.get_file_info(parquet_names)
+        manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
+        # Stat the manifest alongside the data: ANALYZE rewrites only the manifest,
+        # so a data-only signature would serve stale sketches from cache forever.
+        infos = self.filesystem.get_file_info(parquet_names + [manifest_path])
+        infos = [i for i in infos if (getattr(i, "size", None) is not None)]
         sizes = {i.path: (getattr(i, "size", 0) or 0) for i in infos}
 
         # File-set signature: any add/remove/resize/rewrite changes it, so a
@@ -312,12 +331,22 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             # Fresh Manifest over a COPY of the cached file list — optimizer
             # strategies reassign manifest.files (prune, limit, statistics-only
             # COUNT(*) sets it to []), so the cached list is never handed out raw.
-            return schema, Manifest(list(cached[1]), schema)
+            # The sketch vectors are immutable and shared (kernels only read them).
+            return schema, Manifest(
+                list(cached[1]), schema, min_k_vector=cached[2], histogram_vector=cached[3]
+            )
+
+        # ANALYZE's per-dataset manifest, when it describes exactly this file set.
+        # Order matters: the sketch vectors' rows are positional to the manifest's
+        # rows, so file_entries must be built in that same order to stay aligned.
+        ordered_names, min_k_vector, histogram_vector = self._read_dataset_manifest(
+            manifest_path, parquet_names
+        )
 
         # Miss (or first build): build the manifest from file metadata.
         # Build FileEntry objects from file metadata
         file_entries = []
-        for blob_name in parquet_names:
+        for blob_name in ordered_names:
             try:
                 file_format = "PARQUET"
                 record_count = 0
@@ -339,20 +368,23 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     record_count = 0
                     column_stats = None
 
-                min_k_hashes = self._load_sidecar_min_k_hashes(blob_name, schema)
-
                 entry = FileEntry(
                     file_path=blob_name,
                     file_format=file_format,
                     record_count=record_count,
                     file_size_in_bytes=file_size,
                     column_stats=column_stats,
-                    min_k_hashes=min_k_hashes,
                 )
                 file_entries.append(entry)
 
             except (OSError, ValueError, RuntimeError):
-                # Skip files we can't read metadata from
+                # Skip files we can't read metadata from. This breaks the 1:1
+                # positional pairing the sketch vectors rely on (row i describes
+                # ordered_names[i]), so the sketches are dropped rather than
+                # silently read against the wrong file — stats are an accelerator,
+                # a misaligned one is a wrong answer.
+                min_k_vector = None
+                histogram_vector = None
                 continue
 
         # Cache an INDEPENDENT copy of the file list (the returned manifest below
@@ -360,83 +392,54 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         if self.dataset not in _MANIFEST_CACHE and len(_MANIFEST_CACHE) >= _MANIFEST_CACHE_MAX:
             # FIFO evict the oldest entry to bound memory.
             _MANIFEST_CACHE.pop(next(iter(_MANIFEST_CACHE)), None)
-        _MANIFEST_CACHE[self.dataset] = (signature, list(file_entries))
-        return schema, Manifest(file_entries, schema)
+        _MANIFEST_CACHE[self.dataset] = (
+            signature,
+            list(file_entries),
+            min_k_vector,
+            histogram_vector,
+        )
+        return schema, Manifest(
+            file_entries, schema, min_k_vector=min_k_vector, histogram_vector=histogram_vector
+        )
 
+    def _read_dataset_manifest(self, manifest_path, parquet_names):
+        """ANALYZE's per-dataset manifest, as ``(ordered_names, min_k, histogram)``.
 
-    def _load_sidecar_min_k_hashes(self, blob_name: str, schema: RelationSchema):
-        """Load the optional ``<blob_name>.stats.json`` sidecar.
+        Returns the data files in the manifest's own row order — the sketch vectors
+        are positional to those rows, so the caller must build its FileEntry list in
+        this order to keep row i describing ordered_names[i].
 
-        Returns a positional list aligned with ``schema.columns`` of K-min hash
-        lists, or None if the sidecar is missing, malformed, or its embedded
-        field-id mapping disagrees with the schema (stale stats).
+        The sketches are used ONLY when the manifest describes exactly the current
+        file set. A dataset directory is ad-hoc: files can be added or removed under
+        it at any time, and a manifest that has drifted holds an INCOMPLETE picture —
+        `estimate_cardinality` returns an EXACT count when the merged sketch is under
+        K, so serving it from a partial file set would be a wrong answer, not a worse
+        estimate. On any drift (or no manifest) the sketches are dropped and the
+        globbed order is returned; ANALYZE re-run restores them.
         """
-        sidecar_path = blob_name + STATS_SIDECAR_SUFFIX
+        from opteryx.models.manifest_io import read_manifest_file_entries
 
-        # Slurp the sidecar via the same filesystem the connector uses.
+        # No manifest is the norm (a dataset nobody has ANALYZE'd) — an explicit
+        # check, not an exception, so a genuine read failure below stays visible.
+        if not os.path.isfile(manifest_path):
+            return parquet_names, None, None
+
         try:
-            stream = self.filesystem.open_input_stream(sidecar_path)
-        except Exception:
-            return None
-        try:
+            stream = self.filesystem.open_input_stream(manifest_path)
             try:
                 payload = bytes(stream.memoryview)
             except AttributeError:
                 payload = stream.read()
-        except Exception:
-            return None
-        finally:
-            try:
-                stream.close()
-            except Exception:
-                pass
+            stream.close()
+            entries, native = read_manifest_file_entries(payload)
+        except (OSError, ValueError, RuntimeError):
+            return parquet_names, None, None
 
-        import json
+        ordered = [entry.file_path for entry in entries]
+        if set(ordered) != set(parquet_names):
+            return parquet_names, None, None
 
-        try:
-            data = json.loads(payload)
-        except (ValueError, TypeError):
-            return None
-
-        if not isinstance(data, dict):
-            return None
-        if data.get("schema_version") != STATS_SCHEMA_VERSION:
-            return None
-
-        sidecar_field_ids = data.get("field_ids")
-        sidecar_hashes = data.get("min_k_hashes")
-        if not isinstance(sidecar_field_ids, dict) or not isinstance(sidecar_hashes, dict):
-            return None
-
-        expected_field_ids = {col.name: i for i, col in enumerate(schema.columns)}
-        # Sidecar must agree with the schema's positional field ids exactly.
-        if sidecar_field_ids != expected_field_ids:
-            import sys
-
-            print(
-                f"[opteryx] discarding stale stats sidecar: {sidecar_path} "
-                f"(field_id mapping disagrees with current schema)",
-                file=sys.stderr,
-            )
-            return None
-
-        num_columns = len(schema.columns)
-        positional: list = [None] * num_columns
-        for fid_str, hashes in sidecar_hashes.items():
-            try:
-                fid = int(fid_str)
-            except (TypeError, ValueError):
-                return None
-            if fid < 0 or fid >= num_columns:
-                return None
-            if not isinstance(hashes, list):
-                return None
-            positional[fid] = [int(h) for h in hashes]
-
-        if not any(h is not None for h in positional):
-            return None
-
-        return positional
+        return ordered, native.get("min_k_hashes"), native.get("histogram_counts")
 
 
 class FileSystemConnector(BaseConnector):

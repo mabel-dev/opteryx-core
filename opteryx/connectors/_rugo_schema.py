@@ -95,6 +95,63 @@ def _normalize_sql_type_aliases(type_name: str) -> str:
     return normalized
 
 
+# Parquet logical-type strings carry a unit/width the SQL type grammar does not:
+# "timestamp[us]", "time32[ms]", "date32[day]". parse_column_type knows only the
+# bare names.
+_PARQUET_UNIT_SUFFIX = re.compile(r"\[[^\]]*\]")
+_PARQUET_WIDTH_ALIASES = {
+    "time32": "time",
+    "time64": "time",
+    "date32": "date",
+    "date64": "date",
+}
+
+
+def _parse_timestamp_unit(logical_type: Optional[str]):
+    """Extract the TimestampUnit from a parquet timestamp logical string.
+
+    Handles "timestamp[us]" and "array<timestamp[ms]>" alike — the unit is read
+    wherever it sits. Returns None when absent/unparseable, which callers treat as
+    the microsecond default (parquet's own default and the canonical ColumnType's).
+
+    This exists because the unit is REAL data: a `timestamp[ms]` column whose unit
+    is dropped decodes 1704164645000 as microseconds → 1970-01-20 instead of
+    2024-01-02. Silently wrong dates, not a rounding detail.
+    """
+    from opteryx.types.logical_type import TimestampUnit
+
+    if not logical_type:
+        return None
+    match = re.search(r"timestamp\[([a-z]+)\]", logical_type.lower())
+    if not match:
+        return None
+    return {
+        "s": TimestampUnit.SECONDS,
+        "ms": TimestampUnit.MILLISECONDS,
+        "us": TimestampUnit.MICROSECONDS,
+        "ns": TimestampUnit.NANOSECONDS,
+    }.get(match.group(1))
+
+
+def _normalize_parquet_type_string(type_name: str) -> str:
+    """Parquet logical-type string → a string parse_column_type accepts.
+
+    Strips the unit/width suffix ("timestamp[us]" → "timestamp") and collapses
+    width-tagged temporal names ("time32" → "time"). Dropping the unit is not a
+    new loss: a SCALAR timestamp column already resolves through
+    _CATEGORY_TO_CANONICAL to the canonical TIMESTAMP (unit=us) regardless of the
+    file's unit, so this keeps array elements consistent with scalars rather than
+    inventing a second convention. (If per-column units are ever honoured, both
+    paths need it — not just this one.)
+    """
+    normalized = _PARQUET_UNIT_SUFFIX.sub("", type_name.lower())
+    for source, target in _PARQUET_WIDTH_ALIASES.items():
+        normalized = re.sub(
+            rf"(?<![a-z0-9_]){re.escape(source)}(?![a-z0-9_])", target, normalized
+        )
+    return _normalize_sql_type_aliases(normalized)
+
+
 def _map_parquet_type_to_sql(
     parquet_type: Optional[str], logical_type: Optional[str] = None
 ) -> str:
@@ -115,15 +172,22 @@ def _map_parquet_type_to_sql(
         if logical_lower in PARQUET_LOGICAL_TYPE_MAP:
             return PARQUET_LOGICAL_TYPE_MAP[logical_lower]
 
+        # Container types are matched BEFORE the scalar temporal checks below.
+        # Those checks match on a SUBSTRING ("timestamp" in ...), so an
+        # `array<timestamp[us]>` used to resolve to a bare TIMESTAMP — the ARRAY
+        # container silently dropped, leaving the declared type (TIMESTAMP) at odds
+        # with the runtime vector (genuinely ARRAY). That made every ARRAY-typed
+        # function reject the column at bind time ("SORT arg1: expected ARRAY, got
+        # TIMESTAMP"). An element type is the ELEMENT's business — parse the whole
+        # string and let the container win.
+        if logical_lower.startswith(("array", "decimal")):
+            from opteryx.types.logical_type import parse_column_type
+            return parse_column_type(_normalize_parquet_type_string(logical_lower)).category
+
         if logical_lower.startswith("time") and not logical_lower.startswith("timestamp"):
             return PARQUET_LOGICAL_COMPLEX_PREFIXES["time"]
         if logical_lower.startswith("timestamp") or "timestamp" in logical_lower:
             return PARQUET_LOGICAL_COMPLEX_PREFIXES["timestamp"]
-
-        if logical_lower.startswith(("array", "decimal")):
-            from opteryx.types.logical_type import parse_column_type
-            normalized_logical = _normalize_sql_type_aliases(logical_lower)
-            return parse_column_type(normalized_logical).category
 
     # Fall back to physical type mapping
     physical_lower = parquet_type.lower() if parquet_type else ""
@@ -260,19 +324,41 @@ def rugo_to_relation_schema(
 
         from opteryx.types import logical_type as _lt
         from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
+        _ts_unit = _parse_timestamp_unit(logical_type)
         if sql_type == LogicalCategory.DECIMAL and precision is not None and scale is not None:
             _ct = _lt.DECIMAL(precision, scale)
+        elif sql_type == LogicalCategory.TIMESTAMP and _ts_unit is not None:
+            # Honour the FILE's unit. _CATEGORY_TO_CANONICAL would hand back the
+            # canonical TIMESTAMP (unit=us) for every timestamp column, so a
+            # `timestamp[ms]`/`[s]`/`[ns]` column decoded its raw int64 as
+            # microseconds and rendered a wildly wrong date (2024 → 1970), or
+            # overflowed outright for ns. The unit is data, not a formatting hint.
+            _ct = _lt.TIMESTAMP(_ts_unit)
         elif sql_type == LogicalCategory.ARRAY:
             # ARRAY carries its element type in the logical string (e.g.
             # "array<int64>"); _CATEGORY_TO_CANONICAL has no ARRAY entry because
             # an ARRAY ColumnType is invalid without an `element`. Parse the full
             # type so `list[i]` (MapAccess) can resolve the element ColumnType.
+            # Same normalizer as the category mapping above — they must agree, or a
+            # column typed ARRAY there would raise here.
             from opteryx.types.logical_type import parse_column_type
             _ct = (
-                parse_column_type(_normalize_sql_type_aliases(logical_type.lower()))
+                parse_column_type(_normalize_parquet_type_string(logical_type))
                 if logical_type
                 else None
             )
+            # The normalizer strips the unit to make the string parseable, so an
+            # array<timestamp[ms]> element comes back as the canonical TIMESTAMP
+            # (us). Re-attach the file's real unit — same reason as the scalar
+            # branch above; the parquet reader retags the ARRAY's child with it
+            # (parquet_read.pyx's _sp_array_ts_unit_map).
+            if (
+                _ct is not None
+                and _ts_unit is not None
+                and _ct.element is not None
+                and _ct.element.category == LogicalCategory.TIMESTAMP
+            ):
+                _ct = _lt.ARRAY(_lt.TIMESTAMP(_ts_unit))
         else:
             _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
         from opteryx.types.schema import mint_column_identity

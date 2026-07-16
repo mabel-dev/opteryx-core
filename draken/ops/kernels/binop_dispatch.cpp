@@ -196,6 +196,48 @@ static inline void bsc_read_row(const DrakenVector* dv, uint32_t row,
     *len  = str_length(slot);
 }
 
+// `x || NULL` / `NULL || x` → NULL for EVERY row (DuckDB semantics; the architect
+// ruled that CONCAT() deliberately differs on a NULL arg and is correct as-is —
+// do not "fix" that here).
+//
+// This cannot be left to binop_string_concat: a DRAKEN_NULL operand is
+// SELF-DESCRIBING (buffers.h — "type==NULL ⟹ every row null; no data, no
+// validity"), so it carries data == NULL and validity == NULL. bsc_row_valid()
+// reads a null validity as "all rows valid", and bsc_read_row() would then
+// dereference the NULL arena — the exact garbage-read this short-circuit exists
+// to prevent. It must be intercepted before any string kernel touches the operand.
+//
+// Result is a DENSE all-null column of `n` rows typed as the string operand,
+// built through vecresult_from_string_buffers with the SAME hand-allocated
+// slots/arena/validity shape binop_string_concat itself uses. That is deliberate:
+// the direct-write vecresult_string_block_alloc / vecresult_from_string_block
+// variant produces a VecResult whose validity points INSIDE the block, and the
+// BC_C_NATIVE_STRING result wrap this opcode goes through frees it as a separate
+// allocation — an interior free that aborts with
+// POINTER_BEING_FREED_WAS_NOT_ALLOCATED at Vector dealloc. Staying on the exact
+// construction the sibling concat path already uses keeps the two impossible to
+// diverge. Dense (n zeroed slots) rather than a 1-slot constant because
+// `x || NULL` is a degenerate expression, not a hot path.
+static VecResult binop_string_concat_null(uint32_t n, DrakenType out_type) {
+    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+    if (!slots) return draken_error_sentinel("binop_string_concat: slot alloc failed");
+    // Zeroed == str_init_null canonical for every row; no arena bytes are needed.
+    std::memset(slots, 0, slots_sz);
+
+    const size_t vsz = (n > 0u) ? static_cast<size_t>((((n + 7u) >> 3u) + 7u) & ~7u) : 8u;
+    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vsz));
+    if (!validity) {
+        draken_free(slots);
+        return draken_error_sentinel("binop_string_concat: validity alloc failed");
+    }
+    // All bits 0 (Arrow convention: bit SET = valid) ⇒ every row NULL.
+    std::memset(validity, 0, vsz);
+
+    return vecresult_from_string_buffers(slots, /*arena=*/nullptr, /*arena_len=*/0,
+                                         validity, n, out_type);
+}
+
 static VecResult binop_string_concat(const DrakenVector* left, const DrakenVector* right) {
     const uint32_t n = left->length;
     const DrakenType out_type = left->type;
@@ -738,6 +780,20 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
             if (left->length != right->length)
                 return draken_error_sentinel("binop_string_concat: length mismatch");
             return binop_string_concat(left, right);
+        }
+
+        // Untyped NULL operand: short-circuit to an all-null column of the string
+        // operand's type (see binop_string_concat_null). Row count comes from the
+        // STRING side — a DRAKEN_NULL operand carries no rows of its own.
+        // NULL || NULL falls through to the loud error below: no string operand
+        // means no result type to adopt.
+        if (op == BOP_STRING_CONCAT && (lt == DRAKEN_NULL || rt == DRAKEN_NULL)) {
+            const bool rt_is_str = (rt == DRAKEN_VARCHAR || rt == DRAKEN_NVARCHAR
+                                    || rt == DRAKEN_VARBINARY);
+            if (lt == DRAKEN_NULL && rt_is_str)
+                return binop_string_concat_null(right->length, rt);
+            if (rt == DRAKEN_NULL && lt_is_string)
+                return binop_string_concat_null(left->length, lt);
         }
 
         // IP-in-CIDR (op 8 over string operands): left = IP column, right = CIDR
