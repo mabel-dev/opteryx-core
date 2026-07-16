@@ -24,6 +24,12 @@ from opteryx.managers.kvstores.valkey import ValkeyCache
 
 _REQUIRED_CONTEXT_FIELDS = ("query_id", "operator_id")
 
+# Schemes the `valkey` client's own `from_url`/`parse_url` accepts (TCP + TLS, under
+# either the Valkey or Redis-compatible names). `unix://` is deliberately excluded here —
+# no call site constructs one today, and adding it blind would be an unreviewed scope
+# increase, not a fix for the rediss:// gap this set closes.
+_VALKEY_SCHEMES = ("valkey", "valkeys", "redis", "rediss")
+
 # Distinguishes "caller said nothing" (scope by query, the safe default) from
 # "caller explicitly asked for no scoping" (a content-addressed store).
 _UNSET = object()
@@ -125,7 +131,12 @@ def _create_single_store(
         return FileKeyValueStore(location, key_prefix=key_prefix, **kwargs)
     if scheme in ("gs", "gcs"):
         return GCSKeyValueStore(location, key_prefix=key_prefix, **kwargs)
-    if scheme == "valkey":
+    if scheme in _VALKEY_SCHEMES:
+        # The `valkey` client itself accepts valkey(s):// and redis(s):// (TLS variants
+        # `valkeys`/`rediss`) — see its own `parse_url`. Our factory only special-cases
+        # `valkey` for a bare `host:port` location (no scheme to preserve); every full
+        # URL, whichever of the four schemes it uses, is passed through unchanged so the
+        # client's own scheme dispatch (including which one selects TLS) is untouched.
         server = location if "://" in location else f"valkey://{location}"
         return ValkeyCache(location=location, key_prefix=key_prefix, server=server, **kwargs)
     if scheme == "memory":
@@ -255,7 +266,7 @@ def create_kv_store(
     Accepts:
     - file:///path or /path
     - gs://bucket[/prefix]
-    - valkey://connection
+    - valkey://connection, valkeys://connection (TLS), redis://connection, rediss://connection (TLS)
     - memory://pool-name
     - null://anything
     - layered combinations (max three layers)

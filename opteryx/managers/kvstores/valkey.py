@@ -100,6 +100,44 @@ class ValkeyCache(BaseKeyValueStore):
         self.misses += 1
         return None
 
+    def get_many(self, keys) -> dict:
+        """One ``MGET`` for many keys, returning ``{key: value}`` for those present.
+
+        Keyed by the caller's original keys. A single round trip regardless of key
+        count — the reason a batched footer probe is worth doing at all. Failures
+        degrade to an empty dict (every key a miss) and trip the same consecutive-
+        failure disable as ``get``; a cache outage slows queries, never fails them.
+        """
+        keys = list(keys)
+        if not keys:
+            return {}
+        if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+            self.skips += len(keys)
+            return {}
+        normalized = [self._normalize_key(k) for k in keys]
+        try:
+            responses = self._server.mget(normalized)
+            self._consecutive_failures = 0
+        except Exception as err:  # pragma: no cover
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+                import datetime
+
+                print(
+                    f"{datetime.datetime.now()} [CACHE] Disabling remote Valkey cache due to persistent errors ({err}) [MGET]."
+                )
+            self.errors += 1
+            return {}
+
+        out = {}
+        for key, response in zip(keys, responses):
+            if response:
+                out[key] = bytes(response)
+                self.hits += 1
+            else:
+                self.misses += 1
+        return out
+
     def set(self, key: bytes, value: bytes) -> None:
         key = self._normalize_key(key)
         if self._consecutive_failures < MAX_CONSECUTIVE_CACHE_FAILURES:
@@ -116,6 +154,31 @@ class ValkeyCache(BaseKeyValueStore):
                 )
         else:
             self.skips += 1
+
+    def set_many(self, items) -> None:
+        """One ``MSET`` for many key/value pairs — the write-side twin of ``get_many``.
+
+        A single round trip regardless of pair count. Failures trip the same disable as
+        ``set`` and are swallowed; a cache outage slows queries, never fails them.
+        """
+        items = dict(items)
+        if not items:
+            return
+        if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+            self.skips += len(items)
+            return
+        normalized = {self._normalize_key(k): v for k, v in items.items()}
+        try:
+            self._server.mset(normalized)
+            self.sets += len(normalized)
+        except Exception as err:  # pragma: no cover
+            self._consecutive_failures = MAX_CONSECUTIVE_CACHE_FAILURES
+            self.errors += 1
+            import datetime
+
+            print(
+                f"{datetime.datetime.now()} [CACHE] Disabling remote Valkey cache due to persistent errors ({err}) [MSET]."
+            )
 
     def delete(self, key):
         key = self._normalize_key(key)

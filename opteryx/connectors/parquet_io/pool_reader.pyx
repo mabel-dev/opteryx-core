@@ -102,6 +102,11 @@ from rugo.parquet_reader cimport TestBloomFilter
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
 from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchParquetFootersMany
 
+# Cross-instance footer cache: one batched MGET serves footers another instance already
+# fetched, keyed by data-file path. Envelope bytes only — reconstructed through the same
+# parser as a cold fetch, so a hit can never disagree with a cold read.
+from opteryx.connectors.parquet_io.footer_remote_cache import remote_footer_cache
+
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
 _FOOTER_PREFETCH = 65536
@@ -1241,10 +1246,25 @@ cpdef IpcRowGroupSource open_ipc_source(
 
     work_items = []
 
-    # ── Batch footer prefetch: one concurrent get_many for remote/uncached files.
-    batch_orig = []
-    batch_urls = []
-    batch_sizes = []
+    # ── Remote-file footer acquisition, in three steps that share ONE eligibility pass so
+    # the pruning rules can't drift apart (they used to be two near-identical loops):
+    #
+    #   1. classify: for each remote-scheme, non-prefetched file, either populate footer_map
+    #      straight from the in-process parsed-struct cache, skip it if the in-process bytes
+    #      cache already holds it, or record it as still needing a footer;
+    #   2. probe the shared (cross-instance) footer cache with ONE batched mget and seed the
+    #      bytes cache with any envelope another instance already fetched;
+    #   3. fetch the residual (probe misses) from origin in one concurrent batch, parse it,
+    #      and write those envelopes back to the shared cache in ONE batched set.
+    #
+    # Step 3 is the ONLY place a remote footer is read from origin, so it is the only place
+    # that writes the shared cache. The per-path loop further down never origin-fetches a
+    # remote file — it either finds a footer_map entry set here, or hits the bytes cache
+    # seeded in step 2 — which is why write-back lives only here and not there.
+    footer_remote = remote_footer_cache()
+
+    # (orig_path, fetch_url, size) for remote files that still need a footer fetched.
+    remote_candidates = []
     for path in paths:
         if prefetched_footers and path in prefetched_footers:
             continue
@@ -1253,20 +1273,41 @@ cpdef IpcRowGroupSource open_ipc_source(
                 or fetch_url.startswith("http://")
                 or fetch_url.startswith("https://")):
             continue
-        # Probe into a local: passing &footer_map[key] would default-construct an
-        # empty FileStats in the map even on a cache miss, and the loop below would
-        # mistake it for a parsed footer (zero row groups → the file's rows silently
-        # skipped when the bytes cache hits but the parsed cache missed).
+        # Parsed-struct cache hit → populate footer_map and move on. A local probe var is
+        # used (not &footer_map[key]) so a MISS does not default-construct an empty
+        # FileStats in the map, which the pruning loop below would read as "zero row groups"
+        # and silently skip the file's rows.
         if _PARSED_FOOTER_CACHE.try_get(path, &probe_fs):
             src.footer_map[0][path.encode('utf-8')] = probe_fs
             continue
         if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
             continue
+        remote_candidates.append((path, fetch_url,
+                                  file_sizes.get(path, -1) if file_sizes else -1))
+
+    # Step 2: one batched probe of the shared cache; seed the bytes cache with the hits so
+    # the fetch below skips them and the per-path loop parses them locally. footer_map is
+    # deliberately NOT touched here (the default-construct trap noted above); the bytes cache
+    # is the landing spot the existing fetch path already consults, so this needs one to seed.
+    probe_hits = set()
+    if footer_remote is not None and footer_bytes_cache is not None and remote_candidates:
+        for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
+            footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
+            probe_hits.add(path)
+
+    # Step 3: fetch the residual from origin in one concurrent batch, then write back once.
+    batch_orig = []
+    batch_urls = []
+    batch_sizes = []
+    for path, fetch_url, size in remote_candidates:
+        if path in probe_hits:
+            continue
         batch_orig.append(path)
         batch_urls.append(fetch_url)
-        batch_sizes.append(file_sizes.get(path, -1) if file_sizes else -1)
+        batch_sizes.append(size)
     if batch_urls:
         envelopes = _fetch_footers_many(batch_urls, batch_sizes)
+        pending_remote = []
         for bi in range(len(batch_orig)):
             envelope = envelopes[bi]
             if footer_bytes_cache is not None:
@@ -1277,6 +1318,11 @@ cpdef IpcRowGroupSource open_ipc_source(
                 footer_buf_ptr, footer_buf_size
             )
             _PARSED_FOOTER_CACHE.put_fs(batch_orig[bi], src.footer_map[0][batch_orig[bi].encode('utf-8')])
+            # Write back only AFTER a successful parse, so a cross-instance reader never
+            # receives bytes that fail to decode here.
+            pending_remote.append((batch_orig[bi], envelope))
+        if footer_remote is not None and pending_remote:
+            footer_remote.put_many(pending_remote)
 
     for path in paths:
         if prefetched_footers and path in prefetched_footers:

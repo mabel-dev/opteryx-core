@@ -14,6 +14,7 @@ import pytest
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ConcurrentModificationError
 from opteryx.models.file_entry import FileEntry
+from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.types.logical_type import INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 
@@ -140,7 +141,7 @@ def test_drop_relation_missing_raises(connector):
 
 
 def test_truncate_creates_empty_snapshot(connector, simple_schema):
-    """Test truncate creates a snapshot with empty files list."""
+    """Test truncate creates a snapshot pointing to an empty manifest."""
     connector.create_relation("test_table", simple_schema)
     connector.truncate_relation("test_table")
 
@@ -154,14 +155,21 @@ def test_truncate_creates_empty_snapshot(connector, simple_schema):
     assert descriptor["current_snapshot"] is not None
     snapshot_name = descriptor["current_snapshot"]
 
-    # Read snapshot
+    # Read the small snapshot pointer
     snapshot_path = os.path.join(table_dir, snapshot_name)
     with open(snapshot_path, "r") as f:
         snapshot = json.load(f)
 
     assert snapshot["format_version"] == 1
-    assert snapshot["files"] == []
     assert snapshot["parent_snapshot"] is None
+    assert snapshot["manifest_file"] is not None
+
+    # The manifest it points to has zero file entries
+    manifest_path = os.path.join(table_dir, snapshot["manifest_file"])
+    with open(manifest_path, "rb") as f:
+        manifest_bytes = f.read()
+    entries, _native = read_manifest_file_entries(manifest_bytes)
+    assert entries == []
 
 
 def test_insert_appends_to_snapshot_chain(connector, simple_schema):
@@ -203,11 +211,16 @@ def test_insert_appends_to_snapshot_chain(connector, simple_schema):
 
     # Should have parent_snapshot pointing to first snapshot
     assert snapshot2["parent_snapshot"] == snapshot_name1
-    assert len(snapshot2["files"]) == 2
+
+    manifest_path = os.path.join(table_dir, snapshot2["manifest_file"])
+    with open(manifest_path, "rb") as f:
+        manifest_bytes = f.read()
+    entries, _native = read_manifest_file_entries(manifest_bytes)
+    assert len(entries) == 2
 
     # First file should match entry1
-    assert snapshot2["files"][0]["file_path"] == "data-001.parquet"
-    assert snapshot2["files"][1]["file_path"] == "data-002.parquet"
+    assert entries[0].file_path == "data-001.parquet"
+    assert entries[1].file_path == "data-002.parquet"
 
 
 def test_concurrent_commit_aborts(connector, simple_schema):
@@ -241,30 +254,28 @@ def test_concurrent_commit_aborts(connector, simple_schema):
     connector._pre_commit_recheck_hook = None
 
 
-def test_file_entry_round_trip(connector):
-    """Test FileEntry serialization and deserialization."""
-    # Create entry with non-trivial bounds
+def test_file_entry_manifest_round_trip(connector, simple_schema):
+    """FileEntry now round-trips through the Parquet manifest, not JSON."""
     entry = FileEntry(
         file_path="data.parquet",
         file_format="PARQUET",
         record_count=1000,
         file_size_in_bytes=50000,
         uncompressed_size_in_bytes=60000,
-        lower_bounds={0: b"abc", 1: b"\x00\x01\x02"},
-        upper_bounds={0: b"xyz", 1: b"\xff\xfe\xfd"},
-        null_value_counts={0: 5, 1: 0},
+        lower_bounds={0: (5).to_bytes(8, "big", signed=True)},
+        upper_bounds={0: (95).to_bytes(8, "big", signed=True)},
     )
 
-    # Round-trip through JSON
-    json_dict = entry.to_json_dict()
-    restored = FileEntry.from_json_dict(json_dict)
+    from opteryx.models.manifest_io import write_manifest_parquet
 
-    # Verify all fields match
+    data = write_manifest_parquet([entry], simple_schema)
+    restored_entries, _native = read_manifest_file_entries(data)
+    restored = restored_entries[0]
+
     assert restored.file_path == entry.file_path
     assert restored.file_format == entry.file_format
     assert restored.record_count == entry.record_count
     assert restored.file_size_in_bytes == entry.file_size_in_bytes
     assert restored.uncompressed_size_in_bytes == entry.uncompressed_size_in_bytes
-    assert restored.lower_bounds == entry.lower_bounds
-    assert restored.upper_bounds == entry.upper_bounds
-    assert restored.null_value_counts == entry.null_value_counts
+    assert restored.lower_bounds[0] == 5
+    assert restored.upper_bounds[0] == 95

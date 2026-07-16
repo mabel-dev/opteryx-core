@@ -17,6 +17,21 @@ from typing import Any, Dict, Optional, Tuple
 from opteryx.connectors import TableType
 
 logger = logging.getLogger(__name__)
+
+# One-shot guard so a catalog too old to expose native sketch vectors reports the
+# degraded (Python-fallback) stats path once per process instead of silently.
+_warned_no_native_sketches = False
+
+
+def _warn_no_native_sketches() -> None:
+    global _warned_no_native_sketches
+    if not _warned_no_native_sketches:
+        _warned_no_native_sketches = True
+        logger.warning(
+            "Catalog does not expose manifest_sketch_vectors; manifest statistics "
+            "(NDV / histogram) fall back to the slower Python path. Upgrade the "
+            "opteryx_catalog package to enable native sketch reductions."
+        )
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
@@ -277,8 +292,25 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
             )
 
+        # Whole-column native sketch vectors (min_k_hashes / histogram_counts) from
+        # the same cached manifest read, so the planner reduces them with native
+        # kernels instead of the per-file boxed lists. A catalog that predates this
+        # accessor keeps working via the Manifest's Python fallback — but that
+        # degradation is announced once (not silent) so a stale catalog is visible.
+        sketch_vectors_fn = getattr(self.table, "manifest_sketch_vectors", None)
+        if sketch_vectors_fn is not None:
+            sketch_vectors = sketch_vectors_fn(self.snapshot_id)
+        else:
+            sketch_vectors = {}
+            _warn_no_native_sketches()
+
         # Create Manifest with files and schema
-        self.manifest = Manifest(files=file_entries, schema=self.schema)
+        self.manifest = Manifest(
+            files=file_entries,
+            schema=self.schema,
+            min_k_vector=sketch_vectors.get("min_k_hashes"),
+            histogram_vector=sketch_vectors.get("histogram_counts"),
+        )
 
         return self.schema, self.manifest
 

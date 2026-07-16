@@ -38,6 +38,30 @@ def test_create_kv_store_detects_memory_scheme():
     assert isinstance(_inner_store(store), MemoryPoolKeyValueStore)
 
 
+@pytest.mark.parametrize(
+    "location",
+    [
+        "valkey://localhost:6379",
+        "valkeys://localhost:6379",
+        "redis://localhost:6379",
+        "rediss://localhost:6379",
+        # a real-world managed-Valkey URL shape: TLS, credentials, non-default port.
+        "rediss://default:pw@example-cache.aivencloud.com:10068",
+    ],
+)
+def test_create_kv_store_routes_all_valkey_client_schemes(location):
+    # The `valkey` client's own parse_url accepts all four of these (TCP/TLS x
+    # Valkey/Redis-compatible naming) — our factory must route every one of them to
+    # ValkeyCache rather than raising "Unknown KV store scheme". Construction itself
+    # doesn't connect eagerly, so no live server is needed for this to prove routing.
+    from opteryx.managers.kvstores import ValkeyCache
+
+    # `enforce_context_fields=()` opts out of scoping (as the manifest/footer caches do),
+    # so the store comes back unwrapped — no ScopedKeyValueStore to unwrap here.
+    store = create_kv_store(location, enforce_context_fields=())
+    assert isinstance(store, ValkeyCache)
+
+
 def test_create_kv_store_detects_layered_string(tmp_path):
     first = "memory://test-factory-layered?pool_size_bytes=128&max_bytes=8"
     second = f"file://{tmp_path / 'layer2'}"

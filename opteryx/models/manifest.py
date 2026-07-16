@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models.file_entry import FileEntry
-from opteryx.third_party.maki_nage.distogram import Distogram, load
+from opteryx.third_party.maki_nage.distogram import Distogram, load, merge
 from opteryx.types.schema import RelationSchema
 
 
@@ -31,16 +31,38 @@ class Manifest:
     Provides methods for optimizer to make pruning and costing decisions.
     """
 
-    def __init__(self, files: List[FileEntry], schema: RelationSchema):
+    def __init__(
+        self,
+        files: List[FileEntry],
+        schema: RelationSchema,
+        min_k_vector=None,
+        histogram_vector=None,
+    ):
         """
         Initialize Manifest with file entries and schema.
 
         Args:
             files: List of FileEntry objects from catalog scan
             schema: Table schema (RelationSchema)
+            min_k_vector: optional native draken ``array<array<uint64>>`` Vector
+                holding every file's min-k sketch (one outer row per file, one
+                middle row per column). When present, sketch reductions run as
+                native kernels over this vector instead of the per-file Python
+                ``FileEntry.min_k_hashes`` lists. None on paths that don't supply
+                it (e.g. LocalStore), which fall back to the Python merge.
+            histogram_vector: optional native ``array<array<int64>>`` Vector of
+                per-file, per-column histogram bins, used the same way.
         """
         self.files = files
         self.schema = schema
+        self._min_k_vector = min_k_vector
+        self._histogram_vector = histogram_vector
+        # The sketch vectors are built once over the FULL file set and are indexed
+        # by original file position. prune_files shrinks self.files, so we track the
+        # surviving original row indices to keep native reductions aligned with the
+        # (pruned) file list — matching the Python paths that iterate self.files.
+        # None means "no pruning yet": row i of the vectors == self.files[i].
+        self._live_rows: Optional[List[int]] = None
 
         # Lazy-computed mappings
         self._field_id_to_name: Optional[Dict[int, str]] = None
@@ -102,9 +124,26 @@ class Manifest:
             return self.files
 
         kept_files = []
+        kept_rows: List[int] = []
 
-        for file_entry in self.files:
+        # Native exact-set file elimination for `col = <int>`: keep masks indexed by
+        # original vector row (1=keep, 0=provably absent). Empty unless a native
+        # sketch vector and an eligible integer-equality predicate are both present.
+        membership_masks = self._membership_keep_masks(predicates)
+
+        for position, file_entry in enumerate(self.files):
+            # Original vector-row index for this file (identity until first prune).
+            original_row = position if self._live_rows is None else self._live_rows[position]
             skip_file = False
+
+            # Native sketch elimination (conservative: only drops files whose
+            # unsaturated sketch proves the value absent).
+            for mask in membership_masks:
+                if mask[original_row] == 0:
+                    skip_file = True
+                    break
+            if skip_file:
+                continue
 
             # Check each predicate
             for predicate in predicates:
@@ -190,8 +229,10 @@ class Manifest:
 
             if not skip_file:
                 kept_files.append(file_entry)
+                kept_rows.append(original_row)
 
         self.files = kept_files
+        self._live_rows = kept_rows
 
     # ================================================================
     # File Accessors
@@ -264,6 +305,16 @@ class Manifest:
         if field_id is None:
             return None
 
+        # Native path: gather the column's per-file histogram slices from the whole
+        # column vector (no boxing) and fold them with the native load_counts_i64 +
+        # merge. Same bin math as the Python fold below (load_counts_i64 reproduces
+        # the (bin_idx + 0.5) center and min==max single-bin case exactly).
+        if self._histogram_vector is not None:
+            combined = self._native_distogram(field_id)
+            if combined is not None:
+                self._distogram_cache[column] = combined
+            return combined
+
         combined: Optional[Distogram] = None
 
         for file_entry in self.files:
@@ -310,11 +361,122 @@ class Manifest:
                 continue
 
             dgram = load(bins, col_min_f, col_max_f)
-            combined = dgram if combined is None else combined + dgram
+            combined = dgram if combined is None else merge(combined, dgram)
 
         if combined is not None:
             self._distogram_cache[column] = combined
 
+        return combined
+
+    def _membership_keep_masks(self, predicates: List) -> List:
+        """Native exact-set keep masks for eligible integer-equality predicates.
+
+        For each ``col = <int literal>`` on an integer column, hashes the literal
+        with the column's exact draken physical type — provenance-matched to how
+        the writer built the sketch, so the probe hash is guaranteed to equal the
+        value's hash in the sketch — and asks ``sketch_keep_mask`` which files
+        provably lack the value. Returns one bytes mask per eligible predicate
+        (indexed by ORIGINAL vector row; 1=keep, 0=eliminate).
+
+        Restricted to integer columns/literals: that is the case where the Python
+        literal's representation is unambiguously the column's, so the hash match
+        is certain. Other types are left to bounds-only pruning — a mismatched
+        probe hash would wrongly eliminate a matching file, so they are excluded
+        rather than risk a wrong answer.
+        """
+        if self._min_k_vector is None:
+            return []
+
+        from draken.draken_native import DrakenType
+        from draken.interop.vector_sequence import vector_from_sequence
+        from opteryx.compiled.nanobind.vectors import sketch_keep_mask
+        from opteryx.expression import NodeType
+
+        integer_physical = {
+            DrakenType.INT8,
+            DrakenType.INT16,
+            DrakenType.INT32,
+            DrakenType.INT64,
+        }
+        handle = self._native_handle(self._min_k_vector)
+        masks: List = []
+
+        for predicate in predicates:
+            if not (
+                predicate.node_type == NodeType.COMPARISON_OPERATOR
+                and predicate.value == "Eq"
+                and predicate.left.node_type == NodeType.IDENTIFIER
+                and predicate.right.node_type == NodeType.LITERAL
+            ):
+                continue
+
+            column_name = predicate.left.source_column
+            field_id = None
+            physical = None
+            for idx, col in enumerate(self.schema.columns):
+                if col.name == column_name:
+                    field_id = idx
+                    physical = col.column_type.physical if col.column_type is not None else None
+                    break
+            if field_id is None or physical not in integer_physical:
+                continue
+
+            value = predicate.right.value
+            if getattr(value, "item", None) is not None:  # numpy scalar -> python int
+                value = value.item()
+            if not isinstance(value, int) or isinstance(value, bool):
+                continue
+
+            probe = vector_from_sequence([value], dtype=physical).hash()
+            masks.append(sketch_keep_mask(handle, field_id, [int(probe[0])]))
+
+        return masks
+
+    @staticmethod
+    def _native_handle(vector):
+        """Underlying draken_native.Vector handle for a sketch vector.
+
+        Sketch vectors arriving from the catalog are draken ``Vector`` wrappers;
+        the native kernels take the wrapped ``_nb`` handle. Accessed directly (not
+        probed) so a broken contract fails loud rather than silently degrading.
+        """
+        return vector._nb
+
+    def _native_distogram(self, field_id: int) -> Optional[Distogram]:
+        """Fold the column's per-file histograms into one Distogram natively.
+
+        Gathers the field_id bin-count slices from the whole-column histogram
+        vector (no boxing) and folds them with load_counts_i64 + ``+``. Per-file
+        min/max come from the (cheap, flat) FileEntry lists, exactly as the Python
+        path indexes them. Produces the same Distogram as the Python fold.
+        """
+        from opteryx.compiled.nanobind.vectors import histogram_field_slices
+        from opteryx.third_party.maki_nage.distogram import load_counts_i64
+
+        handle = self._native_handle(self._histogram_vector)
+        counts_b, offsets_b = histogram_field_slices(handle, field_id)
+        counts = memoryview(counts_b).cast("q")      # int64 bin counts, files concatenated
+        offsets = memoryview(offsets_b).cast("i")    # int32[n_files + 1]
+
+        combined: Optional[Distogram] = None
+        for position, file_entry in enumerate(self.files):
+            # counts are indexed by ORIGINAL vector row; min/max by the surviving
+            # FileEntry. _live_rows maps the pruned position back to the vector row.
+            original_row = position if self._live_rows is None else self._live_rows[position]
+            start = offsets[original_row]
+            end = offsets[original_row + 1]
+            if end <= start:
+                continue
+            if file_entry.min_values is None or file_entry.max_values is None:
+                continue
+            if field_id >= len(file_entry.min_values) or field_id >= len(file_entry.max_values):
+                continue
+            col_min = file_entry.min_values[field_id]
+            col_max = file_entry.max_values[field_id]
+            if col_min is None or col_max is None:
+                continue
+            dgram = load_counts_i64(counts[start:end], float(col_min), float(col_max))
+            combined = dgram if combined is None else merge(combined, dgram)
         return combined
 
     def estimate_cardinality(self, column) -> Optional[int]:
@@ -333,6 +495,17 @@ class Manifest:
         if field_id is None:
             return None
 
+        # Native path: KMV union over the whole-column sketch vector, no boxing.
+        # Same field_id semantics as the Python merge below (positional index into
+        # each file's per-column sketch), so this is behaviour-preserving.
+        if self._min_k_vector is not None:
+            from opteryx.compiled.nanobind.vectors import kmv_ndv
+
+            # _live_rows (None until first prune) keeps the merge over the same
+            # surviving files the Python fallback below would iterate.
+            return kmv_ndv(self._native_handle(self._min_k_vector), field_id, self._live_rows)
+
+        # Fallback (no native vector, e.g. LocalStore): per-file Python merge.
         # Merge min-k hashes from all files
         min_k_hashes = []
 

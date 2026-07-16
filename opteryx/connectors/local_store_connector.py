@@ -24,6 +24,8 @@ from opteryx.exceptions import ConcurrentModificationError, DatasetNotFoundError
 from opteryx.models.dataset_descriptor import DatasetDescriptor
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
+from opteryx.models.manifest_io import read_manifest_file_entries
+from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.types.schema import RelationSchema
 
 
@@ -55,9 +57,17 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
     Filesystem layout:
         {store_root}/{schema}/{table}/dataset.json
-        {store_root}/{schema}/{table}/snapshot-{ts}.json
+        {store_root}/{schema}/{table}/snapshot-{ts}.json      (small pointer: see below)
+        {store_root}/{schema}/{table}/manifest-{ts}.parquet   (the file list + stats)
         {store_root}/{schema}/{table}/data-{uuid}.parquet
         {store_root}/{schema}/{view}/view.json
+
+    The manifest (file list + per-file stats/sketches) is a Parquet file in the
+    SAME format opteryx_catalog's manifest is — see opteryx.models.manifest_io.
+    One manifest format everywhere, read/written natively, no JSON-boxed file
+    list. snapshot-{ts}.json is a tiny commit-log pointer only: format_version,
+    created_at, parent_snapshot (unchanged OCC bookkeeping), and manifest_file
+    (the sibling Parquet manifest's name).
     """
 
     __mode__ = "Blob"
@@ -128,23 +138,37 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         return DatasetDescriptor.from_dict(data)
 
     def _read_snapshot(self, relation_dir: str, snapshot_name: Optional[str]) -> dict:
-        """Read snapshot JSON file.
+        """Read the snapshot commit-log pointer.
 
         Args:
             relation_dir: Path to relation directory
             snapshot_name: Filename of snapshot (e.g., "snapshot-2026-05-06T12-34-56-123456Z.json")
 
         Returns:
-            Snapshot dict with format_version, created_at, parent_snapshot, files
+            Small dict: format_version, created_at, parent_snapshot, manifest_file
+            (the sibling Parquet manifest's name; None entries have no manifest).
 
         Raises:
             FileNotFoundError: If snapshot doesn't exist
         """
         if snapshot_name is None:
-            return {"files": []}
+            return {"manifest_file": None}
         snapshot_path = os.path.join(relation_dir, snapshot_name)
         with open(snapshot_path, "r") as f:
             return json.load(f)
+
+    def _read_current_file_entries(
+        self, relation_dir: str, descriptor: DatasetDescriptor
+    ) -> List[FileEntry]:
+        """Resolve a dataset's current file list via its snapshot pointer + manifest Parquet."""
+        snapshot = self._read_snapshot(relation_dir, descriptor.current_snapshot)
+        manifest_file = snapshot.get("manifest_file")
+        if not manifest_file:
+            return []
+        with open(os.path.join(relation_dir, manifest_file), "rb") as f:
+            manifest_bytes = f.read()
+        entries, _native = read_manifest_file_entries(manifest_bytes)
+        return entries
 
     def create_relation(self, relation_name: str, schema: RelationSchema) -> None:
         """Create a new relation.
@@ -284,10 +308,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
             raise ValueError(f"relation does not exist: {relation_name}")
 
-        # Read current snapshot and append new entries
+        # Read current file list and append new entries
         base_descriptor = self._read_dataset_json(relation_dir)
-        current_snapshot = self._read_snapshot(relation_dir, base_descriptor.current_snapshot)
-        current_files = [FileEntry.from_json_dict(fe) for fe in current_snapshot.get("files", [])]
+        current_files = self._read_current_file_entries(relation_dir, base_descriptor)
 
         new_files = current_files + file_entries
         self._commit(relation_name, new_files)
@@ -311,17 +334,36 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         base_descriptor = self._read_dataset_json(relation_dir)
         base_snapshot = base_descriptor.current_snapshot
 
-        # Step 2: Build new snapshot
+        # Step 2: Build the manifest Parquet (the file list + stats) and its
+        # tiny commit-log pointer. created_at is shared between both filenames
+        # so they visibly pair up on disk.
         created_at = _now_utc_iso()
+        ts = _ts_for_filename(created_at)
+
+        manifest_bytes = write_manifest_parquet(new_files, base_descriptor.schema)
+
+        manifest_name = f"manifest-{ts}.parquet"
+        counter = 1
+        manifest_base = manifest_name
+        while os.path.isfile(os.path.join(relation_dir, manifest_name)):
+            manifest_name = f"{manifest_base[:-8]}-{counter}.parquet"
+            counter += 1
+
+        manifest_path = os.path.join(relation_dir, manifest_name)
+        manifest_tmp = manifest_path + ".tmp"
+        with open(manifest_tmp, "wb") as f:
+            f.write(manifest_bytes)
+        os.replace(manifest_tmp, manifest_path)
+
         new_snapshot_dict = {
             "format_version": 1,
             "created_at": created_at,
             "parent_snapshot": base_snapshot,
-            "files": [fe.to_json_dict() for fe in new_files],
+            "manifest_file": manifest_name,
         }
 
         # Step 3: Choose snapshot name with collision guard
-        snapshot_name = f"snapshot-{_ts_for_filename(created_at)}.json"
+        snapshot_name = f"snapshot-{ts}.json"
         counter = 1
         snapshot_base = snapshot_name
         while os.path.isfile(os.path.join(relation_dir, snapshot_name)):
@@ -345,6 +387,10 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if check_descriptor.current_snapshot != base_snapshot:
             try:
                 os.remove(snapshot_path)
+            except OSError:
+                pass
+            try:
+                os.remove(manifest_path)
             except OSError:
                 pass
             raise ConcurrentModificationError(
@@ -517,14 +563,23 @@ class LocalStoreTable(BaseTable):
         self.schema = descriptor.schema
 
         file_entries: List[FileEntry] = []
+        min_k_vector = None
+        histogram_vector = None
         if descriptor.current_snapshot is not None:
             snapshot_path = os.path.join(relation_dir, descriptor.current_snapshot)
             with open(snapshot_path, "r") as f:
                 snapshot = json.load(f)
-            for fe_dict in snapshot.get("files", []):
-                fe = FileEntry.from_json_dict(fe_dict)
-                fe.file_path = os.path.join(relation_dir, fe.file_path)
-                file_entries.append(fe)
+            manifest_file = snapshot.get("manifest_file")
+            if manifest_file:
+                with open(os.path.join(relation_dir, manifest_file), "rb") as f:
+                    manifest_bytes = f.read()
+                file_entries, native = read_manifest_file_entries(manifest_bytes)
+                for fe in file_entries:
+                    fe.file_path = os.path.join(relation_dir, fe.file_path)
+                min_k_vector = native.get("min_k_hashes")
+                histogram_vector = native.get("histogram_counts")
 
-        self.manifest = Manifest(file_entries, self.schema)
+        self.manifest = Manifest(
+            file_entries, self.schema, min_k_vector=min_k_vector, histogram_vector=histogram_vector
+        )
         return self.schema, self.manifest

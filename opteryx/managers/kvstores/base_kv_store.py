@@ -51,6 +51,31 @@ class BaseKeyValueStore:
         """
         raise NotImplementedError("`set` method on cache object not overridden.")
 
+    def get_many(self, keys: Iterable) -> dict:
+        """Fetch several keys at once, returning ``{key: value}`` for those present.
+
+        The returned dict is keyed by the caller's original (un-normalized) keys, and
+        omits misses entirely. The default implementation loops ``get``; a backend with
+        a native multi-get (e.g. Valkey ``MGET``) should override this to collapse the
+        N round trips into one — that is the whole reason the method exists.
+        """
+        out = {}
+        for key in keys:
+            value = self.get(key)
+            if value is not None:
+                out[key] = value
+        return out
+
+    def set_many(self, items: dict) -> None:
+        """Store several key/value pairs at once.
+
+        `items` is ``{key: value}``, bytes-like throughout. The default loops ``set``; a
+        backend with a native multi-set (e.g. Valkey ``MSET``) should override this to
+        collapse the N round trips into one — the write-side twin of ``get_many``.
+        """
+        for key, value in items.items():
+            self.set(key, value)
+
     def contains(self, keys: Iterable) -> Iterable:
         """
         Overwrite this method to return a list of items which are in the cache from
