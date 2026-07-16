@@ -240,6 +240,8 @@ opteryx/third_party/mbleven.c
 !.claude/launch.json
 !.claude/scheduled_tasks.json
 
+!vector_sketch_reduce.cpp
+
 **.parquet
 **.csv
 **.tgz

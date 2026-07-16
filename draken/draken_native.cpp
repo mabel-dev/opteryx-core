@@ -5420,6 +5420,34 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
         if (p->vec.type != type)
             throw std::invalid_argument("concat: all inputs must share one type");
 
+    // TIMESTAMP64/DECIMAL/DECIMAL128 carry a required out-of-band logical-type
+    // descriptor (unit, or precision/scale) that lives on VectorOwner, not on
+    // the physical DrakenVector. Result type/logical_type below are taken from
+    // parts[0] only; without this check a part missing its descriptor (or
+    // disagreeing with the others) is silently accepted as long as parts[0]
+    // happens to be a well-formed one, and the defect only resurfaces much
+    // later as an opaque "missing logical-type descriptor" error deep in the
+    // writer. Fail here, at the point of concat, instead.
+    if (type == DRAKEN_TIMESTAMP64 || type == DRAKEN_DECIMAL || type == DRAKEN_DECIMAL128) {
+        for (const VectorOwner* p : parts)
+            if (!p->logical_type)
+                throw std::invalid_argument(
+                    "concat: TIMESTAMP/DECIMAL part missing logical-type descriptor");
+        if (type == DRAKEN_TIMESTAMP64) {
+            for (const VectorOwner* p : parts)
+                if (p->logical_type->unit != lt->unit ||
+                    p->logical_type->offset_minutes != lt->offset_minutes)
+                    throw std::invalid_argument(
+                        "concat: TIMESTAMP parts have mismatched unit/offset_minutes");
+        } else {
+            for (const VectorOwner* p : parts)
+                if (p->logical_type->precision != lt->precision ||
+                    p->logical_type->scale != lt->scale)
+                    throw std::invalid_argument(
+                        "concat: DECIMAL parts have mismatched precision/scale");
+        }
+    }
+
     if (is_varchar_family(type))
         return concat_string(parts, type);
     if (type == DRAKEN_BOOL)
