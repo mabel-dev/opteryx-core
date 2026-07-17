@@ -530,6 +530,16 @@ def inner_binder(
                     result_type = _resolved.inferred_return_type
                     element_type = _resolved.inferred_element_type
                     node.function_ref = _resolved
+                    # MATCH is `cosine_similarity(a, b) >= threshold`. The threshold is a
+                    # session variable, but the kernel is handed it in a ctx at BIND time
+                    # (the same channel EMBED's width uses): a compiled plan must keep
+                    # answering the question it was compiled for, so a later SET cannot
+                    # reach back and change it. Resolved here because this is where the
+                    # session's variables are in scope.
+                    if _resolved.function_definition.name == "_MATCH_AGAINST":
+                        node.match_threshold = context.execution_context.variables[
+                            "match_threshold"
+                        ]
                 elif node_type == NodeType.AGGREGATOR:
                     # Aggregates are not in the function catalog (dispatched at
                     # runtime by the aggregate operators). The binder still needs

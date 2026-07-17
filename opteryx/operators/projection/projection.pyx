@@ -64,13 +64,21 @@ cdef class ProjectionNode(BasePlanNode):
         # where pushdown leaves the inner Project with no ORDER BY columns. Normalise
         # both to empty lists — None means "no columns here", never a passthrough.
         proj = parameters["projection"] or []
-        projection = proj + (parameters.get("order_by_columns") or [])
+        order_by = parameters.get("order_by_columns") or []
+        # Columns a fused Project must compute for internal use (a lower-Project
+        # expression referenced 2+ times by this node's own columns) but never
+        # exposes in its output row — see project_fusion.py. Ordered first so a
+        # later program can load an earlier one's output by identity.
+        hoisted = parameters.get("hoisted_columns") or []
+        projection = proj + order_by
 
         self.projection = []
         for column in projection:
             self.projection.append(column.schema_column.identity)
 
-        eval_nodes = [column for column in projection if column.node_type != NodeType.IDENTIFIER]
+        eval_nodes = [
+            column for column in (hoisted + projection) if column.node_type != NodeType.IDENTIFIER
+        ]
         self._compiled_evals = compile_eval_nodes(eval_nodes)
         self._literal_identities = {
             column.schema_column.identity

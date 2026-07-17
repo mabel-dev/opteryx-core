@@ -16,7 +16,7 @@ from tests.helpers import execute_and_fetch_all
 def test_count_star_parquet():
     """ if is just SELECT COUNT(*) for parquet files, we don't read the rows"""
     result = execute_and_fetch_all("SELECT count(*) FROM testdata.flat.formats.parquet")
-    first = result[0]["count(*)"]
+    first = result[0]["COUNT(*)"]
     assert first == 100000, first
 
 def test_count_star_non_parquet():

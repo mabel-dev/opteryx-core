@@ -6,6 +6,16 @@
 //   draken_cosine_distance_vector     (VEC_FP16, VEC_FP16) -> FLOAT64
 //   draken_cosine_similarity_text     (VARCHAR, VARCHAR)   -> FLOAT64
 //   draken_cosine_distance_text       (VARCHAR, VARCHAR)   -> FLOAT64
+//   draken__match_against_2           (VARCHAR, VARCHAR)   -> BOOL
+//
+// MATCH (col) AGAINST (str) is `COSINE_SIMILARITY(col, str) >= match_threshold` and runs
+// the text cosine body itself to guarantee it. The threshold is the `match_threshold`
+// session variable, resolved at bind time (see match_ctx in kernel_context.h). It is
+// tunable, not a constant, because a score is only meaningful against the ACTIVE embedder:
+// under the core lexical EMBED, scores are bimodal at 1.0 and ~0 (measured over $planets
+// against 'Earth': Earth 1.0, Mars 0.043, everything else <= 0.018, some negative), so any
+// threshold in (0.3, 1.0] makes MATCH a case-insensitive exact match; under a semantic
+// capability the same number is a real similarity cut. One constant could not mean both.
 //
 // The `_vector`/`_text` suffixes are the catalog OVERLOAD IDs lowercased
 // (COSINE_SIMILARITY_VECTOR -> draken_cosine_similarity_vector). compiled_expression.pyx
@@ -445,6 +455,57 @@ VecResult cosine_text_kernel(void* ctx, const DrakenVector* const* args, uint32_
     }
 }
 
+// SQL `MATCH (col) AGAINST (str)` — cosine_text_kernel thresholded to BOOL.
+//
+// Deliberately calls cosine_text_kernel rather than reimplementing the comparison: MATCH
+// is DEFINED as `COSINE_SIMILARITY(col, str) >= threshold`, so running the same code makes
+// the two agree by construction rather than by review. A second scoring implementation
+// here is exactly the split-brain the text overloads already had once.
+//
+// NaN (zero-magnitude embedding — empty or stopword-only text) fails `>=` and yields
+// false, without a special case: an undefined direction is not a match.
+VecResult match_against_kernel(void* ctx, const DrakenVector* const* args, uint32_t nargs,
+                               const char* who) {
+    if (ctx == nullptr) return draken_error_sentinel_fmt("%s: missing match context", who);
+    const auto* m = static_cast<const struct match_ctx*>(ctx);
+
+    struct cosine_text_ctx cctx;
+    cctx.dimension = m->dimension;
+    cctx.embed_fn  = m->embed_fn;
+    // Validates arity/types/lengths and propagates any error sentinel verbatim.
+    VecResult sim = cosine_text_kernel(&cctx, args, nargs, /*as_distance=*/false, who);
+    if (sim.data == nullptr) return sim;
+
+    const uint32_t n      = sim.length;
+    const uint32_t padded = ((((n + 7u) >> 3) + 7u) & ~7u);
+    auto* bits = static_cast<uint8_t*>(draken_malloc(padded ? padded : 8u));
+    if (!bits) {
+        draken_free(sim.data);
+        draken_free(sim.validity);
+        return draken_error_sentinel_fmt("%s: allocation failed", who);
+    }
+    std::memset(bits, 0, padded ? padded : 8u);
+
+    // sim is dense with an identity selection (cosine_over_embedded), so row i is data[i];
+    // its validity is already the merged operand validity and carries straight over.
+    const double* scores = static_cast<const double*>(sim.data);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (scores[i] >= m->threshold) bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+    }
+
+    VecResult r{};
+    r.data           = bits;
+    r.validity       = sim.validity;   // ownership moves to the result
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    draken_free(sim.data);
+    return r;
+}
+
 // Shared body for the two vector overloads. `ctx` carries the bind-time dimension —
 // DrakenVector has no dimension field (it is a LogicalType detail), so the kernel
 // cannot recover it from its operands.
@@ -593,6 +654,15 @@ struct cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* e
     return c;
 }
 
+struct match_ctx* kernel_alloc_match_ctx(uint32_t dimension, void* embed_fn, double threshold) {
+    auto* c = static_cast<struct match_ctx*>(malloc(sizeof(struct match_ctx)));
+    if (!c) return nullptr;
+    c->dimension = dimension;
+    c->embed_fn  = embed_fn;
+    c->threshold = threshold;
+    return c;
+}
+
 struct vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension) {
     auto* c = static_cast<struct vector_dim_ctx*>(malloc(sizeof(struct vector_dim_ctx)));
     if (!c) return nullptr;
@@ -681,6 +751,13 @@ VecResult draken_cosine_distance_text(void* ctx, const DrakenVector* const* args
                                       uint32_t nargs) {
     return cosine_text_kernel(ctx, args, nargs, /*as_distance=*/true,
                               "draken_cosine_distance");
+}
+
+// `_match_against_2` is the catalog OVERLOAD ID lowercased (_MATCH_AGAINST_2), so the
+// registry name carries the leading underscore: draken + _match_against_2.
+VecResult draken__match_against_2(void* ctx, const DrakenVector* const* args,
+                                  uint32_t nargs) {
+    return match_against_kernel(ctx, args, nargs, "draken_match_against");
 }
 
 }  // extern "C"

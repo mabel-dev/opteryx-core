@@ -1501,15 +1501,24 @@ cdef inline int _dv_extraction_kernel_c(
     void* kernel_fn,
     void* ctx_ptr,
     const DrakenVector* operand,
+    const DrakenVector* child,
     DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
     DrakenFrameArena* arena, VecResult* out_vr,
 ) noexcept nogil:
-    """C-ABI BC_EXTRACTION dispatch (`->`, `->>`, str[i]) — called DIRECTLY from the
-    nogil VM. The path/index is bound into extraction_ctx, so the ABI's `key` operand
-    is NULL and exactly one vector is consumed. Every result is a canonical-block
-    string (VARCHAR/NVARCHAR/VARIANT), adopted into the frame arena. rc 0 = pushed;
-    rc 4 = kernel error sentinel (invalid JSON, bad operand type, OOM)."""
-    cdef VecResult vr = (<extr_fn_t>kernel_fn)(ctx_ptr, operand, NULL)
+    """C-ABI BC_EXTRACTION dispatch (`->`, `->>`, str[i], arr[i]) — called DIRECTLY
+    from the nogil VM. The path/index is bound into extraction_ctx, so no key operand
+    is popped and exactly one vector is consumed off the stack.
+
+    `child` rides in the ABI's free second slot: arr[i] needs the ARRAY's element
+    vector, which hangs off the column owner and is unreachable from the parent
+    DrakenVector (BC_C_NATIVE_CHILD — the caller resolves it from dv_cache). NULL for
+    every other sub-op, which ignores the slot.
+
+    _dv_vecresult_adopt_c takes the result of ANY shape, so arr[i]'s element-typed
+    (possibly fixed-width) result folds the same way the string sub-ops' canonical
+    blocks do. rc 0 = pushed; rc 4 = kernel error sentinel (invalid JSON, bad operand
+    type, unsupported element type, OOM)."""
+    cdef VecResult vr = (<extr_fn_t>kernel_fn)(ctx_ptr, operand, child)
     out_vr[0] = vr
     if vr.data == NULL:
         return 4
@@ -1836,15 +1845,27 @@ cdef int c_execute_dv_inner(
                 if vr.child != NULL:
                     out_child[0] = <VecResult*>vr.child
         elif opcode == BC_EXTRACTION and (slot.flags & BC_INSTR_C_NATIVE) != 0:
-            # `->`, `->>`, str[i] — one operand in, canonical-block string out. The
-            # path/index rides in extraction_ctx (bound once), so no key is popped.
+            # `->`, `->>`, str[i], arr[i] — one operand in. The path/index rides in
+            # extraction_ctx (bound once), so no key is popped.
             sp -= 1
             dv_left_ptr = dv_stack[sp]
             if dv_left_ptr == NULL:
                 err_op[0] = opcode
                 return 1
-            rc = _dv_extraction_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
-                                         dv_left_ptr, dv_store, dv_stack, sp, arena, &vr)
+            if (slot.flags & BC_C_NATIVE_CHILD) != 0:
+                # arr[i]: dv_cache[i] holds the owner-resolved child element vector
+                # (same resolution BC_CAST's ARRAY->VARCHAR arm uses). NULL means the
+                # column carries no child — fail loud rather than answer without one.
+                if dv_cache[i] == NULL:
+                    err_op[0] = opcode
+                    return 4
+                rc = _dv_extraction_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
+                                             dv_left_ptr, dv_cache[i],
+                                             dv_store, dv_stack, sp, arena, &vr)
+            else:
+                rc = _dv_extraction_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
+                                             dv_left_ptr, NULL,
+                                             dv_store, dv_stack, sp, arena, &vr)
             if rc == 0:
                 sp += 1
         elif opcode == BC_BINARY_OP:
@@ -1997,11 +2018,12 @@ cdef void _dv_fill_cache_cxx(
             dv_cache[k] = <DrakenVector*>&m.columns[col_idx[k]].view
         elif opcode == BC_LOAD_LIT_CONST:
             dv_cache[k] = lit_dv[k]
-        elif ((opcode == BC_CAST or opcode == BC_FUNCTION)
+        elif ((opcode == BC_CAST or opcode == BC_FUNCTION or opcode == BC_EXTRACTION)
                 and (instrs[k].flags & BC_C_NATIVE_CHILD) != 0):
             # ARRAY child element vector, held by the column's VectorOwner —
             # NULL when the column has no child (kernel then fails loud).
-            # BC_FUNCTION here is SORT's single-array-arg case (compiled_expression.pyx).
+            # BC_FUNCTION here is SORT's single-array-arg case, BC_EXTRACTION is
+            # arr[i] (compiled_expression.pyx).
             dv_cache[k] = <DrakenVector*>cxx_column_child_vec(m, <uint32_t>col_idx[k])
         else:
             dv_cache[k] = NULL
@@ -3427,24 +3449,34 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     sp = func_base
 
                     if is_nb_callable:
+                        # CHECKED cast (<Vector?>): an nb kernel operand must be a
+                        # materialized Vector. A constant ARRAY/collection literal is
+                        # NOT materialized into a DrakenVector (there is no ARRAY case
+                        # in _materialise_constant_literal), so it arrives here as a
+                        # bare Python list. The old unchecked <Vector> cast then read
+                        # ._nb off list memory and handed garbage to the kernel —
+                        # SIGSEGV (e.g. GREATEST([1,5,3]) folded at plan time). The
+                        # checked cast fails loud with TypeError instead of corrupting
+                        # memory. (Making such a literal actually evaluate needs a new
+                        # ARRAY-literal constant path — an architect decision.)
                         if arity == 1:
                             legacy_result = callable_obj(
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
                             )
                         elif arity == 2:
                             legacy_result = callable_obj(
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena))._nb,
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena))._nb,
                             )
                         elif arity == 3:
                             legacy_result = callable_obj(
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena))._nb,
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base + 2], anchor[func_base + 2], arena))._nb,
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena))._nb,
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base + 2], anchor[func_base + 2], arena))._nb,
                             )
                         else:
                             func_args = [
-                                (<Vector>_slot_to_pyobj(dv_stack[func_base + j], anchor[func_base + j], arena))._nb
+                                (<Vector?>_slot_to_pyobj(dv_stack[func_base + j], anchor[func_base + j], arena))._nb
                                 for j in range(arity)
                             ]
                             legacy_result = callable_obj(*func_args)

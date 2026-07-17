@@ -903,12 +903,21 @@ cdef class IpcRowGroupSource:
     cdef bint _closed
     cdef list masks                      # pass-2: bit-packed survival mask per work item (else None)
     cdef cpp_mutex* _mtx                  # guards the cursor under concurrent pull
-    # Remote footer cache visibility for this scan's telemetry (see `diagnostics`).
-    # -1 means "the remote tier was not consulted at all" (not configured, or this
-    # scan had no remote-scheme files) — distinct from 0, which means "consulted and
-    # found nothing". A caller must not conflate "not applicable" with "always misses".
+    # Footer cache visibility for this scan's telemetry (see `diagnostics`).
+    # -1 means "not applicable to this scan" — distinct from 0, which means "applicable,
+    # and the count really was zero". A caller must not conflate the two.
+    #
+    # `footer_cache_*` covers the shared (remote) tier and is -1 only when this scan had
+    # no footer to fetch at all; a scan that needed one with no tier configured reports
+    # it as a miss, so a mis-set OPTERYX_FOOTER_CACHE_LOCATION shows up as 0 hits rather
+    # than as silence indistinguishable from "the tier wasn't needed".
+    # `footer_process_cache_hits` covers the in-process caches, which sit IN FRONT of the
+    # remote tier: a footer they serve never becomes a remote candidate, so the remote
+    # pair is legitimately absent on a warm process. Without this counter that absence is
+    # unreadable — it looks the same as a tier that was never wired up.
     cdef int footer_cache_hits
     cdef int footer_cache_misses
+    cdef int footer_process_cache_hits
 
     def __cinit__(self):
         self.footer_map = NULL
@@ -924,6 +933,7 @@ cdef class IpcRowGroupSource:
         self._mtx = new cpp_mutex()
         self.footer_cache_hits = -1
         self.footer_cache_misses = -1
+        self.footer_process_cache_hits = -1
 
     def __dealloc__(self):
         if self.footer_map != NULL:
@@ -939,14 +949,24 @@ cdef class IpcRowGroupSource:
         NativeScanPlan.diagnostics() exposes on the native path. Returns {} once the
         pipeline is gone. Read BEFORE close() drops the pipeline reference.
 
-        Includes `footer_cache_hits`/`footer_cache_misses` — how many of this
-        scan's remote-file footers were served from the shared Valkey tier versus
-        fetched from origin — ONLY when the tier was actually consulted (configured
-        AND this scan had at least one remote-scheme file). Omitted otherwise, so a
-        caller cannot mistake "not applicable" for "always misses"."""
+        Includes `footer_cache_hits`/`footer_cache_misses` — how many of this scan's
+        remote-file footers came from the shared Valkey tier versus origin — whenever
+        this scan had a footer to fetch at all. A scan that needed one with no tier
+        configured reports every footer as a miss: "configured but cold" and "never
+        wired up" must not both be silent. Omitted only when there was nothing to
+        fetch (all files local, prefetched, or served in-process), so a caller cannot
+        mistake "not applicable" for "always misses".
+
+        Includes `footer_process_cache_hits` — footers served from the in-process
+        caches, which sit in front of the remote tier — whenever this scan considered
+        a remote-scheme file. This is what makes an absent `footer_cache_*` pair
+        readable: a non-zero count beside it means the tier was not needed (a warm
+        process already held the footers), not that it failed."""
         if self.pipeline is None:
             return {}
         diag = self.pipeline.diagnostics()
+        if self.footer_process_cache_hits >= 0:
+            diag["footer_process_cache_hits"] = self.footer_process_cache_hits
         if self.footer_cache_hits >= 0:
             diag["footer_cache_hits"] = self.footer_cache_hits
             diag["footer_cache_misses"] = self.footer_cache_misses
@@ -1283,6 +1303,15 @@ cpdef IpcRowGroupSource open_ipc_source(
 
     # (orig_path, fetch_url, size) for remote files that still need a footer fetched.
     remote_candidates = []
+    # Telemetry for the two in-process caches probed below. Counted together: both mean
+    # "no network round trip for this footer", which is the question an operator is asking
+    # when the remote tier looks idle. (They differ in that a bytes hit still pays a parse
+    # and a parsed hit doesn't — a cost split, not a cache-effectiveness one.)
+    process_hits = 0
+    # Remote-scheme, non-prefetched files this scan looked at. Not reported — it only gates
+    # whether `process_hits` applies at all, separating "0 served in-process" (a cold
+    # process, worth reporting) from "nothing to serve" (an all-local scan, report nothing).
+    remote_files_seen = 0
     for path in paths:
         if prefetched_footers and path in prefetched_footers:
             continue
@@ -1291,30 +1320,44 @@ cpdef IpcRowGroupSource open_ipc_source(
                 or fetch_url.startswith("http://")
                 or fetch_url.startswith("https://")):
             continue
+        remote_files_seen += 1
         # Parsed-struct cache hit → populate footer_map and move on. A local probe var is
         # used (not &footer_map[key]) so a MISS does not default-construct an empty
         # FileStats in the map, which the pruning loop below would read as "zero row groups"
         # and silently skip the file's rows.
         if _PARSED_FOOTER_CACHE.try_get(path, &probe_fs):
             src.footer_map[0][path.encode('utf-8')] = probe_fs
+            process_hits += 1
             continue
         if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
+            process_hits += 1
             continue
         remote_candidates.append((path, fetch_url,
                                   file_sizes.get(path, -1) if file_sizes else -1))
+
+    # Reported whenever this scan considered a remote file, including when the in-process
+    # caches served every one of them and the remote tier below was never reached — that
+    # is exactly the case where the remote counters go absent and need explaining.
+    if remote_files_seen:
+        src.footer_process_cache_hits = process_hits
 
     # Step 2: one batched probe of the shared cache; seed the bytes cache with the hits so
     # the fetch below skips them and the per-path loop parses them locally. footer_map is
     # deliberately NOT touched here (the default-construct trap noted above); the bytes cache
     # is the landing spot the existing fetch path already consults, so this needs one to seed.
     probe_hits = set()
-    if footer_remote is not None and footer_bytes_cache is not None and remote_candidates:
-        for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
-            footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
-            probe_hits.add(path)
-        # Telemetry: only recorded when the tier was actually consulted this scan (see
-        # `diagnostics`'s -1 sentinel), so a query that never touched a remote file — or
-        # ran with no tier configured — doesn't misreport "0 hits" as "cache is failing".
+    if remote_candidates:
+        if footer_remote is not None and footer_bytes_cache is not None:
+            for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
+                footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
+                probe_hits.add(path)
+        # Telemetry keyed off `remote_candidates`, NOT off the tier existing: a candidate is
+        # a footer this scan must fetch from origin unless the tier serves it, so with no
+        # tier (or no bytes cache to seed) every candidate genuinely IS a miss and is
+        # reported as one. Staying silent there would make a mis-set
+        # OPTERYX_FOOTER_CACHE_LOCATION look identical to a warm process that simply didn't
+        # need the tier — the two failure modes must be distinguishable from telemetry
+        # alone. The -1 sentinel now means only "this scan had no footer to fetch".
         src.footer_cache_hits = len(probe_hits)
         src.footer_cache_misses = len(remote_candidates) - len(probe_hits)
 

@@ -73,7 +73,12 @@ def render_project(node: LogicalPlanNode) -> str:
         if node.except_columns
         else ""
     )
-    return f"PROJECT [{cols}]{except_cols}{order_by}"
+    hoisted = (
+        f" (hoisted: {', '.join(format_expression(col) for col in node.hoisted_columns)})"
+        if getattr(node, "hoisted_columns", None)
+        else ""
+    )
+    return f"PROJECT [{cols}]{except_cols}{order_by}{hoisted}"
 
 
 @register_render(LogicalPlanStepType.Union)

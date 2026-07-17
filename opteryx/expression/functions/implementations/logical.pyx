@@ -9,18 +9,10 @@ Logical and control flow function kernels.
 Includes:
 - Null handling: COALESCE, IFNULL, IFNOTNULL, NULLIF
 - Conditional logic: CASE, IIF
-- Array membership: ARRAY_CONTAINS
 
 Note: Binary logical operators (And, Or, Xor, Not) are handled as binary_operators and
 logical operators respectively.
 """
-
-
-def array_contains(array, item):
-    """does array contain item"""
-    if array is None:
-        return False
-    return item in set(array)
 
 
 def null_if(col1, col2):

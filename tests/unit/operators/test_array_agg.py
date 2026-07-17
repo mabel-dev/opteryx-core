@@ -3,33 +3,12 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-import opteryx
-from opteryx.compiled.aggregations.scalar_kernels import ArrayAggState
+from tests.helpers import execute_and_fetch_all
 
 
 def _run(sql):
-    session = opteryx.session()
-    session.execute(sql)
-    return session.fetchall()
-
-
-def test_array_agg_state_distinct_and_limit_on_entry():
-    state = ArrayAggState({"distinct": True, "limit": 2})
-    state.add_value(b"A")
-    state.add_value(b"A")
-    state.add_value(None)
-    state.add_value(b"B")
-
-    assert state.finalize() == [b"A", None]
-
-
-def test_array_agg_state_ordered_descending():
-    state = ArrayAggState({"ordered": True, "descending": True, "limit": 2})
-    state.add_value(b"a")
-    state.add_value(b"c")
-    state.add_value(b"b")
-
-    assert state.finalize() == [b"c", b"b"]
+    rows = execute_and_fetch_all(sql)
+    return [tuple(row.values()) for row in rows]
 
 
 def test_array_agg_group_by_query():
@@ -39,77 +18,77 @@ def test_array_agg_group_by_query():
     )
 
     assert rows == [
-        ([b"Moon"], 3),
-        ([b"Phobos", b"Deimos"], 4),
+        (["Moon"], 3),
+        (["Phobos", "Deimos"], 4),
         (
             [
-                b"Io",
-                b"Europa",
-                b"Ganymede",
-                b"Callisto",
-                b"Amalthea",
-                b"Himalia",
-                b"Elara",
-                b"Pasiphae",
-                b"Sinope",
-                b"Lysithea",
-                b"Carme",
-                b"Ananke",
-                b"Leda",
-                b"Thebe",
-                b"Adrastea",
-                b"Metis",
-                b"Callirrhoe",
-                b"Themisto",
-                b"Megaclite",
-                b"Taygete",
-                b"Chaldene",
-                b"Harpalyke",
-                b"Kalyke",
-                b"Iocaste",
-                b"Erinome",
-                b"Isonoe",
-                b"Praxidike",
-                b"Autonoe",
-                b"Thyone",
-                b"Hermippe",
-                b"Aitne",
-                b"Eurydome",
-                b"Euanthe",
-                b"Euporie",
-                b"Orthosie",
-                b"Sponde",
-                b"Kale",
-                b"Pasithee",
-                b"Hegemone",
-                b"Mneme",
-                b"Aoede",
-                b"Thelxinoe",
-                b"Arche",
-                b"Kallichore",
-                b"Helike",
-                b"Carpo",
-                b"Eukelade",
-                b"Cyllene",
-                b"Kore",
-                b"Herse",
-                b"S/2000 J11",
-                b"S/2003 J2",
-                b"S/2003 J3",
-                b"S/2003 J4",
-                b"S/2003 J5",
-                b"S/2003 J9",
-                b"S/2003 J10",
-                b"S/2003 J12",
-                b"S/2003 J15",
-                b"S/2003 J16",
-                b"S/2003 J18",
-                b"S/2003 J19",
-                b"S/2003 J23",
-                b"S/2010 J1",
-                b"S/2010 J2",
-                b"S/2011 J1",
-                b"S/2011 J2",
+                "Io",
+                "Europa",
+                "Ganymede",
+                "Callisto",
+                "Amalthea",
+                "Himalia",
+                "Elara",
+                "Pasiphae",
+                "Sinope",
+                "Lysithea",
+                "Carme",
+                "Ananke",
+                "Leda",
+                "Thebe",
+                "Adrastea",
+                "Metis",
+                "Callirrhoe",
+                "Themisto",
+                "Megaclite",
+                "Taygete",
+                "Chaldene",
+                "Harpalyke",
+                "Kalyke",
+                "Iocaste",
+                "Erinome",
+                "Isonoe",
+                "Praxidike",
+                "Autonoe",
+                "Thyone",
+                "Hermippe",
+                "Aitne",
+                "Eurydome",
+                "Euanthe",
+                "Euporie",
+                "Orthosie",
+                "Sponde",
+                "Kale",
+                "Pasithee",
+                "Hegemone",
+                "Mneme",
+                "Aoede",
+                "Thelxinoe",
+                "Arche",
+                "Kallichore",
+                "Helike",
+                "Carpo",
+                "Eukelade",
+                "Cyllene",
+                "Kore",
+                "Herse",
+                "S/2000 J11",
+                "S/2003 J2",
+                "S/2003 J3",
+                "S/2003 J4",
+                "S/2003 J5",
+                "S/2003 J9",
+                "S/2003 J10",
+                "S/2003 J12",
+                "S/2003 J15",
+                "S/2003 J16",
+                "S/2003 J18",
+                "S/2003 J19",
+                "S/2003 J23",
+                "S/2010 J1",
+                "S/2010 J2",
+                "S/2011 J1",
+                "S/2011 J2",
             ],
             5,
         ),
@@ -123,9 +102,9 @@ def test_array_agg_distinct_limit_query():
     )
 
     assert rows == [
-        ([b"M"], 3),
-        ([b"P", b"D"], 4),
-        ([b"I", b"E"], 5),
+        (["M"], 3),
+        (["P", "D"], 4),
+        (["I", "E"], 5),
     ]
 
 
@@ -136,9 +115,9 @@ def test_array_agg_ordered_limit_query():
     )
 
     assert rows == [
-        ([b"Moon"], 3),
-        ([b"Phobos", b"Deimos"], 4),
-        ([b"Thyone", b"Themisto"], 5),
+        (["Moon"], 3),
+        (["Phobos", "Deimos"], 4),
+        (["Thyone", "Themisto"], 5),
     ]
 
 
@@ -149,7 +128,7 @@ def test_array_agg_multi_aggregate_query():
     )
 
     assert rows == [
-        (1, [b"Moon"], 3),
-        (2, [b"Phobos", b"Deimos"], 4),
-        (67, [b"Io", b"Europa"], 5),
+        (1, ["Moon"], 3),
+        (2, ["Phobos", "Deimos"], 4),
+        (67, ["Io", "Europa"], 5),
     ]

@@ -1,0 +1,183 @@
+# Source: hand-written 2026-07-17 — value-level coverage for three
+# previously-REFUSED text functions plus the CONCAT/CONCAT_WS family-wide
+# non-string-operand fix. See tests/unit/functions/test_text_function_gaps.py
+# for the NULL-row / out-of-range / independent-oracle coverage that needs
+# Python-side computation rather than fixed literal expected values.
+#
+# All three functions raised NotSupportedError at PLAN time before this
+# change: the native engine has no per-morsel Python fallback for
+# projections, so a column expression lacking a c-native kernel is refused,
+# not run slowly. Every query below therefore runs over a COLUMN (id/name),
+# never a bare literal — a literal-only query is constant-folded through a
+# different code path and would pass even while the column form stayed
+# refused.
+
+# ---------------------------------------------------------------------------
+# TO_CHAR — integer codepoint -> its UTF-8 character (inverse of TO_ASCII)
+# ---------------------------------------------------------------------------
+
+query T rowsort
+SELECT TO_CHAR(id + 64) AS c FROM $planets
+----
+A
+B
+C
+D
+E
+F
+G
+H
+I
+
+# Multi-byte UTF-8 (3-byte, U+2601..U+2603) over a column expression.
+query T rowsort
+SELECT TO_CHAR(id + 9728) AS c FROM $planets WHERE id <= 3
+----
+☁
+☂
+☃
+
+# CHR is an alias for TO_CHAR.
+query T rowsort
+SELECT CHR(66) AS c
+----
+B
+
+# Codepoint 0 -> empty string (documented inverse of TO_ASCII('') -> 0).
+query T rowsort
+SELECT TO_CHAR(0) AS c
+----
+(empty)
+
+# Out-of-range codepoints fail loud over a column, never silently degrade.
+statement error RuntimeError
+SELECT TO_CHAR(0 - id) AS c FROM $planets
+
+statement error RuntimeError
+SELECT TO_CHAR(id + 2000000000) AS c FROM $planets
+
+# ---------------------------------------------------------------------------
+# CONCAT_WS — 2-arg degenerate form: with one value the separator never
+# appears, so the result is just that value rendered as a string.
+# ---------------------------------------------------------------------------
+
+query T rowsort
+SELECT CONCAT_WS('-', name) AS c FROM $planets
+----
+Earth
+Jupiter
+Mars
+Mercury
+Neptune
+Pluto
+Saturn
+Uranus
+Venus
+
+# The >2-arg rewrite is unaffected by the new ==2 arm.
+query T rowsort
+SELECT CONCAT_WS('-', name, name) AS c FROM $planets WHERE id = 1
+----
+Mercury-Mercury
+
+# ---------------------------------------------------------------------------
+# CONCAT / CONCAT_WS — non-string operands are auto-cast to VARCHAR
+# (family-wide fix: StringConcat is string-only natively, so CONCAT(id,
+# name) etc. used to be refused at every arity even though CAST(id AS
+# VARCHAR) already worked).
+# ---------------------------------------------------------------------------
+
+query T rowsort
+SELECT CONCAT(id, name) AS c FROM $planets WHERE id <= 3
+----
+1Mercury
+2Venus
+3Earth
+
+query T rowsort
+SELECT CONCAT(name, id) AS c FROM $planets WHERE id <= 3
+----
+Earth3
+Mercury1
+Venus2
+
+query T rowsort
+SELECT CONCAT_WS('-', id, name) AS c FROM $planets WHERE id <= 3
+----
+1-Mercury
+2-Venus
+3-Earth
+
+# The 2-arg CONCAT_WS form also stringifies a non-string operand.
+query T rowsort
+SELECT CONCAT_WS('-', id) AS c FROM $planets WHERE id <= 3
+----
+1
+2
+3
+
+query T rowsort
+SELECT CONCAT(name, 3.14) AS c FROM $planets WHERE id = 1
+----
+Mercury3.14
+
+query T rowsort
+SELECT CONCAT(name, id = 1) AS c FROM $planets WHERE id <= 2
+----
+Mercurytrue
+Venusfalse
+
+# A NULL-valued (but typed) operand still short-circuits to NULL rather than
+# being stringified to the literal text "None"/"null".
+query T rowsort
+SELECT CONCAT(CASE WHEN id = 3 THEN NULL ELSE name END, '!') AS c FROM $planets WHERE id <= 3
+----
+Mercury!
+NULL
+Venus!
+
+# An untyped NULL literal operand also short-circuits.
+query T rowsort
+SELECT CONCAT(name, NULL) AS c FROM $planets WHERE id = 1
+----
+NULL
+
+# ---------------------------------------------------------------------------
+# RANDOM_STRING — n random BYTES per row as VARBINARY, volatile. Values are
+# non-deterministic by design; width and error behaviour are what's
+# checkable here (byte-level distinctness is covered in the unit test).
+# ---------------------------------------------------------------------------
+
+query I rowsort
+SELECT OCTET_LENGTH(RANDOM_STRING(24)) AS n FROM $planets
+----
+24
+24
+24
+24
+24
+24
+24
+24
+24
+
+query I rowsort
+SELECT OCTET_LENGTH(RANDOM_STRING(id)) AS n FROM $planets
+----
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+query I rowsort
+SELECT OCTET_LENGTH(RANDOM_STRING(0)) AS n FROM $planets WHERE id = 1
+----
+0
+
+statement error RuntimeError
+SELECT RANDOM_STRING(-1) AS c

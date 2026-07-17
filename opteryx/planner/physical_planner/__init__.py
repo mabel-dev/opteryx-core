@@ -173,6 +173,7 @@ def _create_project_node(logical_node, query_properties, registry):
         query_properties,
         projection=logical_node.columns,
         order_by_columns=getattr(logical_node, "order_by_columns", []),
+        hoisted_columns=getattr(logical_node, "hoisted_columns", []),
         **{k: v for k, v in node_config.items() if k in ("projection", "all_relations")},
     )
 

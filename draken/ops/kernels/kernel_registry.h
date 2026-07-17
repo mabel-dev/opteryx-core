@@ -90,6 +90,10 @@ VecResult draken_cosine_similarity_text(void* ctx, const DrakenVector* const* ar
                                         uint32_t nargs);
 VecResult draken_cosine_distance_text(void* ctx, const DrakenVector* const* args,
                                       uint32_t nargs);
+// MATCH (col) AGAINST (str) -> BOOL. `COSINE_SIMILARITY(col, str) >= ctx->threshold`,
+// running the text cosine body itself so the two cannot disagree. ctx is a match_ctx.
+VecResult draken__match_against_2(void* ctx, const DrakenVector* const* args,
+                                  uint32_t nargs);
 // CAST(array AS VECTOR(n)). Two-vector (parent offsets + child elements) shape, like
 // draken_cast_array_to_varchar — dispatched via BC_C_NATIVE_CHILD. Width via ctx.
 VecResult draken_cast_array_to_vector(void* ctx, const DrakenVector* parent,

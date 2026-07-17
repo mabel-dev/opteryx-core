@@ -368,10 +368,14 @@ def humanize(arr):
 
 def array_contains(arr, val):
     """
-    ARRAY_CONTAINS is lowered to the native AnyOpEq operator — item = ANY(arr) —
-    at plan-build time (see logical_planner_builders.function). It must never
-    reach a Python kernel; this guard fails loud if the rewrite was bypassed
-    rather than silently degrading to a row-wise Python implementation.
+    ARRAY_CONTAINS is rewritten to `item = ANY(arr)` (AnyOpEq) at plan-build
+    time (logical_planner_builders.function), so this catalog entry is never
+    actually a FUNCTION node by the time compiled_expression.pyx runs — it
+    exists only because FunctionDefinition registration (_make) requires a
+    real callable. It must never be invoked at runtime; this guard fails loud
+    if a bind path somehow bypasses the AnyOpEq rewrite, rather than silently
+    degrading to a row-wise Python implementation (there is no Python
+    fallback on this engine — see native_engine_has_no_python_fallback).
     """
     raise NotImplementedError(
         "ARRAY_CONTAINS must be lowered to `item = ANY(arr)` (AnyOpEq) during "

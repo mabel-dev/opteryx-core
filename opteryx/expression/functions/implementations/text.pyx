@@ -100,7 +100,14 @@ def right_pad(arr, width, fill):
 
 
 def match_against(arr, val):
-    raise NotImplementedError("MATCH AGAINST is not currently supported.")
+    # MATCH runs natively (draken__match_against_2). The catalog still needs a
+    # callable_ref, but the native engine has no Python fallback, so reaching this is a
+    # bug in kernel resolution, not a missing feature — say so rather than imply MATCH
+    # is unimplemented.
+    raise NotImplementedError(
+        "MATCH is evaluated by the native kernel draken__match_against_2; "
+        "this Python path is unreachable and has no implementation."
+    )
 
 
 def position(sub, string):

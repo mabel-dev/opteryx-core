@@ -89,6 +89,12 @@ cdef extern from "ops/kernels/kernel_registry.h":
 
     cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* embed_fn)
 
+    ctypedef struct match_ctx_:
+        pass
+    ctypedef match_ctx_ match_ctx
+
+    match_ctx* kernel_alloc_match_ctx(uint32_t dimension, void* embed_fn, double threshold)
+
     void kernel_free_context(void* ctx)
 
 
@@ -231,8 +237,10 @@ def alloc_time_bucket_ctx(long long magnitude, int unit_kind, int ts_unit):
 
     Args:
         magnitude: bind-time TIME_BUCKET magnitude literal (e.g. 5 for '5 minutes').
-        unit_kind: 1=second, 2=minute, 3=hour, 4=day.
-        ts_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of the `date` operand.
+        unit_kind: 1=second, 2=minute, 3=hour, 4=day, 5=week, 6=month,
+            7=quarter, 8=year.
+        ts_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of a TIMESTAMP64 `date`
+            operand; ignored for DATE32 (the kernel works in microseconds).
     """
     cdef time_bucket_ctx* ctx = kernel_alloc_time_bucket_ctx(
         <int64_t>magnitude, <uint8_t>unit_kind, <uint8_t>ts_unit)
@@ -282,6 +290,25 @@ def alloc_cosine_text_ctx(int dimension, unsigned long long embed_fn):
     """
     cdef cosine_text_ctx* ctx = kernel_alloc_cosine_text_ctx(
         <uint32_t>dimension, <void*><unsigned long long>embed_fn)
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_match_ctx(int dimension, unsigned long long embed_fn, double threshold):
+    """Allocate context for MATCH (col) AGAINST (str).
+
+    Args:
+        dimension: the active EMBED capability's width.
+        embed_fn: address of the resolved `draken_embed` kernel — the same delegation the
+            text cosine overloads use, so MATCH and COSINE_SIMILARITY cannot embed
+            differently.
+        threshold: similarity at or above which a row matches, resolved at bind time from
+            the `match_threshold` session variable. Bind time, not execution time: a
+            compiled plan keeps answering the question it was compiled for.
+    """
+    cdef match_ctx* ctx = kernel_alloc_match_ctx(
+        <uint32_t>dimension, <void*><unsigned long long>embed_fn, threshold)
     if ctx == NULL:
         return None
     return <unsigned long long>ctx

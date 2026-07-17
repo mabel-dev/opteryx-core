@@ -427,43 +427,122 @@ VecResult draken_unixtime(void* ctx, const DrakenVector* const* args, uint32_t n
     }
 }
 
-// TIME_BUCKET(magnitude, units, date) — floor TIMESTAMP64 to a `magnitude`-wide
-// bucket boundary (calendar-free: second/minute/hour/day). magnitude and units
-// are bind-time literals, consumed into ctx = time_bucket_ctx{magnitude, unit_kind,
-// ts_unit} (kernel_context.h); only `date` is pushed. Output is TIMESTAMP64 in the
-// SAME unit as the input (the floor is a pure integer alignment, no rescale).
+// TIME_BUCKET(magnitude, units, date) — floor a TIMESTAMP64 or DATE32 operand to a
+// `magnitude`-wide bucket boundary. magnitude and units are bind-time literals,
+// consumed into ctx = time_bucket_ctx{magnitude, unit_kind, ts_unit}
+// (kernel_context.h); only `date` is pushed. Output is always TIMESTAMP64.
+//
+// unit_kind:
+//   1=second 2=minute 3=hour 4=day  — fixed-width integer floors from the epoch.
+//   5=week                          — 7-day floor anchored to the ISO Monday on or
+//                                      before the epoch (1969-12-29, matching
+//                                      date_trunc's week boundary).
+//   6=month 7=quarter 8=year        — calendar buckets counted from 1970-01
+//                                      (epoch-anchored): magnitude>1 groups whole
+//                                      calendar units from the epoch; magnitude==1
+//                                      reduces exactly to date_trunc.
+//
+// TIMESTAMP64 output preserves the operand's unit (the floor is a pure integer
+// alignment, no rescale). A DATE32 operand carries no logical unit; it is promoted
+// to microseconds and the result is TIMESTAMP64(microseconds) — the same DATE32
+// convention date_trunc uses.
 VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
   try {
         if (nargs != 1) return draken_error_sentinel("draken_time_bucket: expected 1 argument");
         if (ctx == nullptr) return draken_error_sentinel("draken_time_bucket: missing ctx");
         const auto* c = static_cast<const time_bucket_ctx*>(ctx);
         const DrakenVector* v = args[0];
-        if (v->type != DRAKEN_TIMESTAMP64)
+        const bool is_date32 = (v->type == DRAKEN_DATE32);
+        if (v->type != DRAKEN_TIMESTAMP64 && !is_date32)
             return draken_error_sentinel_fmt(
-                "draken_time_bucket: expected TIMESTAMP64, got DrakenType %d",
+                "draken_time_bucket: expected TIMESTAMP64 or DATE32, got DrakenType %d",
                 static_cast<int>(v->type));
         if (c->magnitude <= 0)
             return draken_error_sentinel_fmt(
                 "draken_time_bucket: magnitude must be positive, got %lld",
                 static_cast<long long>(c->magnitude));
-
-        static const int64_t seconds_per_unit_kind[5] = {0, 1, 60, 3600, 86400};
-        if (c->unit_kind < 1u || c->unit_kind > 4u)
+        if (c->unit_kind < 1u || c->unit_kind > 8u)
             return draken_error_sentinel("draken_time_bucket: unsupported unit kind");
-        const int64_t tps           = ta_ticks_per_second(c->ts_unit);
-        const int64_t native_per_unit = seconds_per_unit_kind[c->unit_kind] * tps;
-        const int64_t floor_period   = native_per_unit * c->magnitude;
+
+        const int64_t mag = c->magnitude;
+        // DATE32 has no logical unit; work in microseconds and emit TIMESTAMP64(us).
+        const int     out_unit = is_date32 ? 2 : static_cast<int>(c->ts_unit);
+        const int64_t tps      = ta_ticks_per_second(out_unit);
+        const int64_t tpd      = ta_ticks_per_day(out_unit);
 
         const uint32_t n = v->length;
         auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("draken_time_bucket: allocation failed");
-        const int64_t* src = static_cast<const int64_t*>(v->data);
-        for (uint32_t i = 0u; i < n; ++i) {
-            out[i] = ft_row_valid(v, i)
-                ? ta_floor_div(src[v->selection[i]], floor_period) * floor_period : 0;
+
+        // Gather to flat int64 ticks in `out_unit`, promoting DATE32 days→ticks via
+        // the uniform data[selection[i]] access; null rows produce 0 (validity is
+        // carried by ft_dense_result, so the placeholder value is never read).
+        if (is_date32) {
+            const int32_t* src = static_cast<const int32_t*>(v->data);
+            for (uint32_t i = 0u; i < n; ++i)
+                out[i] = ft_row_valid(v, i) ? static_cast<int64_t>(src[v->selection[i]]) * tpd : 0;
+        } else {
+            const int64_t* src = static_cast<const int64_t*>(v->data);
+            for (uint32_t i = 0u; i < n; ++i)
+                out[i] = ft_row_valid(v, i) ? src[v->selection[i]] : 0;
         }
+
+        // Bucket in place. The switch is hoisted out of the row loop so each unit
+        // kind runs a branch-free loop.
+        switch (c->unit_kind) {
+            case 1: case 2: case 3: case 4: {   // second/minute/hour/day
+                static const int64_t seconds_per_unit_kind[5] = {0, 1, 60, 3600, 86400};
+                const int64_t period = seconds_per_unit_kind[c->unit_kind] * tps * mag;
+                for (uint32_t i = 0u; i < n; ++i)
+                    out[i] = ta_floor_div(out[i], period) * period;
+                break;
+            }
+            case 5: {   // week — 7-day, anchored to the ISO Monday on/before epoch (day -3)
+                for (uint32_t i = 0u; i < n; ++i) {
+                    const int64_t days          = ta_floor_div(out[i], tpd);
+                    const int64_t weeks_from_ref = ta_floor_div(days + 3LL, 7LL);
+                    const int64_t bucket_week    = ta_floor_div(weeks_from_ref, mag) * mag;
+                    out[i] = (-3LL + bucket_week * 7LL) * tpd;
+                }
+                break;
+            }
+            case 6: {   // month — epoch-anchored calendar months
+                for (uint32_t i = 0u; i < n; ++i) {
+                    const int64_t days = ta_floor_div(ta_floor_div(out[i], tps), 86400LL);
+                    int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
+                    const int64_t mtot = (static_cast<int64_t>(yr) - 1970) * 12 + (mo - 1);
+                    const int64_t mb   = ta_floor_div(mtot, mag) * mag;
+                    const int64_t by   = 1970 + ta_floor_div(mb, 12);
+                    const int     bm   = static_cast<int>(mb - ta_floor_div(mb, 12) * 12) + 1;
+                    out[i] = ta_ymd_to_days(static_cast<int>(by), bm, 1) * tpd;
+                }
+                break;
+            }
+            case 7: {   // quarter — epoch-anchored calendar quarters (3-month blocks)
+                for (uint32_t i = 0u; i < n; ++i) {
+                    const int64_t days = ta_floor_div(ta_floor_div(out[i], tps), 86400LL);
+                    int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
+                    const int64_t qtot = (static_cast<int64_t>(yr) - 1970) * 4 + (mo - 1) / 3;
+                    const int64_t qb   = ta_floor_div(qtot, mag) * mag;
+                    const int64_t by   = 1970 + ta_floor_div(qb, 4);
+                    const int     bq   = static_cast<int>(qb - ta_floor_div(qb, 4) * 4);
+                    out[i] = ta_ymd_to_days(static_cast<int>(by), bq * 3 + 1, 1) * tpd;
+                }
+                break;
+            }
+            case 8: {   // year — epoch-anchored calendar years
+                for (uint32_t i = 0u; i < n; ++i) {
+                    const int64_t days = ta_floor_div(ta_floor_div(out[i], tps), 86400LL);
+                    int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
+                    const int64_t by = 1970 + ta_floor_div(static_cast<int64_t>(yr) - 1970, mag) * mag;
+                    out[i] = ta_ymd_to_days(static_cast<int>(by), 1, 1) * tpd;
+                }
+                break;
+            }
+        }
+
         VecResult r = ft_dense_result(v, out, n, DRAKEN_TIMESTAMP64);
-        if (r.data != nullptr) r.ts_unit = c->ts_unit;   // preserve the operand's unit
+        if (r.data != nullptr) r.ts_unit = static_cast<uint8_t>(out_unit);
         return r;
     } catch (const std::exception& e) {
         return draken_error_sentinel(e.what());

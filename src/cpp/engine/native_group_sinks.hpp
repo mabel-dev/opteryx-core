@@ -20,6 +20,7 @@
 // finalize materializes into a MorselBuffer. Anything outside scope sets ErrCtx —
 // fail loud, never a silent wrong answer.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -52,12 +54,26 @@ namespace opteryx::engine {
 enum class AggFn : uint8_t {
     CountStar = 0, Count = 1, Sum = 2, Avg = 3, Min = 4, Max = 5,
     CountDistinct = 6,   // COUNT(DISTINCT col): dedup on serialized value bytes
+    ArrayAgg = 7,        // ARRAY_AGG(col): one ARRAY per group; GROUP BY only
 };
 
 struct AggSpec2 {
     AggFn fn;
     int col_idx;        // operand column; < 0 only for CountStar
     std::string name;   // output column identity
+    // ARRAY_AGG modifiers — ignored by every other fn. DISTINCT/ORDER BY/LIMIT
+    // all apply at finalize, AFTER the per-partition lists are merged: a worker
+    // sees an arbitrary row subset, so ordering or truncating locally would give
+    // a different answer than the serial plan.
+    bool    aa_distinct   = false;
+    bool    aa_ordered    = false;
+    bool    aa_descending = false;
+    int64_t aa_limit      = -1;     // < 0 == no LIMIT
+    // Hard cap on retained elements per group. Exceeding it fails loud at
+    // finalize (MEDIAN's MedianState precedent) — an unbounded per-group list is
+    // an OOM the query can't diagnose, and silently truncating would be a wrong
+    // answer dressed as a right one.
+    int64_t aa_max_per_group = 1000;
 };
 
 struct AggCell {
@@ -404,6 +420,59 @@ enum class GBKind : uint8_t {
     MinMaxD128,
     MinMaxStr,
     CountDistinct,   // per-group dedup on serialized value bytes; count in valid
+    ArrayAgg,        // per-group element list (capped); emits one ARRAY per group
+};
+
+// Which GBArrayAggState lane an ARRAY_AGG operand's values live in. One store per
+// operand type — chosen once per spec, never per row.
+enum class AAStore : uint8_t {
+    Raw,    // int/uint family, BOOL, temporal, DECIMAL64, floats (bit pattern)
+    I128,   // DECIMAL128
+    Str,    // VARCHAR / NVARCHAR / VARBINARY
+};
+
+inline AAStore aa_store_of(DrakenType t) {
+    if (sort_type_is_string(t)) return AAStore::Str;
+    if (t == DRAKEN_DECIMAL128) return AAStore::I128;
+    return AAStore::Raw;
+}
+
+// ARRAY_AGG accepts every type the other aggregates take PLUS the string family —
+// it copies values rather than ordering or summing them.
+inline bool aa_operand_supported(DrakenType t) {
+    return agg2_operand_supported(t) || sort_type_is_string(t);
+}
+
+// One group's ARRAY_AGG elements. Exactly one value lane is populated (the one
+// aa_store_of picks); `nulls` is parallel to it and is the authoritative element
+// count. NULLs are kept as elements — every other aggregate skips them, but
+// ARRAY_AGG(col) over [1, NULL] is [1, NULL], not [1]. Null positions still push
+// a placeholder into the value lane so the two stay index-aligned.
+struct GBArrayAggState {
+    std::vector<int64_t>     raws;
+    std::vector<__int128>    i128s;
+    std::vector<std::string> strs;
+    std::vector<uint8_t>     nulls;   // 1 == element is NULL
+    bool overflowed = false;          // hit aa_max_per_group; raised at finalize
+
+    size_t size() const noexcept { return nulls.size(); }
+
+    // Append one element. Returns false once the cap is hit (and latches
+    // `overflowed`) so callers stop copying bytes into a doomed group.
+    inline bool push(AAStore st, bool is_null, int64_t raw, __int128 big,
+                     const char* sp, uint32_t slen, int64_t cap) noexcept {
+        if (static_cast<int64_t>(nulls.size()) >= cap) { overflowed = true; return false; }
+        nulls.push_back(is_null ? 1 : 0);
+        switch (st) {
+            case AAStore::Raw:  raws.push_back(is_null ? 0 : raw); break;
+            case AAStore::I128: i128s.push_back(is_null ? static_cast<__int128>(0) : big); break;
+            case AAStore::Str:
+                if (is_null) strs.emplace_back();
+                else strs.emplace_back(sp, slen);
+                break;
+        }
+        return true;
+    }
 };
 
 // COUNT(DISTINCT) value fits the typed (u32 entry, u64 widened value) pair
@@ -421,6 +490,7 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
         case AggFn::CountStar:     return GBKind::Rows;
         case AggFn::Count:         return GBKind::Valid;
         case AggFn::CountDistinct: return GBKind::CountDistinct;
+        case AggFn::ArrayAgg:      return GBKind::ArrayAgg;
         case AggFn::Sum:
             if (m.type == DRAKEN_DECIMAL128) return GBKind::SumD128;
             return m.is_float ? GBKind::SumF : GBKind::SumI;
@@ -481,7 +551,167 @@ struct GBLaneView {
     const double*      f64   = nullptr;   // float sums
     const __int128*    i128  = nullptr;   // DECIMAL128 sums / extremes
     const std::string* sval  = nullptr;   // string extremes
+    GBArrayAggState*   aa    = nullptr;   // ARRAY_AGG element lists
+    const AggSpec2*    aa_spec = nullptr; // ARRAY_AGG DISTINCT/ORDER BY/LIMIT modifiers
 };
+
+// Steal a freshly-built column's owner into a unique_ptr for VectorOwner::child_owner.
+// Safe ONLY for a column this call just created (use_count()==1): VectorOwner is
+// move-constructible and its OwnedBuffers are unique_ptrs, so the husk left behind
+// frees nothing. This reuses the real emitters for the child rather than growing a
+// second copy of every per-type build.
+inline std::unique_ptr<VectorOwner> aa_steal_owner(CxxColumn&& c) {
+    return std::make_unique<VectorOwner>(std::move(*c.own));
+}
+
+// Apply DISTINCT → ORDER BY → LIMIT to one group's element list, in that order.
+// Matches SQL evaluation order: DISTINCT collapses duplicates, ORDER BY sorts what
+// survives, LIMIT truncates last. `idx` is rewritten to the surviving element
+// positions so the caller can gather from whichever value lane is live.
+inline void aa_finalize_group(const AggSpec2& sp, AAStore st,
+                              const GBArrayAggState& A, std::vector<uint32_t>& idx) {
+    const uint32_t n = static_cast<uint32_t>(A.size());
+    idx.clear();
+    idx.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) idx.push_back(i);
+
+    if (sp.aa_distinct) {
+        // First-seen wins (the order the rows arrived), so an unordered
+        // ARRAY_AGG(DISTINCT x) keeps its first occurrence like the serial plan.
+        // NULL is one distinct element, not one per row.
+        std::vector<uint32_t> keep;
+        keep.reserve(idx.size());
+        bool seen_null = false;
+        std::unordered_set<int64_t> seen_raw;
+        std::set<__int128> seen_i128;
+        std::unordered_set<std::string_view> seen_str;
+        for (uint32_t i : idx) {
+            if (A.nulls[i]) {
+                if (seen_null) continue;
+                seen_null = true;
+                keep.push_back(i);
+                continue;
+            }
+            bool fresh = false;
+            switch (st) {
+                case AAStore::Raw:  fresh = seen_raw.insert(A.raws[i]).second; break;
+                case AAStore::I128: fresh = seen_i128.insert(A.i128s[i]).second; break;
+                case AAStore::Str:
+                    fresh = seen_str.insert(std::string_view(A.strs[i])).second;
+                    break;
+            }
+            if (fresh) keep.push_back(i);
+        }
+        idx.swap(keep);
+    }
+
+    if (sp.aa_ordered) {
+        // NULLs sort last in both directions (they carry no order key), matching
+        // the ORDER BY the aggregate's own modifier expresses.
+        const bool desc = sp.aa_descending;
+        std::stable_sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b) {
+            if (A.nulls[a] != A.nulls[b]) return A.nulls[a] < A.nulls[b];
+            if (A.nulls[a]) return false;
+            switch (st) {
+                case AAStore::Raw:
+                    return desc ? A.raws[a] > A.raws[b] : A.raws[a] < A.raws[b];
+                case AAStore::I128:
+                    return desc ? A.i128s[a] > A.i128s[b] : A.i128s[a] < A.i128s[b];
+                case AAStore::Str:
+                    return desc ? A.strs[a] > A.strs[b] : A.strs[a] < A.strs[b];
+            }
+            return false;
+        });
+    }
+
+    if (sp.aa_limit >= 0 && static_cast<int64_t>(idx.size()) > sp.aa_limit)
+        idx.resize(static_cast<size_t>(sp.aa_limit));
+}
+
+// Emit ARRAY_AGG as a DRAKEN_ARRAY column: `data` is an int32 offsets buffer of
+// n+1 entries and the elements live in a flat child vector hung off
+// VectorOwner::child_owner (parent-owns-child RAII — the layout
+// make_array_from_sequence builds and cxx_column_child_vec reads).
+//
+// The ARRAY rows themselves are never NULL: a group exists because it has rows, and
+// LIMIT 0 yields an empty list, which is `[]` and not NULL. Element-level NULLs ride
+// the child's validity bitmap.
+inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& sp,
+                                        GBArrayAggState* states, uint32_t n,
+                                        ErrCtx& err) {
+    for (uint32_t g = 0; g < n; ++g) {
+        if (!states[g].overflowed) continue;
+        err.code = 1;
+        err.msg = "ARRAY_AGG: a group exceeded the per-group element cap — fail loud, "
+                  "never a silently truncated list. Narrow the group, add a LIMIT to "
+                  "the aggregate, or raise the cap.";
+        return CxxColumn{};
+    }
+
+    const AAStore st = aa_store_of(meta.type);
+    const size_t off_bytes = (static_cast<size_t>(n) + 1) * sizeof(int32_t);
+    int32_t* offsets = static_cast<int32_t*>(draken_malloc(off_bytes));
+    offsets[0] = 0;
+
+    // Pass 1: finalize each group and flatten the survivors into child lanes.
+    std::vector<int64_t>     craw;
+    std::vector<__int128>    ci128;
+    std::vector<std::string> cstr;
+    std::vector<uint8_t>     cvalid;   // 0 == element is NULL
+    std::vector<uint32_t>    idx;
+    for (uint32_t g = 0; g < n; ++g) {
+        GBArrayAggState& A = states[g];
+        aa_finalize_group(sp, st, A, idx);
+        for (uint32_t i : idx) {
+            cvalid.push_back(A.nulls[i] ? 0 : 1);
+            switch (st) {
+                case AAStore::Raw:  craw.push_back(A.raws[i]); break;
+                case AAStore::I128: ci128.push_back(A.i128s[i]); break;
+                case AAStore::Str:  cstr.push_back(A.strs[i]); break;
+            }
+        }
+        offsets[g + 1] = offsets[g] + static_cast<int32_t>(idx.size());
+    }
+
+    const uint32_t total = static_cast<uint32_t>(cvalid.size());
+    CxxColumn child_col;
+    switch (st) {
+        case AAStore::Raw:
+            child_col = emit_fixed_column(craw.data(), cvalid.data(), total,
+                                          meta.type, meta.logical);
+            break;
+        case AAStore::I128: {
+            // emit_i128_lane_column reads a per-row int64 "valid" lane, not the
+            // uint8 flags the other emitters take.
+            std::vector<int64_t> v64(total);
+            for (uint32_t i = 0; i < total; ++i) v64[i] = cvalid[i];
+            child_col = emit_i128_lane_column(ci128.data(), v64.data(), total,
+                                              meta.logical);
+            break;
+        }
+        case AAStore::Str: {
+            std::vector<int64_t> v64(total);
+            for (uint32_t i = 0; i < total; ++i) v64[i] = cvalid[i];
+            child_col = emit_string_lane_column(meta, cstr.data(), v64.data(), total);
+            break;
+        }
+    }
+
+    uint32_t* sel = static_cast<uint32_t*>(
+        draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
+    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
+    DrakenVector v;
+    v.data = offsets; v.selection = sel; v.data_length = n; v.length = n;
+    v.validity = nullptr; v.type = DRAKEN_ARRAY;
+    v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(offsets),
+                                          OwnedBuffer<uint8_t>(nullptr),
+                                          OwnedBuffer<void>(sel));
+    c.own->child_owner = aa_steal_owner(std::move(child_col));
+    c.view = c.own->vec;
+    return c;
+}
 
 // One aggregate output column over `n` groups from columnar lanes.
 inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
@@ -550,6 +780,8 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             return emit_fixed_column(L.i64, valid_ok(), n, meta.type, meta.logical);
         case GBKind::MinMaxStr:
             return emit_string_lane_column(meta, L.sval, L.valid, n);
+        case GBKind::ArrayAgg:
+            return emit_array_lane_column(meta, *L.aa_spec, L.aa, n, err);
     }
     return CxxColumn{};   // unreachable
 }
@@ -955,6 +1187,17 @@ struct UngroupedAggSink : Sink {
             DrakenType t = c.view.type;
             bool str_minmax = sort_type_is_string(t)
                 && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max);
+            // ARRAY_AGG is grouped-only (the binder rejects it without a GROUP BY,
+            // and the compiler again at plan time). Reaching the ungrouped sink means
+            // one of those gates broke — say so rather than read a lane that the
+            // ungrouped AggCell has no room for.
+            if (specs[s].fn == AggFn::ArrayAgg) {
+                err.code = 1;
+                err.msg = "native engine: ARRAY_AGG without a GROUP BY reached the "
+                          "ungrouped aggregate sink — fail loud, never a silent wrong "
+                          "answer";
+                return false;
+            }
             // COUNT only reads validity — any column type is countable.
             // COUNT(DISTINCT) reads serialized value bytes (key_append fails
             // loud on unsupported types at run time).
@@ -1270,6 +1513,7 @@ struct GBLanes {
     std::vector<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
     std::vector<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     std::vector<std::string> sval; // MinMaxStr extremes
+    std::vector<GBArrayAggState> aa;  // ArrayAgg per-group element lists
 };
 
 inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
@@ -1297,6 +1541,11 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             return;
         case GBKind::MinMaxStr:
             L.valid.resize(n); L.sval.resize(n);
+            return;
+        case GBKind::ArrayAgg:
+            // No `valid` lane: an ARRAY_AGG row is never NULL, and the element
+            // count is the state's own nulls.size().
+            L.aa.resize(n);
             return;
     }
 }
@@ -1638,11 +1887,21 @@ struct GroupBySink : Sink {
             DrakenType t = c.view.type;
             bool str_minmax = sort_type_is_string(t)
                 && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max);
-            // COUNT reads only validity; COUNT(DISTINCT) reads serialized value
-            // bytes (key_append fails loud on unsupported types at run time).
-            if (specs[s].fn != AggFn::Count && specs[s].fn != AggFn::CountDistinct
+            // ARRAY_AGG copies values instead of ordering/summing them, so it takes
+            // the string family too — its own guard, not agg2's.
+            if (specs[s].fn == AggFn::ArrayAgg) {
+                if (!aa_operand_supported(t)) {
+                    err.code = 1;
+                    err.msg = "native engine: unsupported ARRAY_AGG operand type — "
+                              "fail loud, never a silent wrong answer";
+                    return false;
+                }
+            } else if (specs[s].fn != AggFn::Count
+                    && specs[s].fn != AggFn::CountDistinct
                     && !str_minmax
                     && !agg2_operand_supported(t)) {
+                // COUNT reads only validity; COUNT(DISTINCT) reads serialized value
+                // bytes (key_append fails loud on unsupported types at run time).
                 err.code = 1;
                 err.msg = "native engine: unsupported aggregate operand type — fail "
                           "loud, never a silent wrong answer";
@@ -2057,6 +2316,40 @@ struct GroupBySink : Sink {
                     }
                     break;
                 }
+                case GBKind::ArrayAgg: {
+                    // NO sort_row_valid() skip — NULLs are elements of the list.
+                    // DISTINCT/ORDER BY/LIMIT are NOT applied here: this worker
+                    // holds an arbitrary row subset, so they must wait for the
+                    // merged list at finalize.
+                    const AAStore st = aa_store_of(l.meta[s].type);
+                    const bool is_f = l.meta[s].is_float;
+                    const int64_t cap = specs[s].aa_max_per_group;
+                    const DrakenStringArena* sa =
+                        (st == AAStore::Str) ? string_arena_of(v) : nullptr;
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        GBArrayAggState& A =
+                            l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s].aa[l.mk_ent[i]];
+                        bool nul = !sort_row_valid(v, i);
+                        if (st == AAStore::Str) {
+                            const char* p = nullptr;
+                            uint32_t len = 0;
+                            if (!nul) {
+                                const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
+                                p = reinterpret_cast<const char*>(
+                                    str_data(slot, sa->arena));
+                                len = str_length(slot);
+                            }
+                            A.push(st, nul, 0, 0, p, len, cap);
+                        } else if (st == AAStore::I128) {
+                            A.push(st, nul, 0, nul ? 0 : agg2_read_i128(v, i),
+                                   nullptr, 0, cap);
+                        } else {
+                            A.push(st, nul, nul ? 0 : agg2_read_raw(v, i, is_f), 0,
+                                   nullptr, 0, cap);
+                        }
+                    }
+                    break;
+                }
                 case GBKind::Rows:
                     break;
             }
@@ -2213,6 +2506,49 @@ struct GroupBySink : Sink {
                             D.valid[m] += S.valid[e];
                         }
                         break;
+                    case GBKind::ArrayAgg: {
+                        // Concatenate the worker's list onto the merged one. The cap
+                        // is re-checked here: N workers may each hold up to `cap` for
+                        // the same group, so a merge can cross it even when no single
+                        // worker did.
+                        const AAStore ast = aa_store_of(g.meta[s].type);
+                        const int64_t cap = specs[s].aa_max_per_group;
+                        // The other arms only read the source, so the loop aliases it
+                        // const. This one drains it: `src` is released right after the
+                        // merge, so its element strings are moved, not copied.
+                        GBLanes& SL = src.lanes[s];
+                        for (uint32_t e = 0; e < sn; ++e) {
+                            GBArrayAggState& SA = SL.aa[e];
+                            GBArrayAggState& DA = D.aa[ge[e]];
+                            if (SA.overflowed) DA.overflowed = true;
+                            size_t take = SA.size();
+                            if (static_cast<int64_t>(DA.size() + take) > cap) {
+                                DA.overflowed = true;
+                                take = (static_cast<int64_t>(DA.size()) >= cap)
+                                           ? 0u : static_cast<size_t>(cap - DA.size());
+                            }
+                            if (take == 0) continue;
+                            DA.nulls.insert(DA.nulls.end(), SA.nulls.begin(),
+                                            SA.nulls.begin() + take);
+                            switch (ast) {
+                                case AAStore::Raw:
+                                    DA.raws.insert(DA.raws.end(), SA.raws.begin(),
+                                                   SA.raws.begin() + take);
+                                    break;
+                                case AAStore::I128:
+                                    DA.i128s.insert(DA.i128s.end(), SA.i128s.begin(),
+                                                    SA.i128s.begin() + take);
+                                    break;
+                                case AAStore::Str:
+                                    DA.strs.insert(
+                                        DA.strs.end(),
+                                        std::make_move_iterator(SA.strs.begin()),
+                                        std::make_move_iterator(SA.strs.begin() + take));
+                                    break;
+                            }
+                        }
+                        break;
+                    }
                     case GBKind::CountDistinct: {
                         // Re-key each (group, value) pair: the group entry
                         // renumbers under the merged partition, and the same
@@ -2309,6 +2645,9 @@ struct GroupBySink : Sink {
                 GBLaneView lv;
                 if (kind == GBKind::Rows) {
                     lv.rows = merged.grows.data() + start;
+                } else if (kind == GBKind::ArrayAgg) {
+                    lv.aa = const_cast<GBArrayAggState*>(L.aa.data()) + start;
+                    lv.aa_spec = &specs[s];
                 } else {
                     lv.valid = L.valid.data() + start;
                     if (!L.i64.empty())  lv.i64  = L.i64.data() + start;

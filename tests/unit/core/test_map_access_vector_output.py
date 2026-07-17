@@ -2,23 +2,26 @@ import os
 import sys
 from types import SimpleNamespace
 
-import pyarrow as pa
+import draken.draken_native as dn
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from draken.morsels.morsel import Morsel
-from opteryx.expression import NodeType, evaluate_and_append
+from opteryx.expression import NodeType
+from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import Node
 from opteryx.types.logical_type import INT64, VARCHAR
 import opteryx
 
 
 def _schema(identity: str, value_type):
-    return SimpleNamespace(identity=identity, column_type=value_type, name=identity)
+    return SimpleNamespace(identity=identity.encode(), column_type=value_type, name=identity)
 
 
 def test_map_access_string_projection_returns_draken_vector():
-    morsel = Morsel.from_arrow(pa.table({"user_name": pa.array(["alice", "bob", None])}))
+    morsel = Morsel.from_vectors(
+        ["user_name"], [dn.vector_from_string_sequence([b"alice", b"bob", None])]
+    )
 
     user_name = Node(
         NodeType.IDENTIFIER,
@@ -38,7 +41,7 @@ def test_map_access_string_projection_returns_draken_vector():
         schema_column=_schema("a", VARCHAR),
     )
 
-    out = evaluate_and_append([first_char], morsel)
+    out = execute_and_append(compile_eval_nodes([first_char]), morsel)
     values = out.column(b"a").to_pylist()
     normalized = [v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else v for v in values]
 

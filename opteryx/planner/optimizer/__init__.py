@@ -61,6 +61,7 @@ from opteryx.planner.optimizer.strategies import (
     PredicateOrderingStrategy,
     PredicatePushdownStrategy,
     PredicateRewriteStrategy,
+    ProjectFusionStrategy,
     ProjectionPushdownStrategy,
     RedundantCastEliminationStrategy,
     RedundantOperationsStrategy,
@@ -163,7 +164,16 @@ class OptimizerVisitor:
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
             #            EmptyTableStrategy(telemetry),
             PredicateOrderingStrategy(telemetry),
+            # Strips no-op Subquery boundary nodes (among other redundant nodes) —
+            # a `FROM (SELECT ...)` leaves a Subquery node between the two Project
+            # nodes it wraps, so Project<->Project fusion must run AFTER this, once
+            # the pair is directly adjacent, not before.
             RedundantOperationsStrategy(telemetry),
+            # Fuses adjacent Project->Project pairs into one physical pass. After
+            # ProjectionPushdownStrategy so it sees already-pruned column lists,
+            # and after RedundantOperationsStrategy so Subquery boundary nodes
+            # between two Projects are already gone.
+            ProjectFusionStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
             # Runs last: all other strategies have had their say.
             # Uses FileEntry.stats_by_name for range detection — projection-stable.

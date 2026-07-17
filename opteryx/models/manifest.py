@@ -96,12 +96,13 @@ class Manifest:
         # (pruned) file list — matching the Python paths that iterate self.files.
         # None means "no pruning yet": row i of the vectors == self.files[i].
         self._live_rows: Optional[List[int]] = None
-        # Sketches are POSITIONAL against the schema as it was at load time, but
+        # Everything positional about a column — sketch slots AND per-file stats
+        # field_ids — is positional against the schema as it was at LOAD time, but
         # projection pushdown later prunes `self.schema` down to the referenced
-        # columns — so resolving a sketch's column via the (possibly projected)
-        # schema would silently read a different column's sketch. Snapshot the
-        # load-time order and index sketches through it. See _sketch_index.
-        self._sketch_columns: Dict[str, int] = {
+        # columns. Resolving a column's position via the (possibly projected) schema
+        # therefore silently reads a DIFFERENT column's data. Snapshot the load-time
+        # order once and resolve through it. See _sketch_index and _resolve_field_id.
+        self._load_time_columns: Dict[str, int] = {
             col.name: idx for idx, col in enumerate(schema.columns)
         }
 
@@ -117,7 +118,7 @@ class Manifest:
         Resolved against the load-time schema snapshot, never the live (projected)
         schema — the sketch vectors' middle dimension is fixed at load-time width.
         """
-        return self._sketch_columns.get(column_name)
+        return self._load_time_columns.get(column_name)
 
     # ================================================================
     # Basic Aggregates
@@ -660,12 +661,13 @@ class Manifest:
         if self._name_to_field_id and column_name in self._name_to_field_id:
             return self._name_to_field_id[column_name]
 
-        # Fallback: positional index in schema
-        for idx, col in enumerate(self.schema.columns):
-            if col.name == column_name:
-                return idx
-
-        return None
+        # Fallback: position in the LOAD-TIME schema, which is the order the
+        # per-file stats are keyed by. NEVER the live `self.schema` — projection
+        # pushdown prunes it to the referenced columns, so a lookup there returns a
+        # position in the pruned list and silently reads another column's stats
+        # (MAX(followers) answering with MAX(tweet_id) when followers pruned to
+        # index 0). Same trap _sketch_index documents.
+        return self._load_time_columns.get(column_name)
 
     def _get_field_id(self, column_name: str) -> Optional[int]:
         """Get field_id for column name."""

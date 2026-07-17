@@ -2,11 +2,7 @@ import os
 import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], ".."))
-from rich import traceback
-
 import opteryx
-
-traceback.install()
 
 
 def test_version():

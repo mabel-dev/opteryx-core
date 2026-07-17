@@ -1420,6 +1420,22 @@ def literal_string(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def match_against(branch, alias: Optional[List[str]] = None, key=None):
+    # `columns` is a list of compound identifiers; only the first was ever read, so
+    # `MATCH (a, b) AGAINST (...)` silently answered on `a` alone. The declared arity of
+    # _MATCH_AGAINST is 2 (one column, one query), so a second column cannot reach the
+    # kernel at all — refuse rather than drop it.
+    if len(branch["columns"]) != 1:
+        raise UnsupportedSyntaxError(
+            "MATCH supports a single column: `MATCH (column) AGAINST (string)`."
+        )
+    # MySQL's search modifiers select a full-text search STRATEGY. This MATCH is cosine
+    # similarity over embeddings, which has no counterpart to them, and they were being
+    # accepted and ignored — a silently different query from the one written.
+    if branch.get("opt_search_modifier") is not None:
+        raise UnsupportedSyntaxError(
+            f"MATCH does not support the `{branch['opt_search_modifier']}` search modifier; "
+            "matching is by embedding cosine similarity. Tune it with `SET match_threshold`."
+        )
     columns = [identifier(col["Identifier"]) for col in branch["columns"][0]]
     match_to = build(branch["match_value"])
 

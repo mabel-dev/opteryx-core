@@ -221,10 +221,16 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         Min "opteryx::engine::AggFn::Min"
         Max "opteryx::engine::AggFn::Max"
         CountDistinct "opteryx::engine::AggFn::CountDistinct"
+        ArrayAgg "opteryx::engine::AggFn::ArrayAgg"
     cdef cppclass AggSpec2:
         AggFn fn
         int col_idx
         string name
+        bint aa_distinct
+        bint aa_ordered
+        bint aa_descending
+        int64_t aa_limit
+        int64_t aa_max_per_group
 
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
@@ -1997,10 +2003,11 @@ cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
         ci = -1
         lit_dv.push_back(NULL)
         if slot.opcode == BC_LOAD_COL or (
-                (slot.opcode == BC_CAST or slot.opcode == BC_FUNCTION)
+                (slot.opcode == BC_CAST or slot.opcode == BC_FUNCTION
+                 or slot.opcode == BC_EXTRACTION)
                 and (slot.flags & BC_C_NATIVE_CHILD) != 0):
-            # BC_C_NATIVE_CHILD instructions (ARRAY->VARCHAR cast, SORT) carry
-            # the ARRAY operand's identity — the eval span resolves the
+            # BC_C_NATIVE_CHILD instructions (ARRAY->VARCHAR cast, SORT, arr[i])
+            # carry the ARRAY operand's identity — the eval span resolves the
             # owner-held child element vector through it.
             ident = <bytes>slot.column_identity
             try:
@@ -2077,9 +2084,10 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
             return False
         if op == BC_EXTRACTION:
             # `->`, `->>` and str[i] carry a resolved C-ABI kernel whose path/index is
-            # bound into extraction_ctx. BC_EXTR_MAP_ARRAY never sets the flag (its
-            # child vector is unreachable from a DrakenVector*), so it lands here as
-            # False and routes to the GIL VM.
+            # bound into extraction_ctx. arr[i] additionally carries the operand's
+            # identity (BC_C_NATIVE_CHILD) so the VM can resolve the owner-held child;
+            # it sets the flag only when its operand is a column, which is what the
+            # compiler's array hoist guarantees.
             if (fl & BC_INSTR_C_NATIVE) != 0:
                 continue
             return False
@@ -2454,10 +2462,17 @@ cdef cppvector[SortKeySpec] _sort_spec_from_list(list spec) except *:
 
 
 cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
-    """``spec`` = [(name:bytes|str, fn:str, col_idx:int|-1), ...] in output order."""
+    """``spec`` = [(name:bytes|str, fn:str, col_idx:int|-1[, options:dict]), ...]
+    in output order. ``options`` is ARRAY_AGG-only; every other function ignores it.
+    """
     cdef cppvector[AggSpec2] out
     cdef AggSpec2 s
-    for name, fn, col_idx in spec:
+    cdef object opts
+    for item in spec:
+        name = item[0]
+        fn = item[1]
+        col_idx = item[2]
+        opts = item[3] if len(item) > 3 else None
         if fn == "CountStar":
             s.fn = AggFn.CountStar
         elif fn == "Count":
@@ -2472,10 +2487,26 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.fn = AggFn.Min
         elif fn == "Max":
             s.fn = AggFn.Max
+        elif fn == "ArrayAgg":
+            s.fn = AggFn.ArrayAgg
         else:
             raise ValueError(f"native engine: unknown aggregate function {fn!r}")
         s.col_idx = <int>col_idx
         s.name = <string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8"))
+        # `s` is reused across iterations — every field is assigned unconditionally
+        # so a previous ARRAY_AGG's modifiers can never bleed into a later spec.
+        if opts is None:
+            s.aa_distinct = False
+            s.aa_ordered = False
+            s.aa_descending = False
+            s.aa_limit = -1
+            s.aa_max_per_group = 1000
+        else:
+            s.aa_distinct = <bint>bool(opts.get("distinct", False))
+            s.aa_ordered = <bint>bool(opts.get("ordered", False))
+            s.aa_descending = <bint>bool(opts.get("descending", False))
+            s.aa_limit = <int64_t>(-1 if opts.get("limit") is None else opts["limit"])
+            s.aa_max_per_group = <int64_t>opts.get("max_per_group", 1000)
         out.push_back(s)
     return out
 

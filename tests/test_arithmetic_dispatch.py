@@ -10,11 +10,9 @@ Coverage:
 - Validation of Phase 4.4 refactoring objectives
 """
 
+import draken.draken_native as dn
 import pyarrow as pa
 import pytest
-from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.integer64_vector import Integer64Vector
-from draken.vectors.integer32_vector import Integer32Vector
 
 from opteryx import session
 from opteryx.utils.vector_types import (
@@ -29,22 +27,22 @@ class TestVectorTypeDiscrimination:
     """Test VectorType-based dispatch implementation (Phase 4.1 foundation)."""
 
     def test_type_discrimination_int64_vector(self):
-        """Test VectorType discrimination for Integer64Vector."""
-        v = Integer64Vector.from_arrow(pa.array([1, 2, 3]))
+        """Test VectorType discrimination for an INT64 vector."""
+        v = dn.vector_from_sequence([1, 2, 3])
         vec_type = get_vector_type(v)
 
         assert vec_type == VectorType.INT64
 
     def test_type_discrimination_float64_vector(self):
-        """Test VectorType discrimination for Float64Vector."""
-        v = Float64Vector.from_arrow(pa.array([1.0, 2.0, 3.0]))
+        """Test VectorType discrimination for a FLOAT64 vector."""
+        v = dn.vector_float64_from_sequence([1.0, 2.0, 3.0])
         vec_type = get_vector_type(v)
 
         assert vec_type == VectorType.FLOAT64
 
     def test_type_discrimination_integer_vector(self):
-        """Test VectorType discrimination for Integer32Vector."""
-        v = Integer32Vector.from_arrow(pa.array([1, 2, 3], type=pa.int32()))
+        """Test VectorType discrimination for an INT32 vector."""
+        v = dn.vector_int32_from_sequence([1, 2, 3])
         vec_type = get_vector_type(v)
 
         assert vec_type == VectorType.INTEGER
@@ -69,16 +67,9 @@ class TestVectorTypeDiscrimination:
         """Test is_scalar for None."""
         assert is_scalar(None) is True
 
-    def test_type_discrimination_arrow_array(self):
-        """Test get_vector_type for PyArrow arrays."""
-        arr = pa.array([1, 2, 3], type=pa.int64())
-        vec_type = get_vector_type(arr)
-
-        assert vec_type == VectorType.INT64
-
     def test_is_draken_vector_true(self):
         """Test is_draken_vector returns True for Draken vectors."""
-        v = Integer64Vector.from_arrow(pa.array([1, 2, 3]))
+        v = dn.vector_from_sequence([1, 2, 3])
         assert is_draken_vector(v) is True
 
     def test_is_draken_vector_false_for_arrow(self):
@@ -151,56 +142,6 @@ class TestArithmeticIntegration:
         result = list(s.execute_to_morsels("SELECT (id + 1) * 2 FROM $planets LIMIT 3"))
 
         assert len(result) > 0
-
-
-class TestArithmeticDispatchRefactoring:
-    """Validate Phase 6 refactoring objectives (bind-time resolution)."""
-
-    def test_no_class_name_checks_in_arithmetic(self):
-        """Verify no __class__.__name__ checks in refactored arithmetic.py."""
-        import inspect
-
-        from opteryx.expression.evaluator import arithmetic
-
-        source = inspect.getsource(arithmetic._eval_binary_op_draken)
-
-        # Should not contain __class__.__name__ checks (removed in Phase 4.4)
-        assert "__class__.__name__" not in source
-
-    def test_uses_vectortype_discriminator(self):
-        """Verify refactored code uses VectorType discriminator."""
-        import inspect
-
-        from opteryx.expression.evaluator import arithmetic
-
-        source = inspect.getsource(arithmetic._eval_binary_op_draken)
-
-        # Should use get_vector_type (introduced in Phase 4.4)
-        assert "get_vector_type" in source
-
-    def test_uses_resolve_binary_op_phase6(self):
-        """Verify Phase 6: resolve_binary_op is used for bind-time resolution."""
-        import inspect
-
-        from opteryx.expression.evaluator import arithmetic
-
-        source = inspect.getsource(arithmetic._eval_binary_op_draken)
-
-        # Phase 6: Should use resolve_binary_op (not old dispatch)
-        assert "resolve_binary_op" in source
-
-    def test_date_operations_use_vectortype(self):
-        """Verify date operations refactored to use VectorType."""
-        import inspect
-
-        from opteryx.expression.evaluator import arithmetic
-
-        source = inspect.getsource(arithmetic._eval_binary_op_draken)
-
-        # Should use VectorType.DATE32, VectorType.TIMESTAMP instead of _DATE_TYPES
-        assert "VectorType.DATE32" in source
-        assert "VectorType.TIMESTAMP" in source
-        assert "VectorType.INTERVAL" in source
 
 
 class TestArithmeticDispatchEdgeCases:

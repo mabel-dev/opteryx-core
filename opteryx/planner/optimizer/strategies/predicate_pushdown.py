@@ -34,6 +34,12 @@ from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .predicate_rewriter import rewrite_date_trunc_to_range
+
+# Comparison ops that rewrite_date_trunc_to_range (predicate_rewriter.py) knows how
+# to turn into a raw-column range/literal — the set of ops the TRUNC-alias inline
+# below is allowed to attempt.
+_TRUNC_REWRITE_OPS: frozenset = frozenset({"Eq", "NotEq", "Lt", "LtEq", "Gt", "GtEq"})
 
 
 def _emitted_identities(plan, nid, memo):
@@ -82,6 +88,59 @@ def _predicate_column_ids(predicate):
     return out
 
 
+def _deep_pushdown_target(plan, start_nid, predicate_ids, group_key_identity, emit_memo):
+    """Deepest node at/below `start_nid` whose OWN emitted identities cover
+    `predicate_ids`, reachable by descending single-child hops that a filter
+    may legally cross. Returns the target nid, or None if nothing reachable
+    emits the predicate's columns.
+
+    A filter placed directly above the returned node is valid (that node's
+    output stream carries every column the filter references) and is reached
+    by crossing only nodes it is sound to push a filter past:
+
+      - Project nodes — row-count-preserving, so filtering above vs. below is
+        equivalent.
+      - the single Aggregate/AggregateAndGroup whose group keys include
+        `group_key_identity`. Crossing an aggregate is sound ONLY because the
+        caller guarantees the predicate is group-invariant for it: a
+        unit-aligned range on the raw column that this group key is TRUNC()'d
+        from is constant within every group (all rows of a group share one
+        truncated bucket, and the range is exactly that bucket's boundaries),
+        so filtering it pre-aggregation removes exactly the groups it would
+        remove post-aggregation. A non-monotonic or non-unit-aligned predicate
+        would NOT be group-invariant, which is why `group_key_identity` gates
+        this to the one aggregate whose key generated the rewrite.
+
+    The walk STOPS (never guesses) at any branching node (Join/Union — more
+    than one child) and any other single-child node type (Limit/Distinct/
+    Unnest/...), because pushing a filter past those can change the result.
+    """
+    current = start_nid
+    best = None
+    while current is not None:
+        node = plan[current]
+        if predicate_ids <= _emitted_identities(plan, current, emit_memo):
+            best = current
+        children = list(plan.ingoing_edges(current))
+        if len(children) != 1:
+            break
+        nt = node.node_type
+        if nt == LogicalPlanStepType.Project:
+            pass  # row-count-preserving: always crossable by a filter
+        elif nt in (LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup):
+            group_ids = {
+                g.schema_column.identity
+                for g in (node.groups or [])
+                if g.schema_column is not None
+            }
+            if group_key_identity is None or group_key_identity not in group_ids:
+                break
+        else:
+            break
+        current = children[0][0]
+    return best
+
+
 def _add_condition(existing_condition, new_condition):
     if not existing_condition:
         return new_condition
@@ -89,6 +148,22 @@ def _add_condition(existing_condition, new_condition):
     _and.left = new_condition
     _and.right = existing_condition
     return _and
+
+
+def _unwrap_nested(expression):
+    """Peel NESTED wrappers off an alias-expression template.
+
+    ProjectFusionStrategy inlines a bare-passthrough alias (e.g. `billing_date`
+    re-exporting a lower Project's `TRUNC(x, 'day') AS billing_date`) by wrapping
+    the inlined expression in a NESTED node so the original schema_column/alias/
+    query_column survive on the wrapper (see project_fusion.py's
+    `_substitute_column`). The TRUNC-alias detection below matches on
+    `node_type == FUNCTION and value == "TRUNC"`, which a NESTED wrapper fails
+    even though its `.centre` is exactly that FUNCTION node — unwrap first so
+    fusion doesn't silently starve this rewrite."""
+    while isinstance(expression, Node) and expression.node_type == NodeType.NESTED:
+        expression = expression.centre
+    return expression
 
 
 # Microseconds per unit for each CAST target type name (from cast_node.value).
@@ -306,7 +381,19 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             )
 
             is_having_predicate = bool(has_agg)
-            is_regular_pushable = len(node.relations) > 0 and not has_agg and is_simple_comparison
+            # A TRUNC-alias rewrite (_inline_project_alias_predicates) may have
+            # produced an AND/OR/BETWEEN condition that isn't a "simple
+            # comparison", but stamped an explicit, validated deep_restore_target
+            # on the node. Such a predicate MUST be collected so complete() can
+            # place it at that target -- leaving it in place (the `else` branch)
+            # would strand it above the alias's Project, where the raw column it
+            # now references isn't in the stream (a physical-plan compile crash).
+            has_deep_target = node.deep_restore_target is not None
+            is_regular_pushable = (
+                len(node.relations) > 0
+                and not has_agg
+                and (is_simple_comparison or has_deep_target)
+            )
 
             if is_having_predicate or is_regular_pushable:
                 # record where the node was, so we can put it back
@@ -317,6 +404,52 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 context.optimized_plan.remove_node(context.node_id, heal=True)
             else:
                 context.optimized_plan[context.node_id] = node
+
+        elif node.node_type == LogicalPlanStepType.Project:
+            # A predicate collected above this Project is expressed in terms of its
+            # OUTPUT schema. Passthrough/renamed columns preserve their source
+            # SchemaColumn's identity end-to-end (binder.locate_identifier reuses
+            # the same object rather than minting a new one), so a predicate
+            # referencing only such columns can safely keep flowing down through
+            # collected_predicates unchanged -- it will still correctly match
+            # further down (by identity) at a Scan, Join, or Aggregate boundary.
+            #
+            # A predicate that also needs an identity only this Project's OWN
+            # output defines (a computed expression -- FUNCTION/CAST/etc mint a
+            # fresh identity, see SchemaColumn.__post_init__) cannot be relocated
+            # below this Project. It is deliberately left untouched rather than
+            # eagerly materialised here with insert_node_after: doing so mutates
+            # this node's CURRENT outgoing edge mid-traversal, which is unsafe
+            # when that edge is shared/aliased with a not-yet-visited ancestor
+            # (e.g. an outer GROUP BY ALL reusing the SELECT list's expression
+            # node -- see the copy-memo comment in
+            # opteryx/compiled/structures/node.pyx) -- confirmed by a real
+            # crash repro (a TRUNC() re-application above an aggregate lost its
+            # function_ref) that reproduced ONLY with the eager insert_node_after,
+            # not with the passive fallback below. complete() already restores
+            # an unplaced predicate to its recorded original position via
+            # plan_path, safely, at the end of the whole traversal instead.
+            #
+            # Expression substitution (rewriting a predicate on a computed alias
+            # in terms of the underlying expression -- e.g. exploiting TRUNC's
+            # monotonicity) is explicitly OUT OF SCOPE here; see
+            # _inline_project_alias_predicates for the one existing special case
+            # (boolean alias compared to a literal) and the TRUNC-alias case.
+            _emit_memo = {}
+            child_ids = frozenset()
+            for child, _, _ in context.optimized_plan.ingoing_edges(context.node_id):
+                child_ids |= _emitted_identities(context.optimized_plan, child, _emit_memo)
+
+            passthrough_predicates = []
+            remaining_predicates = []
+            for predicate in context.collected_predicates:
+                predicate_ids = _predicate_column_ids(predicate)
+                if predicate_ids and predicate_ids <= child_ids:
+                    passthrough_predicates.append(predicate)
+                else:
+                    remaining_predicates.append(predicate)
+
+            context.collected_predicates = passthrough_predicates + remaining_predicates
 
         elif node.node_type == LogicalPlanStepType.Unnest:
             # if we're a CROSS JOIN UNNEST, we can push some filters into the UNNEST
@@ -433,6 +566,29 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             else:
                 context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
 
+            # Non-HAVING predicates left in remaining_predicates are simply left
+            # to keep flowing in collected_predicates, exactly as before this
+            # optimizer touched this node type. A predicate on a GROUP BY key
+            # (or anything else this aggregate's child emits) will keep being
+            # validated by identity further down (Project boundaries, Scan) and
+            # gets pushed as far as that allows.
+            #
+            # A predicate that instead needs an identity that only exists at
+            # THIS aggregate's own output (e.g. a reference to an aggregate's
+            # alias, bound by identity without literally embedding an
+            # AGGREGATOR node in the condition -- so `has_agg` above missed it)
+            # cannot be pushed below. It is deliberately NOT eagerly relocated
+            # with insert_node_after here: that call mutates this node's CURRENT
+            # outgoing edge mid-traversal, which is unsafe when the edge (or the
+            # predicate's own expression tree) is shared/aliased with a
+            # not-yet-visited ancestor (e.g. an outer GROUP BY ALL reusing the
+            # SELECT list's expression node -- see the copy-memo comment in
+            # opteryx/compiled/structures/node.pyx). Confirmed by a real crash
+            # repro (a TRUNC() re-applied above this aggregate lost its
+            # function_ref) that reproduced ONLY with the eager
+            # insert_node_after and disappeared entirely once removed --
+            # complete()'s plan_path-based restoration produces the identical
+            # final plan shape, safely, at the end of the whole traversal.
             context.collected_predicates = remaining_predicates
             if context.last_nid:
                 context.optimized_plan.add_edge(context.node_id, context.last_nid)
@@ -695,7 +851,28 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         # anything we couldn't push, we need to put back
+        _memo = {}
         for predicate in context.collected_predicates:
+            # A predicate carrying an explicit deep-restore target was rewritten
+            # (e.g. a TRUNC-alias range) into a form the ordinary top-down,
+            # one-hop-at-a-time gates can't route, but which IS valid at a
+            # specific node deeper in the plan. The rewriting site
+            # (_inline_trunc_alias_*) computed and justified that target; place
+            # the predicate directly above it. Guarded by a re-check that the
+            # target still exists and still emits every column the predicate
+            # needs, so a stale/invalid target can never produce a broken plan
+            # -- it just falls through to the plan_path restore below.
+            target = predicate.deep_restore_target
+            if (
+                target is not None
+                and target in context.optimized_plan
+                and _predicate_column_ids(predicate)
+                <= _emitted_identities(context.optimized_plan, target, _memo)
+            ):
+                self.telemetry.optimization_predicate_pushdown_deep_restore += 1
+                context.optimized_plan.insert_node_after(predicate.nid, predicate, target)
+                continue
+
             if predicate.plan_path is not None:
                 for nid in predicate.plan_path:
                     if nid in context.optimized_plan:
@@ -718,11 +895,23 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         metadata_to_push = []   # (predicate, condition_to_push)
         not_pushable = []       # predicate
 
+        # Match by column identity, not by relation name. `predicate.relations`
+        # is stamped with the relation/alias name in scope at the point the
+        # Filter node was originally collected — when the predicate's origin is
+        # an outer query against a VIEW that the planner has since inlined down
+        # to this real Scan, that name has nothing to do with `node.relation`/
+        # `node.alias` and the two can never match, even for a trivially
+        # pushable passthrough predicate. Column identity survives inlining
+        # (renames/aliases reuse the source SchemaColumn, see
+        # binder.locate_identifier), so it's the correct — and already
+        # established elsewhere in this file (_dump_above) — ground truth for
+        # "does this scan actually emit every column this predicate needs".
+        _emit_memo = {}
+        emitted_ids = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
+
         for predicate in context.collected_predicates:
-            if not (
-                len(predicate.relations) >= 1
-                and predicate.relations.issubset({node.relation, node.alias})
-            ):
+            predicate_ids = _predicate_column_ids(predicate)
+            if not predicate_ids or not predicate_ids <= emitted_ids:
                 remaining_predicates.append(predicate)
                 continue
 
@@ -838,6 +1027,22 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         if project_node is None:
             return
 
+        # A TRUNC-alias substitution rewrites the predicate to reference the raw
+        # column the alias's TRUNC()'d group key was computed from -- a column
+        # the ordinary top-down, one-hop-at-a-time Project/AggregateAndGroup
+        # gates in visit() can't route to (it lives below an aggregate, whose
+        # one-hop emitted set doesn't include it). Instead of relying on those
+        # gates, the substitution computes an explicit deep-restore target by
+        # descending from the alias-defining Project (`parent_nid`) to the
+        # deepest node that actually emits the rewritten column, crossing only
+        # nodes a filter may soundly be pushed past (see _deep_pushdown_target).
+        # complete() then places the predicate directly above that target. The
+        # descent runs against pre_optimized_tree, whose Project/Aggregate/Scan
+        # skeleton is stable through this strategy (only Filter nodes move), so
+        # the target nid it returns is still valid at complete() time.
+        _emit_memo = {}
+        descent_start_nid = parent_nid
+
         alias_expressions = {}
         for column in project_node.columns or []:
             query_column = getattr(column, "query_column", None)
@@ -854,10 +1059,28 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             return
 
         condition = node.condition
-        if condition.node_type != NodeType.COMPARISON_OPERATOR or condition.value not in {
-            "Eq",
-            "NotEq",
-        }:
+
+        # PredicateCompactionStrategy (runs before this strategy) commonly fuses
+        # a `col >= X AND col < Y` pair into a single BETWEEN node before this
+        # code ever sees it — handle that shape directly rather than only the
+        # single-comparison case, since it's the realistic shape a date-range
+        # WHERE clause takes once compacted.
+        if condition.node_type == NodeType.BETWEEN and self._inline_trunc_alias_between(
+            node, condition, alias_expressions, alias_chain,
+            context.pre_optimized_tree, descent_start_nid, _emit_memo,
+        ):
+            return
+
+        if condition.node_type != NodeType.COMPARISON_OPERATOR:
+            return
+
+        if condition.value in _TRUNC_REWRITE_OPS and self._inline_trunc_alias_predicate(
+            node, condition, alias_expressions, alias_chain,
+            context.pre_optimized_tree, descent_start_nid, _emit_memo,
+        ):
+            return
+
+        if condition.value not in {"Eq", "NotEq"}:
             return
 
         candidates = (
@@ -934,3 +1157,269 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
                 self.telemetry.optimization_predicate_pushdown_inline_project += 1
                 return
+
+    def _inline_trunc_alias_between(
+        self,
+        node: LogicalPlanNode,
+        condition: Node,
+        alias_expressions: dict,
+        alias_chain: set,
+        plan: LogicalPlan,
+        descent_start_nid: str,
+        emit_memo: dict,
+    ) -> bool:
+        """BETWEEN-shaped counterpart to _inline_trunc_alias_predicate.
+
+        PredicateCompactionStrategy's BETWEEN node always has the compared
+        expression on `.left`, the lower bound on `.right`, the upper bound on
+        `.centre`, and `.value == (lower_inclusive, upper_inclusive)` (see
+        predicate_compaction.py's _build_range_node) — no left/right ambiguity
+        to handle, unlike a plain comparison.
+
+        Decomposes into two comparisons (lower/upper), rewrites each via
+        rewrite_date_trunc_to_range, and recombines with AND. Same TRUNC-only
+        allow-list and deep-restore-target validation as
+        _inline_trunc_alias_predicate; see that method's docstring for the
+        rationale on both.
+        """
+        alias_candidate = condition.left
+        if not (
+            alias_candidate
+            and alias_candidate.node_type == NodeType.IDENTIFIER
+            and alias_candidate.source_column in alias_expressions
+        ):
+            return False
+        if alias_candidate.source and alias_chain and alias_candidate.source not in alias_chain:
+            return False
+
+        _, expression_template = alias_expressions[alias_candidate.source_column]
+        expression_template = _unwrap_nested(expression_template)
+        if (
+            not isinstance(expression_template, Node)
+            or expression_template.node_type != NodeType.FUNCTION
+            or expression_template.value != "TRUNC"
+        ):
+            return False
+        if get_all_nodes_of_type(expression_template, (NodeType.AGGREGATOR,)):
+            return False
+
+        lower_literal, upper_literal = condition.right, condition.centre
+        lower_inclusive, upper_inclusive = condition.value
+
+        def _make_side(op, literal):
+            trunc_expression = expression_template.copy()
+            trunc_expression.alias = None
+            trunc_expression.query_column = None
+            if trunc_expression.schema_column:
+                trunc_expression.schema_column.aliases = []
+            side_condition = Node(
+                node_type=NodeType.COMPARISON_OPERATOR,
+                value=op,
+                left=trunc_expression,
+                right=literal,
+            )
+            side_condition.schema_column = ExpressionColumn(
+                name=format_expression(side_condition, True), column_type=_CT_BOOLEAN
+            )
+            return rewrite_date_trunc_to_range(side_condition, self.telemetry)
+
+        rewritten_lower = _make_side("GtEq" if lower_inclusive else "Gt", lower_literal)
+        rewritten_upper = _make_side("LtEq" if upper_inclusive else "Lt", upper_literal)
+
+        # rewrite_date_trunc_to_range silently declines (returns its input
+        # unchanged) for a literal it can't parse -- notably, parse_iso
+        # misinterprets an already-folded TIMESTAMP literal (epoch
+        # MICROSECONDS, Opteryx's native storage unit) as epoch SECONDS,
+        # which is wildly out of range for any realistic date and returns
+        # None. Committing a "rewrite" where one side silently kept its
+        # original TRUNC(...) wrapper while the other got stripped produces a
+        # malformed, half-rewritten predicate that crashes downstream at
+        # physical-plan compile time ("FUNCTION 'TRUNC' has no function_ref").
+        # Require BOTH sides to have actually lost their TRUNC wrapper before
+        # committing either.
+        def _still_wraps_trunc(side):
+            return any(
+                fn.value == "TRUNC" for fn in get_all_nodes_of_type(side, (NodeType.FUNCTION,))
+            )
+
+        if _still_wraps_trunc(rewritten_lower) or _still_wraps_trunc(rewritten_upper):
+            self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
+            return False
+
+        combined = Node(node_type=NodeType.AND, left=rewritten_lower, right=rewritten_upper)
+
+        identifiers = get_all_nodes_of_type(combined, (NodeType.IDENTIFIER,))
+        rewritten_ids = {
+            sc.identity
+            for ident in identifiers
+            for sc in (getattr(ident, "schema_column", None),)
+            if sc is not None and sc.identity is not None
+        }
+        group_key_identity = getattr(
+            getattr(alias_candidate, "schema_column", None), "identity", None
+        )
+        target = (
+            _deep_pushdown_target(plan, descent_start_nid, rewritten_ids, group_key_identity, emit_memo)
+            if rewritten_ids
+            else None
+        )
+        if target is None:
+            self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
+            return False
+
+        node.condition = combined
+        node.columns = identifiers
+        node.relations = {
+            identifier.source for identifier in identifiers if getattr(identifier, "source", None)
+        }
+        node.deep_restore_target = target
+
+        self.telemetry.optimization_predicate_pushdown_trunc_alias_inline += 1
+        return True
+
+    def _inline_trunc_alias_predicate(
+        self,
+        node: LogicalPlanNode,
+        condition: Node,
+        alias_expressions: dict,
+        alias_chain: set,
+        plan: LogicalPlan,
+        descent_start_nid: str,
+        emit_memo: dict,
+    ) -> bool:
+        """Substitute a WHERE-clause alias for `TRUNC(col, unit)` with the TRUNC
+        expression itself, then immediately fold it into a range predicate on the
+        raw column via the existing (calendar-correct, all-units) rewrite already
+        used by PredicateRewriteStrategy.
+
+        Only TRUNC is allow-listed here — this is a monotonic function, so a
+        range comparison against its result is equivalent to a range comparison
+        against the raw input (exploited by rewrite_date_trunc_to_range). Other
+        computed aliases are NOT safe to substitute this way (e.g. ABS/MOD are
+        not monotonic, so the pre-image of a range under them isn't a simple
+        range) and are deliberately left untouched.
+
+        PredicateRewriteStrategy (which owns rewrite_date_trunc_to_range) already
+        had its one pass over the plan by the time PredicatePushdownStrategy runs
+        (see strategy ordering in opteryx/planner/optimizer/__init__.py), so a
+        TRUNC expression that only becomes visible via this substitution would
+        otherwise never get folded — we call the rewrite directly instead of
+        duplicating its logic.
+
+        The rewritten predicate is committed only if `_deep_pushdown_target`
+        finds a node deeper in the plan that actually emits the raw column it
+        now references, reachable by crossing only filter-transparent nodes
+        (and the one aggregate whose group key it is provably group-invariant
+        under). That target is stamped on the node as `deep_restore_target` and
+        honored by complete(). If no valid target exists, the rewrite is
+        declined and the predicate left untouched -- always safe, since it then
+        restores to its original valid position via plan_path. Requiring a
+        concrete valid target (rather than a looser "the identity exists
+        somewhere" check) is what prevents committing a predicate the plan
+        can't actually place, which crashes at physical-plan compile time
+        ("expression references column ... which the stream does not carry").
+
+        Returns True if the predicate was rewritten (node.condition/.columns/
+        .relations/.deep_restore_target were updated), False if nothing
+        matched or no valid deep target was found, and the predicate is
+        unchanged.
+        """
+        candidates = (
+            (condition.left, condition.right, condition.value),
+            (condition.right, condition.left, _INVERT_COMPARISON_OP.get(condition.value)),
+        )
+
+        for alias_candidate, literal_candidate, op_with_alias_on_left in candidates:
+            if op_with_alias_on_left is None:
+                continue
+            if not (
+                alias_candidate
+                and alias_candidate.node_type == NodeType.IDENTIFIER
+                and alias_candidate.source_column in alias_expressions
+                and literal_candidate
+                and literal_candidate.node_type == NodeType.LITERAL
+            ):
+                continue
+
+            if (
+                alias_candidate.source
+                and alias_chain
+                and alias_candidate.source not in alias_chain
+            ):
+                continue
+
+            _, expression_template = alias_expressions[alias_candidate.source_column]
+            expression_template = _unwrap_nested(expression_template)
+            if (
+                not isinstance(expression_template, Node)
+                or expression_template.node_type != NodeType.FUNCTION
+                or expression_template.value != "TRUNC"
+            ):
+                continue
+            if get_all_nodes_of_type(expression_template, (NodeType.AGGREGATOR,)):
+                continue
+
+            trunc_expression = expression_template.copy()
+            trunc_expression.alias = None
+            trunc_expression.query_column = None
+            if trunc_expression.schema_column:
+                trunc_expression.schema_column.aliases = []
+
+            new_condition = Node(
+                node_type=NodeType.COMPARISON_OPERATOR,
+                value=op_with_alias_on_left,
+                left=trunc_expression,
+                right=literal_candidate,
+            )
+            new_condition.schema_column = ExpressionColumn(
+                name=format_expression(new_condition, True), column_type=_CT_BOOLEAN
+            )
+
+            rewritten = rewrite_date_trunc_to_range(new_condition, self.telemetry)
+
+            # rewrite_date_trunc_to_range silently declines (returns its input
+            # unchanged, still TRUNC-wrapped) for a literal it can't parse --
+            # see _inline_trunc_alias_between's docstring/comment for the
+            # concrete failure mode (an already-folded TIMESTAMP literal,
+            # epoch microseconds, misread as epoch seconds). A predicate still
+            # containing the TRUNC call is not a successful rewrite; committing
+            # it crashes downstream at physical-plan compile time.
+            if any(
+                fn.value == "TRUNC"
+                for fn in get_all_nodes_of_type(rewritten, (NodeType.FUNCTION,))
+            ):
+                self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
+                continue
+
+            identifiers = get_all_nodes_of_type(rewritten, (NodeType.IDENTIFIER,))
+            rewritten_ids = {
+                sc.identity
+                for ident in identifiers
+                for sc in (getattr(ident, "schema_column", None),)
+                if sc is not None and sc.identity is not None
+            }
+            group_key_identity = getattr(
+                getattr(alias_candidate, "schema_column", None), "identity", None
+            )
+            target = (
+                _deep_pushdown_target(
+                    plan, descent_start_nid, rewritten_ids, group_key_identity, emit_memo
+                )
+                if rewritten_ids
+                else None
+            )
+            if target is None:
+                self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
+                continue
+
+            node.condition = rewritten
+            node.columns = identifiers
+            node.relations = {
+                identifier.source for identifier in identifiers if getattr(identifier, "source", None)
+            }
+            node.deep_restore_target = target
+
+            self.telemetry.optimization_predicate_pushdown_trunc_alias_inline += 1
+            return True
+
+        return False

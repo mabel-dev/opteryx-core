@@ -67,6 +67,40 @@ def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
     return environ.get(key, default=default)
 
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off"})
+
+
+def get_bool(key: str, default: bool) -> bool:
+    """
+    Retrieve a boolean configuration value from the environment.
+
+    `bool()` of any non-empty string is True, so `FLAG=false` and `FLAG=0` must not be
+    parsed that way. An unset variable takes the default; anything else is parsed
+    case-insensitively and an unrecognised value raises rather than being silently
+    misread as its opposite.
+
+    Parameters:
+        key (str): The environment variable to look up.
+        default (bool): The value used when the variable is unset.
+
+    Returns:
+        bool: The configuration value.
+    """
+    value = environ.get(key)
+    if value is None:
+        return default
+    text = value.strip().lower()
+    if text in _TRUTHY:
+        return True
+    if text in _FALSY:
+        return False
+    raise ValueError(
+        f"Invalid boolean for `{key}`: {value!r}. Expected one of "
+        f"{sorted(_TRUTHY)} or {sorted(_FALSY)}."
+    )
+
+
 def parse_json(value: typing.Any, default: typing.Any = None) -> typing.Any:
     """
     Parse a JSON value from text or return the object when already structured.
@@ -88,13 +122,23 @@ def parse_json(value: typing.Any, default: typing.Any = None) -> typing.Any:
 
 # These are 'protected' properties which cannot be overridden by a single query
 
-DISABLE_OPTIMIZER: bool = bool(get("DISABLE_OPTIMIZER", False))
+DISABLE_OPTIMIZER: bool = get_bool("DISABLE_OPTIMIZER", False)
 """**DANGEROUS** This will cause most queries to fail."""
 
-OPTERYX_DEBUG: bool = bool(get("OPTERYX_DEBUG", False))
+OPTERYX_DEBUG: bool = get_bool("OPTERYX_DEBUG", False)
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
 
-VALIDATE_OPTIMIZER_PLANS: bool = bool(get("VALIDATE_OPTIMIZER_PLANS", False))
+MATCH_THRESHOLD: float = float(get("MATCH_THRESHOLD", 0.5))
+"""Default cosine similarity at or above which `MATCH (col) AGAINST (str)` is true.
+
+Meaningful only relative to the ACTIVE EMBED capability — the score distributions of two
+embedders are not comparable. Under the core static-hash EMBED (lexical, not semantic)
+scores are bimodal at 1.0 and ~0, so any value in (0.3, 1.0] makes MATCH a case-insensitive
+exact match; under a semantic capability (MiniLM) 0.5 separates related from unrelated
+text. Tune per embedder with `SET match_threshold`.
+"""
+
+VALIDATE_OPTIMIZER_PLANS: bool = get_bool("VALIDATE_OPTIMIZER_PLANS", False)
 """Debug guardrail: when set, the optimizer checks plan structural invariants
 after every strategy and raises (naming the offending strategy) on corruption.
 Off by default — adds per-strategy validation cost only when enabled."""
@@ -140,6 +184,15 @@ execution starts and restored when result iteration completes.
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 
+ARRAY_AGG_MAX_VALUES_PER_GROUP: int = int(get("ARRAY_AGG_MAX_VALUES_PER_GROUP", 1000))
+"""Hard cap on the elements ARRAY_AGG retains per group.
+
+A per-group list is unbounded by nature, so a high-cardinality grouping can hold the
+whole relation in sink state. Exceeding the cap raises rather than truncating — a
+short list silently passed off as complete is a wrong answer. Mirrors MEDIAN's
+per-group cap. Raise it when a query legitimately needs longer lists.
+"""
+
 KVSTORE_LOCATION: str = str(get("KVSTORE_LOCATION", "")).strip()
 """Single-store KV location (e.g. file://, valkey://, gs://, memory://)."""
 
@@ -165,7 +218,7 @@ MAX_LOCAL_BUFFER_CAPACITY: int
 
 CONCURRENT_READS:int = int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
 
-ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
+ENABLE_ZERO_COPY: bool = get_bool("ENABLE_ZERO_COPY", True)
 
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
@@ -208,6 +261,15 @@ if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
     import warnings
     warnings.warn(
         "FEATURE_DRAKEN_DICT_EXPR_STRICT is retired and ignored; "
+        "dictionary expression execution is strict-only.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+if environ.get("FEATURE_DRAKEN_DICT_EXPR_FASTPATH") is not None:
+    import warnings
+    warnings.warn(
+        "FEATURE_DRAKEN_DICT_EXPR_FASTPATH is retired and ignored; "
         "dictionary expression execution is strict-only.",
         DeprecationWarning,
         stacklevel=2,
@@ -287,15 +349,15 @@ LOCAL_STORE_ROOT: str = get("OPTERYX_LOCAL_STORE", "./.opteryx")
 # FEATURE FLAGS
 class Features:
     # Feature flags are used to enable or disable experimental features.
-    disable_nested_loop_join = bool(get("FEATURE_DISABLE_NESTED_LOOP_JOIN", False))
-    force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
-    use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
-    disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
-    disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
-    disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
+    disable_nested_loop_join = get_bool("FEATURE_DISABLE_NESTED_LOOP_JOIN", False)
+    force_nested_loop_join = get_bool("FEATURE_FORCE_NESTED_LOOP_JOIN", False)
+    use_draken_ops_kernels = get_bool("FEATURE_USE_DRAKEN_OPS_KERNELS", False)
+    disable_predicate_ordering = get_bool("FEATURE_DISABLE_PREDICATE_ORDERING", False)
+    disable_predicate_pushdown = get_bool("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False)
+    disable_manifest_pruning = get_bool("FEATURE_DISABLE_MANIFEST_PRUNING", False)
     parquet_pool_reader = str(get("FEATURE_PARQUET_POOL_READER", "1")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
-    enable_dpccp_join_planning = bool(get("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", True))
+    enable_dpccp_join_planning = get_bool("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", True)
 
 
 features = Features()

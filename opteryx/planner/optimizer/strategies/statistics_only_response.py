@@ -436,13 +436,13 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
     if manifest is None:
         return None
 
-    # Get field_id for this column
-    field_id = None
-    for i, col in enumerate(manifest.schema.columns):
-        if col.name == column_name:
-            field_id = i
-            break
-
+    # The manifest owns this mapping: per-file stats are keyed by the column's
+    # LOAD-TIME position, and by now projection pushdown has pruned
+    # manifest.schema to just the referenced columns. Resolving the position here
+    # against that pruned schema silently read a different column's bounds —
+    # MAX(followers) answered with MAX(tweet_id) once followers was the only
+    # column left (index 0, the file's tweet_id slot).
+    field_id = manifest._resolve_field_id(column_name)
     if field_id is None:
         return None
 

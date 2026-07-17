@@ -3,6 +3,7 @@
 
 include "case_helpers.pyx"
 include "vector_anyop_like.pyx"
+include "vector_dfa_compile.pyx"
 include "vector_dfa_extract.pyx"
 include "vector_like.pyx"
 include "vector_rlike.pyx"

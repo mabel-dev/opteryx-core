@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import pytest
 
+import draken.draken_native as dn
 from draken.morsels.morsel import Morsel
-from draken.vectors.string_vector import StringVector
 from opteryx.operators._operators import (
     AggregationSpec,
     GroupHashEngine,
@@ -27,11 +27,17 @@ from opteryx.operators._operators import (
 )
 
 
-def _morsel(codes, dictionary, row_validity=None, name=b"col"):
+def _codes_to_values(codes, dictionary, row_validity=None):
     if row_validity is None:
-        v = StringVector.from_dict(codes, dictionary)
-    else:
-        v = StringVector.from_dict(codes, dictionary, row_validity=row_validity)
+        return [dictionary[c].encode() for c in codes]
+    return [
+        dictionary[c].encode() if valid else None
+        for c, valid in zip(codes, row_validity)
+    ]
+
+
+def _morsel(codes, dictionary, row_validity=None, name=b"col"):
+    v = dn.vector_from_string_dict_sequence(_codes_to_values(codes, dictionary, row_validity))
     return Morsel.from_vectors([name], [v]), v
 
 
@@ -82,17 +88,18 @@ class TestSingleMorsel:
             [b"col"], count_spec, [_materialized_morsel(v)]
         )
         assert _result_as_dict(dict_out) == _result_as_dict(dense_out) == {
-            b"banana": 3,
-            b"apple": 2,
-            b"cherry": 2,
+            "banana": 3,
+            "apple": 2,
+            "cherry": 2,
         }
 
-    def test_unreferenced_dict_codes_excluded(self, count_spec):
-        # 'b' and 'c' are in the dictionary but never referenced.  The
-        # fast path must not allocate empty groups for them.
-        m, v = _morsel([0, 0, 0], ["a", "b", "c"])
+    def test_only_referenced_values_form_groups(self, count_spec):
+        # vector_from_string_dict_sequence's dictionary is built from only the
+        # values actually present in the data, so there's nothing unreferenced
+        # to exclude — this asserts that invariant holds for the fast path.
+        m, v = _morsel([0, 0, 0], ["a", "a", "a"])
         dict_out = _run_engine([b"col"], count_spec, [m])
-        assert _result_as_dict(dict_out) == {b"a": 3}
+        assert _result_as_dict(dict_out) == {"a": 3}
 
     def test_with_row_nulls(self, count_spec):
         m, v = _morsel(
@@ -132,10 +139,10 @@ class TestMultiMorsel:
         m2, _ = _morsel([0, 0, 1, 1], ["gamma", "delta"])
         out = _run_engine([b"col"], count_spec, [m1, m2])
         assert _result_as_dict(out) == {
-            b"alpha": 2,
-            b"beta": 1,
-            b"gamma": 2,
-            b"delta": 2,
+            "alpha": 2,
+            "beta": 1,
+            "gamma": 2,
+            "delta": 2,
         }
 
     def test_overlapping_dicts_same_value_different_codes(self, count_spec):
@@ -145,9 +152,9 @@ class TestMultiMorsel:
         m2, _ = _morsel([1, 0], ["beta", "shared"])
         out = _run_engine([b"col"], count_spec, [m1, m2])
         assert _result_as_dict(out) == {
-            b"shared": 2,
-            b"alpha": 1,
-            b"beta": 1,
+            "shared": 2,
+            "alpha": 1,
+            "beta": 1,
         }
 
     def test_dict_and_dense_morsels_match(self, count_spec):
@@ -155,10 +162,10 @@ class TestMultiMorsel:
         # collapse correctly across the two encodings.
         m_dict, v = _morsel([0, 1, 0], ["x", "y"])
         m_dense = Morsel.from_vectors([b"col"], [
-            StringVector.from_dict([0, 1], ["x", "y"]).materialize()
+            dn.vector_from_string_dict_sequence([b"x", b"y"]).materialize()
         ])
         out = _run_engine([b"col"], count_spec, [m_dict, m_dense])
-        assert _result_as_dict(out) == {b"x": 3, b"y": 2}
+        assert _result_as_dict(out) == {"x": 3, "y": 2}
 
 
 # ---------------------------------------------------------------------------

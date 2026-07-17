@@ -14,36 +14,71 @@ from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSl
 from draken.core.buffers cimport str_length, str_data
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
-from libc.stdint cimport uint8_t, uint32_t
-from libcpp.string cimport string
+from libc.stdint cimport uint8_t, uint16_t, uint32_t
 
 cdef extern from "core/alloc.h":
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
 
 
-cdef extern from "re2/stringpiece.h":
-    cdef cppclass StringPieceRL "re2::StringPiece":
-        StringPieceRL() except +
-        StringPieceRL(const char* data, size_t length) except +
+# Pattern operand is a pre-compiled DFA blob (vector_dfa_compile.compile_rlike_dfa),
+# produced at plan time from a literal pattern by predicate_rewriter.py's
+# _rewrite_rlike_to_dfa — never a raw regex string. RE2 is not linked here; RE2's
+# parser only ever runs at plan time (vector_dfa_compile.pyx). A non-literal or
+# uncompilable pattern is refused with NotSupportedError before a predicate ever
+# reaches this function — see .claude/CLAUDE.md's plan-time-refusal precedent.
+cdef inline bint _dfa_match(
+    const uint8_t* blob,
+    Py_ssize_t blob_len,
+    const uint8_t* sdata,
+    uint32_t slen,
+) except -1 nogil:
+    if blob_len < 4:
+        with gil:
+            raise ValueError("vector_rlike: malformed DFA blob (too short)")
+    cdef uint8_t version = blob[0]
+    cdef uint8_t flags = blob[1]
+    cdef uint16_t num_states = (<uint16_t>blob[2]) | ((<uint16_t>blob[3]) << 8)
+    if version != 1:
+        with gil:
+            raise ValueError("vector_rlike: unsupported DFA blob version")
+    cdef bint has_begin = (flags & 0x01) != 0
+    cdef bint has_end = (flags & 0x02) != 0
+    cdef Py_ssize_t accept_bitmap_len = (num_states + 7) // 8
+    cdef Py_ssize_t expected_len = 4 + accept_bitmap_len + (<Py_ssize_t>num_states) * 256 * 2
+    if blob_len != expected_len:
+        with gil:
+            raise ValueError("vector_rlike: malformed DFA blob (length mismatch)")
 
+    cdef const uint8_t* accept_bitmap = blob + 4
+    cdef const uint16_t* table = <const uint16_t*>(blob + 4 + accept_bitmap_len)
+    cdef int state = 0
+    cdef uint32_t i
+    cdef uint16_t next_state
 
-cdef extern from "re2/re2.h":
-    cdef cppclass RE2OptionsRL "re2::RE2::Options":
-        RE2OptionsRL() except +
-        void set_case_sensitive(bint)
-        void set_log_errors(bint)
+    if not has_end and ((accept_bitmap[0] >> 0) & 1):
+        return True
 
-    cdef cppclass RE2RL "re2::RE2":
-        RE2RL(const string& pattern) except +
-        RE2RL(const string& pattern, const RE2OptionsRL& options) except +
-        bint ok() const
-        @staticmethod
-        bint PartialMatch(const StringPieceRL& text, const RE2RL& re)
+    for i in range(slen):
+        next_state = table[(<Py_ssize_t>state) * 256 + sdata[i]]
+        if next_state == 0xFFFF:
+            # Anchored-start (has_begin): a genuine dead end, no recovery.
+            # Unanchored-start: the NFA's self-loop "search anywhere" state is
+            # always active, so a real dead transition should not occur here —
+            # treat it the same (no match) rather than guess at recovery.
+            return False
+        state = <int>next_state
+        if not has_end and ((accept_bitmap[state >> 3] >> (state & 7)) & 1):
+            return True
+
+    if has_end:
+        return ((accept_bitmap[state >> 3] >> (state & 7)) & 1) != 0
+    return False
 
 
 cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
-    """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs."""
+    """Return mask: 1 if element matches the compiled DFA pattern, else 0.
+    Propagates NULLs."""
     cdef DrakenVector* puv = pattern.unified()
     if puv.data_length != 1:
         raise ValueError(
@@ -73,62 +108,45 @@ cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
-    cdef RE2OptionsRL options
-    cdef RE2RL* regex = NULL
-    cdef StringPieceRL text_piece
 
     # A NULL pattern makes every row NULL.
     if puv.validity != NULL and (puv.validity[0] & 1) == 0:
         draken_free(dst)
         return _all_null_bool(n)
 
-    options = RE2OptionsRL()
-    options.set_case_sensitive(True)
-    options.set_log_errors(False)
-    regex = new RE2RL(string(<const char*>pat_ptr, <size_t>pat_len), options)
+    if negate:
+        memset(dst, 0xFF, sz)
+        if (n & 7) != 0:
+            dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
+    else:
+        memset(dst, 0, sz)
 
-    try:
-        if not regex.ok():
-            raise ValueError("Invalid REGEXP pattern")
+    if nulls != NULL and nbytes != 0:
+        out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, nulls, nbytes)
+        if (n & 7) != 0:
+            mask = <uint8_t>((1 << (n & 7)) - 1)
+            out_null[nbytes - 1] &= mask
 
-        if negate:
-            memset(dst, 0xFF, sz)
-            if (n & 7) != 0:
-                dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
-        else:
-            memset(dst, 0, sz)
+    if negate:
+        for i in range(n):
+            if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+                continue
+            slot = &arena.slots[sel[i]]
+            slen = str_length(slot)
+            sdata = str_data(slot, arena.arena)
+            if _dfa_match(pat_ptr, pat_len, sdata, slen):
+                dst[i >> 3] &= ~(1 << (i & 7))
+    else:
+        for i in range(n):
+            if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+                continue
+            slot = &arena.slots[sel[i]]
+            slen = str_length(slot)
+            sdata = str_data(slot, arena.arena)
+            if _dfa_match(pat_ptr, pat_len, sdata, slen):
+                dst[i >> 3] |= (1 << (i & 7))
 
-        if nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memcpy(out_null, nulls, nbytes)
-            if (n & 7) != 0:
-                mask = <uint8_t>((1 << (n & 7)) - 1)
-                out_null[nbytes - 1] &= mask
-
-        if negate:
-            for i in range(n):
-                if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
-                    continue
-                slot = &arena.slots[sel[i]]
-                slen = str_length(slot)
-                sdata = str_data(slot, arena.arena)
-                text_piece = StringPieceRL(<const char*>sdata, <size_t>slen)
-                if RE2RL.PartialMatch(text_piece, regex[0]):
-                    dst[i >> 3] &= ~(1 << (i & 7))
-        else:
-            for i in range(n):
-                if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
-                    continue
-                slot = &arena.slots[sel[i]]
-                slen = str_length(slot)
-                sdata = str_data(slot, arena.arena)
-                text_piece = StringPieceRL(<const char*>sdata, <size_t>slen)
-                if RE2RL.PartialMatch(text_piece, regex[0]):
-                    dst[i >> 3] |= (1 << (i & 7))
-
-        return from_decoded(<void*>dst, out_null, <size_t>n)
-    finally:
-        if regex != NULL:
-            del regex
+    return from_decoded(<void*>dst, out_null, <size_t>n)

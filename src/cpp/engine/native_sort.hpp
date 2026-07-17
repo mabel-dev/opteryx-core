@@ -384,11 +384,99 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             continue;
         }
 
+        if (t == DRAKEN_ARRAY) {
+            // An ARRAY column is an int32 offsets buffer plus a flat child vector
+            // hung off VectorOwner::child_owner. Gathering rows means gathering each
+            // row's element RANGE out of the child — and the child can be any type
+            // (including another ARRAY). Rather than restate every per-type gather
+            // here, expand the ranges into child-level (morsel, row) pairs and RECURSE
+            // on a synthetic one-column view of each source's child.
+            std::vector<uint32_t> c_order, c_row_m, c_row_r;
+            int32_t* offsets = static_cast<int32_t*>(
+                draken_malloc((static_cast<size_t>(n) + 1) * sizeof(int32_t)));
+            offsets[0] = 0;
+            for (uint32_t i = 0; i < n; ++i) {
+                uint32_t g = order[first + i];
+                const CxxColumn& sc = ms[row_m[g]]->columns[ci];
+                const DrakenVector& v = sc.view;
+                uint32_t r = row_r[g];
+                if (!sort_row_valid(v, r)) {
+                    offsets[i + 1] = offsets[i];
+                    mark_null(i);
+                    continue;
+                }
+                if (!sc.own || !sc.own->child_owner) {
+                    draken_free(offsets);
+                    if (vbits) draken_free(vbits);
+                    err.code = 1;
+                    err.msg = "gather_rows: ARRAY column has no child vector — fail "
+                              "loud, never silent corruption";
+                    return nullptr;
+                }
+                const int32_t* soff = static_cast<const int32_t*>(v.data);
+                uint32_t phys = v.selection[r];
+                int32_t s0 = soff[phys], s1 = soff[phys + 1];
+                for (int32_t j = s0; j < s1; ++j) {
+                    c_order.push_back(static_cast<uint32_t>(c_row_m.size()));
+                    c_row_m.push_back(row_m[g]);
+                    c_row_r.push_back(static_cast<uint32_t>(j));
+                }
+                offsets[i + 1] = offsets[i] + (s1 - s0);
+            }
+
+            // One synthetic morsel per source morsel, index-parallel to `ms` so the
+            // child-level row_m indices line up. The aliasing shared_ptr points at the
+            // child owner while keeping the PARENT owner alive — the child's buffers
+            // belong to that subtree, not to us.
+            std::vector<MorselPtr> child_ms;
+            child_ms.reserve(ms.size());
+            for (const MorselPtr& m : ms) {
+                auto cm = std::make_shared<CxxMorsel>();
+                const CxxColumn& sc = m->columns[ci];
+                CxxColumn cc;
+                if (sc.own && sc.own->child_owner) {
+                    cc.own = std::shared_ptr<VectorOwner>(sc.own, sc.own->child_owner.get());
+                    cc.view = sc.own->child_owner->vec;
+                }
+                cm->columns.push_back(std::move(cc));
+                cm->names.push_back("c");
+                child_ms.push_back(std::move(cm));
+            }
+            std::vector<std::string> child_names{"c"};
+            MorselPtr child_out = gather_rows(child_ms, c_order, 0, c_order.size(),
+                                              c_row_m, c_row_r, child_names, err);
+            if (child_out == nullptr || err.code != 0) {
+                draken_free(offsets);
+                if (vbits) draken_free(vbits);
+                return nullptr;
+            }
+
+            uint32_t* sel = static_cast<uint32_t*>(
+                draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
+            for (uint32_t i = 0; i < n; ++i) sel[i] = i;
+            DrakenVector av;
+            av.data = offsets; av.selection = sel; av.data_length = n; av.length = n;
+            av.validity = vbits; av.type = DRAKEN_ARRAY;
+            av.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+            CxxColumn c;
+            c.own = std::make_shared<VectorOwner>(av, OwnedBuffer<void>(offsets),
+                                                  OwnedBuffer<uint8_t>(vbits),
+                                                  OwnedBuffer<void>(sel));
+            c.own->logical_type = src_lt;
+            // child_out's column owner was just built here (use_count()==1), so its
+            // VectorOwner can be moved into sole ownership under this parent.
+            c.own->child_owner =
+                std::make_unique<VectorOwner>(std::move(*child_out->columns[0].own));
+            c.view = c.own->vec;
+            out->columns.push_back(std::move(c));
+            continue;
+        }
+
         size_t es = gather_elem_size(t);
         if (es == 0) {
             err.code = 1;
-            err.msg = "gather_rows: unsupported column type (e.g. ARRAY/INTERVAL/"
-                      "VARIANT) — fail loud, never silent corruption";
+            err.msg = "gather_rows: unsupported column type (e.g. INTERVAL/VARIANT) "
+                      "— fail loud, never silent corruption";
             return nullptr;
         }
         uint8_t* data = static_cast<uint8_t*>(

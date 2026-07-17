@@ -33,7 +33,7 @@ import decimal as _decimal
 import struct as _struct
 
 from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16, DRAKEN_ARRAY
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 
@@ -150,6 +150,15 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         # INTERVAL Vector so the temporal arithmetic kernels receive a real vector
         # rather than a raw Python tuple.
         return Vector(_draken_native.vector_interval_from_constant(value, 1))
+    if physical_type == <int>DRAKEN_ARRAY:
+        # An ARRAY literal's value is a Python list/tuple of element values — ONE
+        # array row. vector_array_from_sequence takes a LIST OF ROWS, so wrap it as
+        # a single-row sequence [[...]]. The result is a length-1 ARRAY Vector with
+        # a real child, which the executor broadcasts per morsel (the same
+        # constant-shape contract as every other constant here). This is what lets
+        # a folded ARRAY-literal argument (GREATEST([1,5,3])) reach a reducer as a
+        # Vector rather than a bare Python list.
+        return Vector(_draken_native.vector_array_from_sequence([list(value)]))
     if physical_type == <int>DRAKEN_VECTOR_FP16:
         # CAST(<array literal> AS VECTOR(n)) folds to a VECTOR-typed literal whose
         # value is the element list — a genuine scalar (ONE vector), not an in-list
@@ -347,9 +356,21 @@ cdef dict _LIKE_MODES = {"Like": 0, "NotLike": 1, "ILike": 2, "NotILike": 3}
 # draken_contains modes — the optimizer's `LIKE '%x%'` → InStr rewrite family.
 cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr": 3}
 
+# draken_rlike bind-time modes (bit0 = negate; no case-insensitive bit — RLIKE
+# has no ILIKE-style SQL variant). The pattern operand at this point is always
+# a pre-compiled DFA blob (predicate_rewriter.py's _rewrite_rlike_to_dfa runs
+# at optimize time, before bind-time lowering ever sees the node) — a
+# non-literal or uncompilable pattern raises NotSupportedError there, so this
+# arm never needs to handle a raw pattern.
+cdef dict _RLIKE_MODES = {"RLike": 0, "NotRLike": 1}
+
 # draken_date_trunc unit ids (kernel contract — function_kernels.cpp FK_TR_*).
-cdef dict _TRUNC_PARTS = {"SECOND": 1, "MINUTE": 2, "HOUR": 3, "DAY": 4,
-                          "WEEK": 5, "MONTH": 6, "QUARTER": 7, "YEAR": 8}
+# singular/plural, case-insensitive — mirrors _DIFF_PARTS below.
+cdef dict _TRUNC_PARTS = {
+    "SECOND": 1, "SECONDS": 1, "MINUTE": 2, "MINUTES": 2, "HOUR": 3, "HOURS": 3,
+    "DAY": 4, "DAYS": 4, "WEEK": 5, "WEEKS": 5, "MONTH": 6, "MONTHS": 6,
+    "QUARTER": 7, "QUARTERS": 7, "YEAR": 8, "YEARS": 8,
+}
 
 # draken_datediff/draken_timediff bind-time diff-kind ids (kernel contract —
 # date_diff_batch, draken/ops/temporal_arith.h; singular/plural, case-insensitive).
@@ -366,6 +387,8 @@ DEF _TIMEDIFF_DIFF_KIND = 4
 cdef dict _BUCKET_UNITS = {
     "SECOND": 1, "SECONDS": 1, "MINUTE": 2, "MINUTES": 2,
     "HOUR": 3, "HOURS": 3, "DAY": 4, "DAYS": 4,
+    "WEEK": 5, "WEEKS": 5, "MONTH": 6, "MONTHS": 6,
+    "QUARTER": 7, "QUARTERS": 7, "YEAR": 8, "YEARS": 8,
 }
 
 
@@ -375,8 +398,11 @@ def _pack_membership_blob(vals, int kind, int negate):
 
     kind 0 payload is int64 SORTED ASCENDING (draken_in_list binary-searches it, so
     the sortedness is load-bearing, not cosmetic); kind 1 is (u32 len + bytes)
-    entries. Shared by the IN-list lowering and the ARRAY_CONTAINS_ANY/ALL lowering
-    so the two cannot drift on either the byte format or that sort invariant.
+    entries; kind 2 is float64 in GIVEN order (draken_array_contains's only
+    consumer never has more than one entry, so there is no binary-search
+    invariant to preserve — draken_in_list has no kind-2 arm). Shared by the
+    IN-list lowering and the ARRAY_CONTAINS_ANY/ALL/single-item lowerings so
+    they cannot drift on the byte format or the kind-0 sort invariant.
     Duplicates are collapsed (set()) — membership is unaffected, and for
     ARRAY_CONTAINS_ALL a de-duplicated needle set is exactly the subset test.
     """
@@ -386,6 +412,10 @@ def _pack_membership_blob(vals, int kind, int negate):
         items = sorted(set(int(v) for v in vals))
         blob = _struct.pack("<IBBH", len(items), 0, negate, 0)
         return blob + b"".join(_struct.pack("<q", v) for v in items)
+    if kind == 2:
+        items = sorted(set(float(v) for v in vals))
+        blob = _struct.pack("<IBBH", len(items), 2, negate, 0)
+        return blob + b"".join(_struct.pack("<d", v) for v in items)
     entries = sorted(set(
         v.encode("utf-8") if isinstance(v, str) else bytes(v) for v in vals))
     blob = _struct.pack("<IBBH", len(entries), 1, negate, 0)
@@ -445,6 +475,69 @@ def _build_array_membership_blob(values):
     if all(isinstance(v, (str, bytes)) for v in vals):
         return _pack_membership_blob(vals, 1, 0)
     return None   # mixed / unsupported literal types stay on the Python path
+
+
+# TimestampUnit (draken/logical_type.h): SECONDS=0, MILLISECONDS=1,
+# MICROSECONDS=2, NANOSECONDS=3. Literal TIMESTAMP values are always carried
+# as raw MICROSECONDS (_materialise_constant_literal's int branch, and
+# vector_timestamp_from_constant's unit="us" default) regardless of the
+# target array's storage unit.
+def _micros_to_array_unit(long long micros, int unit_value):
+    """Convert a microsecond instant to the array child's raw storage unit.
+    Returns None when the conversion is LOSSY (the literal has finer
+    precision than the array's granularity) — such an item can provably never
+    equal any element (every stored value is already a whole tick of that
+    unit), but the caller has no "guaranteed false" blob kind, so it declines
+    rather than silently rounding to a DIFFERENT stored value's raw int."""
+    if unit_value == 2:
+        return micros
+    if unit_value == 3:
+        return micros * 1000
+    if unit_value == 1:
+        return micros // 1000 if micros % 1000 == 0 else None
+    if unit_value == 0:
+        return micros // 1_000_000 if micros % 1_000_000 == 0 else None
+    return None
+
+
+def _build_single_item_blob(value, element_ct):
+    """Serialize ONE scalar item — the LEFT (item) side of ARRAY_CONTAINS's
+    lowered `item = ANY(arr)` — into a one-element in_list_ctx blob. Kind is
+    inferred from the item's Python/bind-time type:
+      bool/int  -> kind 0 (int64)
+      float     -> kind 2 (float64)
+      str/bytes -> kind 1
+      TIMESTAMP64-tagged int (see _materialise_constant_literal) -> kind 0,
+        raw value converted from microseconds to the ARRAY's own storage
+        unit — draken_array_contains does a plain int64 compare, no runtime
+        unit ctx. `element_ct` is node.right.schema_column.column_type.element
+        (the array's element type — populated for a real column, unlike a
+        literal array; see _build_array_membership_blob's note on that).
+    Returns None (not eligible — caller falls through to plan-time refusal)
+    for anything else: NULL, DATE (DATE32 array children are not yet
+    unit-retagged — see draken_array_contains's DECIMAL/DATE32 note),
+    DECIMAL (array children unreachable), or a TIMESTAMP item whose precision
+    the array's unit cannot represent losslessly.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return _pack_membership_blob([int(value)], 0, 0)
+    if isinstance(value, float):
+        return _pack_membership_blob([value], 2, 0)
+    if isinstance(value, int):
+        if element_ct is not None and getattr(
+                getattr(element_ct, "physical", None), "name", "") == "TIMESTAMP64":
+            if element_ct.logical is None or element_ct.logical.unit is None:
+                return None
+            raw = _micros_to_array_unit(value, int(element_ct.logical.unit.value))
+            if raw is None:
+                return None
+            return _pack_membership_blob([raw], 0, 0)
+        return _pack_membership_blob([value], 0, 0)
+    if isinstance(value, (str, bytes)):
+        return _pack_membership_blob([value], 1, 0)
+    return None
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
 
@@ -859,6 +952,21 @@ cdef Py_ssize_t _linearize(
                 slot.opcode = BC_LOAD_LIT_CONST
                 bc._hold(const_lit)
                 slot.literal_obj = <PyObject*>const_lit
+            elif node.physical_type == <int>DRAKEN_ARRAY \
+                    and isinstance(value_obj, (list, tuple)):
+                # An ARRAY-typed literal is ONE array VALUE (e.g. the [1,5,3] in
+                # GREATEST([1,5,3])), not a membership collection — membership
+                # lists (x IN (...), x = ANY(...)) are consumed by the BC_COMPARE
+                # arm and never linearized here, so this branch cannot capture one.
+                # Materialise a real constant-shape ARRAY Vector so a reducer / nb
+                # callable receives a Vector, not a bare Python list (the bare list
+                # was the un-materialized operand the nb trampoline used to
+                # unchecked-cast to Vector → SIGSEGV). Must precede the generic
+                # list/tuple in-list branch below, exactly as INTERVAL/VECTOR do.
+                const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                slot.opcode = BC_LOAD_LIT_CONST
+                bc._hold(const_lit)
+                slot.literal_obj = <PyObject*>const_lit
             elif isinstance(value_obj, (list, tuple, set, frozenset)):
                 # In-list collection literal — stays a Python object on the stack
                 # for a downstream BC_COMPARE membership test.
@@ -1012,6 +1120,108 @@ cdef Py_ssize_t _linearize(
                     slot.ctx_ptr = <void*>(<unsigned long long>_lk_ctx.ctx_ptr)
                 return sub_depth - 2 + 1
             # kernel unavailable — fall through to the Python compare path
+
+        # RLIKE/NOT RLIKE — draken_rlike, same BC_FUNCTION|WRAP_AS_BOOL shape as
+        # LIKE above. Pattern operand is a pre-compiled DFA blob by this point
+        # (see _RLIKE_MODES's comment) — always pushed as the second operand,
+        # never baked into ctx, so a per-row (non-constant) blob would still be
+        # structurally valid here; in practice the optimizer only ever produces
+        # a constant blob since only literal patterns compile.
+        _rlike_mode = _RLIKE_MODES.get(op_str, -1)
+        if _rlike_mode >= 0:
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _rl_alloc
+            _rl_fn, _rl_ctx = _resolve_kernel_and_context(
+                "draken_rlike", _rl_alloc, (_rlike_mode, 0, 0, 0, 0, 0, 0))
+            if _rl_fn is not None:
+                sub_depth = _linearize(node.left, bc, depth)
+                sub_depth = _linearize(node.right, bc, sub_depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 2
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                slot.kernel_fn = <void*>(<unsigned long long>_rl_fn)
+                if _rl_ctx is not None:
+                    bc._hold(_rl_ctx)
+                    slot.ctx_ptr = <void*>(<unsigned long long>_rl_ctx.ctx_ptr)
+                return sub_depth - 2 + 1
+            # kernel unavailable (should not happen — draken_rlike is a static
+            # built-in, not an external-kernel-home lookup) — fall through to
+            # the generic compare path, which the c-native gate will refuse.
+
+        # ARRAY_CONTAINS(arr, item) lowers to `item = ANY(arr)` (AnyOpEq) at
+        # plan-build time; bare `x = ANY(arr)` produces the same node. Two
+        # native shapes, both GIL-free (no Python `anyop_eq`/`vector_anyop_eq`
+        # is ever reached — that GIL path is retired for this node type):
+        #
+        # (a) node.right is a DIRECT ARRAY column, node.left a literal item —
+        #     pack the item into a one-element in_list_ctx blob and dispatch
+        #     draken_array_contains via the SAME BC_C_NATIVE_CHILD +
+        #     WRAP_AS_BOOL path ARRAY_CONTAINS_ANY uses, so the compare
+        #     admission gate (which refuses AnyOpEq) is never touched.
+        # (b) node.right is a LITERAL array (`x = ANY([1,2,3])` /
+        #     `ARRAY_CONTAINS([1,2,3], x)`), node.left anything (literal or
+        #     column) — this is exactly an IN-list test, so it reuses
+        #     draken_in_list directly: no new kernel, no new blob kind, and a
+        #     fully-literal expression (both sides) now constant-folds through
+        #     THIS same native instruction (fold_constants calls
+        #     execute_bytecode on the compiled bytecode) instead of the old
+        #     GIL AnyOpEq fallback that could only see materialised Vectors,
+        #     not bare Python lists.
+        #
+        # A computed (non-column, non-literal) array, or an item type this
+        # kernel doesn't cover (DECIMAL, DATE, mixed types), is not eligible
+        # and falls through to the generic compare, which the native engine
+        # then refuses (no fallback) — never a silent wrong answer.
+        if op_str == "AnyOpEq" and node.left != NULL and node.right != NULL:
+            if node.right.node_type == _NT_LITERAL and node.right.value != NULL:
+                _ari_obj = <object>node.right.value
+                if isinstance(_ari_obj, (list, tuple)):
+                    _ari_blob = _build_in_list_blob(_ari_obj, left_type, 0)
+                    if _ari_blob is not None:
+                        from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _ari_alloc
+                        _ari_fn, _ari_ctx = _resolve_kernel_and_context(
+                            "draken_in_list", _ari_alloc, _ari_blob)
+                        if _ari_fn is not None:
+                            sub_depth = _linearize(node.left, bc, depth)
+                            slot = bc._push_instr()
+                            slot.opcode = BC_FUNCTION
+                            slot.arity = 1
+                            slot.bool_value = 0
+                            slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                            slot.kernel_fn = <void*>(<unsigned long long>_ari_fn)
+                            if _ari_ctx is not None:
+                                bc._hold(_ari_ctx)
+                                slot.ctx_ptr = <void*>(<unsigned long long>_ari_ctx.ctx_ptr)
+                            return sub_depth   # pops the value, pushes the mask — net 0
+            elif node.left.node_type == _NT_LITERAL and node.left.value != NULL \
+                    and (node.right.node_type == _NT_IDENTIFIER
+                         or node.right.node_type == _NT_EVALUATED
+                         or node.right.node_type == _NT_AGGREGATOR):
+                _ac_right_ct = (<object>node.right.schema_column).column_type \
+                    if node.right.schema_column != NULL else None
+                _ac_element_ct = getattr(_ac_right_ct, "element", None) if _ac_right_ct is not None else None
+                _ac_blob = _build_single_item_blob(<object>node.left.value, _ac_element_ct)
+                if _ac_blob is not None:
+                    from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _ac_alloc
+                    _ac_fn, _ac_ctx = _resolve_kernel_and_context(
+                        "draken_array_contains", _ac_alloc, _ac_blob)
+                    if _ac_fn is not None:
+                        sub_depth = _linearize(node.right, bc, depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 1
+                        slot.bool_value = 0
+                        slot.flags = (BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                                      | BC_C_NATIVE_CHILD)
+                        slot.kernel_fn = <void*>(<unsigned long long>_ac_fn)
+                        # bc.count - 2 is the array's BC_LOAD_COL (this FUNCTION slot is
+                        # bc.count - 1) — same indexing SORT's child path uses.
+                        slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                        if _ac_ctx is not None:
+                            bc._hold(_ac_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_ac_ctx.ctx_ptr)
+                        return sub_depth   # value pushed, fn pops 1 pushes 1 — net 0
 
         # IN-list — bind-time lowering to the C-ABI draken_in_list kernel for
         # plain literal collections over integer-family or string columns.
@@ -1641,7 +1851,9 @@ cdef Py_ssize_t _linearize(
         # ParameterSpec allows a column, matching the SUBSTRING(start,...)
         # precedent of only lowering the literal-args case); both are consumed
         # into a time_bucket_ctx (kernel_context.h) — only `date` is pushed.
-        # TIME_BUCKET's catalog return type is TIMESTAMP-only (no DATE32 input).
+        # Accepts a TIMESTAMP64 operand (result preserves its unit) or a DATE32
+        # operand (promoted to microseconds; result is TIMESTAMP64(us), matching
+        # the date_trunc DATE32 convention).
         _tb_func = func_val.upper() if func_val else ""
         if _tb_func == "TIME_BUCKET" and n == 3 \
                 and node.parameters[0] != NULL and node.parameters[1] != NULL \
@@ -1664,8 +1876,15 @@ cdef Py_ssize_t _linearize(
                 _tb_sc = <object>node.parameters[2].schema_column
                 _tb_ct = getattr(_tb_sc, "column_type", None)
                 _tb_phys = getattr(getattr(_tb_ct, "physical", None), "name", "")
+                # TIMESTAMP64 carries a logical unit; DATE32 has none and is
+                # worked in microseconds by the kernel (ts_unit=2 is a placeholder
+                # the DATE32 path ignores). Any other physical type is not lowered.
+                _tb_unit = -1
                 if _tb_phys == "TIMESTAMP64" and _tb_ct.logical is not None:
                     _tb_unit = int(_tb_ct.logical.unit.value)
+                elif _tb_phys == "DATE32":
+                    _tb_unit = 2
+                if _tb_unit >= 0:
                     from draken.ops.kernels._kernel_registry import alloc_time_bucket_ctx as _tb_alloc
                     _tb_fn, _tb_ctx = _resolve_kernel_and_context(
                         "draken_time_bucket", _tb_alloc, (int(_tb_mag_val), _tb_kind, _tb_unit))
@@ -1867,30 +2086,31 @@ cdef Py_ssize_t _linearize(
             # operand), fall through to the Python callable_ref, never here.
             if func_name in ("DATEDIFF", "TIMEDIFF", "UNIXTIME", "TIME_BUCKET", "DATE_FORMAT"):
                 _fn_skip_lookup = True
-            # SORT(arr): the elements live in the column owner's child vector
-            # (draken_sort reads it exactly like draken_cast_array_to_varchar —
-            # same ARRAY-elements-unreachable-from-DrakenVector* wall). Only a
-            # DIRECT column load has a child to resolve, so an indirect/computed
-            # array argument (e.g. SORT(some_function(x))) is NOT eligible —
-            # force it down the Python callable_ref path rather than dispatch a
-            # kernel that cannot see its own input. bc.instrs[bc.count - 2] is
-            # the arg's terminal instruction (this FUNCTION slot was just
-            # pushed as bc.instrs[bc.count - 1]) — same indexing CAST's
+            # Unary ARRAY reducers — SORT(arr) -> ARRAY, GREATEST/LEAST(arr) ->
+            # element scalar. All three read the array's elements from the column
+            # owner's child vector (draken_sort/greatest/least read it exactly like
+            # draken_cast_array_to_varchar — same ARRAY-elements-unreachable-from-
+            # DrakenVector* wall). Only a DIRECT column load has a child to resolve,
+            # so an indirect/computed array argument (e.g. SORT(some_function(x)))
+            # is NOT eligible — force it down the Python callable_ref path rather
+            # than dispatch a kernel that cannot see its own input. bc.instrs[
+            # bc.count - 2] is the arg's terminal instruction (this FUNCTION slot
+            # was just pushed as bc.instrs[bc.count - 1]) — same indexing CAST's
             # BC_C_NATIVE_CHILD check above uses.
-            _sort_child_eligible = (
-                func_name == "SORT" and n == 1 and bc.count >= 2
+            _reduce_child_eligible = (
+                func_name in ("SORT", "GREATEST", "LEAST") and n == 1 and bc.count >= 2
                 and bc.instrs[bc.count - 2].opcode == BC_LOAD_COL
             )
-            if func_name == "SORT" and not _sort_child_eligible:
+            if func_name in ("SORT", "GREATEST", "LEAST") and not _reduce_child_eligible:
                 _fn_skip_lookup = True
-            # SORT over ARRAY<TIMESTAMP>: the sorted CHILD is itself a TIMESTAMP64
-            # vector, and a TIMESTAMP64 with no unit descriptor is a hard error
-            # (vector_owner.h). draken_sort cannot read the unit off a
-            # DrakenVector — it is a LogicalType detail — so hand it over at bind
-            # time in binary_op_ctx.left_unit, the same vehicle the temporal binops
-            # use. Element type comes from the schema (ARRAY<TIMESTAMP> since the
-            # _rugo_schema container fix).
-            if _sort_child_eligible and node.parameters[0].schema_column != NULL:
+            # Reducer over ARRAY<TIMESTAMP>: the result (SORT's child, or GREATEST/
+            # LEAST's scalar) is itself a TIMESTAMP64 value, and a TIMESTAMP64 with
+            # no unit descriptor is a hard error (vector_owner.h). The kernel cannot
+            # read the unit off a DrakenVector — it is a LogicalType detail — so
+            # hand it over at bind time in binary_op_ctx.left_unit, the same vehicle
+            # the temporal binops use. Element type comes from the schema
+            # (ARRAY<TIMESTAMP> since the _rugo_schema container fix).
+            if _reduce_child_eligible and node.parameters[0].schema_column != NULL:
                 _sort_p0_ct = getattr(
                     <object>node.parameters[0].schema_column, "column_type", None)
                 _sort_el = getattr(_sort_p0_ct, "element", None) if _sort_p0_ct is not None else None
@@ -1909,6 +2129,9 @@ cdef Py_ssize_t _linearize(
             # own width. Mismatched widths are rejected here, at PLAN time, rather than
             # producing a garbage score per row.
             _fn_overload_id = getattr(func_ref_meta.selected_overload, "id", None)
+            # Drives the bare-name fallback rule below: only an unambiguous
+            # single-overload function may fall back to draken_{name}.
+            _fn_overload_count = len(func_ref_meta.function_definition.overloads)
             if (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
                     and _fn_overload_id is not None and _fn_overload_id.endswith("_VECTOR")
                     and n == 2):
@@ -1956,6 +2179,32 @@ cdef Py_ssize_t _linearize(
                         "COSINE_SIMILARITY over text cannot be lowered")
                 _fn_ctx_alloc = alloc_cosine_text_ctx
                 _fn_ctx_arg = (int(embedding_dimensions()), _emb_fn)
+            # MATCH (col) AGAINST (str) is COSINE_SIMILARITY(col, str) >= threshold, so it
+            # delegates to the SAME resolved draken_embed for exactly the reason the _TEXT
+            # arm above does — a MATCH that embedded differently from COSINE_SIMILARITY
+            # would be the same split-brain in a new place. The threshold comes off the
+            # node, where the binder put it after reading the `match_threshold` session
+            # variable (the variables are not in scope here), so a compiled plan keeps the
+            # threshold it was compiled with.
+            elif func_name == "_MATCH_AGAINST":
+                from draken.ops.kernels._kernel_registry import (
+                    alloc_match_ctx, lookup_kernel as _lk_match_embed)
+                from opteryx.types.vectors.embedding_capability import embedding_dimensions
+                _emb_fn, _emb_unused = _lk_match_embed("draken_embed")
+                if _emb_fn is None:
+                    raise ValueError(
+                        "compiled_expression: draken_embed is not registered — "
+                        "MATCH cannot be lowered")
+                _match_thresh = getattr(func_py_node, "match_threshold", None)
+                if _match_thresh is None:
+                    # The binder stamps this on every bound _MATCH_AGAINST. Missing means
+                    # the node reached here unbound, not that MATCH is unsupported —
+                    # defaulting a threshold would silently answer a different question.
+                    raise ValueError(
+                        "compiled_expression: _MATCH_AGAINST has no match_threshold — "
+                        "not bound")
+                _fn_ctx_alloc = alloc_match_ctx
+                _fn_ctx_arg = (int(embedding_dimensions()), _emb_fn, float(_match_thresh))
             # Any VECTOR-returning function (EMBED today) is TOLD the width the plan
             # declared for it, and must produce exactly that. The declaration is the
             # single source of truth: the projection boundary copies rows at the
@@ -1976,14 +2225,22 @@ cdef Py_ssize_t _linearize(
                 # original scheme) forced every overload of a function onto one kernel —
                 # fine while each ported function had a single native overload, wrong as
                 # soon as two overloads take different operand types and need different
-                # kernels (COSINE_SIMILARITY over VECTOR vs over VARCHAR). Functions with
-                # one overload, or whose overloads genuinely share a kernel, register the
-                # bare name and are unaffected.
+                # kernels (COSINE_SIMILARITY over VECTOR vs over VARCHAR).
+                #
+                # The bare-name fallback is therefore allowed ONLY for a function with
+                # exactly one overload, where it cannot be ambiguous. With more than one
+                # overload the kernel must be named per overload in kernel_registry.cpp
+                # (aliases are fine when the overloads genuinely share a kernel). An
+                # unconditional fallback bound LENGTH(array) to the string-only
+                # draken_length, which accepted the bind and then failed at RUNTIME —
+                # a kernel silently chosen for operands it refuses. Leaving fn_ptr NULL
+                # here instead routes to the plan-time gate, which rejects the query up
+                # front (hard-cutover: there is no fallback engine to degrade into).
                 fn_ptr, ctx_wrapper = None, None
                 if _fn_overload_id:
                     fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
                         f"draken_{_fn_overload_id.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
-                if fn_ptr is None:
+                if fn_ptr is None and _fn_overload_count <= 1:
                     fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
                         f"draken_{func_name.lower()}", _fn_ctx_alloc, _fn_ctx_arg)
             if fn_ptr is not None:
@@ -1997,12 +2254,24 @@ cdef Py_ssize_t _linearize(
                     slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
                 # Function kernels generally don't need context structs
                 slot.flags |= BC_INSTR_C_NATIVE
-                if _sort_child_eligible:
+                if func_name == "_MATCH_AGAINST":
+                    # draken__match_against_2 returns a BOOL mask, and a bool-returning
+                    # C-ABI kernel must say so at bind time or the filter's admission gate
+                    # (bytecode_is_c_native_predicate) rejects the whole predicate. The
+                    # flag-setting above only marks the nb-callable path; every other
+                    # bool-returning c-native kernel (LIKE, STARTS_WITH, array membership)
+                    # sets this in its own dedicated arm. Deliberately keyed to MATCH
+                    # rather than generalised to "c-native and declared BOOLEAN": the other
+                    # bool-returning kernels are being worked on concurrently, and widening
+                    # the gate for them is their change to make, not a side effect of this.
+                    slot.flags |= BC_RESULT_WRAP_AS_BOOL
+                if _reduce_child_eligible:
                     # VM resolves the child per morsel via the identity stored on
                     # THIS instruction (mirrors the ARRAY->VARCHAR cast) and
-                    # appends it as a synthetic extra fargs[] entry — draken_sort
-                    # keeps the plain func_fn_t(ctx, args[], nargs) shape, reading
-                    # args[0]=parent (offsets) / args[1]=child (elements).
+                    # appends it as a synthetic extra fargs[] entry — the reducer
+                    # kernel (SORT/GREATEST/LEAST) keeps the plain
+                    # func_fn_t(ctx, args[], nargs) shape, reading args[0]=parent
+                    # (offsets) / args[1]=child (elements).
                     slot.flags |= BC_C_NATIVE_CHILD
                     slot.column_identity = bc.instrs[bc.count - 2].column_identity
             # else: kernel not available yet (pending Phase 9a-fn); callable_ref path remains
@@ -2307,23 +2576,43 @@ cdef Py_ssize_t _linearize(
         slot.op_code = sub_op
         slot.flags = BC_RESULT_NEEDS_NB_WRAP
 
-        # Resolve the C-ABI kernel. BC_EXTR_MAP_ARRAY is EXCLUDED: the ARRAY child
-        # vector hangs off the VectorOwner, not off DrakenVector, so no kernel with
-        # the (ctx, vec, key) signature can reach it. It stays on the GIL VM until
-        # the BC_C_NATIVE_CHILD plumbing (see the ARRAY→VARCHAR cast) is extended to
-        # extraction. Flagging it C-native here would dispatch into an error sentinel.
+        # Resolve the C-ABI kernel.
+        #
+        # BC_EXTR_MAP_ARRAY (arr[i]) is admitted ONLY when its array operand lowers to
+        # BC_LOAD_COL. The elements hang off the VectorOwner, not off DrakenVector, so
+        # the kernel cannot reach them from the parent operand: the VM resolves the
+        # child per morsel from the column owner and hands it over in the ABI's unused
+        # `key` slot (BC_C_NATIVE_CHILD — the mechanism the ARRAY→VARCHAR cast and SORT
+        # use). That resolution is keyed on a column identity, which only a column
+        # operand has. A computed array is projected into a column first
+        # (compiler.py _hoist_array_operands), so this stays satisfiable rather than
+        # rejecting the query.
+        # _NT_IDENTIFIER/_NT_EVALUATED/_NT_AGGREGATOR are exactly the node types that
+        # lower to BC_LOAD_COL.
+        _extr_child_eligible = (
+            sub_op == BC_EXTR_MAP_ARRAY
+            and (node.left.node_type == _NT_IDENTIFIER
+                 or node.left.node_type == _NT_EVALUATED
+                 or node.left.node_type == _NT_AGGREGATOR)
+        )
         _extr_kernel_names = {
             BC_EXTR_MAP_STRING: "draken_map_access_string",
             BC_EXTR_JSON_PTR: "draken_json_extract",
             BC_EXTR_JSON_KEY: "draken_json_extract",
         }
+        if _extr_child_eligible:
+            _extr_kernel_names[BC_EXTR_MAP_ARRAY] = "draken_array_map_access"
         if sub_op in _extr_kernel_names:
             from draken.ops.kernels._kernel_registry import alloc_extraction_ctx
             # The path/key and the subscript index are bind-time constants: they go
             # into the ctx, so BC_EXTRACTION pops exactly one operand at run time.
             # JSON paths are normalized to RFC 6901 inside the allocator.
             ctx_nav = extr_literal if sub_op in (BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY) else None
-            ctx_index = int(extr_key) if sub_op == BC_EXTR_MAP_STRING else 0
+            ctx_index = 0
+            if sub_op == BC_EXTR_MAP_STRING:
+                ctx_index = int(extr_key)
+            elif sub_op == BC_EXTR_MAP_ARRAY:
+                ctx_index = int(slot_bool_val)
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
                 _extr_kernel_names[sub_op],
                 alloc_extraction_ctx,
@@ -2340,6 +2629,13 @@ cdef Py_ssize_t _linearize(
                 bc._hold(ctx_wrapper)
                 slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
             slot.flags |= BC_INSTR_C_NATIVE
+            if _extr_child_eligible:
+                # The VM resolves the child per morsel via the identity stored on THIS
+                # instruction and passes it as the second ABI operand.
+                slot.flags |= BC_C_NATIVE_CHILD
+                # bc.count-1 is THIS slot (just pushed); bc.count-2 is the operand's
+                # own BC_LOAD_COL, which carries the identity to resolve the child by.
+                slot.column_identity = bc.instrs[bc.count - 2].column_identity
 
         # Store the extracted literal (bytes or Vector).
         if extr_literal is not None:

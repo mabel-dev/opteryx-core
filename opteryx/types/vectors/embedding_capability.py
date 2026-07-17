@@ -146,11 +146,18 @@ def install_minilm_capability(max_length: int = 256) -> EmbeddingCapability:
     from opteryx.types.vectors.embeddings import _minilm_model_dir
 
     model_dir = _minilm_model_dir()
+    if model_dir is None:
+        raise MissingDependencyError(
+            "the MiniLM model is not configured — set OPTERYX_MINILM_MODEL_DIR to a "
+            "locally-obtained all-MiniLM-L6-v2 directory (model.onnx + vocab.txt). The "
+            "weights are not vendored (CLAUDE.md §4)."
+        )
     model_path = model_dir / "model.onnx"
     vocab_path = model_dir / "vocab.txt"
     if not model_path.exists() or not vocab_path.exists():
         raise MissingDependencyError(
-            f"the MiniLM model is not present at {model_dir}"
+            f"the MiniLM model is not present at {model_dir} (expected model.onnx and "
+            "vocab.txt); check OPTERYX_MINILM_MODEL_DIR"
         )
     try:
         from opteryx.compiled.nanobind import minilm_native

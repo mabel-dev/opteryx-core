@@ -503,6 +503,89 @@ class _Compiler:
             const_scalar_vecs.append(vec)
         return const_col_idx, const_scalar_vecs
 
+    # Functions that CONSUME an ARRAY operand. SORT/GREATEST/LEAST read it
+    # element-wise and need the child vector; LENGTH reads only the offsets. Both
+    # still require a COLUMN operand — see _hoist_array_operands for why the second
+    # case is not an exception.
+    _ARRAY_CONSUMING_FNS = {"SORT", "GREATEST", "LEAST", "LENGTH"}
+
+    def _hoist_array_operands(self, p, eval_nodes, layout):
+        """Materialize a COMPUTED ARRAY operand into its own ExprProject column, then
+        point the consuming op at that column. Covers SORT/GREATEST/LEAST/LENGTH and
+        the `arr[i]` subscript.
+
+        Two independent reasons an ARRAY operand must be a column, not an intermediate:
+
+        1. Element access. An ARRAY's elements hang off the column owner's
+           child_owner, not off the 40-byte DrakenVector, so the VM resolves them by
+           column identity against the morsel (cxx_column_child_vec). An arena
+           intermediate has neither identity nor owner, so there is nothing to
+           resolve — hence the bind-time gate demanding a plain column.
+
+        2. Child ownership, which binds even LENGTH (whose kernel needs no child).
+           c_execute_dv_inner carries a produced ARRAY's element vector out in a
+           SINGLE out_child slot, on the standing invariant that an ARRAY is only ever
+           a program's FINAL result (evaluation.pyx). Compiling LENGTH(SPLIT(x)) as one
+           program breaks that: SPLIT sets out_child, LENGTH then returns INT64, and
+           the stale child gets adopted onto an INT64 column. Splitting the program in
+           two restores the invariant exactly — SPLIT's ARRAY is terminal in its own
+           program, and LENGTH's operand is a column.
+
+        Projecting the inner array gives it what it lacked: an ExprProject output column
+        adopts the ARRAY child (native_expression.hpp), so it is indistinguishable from a
+        native ARRAY column. The operand is then flipped to EVALUATED — the node type
+        that lowers to BC_LOAD_COL against its own already-bound identity.
+
+        Same shape as _project_agg_operands, which hoists SUM(a * b) for the same
+        reason: the consumer takes a column, so give it one."""
+        for node_ in eval_nodes or []:
+            layout = self._hoist_array_in_tree(p, node_, layout)
+        return layout
+
+    def _array_operand_of(self, node):
+        """The ARRAY-typed operand this node consumes, or None if it consumes none."""
+        if node.node_type == NodeType.FUNCTION:
+            params = getattr(node, "parameters", None) or []
+            if (node.value or "").upper() in self._ARRAY_CONSUMING_FNS and len(params) == 1:
+                return params[0]
+            return None
+        if node.node_type == NodeType.EXTRACTION_OPERATOR and node.value == "MapAccess":
+            return node.left
+        return None
+
+    def _hoist_array_in_tree(self, p, node, layout):
+        """Depth-first: inner arrays hoist before the outer ones that read them, so
+        SORT(SORT(SPLIT(x)))[0] resolves one level at a time. Returns the grown
+        layout."""
+        if node is None:
+            return layout
+        for child in (getattr(node, "parameters", None) or []):
+            layout = self._hoist_array_in_tree(p, child, layout)
+        for attr in ("left", "right"):
+            layout = self._hoist_array_in_tree(p, getattr(node, attr, None), layout)
+
+        operand = self._array_operand_of(node)
+        if operand is None:
+            return layout
+        if operand.node_type in (
+            NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR
+        ):
+            return layout   # already lowers to BC_LOAD_COL — nothing to hoist
+        sc = getattr(operand, "schema_column", None)
+        if sc is None or sc.identity is None:
+            return layout   # unbound: leave it for the gate to reject, don't guess
+        if _physical_type(sc) != DrakenType.ARRAY:
+            return layout   # not an array operand — LENGTH(string), str[i], and the
+            # literal-array forms all land here and are unaffected
+
+        if sc.identity not in layout:
+            layout = self._add_computed(p, [operand], layout)
+        # Compiled and projected under its own identity, so reading it as a column is
+        # now the truth rather than a rewrite — anything else pointing at this node
+        # wants the projected column too.
+        operand.node_type = NodeType.EVALUATED
+        return layout
+
     def _add_computed(self, p, eval_nodes, layout, preserve_shape=False):
         """Append one ExprProject per computed expression (bind order preserved —
         later programs may reference earlier outputs). DECIMAL/TIMESTAMP results
@@ -515,6 +598,8 @@ class _Compiler:
         GROUP BY / DISTINCT keys, whose sole consumer is the group/distinct sink."""
         from opteryx.expression.evaluator import compile_eval_nodes
         from opteryx.operators._operators import bytecode_ops_all_c_native
+
+        layout = self._hoist_array_operands(p, eval_nodes, layout)
 
         # Same plan-time tree rewrites the filter path gets (CASE→IF_THEN_ELSE,
         # BETWEEN→compares, decimal literal rescale) — applied BEFORE lowering.
@@ -580,12 +665,45 @@ class _Compiler:
 
     # ---- aggregate parsing --------------------------------------------------------
 
-    _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX"}
+    _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG"}
     _AGG_OPERAND_TYPES = _NUMERIC_TYPES + (
         DrakenType.DECIMAL, DrakenType.DECIMAL128, DrakenType.DATE32,
         DrakenType.TIMESTAMP64, DrakenType.TIME32, DrakenType.TIME64,
         DrakenType.BOOL,
     )
+    # ARRAY_AGG copies values instead of ordering/summing them, so it takes the
+    # string family on top of the scalar-aggregate set. Mirrors the sink's
+    # aa_operand_supported() — keep the two in step.
+    _ARRAY_AGG_OPERAND_TYPES = _AGG_OPERAND_TYPES + (
+        DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
+    )
+
+    @staticmethod
+    def _array_agg_options(agg):
+        """ARRAY_AGG's DISTINCT / ORDER BY / LIMIT modifiers, as the sink's spec wants
+        them. The binder has already rejected ORDER BY on anything but the aggregated
+        column, so `order` is at most one entry here."""
+        from opteryx import config
+
+        order = getattr(agg, "order", None)
+        descending = False
+        if order:
+            if len(order) != 1:
+                _unsupported("ARRAY_AGG ordered by more than one column")
+            # order entries are (node, ascending: bool)
+            descending = not bool(order[0][1])
+        limit = getattr(agg, "limit", None)
+        if limit is not None:
+            limit = int(limit)
+            if limit < 0:
+                _unsupported("ARRAY_AGG with a negative LIMIT")
+        return {
+            "distinct": getattr(agg, "duplicate_treatment", None) == "Distinct",
+            "ordered": bool(order),
+            "descending": descending,
+            "limit": limit,
+            "max_per_group": int(config.ARRAY_AGG_MAX_VALUES_PER_GROUP),
+        }
 
     def _project_agg_operands(self, p, node, layout):
         """Aggregate operands that are computed expressions (SUM(a * b)) become
@@ -605,9 +723,11 @@ class _Compiler:
             layout = self._add_computed(p, computed, layout)
         return layout
 
-    def _parse_aggregates(self, aggs, layout):
-        """Any mix of COUNT(*) / COUNT(col) / SUM / AVG / MIN / MAX over plain
-        columns. Returns [(identity, fn, operand_idx | -1), ...] in output order."""
+    def _parse_aggregates(self, aggs, layout, grouped=True):
+        """Any mix of COUNT(*) / COUNT(col) / SUM / AVG / MIN / MAX / ARRAY_AGG over
+        plain columns. Returns [(identity, fn, operand_idx | -1[, options]), ...] in
+        output order. ``grouped`` is False for the ungrouped sink, which ARRAY_AGG
+        cannot use."""
         if not aggs:
             _unsupported("an aggregate node with no aggregates")
         specs = []
@@ -623,7 +743,7 @@ class _Compiler:
                 _unsupported(f"{func} with {len(params)} parameters")
             operand = params[0]
             distinct = getattr(agg, "duplicate_treatment", None) == "Distinct"
-            if distinct and func != "COUNT":
+            if distinct and func not in ("COUNT", "ARRAY_AGG"):
                 _unsupported(f"{func}(DISTINCT ...)")
             if func == "COUNT" and operand.node_type == NodeType.WILDCARD:
                 if distinct:
@@ -637,6 +757,16 @@ class _Compiler:
                 _unsupported(f"{func} over a column the stream does not carry")
             idx = layout.index(psc.identity)
             pt = _physical_type(psc)
+            if func == "ARRAY_AGG":
+                # Grouped-only: an ARRAY_AGG list is per group, and the ungrouped
+                # sink's fixed-width AggCell has nowhere to put one. The binder
+                # rejects this first; this is the engine's own gate.
+                if not grouped:
+                    _unsupported("ARRAY_AGG without a GROUP BY")
+                if pt not in self._ARRAY_AGG_OPERAND_TYPES:
+                    _unsupported(f"ARRAY_AGG over a {pt} column")
+                specs.append((sc.identity, "ArrayAgg", idx, self._array_agg_options(agg)))
+                continue
             if func == "COUNT":
                 # COUNT(DISTINCT col) dedups on serialized VALUE bytes in the
                 # sinks — silently lowering it as plain COUNT was a wrong answer.
@@ -677,11 +807,16 @@ class _Compiler:
 
         if kind == "ProjectionNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            # Computed expressions come from the FULL projection list — the SELECT
-            # columns plus any ORDER BY keys the planner routed through this node
+            # Computed expressions come from the FULL projection list — hoisted
+            # internal-only columns (a fused Project's shared subexpression, computed
+            # once and referenced by 2+ of this node's own columns — see
+            # project_fusion.py) first so dependents can load them, then the SELECT
+            # columns, then any ORDER BY keys the planner routed through this node
             # (mirrors ProjectionNode.__init__'s own eval-node derivation).
-            proj_exprs = list(node.parameters.get("projection") or []) + list(
-                node.parameters.get("order_by_columns") or []
+            proj_exprs = (
+                list(node.parameters.get("hoisted_columns") or [])
+                + list(node.parameters.get("projection") or [])
+                + list(node.parameters.get("order_by_columns") or [])
             )
             eval_nodes = [col for col in proj_exprs
                           if col.node_type != NodeType.IDENTIFIER]
@@ -698,12 +833,13 @@ class _Compiler:
         if kind == "UngroupedAggregateNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
             layout = self._project_agg_operands(p, node, layout)
-            specs = self._parse_aggregates(getattr(node, "aggregates", None) or [], layout)
+            specs = self._parse_aggregates(
+                getattr(node, "aggregates", None) or [], layout, grouped=False)
             buf = self.nplan.new_buffer()
             self.nplan.set_agg_sink(p, specs, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
-            out_layout = [identity for identity, _fn, _i in specs]
+            out_layout = [spec[0] for spec in specs]
             self._apply_having(p2, node, out_layout)
             return p2, out_layout
 
@@ -751,7 +887,7 @@ class _Compiler:
             self.nplan.set_groupby_sink(p, key_idx, specs, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
-            out_layout = list(group_cols) + [identity for identity, _fn, _i in specs]
+            out_layout = list(group_cols) + [spec[0] for spec in specs]
             self._apply_having(p2, node, out_layout)
             return p2, out_layout
 
@@ -1427,7 +1563,21 @@ class _Compiler:
         (p, layout) = self._compile_only_child(in_edges, "UnnestJoinNode", node)
         array_identity = source_sc.identity
         if array_identity not in layout:
-            _unsupported("a CROSS JOIN UNNEST source array the stream does not carry")
+            # A COMPUTED source (UNNEST(SPLIT(name,'a'))): nothing projected it, so the
+            # stream genuinely does not carry it — the operator addresses its array by
+            # COLUMN INDEX and flattens the child off that column's owner, neither of
+            # which an arena intermediate has. Project it first and the operator gets
+            # the plain column it requires; an ExprProject output adopts the ARRAY child
+            # (native_expression.hpp), so it is indistinguishable from a native ARRAY
+            # column here. Mirrors _project_agg_operands and the SORT operand hoist.
+            #
+            # A non-c-native source still fails, one level down, inside _add_computed's
+            # own gate — which is the honest place for it to fail.
+            if _physical_type(source_sc) != DrakenType.ARRAY:
+                _unsupported("a CROSS JOIN UNNEST over a source that is not an array")
+            layout = self._add_computed(p, [source], layout)
+            if array_identity not in layout:
+                _unsupported("a CROSS JOIN UNNEST source array the stream does not carry")
         array_idx = layout.index(array_identity)
 
         # Drop the consumed source array unless something ABOVE the unnest still
@@ -1888,12 +2038,17 @@ def execute_native(plan, telemetry=None):
                     telemetry._reading["time_engine_io_worker_blocked"] = sum(
                         d.get("worker_blocked_ns", 0) for d in _io_diags
                     )
-                    # Remote footer cache (see footer_remote_cache.py): only surfaced when
-                    # at least one scan this query actually consulted the tier — its
-                    # `footer_cache_hits`/`_misses` keys are absent entirely otherwise (the
-                    # -1 sentinel in IpcRowGroupSource.diagnostics()/NativeScanPlan is
-                    # dropped, not summed as 0), so an unconfigured or all-local-file query
-                    # doesn't misreport "0 hits" as a failing cache.
+                    # Footer caches (see footer_remote_cache.py). Each key is surfaced only
+                    # when at least one scan this query reported it — the -1 "not
+                    # applicable" sentinel is dropped by IpcRowGroupSource.diagnostics()
+                    # rather than summed as 0, so an all-local query doesn't misreport
+                    # "0 hits" as a failing cache.
+                    #
+                    # Read the two together. `footer_process_cache_hits` alone (no remote
+                    # pair) means a warm process served every footer in-process and the
+                    # remote tier was never needed. A remote pair with 0 hits and non-zero
+                    # misses means footers WERE fetched from origin — either a cold shared
+                    # tier or no tier configured at all.
                     _footer_diags = [d for d in _io_diags if "footer_cache_hits" in d]
                     if _footer_diags:
                         telemetry._reading["footer_cache_hits"] = sum(
@@ -1901,6 +2056,13 @@ def execute_native(plan, telemetry=None):
                         )
                         telemetry._reading["footer_cache_misses"] = sum(
                             d["footer_cache_misses"] for d in _footer_diags
+                        )
+                    _process_diags = [
+                        d for d in _io_diags if "footer_process_cache_hits" in d
+                    ]
+                    if _process_diags:
+                        telemetry._reading["footer_process_cache_hits"] = sum(
+                            d["footer_process_cache_hits"] for d in _process_diags
                         )
             _tc0 = _t.perf_counter_ns()
             nplan.close_scan_plans()

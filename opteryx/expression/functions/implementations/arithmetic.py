@@ -11,7 +11,7 @@ Includes:
 - Rounding: ROUND, FLOOR, CEILING, TRUNCATE
 - Magnitude: ABS, SIGN, SQRT
 - Exponentiation & logarithms: POWER, LOG
-- Random: RANDOM, NORMAL, RANDOM_STRING
+- Random: RANDOM, NORMAL (RANDOM_STRING is c-native only — draken_random_string)
 """
 
 from opteryx.compiled.nanobind.vectors import (
@@ -28,7 +28,11 @@ from opteryx.compiled.nanobind.vectors import (
     vector_power as safe_power,
 )
 from opteryx.compiled.nanobind.vectors import vector_log as log
-from opteryx.compiled.nanobind.vectors import vector_random_strings as random_strings
+
+# RANDOM_STRING no longer binds here: it is c-native only (draken_random_string),
+# so its registrar declares callable_ref=None. The nanobind vector_random_strings
+# primitive remains in the draken vectors module (its own native test suite covers
+# it); it is just no longer re-exported as a SQL-function implementation.
 
 __all__ = [
     "round1",
@@ -43,5 +47,4 @@ __all__ = [
     "random_normal",
     "safe_power",
     "log",
-    "random_strings",
 ]

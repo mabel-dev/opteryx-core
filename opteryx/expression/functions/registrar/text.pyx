@@ -205,7 +205,16 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=lambda *args: "".join(str(a) for a in args if a is not None),
+                        # No draken_concat kernel exists — the optimizer (predicate_rewriter.py)
+                        # always rewrites CONCAT(a, b, ...) to a || b || ... (StringConcat) chains
+                        # before execution, so this call is never dispatched under normal
+                        # operation. Unreachable via callable_ref too: the native engine has no
+                        # per-morsel Python fallback for projections (compiler.py `_unsupported`),
+                        # so a stray CONCAT that reaches the executor (e.g. DISABLE_OPTIMIZER=1)
+                        # is refused at plan time rather than run through this. Confirmed dead
+                        # 2026-07-17 in every mode: with the optimizer enabled it never reaches
+                        # kernel dispatch; with it disabled it is refused before reaching here.
+                        callable_ref=None,
                         cost_us_per_million=523.0,
                     ),
                 ),
@@ -342,6 +351,25 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     )
     from opteryx.expression.functions.implementations import text as string_functions
 
+    def _split_return_type(arg_nodes):
+        """SPLIT(str, delim[, limit]): ARRAY<element> where element is the input's
+        OWN string type.
+
+        The parts are substrings of the input, so the element type is fixed and
+        knowable — it is whatever string family went in. The draken_split kernel tags
+        the child with `str->type` for exactly this reason; these two must agree.
+        VARIANT would be a lie that also strands the result (VARIANT has no
+        gather/compare path, so it could not survive an ORDER BY or join).
+        """
+        sc = getattr(arg_nodes[0], "schema_column", None) if arg_nodes else None
+        elem = getattr(sc, "column_type", None) if sc is not None else None
+        if elem is None:
+            # Unbound/unknown operand — the kernel still emits the input's type, but
+            # the binder cannot name it here. VARCHAR is the only string type a
+            # SPLIT operand can be by default.
+            elem = _CT_VARCHAR
+        return (_CT_ARRAY(elem), elem)
+
     # Parameter shortcuts
     _string = ParameterSpec(name="string", type_family="string")
     _pattern = ParameterSpec(name="pattern", type_family="string", constant_only=True)
@@ -354,10 +382,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     def _trim_return_type(arg_nodes):
         """TRIM/LTRIM/RTRIM always return VARCHAR."""
         return _CT_VARCHAR
-
-    def _concat_ws_kernel(sep, *args):
-        """Concatenate with separator, skipping nulls."""
-        return sep.join(str(a) for a in args if a is not None)
 
     vector_dfa_extract = getattr(compiled_vector_ops, "vector_dfa_extract")
 
@@ -383,7 +407,11 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_concat_ws_kernel,
+                        # No draken_concat_ws kernel exists — every arity is rewritten by the
+                        # optimizer (predicate_rewriter.py) to a StringConcat chain before
+                        # execution; see CONCAT's kernel comment above for why callable_ref is
+                        # unreachable in every mode, including DISABLE_OPTIMIZER=1.
+                        callable_ref=None,
                         cost_us_per_million=587.0,
                     ),
                 ),
@@ -405,7 +433,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         _string,
                         ParameterSpec(name="delimiter", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_ARRAY(_CT_VARIANT)),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_split_return_type),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -420,7 +448,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="delimiter", type_family="string"),
                         ParameterSpec(name="limit", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_ARRAY(_CT_VARIANT)),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_split_return_type),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -711,8 +739,17 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             volatility="stable",
             deterministic=False,
             lifecycle=LifecycleSpec(status="active"),
-            summary="Semantic text matching via embeddings.",
-            documentation="Performs semantic text matching using embeddings and cosine similarity.",
+            summary="Text matching by embedding cosine similarity.",
+            documentation=(
+                "True when COSINE_SIMILARITY(column, query) >= the `match_threshold` "
+                "session variable (default 0.5). Matching is only as semantic as the "
+                "active EMBED capability: the built-in embedder is a lexical hashed "
+                "projection, so by default MATCH behaves as a case-insensitive exact "
+                "match rather than a meaning-based one. Install a semantic embedding "
+                "capability, and/or tune `match_threshold`, to change that. Empty or "
+                "stopword-only text embeds to a zero vector, giving an undefined (NaN) "
+                "similarity, which never matches."
+            ),
             overloads=(
                 FunctionOverload(
                     id="_MATCH_AGAINST_2",

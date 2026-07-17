@@ -378,18 +378,24 @@ class _HybridEmbeddingProvider:
         return (positions, final_scores)
 
 
-def _minilm_model_dir() -> Path:
-    """Directory holding the vendored all-MiniLM-L6-v2 model.
+def _minilm_model_dir() -> Path | None:
+    """Directory holding the all-MiniLM-L6-v2 model, or None if none is configured.
 
-    `third_party/` is at the REPO ROOT (CLAUDE.md §5) — `opteryx/third_party/` holds
-    only opteryx's own Cython wrappers, and nothing copies the model under it. This file
-    is opteryx/types/vectors/embeddings.py, so the root is four parents up, not three.
-    Deriving it in one place: the same expression was written out twice and both copies
-    were one level short, which silently disabled the MiniLM provider entirely —
-    `_load_default_embedding_provider` saw no model.onnx and returned None, so EMBED
-    reported "embeddings unavailable" with a 90MB model sitting in the tree.
+    The model weights are NOT vendored (CLAUDE.md §4 — zero installed dependencies). The
+    ~90MB `model.onnx` + `vocab.txt` are sourced out-of-band: whoever wants the MiniLM
+    EMBED capability obtains them locally and points `OPTERYX_MINILM_MODEL_DIR` at the
+    directory holding them. Unset → None, and there is no in-tree fallback.
+
+    Returning None (rather than a guessed path) is deliberate: the two callers want
+    opposite things on "unset". The explicit capability install
+    (`install_minilm_capability`) turns None into a loud, actionable error; the auto-probe
+    (`_load_default_embedding_provider`) turns None into "no MiniLM provider", which keeps
+    the dependency-free static-hash EMBED as the default and never auto-installs MiniLM.
     """
-    return Path(__file__).resolve().parents[3] / "third_party" / "models" / "all-MiniLM-L6-v2"
+    configured = os.environ.get("OPTERYX_MINILM_MODEL_DIR", "").strip()
+    if not configured:
+        return None
+    return Path(configured).expanduser()
 
 
 class _MiniLMNativeEmbeddingProvider:
@@ -397,6 +403,11 @@ class _MiniLMNativeEmbeddingProvider:
         from opteryx.compiled.nanobind import minilm_native
 
         model_dir = _minilm_model_dir()
+        if model_dir is None:
+            raise MissingDependencyError(
+                "the MiniLM model is not configured — set OPTERYX_MINILM_MODEL_DIR to a "
+                "locally-obtained all-MiniLM-L6-v2 directory (model.onnx + vocab.txt)"
+            )
         model_path = model_dir / "model.onnx"
         vocab_path = model_dir / "vocab.txt"
         self._embedder = minilm_native.MiniLMEmbedder(str(model_path), str(vocab_path), 256)
@@ -460,6 +471,8 @@ def _load_default_embedding_provider():
         return _default_embedding_provider
 
     model_dir = _minilm_model_dir()
+    if model_dir is None:
+        return None
     if not (model_dir / "model.onnx").exists() or not (model_dir / "vocab.txt").exists():
         return None
 

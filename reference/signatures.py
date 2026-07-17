@@ -335,7 +335,7 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
         "n": "Number of random values to generate.",
     },
     "RANDOM_STRING": {
-        "n": "Length hint or row count used to generate random strings.",
+        "n": "Number of random bytes to generate for each row.",
     },
     "REGEXP_REPLACE": {
         "pattern": "Regular expression pattern to match in the input string.",
@@ -405,6 +405,10 @@ _RETURN_OVERRIDES = {
         "same as `arr`",
         "Returns a sorted array while preserving the input array type.",
     ),
+    "SPLIT": (
+        "array<element type of `string`>",
+        "Returns an array whose element type is the string type of `string` — the parts are substrings of the input, so the element type is fixed and known.",
+    ),
     "TRY_ARRAY": (
         "array<type_name>",
         "Returns a typed array whose element type is taken from `type_name`, or null when conversion fails.",
@@ -425,7 +429,7 @@ _FUNCTION_NOTES = {
     "POSITION": "Canonical SQL-92 form is `POSITION(needle IN haystack)`. Opteryx also accepts `POSITION(needle, haystack)`.",
     "ROUND": "Uses PyArrow's default half-to-even rule to break ties when a value falls exactly between two candidates.",
     "RANDOM": "This function is volatile. The integer argument controls how many values are generated, not a seed.",
-    "RANDOM_STRING": "This function is volatile. The integer argument controls the generated output rather than supplying a seed.",
+    "RANDOM_STRING": "This function is volatile. It returns `n` random bytes as `VARBINARY` for each row; the integer argument is the byte length, not a seed.",
     "SUBSTRING": "Canonical SQL-92 form is `SUBSTRING(str FROM start FOR length)`. Opteryx also accepts `SUBSTRING(str[, start[, length]])`.",
     "TRIM": "Canonical SQL-92 form is `TRIM([BOTH|LEADING|TRAILING] [chars] FROM str)`. Opteryx also accepts `TRIM(str[, chars])` as well as `LTRIM` and `RTRIM`.",
     "TRY_ARRAY": "The `type_name` argument must be a constant expression naming the target element type.",

@@ -13,12 +13,25 @@
 //   draken_levenshtein(str1, str2)    — bytewise edit distance.
 //   draken_to_ascii(str)              — codepoint of the FIRST character.
 //
-// DENSE OUTPUT, NOT SHAPE-PRESERVING. Unlike the string→string transforms
-// (upper/lower/trim/pad/replace), these produce a FIXED-WIDTH result, and the
-// VM's fixed-result fold contract wants a dense INT64 block — exactly what the
-// sibling draken_length in function_kernels.cpp emits. Values are computed via
-// the uniform data[selection[i]] access pattern, so dense / constant / dict
-// inputs all yield identical answers (CLAUDE.md §11).
+// Two STRING-PRODUCING kernels also live here (dense, not INT64):
+//   draken_to_char(codepoint)         — inverse of draken_to_ascii: an integer
+//                                       Unicode codepoint → its UTF-8 encoding
+//                                       (one character), VARCHAR. Empty for 0
+//                                       (mirroring to_ascii's empty→0); a loud
+//                                       error for any non-scalar value.
+//   draken_random_string(n)           — VOLATILE: n random BYTES per row as
+//                                       VARBINARY (architect ruling 2026-07-17),
+//                                       where n is the operand's per-row value.
+//
+// DENSE OUTPUT, NOT SHAPE-PRESERVING. The INT64-producing four match the sibling
+// draken_length's fixed-result fold contract (a dense INT64 block). The two
+// string producers are dense per-LOGICAL-ROW like draken_date_format
+// (function_temporal.cpp): they do NOT reduce over data_length physical uniques,
+// because validating/generating per unique would touch physical slots that only
+// NULL rows reference (an out-of-range codepoint hidden behind a null would raise
+// wrongly; a random draw would be shared across the wrong rows). Every valid
+// logical row is read on its own via the uniform data[selection[i]] access, so
+// dense / constant / dict inputs all yield identical answers (CLAUDE.md §11).
 //
 // draken_octet_length stages per-UNIQUE work for compressed inputs the way
 // draken_length does; the other three read a per-row operand pair (position,
@@ -43,7 +56,10 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <new>                     // std::bad_alloc (kernel_copy_validity)
+#include <random>                  // std::random_device — per-thread RNG seeding
 
+#include "pcg_random.hpp"          // vendored third_party/pcg — RANDOM_STRING
 #include "core/buffers.h"
 #include "core/string_slot.h"
 #include "core/alloc.h"
@@ -206,6 +222,114 @@ bool fse_first_codepoint(const uint8_t* p, uint32_t len, bool is_utf8, int64_t* 
     *out = static_cast<int64_t>(cp);
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// TO_CHAR / RANDOM_STRING helpers
+// ---------------------------------------------------------------------------
+
+inline bool fse_is_integer(DrakenType t) {
+    switch (t) {
+        case DRAKEN_INT8:  case DRAKEN_INT16:  case DRAKEN_INT32:  case DRAKEN_INT64:
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Read the integer operand at a logical row as int64, for EVERY integer width and
+// signedness (codepoint for TO_CHAR, byte-count for RANDOM_STRING). Both are
+// semantically non-negative; reading through int64 keeps a negative signed value
+// intact so the caller rejects it loudly rather than silently wrapping it. A
+// UINT64 above INT64_MAX becomes negative here and is likewise rejected — no valid
+// codepoint or byte-count reaches that magnitude. Caller gates on fse_is_integer.
+inline int64_t fse_read_int(const DrakenVector* v, uint32_t row) {
+    const uint32_t j = v->selection[row];
+    switch (v->type) {
+        case DRAKEN_INT8:   return static_cast<const int8_t*>(v->data)[j];
+        case DRAKEN_INT16:  return static_cast<const int16_t*>(v->data)[j];
+        case DRAKEN_INT32:  return static_cast<const int32_t*>(v->data)[j];
+        case DRAKEN_INT64:  return static_cast<const int64_t*>(v->data)[j];
+        case DRAKEN_UINT8:  return static_cast<const uint8_t*>(v->data)[j];
+        case DRAKEN_UINT16: return static_cast<const uint16_t*>(v->data)[j];
+        case DRAKEN_UINT32: return static_cast<const uint32_t*>(v->data)[j];
+        case DRAKEN_UINT64: return static_cast<int64_t>(static_cast<const uint64_t*>(v->data)[j]);
+        default:            return -1;   // unreachable: fse_is_integer gates every caller
+    }
+}
+
+// Encode a Unicode scalar value as UTF-8 into buf (≤4 bytes); returns the byte
+// count, or -1 for a value that is NOT a scalar (negative, > U+10FFFF, or a
+// UTF-16 surrogate U+D800..U+DFFF, which has no UTF-8 form). Codepoint 0 encodes
+// to an EMPTY string — TO_CHAR is the documented inverse of TO_ASCII, whose
+// empty→0 rule this mirrors (0→empty), rather than emitting an embedded NUL.
+inline int fse_utf8_encode(int64_t cp, uint8_t* buf) {
+    if (cp == 0)          return 0;
+    if (cp < 0 || cp > 0x10FFFF)      return -1;
+    if (cp >= 0xD800 && cp <= 0xDFFF) return -1;
+    if (cp < 0x80) {
+        buf[0] = static_cast<uint8_t>(cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        buf[0] = static_cast<uint8_t>(0xC0u | (cp >> 6));
+        buf[1] = static_cast<uint8_t>(0x80u | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        buf[0] = static_cast<uint8_t>(0xE0u | (cp >> 12));
+        buf[1] = static_cast<uint8_t>(0x80u | ((cp >> 6) & 0x3F));
+        buf[2] = static_cast<uint8_t>(0x80u | (cp & 0x3F));
+        return 3;
+    }
+    buf[0] = static_cast<uint8_t>(0xF0u | (cp >> 18));
+    buf[1] = static_cast<uint8_t>(0x80u | ((cp >> 12) & 0x3F));
+    buf[2] = static_cast<uint8_t>(0x80u | ((cp >> 6) & 0x3F));
+    buf[3] = static_cast<uint8_t>(0x80u | (cp & 0x3F));
+    return 4;
+}
+
+// RANDOM_STRING RNG. Mirrors function_numeric.cpp's fn_thread_rng: one pcg64 per
+// worker thread, seeded independently from std::random_device on first use —
+// lock-free under the morsel scheduler, and the correct design for a VOLATILE
+// function (no reproducibility contract to honour). This is a SEPARATE
+// thread_local from function_numeric's: its accessor lives in that file's
+// anonymous namespace and is unreachable across the TU, and that file is not this
+// chip's to edit — the same duplication precedent its header sets for the fk_*
+// readers. Only the accessor is re-stated; the RNG algorithm (vendored PCG) is not
+// re-implemented.
+inline pcg64& fse_thread_rng() {
+    static thread_local pcg64 rng{pcg_extras::seed_seq_from<std::random_device>()};
+    return rng;
+}
+
+// Fill `width` bytes of `dst` with random bytes drawn from `rng` (64 bits/draw).
+inline void fse_fill_random_bytes(pcg64& rng, uint8_t* dst, uint32_t width) {
+    uint32_t i = 0u;
+    while (i + 8u <= width) {
+        const uint64_t r = rng();
+        std::memcpy(dst + i, &r, 8u);
+        i += 8u;
+    }
+    if (i < width) {
+        const uint64_t r = rng();
+        std::memcpy(dst + i, &r, static_cast<size_t>(width - i));
+    }
+}
+
+// RAII free-on-throw guard for the hand-allocated string component buffers (the
+// draken_date_format pattern). On the success path the kernel nulls the members
+// before handing ownership to vecresult_from_string_buffers.
+struct FseStringBufGuard {
+    DrakenStringSlot* slots;
+    uint8_t*          arena;
+    uint8_t*          validity;
+    ~FseStringBufGuard() {
+        if (slots)    draken_free(slots);
+        if (arena)    draken_free(arena);
+        if (validity) draken_free(validity);
+    }
+};
 
 }  // namespace
 
@@ -460,6 +584,131 @@ VecResult draken_to_ascii(void* /*ctx*/, const DrakenVector* const* args, uint32
         }
     }
     return fse_dense_int64(out, validity, n);
+}
+
+// TO_CHAR(codepoint) -> VARCHAR (alias CHR). The inverse of draken_to_ascii:
+// converts an integer Unicode codepoint to its UTF-8 encoding — one character.
+// Empty string for codepoint 0 (mirroring TO_ASCII's empty→0); a LOUD error for
+// any value that is not a Unicode scalar (negative, > U+10FFFF, or a surrogate),
+// never a silently wrong or replacement character. Null row → null output.
+//
+// Output type is the registrar's declared VARCHAR; its bytes are the codepoint's
+// UTF-8 form (≤4 bytes, always inline — no arena). Dense per-logical-row (see the
+// file header for why this is not shape-preserving). Single overload, so a bare
+// draken_to_char registry entry captures TO_CHAR/CHR with no _fn_skip_lookup gate.
+VecResult draken_to_char(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 1) return draken_error_sentinel("draken_to_char: expected 1 argument");
+    const DrakenVector* v = args[0];
+    if (!fse_is_integer(v->type))
+        return draken_error_sentinel("draken_to_char: integer codepoint input required");
+
+    // Explicit try/catch (NOT DRAKEN_KERNEL_TRY): the body's brace-initializer
+    // comma lists would be split by the function-like macro's argument parser.
+    try {
+        const uint32_t n = v->length;
+        const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+        auto* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+        if (!slots) return draken_error_sentinel("draken_to_char: allocation failed");
+        std::memset(slots, 0, slots_sz);
+        FseStringBufGuard g{slots, nullptr, nullptr};
+
+        g.validity = kernel_copy_validity(v);   // nullptr if all-valid; throws on OOM (caught)
+
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (!fse_row_valid(v, i)) { str_init_null(&slots[i]); continue; }
+            const int64_t cp = fse_read_int(v, i);
+            uint8_t buf[4];
+            const int len = fse_utf8_encode(cp, buf);
+            if (len < 0)
+                return draken_error_sentinel_fmt(
+                    "draken_to_char: codepoint %lld is not a Unicode scalar value",
+                    static_cast<long long>(cp));
+            str_init_inline(&slots[i], buf, static_cast<uint32_t>(len));
+        }
+
+        DrakenStringSlot* out_slots = g.slots;
+        uint8_t*          validity  = g.validity;
+        g.slots = nullptr; g.validity = nullptr;
+        return vecresult_from_string_buffers(out_slots, nullptr, 0u, validity, n, DRAKEN_VARCHAR);
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("draken_to_char: unknown error");
+    }
+}
+
+// RANDOM_STRING(n) -> VARBINARY. Each output row is `n` random BYTES, where `n` is
+// that row's value of the integer operand — a constant literal broadcast to the
+// morsel, or a real column. Architect ruling (2026-07-17): honour the declared
+// VARBINARY return, n random bytes (not characters), one value per row.
+//
+// VOLATILE: one independent draw per row (the per-thread PCG stream). It is never
+// constant-folded — constant_folding.py excludes RANDOM_STRING — and never
+// shape-preserving (every row needs its own value). n = 0 → empty VARBINARY; a
+// NULL operand row → NULL output; a negative n → loud error. Single overload, so a
+// bare draken_random_string entry captures it with no _fn_skip_lookup gate.
+VecResult draken_random_string(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 1) return draken_error_sentinel("draken_random_string: expected 1 argument");
+    const DrakenVector* v = args[0];
+    if (!fse_is_integer(v->type))
+        return draken_error_sentinel("draken_random_string: integer length input required");
+
+    // Explicit try/catch (NOT DRAKEN_KERNEL_TRY): the body's brace-initializer
+    // comma lists would be split by the function-like macro's argument parser.
+    try {
+        const uint32_t n = v->length;
+        const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+        auto* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+        if (!slots) return draken_error_sentinel("draken_random_string: allocation failed");
+        std::memset(slots, 0, slots_sz);
+        FseStringBufGuard g{slots, nullptr, nullptr};
+
+        // Pass 1: sum arena bytes for the widths that exceed the inline slot, and
+        // validate every width loudly before committing further allocations.
+        size_t arena_cap = 0u;
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (!fse_row_valid(v, i)) continue;
+            const int64_t w = fse_read_int(v, i);
+            if (w < 0)
+                return draken_error_sentinel_fmt(
+                    "draken_random_string: negative length %lld", static_cast<long long>(w));
+            if (w > STR_INLINE_MAX) arena_cap += static_cast<size_t>(w);
+        }
+
+        if (arena_cap > 0u) {
+            g.arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
+            if (!g.arena) return draken_error_sentinel("draken_random_string: allocation failed");
+        }
+        g.validity = kernel_copy_validity(v);   // nullptr if all-valid; throws on OOM (caught)
+
+        pcg64& rng = fse_thread_rng();
+        size_t arena_used = 0u;
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (!fse_row_valid(v, i)) { str_init_null(&slots[i]); continue; }
+            const uint32_t width = static_cast<uint32_t>(fse_read_int(v, i));  // ≥0 (pass 1)
+            if (width <= STR_INLINE_MAX) {
+                uint8_t inl[STR_INLINE_MAX];
+                fse_fill_random_bytes(rng, inl, width);
+                str_init_inline(&slots[i], inl, width);
+            } else {
+                uint8_t* dst = g.arena + arena_used;
+                fse_fill_random_bytes(rng, dst, width);
+                draken_build_string_slot(&slots[i], dst, width, static_cast<uint32_t>(arena_used));
+                arena_used += width;
+            }
+        }
+
+        DrakenStringSlot* out_slots = g.slots;
+        uint8_t*          out_arena = g.arena;
+        uint8_t*          validity  = g.validity;
+        g.slots = nullptr; g.arena = nullptr; g.validity = nullptr;
+        return vecresult_from_string_buffers(out_slots, out_arena, arena_used, validity, n,
+                                             DRAKEN_VARBINARY);
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("draken_random_string: unknown error");
+    }
 }
 
 }  // extern "C"

@@ -1,6 +1,75 @@
 import importlib
 import warnings
 
+import pytest
+
+
+def _reload_config():
+    import opteryx.config as config
+
+    return importlib.reload(config)
+
+
+def test_get_bool_unset_uses_default(monkeypatch):
+    monkeypatch.delenv("DISABLE_OPTIMIZER", raising=False)
+    config = _reload_config()
+    assert config.DISABLE_OPTIMIZER is False
+
+
+def test_get_bool_true(monkeypatch):
+    monkeypatch.setenv("DISABLE_OPTIMIZER", "true")
+    config = _reload_config()
+    assert config.DISABLE_OPTIMIZER is True
+
+
+def test_get_bool_false(monkeypatch):
+    monkeypatch.setenv("DISABLE_OPTIMIZER", "false")
+    config = _reload_config()
+    assert config.DISABLE_OPTIMIZER is False
+
+
+def test_get_bool_zero(monkeypatch):
+    monkeypatch.setenv("DISABLE_OPTIMIZER", "0")
+    config = _reload_config()
+    assert config.DISABLE_OPTIMIZER is False
+
+
+def test_get_bool_one(monkeypatch):
+    monkeypatch.setenv("DISABLE_OPTIMIZER", "1")
+    config = _reload_config()
+    assert config.DISABLE_OPTIMIZER is True
+
+
+def test_get_bool_mixed_case_and_whitespace(monkeypatch):
+    monkeypatch.setenv("DISABLE_OPTIMIZER", "  YeS ")
+    config = _reload_config()
+    assert config.DISABLE_OPTIMIZER is True
+
+
+def test_get_bool_default_true_flag_can_be_disabled(monkeypatch):
+    # ENABLE_ZERO_COPY defaults True: the old bool(str) idiom could never turn it off.
+    monkeypatch.setenv("ENABLE_ZERO_COPY", "false")
+    config = _reload_config()
+    assert config.ENABLE_ZERO_COPY is False
+
+
+def test_get_bool_default_true_flag_unset(monkeypatch):
+    monkeypatch.delenv("ENABLE_ZERO_COPY", raising=False)
+    config = _reload_config()
+    assert config.ENABLE_ZERO_COPY is True
+
+
+def test_get_bool_unrecognised_value_raises(monkeypatch):
+    monkeypatch.setenv("DISABLE_OPTIMIZER", "maybe")
+    with pytest.raises(ValueError):
+        _reload_config()
+
+
+def test_get_bool_feature_flag_false(monkeypatch):
+    monkeypatch.setenv("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", "0")
+    config = _reload_config()
+    assert config.features.enable_dpccp_join_planning is False
+
 
 def test_retired_feature_draken_dict_expr_strict_warns(monkeypatch):
     monkeypatch.setenv("FEATURE_DRAKEN_DICT_EXPR_STRICT", "1")

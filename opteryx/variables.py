@@ -23,7 +23,7 @@ from opteryx.__version__ import __version__
 from opteryx.compiled.simd_probe import cpu_architecture
 from opteryx.constants.character_set import CharacterSet, Collation
 from opteryx.exceptions import PermissionsError, VariableNotFoundError
-from opteryx.types.logical_type import BOOLEAN, INT64, VARCHAR, ARRAY, VARIANT
+from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
 
 
 class VariableOwner(int, Enum):
@@ -80,6 +80,7 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # These are Opteryx specific variables
     "disable_optimizer": (BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
     "concurrent_reads": (INT64, config.CONCURRENT_READS, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "match_threshold": (FLOAT64, config.MATCH_THRESHOLD, VariableOwner.USER, Visibility.UNRESTRICTED),
     "user_memberships": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.SERVER, Visibility.RESTRICTED),
 }

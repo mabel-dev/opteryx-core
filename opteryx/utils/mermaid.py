@@ -210,6 +210,21 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                         node_stat["rows_read"] = node_stat.get("records_out", 0)
                         node_stat["bytes_processed"] = node_stat.get("bytes_out", 0)
 
+            # Operator config — the per-node human-readable summary each operator
+            # already exposes for diagnostics (the FILTER's predicate expression,
+            # the LIMIT's "N OFFSET M", the PROJECT's column list, the SORT's
+            # order-by keys, ...). It's the one field that tells a reader what a
+            # node is actually configured to do, so surface it for every operator.
+            # The .config properties are cheap string builders but marked no-cover
+            # and a few import/format lazily, so guard against a raising one rather
+            # than dropping the whole node's telemetry.
+            try:
+                config = node.config
+            except Exception:  # pragma: no cover - never let one node's config break telemetry
+                config = None
+            if config:
+                node_stat["config"] = str(config)
+
             # Add node-specific attributes
             if getattr(node, "columns", None):
                 node_stat["columns"] = len(node.columns)

@@ -23,6 +23,7 @@ from .function_rewriter import FunctionRewriteStrategy
 from .filter_implied_group_key_reduction import FilterImpliedGroupKeyReductionStrategy
 from .group_key_reduction import GroupKeyReductionStrategy
 from .predicate_rewriter import PredicateRewriteStrategy
+from .project_fusion import ProjectFusionStrategy
 from .projection_pushdown import ProjectionPushdownStrategy
 from .redundant_cast import RedundantCastEliminationStrategy
 from .redundant_operators import RedundantOperationsStrategy
@@ -57,6 +58,7 @@ __all__ = [
     "FilterImpliedGroupKeyReductionStrategy",
     "GroupKeyReductionStrategy",
     "PredicateRewriteStrategy",
+    "ProjectFusionStrategy",
     "ProjectionPushdownStrategy",
     "RedundantCastEliminationStrategy",
     "RedundantOperationsStrategy",

@@ -47,6 +47,10 @@ VecResult draken_ceiling(void* ctx, const DrakenVector* const* args, uint32_t na
 VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_if_then_else(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// function_rlike.cpp — pattern operand is always a pre-compiled DFA blob
+// (opteryx.compiled.vector_ops.compile_rlike_dfa, plan-time only); this
+// kernel has zero RE2 dependency and is a genuine draken-native kernel.
+VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_not_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -98,27 +102,34 @@ VecResult draken_log(void* ctx, const DrakenVector* const* args, uint32_t nargs)
 VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_random(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_normal(void* ctx, const DrakenVector* const* args, uint32_t nargs);
-// Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII (function_string_extra.cpp).
-// CONCAT/CONCAT_WS/SPLIT/REGEXP_REPLACE/MATCH/RANDOM_STRING are absent by design —
-// see that file's header and the report to the architect.
+// Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII + TO_CHAR/RANDOM_STRING
+// (function_string_extra.cpp). CONCAT/CONCAT_WS/REGEXP_REPLACE/MATCH are absent by
+// design — see that file's header. SPLIT returns an ARRAY, so it lives with the
+// ARRAY kernels below (function_array_json.cpp), not here.
 VecResult draken_octet_length(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_position(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_levenshtein(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_to_ascii(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_to_char(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_random_string(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (function_null_conditional.cpp).
 // NULLIF is absent by design — the logical planner lowers it to IIF(a = b, NULL, a)
-// before binding, so a draken_nullif entry would be unreachable. GREATEST/LEAST are
-// absent because they reduce over an ARRAY, whose child hangs off VectorOwner and is
-// unreachable on this signature — see that file's header and the report to the architect.
+// before binding, so a draken_nullif entry would be unreachable. (GREATEST/LEAST are
+// ARRAY reducers and live with the ARRAY kernels below, function_array_json.cpp.)
 VecResult draken_coalesce(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_ifnull(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_ifnotnull(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_iif(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // ARRAY & JSON kernels (function_array_json.cpp)
 VecResult draken_jsonb_object_keys(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_length_array(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_sort(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_array_contains_any(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_greatest(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_least(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // Phase 9a-fn: DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
 VecResult draken_datediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_timediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -144,6 +155,42 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
 //
 static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // ========================================================================
+    // Per-overload kernel names (draken_{overload_id})
+    // ------------------------------------------------------------------------
+    // The binder probes draken_{overload_id} first and only falls back to the
+    // bare draken_{name} for a function with exactly ONE overload, where the
+    // bare name cannot be ambiguous. A function with MORE than one overload
+    // must name its kernel per overload HERE — otherwise the binder refuses to
+    // bind it C-native rather than guessing.
+    //
+    // That rule exists because the old unconditional bare-name fallback bound
+    // LENGTH(array) to the string-only draken_length, which then failed at
+    // RUNTIME ("string input required"). Silently binding a kernel that refuses
+    // the overload's own operand types is exactly the hidden behaviour §1
+    // forbids; the fix is to make the choice explicit, not smarter.
+    //
+    // The entries below are the multi-overload functions whose overloads
+    // GENUINELY share one kernel (arity variants, and TRUNC's type variants —
+    // each kernel already dispatches internally). They are aliases, not new
+    // kernels. LENGTH is the one function whose overloads truly differ.
+    // ========================================================================
+    {"draken_length_string", (kernel_fn_t)&draken_length},
+    {"draken_length_array", (kernel_fn_t)&draken_length_array},
+    {"draken_round_1", (kernel_fn_t)&draken_round},
+    {"draken_round_2", (kernel_fn_t)&draken_round},
+    {"draken_split_2", (kernel_fn_t)&draken_split},
+    {"draken_split_3", (kernel_fn_t)&draken_split},
+    {"draken_substring_2", (kernel_fn_t)&draken_substring},
+    {"draken_substring_3", (kernel_fn_t)&draken_substring},
+    {"draken_random_default", (kernel_fn_t)&draken_random},
+    {"draken_random_0", (kernel_fn_t)&draken_random},
+    {"draken_normal_default", (kernel_fn_t)&draken_normal},
+    {"draken_normal_0", (kernel_fn_t)&draken_normal},
+    {"draken_trunc_numeric", (kernel_fn_t)&draken_trunc},
+    {"draken_trunc_date", (kernel_fn_t)&draken_trunc},
+    {"draken_trunc_timestamp", (kernel_fn_t)&draken_trunc},
+
+    // ========================================================================
     // Scalar function kernels (Phase 9a-fn, function_kernels.cpp)
     // ========================================================================
     {"draken_length", (kernel_fn_t)&draken_length},
@@ -158,6 +205,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_date_part", (kernel_fn_t)&draken_date_part},
     {"draken_if_then_else", (kernel_fn_t)&draken_if_then_else},
     {"draken_like", (kernel_fn_t)&draken_like},
+    {"draken_rlike", (kernel_fn_t)&draken_rlike},
     {"draken_in_list", (kernel_fn_t)&draken_in_list},
     {"draken_is_empty", (kernel_fn_t)&draken_is_empty},
     {"draken_is_not_empty", (kernel_fn_t)&draken_is_not_empty},
@@ -359,17 +407,22 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_normal", (kernel_fn_t)&draken_normal},
 
     // ========================================================================
-    // Fixed-result string function kernels (Phase 9a-fn, function_string_extra.cpp)
+    // String function kernels (Phase 9a-fn, function_string_extra.cpp)
     //
-    // The rest of the string group is absent DELIBERATELY, not pending:
+    // draken_to_char / draken_random_string produce STRING results (VARCHAR /
+    // VARBINARY), dense per-logical-row; the other four produce dense INT64.
+    // draken_random_string honours the architect's 2026-07-17 ruling: n random
+    // BYTES per row as VARBINARY. It is VOLATILE and excluded from constant
+    // folding (constant_folding.py). The rest of the string group is absent
+    // DELIBERATELY, not pending:
     //   CONCAT / CONCAT_WS — the optimizer rewrites both to `||` (StringConcat)
     //       chains, which are already native. A kernel here would be shadowed.
+    //       (CONCAT_WS's 2-arg form is now rewritten too — predicate_rewriter.py.)
     //   SPLIT          — returns ARRAY; VecResult has no array-ownership contract.
     //   REGEXP_REPLACE — needs RE2, which is not compiled into draken/rugo.
-    //   MATCH          — `_MATCH_AGAINST` raises NotImplementedError; no semantics
-    //                    to port.
-    //   RANDOM_STRING  — volatile, and its declared arity does not match its
-    //                    callable; semantics undefined.
+    //   MATCH          — LANDED, but as draken__match_against_2 on the vector/distance
+    //                    path (function_vector_distance.cpp), not here: it is embedding
+    //                    cosine similarity, not string manipulation.
     // Each is explained in function_string_extra.cpp's header and was raised with
     // the architect rather than guessed at.
     // ========================================================================
@@ -377,6 +430,8 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_position", (kernel_fn_t)&draken_position},
     {"draken_levenshtein", (kernel_fn_t)&draken_levenshtein},
     {"draken_to_ascii", (kernel_fn_t)&draken_to_ascii},
+    {"draken_to_char", (kernel_fn_t)&draken_to_char},
+    {"draken_random_string", (kernel_fn_t)&draken_random_string},
 
     // ========================================================================
     // Null & conditional kernels (function_null_conditional.cpp)
@@ -389,11 +444,8 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // Absent by design:
     //   NULLIF          — lowered to IIF(a = b, NULL, a) by the logical planner
     //                     before binding; an entry here would never be dispatched.
-    //   GREATEST/LEAST  — reduce over an ARRAY, whose child vector hangs off
-    //                     VectorOwner rather than DrakenVector and so cannot be
-    //                     reached on this signature (the same wall extraction.cpp's
-    //                     `arr[i]` documents). Needs the BC_C_NATIVE_CHILD plumbing;
-    //                     raised with the architect rather than guessed at.
+    // (GREATEST/LEAST are ARRAY reducers and now live in the ARRAY & JSON block
+    //  below, using the BC_C_NATIVE_CHILD plumbing to reach the array child.)
     // ========================================================================
     {"draken_coalesce", (kernel_fn_t)&draken_coalesce},
     {"draken_ifnull", (kernel_fn_t)&draken_ifnull},
@@ -428,19 +480,34 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // NOT Python's sorted(): fp_total_lt for floats (NaN highest), str_compare for
     // strings (the engine's own GT/LT comparator), false<true for BOOL.
     //
-    // Absent by design:
-    //   GREATEST/LEAST  — see the null-conditional block above; they reduce over an
-    //                     ARRAY and could now plausibly use this same mechanism,
-    //                     but that is a separate port, not assumed here.
-    //   ARRAY_CONTAINS  — lowered to `item = ANY(arr)` (AnyOpEq) at plan-build
-    //                     time; already native. Its Python impl is a fail-loud
-    //                     guard for a bypassed rewrite, so an entry here would
-    //                     silence that guard, not accelerate anything.
+    // GREATEST/LEAST are unary ARRAY reducers (per-row max/min of an ARRAY column,
+    // NOT variadic scalars). They READ their array via the same BC_C_NATIVE_CHILD
+    // one-child mechanism as SORT and return an element SCALAR. Their order matches
+    // the reducer they replace (make_array_greatest, nanmax/nanmin — NaN smallest),
+    // NOT SORT's NaN-highest order — see array_reduce in function_array_json.cpp.
+    //
+    // SPLIT reads a VARCHAR and RETURNS an ARRAY<VARIANT> (child rides VecResult::
+    // child, like JSONB_OBJECT_KEYS); its scalar delimiter/limit are literal args.
+    //
+    // ARRAY_CONTAINS(arr, item) == `item = ANY(arr)` (AnyOpEq). Architect ruling
+    // 2026-07-17: make the AnyOp form native (Fix B). The old comments claiming it
+    // was "already native via AnyOpEq" were WRONG — the compare admission gate
+    // refuses AnyOpEq, so it was unrunnable. Rather than widen that hot gate, the
+    // compare arm lowers AnyOpEq-over-an-ARRAY-column to this BC_FUNCTION (the same
+    // BC_C_NATIVE_CHILD + WRAP_AS_BOOL path ARRAY_CONTAINS_ANY uses). The item is a
+    // one-element in_list_ctx blob; semantics are the reference SQL `= ANY`
+    // (three-valued: null row -> NULL), distinct from ARRAY_CONTAINS_ANY's
+    // null-row -> false. Bare `x = ANY(arr)` gets it too. A per-row item column or
+    // a computed array stays refused at plan time (no fallback).
     // ========================================================================
     {"draken_jsonb_object_keys", (kernel_fn_t)&draken_jsonb_object_keys},
     {"draken_sort", (kernel_fn_t)&draken_sort},
     {"draken_array_contains_any", (kernel_fn_t)&draken_array_contains_any},
     {"draken_array_contains_all", (kernel_fn_t)&draken_array_contains_all},
+    {"draken_array_contains", (kernel_fn_t)&draken_array_contains},
+    {"draken_greatest", (kernel_fn_t)&draken_greatest},
+    {"draken_least", (kernel_fn_t)&draken_least},
+    {"draken_split", (kernel_fn_t)&draken_split},
 
     // DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
     {"draken_datediff", (kernel_fn_t)&draken_datediff},
@@ -456,6 +523,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cosine_distance_vector", (kernel_fn_t)&draken_cosine_distance_vector},
     {"draken_cosine_similarity_text", (kernel_fn_t)&draken_cosine_similarity_text},
     {"draken_cosine_distance_text", (kernel_fn_t)&draken_cosine_distance_text},
+    // MATCH (col) AGAINST (str) — the overload id _MATCH_AGAINST_2 lowercased, hence the
+    // doubled underscore. Runs the text cosine body and thresholds it (match_ctx).
+    {"draken__match_against_2", (kernel_fn_t)&draken__match_against_2},
     // Two-vector cast (parent+child); cast dispatch casts the fn ptr to its own
     // signature, exactly as draken_cast_array_to_varchar is registered.
     {"draken_cast_array_to_vector", (kernel_fn_t)&draken_cast_array_to_vector},

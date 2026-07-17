@@ -111,6 +111,10 @@ struct case_ctx {
  * kind 0: count x int64 SORTED ASCENDING (int family raw values; DECIMAL raw
  *         quantized to the column's scale at bind time).
  * kind 1: count x (u32 len + bytes) — UTF-8/ASCII string entries.
+ * kind 2: count x float64 (IEEE754 double), in GIVEN order (NOT sorted —
+ *         draken_in_list does not binary-search this kind). Consumed today
+ *         only by draken_array_contains (function_array_json.cpp), which
+ *         always packs a single entry; draken_in_list has no kind-2 arm.
  * The list never contains NULL (the plan compiler rejects those lists).
  */
 struct in_list_ctx {
@@ -141,14 +145,15 @@ struct substring_ctx* kernel_alloc_substring_ctx(int32_t start, int32_t count,
  * Context for draken_time_bucket — TIME_BUCKET(magnitude, units, date).
  * magnitude/units are bind-time (literal) operands, consumed here rather than
  * pushed as vector operands; only the `date` operand is pushed. unit_kind
- * selects the calendar-free bucket period (seconds/minutes/hours/days — the
- * same subset vector_floor_temporal supports); ts_unit is the TIMESTAMP64
- * operand's TimestampUnit (0=s,1=ms,2=us,3=ns), a LogicalType detail not
- * carried on DrakenVector.
+ * selects the bucket period: 1-4 are fixed-width (second/minute/hour/day),
+ * 5 is week (7-day, ISO-Monday anchored), 6-8 are epoch-anchored calendar
+ * buckets (month/quarter/year). ts_unit is a TIMESTAMP64 operand's TimestampUnit
+ * (0=s,1=ms,2=us,3=ns), a LogicalType detail not carried on DrakenVector; a
+ * DATE32 operand ignores it (the kernel works in microseconds).
  */
 struct time_bucket_ctx {
     int64_t magnitude;
-    uint8_t unit_kind;   // 1=second 2=minute 3=hour 4=day
+    uint8_t unit_kind;   // 1=second 2=minute 3=hour 4=day 5=week 6=month 7=quarter 8=year
     uint8_t ts_unit;
 };
 
@@ -213,6 +218,30 @@ struct cosine_text_ctx {
 };
 
 struct cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* embed_fn);
+
+/**
+ * Context for draken__match_against_2 (SQL `MATCH (col) AGAINST (str)`).
+ *
+ * MATCH is defined as `cosine_similarity(col, str) >= threshold`, so the first two fields
+ * are cosine_text_ctx's and carry the same meaning — the kernel builds a cosine_text_ctx
+ * from them and calls the SAME body the text cosine overloads use. MATCH therefore cannot
+ * disagree with COSINE_SIMILARITY on the same inputs: it is that function, thresholded.
+ *
+ * `threshold` is resolved at BIND time from the `match_threshold` session variable, not
+ * read at execution time: a compiled plan must keep answering the question it was compiled
+ * for. It is only meaningful relative to the ACTIVE embedder — two embedders' score
+ * distributions are not comparable — which is why it is tunable rather than a constant.
+ *
+ * A NaN similarity (a zero-magnitude embedding: empty or stopword-only text) fails the
+ * `>=` and yields false. That is intended: an undefined direction is not a match.
+ */
+struct match_ctx {
+    uint32_t dimension;
+    void*    embed_fn;   /* func_fn_t: VecResult (*)(void*, const DrakenVector* const*, uint32_t) */
+    double   threshold;
+};
+
+struct match_ctx* kernel_alloc_match_ctx(uint32_t dimension, void* embed_fn, double threshold);
 
 #ifdef __cplusplus
 }

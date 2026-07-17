@@ -1,8 +1,9 @@
-from opteryx.compiled.vector_ops import vector_contains_all
+import draken.draken_native as dn
+from opteryx.compiled.nanobind.vectors import vector_contains_all
 
 
 def test_list_contains_all_basic():
-    arr = [[1,2,3],[2,3],[None],[]]
-    items = {2,3}
+    arr = dn.vector_array_from_sequence([[1, 2, 3], [2, 3], [None], []])
+    items = {2, 3}
     res = vector_contains_all(arr, items)
-    assert list(res) == [1,0,0,0]
+    assert res.to_pylist() == [True, True, False, False]

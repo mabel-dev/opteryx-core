@@ -184,14 +184,38 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             ),
         ),
         # Other convenience encoders/decoders
-        _make(
-            "RANDOM_STRING",
-            number_functions.random_strings,
-            _CT_VARBINARY,
-            (_n,),
+        #
+        # RANDOM_STRING(n) -> VARBINARY: n random BYTES per row (architect ruling
+        # 2026-07-17). C-native only — the draken_random_string kernel
+        # (function_string_extra.cpp) is the sole implementation, so callable_ref
+        # is None (the coalesce/iif precedent: a c-native function declares "no
+        # Python"). It is VOLATILE, so it is never constant-folded (the one path a
+        # callable_ref would otherwise serve) — constant_folding.py excludes it.
+        # The old `number_functions.random_strings` binding is removed: its
+        # (row_count, width) VARCHAR callable never matched this 1-param VARBINARY
+        # signature, and the native engine has no per-morsel Python fallback anyway.
+        FunctionDefinition(
+            name="RANDOM_STRING",
+            aliases=(),
+            category="text",
             volatility="volatile",
-            summary="Generate random strings.",
-            cost=372872.83,
+            deterministic=False,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Generate random bytes.",
+            documentation="Returns n random bytes as VARBINARY, one value per row.",
+            overloads=(
+                FunctionOverload(
+                    id="RANDOM_STRING_default",
+                    parameters=(_n,),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARBINARY),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=None,
+                        cost_us_per_million=372872.83,
+                    ),
+                ),
+            ),
         ),
         _make(
             "BASE64_ENCODE",

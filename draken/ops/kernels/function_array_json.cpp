@@ -38,23 +38,35 @@
 // draken_in_list uses), not a second vector operand — so there is no second
 // child to resolve.
 //
-// ARRAY_CONTAINS is not in this file by design — it is lowered at plan-build time
-// to `item = ANY(arr)` (AnyOpEq, already native); its Python impl is a fail-loud
-// guard for a bypassed rewrite. Registering draken_array_contains would silence
-// that guard.
+// GREATEST/LEAST (array_reduce) READ their array via the same BC_C_NATIVE_CHILD
+// child and return an element SCALAR — the mirror of the READ half without an
+// ARRAY result. SPLIT does the opposite: it reads a VARCHAR and RETURNS an
+// ARRAY<VARIANT>, so its child rides out on VecResult::child exactly like
+// JSONB_OBJECT_KEYS.
+//
+// ARRAY_CONTAINS(arr, item) IS in this file (draken_array_contains, below): it
+// is lowered at plan-build time to `item = ANY(arr)` (AnyOpEq), bypassing the
+// compare admission gate entirely by dispatching as a BC_FUNCTION (same
+// BC_C_NATIVE_CHILD path as ARRAY_CONTAINS_ANY/ALL) rather than a BC_COMPARE —
+// so AnyOpEq itself stays refused, but ARRAY_CONTAINS never emits it. A literal
+// array on the right (`x = ANY([1,2,3])`) lowers separately, to draken_in_list.
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "core/alloc.h"
 #include "core/buffers.h"
 #include "core/string_slot.h"
 #include "core/vector_alloc.h"            // draken_identity_sel
+#include "ops/array_reductions.h"         // arr_reduce_int64/string — reference = ANY(arr) impl
 #include "ops/float_ops.h"                // fp_total_lt — Draken's canonical NaN-highest order
 #include "ops/string_result.h"            // StringRows + sr_* helpers
 #include "ops/vec_result.h"
@@ -494,6 +506,449 @@ VecResult acm_run(void* ctx, const DrakenVector* const* args, uint32_t nargs,
     return r;
 }
 
+// ---------------------------------------------------------------------------
+// GREATEST / LEAST support — per-row max/min reducer over an ARRAY column.
+// ---------------------------------------------------------------------------
+// Faithful port of make_array_greatest (draken_native.cpp — the nanobind
+// vector_array_greatest/least these functions bound to as callable_ref):
+//   * a NULL parent row               -> NULL result row;
+//   * NULL elements are skipped;
+//   * an empty / all-null array row   -> NULL result row (no element wins).
+// Element order is that reducer's order, NOT draken_sort's fp_total_lt: for
+// floats NaN is treated as SMALLEST for BOTH max and min (nanmax/nanmin) — a
+// non-NaN always beats a NaN and a NaN never wins; an all-NaN row keeps the
+// first NaN. This deliberately differs from SORT (where NaN sorts highest);
+// GREATEST/LEAST match the reducer they replace. An array carries ONE element
+// type, so there is no mixed-type ordering question at this layer.
+
+// Allocate an all-valid, 8-byte-padded validity bitmap for `n` logical rows.
+inline uint8_t* ar_alloc_validity(uint32_t n) {
+    const uint32_t bm = (n + 7u) >> 3;
+    const uint32_t padded = (bm + 7u) & ~7u;
+    uint8_t* v = static_cast<uint8_t*>(draken_malloc(padded > 0u ? padded : 8u));
+    if (!v) throw std::bad_alloc();
+    std::memset(v, 0xFFu, padded > 0u ? padded : 8u);
+    return v;
+}
+
+template <typename T>
+VecResult reduce_numeric_child(const DrakenVector* parent, const DrakenVector* child,
+                               DrakenType out_type, bool want_max) {
+    const uint32_t n = parent->length;
+    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
+    const T* cdata = static_cast<const T*>(child->data);
+
+    T* out_data = static_cast<T*>(draken_malloc((n > 0u ? n : 1u) * sizeof(T)));
+    if (!out_data) throw std::bad_alloc();
+    std::memset(out_data, 0, (n > 0u ? n : 1u) * sizeof(T));
+
+    uint8_t* validity = ar_alloc_validity(n);
+    bool any_null = false;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        bool have = false;
+        T best{};
+        if (aj_row_valid(parent, i)) {
+            const int32_t start = offsets[parent->selection[i]];
+            const int32_t end   = offsets[parent->selection[i] + 1u];
+            for (int32_t j = start; j < end; ++j) {
+                const uint32_t jj = static_cast<uint32_t>(j);
+                if (!aj_row_valid(child, jj)) continue;
+                const T v = cdata[child->selection[jj]];
+                if (!have) { best = v; have = true; continue; }
+                bool v_wins;
+                if constexpr (std::is_floating_point<T>::value) {
+                    if (v != v)            v_wins = false;  // v is NaN — never wins
+                    else if (best != best) v_wins = true;   // best is NaN — v beats it
+                    else v_wins = want_max ? (v > best) : (v < best);
+                } else {
+                    v_wins = want_max ? (v > best) : (v < best);
+                }
+                if (v_wins) best = v;
+            }
+        }
+        if (have) {
+            out_data[i] = best;
+        } else {
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            any_null = true;
+        }
+    }
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+
+    VecResult r{};
+    r.data           = out_data;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = out_type;
+    r.flags          = DRAKEN_SEL_IDENTITY;
+    return r;
+}
+
+inline VecResult reduce_bool_child(const DrakenVector* parent, const DrakenVector* child,
+                                   bool want_max) {
+    const uint32_t n = parent->length;
+    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
+    const uint8_t* cbits = static_cast<const uint8_t*>(child->data);
+
+    const uint32_t obytes = ((n + 7u) >> 3) > 0u ? ((n + 7u) >> 3) : 1u;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc(obytes));
+    if (!out) throw std::bad_alloc();
+    std::memset(out, 0, obytes);
+
+    uint8_t* validity = ar_alloc_validity(n);
+    bool any_null = false;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        bool have = false, best = false;
+        if (aj_row_valid(parent, i)) {
+            const int32_t start = offsets[parent->selection[i]];
+            const int32_t end   = offsets[parent->selection[i] + 1u];
+            for (int32_t j = start; j < end; ++j) {
+                const uint32_t jj = static_cast<uint32_t>(j);
+                if (!aj_row_valid(child, jj)) continue;
+                const uint32_t phys = child->selection[jj];
+                const bool v = ((cbits[phys >> 3] >> (phys & 7u)) & 1u) != 0u;
+                if (!have) { best = v; have = true; continue; }
+                if (want_max ? (v && !best) : (!v && best)) best = v;
+            }
+        }
+        if (have) {
+            if (best) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        } else {
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            any_null = true;
+        }
+    }
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+
+    VecResult r{};
+    r.data           = out;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = DRAKEN_SEL_IDENTITY;
+    return r;
+}
+
+// String-family reducer. Winner per row by str_compare (the engine's own GT/LT
+// string order, string_compare.h). Output is a fresh consolidated string block
+// of n rows (one winner or null per row) — the input arena cannot be aliased
+// (the frame arena dies right after the span returns), mirroring
+// sort_string_child.
+inline VecResult reduce_string_child(const DrakenVector* parent, const DrakenVector* child,
+                                     bool want_max) {
+    const uint32_t n = parent->length;
+    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
+    const auto* sa = static_cast<const DrakenStringArena*>(child->data);
+
+    StringRows rows;
+    rows.length = n;
+    rows.type   = child->type;
+    rows.slots  = sr_alloc_slots(n);
+    struct RowsGuard {
+        StringRows* r; bool released = false;
+        ~RowsGuard() { if (!released && r) sr_free(*r); }
+    } rg{&rows};
+
+    std::vector<uint8_t> arena_buf;
+    for (uint32_t i = 0; i < n; ++i) {
+        long long best = -1;   // physical slot index of the current winner
+        if (aj_row_valid(parent, i)) {
+            const int32_t start = offsets[parent->selection[i]];
+            const int32_t end   = offsets[parent->selection[i] + 1u];
+            for (int32_t j = start; j < end; ++j) {
+                const uint32_t jj = static_cast<uint32_t>(j);
+                if (!aj_row_valid(child, jj)) continue;
+                const uint32_t phys = child->selection[jj];
+                if (best < 0) { best = static_cast<long long>(phys); continue; }
+                const int c = str_compare(&sa->slots[phys], sa->arena,
+                                          &sa->slots[static_cast<uint32_t>(best)], sa->arena);
+                if (want_max ? (c > 0) : (c < 0)) best = static_cast<long long>(phys);
+            }
+        }
+        if (best < 0) {
+            sr_mark_null(rows, i);
+        } else {
+            const DrakenStringSlot* src = &sa->slots[static_cast<uint32_t>(best)];
+            const uint8_t* bytes = str_data(src, sa->arena);
+            const uint32_t len   = str_length(src);
+            if (len <= STR_INLINE_MAX) {
+                str_init_inline(&rows.slots[i], bytes, len);
+            } else {
+                const uint32_t off = static_cast<uint32_t>(arena_buf.size());
+                arena_buf.insert(arena_buf.end(), bytes, bytes + len);
+                draken_build_string_slot(&rows.slots[i], arena_buf.data() + off, len, off);
+            }
+        }
+    }
+
+    rows.arena_len = arena_buf.size();
+    if (rows.arena_len > 0u) {
+        rows.arena = static_cast<uint8_t*>(draken_malloc(rows.arena_len));
+        if (!rows.arena) throw std::bad_alloc();
+        std::memcpy(rows.arena, arena_buf.data(), rows.arena_len);
+    }
+    rg.released = true;
+    VecResult r = vecresult_from_string_buffers(
+        rows.slots, rows.arena, rows.arena_len, rows.validity, rows.length, rows.type);
+    if (r.data == nullptr)
+        throw std::runtime_error("array reducer: failed to build string result");
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// ANY-EQ reducers for draken_array_contains (item = ANY(arr)). Same null-row/
+// element semantics as reduce_numeric_child/reduce_bool_child above (NULL
+// parent row -> NULL result row, NULL elements skipped) EXCEPT an empty or
+// all-null row is FALSE, not NULL — that is the reference `= ANY` contract
+// (array_reductions.h's arr_reduce_int64/arr_reduce_string), unlike GREATEST/
+// LEAST where an empty row has no winner and must be NULL. Deliberately not
+// unified with reduce_numeric_child: the "no NULL-when-empty" rule makes them
+// different reducers, not a parameterization of the same one.
+template <typename T>
+VecResult contains_numeric_child(const DrakenVector* parent, const DrakenVector* child, T needle) {
+    const uint32_t n = parent->length;
+    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
+    const T* cdata = static_cast<const T*>(child->data);
+
+    const uint32_t obytes = ((n + 7u) >> 3) > 0u ? ((n + 7u) >> 3) : 1u;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc(obytes));
+    if (!out) throw std::bad_alloc();
+    std::memset(out, 0, obytes);
+
+    uint8_t* validity = ar_alloc_validity(n);
+    bool any_null = false;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!aj_row_valid(parent, i)) {
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            any_null = true;
+            continue;
+        }
+        const int32_t start = offsets[parent->selection[i]];
+        const int32_t end   = offsets[parent->selection[i] + 1u];
+        bool found = false;
+        for (int32_t j = start; j < end && !found; ++j) {
+            const uint32_t jj = static_cast<uint32_t>(j);
+            if (!aj_row_valid(child, jj)) continue;
+            if (cdata[child->selection[jj]] == needle) found = true;
+        }
+        if (found) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+    }
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+
+    VecResult r{};
+    r.data           = out;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = DRAKEN_SEL_IDENTITY;
+    return r;
+}
+
+inline VecResult contains_bool_child(const DrakenVector* parent, const DrakenVector* child,
+                                     bool needle) {
+    const uint32_t n = parent->length;
+    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
+    const uint8_t* cbits = static_cast<const uint8_t*>(child->data);
+
+    const uint32_t obytes = ((n + 7u) >> 3) > 0u ? ((n + 7u) >> 3) : 1u;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc(obytes));
+    if (!out) throw std::bad_alloc();
+    std::memset(out, 0, obytes);
+
+    uint8_t* validity = ar_alloc_validity(n);
+    bool any_null = false;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!aj_row_valid(parent, i)) {
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            any_null = true;
+            continue;
+        }
+        const int32_t start = offsets[parent->selection[i]];
+        const int32_t end   = offsets[parent->selection[i] + 1u];
+        bool found = false;
+        for (int32_t j = start; j < end && !found; ++j) {
+            const uint32_t jj = static_cast<uint32_t>(j);
+            if (!aj_row_valid(child, jj)) continue;
+            const uint32_t phys = child->selection[jj];
+            const bool v = ((cbits[phys >> 3] >> (phys & 7u)) & 1u) != 0u;
+            if (v == needle) found = true;
+        }
+        if (found) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+    }
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+
+    VecResult r{};
+    r.data           = out;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = DRAKEN_SEL_IDENTITY;
+    return r;
+}
+
+// A row where the item can provably never equal any element of the target
+// integer width (out-of-range needle, e.g. item=9999 against a UINT8 array) —
+// legitimately FALSE (not an error, not NULL) for every non-null row, same
+// row-null propagation as contains_numeric_child.
+inline VecResult contains_never_match(const DrakenVector* parent) {
+    const uint32_t n = parent->length;
+    const uint32_t obytes = ((n + 7u) >> 3) > 0u ? ((n + 7u) >> 3) : 1u;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc(obytes));
+    if (!out) throw std::bad_alloc();
+    std::memset(out, 0, obytes);
+
+    uint8_t* validity = ar_alloc_validity(n);
+    bool any_null = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!aj_row_valid(parent, i)) {
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            any_null = true;
+        }
+    }
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+
+    VecResult r{};
+    r.data           = out;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = DRAKEN_SEL_IDENTITY;
+    return r;
+}
+
+// Does int64 payload `v` fit exactly in T's range (no silent truncation)?
+template <typename T>
+inline bool numeric_item_fits(int64_t v) {
+    if constexpr (std::is_same<T, int64_t>::value) {
+        return true;
+    } else if constexpr (std::is_unsigned<T>::value) {
+        if (v < 0) return false;
+        return static_cast<uint64_t>(v) <= static_cast<uint64_t>(std::numeric_limits<T>::max());
+    } else {
+        return v >= static_cast<int64_t>(std::numeric_limits<T>::min())
+            && v <= static_cast<int64_t>(std::numeric_limits<T>::max());
+    }
+}
+
+// Shared dispatch for GREATEST (want_max=true) / LEAST (want_max=false). ctx is
+// a binary_op_ctx* carrying the element unit in left_unit, set ONLY for an
+// ARRAY<TIMESTAMP> operand (compiled_expression.pyx) — a TIMESTAMP64 result with
+// no unit descriptor is a hard error (vector_owner.h) and DrakenVector carries
+// none, so the binder hands it over, exactly as draken_sort does.
+VecResult array_reduce(void* ctx, const DrakenVector* const* args, uint32_t nargs,
+                       bool want_max, const char* who) {
+    if (!args || nargs != 2u || !args[0] || !args[1])
+        return draken_error_sentinel_fmt(
+            "%s: expects (parent, child) — 2 arguments; a computed array argument "
+            "has no resolvable child on this kernel", who);
+    const DrakenVector* parent = args[0];
+    const DrakenVector* child  = args[1];
+    if (parent->type != DRAKEN_ARRAY)
+        return draken_error_sentinel_fmt("%s: operand must be ARRAY", who);
+
+    switch (child->type) {
+        case DRAKEN_INT8:
+            return reduce_numeric_child<int8_t>(parent, child, DRAKEN_INT8, want_max);
+        case DRAKEN_INT16:
+            return reduce_numeric_child<int16_t>(parent, child, DRAKEN_INT16, want_max);
+        case DRAKEN_INT32:
+            return reduce_numeric_child<int32_t>(parent, child, DRAKEN_INT32, want_max);
+        case DRAKEN_INT64:
+            return reduce_numeric_child<int64_t>(parent, child, DRAKEN_INT64, want_max);
+        case DRAKEN_UINT8:
+            return reduce_numeric_child<uint8_t>(parent, child, DRAKEN_UINT8, want_max);
+        case DRAKEN_UINT16:
+            return reduce_numeric_child<uint16_t>(parent, child, DRAKEN_UINT16, want_max);
+        case DRAKEN_UINT32:
+            return reduce_numeric_child<uint32_t>(parent, child, DRAKEN_UINT32, want_max);
+        case DRAKEN_UINT64:
+            return reduce_numeric_child<uint64_t>(parent, child, DRAKEN_UINT64, want_max);
+        case DRAKEN_FLOAT32:
+            return reduce_numeric_child<float>(parent, child, DRAKEN_FLOAT32, want_max);
+        case DRAKEN_FLOAT64:
+            return reduce_numeric_child<double>(parent, child, DRAKEN_FLOAT64, want_max);
+        case DRAKEN_BOOL:
+            return reduce_bool_child(parent, child, want_max);
+        case DRAKEN_VARCHAR:
+        case DRAKEN_NVARCHAR:
+        case DRAKEN_VARBINARY:
+        case DRAKEN_VARIANT:
+            return reduce_string_child(parent, child, want_max);
+        case DRAKEN_TIMESTAMP64: {
+            // Raw int64 instants share a unit within an array, so raw order is
+            // chronological order — but the scalar result still needs the unit
+            // descriptor, handed over in ctx (mirrors draken_sort).
+            if (!ctx)
+                return draken_error_sentinel_fmt(
+                    "%s: ARRAY<TIMESTAMP> requires the bind-time unit ctx", who);
+            VecResult r = reduce_numeric_child<int64_t>(
+                parent, child, DRAKEN_TIMESTAMP64, want_max);
+            if (r.data != nullptr)
+                r.ts_unit = static_cast<const binary_op_ctx*>(ctx)->left_unit;
+            return r;
+        }
+        default:
+            // DECIMAL/DATE32/TIME/nested-ARRAY/INTERVAL are absent for the SAME
+            // reasons draken_sort documents: unreachable as array children today
+            // (rugo can't decode list<decimal>; only the timestamp leaf is
+            // retagged), each would need its descriptor threaded through ctx, and
+            // INTERVAL is not totally orderable. Fail loud rather than guess.
+            return draken_error_sentinel_fmt(
+                "%s: element type %d not supported (numeric / BOOL / string-family / "
+                "TIMESTAMP only)", who, (int)child->type);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SPLIT support — VARCHAR -> ARRAY<VARIANT> by literal delimiter.
+// ---------------------------------------------------------------------------
+inline bool sp_is_string(DrakenType t) {
+    return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR ||
+           t == DRAKEN_VARBINARY || t == DRAKEN_VARIANT;
+}
+
+// Split hay[0..hlen) by ndl[0..ndlen) with Python str.split(sep, maxsplit)
+// semantics: separators are NOT collapsed, an empty input yields one empty part,
+// and after `maxsplit` splits the remainder is a single trailing part. maxsplit
+// < 0 means unlimited. Appends (ptr,len) spans (into hay) to `parts`.
+inline void sp_split_one(const uint8_t* hay, uint32_t hlen,
+                         const uint8_t* ndl, uint32_t ndlen, int64_t maxsplit,
+                         std::vector<std::pair<const uint8_t*, uint32_t>>& parts) {
+    uint32_t start = 0u, pos = 0u;
+    int64_t done = 0;
+    while (pos + ndlen <= hlen) {
+        if (maxsplit >= 0 && done >= maxsplit) break;
+        if (std::memcmp(hay + pos, ndl, ndlen) == 0) {
+            parts.emplace_back(hay + start, pos - start);
+            pos += ndlen;
+            start = pos;
+            ++done;
+        } else {
+            ++pos;
+        }
+    }
+    parts.emplace_back(hay + start, hlen - start);
+}
+
 }  // namespace
 
 extern "C" {
@@ -657,6 +1112,67 @@ VecResult draken_jsonb_object_keys(void* ctx, const DrakenVector* const* args, u
         return draken_error_sentinel(e.what());
     } catch (...) {
         return draken_error_sentinel("Unknown error in draken_jsonb_object_keys");
+    }
+}
+
+// LENGTH(arr) -> INT64: the element count of each ARRAY row.
+//
+// Alone among the ARRAY-reading kernels here, this one needs NO child: a row's
+// element COUNT is fully described by the offsets in `data`
+// (offsets[phys+1] - offsets[phys]). So it keeps the plain 1-arg shape and needs
+// no BC_C_NATIVE_CHILD plumbing — which is why it composes over a COMPUTED array
+// where the element-reading kernels (SORT, ARRAY_CONTAINS) cannot.
+//
+// Null TVL: a null row answers NULL, not 0 — an absent array has no length. The
+// offsets of a null row are still in-bounds (an empty span), so the value loop
+// stays branch-free and validity alone carries nullness.
+VecResult draken_length_array(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    (void)ctx;
+    try {
+        if (!args || nargs != 1u || !args[0])
+            return draken_error_sentinel("draken_length_array: expected 1 argument");
+
+        const DrakenVector* v = args[0];
+        if (v->type != DRAKEN_ARRAY)
+            return draken_error_sentinel("draken_length_array: operand must be ARRAY");
+
+        const uint32_t n = v->length;
+        const int32_t* offsets = static_cast<const int32_t*>(v->data);
+
+        auto* out = static_cast<int64_t*>(
+            draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+        if (!out) throw std::bad_alloc();
+
+        uint8_t* validity = nullptr;
+        if (v->validity != nullptr) {
+            const size_t vb = (static_cast<size_t>(n) + 7u) / 8u;
+            validity = static_cast<uint8_t*>(draken_malloc(vb > 0 ? vb : 1));
+            if (!validity) {
+                draken_free(out);
+                throw std::bad_alloc();
+            }
+            std::memcpy(validity, v->validity, vb > 0 ? vb : 1);
+        }
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t phys = v->selection[i];
+            out[i] = static_cast<int64_t>(offsets[phys + 1u] - offsets[phys]);
+        }
+
+        VecResult r{};
+        r.data           = out;
+        r.validity       = validity;
+        r.selection      = draken_identity_sel(n);   // global; not owned
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_INT64;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        return r;
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_length_array");
     }
 }
 
@@ -846,6 +1362,298 @@ VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, 
         return draken_error_sentinel(e.what());
     } catch (...) {
         return draken_error_sentinel("Unknown error in draken_array_contains_all");
+    }
+}
+
+// ARRAY_CONTAINS(arr, item) -> BOOL, i.e. `item = ANY(arr)`. The item is a
+// bind-time LITERAL packed into a one-element in_list_ctx blob (the same vehicle
+// ARRAY_CONTAINS_ANY uses), NOT a vector operand — a per-row item column is not
+// supported (same as the GIL anyop_eq it replaces). args[0]=parent (offsets),
+// args[1]=child (elements, via BC_C_NATIVE_CHILD), nargs==2; item via ctx.
+//
+// Semantics are the reference SQL `= ANY` (arr_reduce_int64/arr_reduce_string in
+// array_reductions.h for kind 0/1; contains_numeric_child/contains_bool_child
+// above match that SAME contract for the wider type set), which is THREE-VALUED
+// and differs from ARRAY_CONTAINS_ANY (acm_run): a NULL array row -> NULL
+// (validity cleared), an empty row -> FALSE, a NULL element is skipped, TRUE iff
+// any non-null element equals the item.
+//
+// Item kinds (in_list_ctx.kind, kernel_context.h):
+//   0 int64   -> INT8/16/32/64, UINT8/16/32/64 (range-checked — an
+//                out-of-range item is a legitimate FALSE, not an error),
+//                BOOL (0/1), TIMESTAMP64 (raw instant, PRE-QUANTIZED to the
+//                array's own storage unit at bind time by
+//                compiled_expression.pyx — the kernel does a plain int64
+//                compare, no runtime unit ctx needed).
+//   1 string  -> VARCHAR/NVARCHAR/VARBINARY/VARIANT, via arr_reduce_string
+//                directly (bypassing arr_any_eq's VARCHAR-only dispatch) so
+//                the whole string family works from one call, no duplicated
+//                logic.
+//   2 float64 -> FLOAT32/FLOAT64.
+// DECIMAL and DATE32 array elements are absent: DECIMAL arrays are unreachable
+// (rugo cannot decode list<decimal>, matching draken_sort/array_reduce's same
+// finding); DATE32 arrays decode but the leaf is not yet retagged from raw
+// INT32 (a pre-existing gap shared with GREATEST/LEAST/SORT, not something
+// this kernel can paper over — see array_native_kernel_four_walls).
+VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    try {
+        if (!args || nargs != 2u || !args[0] || !args[1])
+            return draken_error_sentinel(
+                "draken_array_contains: expects (array, child) — 2 arguments; a "
+                "non-column array operand has no resolvable child on this kernel");
+        if (!ctx)
+            return draken_error_sentinel("draken_array_contains: missing bind-time item ctx");
+        const DrakenVector* parent = args[0];
+        const DrakenVector* child  = args[1];
+        if (parent->type != DRAKEN_ARRAY)
+            return draken_error_sentinel("draken_array_contains: operand must be ARRAY");
+
+        const auto* c = static_cast<const in_list_ctx*>(ctx);
+        const uint8_t* payload = reinterpret_cast<const uint8_t*>(c) + sizeof(in_list_ctx);
+
+        if (c->kind == 0) {
+            int64_t v;
+            std::memcpy(&v, payload, sizeof(int64_t));
+            switch (child->type) {
+                case DRAKEN_INT8:
+                    return numeric_item_fits<int8_t>(v)
+                        ? contains_numeric_child<int8_t>(parent, child, static_cast<int8_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_INT16:
+                    return numeric_item_fits<int16_t>(v)
+                        ? contains_numeric_child<int16_t>(parent, child, static_cast<int16_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_INT32:
+                    return numeric_item_fits<int32_t>(v)
+                        ? contains_numeric_child<int32_t>(parent, child, static_cast<int32_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_INT64:
+                case DRAKEN_TIMESTAMP64:
+                    return contains_numeric_child<int64_t>(parent, child, v);
+                case DRAKEN_UINT8:
+                    return numeric_item_fits<uint8_t>(v)
+                        ? contains_numeric_child<uint8_t>(parent, child, static_cast<uint8_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_UINT16:
+                    return numeric_item_fits<uint16_t>(v)
+                        ? contains_numeric_child<uint16_t>(parent, child, static_cast<uint16_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_UINT32:
+                    return numeric_item_fits<uint32_t>(v)
+                        ? contains_numeric_child<uint32_t>(parent, child, static_cast<uint32_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_UINT64:
+                    return numeric_item_fits<uint64_t>(v)
+                        ? contains_numeric_child<uint64_t>(parent, child, static_cast<uint64_t>(v))
+                        : contains_never_match(parent);
+                case DRAKEN_BOOL:
+                    return contains_bool_child(parent, child, v != 0);
+                default:
+                    return draken_error_sentinel_fmt(
+                        "draken_array_contains: integer item but array elements are type %d "
+                        "(supported: int/uint family, BOOL, TIMESTAMP)", (int)child->type);
+            }
+        }
+        if (c->kind == 2) {
+            double v;
+            std::memcpy(&v, payload, sizeof(double));
+            switch (child->type) {
+                case DRAKEN_FLOAT32:
+                    return contains_numeric_child<float>(parent, child, static_cast<float>(v));
+                case DRAKEN_FLOAT64:
+                    return contains_numeric_child<double>(parent, child, v);
+                default:
+                    return draken_error_sentinel_fmt(
+                        "draken_array_contains: float item but array elements are type %d "
+                        "(supported: FLOAT32/FLOAT64)", (int)child->type);
+            }
+        }
+        // kind 1: string item — [u32 len][bytes]. Works for any string-family child.
+        if (child->type != DRAKEN_VARCHAR && child->type != DRAKEN_NVARCHAR
+                && child->type != DRAKEN_VARBINARY && child->type != DRAKEN_VARIANT)
+            return draken_error_sentinel_fmt(
+                "draken_array_contains: string item but array elements are type %d",
+                (int)child->type);
+        uint32_t len;
+        std::memcpy(&len, payload, 4);
+        const uint8_t* bytes = payload + 4u;
+        // arena_offset == 0 → str_data(&slot, bytes) returns bytes directly, so the
+        // item bytes double as the "arena" for the scalar slot (same trick the
+        // nanobind build_scalar uses).
+        DrakenStringSlot slot_storage;
+        draken_build_string_slot(&slot_storage, bytes, len, 0);
+        return draken::ops::arr_reduce_string<draken::ops::ArrStrEq, false>(
+            *parent, *child, &slot_storage, bytes);
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_array_contains");
+    }
+}
+
+// GREATEST(arr) -> element scalar. Per-row MAX element of an ARRAY column. Unary
+// ARRAY reducer (NOT a variadic scalar). args[0]=parent (offsets), args[1]=child
+// (elements) — the synthetic BC_C_NATIVE_CHILD arg the VM appends. See
+// array_reduce for null / empty-row / NaN semantics.
+VecResult draken_greatest(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    try {
+        return array_reduce(ctx, args, nargs, /*want_max=*/true, "draken_greatest");
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_greatest");
+    }
+}
+
+// LEAST(arr) -> element scalar. Per-row MIN element of an ARRAY column.
+VecResult draken_least(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    try {
+        return array_reduce(ctx, args, nargs, /*want_max=*/false, "draken_least");
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_least");
+    }
+}
+
+// SPLIT(string, delimiter[, limit]) -> ARRAY<VARIANT>. Splits each string by a
+// scalar (literal) delimiter with Python str.split(sep, maxsplit) semantics:
+// separators are not collapsed, an empty string yields one empty part, and after
+// `limit` splits the remainder is one trailing part. A NULL string row (or a
+// NULL delimiter) yields a NULL array row. args[1]/args[2] are scalar literals.
+VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    (void)ctx;
+    try {
+        if (!args || (nargs != 2u && nargs != 3u) || !args[0] || !args[1])
+            return draken_error_sentinel(
+                "draken_split: expects (string, delimiter[, limit])");
+        const DrakenVector* str   = args[0];
+        const DrakenVector* delim = args[1];
+        if (!sp_is_string(str->type))
+            return draken_error_sentinel("draken_split: first operand must be a string");
+        if (!sp_is_string(delim->type))
+            return draken_error_sentinel("draken_split: delimiter must be a string");
+        if (delim->data_length != 1u)
+            return draken_error_sentinel(
+                "draken_split: delimiter must be a scalar literal "
+                "(per-row delimiter not supported natively)");
+
+        const auto* sd = static_cast<const DrakenStringArena*>(delim->data);
+        const bool delim_null = (delim->length == 0u) || !aj_row_valid(delim, 0u);
+        const uint32_t dphys = delim_null ? 0u : delim->selection[0];
+        const DrakenStringSlot* dslot = &sd->slots[dphys];
+        const uint8_t* dbytes = str_data(dslot, sd->arena);
+        const uint32_t dlen   = str_length(dslot);
+        if (!delim_null && dlen == 0u)
+            return draken_error_sentinel("draken_split: empty delimiter not supported");
+
+        int64_t maxsplit = -1;
+        if (nargs == 3u) {
+            const DrakenVector* lim = args[2];
+            if (lim->data_length != 1u)
+                return draken_error_sentinel("draken_split: limit must be a scalar literal");
+            if (lim->length > 0u && aj_row_valid(lim, 0u)) {
+                int64_t lv;
+                if (!acm_elem_int64(lim, lim->selection[0], lv))
+                    return draken_error_sentinel("draken_split: limit must be an integer");
+                if (lv < 1)
+                    return draken_error_sentinel("draken_split: limit must be greater than 0");
+                maxsplit = lv;
+            }
+            // NULL limit -> unlimited (maxsplit stays -1).
+        }
+
+        const uint32_t n = str->length;
+        const auto* ss = static_cast<const DrakenStringArena*>(str->data);
+
+        std::vector<int32_t> new_offsets(static_cast<size_t>(n) + 1u, 0);
+        std::vector<std::pair<const uint8_t*, uint32_t>> parts;
+        std::vector<uint8_t> row_null(n > 0u ? n : 1u, 0u);
+        bool any_null = false;
+
+        for (uint32_t i = 0; i < n; ++i) {
+            if (delim_null || !aj_row_valid(str, i)) {
+                new_offsets[i + 1] = new_offsets[i];
+                row_null[i] = 1u;
+                any_null = true;
+                continue;
+            }
+            const uint32_t phys = str->selection[i];
+            const DrakenStringSlot* slot = &ss->slots[phys];
+            const uint8_t* hb = str_data(slot, ss->arena);
+            const uint32_t hl = str_length(slot);
+            const size_t before = parts.size();
+            sp_split_one(hb, hl, dbytes, dlen, maxsplit, parts);
+            new_offsets[i + 1] =
+                new_offsets[i] + static_cast<int32_t>(parts.size() - before);
+        }
+
+        // Flattened child: every part, never null. The parts are substrings of the
+        // input, so the element type is FIXED and known — it is the input's own
+        // string type (VARCHAR/NVARCHAR/VARBINARY), never VARIANT. Tagging them
+        // VARIANT threw away a type the kernel already had and left the child
+        // untypable downstream (VARIANT has no gather/compare/cast path, so a
+        // SPLIT result could not survive an ORDER BY, join, or GROUP BY).
+        const uint32_t total = static_cast<uint32_t>(parts.size());
+        StringRows rows;
+        rows.length = total;
+        rows.type   = str->type;
+        rows.slots  = sr_alloc_slots(total);
+        struct RowsGuard {
+            StringRows* r; bool released = false;
+            ~RowsGuard() { if (!released && r) sr_free(*r); }
+        } rg{&rows};
+        std::vector<uint8_t> arena_buf;
+        for (uint32_t p = 0; p < total; ++p) {
+            const uint8_t* bytes = parts[p].first;
+            const uint32_t len   = parts[p].second;
+            if (len <= STR_INLINE_MAX) {
+                str_init_inline(&rows.slots[p], bytes, len);
+            } else {
+                const uint32_t off = static_cast<uint32_t>(arena_buf.size());
+                arena_buf.insert(arena_buf.end(), bytes, bytes + len);
+                draken_build_string_slot(&rows.slots[p], arena_buf.data() + off, len, off);
+            }
+        }
+        rows.arena_len = arena_buf.size();
+        if (rows.arena_len > 0u) {
+            rows.arena = static_cast<uint8_t*>(draken_malloc(rows.arena_len));
+            if (!rows.arena) throw std::bad_alloc();
+            std::memcpy(rows.arena, arena_buf.data(), rows.arena_len);
+        }
+        rg.released = true;
+        VecResult* child = finalize_child(rows, "split");   // owns rows' buffers now
+
+        // Parent ARRAY: offsets (+ validity), child.
+        int32_t* out_offsets = static_cast<int32_t*>(
+            draken_malloc((static_cast<size_t>(n) + 1u) * sizeof(int32_t)));
+        if (!out_offsets) { delete child; throw std::bad_alloc(); }
+        std::memcpy(out_offsets, new_offsets.data(),
+                    (static_cast<size_t>(n) + 1u) * sizeof(int32_t));
+
+        uint8_t* validity = nullptr;
+        if (any_null) {
+            validity = ar_alloc_validity(n);
+            for (uint32_t i = 0; i < n; ++i)
+                if (row_null[i])
+                    validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+        }
+
+        VecResult r{};
+        r.data           = out_offsets;
+        r.validity       = validity;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_ARRAY;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        r.child          = child;
+        return r;
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_split");
     }
 }
 

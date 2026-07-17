@@ -2858,7 +2858,7 @@
     "MATCH": {
         "catalog_name": "_MATCH_AGAINST",
         "aliases": [],
-        "summary": "Semantic text matching via embeddings.",
+        "summary": "Text matching by embedding cosine similarity.",
         "volatility": "stable",
         "deterministic": false,
         "foldable": false,
@@ -2875,7 +2875,7 @@
                 "id": "_MATCH_AGAINST_2",
                 "label": "MATCH(str) AGAINST(pattern)",
                 "category": "String Functions",
-                "documentation": "Performs semantic text matching using embeddings and cosine similarity.",
+                "documentation": "True when COSINE_SIMILARITY(column, query) >= the `match_threshold` session variable (default 0.5). Matching is only as semantic as the active EMBED capability: the built-in embedder is a lexical hashed projection, so by default MATCH behaves as a case-insensitive exact match rather than a meaning-based one. Install a semantic embedding capability, and/or tune `match_threshold`, to change that. Empty or stopword-only text embeds to a zero vector, giving an undefined (NaN) similarity, which never matches.",
                 "related_functions": [
                     "LENGTH",
                     "UPPER",
@@ -3512,7 +3512,7 @@
     "RANDOM_STRING": {
         "catalog_name": "RANDOM_STRING",
         "aliases": [],
-        "summary": "Generate random strings.",
+        "summary": "Generate random bytes.",
         "volatility": "volatile",
         "deterministic": false,
         "foldable": false,
@@ -3529,7 +3529,7 @@
                 "id": "RANDOM_STRING_default",
                 "label": "RANDOM_STRING(n)",
                 "category": "Utility Functions",
-                "documentation": "Generate random strings.",
+                "documentation": "Computes n random bytes as varbinary, one value per row.",
                 "related_functions": [
                     "COALESCE",
                     "IFNULL",
@@ -3556,14 +3556,14 @@
                     {
                         "label": "n",
                         "type": "integer",
-                        "documentation": "Length hint or row count used to generate random strings.",
+                        "documentation": "Number of random bytes to generate for each row.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
                         "null_handling": "strict"
                     }
                 ],
-                "notes": "This function is volatile. The integer argument controls the generated output rather than supplying a seed."
+                "notes": "This function is volatile. It returns `n` random bytes as `VARBINARY` for each row; the integer argument is the byte length, not a seed."
             }
         ]
     },
@@ -4565,10 +4565,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "ARRAY<VARIANT>",
+                "return_type": "array<element type of `string`>",
                 "returns": {
-                    "type": "ARRAY<VARIANT>",
-                    "documentation": "Returns the computed result as `ARRAY<VARIANT>`."
+                    "type": "array<element type of `string`>",
+                    "documentation": "Returns an array whose element type is the string type of `string` \u2014 the parts are substrings of the input, so the element type is fixed and known."
                 },
                 "arity": {
                     "minimum": 2,
@@ -4613,10 +4613,10 @@
                     "TITLECASE",
                     "INITCAP"
                 ],
-                "return_type": "ARRAY<VARIANT>",
+                "return_type": "array<element type of `string`>",
                 "returns": {
-                    "type": "ARRAY<VARIANT>",
-                    "documentation": "Returns the computed result as `ARRAY<VARIANT>`."
+                    "type": "array<element type of `string`>",
+                    "documentation": "Returns an array whose element type is the string type of `string` \u2014 the parts are substrings of the input, so the element type is fixed and known."
                 },
                 "arity": {
                     "minimum": 3,

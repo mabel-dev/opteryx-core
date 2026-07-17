@@ -2,12 +2,27 @@
 
 The remote footer cache is invisible in production unless a query's own telemetry says
 whether it paid for itself. `IpcRowGroupSource.diagnostics()` reports `footer_cache_hits`/
-`footer_cache_misses` for THIS scan, which `compiler.py` rolls into the same
+`footer_cache_misses` (the shared tier) and `footer_process_cache_hits` (the in-process
+caches in front of it) for THIS scan, which `compiler.py` rolls into the same
 `io_scan_diagnostics` telemetry that already carries `bytes_fetched`/`http_request_count`
 to the query's persisted stats. These tests drive the real compiled scan planner
 (`open_ipc_source`) over two files served by a local HTTP server — one pre-seeded in a fake
 remote store (simulating another instance's hit), one not (a genuine miss) — so both counts
 are exercised in a single call, with no live Valkey or cloud dependency.
+
+What these tests pin down is that each distinct operational state has a DISTINCT telemetry
+signature, because the states are otherwise indistinguishable from outside and an operator
+has nothing else to go on:
+
+    warm process, tier not needed  -> process_hits > 0, remote keys ABSENT
+    cold process, tier serving     -> process_hits == 0, hits > 0
+    cold process, tier cold/absent -> process_hits == 0, hits == 0, misses > 0
+    no remote files at all         -> all three keys ABSENT
+
+The third line is deliberately NOT silent: an unconfigured tier reports misses. Silence
+there once made a mis-set `OPTERYX_FOOTER_CACHE_LOCATION` look exactly like a warm process
+that simply had no need of the tier, which is not a distinction an operator can make by
+guessing.
 """
 
 import functools
@@ -108,14 +123,19 @@ def test_hit_and_miss_are_both_reported_in_one_scans_diagnostics(http_server, pa
 
     assert diag.get("footer_cache_hits") == 1, diag
     assert diag.get("footer_cache_misses") == 1, diag
+    # Cold process: nothing was in front of the tier, so the tier's own numbers account
+    # for both files. A non-zero count here would mean this test wasn't measuring the
+    # tier at all (a leaked in-process entry serving the file before the probe ran).
+    assert diag.get("footer_process_cache_hits") == 0, diag
 
     # The miss must have been written back — the whole point of the tier.
     assert cache._store.get(RemoteFooterCache._key(url_miss)) is not None
 
 
 def test_all_local_files_omit_footer_cache_fields_entirely(patched_remote_cache):
-    # Local paths are never remote-scheme, so the tier is never consulted — diagnostics
-    # must OMIT the keys, not report a misleading 0/0 ("consulted, found nothing").
+    # Local paths are never remote-scheme, so there is no footer to fetch and nothing in
+    # front of it either — diagnostics must OMIT all three keys, not report a misleading
+    # 0/0 ("consulted, found nothing"). This is the only remaining silent case.
     local_path = os.path.join(DATADIR, FILE_MISS)
 
     src = pool_reader.open_ipc_source(
@@ -132,11 +152,15 @@ def test_all_local_files_omit_footer_cache_fields_entirely(patched_remote_cache)
 
     assert "footer_cache_hits" not in diag, diag
     assert "footer_cache_misses" not in diag, diag
+    assert "footer_process_cache_hits" not in diag, diag
 
 
-def test_no_remote_tier_configured_omits_footer_cache_fields(http_server, monkeypatch):
-    # The disabled-by-default case: no tier at all. Must look identical to "never
-    # consulted", not "consulted and got nothing".
+def test_no_remote_tier_configured_reports_every_footer_as_a_miss(http_server, monkeypatch):
+    # The disabled/misconfigured case. This scan HAD a remote footer to fetch and paid an
+    # origin read for it, so it reports a miss — it must NOT look like "the tier wasn't
+    # needed". This is the signature of a mis-set OPTERYX_FOOTER_CACHE_LOCATION, and it is
+    # the operator's only clue that the tier is not wired up: 0 hits against non-zero
+    # misses, with nothing served in-process.
     monkeypatch.setattr(pool_reader, "remote_footer_cache", lambda: None)
     url = f"{http_server}/{FILE_MISS}"
 
@@ -152,8 +176,49 @@ def test_no_remote_tier_configured_omits_footer_cache_fields(http_server, monkey
     finally:
         src.close()
 
-    assert "footer_cache_hits" not in diag, diag
-    assert "footer_cache_misses" not in diag, diag
+    assert diag.get("footer_cache_hits") == 0, diag
+    assert diag.get("footer_cache_misses") == 1, diag
+    assert diag.get("footer_process_cache_hits") == 0, diag
+
+
+def test_warm_process_reports_in_process_hits_and_omits_remote_counters(
+    http_server, patched_remote_cache
+):
+    """The case that prompted this counter: a second scan of the same files in the SAME
+    process. The in-process caches sit in front of the remote tier, so they serve every
+    footer, nothing becomes a remote candidate, and the remote pair is legitimately absent.
+
+    Absent remote counters here are correct — the tier was not needed, not broken. Without
+    `footer_process_cache_hits` this state is indistinguishable from a tier that was never
+    configured, which is precisely the guess this test exists to remove."""
+    url = f"{http_server}/{FILE_MISS}"
+    column = _first_column(FILE_MISS)
+    bytes_cache = ParquetFooterBytesCache(64 * 1024 * 1024)
+
+    # First scan: cold process, footer fetched from origin, populating the in-process
+    # caches (and writing back to the shared tier).
+    src = pool_reader.open_ipc_source(
+        None, [url], [column], decode_workers=2, footer_bytes_cache=bytes_cache
+    )
+    try:
+        cold = src.diagnostics()
+    finally:
+        src.close()
+    assert cold.get("footer_process_cache_hits") == 0, cold
+    assert cold.get("footer_cache_misses") == 1, cold
+
+    # Second scan: same process, same file. The in-process caches now hold the footer.
+    src = pool_reader.open_ipc_source(
+        None, [url], [column], decode_workers=2, footer_bytes_cache=bytes_cache
+    )
+    try:
+        warm = src.diagnostics()
+    finally:
+        src.close()
+
+    assert warm.get("footer_process_cache_hits") == 1, warm
+    assert "footer_cache_hits" not in warm, warm
+    assert "footer_cache_misses" not in warm, warm
 
 
 if __name__ == "__main__":  # pragma: no cover

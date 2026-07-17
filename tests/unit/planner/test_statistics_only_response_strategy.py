@@ -48,7 +48,7 @@ class MockAggregator:
         # Parameters: first parameter is wildcard for COUNT(*)
         self.parameters = [types.SimpleNamespace(node_type=NodeType.WILDCARD)]
         # Keep schema_column identity shape to match other code paths where needed
-        self.schema_column = types.SimpleNamespace(identity="$COUNT(*)", type=None)
+        self.schema_column = types.SimpleNamespace(identity="$COUNT(*)", column_type=None)
         self.duplicate_treatment = None
         self.condition = None
 
@@ -74,10 +74,17 @@ def make_simple_count_plan(count=9, alias="my_count"):
     aggregator = MockAggregator()
     agg.aggregates = [aggregator]
 
-    # Exit node to hold column alias
+    # Exit node to hold column alias. The strategy pairs Exit columns to aggregates
+    # by schema IDENTITY (Exit order is not guaranteed to match aggregate order), so
+    # the column has to carry the aggregate's identity for its alias to be found.
     exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
-    # Simulate a projection column with alias
-    exit_node.columns = [types.SimpleNamespace(alias=alias, source_column=None)]
+    exit_node.columns = [
+        types.SimpleNamespace(
+            alias=alias,
+            source_column=None,
+            schema_column=types.SimpleNamespace(identity=aggregator.schema_column.identity),
+        )
+    ]
 
     plan.add_node("scan", scan)
     plan.add_node("agg", agg)
@@ -147,10 +154,11 @@ def test_strategy_prunes_manifest():
 
     strategy.complete(plan, None)
 
-    # After rewrite, manifest should have zero files
-    assert getattr(scan_node, "manifest", None) is not None
-    assert scan_node.manifest.get_file_count() == 0
-    assert scan_node.manifest.get_record_count() == 0
+    # After the rewrite the scan is repointed at the `$no_table` virtual relation and
+    # its manifest is dropped entirely — the strategy clears it so a file-based reader
+    # can't supply a file list for a plan that must read nothing.
+    assert getattr(scan_node, "manifest", None) is None
+    assert scan_node.relation == "$no_table"
 
 
 def test_strategy_no_manifest_leaves_plan_unchanged():

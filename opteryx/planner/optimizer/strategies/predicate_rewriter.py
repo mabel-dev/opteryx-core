@@ -45,10 +45,11 @@ import math
 import re
 from typing import Callable, Dict
 
+from opteryx.exceptions import NotSupportedError
 from opteryx.expression import ExpressionColumn, NodeType, format_expression
 from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
-from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.binder.operator_map import determine_type, _STRING_CATEGORIES
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
@@ -121,6 +122,56 @@ def reorder_interval_calc(predicate):
         )
 
         return predicate
+
+
+def _rewrite_rlike_to_dfa(predicate, telemetry):
+    """RLike/NotRLike with a literal pattern: compile the pattern into a byte
+    DFA at plan time (RE2's parser only — see vector_dfa_compile.pyx's module
+    docstring) and replace the pattern operand with the compiled blob.
+
+    A non-literal pattern, or a literal pattern outside the compiler's
+    supported scope (non-ASCII content, case-fold, nested anchors, or a
+    state-count blowup), raises NotSupportedError here rather than reaching
+    vector_rlike at runtime with a pattern it can no longer interpret —
+    vector_rlike expects a pre-compiled blob unconditionally now that RE2's
+    matcher has been removed from it, so there is no runtime fallback to
+    silently degrade to.
+    """
+    if predicate.value not in ("RLike", "NotRLike"):
+        return predicate
+
+    if predicate.right.node_type != NodeType.LITERAL:
+        raise NotSupportedError(
+            "RLIKE/REGEXP_LIKE requires a constant pattern — "
+            f"got a non-literal expression for {predicate.value}."
+        )
+
+    pattern_value = predicate.right.value
+    if isinstance(pattern_value, str):
+        pattern_value = pattern_value.encode("utf8")
+    elif not isinstance(pattern_value, bytes):
+        raise NotSupportedError(
+            f"RLIKE/REGEXP_LIKE pattern must be a string constant, got {type(pattern_value)!r}."
+        )
+
+    from opteryx.compiled import vector_ops as compiled_vector_ops
+
+    compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
+    if compiled_blob is None:
+        raise NotSupportedError(
+            "RLIKE/REGEXP_LIKE pattern is outside the supported regex dialect "
+            "(no lookaround/backreferences/case-fold, ASCII pattern content only, "
+            "anchors only at the outermost start/end, and the compiled automaton "
+            f"must stay within the state-count cap): {pattern_value!r}"
+        )
+
+    telemetry.optimization_predicate_rewriter_rlike_to_dfa += 1
+    predicate.right = build_literal_node(
+        compiled_blob,
+        root=predicate.right,
+        suggested_type=_lt.VARBINARY,
+    )
+    return predicate
 
 
 def rewrite_ored_like_to_regex(predicate, telemetry):
@@ -579,8 +630,33 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     if literal_node.node_type != NodeType.LITERAL:
         return predicate
 
-    # Parse the literal value
-    parsed_literal = parse_iso(literal_node.value)
+    # Parse the literal value. Once ConstantFolding has evaluated a
+    # CAST('...' AS TIMESTAMP/DATE), the literal arrives as an INTEGER in the
+    # column's native unit — TIMESTAMP: microseconds since epoch; DATE: days
+    # since epoch. parse_iso would misread such an integer as epoch SECONDS
+    # (e.g. a 2026 timestamp of ~1.78e15 µs read as seconds lands ~56 million
+    # years out and overflows datetime), silently returning None and aborting
+    # the whole rewrite. Convert an integer temporal literal by its own type
+    # first, falling back to parse_iso for strings / datetimes.
+    literal_value = literal_node.value
+    literal_cat = getattr(getattr(literal_node, "type", None), "category", None)
+    if (
+        isinstance(literal_value, int)
+        and not isinstance(literal_value, bool)
+        and literal_cat in (LogicalCategory.TIMESTAMP, LogicalCategory.DATE)
+    ):
+        import datetime as _datetime
+
+        if literal_cat == LogicalCategory.TIMESTAMP:
+            parsed_literal = _datetime.datetime(1970, 1, 1) + _datetime.timedelta(
+                microseconds=literal_value
+            )
+        else:  # DATE — integer days since epoch
+            parsed_literal = _datetime.datetime(1970, 1, 1) + _datetime.timedelta(
+                days=literal_value
+            )
+    else:
+        parsed_literal = parse_iso(literal_value)
     if parsed_literal is None:
         return predicate
 
@@ -875,6 +951,12 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     if predicate.node_type == NodeType.FUNCTION:
         return _rewrite_function(predicate, telemetry)
 
+    if predicate.node_type == NodeType.COMPARISON_OPERATOR and predicate.value in (
+        "RLike",
+        "NotRLike",
+    ):
+        return _rewrite_rlike_to_dfa(predicate, telemetry)
+
     # Add our new rewrite for ORed LIKE conditions
     if predicate.node_type == NodeType.OR:
         rewritten = rewrite_ored_like_to_regex(predicate, telemetry)
@@ -1107,6 +1189,44 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     return predicate
 
 
+def _stringify_for_concat(node):
+    """Coerce a CONCAT/CONCAT_WS operand to VARCHAR, unless it is already
+    string-family (VARCHAR/NVARCHAR/VARBINARY) or NULL-typed.
+
+    CONCAT/CONCAT_WS are rewritten to `||` (StringConcat) chains, and
+    StringConcat is string-only natively (binop_string_concat,
+    function_string_extra.cpp header) — every arity of the family refused a
+    non-string operand (`CONCAT(id, name)`, `CONCAT_WS('-', id, name)`, ...)
+    with an opaque "outside the c-native kernel set" error, even though
+    `CAST(id AS VARCHAR)` already works. This wraps each non-string operand in
+    the SAME cast a caller would have to write explicitly, closing the gap
+    uniformly for every CONCAT/CONCAT_WS arity rather than one arm at a time.
+
+    A NULL-typed operand is passed through unwrapped: StringConcat already
+    short-circuits `x || NULL` to NULL via the dedicated NULL-operand rule in
+    operator_map.determine_type, so no cast is needed to make it type-check.
+
+    Built directly (Node(NodeType.CAST, ...) with a synthesized
+    schema_column) rather than through the binder — this rewrite runs POST-bind,
+    so there is no second binder pass to fill one in. This is the same pattern
+    the StringConcat wrapper nodes in this function already use for their own
+    schema_column. An operand whose target CAST has no native kernel still
+    fails — but loudly, naming the exact unsupported CAST, in place of the
+    previous blanket refusal.
+    """
+    ct = determine_type(node)
+    if ct is not None and (ct.category in _STRING_CATEGORIES or ct.category == LogicalCategory.NULL):
+        return node
+    return Node(
+        node_type=NodeType.CAST,
+        left=node,
+        value="VARCHAR",
+        parameters=(),
+        alias=None,
+        schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
+    )
+
+
 def _rewrite_function(function, telemetry: QueryTelemetry):
     def _rebind_function_ref():
         # Rebind the function reference when the function name or parameters have been rewritten.
@@ -1194,26 +1314,29 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
         function.parameters = [function.parameters[0], function.parameters[2]]
         _rebind_function_ref()
         return function
-    # CONCAT(x, y, z) → x || y || z
+    # CONCAT(x, y, z) → x || y || z. Each operand is stringified first
+    # (_stringify_for_concat) — StringConcat is string-only natively, so a
+    # non-string operand (CONCAT(id, name)) was refused family-wide before this.
     if function.value == "CONCAT" and len(function.parameters) > 1:
         telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
-        left_node = function.parameters[0]
+        left_node = _stringify_for_concat(function.parameters[0])
         for param in function.parameters[1:]:
             left_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=left_node,
-                right=param,
+                right=_stringify_for_concat(param),
                 schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
         function = left_node
-    # CONCAT_WS(x, y, z) → y || x || z
+    # CONCAT_WS(x, y, z) → y || x || z. Same stringify-every-operand treatment
+    # as CONCAT above, applied to the separator and every value.
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
-        separator = function.parameters[0]
-        left_node = function.parameters[1]
+        separator = _stringify_for_concat(function.parameters[0])
+        left_node = _stringify_for_concat(function.parameters[1])
         for param in function.parameters[2:]:
             separator_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
@@ -1226,9 +1349,33 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=separator_node,
-                right=param,
+                right=_stringify_for_concat(param),
                 schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
             )
+        left_node.alias = function.alias
+        left_node.schema_column = function.schema_column
+        function = left_node
+    # CONCAT_WS(sep, x) → x || '' (the single-value degenerate form). With one
+    # value the separator never appears, so the result is just x rendered as a
+    # string. The `|| ''` is not cosmetic: it routes x through the SAME
+    # StringConcat + _stringify_for_concat coercion the >2 path applies to
+    # parameters[1], so a non-string arg is stringified and NULL propagates
+    # identically — parity with the multi-arg form, not a second semantics.
+    # Without this the 2-arg form is refused (the >2 guard skipped it, and there
+    # is no draken_concat_ws kernel). NOTE: CONCAT/CONCAT_WS correctness
+    # depending on this optimizer pass at all is a known smell — under
+    # DISABLE_OPTIMIZER=1 every arity fails. Widening this guard keeps that
+    # dependency (the architect's choice) rather than removing it with a kernel.
+    if function.value == "CONCAT_WS" and len(function.parameters) == 2:
+        telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
+        value_node = _stringify_for_concat(function.parameters[1])
+        left_node = Node(
+            node_type=NodeType.BINARY_OPERATOR,
+            value="StringConcat",
+            left=value_node,
+            right=build_literal_node("", suggested_type=_lt.VARCHAR),
+            schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
+        )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
         function = left_node

@@ -18,10 +18,23 @@ happens once per process (feeding the in-process `_PARSED_FOOTER_CACHE`); what t
 removes is the network round trip, which dominates the cost.
 
 The consumer (`pool_reader.open_ipc_source`) probes this tier for every uncached remote file
-in **one** `get_many` (a single Valkey `MGET`), pre-fills the in-process footer-bytes cache
-with the hits, and lets the existing fetch loop skip them; genuine misses are fetched from
-origin and written back here. See `OPTERYX_FOOTER_CACHE_LOCATION` in config — it defaults to
-the manifest cache's Valkey, kept apart by this module's key prefix.
+in **one** `get_many` call, pre-fills the in-process footer-bytes cache with the hits, and
+lets the existing fetch loop skip them; genuine misses are fetched from origin and written
+back here. That one call is a bounded number of round trips, not necessarily a single MGET —
+see `_BATCH_CHUNK` for why a 900-file scan must not be one giant reply.
+
+The in-process caches sit IN FRONT of this tier, so a warm process serves footers without
+ever reaching it. That is correct — the fastest path wins — but it means this tier's hit rate
+can only be observed across process boundaries, and that a scan reporting nothing from this
+tier has NOT necessarily failed. `pool_reader`'s `footer_process_cache_hits` /
+`footer_cache_hits` / `footer_cache_misses` telemetry exists to tell those states apart.
+
+**Config:** the environment variable is `OPTERYX_FOOTER_CACHE_LOCATION`; `FOOTER_REMOTE_LOCATION`
+(read below) is only its attribute name in `config.py`. The two names differ, `config.get()` does
+no aliasing, and an unset location is a silent, legitimate "disabled" — so a deployment that sets
+the attribute name as the env var disables this tier with no warning. It is independently
+configured and disabled by default; it deliberately does NOT default from the manifest cache's
+location, whose key population grows at a different rate (see the config docstring).
 
 opteryx-core does not depend on any KV client library; the store is built through
 `create_kv_store`, whose backends import their clients lazily. With no location configured,
@@ -184,10 +197,18 @@ _remote_cache_lock = threading.Lock()
 def remote_footer_cache() -> Optional[RemoteFooterCache]:
     """The process-wide remote footer cache, or None when no KV store is configured.
 
+    Configured by the `OPTERYX_FOOTER_CACHE_LOCATION` environment variable — NOT by
+    `FOOTER_REMOTE_LOCATION`, which is only the name of the attribute holding its value.
+    An unset location returns None, which is a legitimate disabled state and so is
+    deliberately silent; the cost is that a deployment which sets the wrong name gets no
+    warning here. Diagnose that from the scan's telemetry (a cold scan reporting misses
+    with zero hits), not from this function.
+
     `enforce_context_fields=()` opts out of the factory's default query/operator key
     scoping: the cross-query, cross-instance hit is the whole feature, and the key already
     identifies the payload immutably. A store that cannot be constructed (missing client
-    library, unparseable location) disables the tier rather than failing the process.
+    library, unparseable location) disables the tier rather than failing the process — that
+    case DOES warn, and is the one failure mode visible from the logs alone.
     """
     global _remote_cache, _remote_cache_built
 
