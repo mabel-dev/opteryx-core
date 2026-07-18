@@ -90,7 +90,7 @@ static void sha512_transform_scalar(uint64_t state[8], const unsigned char block
  *   (C) 2023 René Fischer — Botan, Simplified BSD License (BSD-2-Clause).
  * Adapted to a single 128-byte block over our SHA512_CTX state layout; uses the
  * file's existing K512 constants. Verified against NIST/hashlib test vectors. */
-__attribute__((target("sha3")))
+__attribute__((target("+sha3")))
 static void sha512_transform_neon(uint64_t state[8], const unsigned char block[128]) {
     uint64x2_t STATE0 = vld1q_u64(&state[0]);  // ab
     uint64x2_t STATE1 = vld1q_u64(&state[2]);  // cd
