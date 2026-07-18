@@ -55,7 +55,7 @@ static void sha1_transform_scalar(uint32_t state[5], const unsigned char buffer[
 #if defined(__aarch64__)
 /* ARMv8 SHA-1 single-block transform (crypto extensions). State {a,b,c,d} in a
  * vector + e scalar; messages loaded little-endian then byte-reversed. */
-__attribute__((target("crypto")))
+__attribute__((target("+crypto")))
 static void sha1_transform_neon(uint32_t state[5], const unsigned char data[64]) {
     uint32x4_t ABCD, ABCD_SAVED, TMP0, TMP1, MSG0, MSG1, MSG2, MSG3;
     uint32_t   E0, E0_SAVED, E1;

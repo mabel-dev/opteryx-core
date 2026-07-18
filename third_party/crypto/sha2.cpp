@@ -61,7 +61,7 @@ static void sha256_transform_scalar(uint32_t state[8], const unsigned char data[
 /* ARMv8 SHA-256 single-block transform using the crypto extensions. State is the
  * canonical {a,b,c,d} / {e,f,g,h} layout, matching the scalar core. Messages are
  * loaded little-endian then byte-reversed (SHA-256 is big-endian). */
-__attribute__((target("crypto")))
+__attribute__((target("+crypto")))
 static void sha256_transform_neon(uint32_t state[8], const unsigned char data[64]) {
     uint32x4_t STATE0 = vld1q_u32(&state[0]);
     uint32x4_t STATE1 = vld1q_u32(&state[4]);
