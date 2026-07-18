@@ -360,15 +360,23 @@ cdef class Morsel:
     def __iter__(self):
         """Iterate rows as named tuples. Field names are the column names."""
         import collections
+        import keyword
+        import re
         names = self.column_names
         str_names = [
             (n.decode("utf-8") if isinstance(n, bytes) else n)
             for n in names
         ]
-        # Sanitise: namedtuple field names must be valid identifiers
-        safe = [n.replace(".", "_").replace(" ", "_") or f"col{i}"
-                for i, n in enumerate(str_names)]
-        Row = collections.namedtuple("Row", safe)
+        # Sanitise: namedtuple field names must be valid, non-keyword identifiers
+        safe = []
+        for i, n in enumerate(str_names):
+            candidate = re.sub(r"\W", "_", n)
+            if not candidate or candidate[0].isdigit():
+                candidate = f"_{candidate}"
+            if keyword.iskeyword(candidate):
+                candidate = f"{candidate}_"
+            safe.append(candidate or f"col{i}")
+        Row = collections.namedtuple("Row", safe, rename=True)
         columns = [self._get_column(i).to_pylist() for i in range(self._num_columns())]
         for row_idx in range(self.num_rows):
             yield Row(*[col[row_idx] for col in columns])
