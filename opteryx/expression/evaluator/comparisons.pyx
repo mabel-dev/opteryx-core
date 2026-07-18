@@ -11,8 +11,6 @@ import datetime
 
 from draken.vectors.bool_vector import BoolVector
 from opteryx.compiled.vector_ops import (
-    vector_anyop_ilike,
-    vector_anyop_like,
     vector_like,
     vector_rlike,
 )
@@ -339,22 +337,23 @@ cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, i
         return _json_array_contains_all(left, right)
     if op_code == OP_AT_QUESTION:
         return _json_at_question(left, right)
-    if op_code == OP_ANYOP_LIKE:
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=False)
-        return vector_anyop_like(left, right)
-    if op_code == OP_ANYOP_NOT_LIKE:
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=False).not_vector()
-        return vector_anyop_like(left, right, True)
-    if op_code == OP_ANYOP_ILIKE:
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=True)
-        return vector_anyop_ilike(left, right)
-    if op_code == OP_ANYOP_NOT_ILIKE:
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=True).not_vector()
-        return vector_anyop_ilike(left, right, True)
+    # LIKE ANY / ILIKE ANY: the constant-pattern case is compiled to the native
+    # draken_like_any kernel in compiled_expression.pyx (both scalar and
+    # ARRAY<string> subjects), so it never reaches this Python evaluator. The
+    # scalar fallback below (native glob, RE2-free) covers a scalar subject that
+    # fell out of the c-native path; an ARRAY subject here is unported — fail
+    # loud rather than reintroduce a Python/RE2 matcher on the execution path.
+    if op_code in (OP_ANYOP_LIKE, OP_ANYOP_NOT_LIKE, OP_ANYOP_ILIKE, OP_ANYOP_NOT_ILIKE):
+        if get_vector_type(left) != VectorType.STRING:
+            raise NotImplementedError(
+                "LIKE ANY over an ARRAY subject must be compiled to draken_like_any "
+                "(native); it is not supported on the Python evaluator fallback."
+            )
+        ignore_case = op_code in (OP_ANYOP_ILIKE, OP_ANYOP_NOT_ILIKE)
+        result = _string_anyop_like(left, right, ignore_case=ignore_case)
+        if op_code in (OP_ANYOP_NOT_LIKE, OP_ANYOP_NOT_ILIKE):
+            return result.not_vector()
+        return result
 
     # Map negated op codes to their positive counterpart and set negate flag.
     # All "Not" variants are: NotEq=2, NotInList=8, NotLike=10, NotILike=12,

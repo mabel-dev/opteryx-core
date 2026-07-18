@@ -142,6 +142,27 @@ struct substring_ctx* kernel_alloc_substring_ctx(int32_t start, int32_t count,
                                                  uint8_t has_count);
 
 /**
+ * Context for the length-adaptive LIKE kernel (draken_like_adaptive). Carries
+ * the op mode, a per-column avg-string-length threshold, and a plan-time
+ * compiled LIKE-DFA blob (opteryx.compiled.vector_ops.compile_like_dfa). At run
+ * time the kernel estimates the column's average string length (sampled slot
+ * lengths) and walks the DFA when it is below the threshold — the DFA wins on
+ * SHORT strings (measured ~2.2x), the glob matcher wins on long ones. Both
+ * matchers are verified byte-for-byte equivalent, so the length dispatch changes
+ * only SPEED, never the answer (§11: a shape discriminant must not change the
+ * result). The DFA blob (blob_len bytes) trails this struct.
+ */
+struct like_dfa_ctx {
+    uint16_t op_code;    // bit0 negate, bit1 ci
+    uint16_t threshold;  // avg string length (bytes) below which to use the DFA
+    uint32_t blob_len;   // trailing LIKE-DFA blob length
+};
+
+static inline const uint8_t* like_dfa_ctx_blob(const struct like_dfa_ctx* c) {
+    return (const uint8_t*)((const unsigned char*)c + sizeof(struct like_dfa_ctx));
+}
+
+/**
  * Context for draken_time_bucket — TIME_BUCKET(magnitude, units, date).
  * magnitude/units are bind-time (literal) operands, consumed here rather than
  * pushed as vector operands; only the `date` operand is pushed. unit_kind

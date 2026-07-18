@@ -47,10 +47,22 @@ VecResult draken_ceiling(void* ctx, const DrakenVector* const* args, uint32_t na
 VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_if_then_else(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// function_kernels.cpp — length-adaptive LIKE: walks a plan-time LIKE-DFA blob
+// on short-string columns, the glob matcher on long ones (both verified equal).
+VecResult draken_like_adaptive(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// function_kernels.cpp — SIMD op-program LIKE: walks a plan-time version-2
+// op-program blob (compile_like_program) with SIMD substring scans. Replaces
+// the transition-table path for decomposable globs; non-decomposable globs
+// stay on draken_like_adaptive.
+VecResult draken_like_program(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // function_rlike.cpp — pattern operand is always a pre-compiled DFA blob
 // (opteryx.compiled.vector_ops.compile_rlike_dfa, plan-time only); this
 // kernel has zero RE2 dependency and is a genuine draken-native kernel.
 VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// function_like_any.cpp — LIKE ANY / ILIKE ANY (+ NOT). Pattern set is a
+// pre-compiled matcher blob (opteryx.compiled.vector_ops.compile_like_any) in
+// ctx; scalar-string or ARRAY<string> subject. Zero RE2, zero Python.
+VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_not_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -205,7 +217,10 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_date_part", (kernel_fn_t)&draken_date_part},
     {"draken_if_then_else", (kernel_fn_t)&draken_if_then_else},
     {"draken_like", (kernel_fn_t)&draken_like},
+    {"draken_like_adaptive", (kernel_fn_t)&draken_like_adaptive},
+    {"draken_like_program", (kernel_fn_t)&draken_like_program},
     {"draken_rlike", (kernel_fn_t)&draken_rlike},
+    {"draken_like_any", (kernel_fn_t)&draken_like_any},
     {"draken_in_list", (kernel_fn_t)&draken_in_list},
     {"draken_is_empty", (kernel_fn_t)&draken_is_empty},
     {"draken_is_not_empty", (kernel_fn_t)&draken_is_not_empty},
@@ -611,6 +626,31 @@ in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len) {
     if (blob == nullptr || blob_len < sizeof(in_list_ctx)) return nullptr;
     auto* ctx = static_cast<in_list_ctx*>(malloc(blob_len));
     if (ctx) memcpy(ctx, blob, blob_len);
+    return ctx;
+}
+
+like_dfa_ctx* kernel_alloc_like_dfa_ctx(uint16_t op_code, uint16_t threshold,
+                                        const uint8_t* blob, size_t blob_len) {
+    auto* ctx = static_cast<like_dfa_ctx*>(malloc(sizeof(like_dfa_ctx) + blob_len));
+    if (!ctx) return nullptr;
+    ctx->op_code = op_code;
+    ctx->threshold = threshold;
+    ctx->blob_len = static_cast<uint32_t>(blob_len);
+    if (blob_len > 0u && blob != nullptr)
+        memcpy(reinterpret_cast<unsigned char*>(ctx) + sizeof(like_dfa_ctx), blob, blob_len);
+    return ctx;
+}
+
+void* kernel_alloc_like_any_ctx(const uint8_t* blob, size_t blob_len) {
+    // [u32 blob_len][blob bytes] — one copy; the kernel reads the length prefix.
+    if (blob == nullptr) return nullptr;
+    auto* ctx = static_cast<uint8_t*>(malloc(4 + blob_len));
+    if (!ctx) return nullptr;
+    ctx[0] = static_cast<uint8_t>(blob_len & 0xFF);
+    ctx[1] = static_cast<uint8_t>((blob_len >> 8) & 0xFF);
+    ctx[2] = static_cast<uint8_t>((blob_len >> 16) & 0xFF);
+    ctx[3] = static_cast<uint8_t>((blob_len >> 24) & 0xFF);
+    memcpy(ctx + 4, blob, blob_len);
     return ctx;
 }
 

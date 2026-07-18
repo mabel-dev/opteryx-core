@@ -55,7 +55,6 @@ from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
-from opteryx.utils.sql import sql_like_to_regex
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
@@ -156,6 +155,22 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
 
     from opteryx.compiled import vector_ops as compiled_vector_ops
 
+    # Prefer the SIMD op-program (blob version 2) when the pattern decomposes to
+    # ASCII literals joined by `.*`/`.+` with optional `^`/`$` anchors — it beats
+    # the transition-table DFA (blob version 1) on short and long columns alike.
+    # The blob's version byte tells compiled_expression which kernel to dispatch
+    # (draken_like_program vs draken_rlike). Non-decomposable patterns fall
+    # through to the DFA, which stays the correct, fully-general fallback.
+    compiled_blob = compiled_vector_ops.compile_rlike_program(pattern_value)
+    if compiled_blob is not None:
+        telemetry.optimization_predicate_rewriter_rlike_to_dfa += 1
+        predicate.right = build_literal_node(
+            compiled_blob,
+            root=predicate.right,
+            suggested_type=_lt.VARBINARY,
+        )
+        return predicate
+
     compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
     if compiled_blob is None:
         raise NotSupportedError(
@@ -174,67 +189,115 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
     return predicate
 
 
-def rewrite_ored_like_to_regex(predicate, telemetry):
+def rewrite_ored_like_to_any(predicate, telemetry):
     """
-    Rewrite multiple OR'ed LIKE conditions on the same column to a single regex pattern.
+    Rewrite OR'd LIKE/ILIKE conditions on the same column into a single
+    ``LIKE ANY`` node (AnyOpLike / AnyOpILike), routed to the native
+    ``draken_like_any`` (Aho-Corasick) kernel — NOT a regex/DFA.
 
     Example:
-    col LIKE 'pattern1%' OR col LIKE '%pattern2' OR col LIKE '%pattern3%'
-    -->
-    col REGEX '^pattern1.*|.*pattern2$|.*pattern3.*$'
+        col LIKE 'a%' OR col LIKE '%b' OR col LIKE '%c%'
+        -->  col LIKE ANY ('a%', '%b', '%c%')
 
-    This optimization reduces multiple string pattern checks to a single regex evaluation.
+    The raw glob patterns pass straight through — no ``sql_like_to_regex``
+    middle translation — because ``draken_like_any`` buckets them itself
+    (exact / prefix / suffix / contains-Aho-Corasick / residual glob) and stays
+    O(1) in pattern count, whereas OR'd LIKEs execute as N independent passes
+    (measured ~16× slower at N=50). Grouped by (column, case-sensitivity) so a
+    single ANY node is uniformly case-sensitive or -insensitive; a column mixing
+    LIKE and ILIKE yields one AnyOpLike and one AnyOpILike. Only positive
+    LIKE/ILIKE over an identifier with a string-literal pattern are fused; NOT
+    LIKE and everything else is left untouched.
     """
-    # Collect LIKE conditions that can be combined
-    like_conditions = {}
+    groups: dict = {}  # (col_id, is_ci) -> {"patterns": [...], "nodes": [...]}
 
-    def collect_likes(node, likes_dict):
-        # Base case: LIKE/ILIKE condition
+    def collect(node):
         if node.node_type == NodeType.COMPARISON_OPERATOR and node.value in {"Like", "ILike"}:
-            # Only proceed if the right side is a literal
-            if node.right.node_type == NodeType.LITERAL:
-                # Get column identifier for grouping
-                col_id = None
-                if node.left.node_type == NodeType.IDENTIFIER:
-                    col_id = node.left.schema_column.identity
-
-                if col_id:
-                    is_case_sensitive = node.value == "Like"
-                    if col_id not in likes_dict:
-                        likes_dict[col_id] = {
-                            "patterns": [],
-                            "nodes": [],
-                        }
-
-                    likes_dict[col_id]["patterns"].append(
-                        sql_like_to_regex(
-                            node.right.value, full_match=False, case_sensitive=is_case_sensitive
-                        )
-                    )
-                    likes_dict[col_id]["nodes"].append(node)
+            if (
+                node.right.node_type == NodeType.LITERAL
+                and isinstance(node.right.value, (str, bytes))
+                and node.left.node_type == NodeType.IDENTIFIER
+                and node.left.schema_column is not None
+            ):
+                key = (node.left.schema_column.identity, node.value == "ILike")
+                group = groups.setdefault(key, {"patterns": [], "nodes": []})
+                group["patterns"].append(node.right.value)
+                group["nodes"].append(node)
             return
-
-        # Recursive cases
         if node.node_type == NodeType.OR:
-            collect_likes(node.left, likes_dict)
-            collect_likes(node.right, likes_dict)
+            collect(node.left)
+            collect(node.right)
 
-    collect_likes(predicate, like_conditions)
+    collect(predicate)
 
-    for col_id, like_data in like_conditions.items():
-        if len(like_data["patterns"]) > 1:
-            telemetry.optimization_predicate_rewriter_like_to_regex += 1
-            # Create a new regex pattern
-            regex_pattern = "|".join(pattern for pattern in like_data["patterns"])
-            new_node = like_data["nodes"][0]
-            new_node.value = "RLike"
-            new_node.right.value = regex_pattern
-            for node in like_data["nodes"][1:]:
+    for (col_id, is_ci), group in groups.items():
+        if len(group["nodes"]) > 1:
+            telemetry.optimization_predicate_rewriter_like_to_any += 1
+            _fuse_like_group(group["nodes"][0], group["patterns"], is_ci)
+            # Disable the now-redundant OR branches (X OR False OR False == X).
+            for node in group["nodes"][1:]:
                 node.value = False
                 node.node_type = NodeType.LITERAL
                 node.type = _lt.BOOLEAN
 
     return predicate
+
+
+def _fuse_like_group(first_node, patterns, is_ci):
+    """Turn a group's first LIKE/ILIKE node into a LIKE ANY node in place:
+    the raw glob patterns become an ARRAY<VARCHAR> literal on the right, and the
+    op becomes AnyOpLike / AnyOpILike (native draken_like_any). The node's
+    BOOLEAN schema_column is preserved."""
+    first_node.value = "AnyOpILike" if is_ci else "AnyOpLike"
+    first_node.right.value = list(patterns)
+    first_node.right.type = _lt.ARRAY(_lt.VARCHAR)
+
+
+def rewrite_cnf_like_to_any(condition, telemetry):
+    """CNF counterpart of rewrite_ored_like_to_any: 3+ OR'd LIKE/ILIKE on one
+    column are normalised to a CNF node whose `parameters` are the OR-terms, so
+    the binary-OR walker never sees them. Fuse same-column same-case LIKE terms
+    into one `LIKE ANY` (AnyOpLike/AnyOpILike) here too — this is the case that
+    matters most (large N), where OR'd LIKEs otherwise run as N separate passes."""
+    if condition.node_type != NodeType.CNF:
+        return condition
+
+    groups: dict = {}  # (col_id, is_ci) -> {"patterns": [...], "nodes": [...]}
+    others = []
+    for branch in condition.parameters:
+        if (
+            branch.node_type == NodeType.COMPARISON_OPERATOR
+            and branch.value in {"Like", "ILike"}
+            and branch.right.node_type == NodeType.LITERAL
+            and isinstance(branch.right.value, (str, bytes))
+            and branch.left.node_type == NodeType.IDENTIFIER
+            and branch.left.schema_column is not None
+        ):
+            key = (branch.left.schema_column.identity, branch.value == "ILike")
+            group = groups.setdefault(key, {"patterns": [], "nodes": []})
+            group["patterns"].append(branch.right.value)
+            group["nodes"].append(branch)
+        else:
+            others.append(branch)
+
+    new_params = list(others)
+    rewrote = False
+    for (col_id, is_ci), group in groups.items():
+        if len(group["nodes"]) > 1:
+            telemetry.optimization_predicate_rewriter_like_to_any += 1
+            _fuse_like_group(group["nodes"][0], group["patterns"], is_ci)
+            new_params.append(group["nodes"][0])
+            rewrote = True
+        else:
+            new_params.extend(group["nodes"])
+
+    if not rewrote:
+        return condition
+    if len(new_params) == 1:
+        return new_params[0]
+    result = Node(node_type=NodeType.CNF)
+    result.parameters = new_params
+    return result
 
 
 def rewrite_ored_any_eq_to_contains(predicate, telemetry):
@@ -957,9 +1020,9 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     ):
         return _rewrite_rlike_to_dfa(predicate, telemetry)
 
-    # Add our new rewrite for ORed LIKE conditions
+    # Fuse OR'd LIKE/ILIKE on one column into a single native LIKE ANY.
     if predicate.node_type == NodeType.OR:
-        rewritten = rewrite_ored_like_to_regex(predicate, telemetry)
+        rewritten = rewrite_ored_like_to_any(predicate, telemetry)
         rewritten = rewrite_ored_eq_to_inlist(rewritten, telemetry)
         rewritten = rewrite_ored_any_eq_to_contains(rewritten, telemetry)
         if rewritten != predicate:
@@ -967,6 +1030,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
 
     if predicate.node_type == NodeType.CNF:
         predicate = rewrite_cnf_eq_to_inlist(predicate, telemetry)
+        predicate = rewrite_cnf_like_to_any(predicate, telemetry)
 
     # if predicate.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
     if predicate.left:

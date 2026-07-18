@@ -646,6 +646,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/function_null_conditional.cpp",  # Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (C ABI)
                 "draken/ops/kernels/function_vector_distance.cpp",  # Phase 9a-fn: EMBED/COSINE_SIMILARITY/COSINE_DISTANCE (C ABI)
                 "draken/ops/kernels/function_rlike.cpp",  # RLIKE/NOT RLIKE over a plan-time-compiled DFA blob (C ABI, no RE2)
+                "draken/ops/kernels/function_like_any.cpp",  # LIKE ANY/ILIKE ANY over a plan-time-compiled matcher blob (C ABI, no RE2)
                 # Vendored digest cores backing function_hash_encoding.cpp. Headers are
                 # already on include_dirs ("third_party/crypto"); the impls must be
                 # listed here or the kernels fail to link.
@@ -739,6 +740,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/function_null_conditional.cpp",  # Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (C ABI)
                 "draken/ops/kernels/function_vector_distance.cpp",  # Phase 9a-fn: EMBED/COSINE_SIMILARITY/COSINE_DISTANCE (C ABI)
                 "draken/ops/kernels/function_rlike.cpp",  # RLIKE/NOT RLIKE over a plan-time-compiled DFA blob (C ABI, no RE2)
+                "draken/ops/kernels/function_like_any.cpp",  # LIKE ANY/ILIKE ANY over a plan-time-compiled matcher blob (C ABI, no RE2)
                 # Vendored digest cores backing function_hash_encoding.cpp (see above).
                 "third_party/crypto/md5.cpp",
                 "third_party/crypto/sha1.cpp",

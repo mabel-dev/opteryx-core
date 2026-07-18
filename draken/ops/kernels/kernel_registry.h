@@ -104,6 +104,16 @@ vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension);
 // they delegate both operands to).
 cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* embed_fn);
 
+// Allocate context for the length-adaptive LIKE kernel (draken_like_adaptive):
+// op mode + avg-length threshold + a plan-time LIKE-DFA blob (copied inline).
+like_dfa_ctx* kernel_alloc_like_dfa_ctx(uint16_t op_code, uint16_t threshold,
+                                        const uint8_t* blob, size_t blob_len);
+
+// Allocate context for draken_like_any (LIKE ANY / ILIKE ANY). The matcher blob
+// (opteryx.compiled.vector_ops.compile_like_any) is copied behind a u32 length
+// prefix: [u32 blob_len][blob bytes]. Freed by the generic kernel_free_context.
+void* kernel_alloc_like_any_ctx(const uint8_t* blob, size_t blob_len);
+
 // Free allocated context (called during bytecode cleanup)
 void kernel_free_context(void* ctx);
 

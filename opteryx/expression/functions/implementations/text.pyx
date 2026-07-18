@@ -6,6 +6,7 @@
 from typing import List
 
 from opteryx.exceptions import InvalidFunctionParameterError
+from opteryx.exceptions import UnsupportedSyntaxError
 
 """Text and encoding function kernels.
 
@@ -136,58 +137,23 @@ def position(sub, string):
     return _ShimVector(result)
 
 
-def _normalise_replacement(repl: bytes) -> bytes:
-    """
-    Normalise regex replacement backreferences from double-backslash form to single.
-
-    SQL raw-string literals written as r'\\1' produce 3 bytes (backslash, backslash,
-    digit) because the `r` prefix suppresses escape processing but the two backslash
-    characters are still present verbatim.  RE2 interprets ``\\1`` as a literal
-    backslash followed by the digit 1, NOT as capture-group 1.  ClickHouse (and users
-    following its conventions) write ``r'\\1'`` expecting capture-group substitution.
-
-    This helper folds the double-backslash form into the canonical single-backslash
-    form (``b'\\1'``) that both RE2 and the DFA compiler recognise as a backreference,
-    so ``r'\\1'`` and ``r'\1'`` behave identically.
-
-    Only backreference positions (backslash followed by a digit 0-9) are collapsed;
-    other double-backslash sequences are left untouched.
-    """
-    import re as _re
-
-    return _re.sub(rb"\\\\([0-9])", rb"\\\1", repl)
-
-
 def regex_replace(array, pattern, replacement):
-    """Regex replacement using the vendored RE2 engine."""
-    from opteryx.compiled.nanobind.vectors import vector_regex_replace
+    """REGEXP_REPLACE runtime backstop — fail loud.
 
-    # Unwrap Cython Vector shim to nanobind Vector if needed
-    nb_array = getattr(array, "_nb", array)
-
-    pat = pattern[0]
-    repl = replacement[0]
-
-    # Convert to bytes if needed
-    pattern_bytes = (
-        pat
-        if isinstance(pat, bytes)
-        else pat.encode("utf-8")
-        if isinstance(pat, str)
-        else bytes(pat)
+    The only natively-supported REGEXP_REPLACE is the whole-match capture form
+    ``REGEXP_REPLACE(s, pattern, '\\1')`` whose pattern compiles to a DFA
+    program; the optimizer rewrites those to _DFA_EXTRACT
+    (predicate_rewriter._rewrite_regexp_replace_to_dfa) so they never reach this
+    callable. Anything that DOES reach here — a non-``\\1`` replacement, or a
+    pattern outside the DFA-compilable subset — was, until the RE2 matcher was
+    removed from the execution path, served by RE2 at run time. That path is
+    gone: RE2 is plan-time-parser-only now, so we fail loud rather than silently
+    degrade (.claude/CLAUDE.md §1/§9)."""
+    raise UnsupportedSyntaxError(
+        "REGEXP_REPLACE is only supported natively as whole-match capture "
+        "extraction — REGEXP_REPLACE(s, pattern, '\\1') where `pattern` "
+        "compiles to a DFA program (anchored, consuming the whole input). "
+        "General regex replacement (arbitrary replacement templates or "
+        "non-compilable patterns) is not supported: the RE2 runtime matcher "
+        "has been removed from the execution path."
     )
-    repl_bytes = (
-        repl
-        if isinstance(repl, bytes)
-        else repl.encode("utf-8")
-        if isinstance(repl, str)
-        else bytes(repl)
-    )
-
-    replacement_bytes = _normalise_replacement(repl_bytes)
-
-    try:
-        result = vector_regex_replace(nb_array, pattern_bytes, replacement_bytes)
-        return result
-    except ValueError as exc:
-        raise InvalidFunctionParameterError(str(exc)) from exc

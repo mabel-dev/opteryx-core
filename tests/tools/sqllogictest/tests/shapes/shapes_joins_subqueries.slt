@@ -181,7 +181,9 @@ SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships) AND name =
 statement error SqlError: Error Executing SQL Statement.*Constant motor path does not support operator
 SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships)
 
-query shape 1 1
+# REGEXP_REPLACE with a non-'\1' replacement is not natively supported (the RE2
+# runtime matcher was removed; only whole-match capture -> _DFA_EXTRACT remains).
+query error NotSupportedError
 SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'
 
 query error sql failed ValueError: Vectors must have the same length

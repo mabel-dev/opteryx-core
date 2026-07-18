@@ -27,6 +27,7 @@
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/kernel_context.h"  // binary_op_ctx
 #include "ops/kernels/error_handling.h"
+#include "ops/kernels/dfa_walk.h"        // draken_dfa::match — shared byte-DFA walk
 
 namespace {
 
@@ -41,36 +42,8 @@ inline bool rk_row_valid(const DrakenVector* v, uint32_t row) {
 // Returns 1/0 for match/no-match, or -1 for a malformed blob — the blob is
 // entirely plan-time-compiler-produced, so -1 means a compiler/kernel format
 // drift, not bad user input; the caller fails loud rather than guessing.
-int rk_dfa_match(const uint8_t* blob, size_t blob_len, const uint8_t* sdata, uint32_t slen) {
-    if (blob_len < 4) return -1;
-    const uint8_t version = blob[0];
-    const uint8_t flags = blob[1];
-    const uint16_t num_states =
-        static_cast<uint16_t>(blob[2]) | (static_cast<uint16_t>(blob[3]) << 8);
-    if (version != 1) return -1;
-    const bool has_begin = (flags & 0x01) != 0;
-    const bool has_end = (flags & 0x02) != 0;
-    (void)has_begin;  // encoded implicitly in the transition table itself
-    const size_t accept_bitmap_len = (static_cast<size_t>(num_states) + 7) / 8;
-    const size_t expected_len =
-        4 + accept_bitmap_len + static_cast<size_t>(num_states) * 256 * 2;
-    if (blob_len != expected_len) return -1;
-
-    const uint8_t* accept_bitmap = blob + 4;
-    const uint16_t* table =
-        reinterpret_cast<const uint16_t*>(blob + 4 + accept_bitmap_len);
-
-    int state = 0;
-    if (!has_end && ((accept_bitmap[0] >> 0) & 1u)) return 1;
-
-    for (uint32_t i = 0; i < slen; ++i) {
-        const uint16_t next_state = table[static_cast<size_t>(state) * 256 + sdata[i]];
-        if (next_state == 0xFFFFu) return 0;
-        state = static_cast<int>(next_state);
-        if (!has_end && ((accept_bitmap[state >> 3] >> (state & 7)) & 1u)) return 1;
-    }
-    if (has_end) return ((accept_bitmap[state >> 3] >> (state & 7)) & 1u) ? 1 : 0;
-    return 0;
+inline int rk_dfa_match(const uint8_t* blob, size_t blob_len, const uint8_t* sdata, uint32_t slen) {
+    return draken_dfa::match(blob, blob_len, sdata, slen);  // shared walk (dfa_walk.h)
 }
 
 }  // namespace

@@ -422,6 +422,276 @@ cdef object _epsilon_closure(list nfa_states, frozenset seed):
     return frozenset(closure)
 
 
+cdef object _subset_and_serialize(object nb, object start, object accepts,
+                                  bint has_begin, bint has_end):
+    """Add the unanchored-search self-loop (unless has_begin), determinise via
+    subset construction, and serialize to the byte-DFA blob (version 1 format —
+    see module docstring). Returns bytes, or None past DFA_STATE_CAP. Shared by
+    compile_rlike_dfa (regex source) and compile_like_dfa (glob source); the
+    executor (draken_rlike / vector_rlike._dfa_match) walks either blob."""
+    # Unanchored search: rather than patching the DFA after the fact (which only
+    # handles a failed match at the very first byte), add the "search anywhere"
+    # behaviour to the NFA itself, before subset construction. A fresh state with
+    # a self-loop on every byte plus an epsilon into the real pattern start is
+    # always "active" — present in the closure of every DFA state — so a match
+    # starting mid-string is still found after an earlier partial match failed.
+    if not has_begin:
+        search_start = nb.new_state()
+        nb.states[search_start].eps.add(start)
+        for b in range(256):
+            nb.states[search_start].trans[b] = search_start
+        start = search_start
+
+    # --- subset construction ---
+    nfa_states = nb.states
+    start_closure = _epsilon_closure(nfa_states, frozenset({start}))
+    dfa_index = {start_closure: 0}
+    dfa_order = [start_closure]
+    dfa_accept = [bool(start_closure & accepts)]
+    dfa_trans = [None]  # dfa_trans[i] = list[256] of state idx or None
+
+    worklist = [0]
+    while worklist:
+        idx = worklist.pop()
+        nfa_set = dfa_order[idx]
+        row = [None] * 256
+        for b in range(256):
+            target_nfa = set()
+            for s in nfa_set:
+                t = nfa_states[s].trans.get(b)
+                if t is not None:
+                    target_nfa.add(t)
+            if not target_nfa:
+                continue
+            closure = _epsilon_closure(nfa_states, frozenset(target_nfa))
+            existing = dfa_index.get(closure)
+            if existing is None:
+                if len(dfa_order) >= DFA_STATE_CAP:
+                    return None
+                existing = len(dfa_order)
+                dfa_index[closure] = existing
+                dfa_order.append(closure)
+                dfa_accept.append(bool(closure & accepts))
+                dfa_trans.append(None)
+                worklist.append(existing)
+            row[b] = existing
+        dfa_trans[idx] = row
+
+    num_states = len(dfa_order)
+
+    # --- serialize ---
+    flags = 0
+    if has_begin:
+        flags |= 0x01
+    if has_end:
+        flags |= 0x02
+
+    accept_bitmap = bytearray((num_states + 7) // 8)
+    for i in range(num_states):
+        if dfa_accept[i]:
+            accept_bitmap[i >> 3] |= (1 << (i & 7))
+
+    out = bytearray()
+    out.append(1)
+    out.append(flags)
+    out += num_states.to_bytes(2, "little")
+    out += bytes(accept_bitmap)
+    for i in range(num_states):
+        row = dfa_trans[i]
+        for b in range(256):
+            target = row[b]
+            out += (0xFFFF if target is None else target).to_bytes(2, "little")
+
+    return bytes(out)
+
+
+cpdef object compile_like_dfa(bytes pattern):
+    """Compile a SQL LIKE glob into a byte-DFA blob (anchored full match),
+    walked by the SAME executor as RLIKE (draken_rlike / _dfa_match).
+
+    This is LIKE-correct where routing LIKE through compile_rlike_dfa is NOT:
+    SQL `%` matches ANY byte INCLUDING newline (it is dotall), whereas the RLIKE
+    compiler lowers `.` to any-byte-EXCEPT-newline. On real data that divergence
+    is not academic — e.g. ~30% of tweets contain a newline, so the RLIKE DFA
+    silently under-matches `LIKE 'a%b'`. Here `%` is a star over all 256 bytes.
+
+    No RE2: a LIKE glob is a flat token sequence lowered straight into the NFA
+    (literal->one byte, `_`->any-of-256, `%`->star-over-256, full-match anchored
+    at both ends), matching fk_like_match / draken_like byte-for-byte (no
+    backslash escape). ASCII pattern only — a non-ASCII pattern returns None (so
+    the caller keeps the glob path), which also keeps `_` byte-safe (one byte ==
+    one char only for ASCII; multibyte `_` stays on the glob/NVARCHAR guard).
+    Returns None on non-ASCII or a state-cap overflow.
+    """
+    cdef Py_ssize_t i
+    cdef int b
+    for i in range(len(pattern)):
+        if pattern[i] > 127:
+            return None
+    nb = _NfaBuilder()
+    frag = None
+    for i in range(len(pattern)):
+        b = pattern[i]
+        if b == 37:        # '%' -> (any byte)*  — INCLUDING newline (SQL dotall)
+            f = nb.frag_star(nb.frag_byte_set(set(range(256))))
+        elif b == 95:      # '_' -> any single byte
+            f = nb.frag_byte_set(set(range(256)))
+        else:              # literal byte
+            f = nb.frag_byte_set({b})
+        frag = f if frag is None else nb.frag_concat(frag, f)
+    if frag is None:
+        # empty pattern matches ONLY the empty string
+        s = nb.new_state()
+        frag = (s, {s})
+    start, accepts = frag
+    # LIKE is a full match: anchored at both start and end.
+    return _subset_and_serialize(nb, start, accepts, True, True)
+
+
+# ---------------------------------------------------------------------------
+# SIMD op-program LIKE compiler (blob version 2).
+#
+# Lowers the DECOMPOSABLE subset of a SQL LIKE glob into the boolean op-program
+# walked by draken_like_program (draken/ops/kernels/like_program.h). The subset:
+#
+#     [fixed-prefix] ( % floating-literal )* [ % ] [fixed-suffix]
+#
+# where a "fixed" prefix/suffix is literal bytes + `_` (SKIP), and each floating
+# literal (between `%`) is a pure ASCII literal <= 16 bytes (simd_search_substring
+# cap). Anything outside this — a `_` inside a floating segment or the anchored
+# suffix, a floating literal > 16 bytes, or more than 8 ops — returns None, and
+# the caller keeps the transition-table DFA (compile_like_dfa) as the correct
+# fallback. Byte-for-byte equivalent to fk_like_match on the supported subset:
+# `%` is dotall (crosses newline) which is exactly simd_search_substring's
+# semantics, and `_` is one ASCII byte (SKIP 1). ASCII pattern only (keeps `_`
+# byte-safe and the literal compares exact).
+# ---------------------------------------------------------------------------
+
+# Op codes — MUST match draken/ops/kernels/like_program.h.
+DEF _LMOP_LIT = 1
+DEF _LMOP_SKIP = 2
+DEF _LMOP_SEARCH = 3
+DEF _LMOP_SUFFIX = 5
+DEF _LMOP_END = 6
+DEF _LMOP_ACCEPT = 7
+DEF _LMOP_TAIL_NO_NEWLINE = 8
+
+# Program flags — MUST match draken/ops/kernels/like_program.h LikeFlag.
+DEF _LFLAG_ANCHOR_START = 1
+DEF _LFLAG_ANCHOR_END = 2
+DEF _LFLAG_LINE_DRIVER = 4
+
+_LIKE_PROG_SEARCH_MAX = 16   # simd_search_substring pattern cap
+_LIKE_PROG_OP_CAP = 8        # like_program.h op_count ceiling
+
+
+cdef object _emit_fixed_ops(bytes seg, list ops):
+    """Lower a fixed segment (literal bytes + `_`) into LIT / SKIP ops appended
+    to `ops`. Returns False if it cannot (never, currently) — kept for symmetry.
+    `_` (0x5F) runs become SKIP(n); literal runs become LIT(bytes)."""
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t j
+    cdef Py_ssize_t m = len(seg)
+    while i < m:
+        if seg[i] == 0x5F:  # '_'
+            j = i
+            while j < m and seg[j] == 0x5F:
+                j += 1
+            ops.append((_LMOP_SKIP, j - i, None))
+            i = j
+        else:
+            j = i
+            while j < m and seg[j] != 0x5F:
+                j += 1
+            ops.append((_LMOP_LIT, 0, seg[i:j]))
+            i = j
+    return True
+
+
+cdef object _serialize_like_program(list ops, int tail_reserve, int flags=0):
+    """Serialize an op list into the version-2 op-program blob. Returns bytes,
+    or None if the op count exceeds the executor's cap. Header (6 bytes):
+    u8 version(=2), u8 op_count, u8 flags, u8 pad, u16 tail_reserve."""
+    if len(ops) == 0 or len(ops) > _LIKE_PROG_OP_CAP:
+        return None
+    if tail_reserve < 0 or tail_reserve > 0xFFFF:
+        return None
+    out = bytearray()
+    out.append(2)                       # version
+    out.append(len(ops))                # op_count
+    out.append(flags & 0xFF)            # flags (RLIKE anchoring + line driver)
+    out.append(0)                       # pad
+    out += (tail_reserve).to_bytes(2, "little")
+    for op_type, n, lit in ops:
+        out.append(op_type)
+        if op_type == _LMOP_LIT or op_type == _LMOP_SEARCH or op_type == _LMOP_SUFFIX:
+            out += len(lit).to_bytes(4, "little")
+            out += lit
+        elif op_type == _LMOP_SKIP:
+            out += (<int>n).to_bytes(4, "little")
+        # _LMOP_END / _LMOP_ACCEPT carry no payload
+    return bytes(out)
+
+
+cpdef object compile_like_program(bytes pattern):
+    """Compile a decomposable SQL LIKE glob into a version-2 SIMD op-program
+    blob (walked by draken_like_program). Returns bytes on success, or None for
+    a non-ASCII pattern or one outside the decomposable subset — in which case
+    the caller keeps the transition-table DFA / glob path (which stays correct
+    for every pattern, just scalar).
+    """
+    cdef Py_ssize_t i
+    cdef list ops = []
+    cdef int tail_reserve = 0
+
+    for i in range(len(pattern)):
+        if pattern[i] > 127:
+            return None
+
+    parts = pattern.split(b"%")
+    cdef Py_ssize_t num_pct = len(parts) - 1
+
+    if num_pct == 0:
+        # No `%`: a fully-anchored fixed match (literal bytes + `_`).
+        _emit_fixed_ops(pattern, ops)
+        ops.append((_LMOP_END, 0, None))
+        return _serialize_like_program(ops, 0)
+
+    prefix = parts[0]
+    suffix = parts[len(parts) - 1]
+    # Middle floating literals sit strictly between two `%` (parts[1 : -1]).
+
+    # Anchored fixed prefix (empty => leading `%`).
+    if len(prefix) > 0:
+        _emit_fixed_ops(prefix, ops)
+
+    # Floating middle literals -> SEARCH (dotall substring). Pure literals only.
+    for i in range(1, len(parts) - 1):
+        m = parts[i]
+        if len(m) == 0:
+            continue  # `%%` collapses to `%`
+        if m.find(b"_") != -1:
+            return None  # `_` in a floating segment needs a masked search (v2)
+        if len(m) > _LIKE_PROG_SEARCH_MAX:
+            return None  # beyond simd_search_substring's 16-byte cap
+        ops.append((_LMOP_SEARCH, 0, m))
+
+    # Terminal.
+    if len(suffix) == 0:
+        # Trailing `%`: any remainder is fine.
+        ops.append((_LMOP_ACCEPT, 0, None))
+        tail_reserve = 0
+    else:
+        # Anchored-end floating suffix (always preceded by a `%` here). Compare
+        # at the true end so `%foo` requires foo AT the end, not the first foo.
+        if suffix.find(b"_") != -1:
+            return None  # fixed-width suffix wildcard needs a mask (v2)
+        ops.append((_LMOP_SUFFIX, 0, suffix))
+        tail_reserve = len(suffix)
+
+    return _serialize_like_program(ops, tail_reserve)
+
+
 cpdef object compile_rlike_dfa(bytes pattern):
     """Compile a literal RLIKE/LIKE-ANY regex pattern into a DFA blob.
 
@@ -501,87 +771,225 @@ cpdef object compile_rlike_dfa(bytes pattern):
         except _TooComplex:
             return None
 
-        # Unanchored search: rather than patching the DFA after the fact
-        # (which only handles a failed match at the very first byte), add
-        # the "search anywhere" behaviour to the NFA itself, before subset
-        # construction. A fresh state with a self-loop on every byte plus an
-        # epsilon into the real pattern start is always "active" — it's
-        # present in the closure of every DFA state, because its own
-        # self-loop keeps re-adding it to whatever byte was just consumed.
-        # That lets a match starting mid-string be found even after an
-        # earlier partial match at an earlier position has already failed,
-        # which a start-state-only DFA patch cannot do (once you've
-        # committed past the start state into a partial match, hitting a
-        # dead transition there has no way back to "retry from here").
-        if not has_begin:
-            search_start = nb.new_state()
-            nb.states[search_start].eps.add(start)
-            for b in range(256):
-                nb.states[search_start].trans[b] = search_start
-            start = search_start
-
-        # --- subset construction ---
-        nfa_states = nb.states
-        start_closure = _epsilon_closure(nfa_states, frozenset({start}))
-        dfa_index = {start_closure: 0}
-        dfa_order = [start_closure]
-        dfa_accept = [bool(start_closure & accepts)]
-        dfa_trans = [None]  # filled below, dfa_trans[i] = list[256] of state idx or None
-
-        worklist = [0]
-        while worklist:
-            idx = worklist.pop()
-            nfa_set = dfa_order[idx]
-            row = [None] * 256
-            for b in range(256):
-                target_nfa = set()
-                for s in nfa_set:
-                    t = nfa_states[s].trans.get(b)
-                    if t is not None:
-                        target_nfa.add(t)
-                if not target_nfa:
-                    continue
-                closure = _epsilon_closure(nfa_states, frozenset(target_nfa))
-                existing = dfa_index.get(closure)
-                if existing is None:
-                    if len(dfa_order) >= DFA_STATE_CAP:
-                        return None
-                    existing = len(dfa_order)
-                    dfa_index[closure] = existing
-                    dfa_order.append(closure)
-                    dfa_accept.append(bool(closure & accepts))
-                    dfa_trans.append(None)
-                    worklist.append(existing)
-                row[b] = existing
-            dfa_trans[idx] = row
-
-        num_states = len(dfa_order)
-
-        # --- serialize ---
-        flags = 0
-        if has_begin:
-            flags |= 0x01
-        if has_end:
-            flags |= 0x02
-
-        accept_bitmap = bytearray((num_states + 7) // 8)
-        for i in range(num_states):
-            if dfa_accept[i]:
-                accept_bitmap[i >> 3] |= (1 << (i & 7))
-
-        out = bytearray()
-        out.append(1)
-        out.append(flags)
-        out += num_states.to_bytes(2, "little")
-        out += bytes(accept_bitmap)
-        for i in range(num_states):
-            row = dfa_trans[i]
-            for b in range(256):
-                target = row[b]
-                out += (0xFFFF if target is None else target).to_bytes(2, "little")
-
-        return bytes(out)
+        return _subset_and_serialize(nb, start, accepts, has_begin, has_end)
     finally:
         if simplified != NULL:
             simplified.Decref()
         parsed.Decref()
+
+
+# ---------------------------------------------------------------------------
+# SIMD op-program RLIKE compiler (blob version 2, shared executor with LIKE).
+#
+# Lowers the subset of RLIKE/REGEXP_LIKE expressible as ASCII literal segments
+# joined by `.*`/`.+` gaps, optionally anchored with `^`/`$`, into the SAME
+# op-program executor as LIKE (draken_like_program / like_program.h). Returns
+# None for anything outside the subset (char classes, alternation, bounded
+# repeats, bare `.`, dotall `(?s)`, case-fold, non-ASCII, trailing/leading
+# gap), in which case the caller keeps the transition-table DFA (compile_rlike_dfa)
+# — the correct fallback that loses no coverage.
+#
+# `.*`/`.+` are NON-dotall (`.` excludes newline), so the whole match is confined
+# to one line. The executor's LFLAG_LINE_DRIVER runs the program per newline-free
+# window, selected by the anchors (see like_program.h match_rlike). Every routed
+# pattern is verified byte-for-byte against the transition-table DFA (the
+# established-correct oracle) before routing; disagreements return None.
+# ---------------------------------------------------------------------------
+
+cdef object _rlike_ascii_literal_bytes(Regexp* re):
+    """Bytes of a Literal/LiteralString node if it is all-ASCII, else None."""
+    cdef int i
+    cdef int rune
+    cdef int nr
+    if re == NULL:
+        return None
+    if re.op() == kRegexpLiteral:
+        rune = re.rune()
+        if rune < 0 or rune > 127:
+            return None
+        return bytes([rune])
+    if re.op() == kRegexpLiteralString:
+        nr = re.nrunes()
+        if nr <= 0:
+            return None
+        out = bytearray()
+        for i in range(nr):
+            rune = re.runes()[i]
+            if rune < 0 or rune > 127:
+                return None
+            out.append(rune)
+        return bytes(out)
+    return None
+
+
+cdef object _rlike_gap_kind(Regexp* re):
+    """'*' or '+' if re is Star/Plus over a NON-dotall `.` (every byte except
+    newline), else None. RE2/LikePerl lowers `.` to a CharClass [^\\n] (not
+    kRegexpAnyChar), so this checks the actual byte-set. A dotall `(?s).`
+    (byte-set includes newline) or any real char class is refused — the line
+    driver is only valid for gaps that cannot cross a newline."""
+    cdef Regexp* child
+    cdef object bset
+    cdef object dot_set = set(range(256)) - {0x0A}
+    if re == NULL or re.nsub() != 1:
+        return None
+    if re.op() != kRegexpStar and re.op() != kRegexpPlus:
+        return None
+    child = re.sub()[0]
+    if child == NULL:
+        return None
+    if child.op() == kRegexpAnyChar:
+        bset = dot_set
+    elif child.op() == kRegexpCharClass:
+        bset = _charclass_byte_set(child.cc())
+    else:
+        return None
+    if bset is None or bset != dot_set:
+        return None
+    return "+" if re.op() == kRegexpPlus else "*"
+
+
+cpdef object compile_rlike_program(bytes pattern):
+    """Compile a literal-segments-joined-by-`.*`/`.+` RLIKE pattern into a
+    version-2 op-program blob (walked by draken_like_program). Returns bytes on
+    success, or None if outside the supported subset (caller keeps the DFA)."""
+    cdef char* pattern_buf = NULL
+    cdef Py_ssize_t pattern_len = 0
+    cdef StringPiece pattern_piece
+    cdef RegexpStatus status
+    cdef Regexp* parsed = NULL
+    cdef Regexp* simplified = NULL
+    cdef Regexp* child = NULL
+    cdef bint has_begin = False
+    cdef bint has_end = False
+    cdef bint skip_first = False
+    cdef bint skip_last = False
+    cdef int n
+    cdef int i
+    cdef int lo_idx
+    cdef int hi_idx
+    cdef bint expect_literal = True
+    cdef bint trailing_gap = False
+    cdef list ops = []
+    cdef int tail_reserve = 0
+    cdef int seg_count
+    cdef bint has_gap
+    cdef int flags = 0
+
+    PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
+    pattern_piece = StringPiece(pattern_buf, <size_t>pattern_len)
+    parsed = Regexp.Parse(pattern_piece, LikePerl, &status)
+    if parsed == NULL:
+        return None
+
+    try:
+        simplified = parsed.Simplify()
+        if simplified == NULL:
+            return None
+        if (simplified.parse_flags() & FoldCase) != 0:
+            return None
+
+        # Outermost-only anchor detection (same rule as compile_rlike_dfa).
+        if simplified.op() == kRegexpConcat and simplified.nsub() >= 1:
+            n = simplified.nsub()
+            if simplified.sub()[0] != NULL and simplified.sub()[0].op() == kRegexpBeginText:
+                has_begin = True
+                skip_first = True
+            if simplified.sub()[n - 1] != NULL and simplified.sub()[n - 1].op() == kRegexpEndText:
+                has_end = True
+                skip_last = True
+        elif simplified.op() == kRegexpBeginText or simplified.op() == kRegexpEndText:
+            return None  # bare anchor only
+
+        # Walk the body children into literal segments + gaps.
+        segs = []      # list[bytes]
+        gaps = []      # list[str] '*'/'+', gap BEFORE segs[i+1]
+        if simplified.op() == kRegexpConcat:
+            n = simplified.nsub()
+            lo_idx = 1 if skip_first else 0
+            hi_idx = n - 1 if skip_last else n
+            if lo_idx >= hi_idx:
+                return None  # anchors only (e.g. ^$) — leave to the DFA
+            for i in range(lo_idx, hi_idx):
+                child = simplified.sub()[i]
+                if child == NULL:
+                    return None
+                if child.op() == kRegexpBeginText or child.op() == kRegexpEndText:
+                    return None  # nested anchor beyond outermost
+                lit = _rlike_ascii_literal_bytes(child)
+                if lit is not None:
+                    if not expect_literal:
+                        return None
+                    segs.append(lit)
+                    expect_literal = False
+                    continue
+                gk = _rlike_gap_kind(child)
+                if gk is not None:
+                    if expect_literal:
+                        return None  # leading or doubled gap
+                    gaps.append(gk)
+                    expect_literal = True
+                    continue
+                return None  # unsupported node
+        else:
+            lit = _rlike_ascii_literal_bytes(simplified)
+            if lit is None:
+                return None
+            segs.append(lit)
+            expect_literal = False
+
+        if len(segs) == 0:
+            return None  # no literals at all
+        # A trailing gap (`foo.*`, nothing between the last gap and end) is only
+        # supported when anchored with `$` — LMOP_TAIL_NO_NEWLINE below relies on
+        # the line-driver window already being newline-bounded, which requires
+        # LFLAG_ANCHOR_END routing. An unanchored trailing gap (no `$`) is out of
+        # scope; the DFA keeps it.
+        trailing_gap = expect_literal
+        if trailing_gap and not has_end:
+            return None
+
+        # Emit ops. A `+` gap is an exact +1 skip (>=1 char) before the search.
+        seg_count = len(segs)
+        has_gap = len(gaps) > 0
+        for i in range(seg_count):
+            is_last = (i == seg_count - 1)
+            if i == 0:
+                if has_begin:
+                    ops.append((_LMOP_LIT, 0, segs[0]))
+                elif is_last and has_end and not trailing_gap:
+                    ops.append((_LMOP_SUFFIX, 0, segs[0]))
+                    tail_reserve = len(segs[0])
+                else:
+                    ops.append((_LMOP_SEARCH, 0, segs[0]))
+            else:
+                if gaps[i - 1] == "+":
+                    ops.append((_LMOP_SKIP, 1, None))
+                if is_last and has_end and not trailing_gap:
+                    ops.append((_LMOP_SUFFIX, 0, segs[i]))
+                    tail_reserve = len(segs[i])
+                else:
+                    ops.append((_LMOP_SEARCH, 0, segs[i]))
+
+        if has_end:
+            if trailing_gap:
+                ops.append((_LMOP_TAIL_NO_NEWLINE, 0, None))
+            elif seg_count == 1 and has_begin:
+                ops.append((_LMOP_END, 0, None))
+            # otherwise the last op is a terminal SUFFIX already
+        else:
+            ops.append((_LMOP_ACCEPT, 0, None))
+
+        if has_begin:
+            flags |= _LFLAG_ANCHOR_START
+        if has_end:
+            flags |= _LFLAG_ANCHOR_END
+        if has_gap:
+            flags |= _LFLAG_LINE_DRIVER
+
+        return _serialize_like_program(ops, tail_reserve, flags)
+    finally:
+        if simplified != NULL:
+            simplified.Decref()
+        parsed.Decref()
+

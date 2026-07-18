@@ -180,3 +180,27 @@ jobs:
         with:
           # Distinct token, scoped to the `rugo` PyPI project (not opteryx_core).
           password: ${{ secrets.RUGO_PYPI_API_TOKEN }}
+
+  # ── Mirror the release to mabel-dev/rugo.dev, the public docs/releases hub for
+  # rugo. This is a NOTES-ONLY GitHub Release (no wheel assets — PyPI is the
+  # distribution channel); it exists as the public changelog. It runs only after
+  # the PyPI publish succeeds, so the release note never points at a version that
+  # failed to ship.
+  #
+  # The default GITHUB_TOKEN cannot write to another repo, so this needs a
+  # credential with `contents: write` on mabel-dev/rugo.dev, stored here as the
+  # RUGO_DEV_RELEASE_TOKEN secret. Creating the release also creates the tag
+  # (e.g. `rugo-0.2.0`) in rugo.dev, matching the tag used here.
+  github-release:
+    needs: upload
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create notes-only release on mabel-dev/rugo.dev
+        env:
+          GH_TOKEN: ${{ secrets.RUGO_DEV_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo mabel-dev/rugo.dev \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

@@ -1,15 +1,18 @@
 // opteryx/compiled/nanobind/vector_string_misc2.cpp — Milestone E.16 / E.26+, C′.
 //
-// C′ pattern: pure nanobind C++, zero Cython.  One NB_MODULE, four functions:
+// C′ pattern: pure nanobind C++, zero Cython.  One NB_MODULE, three functions:
 //
 //   vector_replace(haystack, needle, replacement) — bytewise string replace (VARCHAR).
-//   vector_regex_replace(data, pattern, replacement) — RE2 regex replace.
 //   vector_cosine_similarity(a, b)               — fp16 cosine similarity (FLOAT64).
 //   vector_cosine_distance(a, b)                 — 1 - clip(similarity, -1, 1) (FLOAT64).
 //
+// (REGEXP_REPLACE's RE2 runtime matcher was removed — the only supported form is
+// the whole-match capture REGEXP_REPLACE(s, pat, '\1'), rewritten at plan time to
+// the native _DFA_EXTRACT kernel; anything else fails loud. RE2 is now plan-time
+// parser only.)
+//
 // Null TVL:
 //   vector_replace:            any null in (haystack, needle, replacement) → null output.
-//   vector_regex_replace:      null input row → null output row.
 //   vector_cosine_similarity:  null in either input row → null output row.
 //   vector_cosine_distance:    inherits similarity null TVL.
 //
@@ -18,11 +21,6 @@
 //   UTF-8 NVARCHAR when needle/replacement are themselves valid UTF-8.
 //   Empty needle: no-op (returns haystack unchanged; PostgreSQL convention).
 //
-// vector_regex_replace notes:
-//   RE2-based regex replace (all non-overlapping occurrences).
-//   pattern and replacement are Python bytes.
-//   RE2 patterns are compiled once and cached at module level (process lifetime).
-//
 // vector_cosine notes:
 //   Both inputs must be DRAKEN_VECTOR_FP16 with a mandatory logical_type_dimension.
 //   fp16 values are widened to float64 for accumulation.
@@ -30,7 +28,6 @@
 //
 // Replaces:
 //   opteryx/compiled/vector_ops/vector_replace.pyx
-//   opteryx/compiled/vector_ops/vector_regex_replace.pyx
 //   opteryx/compiled/vector_ops/vector_cosine.pyx
 
 #include <Python.h>
@@ -51,8 +48,6 @@
 #include "core/draken_bridge.h"
 #include "ops/vector_cosine.h"
 
-#include "re2/re2.h"
-#include "re2/stringpiece.h"
 
 #include <unordered_map>
 #include <mutex>
@@ -313,151 +308,6 @@ static nb::object impl_cosine_distance(nb::object a_obj, nb::object b_obj) {
     return nb::steal<nb::object>(out);
 }
 
-// ---------------------------------------------------------------------------
-// vector_regex_replace — RE2 regex replace, all non-overlapping occurrences.
-// Pattern and replacement are Python bytes. Pattern compiled once, cached.
-// ---------------------------------------------------------------------------
-
-static std::unordered_map<std::string, RE2*> s_re2_cache;
-static std::mutex s_re2_mutex;
-
-static RE2* get_or_compile_re2(const char* pat_data, size_t pat_len) {
-    std::string key(pat_data, pat_len);
-    std::lock_guard<std::mutex> lk(s_re2_mutex);
-    auto it = s_re2_cache.find(key);
-    if (it != s_re2_cache.end()) return it->second;
-    RE2* re = new RE2(key);
-    if (!re->ok()) {
-        std::string err = re->error();
-        delete re;
-        throw std::invalid_argument("vector_regex_replace: invalid RE2 pattern: " + err);
-    }
-    s_re2_cache.emplace(std::move(key), re);
-    return re;
-}
-
-static nb::object impl_regex_replace(
-    nb::object data_obj, nb::object pattern_obj, nb::object repl_obj)
-{
-    const DrakenVector* dv = draken_vector_unwrap(data_obj.ptr());
-    if (!dv) throw nb::python_error();
-    const bool is_str = dv->type == DRAKEN_VARCHAR || dv->type == DRAKEN_NVARCHAR ||
-                        dv->type == DRAKEN_VARBINARY;
-    if (!is_str)
-        throw nb::type_error(
-            "vector_regex_replace: expected a string-family Vector");
-
-    if (!PyBytes_Check(pattern_obj.ptr()))
-        throw nb::type_error("vector_regex_replace: pattern must be bytes");
-    if (!PyBytes_Check(repl_obj.ptr()))
-        throw nb::type_error("vector_regex_replace: replacement must be bytes");
-
-    const char* pat_data = PyBytes_AS_STRING(pattern_obj.ptr());
-    const size_t pat_len = static_cast<size_t>(PyBytes_GET_SIZE(pattern_obj.ptr()));
-    const char* rep_data = PyBytes_AS_STRING(repl_obj.ptr());
-    const size_t rep_len = static_cast<size_t>(PyBytes_GET_SIZE(repl_obj.ptr()));
-
-    RE2* regex = get_or_compile_re2(pat_data, pat_len);
-    const re2::StringPiece repl_piece(rep_data, rep_len);
-
-    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-    DrakenStringSlot* out_slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-    if (!out_slots) throw std::bad_alloc();
-    std::memset(out_slots, 0, slots_sz);
-
-    size_t arena_cap  = (sa->arena_used > 0u ? sa->arena_used : 64u);
-    uint8_t* out_arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
-    if (!out_arena) { draken_free(out_slots); throw std::bad_alloc(); }
-    size_t arena_used  = 0u;
-
-    uint8_t* validity = nullptr;
-    bool any_null = false;
-
-    // Per-row scratch string.
-    std::string scratch;
-    scratch.reserve(256u);
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (!(dv->validity == nullptr ||
-              ((dv->validity[i >> 3] >> (i & 7u)) & 1u))) {
-            // Null row.
-            if (!validity) {
-                const uint32_t nb_ = (n + 7u) >> 3;
-                validity = static_cast<uint8_t*>(draken_malloc(nb_ > 0u ? nb_ : 1u));
-                if (!validity) { draken_free(out_slots); draken_free(out_arena); throw std::bad_alloc(); }
-                std::memset(validity, 0xFF, nb_ > 0u ? nb_ : 1u);
-            }
-            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
-            str_init_null(&out_slots[i]);
-            any_null = true;
-            continue;
-        }
-
-        const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
-        const uint32_t slen  = str_length(slot);
-        const uint8_t* sdata = str_data(slot, sa->arena);
-
-        scratch.assign(reinterpret_cast<const char*>(sdata), slen);
-        RE2::GlobalReplace(&scratch, *regex, repl_piece);
-
-        const uint32_t out_len = static_cast<uint32_t>(scratch.size());
-        const uint8_t* out_bytes = reinterpret_cast<const uint8_t*>(scratch.data());
-
-        if (out_len <= STR_INLINE_MAX) {
-            draken_build_string_slot(&out_slots[i], out_bytes, out_len, 0u);
-        } else {
-            if (arena_used + out_len > arena_cap) {
-                size_t nc = arena_cap * 2u;
-                if (nc < arena_used + out_len) nc = arena_used + out_len;
-                uint8_t* na = static_cast<uint8_t*>(draken_malloc(nc));
-                if (!na) {
-                    draken_free(out_slots); draken_free(out_arena);
-                    if (validity) draken_free(validity);
-                    throw std::bad_alloc();
-                }
-                if (arena_used > 0u) std::memcpy(na, out_arena, arena_used);
-                draken_free(out_arena); out_arena = na; arena_cap = nc;
-            }
-            const uint32_t off = static_cast<uint32_t>(arena_used);
-            std::memcpy(out_arena + off, out_bytes, out_len);
-            draken_build_string_slot(&out_slots[i], out_bytes, out_len, off);
-            arena_used += out_len;
-        }
-    }
-
-    if (!any_null && validity) { draken_free(validity); validity = nullptr; }
-
-    // Debug validation: when OPTERYX_DEBUG_VALIDATE_SLOTS is set, verify that
-    // every extern slot's arena_offset + length fits within the produced arena.
-    // This is strictly diagnostic and only enabled by environment to avoid
-    // impacting normal runtime performance.
-    const char* dbg_env = std::getenv("OPTERYX_DEBUG_VALIDATE_SLOTS");
-    if (dbg_env) {
-        for (uint32_t idx = 0u; idx < n; ++idx) {
-            const DrakenStringSlot* s = &out_slots[idx];
-            const uint32_t len = str_length(s);
-            if (!str_is_inline(s)) {
-                const uint32_t off = s->ext.arena_offset;
-                if ((size_t)off + (size_t)len > arena_used) {
-                    // Clean up allocated buffers before throwing so Python traceback
-                    // is visible and ownership isn't leaked.
-                    if (validity) draken_free(validity);
-                    draken_free(out_arena);
-                    draken_free(out_slots);
-                    throw std::runtime_error("vector_regex_replace: slot references beyond arena bounds");
-                }
-            }
-        }
-    }
-
-    PyObject* out = draken_vector_own_string(
-        out_slots, out_arena, arena_used, validity, n, dv->type);
-    if (!out) throw nb::python_error();
-    return nb::steal<nb::object>(out);
-}
 
 // ---------------------------------------------------------------------------
 // NB_MODULE
@@ -473,15 +323,6 @@ void register_vector_string_misc2(nb::module_ &m) {
         "Bytewise string replace: replace all occurrences of needle in haystack.\n"
         "Output: DRAKEN_VARCHAR. Null TVL: any null input row → null output.\n"
         "Empty needle: no-op (returns haystack unchanged; PostgreSQL convention).");
-
-    m.def("vector_regex_replace",
-        [](nb::object data, nb::object pattern, nb::object replacement) -> nb::object {
-            return impl_regex_replace(data, pattern, replacement);
-        },
-        nb::arg("data"), nb::arg("pattern"), nb::arg("replacement"),
-        "RE2 regex replace: replace all non-overlapping occurrences of pattern.\n"
-        "pattern and replacement must be Python bytes.  Pattern cached at module level.\n"
-        "Null TVL: null input row → null output row.");
 
     m.def("vector_cosine_similarity",
         [](nb::object a, nb::object b) -> nb::object {

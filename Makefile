@@ -8,12 +8,12 @@ SHELL := /bin/bash
 # environment requests it (fatal error: config_read_gil). To enable running
 # without the GIL you can override this like:
 #
-#   make PYTHON_GIL='PYTHON_GIL=0' <target>
+#   make PYTHON_GIL=0 <target>
 #
-PYTHON_GIL ?=0
+PYTHON_GIL ?=
 # Prefer python3.14 by default for consistent ABI and compiled artifacts.
 # Users may override by passing PYTHON='python3.x' on the make commandline.
-PYTHON ?= PYTHON_GIL=$(PYTHON_GIL) PYENV_VERSION=3.14.5t pyenv exec python
+PYTHON ?= $(if $(PYTHON_GIL),PYTHON_GIL=$(PYTHON_GIL)) PYENV_VERSION=3.14.5 pyenv exec python
 UV := $(PYTHON) -m uv
 PIP := $(UV) pip
 PYTEST := $(PYTHON) -m pytest
@@ -95,7 +95,7 @@ check-python:
 	@ver=`$(PYTHON) -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')" 2>/dev/null`; \
 	if [ "$$ver" != "3.14" ]; then \
 		echo "\nERROR: Python 3.14 is required for builds in this repository; found $$ver\n" >&2; \
-		echo "Set your local Python to 3.14 (pyenv local 3.14.5t) or override with: make PYTHON=python3.14 <target>" >&2; \
+		echo "Set your local Python to 3.14 (pyenv local 3.14.5) or override with: make PYTHON=python3.14 <target>" >&2; \
 		exit 1; \
 	fi
 

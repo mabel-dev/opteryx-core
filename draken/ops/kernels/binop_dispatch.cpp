@@ -177,7 +177,9 @@ VecResult binop_float64_scaled(int op, const DrakenVector& a, unsigned char sa,
 
 // ---- string concat (op 7, BOP_STRING_CONCAT) ------------------------------
 // Element-wise `a || b`. Ported from the live nanobind impl_concat
-// (vector_selection_concat.cpp): 2-pass byte assembly. The arena budget (Pass 1)
+// (vector_selection_concat.cpp): 2-pass byte assembly (Pass 1 sizes the arena,
+// Pass 2 assembles). Long results are written once, straight into the arena — no
+// intermediate scratch copy. The arena budget (Pass 1)
 // uses the per-row SUM (ll+rl) vs STR_INLINE_MAX — NOT the per-operand length:
 // two individually-inline operands can concatenate past the inline limit (7+7=14)
 // and still need arena bytes (the concat_arena_overflow trap). NULL || x = NULL
@@ -266,14 +268,14 @@ static VecResult binop_string_concat(const DrakenVector* left, const DrakenVecto
     if (!validity) { draken_free(slots); draken_free(arena); return draken_error_sentinel("binop_string_concat: validity alloc failed"); }
     std::memset(validity, 0, vsz);
 
-    size_t scratch_cap = 64u;
-    uint8_t* scratch = static_cast<uint8_t*>(draken_malloc(scratch_cap));
-    if (!scratch) { draken_free(slots); draken_free(arena); draken_free(validity); return draken_error_sentinel("binop_string_concat: scratch alloc failed"); }
-
     bool any_null = false;
     size_t arena_pos = 0u;
 
     // Pass 2: assemble bytes, build slots (inline vs arena), set validity bits.
+    // Long (arena) results are copied ONCE, straight into the arena — the operand
+    // bytes go directly to their final destination and draken_build_string_slot
+    // hashes from that arena location. Only inline (<=STR_INLINE_MAX) results need
+    // a contiguous temp, which fits on the stack — so there is no heap scratch.
     for (uint32_t row = 0u; row < n; ++row) {
         if (!bsc_row_valid(left, row) || !bsc_row_valid(right, row)) {
             str_init_null(&slots[row]); any_null = true; continue;
@@ -286,25 +288,20 @@ static VecResult binop_string_concat(const DrakenVector* left, const DrakenVecto
             validity[row >> 3u] |= static_cast<uint8_t>(1u << (row & 7u));
             continue;
         }
-        if (static_cast<size_t>(row_len) > scratch_cap) {
-            draken_free(scratch);
-            scratch_cap = static_cast<size_t>(row_len) + 64u;
-            scratch = static_cast<uint8_t*>(draken_malloc(scratch_cap));
-            if (!scratch) { draken_free(slots); draken_free(arena); draken_free(validity); return draken_error_sentinel("binop_string_concat: scratch grow failed"); }
-        }
-        if (ll) std::memcpy(scratch, ld, ll);
-        if (rl) std::memcpy(scratch + ll, rd, rl);
         if (row_len > STR_INLINE_MAX) {
             const uint32_t off = static_cast<uint32_t>(arena_pos);
-            std::memcpy(arena + off, scratch, row_len);
-            draken_build_string_slot(&slots[row], scratch, row_len, off);
+            if (ll) std::memcpy(arena + off, ld, ll);
+            if (rl) std::memcpy(arena + off + ll, rd, rl);
+            draken_build_string_slot(&slots[row], arena + off, row_len, off);
             arena_pos += row_len;
         } else {
-            draken_build_string_slot(&slots[row], scratch, row_len, 0u);
+            uint8_t inl[STR_INLINE_MAX];
+            if (ll) std::memcpy(inl, ld, ll);
+            if (rl) std::memcpy(inl + ll, rd, rl);
+            draken_build_string_slot(&slots[row], inl, row_len, 0u);
         }
         validity[row >> 3u] |= static_cast<uint8_t>(1u << (row & 7u));
     }
-    draken_free(scratch);
     if (!any_null) { draken_free(validity); validity = nullptr; }
 
     return vecresult_from_string_buffers(slots, arena, arena_pos, validity, n, out_type);

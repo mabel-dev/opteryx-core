@@ -33,6 +33,9 @@
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/kernel_context.h"  // binary_op_ctx — carries the DECIMAL operand scale
 #include "ops/kernels/error_handling.h"
+#include "ops/kernels/glob_match.h"      // draken_glob::like_match — shared with draken_like_any
+#include "ops/kernels/dfa_walk.h"        // draken_dfa::match — length-adaptive LIKE fast path
+#include "ops/kernels/like_program.h"    // draken_like_prog::match — SIMD op-program LIKE matcher
 #include "xxhash.h"                // XXH3_64bits — long-slot hash32, same as every builder
 
 namespace {
@@ -1071,25 +1074,12 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
 
 namespace {
 
-inline uint8_t fk_ascii_lower(uint8_t c) {
-    return (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + 32) : c;
-}
-
-// Iterative glob match over bytes with %-backtracking. `_` matches ONE BYTE —
-// correct for VARCHAR (ASCII); callers must reject `_` for NVARCHAR (UTF-8
-// multibyte). `%` is byte-safe on UTF-8 (matches whole suffixes only).
-bool fk_like_match(const uint8_t* s, uint32_t sn, const uint8_t* p, uint32_t pn, bool ci) {
-    uint32_t si = 0, pi = 0, star_p = UINT32_MAX, star_s = 0;
-    while (si < sn) {
-        if (pi < pn && p[pi] == '%') { star_p = ++pi; star_s = si; continue; }
-        if (pi < pn && (p[pi] == '_' ||
-                        (ci ? fk_ascii_lower(p[pi]) == fk_ascii_lower(s[si])
-                            : p[pi] == s[si]))) { ++pi; ++si; continue; }
-        if (star_p != UINT32_MAX) { pi = star_p; si = ++star_s; continue; }
-        return false;
-    }
-    while (pi < pn && p[pi] == '%') ++pi;
-    return pi == pn;
+// fk_ascii_lower / fk_like_match now live in the shared glob_match.h so
+// draken_like and draken_like_any share ONE implementation (§2). Thin aliases
+// keep the existing call sites in this file unchanged.
+inline uint8_t fk_ascii_lower(uint8_t c) { return draken_glob::ascii_lower(c); }
+inline bool fk_like_match(const uint8_t* s, uint32_t sn, const uint8_t* p, uint32_t pn, bool ci) {
+    return draken_glob::like_match(s, sn, p, pn, ci);
 }
 
 }  // namespace
@@ -1297,10 +1287,11 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
         if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
         std::memset(validity, 0xFF, nb > 0 ? nb : 1);
     }
-    if (v->data_length < v->length && p->data_length == 1 && fk_row_valid(p, 0)) {
-        // §11 fast path: dict/constant haystack + constant pattern — run the
-        // wildcard matcher once per DISTINCT slot, scatter the verdicts
-        // (bit-identical to the per-row loop).
+    if (draken_is_compressed(v) && p->data_length == 1 && fk_row_valid(p, 0)) {
+        // §11 fast path: compressed (dict/constant) haystack + constant pattern —
+        // run the wildcard matcher once per DISTINCT slot, scatter the verdicts
+        // (bit-identical to the per-row loop). draken_is_compressed is the
+        // canonical shape predicate (buffers.h), not an open-coded compare.
         const DrakenStringSlot* ps = &psa->slots[p->selection[0]];
         const uint32_t plen = str_length(ps);
         const uint8_t* pdat =
@@ -1369,6 +1360,213 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
     r.type = DRAKEN_BOOL;
     r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     return r;
+}
+
+// Length-adaptive LIKE — same answer as draken_like, chosen matcher varies by
+// the column's average string length: a plan-time LIKE-DFA blob (ctx) on SHORT
+// columns (the DFA table-walk wins ~2.2x there), the glob matcher on long ones
+// (its early-exit backtrack wins). Only ever emitted for a constant, ASCII,
+// case-sensitive pattern over a VARCHAR column whose glob DID NOT reduce to an
+// affix/contains rewrite — so args[1] is the single glob pattern, ctx.blob the
+// verified-equivalent DFA. Both paths dict-dedup + scatter identically; the
+// length test can only change speed, never the result (§11).
+VecResult draken_like_adaptive(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 2)
+        return draken_error_sentinel("draken_like_adaptive: expected 2 arguments");
+    if (ctx == nullptr)
+        return draken_error_sentinel("draken_like_adaptive: missing bind-time ctx");
+    const auto* c = static_cast<const like_dfa_ctx*>(ctx);
+    const bool negate = (c->op_code & 1) != 0;
+    const bool ci = (c->op_code & 2) != 0;
+    const uint8_t* blob = like_dfa_ctx_blob(c);
+    const size_t blob_len = c->blob_len;
+
+    const DrakenVector* v = args[0];
+    const DrakenVector* p = args[1];
+    if (!fk_is_string(v->type) || !fk_is_string(p->type))
+        return draken_error_sentinel("draken_like_adaptive: string operands required");
+
+    const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
+    const auto* psa = static_cast<const DrakenStringArena*>(p->data);
+    const uint32_t n = v->length;
+    const size_t nb = (static_cast<size_t>(n) + 7) / 8;
+    const size_t nb_alloc = nb > 0 ? nb : 1;
+
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+    if (out == nullptr) return draken_error_sentinel("allocation failed");
+    std::memset(out, 0, nb_alloc);
+    uint8_t* validity = nullptr;
+    if (v->validity != nullptr || p->validity != nullptr) {
+        validity = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+        if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
+        std::memset(validity, 0xFF, nb_alloc);
+    }
+
+    auto finish = [&]() -> VecResult {
+        VecResult r{};
+        r.data = out; r.validity = validity;
+        r.selection = draken_identity_sel(n); r.owns_selection = false;
+        r.data_length = n; r.length = n; r.type = DRAKEN_BOOL;
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    };
+
+    // NULL pattern -> every row NULL (SQL comparison-with-NULL).
+    if (p->validity != nullptr && !fk_row_valid(p, 0)) {
+        std::memset(validity, 0x00, nb_alloc);
+        return finish();
+    }
+
+    const uint32_t k = v->data_length;                 // distinct physical values
+    // Average string length estimate (sampled) chooses the matcher.
+    uint32_t sample = k < 256u ? k : 256u;
+    uint64_t total = 0;
+    for (uint32_t j = 0; j < sample; ++j) total += str_length(&vsa->slots[j]);
+    const uint32_t avg = sample > 0u ? static_cast<uint32_t>(total / sample) : 0u;
+    const bool use_dfa = (blob_len > 0u) && (avg < c->threshold);
+
+    // The LIKE-DFA blob is plan-time-produced; validate its format ONCE (a -1
+    // here means compiler/kernel drift), then trust it in the hot loop.
+    if (use_dfa &&
+        draken_dfa::match(blob, blob_len, reinterpret_cast<const uint8_t*>(""), 0) < 0) {
+        draken_free(out); if (validity) draken_free(validity);
+        return draken_error_sentinel("draken_like_adaptive: malformed LIKE-DFA blob");
+    }
+
+    const DrakenStringSlot* ps = &psa->slots[p->selection[0]];
+    const uint8_t* pdat = reinterpret_cast<const uint8_t*>(str_data(ps, psa->arena));
+    const uint32_t plen = str_length(ps);
+    auto matches = [&](const DrakenStringSlot* vs) -> bool {
+        const uint8_t* sd = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
+        const uint32_t sl = str_length(vs);
+        return use_dfa ? (draken_dfa::match(blob, blob_len, sd, sl) != 0)
+                       : fk_like_match(sd, sl, pdat, plen, ci);
+    };
+
+    // Dedup keyed on the canonical shape predicate draken_is_compressed(v) — NOT
+    // an open-coded data_length compare (buffers.h §"Shape predicates"). A
+    // compressed vector (dict/constant) matches each unique once and scatters;
+    // a dense vector matches per row (no extra scatter pass).
+    if (draken_is_compressed(v)) {
+        std::vector<uint8_t> uhit(k > 0u ? k : 1u, 0);
+        for (uint32_t j = 0; j < k; ++j)
+            uhit[j] = (matches(&vsa->slots[j]) != negate) ? 1 : 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            if (uhit[v->selection[i]])
+                out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    } else {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            if (matches(&vsa->slots[v->selection[i]]) != negate)
+                out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    }
+    return finish();
+}
+
+// SIMD op-program LIKE — draken_like_program(value, pattern). The optimizer
+// compiles a decomposable ASCII glob (anchored fixed prefix + %-separated
+// floating literals + optional anchored suffix) into a version-2 op-program
+// blob (compile_like_program), which rides in like_dfa_ctx (threshold unused).
+// draken_like_prog::match walks it with SIMD substring scans — O(segments),
+// not O(bytes). Non-decomposable globs never reach here (the bind site keeps
+// the transition-table draken_like_adaptive / glob path for those). Same
+// dict-dedup + scatter, same NULL semantics as draken_like_adaptive; the op
+// program can only change SPEED, never the answer (§11).
+VecResult draken_like_program(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    if (nargs != 2)
+        return draken_error_sentinel("draken_like_program: expected 2 arguments");
+    if (ctx == nullptr)
+        return draken_error_sentinel("draken_like_program: missing bind-time ctx");
+    const auto* c = static_cast<const like_dfa_ctx*>(ctx);
+    const bool negate = (c->op_code & 1) != 0;
+    const uint8_t* blob = like_dfa_ctx_blob(c);
+    const size_t blob_len = c->blob_len;
+
+    const DrakenVector* v = args[0];
+    const DrakenVector* p = args[1];
+    if (!fk_is_string(v->type) || !fk_is_string(p->type))
+        return draken_error_sentinel("draken_like_program: string operands required");
+
+    const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
+    const uint32_t n = v->length;
+    const size_t nb = (static_cast<size_t>(n) + 7) / 8;
+    const size_t nb_alloc = nb > 0 ? nb : 1;
+
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+    if (out == nullptr) return draken_error_sentinel("allocation failed");
+    std::memset(out, 0, nb_alloc);
+    uint8_t* validity = nullptr;
+    if (v->validity != nullptr || p->validity != nullptr) {
+        validity = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+        if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
+        std::memset(validity, 0xFF, nb_alloc);
+    }
+
+    auto finish = [&]() -> VecResult {
+        VecResult r{};
+        r.data = out; r.validity = validity;
+        r.selection = draken_identity_sel(n); r.owns_selection = false;
+        r.data_length = n; r.length = n; r.type = DRAKEN_BOOL;
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    };
+
+    // NULL pattern -> every row NULL (SQL comparison-with-NULL).
+    if (p->validity != nullptr && !fk_row_valid(p, 0)) {
+        std::memset(validity, 0x00, nb_alloc);
+        return finish();
+    }
+
+    // The op-program blob is plan-time-produced; decode its format ONCE (a
+    // failure means compiler/kernel drift), then walk the decoded program per
+    // row with no blob re-parsing.
+    draken_like_prog::LikeProgram prog;
+    if (!draken_like_prog::decode(blob, blob_len, &prog)) {
+        draken_free(out); if (validity) draken_free(validity);
+        return draken_error_sentinel("draken_like_program: malformed op-program blob");
+    }
+
+    const uint32_t k = v->data_length;
+    auto matches = [&](const DrakenStringSlot* vs) -> bool {
+        const uint8_t* sd = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
+        const uint32_t sl = str_length(vs);
+        return draken_like_prog::match(&prog, sd, sl) != 0;
+    };
+
+    // Dict/constant: match each unique value once, then scatter (§11). Keyed on
+    // the canonical shape predicate, identical to draken_like_adaptive.
+    if (draken_is_compressed(v)) {
+        std::vector<uint8_t> uhit(k > 0u ? k : 1u, 0);
+        for (uint32_t j = 0; j < k; ++j)
+            uhit[j] = (matches(&vsa->slots[j]) != negate) ? 1 : 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            if (uhit[v->selection[i]])
+                out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    } else {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            if (matches(&vsa->slots[v->selection[i]]) != negate)
+                out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    }
+    return finish();
 }
 
 // ---------------------------------------------------------------------------

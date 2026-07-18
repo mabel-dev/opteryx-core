@@ -36,7 +36,6 @@ from opteryx.compiled.nanobind.vectors import (
 )
 from opteryx.compiled.nanobind.vectors import (
     vector_replace,
-    vector_regex_replace,
 )
 from opteryx.compiled.nanobind.vectors import (
     vector_ci_ends_with,

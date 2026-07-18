@@ -26,7 +26,7 @@ from opteryx.types.vectors.vector_types import node_is_vector_query_expression
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
+from libc.stdint cimport INT64_MIN, int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 
@@ -702,7 +702,7 @@ cdef class HeapSortNode(BasePlanNode):
     cdef public list _chunk_buffer
     cdef public list _compiled_evals
 
-    _NULL_COMPRESSED = -(1 << 63)  # INT64_MIN — same sentinel used by compress_into
+    _NULL_COMPRESSED = INT64_MIN  # same sentinel used by compress_into
     _USEARCH_ENABLED = False
     _USEARCH_MIN_ROWS = 2048
 
@@ -1224,7 +1224,7 @@ cdef class HeapSortNode(BasePlanNode):
             compressed = first_vector.compress()
         except Exception:
             return None
-        return _compressed_threshold_candidates(compressed, k, descending, -(1 << 63))
+        return _compressed_threshold_candidates(compressed, k, descending, INT64_MIN)
 
     cdef _top_n_single_key_compressed(self, Morsel morsel, Vector vector, bint descending, Py_ssize_t k):
         cdef int64_t[::1] compressed
@@ -1237,7 +1237,7 @@ cdef class HeapSortNode(BasePlanNode):
             return None
         if compressed.shape[0] != morsel.num_rows:
             return None
-        selected = _compressed_top_k(compressed, k, descending, -(1 << 63))
+        selected = _compressed_top_k(compressed, k, descending, INT64_MIN)
         return self._materialize_rows(morsel, selected)
 
     def _vector_top_n(self, morsel):

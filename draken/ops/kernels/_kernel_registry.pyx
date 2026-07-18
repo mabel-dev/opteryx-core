@@ -63,6 +63,13 @@ cdef extern from "ops/kernels/kernel_registry.h":
     extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code, const char* nav,
                                                 size_t nav_len, int64_t index) except +
     in_list_ctx* kernel_alloc_in_list_ctx(const uint8_t* blob, size_t blob_len)
+    void* kernel_alloc_like_any_ctx(const uint8_t* blob, size_t blob_len)
+
+    ctypedef struct like_dfa_ctx_:
+        uint16_t op_code
+    ctypedef like_dfa_ctx_ like_dfa_ctx
+    like_dfa_ctx* kernel_alloc_like_dfa_ctx(uint16_t op_code, uint16_t threshold,
+                                            const uint8_t* blob, size_t blob_len)
     substring_ctx* kernel_alloc_substring_ctx(int start, int count, uint8_t has_count)
 
     ctypedef struct time_bucket_ctx_:
@@ -212,6 +219,39 @@ def alloc_in_list_ctx(bytes blob):
     """
     cdef const uint8_t* p = <const uint8_t*><char*>blob
     cdef in_list_ctx* ctx = kernel_alloc_in_list_ctx(p, <size_t>len(blob))
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_like_dfa_ctx(int op_code, int threshold, bytes blob):
+    """Allocate context for the length-adaptive LIKE kernel (draken_like_adaptive).
+
+    Args:
+        op_code: bit0 negate, bit1 ci.
+        threshold: average string length (bytes) below which the kernel walks the
+            DFA instead of the glob matcher.
+        blob: a compile_like_dfa LIKE-DFA blob (verified equivalent to the glob).
+    """
+    cdef const uint8_t* p = <const uint8_t*><char*>blob
+    cdef like_dfa_ctx* ctx = kernel_alloc_like_dfa_ctx(
+        <uint16_t>op_code, <uint16_t>threshold, p, <size_t>len(blob))
+    if ctx == NULL:
+        return None
+    return <unsigned long long>ctx
+
+
+def alloc_like_any_ctx(bytes blob):
+    """Allocate context for the LIKE ANY / ILIKE ANY kernel (draken_like_any).
+
+    Args:
+        blob: matcher blob from opteryx.compiled.vector_ops.compile_like_any
+            (patterns bucketed into exact/prefix/suffix/contains-AC/residual;
+            ci and negate carried in its flags). Copied behind a u32 length
+            prefix so the kernel can bound its parse.
+    """
+    cdef const uint8_t* p = <const uint8_t*><char*>blob
+    cdef void* ctx = kernel_alloc_like_any_ctx(p, <size_t>len(blob))
     if ctx == NULL:
         return None
     return <unsigned long long>ctx

@@ -353,6 +353,13 @@ cdef dict _EXTRACT_PARTS = {"YEAR": 1, "MONTH": 2, "DAY": 3, "QUARTER": 4,
 # draken_like bind-time modes (bit0 = negate, bit1 = case-insensitive).
 cdef dict _LIKE_MODES = {"Like": 0, "NotLike": 1, "ILike": 2, "NotILike": 3}
 
+# Average string length (bytes) below which the length-adaptive LIKE kernel walks
+# a plan-time LIKE-DFA instead of the glob matcher. Measured crossover on real
+# data: the DFA wins ~2.2x below this and converges to parity above it, so short
+# columns take the DFA, long columns (text) stay on the glob. The dispatch is
+# correctness-neutral (both matchers verified equivalent) — this only tunes speed.
+DEF _LIKE_DFA_LEN_THRESHOLD = 64
+
 # draken_contains modes — the optimizer's `LIKE '%x%'` → InStr rewrite family.
 cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr": 3}
 
@@ -363,6 +370,18 @@ cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr"
 # non-literal or uncompilable pattern raises NotSupportedError there, so this
 # arm never needs to handle a raw pattern.
 cdef dict _RLIKE_MODES = {"RLike": 0, "NotRLike": 1}
+
+# LIKE ANY / ILIKE ANY (+ NOT) -> (case_insensitive, negate). Both flags are
+# baked into the matcher blob by compile_like_any, not into a binary_op_ctx —
+# the blob rides in ctx (like draken_in_list's set). The pattern set is a
+# plan-time constant list; a per-row (column-sourced) pattern set is not handled
+# by this arm (it has no constant blob to compile) and falls through.
+cdef dict _LIKE_ANY_MODES = {
+    "AnyOpLike": (False, False),
+    "AnyOpNotLike": (False, True),
+    "AnyOpILike": (True, False),
+    "AnyOpNotILike": (True, True),
+}
 
 # draken_date_trunc unit ids (kernel contract — function_kernels.cpp FK_TR_*).
 # singular/plural, case-insensitive — mirrors _DIFF_PARTS below.
@@ -1100,6 +1119,65 @@ cdef Py_ssize_t _linearize(
         if _like_mode < 0:
             _like_mode = _CONTAINS_MODES.get(op_str, -1)
             _like_kernel = "draken_contains"
+        # Length-adaptive LIKE: a case-sensitive general-glob LIKE over a VARCHAR
+        # column, whose ASCII pattern compiles to a LIKE-DFA, dispatches to
+        # draken_like_adaptive — it picks the DFA (short columns) or the glob
+        # (long) at run time from the column's avg string length. Pure prefix/
+        # suffix/contains/exact never reach here (already affix/=-rewritten), and
+        # ILIKE/NVARCHAR/non-ASCII fall through to plain draken_like below.
+        if _like_kernel == "draken_like" and op_str in ("Like", "NotLike") \
+                and node.right != NULL and node.right.node_type == _NT_LITERAL \
+                and left_type is not None:
+            _ensure_sql_types()
+            _ld_pat = <object>node.right.value
+            if left_type.category is _LogicalCategory_VARCHAR \
+                    and isinstance(_ld_pat, (str, bytes)):
+                _ld_bytes = _ld_pat.encode("utf-8") if isinstance(_ld_pat, str) else _ld_pat
+                from opteryx.compiled import vector_ops as _ld_vops
+                # Prefer the SIMD op-program (draken_like_program) when the glob
+                # decomposes to anchored-fixed + %-floating-literals + suffix —
+                # O(segments) SIMD scans, beats both the transition-table DFA and
+                # glob on short and long columns. Non-decomposable globs return
+                # None and fall through to the length-adaptive DFA/glob path.
+                _lp_blob = _ld_vops.compile_like_program(_ld_bytes)
+                if _lp_blob is not None:
+                    from draken.ops.kernels._kernel_registry import alloc_like_dfa_ctx as _lp_alloc
+                    _lp_fn, _lp_ctx = _resolve_kernel_and_context(
+                        "draken_like_program", _lp_alloc,
+                        (_like_mode, 0, _lp_blob))
+                    if _lp_fn is not None:
+                        sub_depth = _linearize(node.left, bc, depth)
+                        sub_depth = _linearize(node.right, bc, sub_depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 2
+                        slot.bool_value = 0
+                        slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                        slot.kernel_fn = <void*>(<unsigned long long>_lp_fn)
+                        if _lp_ctx is not None:
+                            bc._hold(_lp_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_lp_ctx.ctx_ptr)
+                        return sub_depth - 2 + 1
+                _ld_blob = _ld_vops.compile_like_dfa(_ld_bytes)
+                if _ld_blob is not None:
+                    from draken.ops.kernels._kernel_registry import alloc_like_dfa_ctx as _ld_alloc
+                    _ld_fn, _ld_ctx = _resolve_kernel_and_context(
+                        "draken_like_adaptive", _ld_alloc,
+                        (_like_mode, _LIKE_DFA_LEN_THRESHOLD, _ld_blob))
+                    if _ld_fn is not None:
+                        sub_depth = _linearize(node.left, bc, depth)
+                        sub_depth = _linearize(node.right, bc, sub_depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 2
+                        slot.bool_value = 0
+                        slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                        slot.kernel_fn = <void*>(<unsigned long long>_ld_fn)
+                        if _ld_ctx is not None:
+                            bc._hold(_ld_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_ld_ctx.ctx_ptr)
+                        return sub_depth - 2 + 1
+
         if _like_mode >= 0:
             from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _lk_alloc
             _lk_fn, _lk_ctx = _resolve_kernel_and_context(
@@ -1129,6 +1207,33 @@ cdef Py_ssize_t _linearize(
         # a constant blob since only literal patterns compile.
         _rlike_mode = _RLIKE_MODES.get(op_str, -1)
         if _rlike_mode >= 0:
+            # The pattern operand is a pre-compiled blob (predicate_rewriter):
+            # version 2 = SIMD op-program -> draken_like_program (ctx-carried
+            # blob, same executor as LIKE); version 1 = transition-table DFA ->
+            # draken_rlike. Peek the version byte to pick the kernel.
+            _rl_blob = None
+            if node.right != NULL and node.right.node_type == _NT_LITERAL:
+                _rl_rawpat = <object>node.right.value
+                if isinstance(_rl_rawpat, (bytes, bytearray)) and len(_rl_rawpat) >= 1 \
+                        and _rl_rawpat[0] == 2:
+                    _rl_blob = bytes(_rl_rawpat)
+            if _rl_blob is not None:
+                from draken.ops.kernels._kernel_registry import alloc_like_dfa_ctx as _rlp_alloc
+                _rlp_fn, _rlp_ctx = _resolve_kernel_and_context(
+                    "draken_like_program", _rlp_alloc, (_rlike_mode, 0, _rl_blob))
+                if _rlp_fn is not None:
+                    sub_depth = _linearize(node.left, bc, depth)
+                    sub_depth = _linearize(node.right, bc, sub_depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 2
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                    slot.kernel_fn = <void*>(<unsigned long long>_rlp_fn)
+                    if _rlp_ctx is not None:
+                        bc._hold(_rlp_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_rlp_ctx.ctx_ptr)
+                    return sub_depth - 2 + 1
             from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _rl_alloc
             _rl_fn, _rl_ctx = _resolve_kernel_and_context(
                 "draken_rlike", _rl_alloc, (_rlike_mode, 0, 0, 0, 0, 0, 0))
@@ -1148,6 +1253,48 @@ cdef Py_ssize_t _linearize(
             # kernel unavailable (should not happen — draken_rlike is a static
             # built-in, not an external-kernel-home lookup) — fall through to
             # the generic compare path, which the c-native gate will refuse.
+
+        # LIKE ANY / ILIKE ANY (+ NOT) — bind-time compile the constant pattern
+        # set into a matcher blob (compile_like_any) and dispatch draken_like_any.
+        # The pattern set NEVER becomes a Draken vector (which is exactly why the
+        # old RE2 path errored: _eval_value could not construct one). Subject is
+        # scalar string OR ARRAY<string> (any element matches → BC_C_NATIVE_CHILD,
+        # like draken_array_contains). Zero RE2, zero Python at run time.
+        _la_modes = _LIKE_ANY_MODES.get(op_str, None)
+        if _la_modes is not None and node.right != NULL \
+                and node.right.node_type == _NT_LITERAL:
+            _la_patterns = <object>node.right.value
+            if isinstance(_la_patterns, (list, tuple)):
+                _ensure_sql_types()
+                _la_is_array = (left_type is not None
+                                and left_type.category is _LogicalCategory_ARRAY)
+                # An ARRAY subject needs a resolvable child (per-morsel), so it
+                # must be a direct column load; a computed-array subject falls
+                # through to the generic path.
+                if not (_la_is_array and node.left.node_type != _NT_IDENTIFIER):
+                    from opteryx.compiled import vector_ops as _la_vops
+                    _la_blob = _la_vops.compile_like_any(
+                        tuple(_la_patterns), _la_modes[0], _la_modes[1])
+                    from draken.ops.kernels._kernel_registry import alloc_like_any_ctx as _la_alloc
+                    _la_fn, _la_ctx = _resolve_kernel_and_context(
+                        "draken_like_any", _la_alloc, _la_blob)
+                    if _la_fn is not None:
+                        sub_depth = _linearize(node.left, bc, depth)
+                        slot = bc._push_instr()
+                        slot.opcode = BC_FUNCTION
+                        slot.arity = 1
+                        slot.bool_value = 0
+                        slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                        if _la_is_array:
+                            slot.flags = slot.flags | BC_C_NATIVE_CHILD
+                            # bc.count - 2 is the array's BC_LOAD_COL (this FUNCTION
+                            # slot is bc.count - 1) — same indexing array_contains uses.
+                            slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                        slot.kernel_fn = <void*>(<unsigned long long>_la_fn)
+                        if _la_ctx is not None:
+                            bc._hold(_la_ctx)
+                            slot.ctx_ptr = <void*>(<unsigned long long>_la_ctx.ctx_ptr)
+                        return sub_depth   # pops 1 (subject), pushes mask — net 0
 
         # ARRAY_CONTAINS(arr, item) lowers to `item = ANY(arr)` (AnyOpEq) at
         # plan-build time; bare `x = ANY(arr)` produces the same node. Two
