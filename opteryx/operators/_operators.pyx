@@ -299,7 +299,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf)
         void set_window_sink(size_t p, cppvector[SortKeySpec] sort_spec, size_t n_part,
                              cppvector[int] fn_kinds, cppvector[string] fn_names, size_t buf)
-        void set_final_schema(cppvector[string] names, cppvector[DrakenType] types)
+        void set_final_schema(cppvector[string] names, cppvector[DrakenType] types,
+                              cppvector[int] lt_kind, cppvector[int] lt_unit,
+                              cppvector[int] lt_precision, cppvector[int] lt_scale,
+                              cppvector[int] lt_dimension)
         void run(int dop, void* pool, ErrCtx& err)
 
 
@@ -2439,16 +2442,30 @@ cdef class NativePlan:
         self._e.set_window_sink(p, _sort_spec_from_list(sort_spec), n_part,
                                 kinds, names, buf)
 
-    def set_final_schema(self, list names, list types):
-        """``names`` = final display names; ``types`` = DrakenType ints (physical) —
-        used for the courtesy empty-result morsel when a query yields zero rows."""
+    def set_final_schema(self, list names, list types, list logical=None):
+        """``names`` = final display names; ``types`` = DrakenType ints (physical);
+        ``logical`` = per-column (kind, unit, precision, scale, dimension) int tuples
+        or None (same shape as ``add_expr_project``'s ``logical``) — used for the
+        courtesy empty-result morsel when a query yields zero rows. A TIMESTAMP64 /
+        DECIMAL / DECIMAL128 column with no entry here would build that empty column
+        with no logical-type descriptor, which draken treats as a hard error the
+        moment it is re-encoded (e.g. written back out to Parquet)."""
         cdef cppvector[string] nms
         cdef cppvector[DrakenType] ts
+        cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef int i
         for n in names:
             nms.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
         for t in types:
             ts.push_back(<DrakenType><int>t)
-        self._e.set_final_schema(nms, ts)
+        for i in range(len(types)):
+            entry = logical[i] if logical is not None and i < len(logical) else None
+            if entry is None:
+                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
+            else:
+                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
+                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
+        self._e.set_final_schema(nms, ts, lk, lu, lp, lsc, ld)
 
 
 cdef cppvector[SortKeySpec] _sort_spec_from_list(list spec) except *:

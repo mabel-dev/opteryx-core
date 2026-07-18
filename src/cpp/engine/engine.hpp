@@ -46,7 +46,7 @@ namespace opteryx::engine {
 // query legitimately returns no rows; the old ExitNode's `at_least_one` contract).
 // String-family columns get a canonical empty DrakenStringArena header (buffers.h:
 // a string vector's `data` points at the arena STRUCT, even when empty).
-inline CxxColumn make_empty_col(DrakenType t) {
+inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
     void* data;
     if (t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY
             || t == DRAKEN_VARIANT) {
@@ -65,6 +65,12 @@ inline CxxColumn make_empty_col(DrakenType t) {
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
                                           OwnedBuffer<uint8_t>(nullptr), OwnedBuffer<void>(sel));
+    // TIMESTAMP64/DECIMAL/DECIMAL128 carry their descriptor out-of-band on the owner,
+    // never on DrakenVector itself (draken/logical_type.h) — a zero-row column is no
+    // exception; omitting it here left the courtesy empty-result morsel with a
+    // TIMESTAMP64/DECIMAL column draken treats as a hard error the moment it's
+    // re-encoded (e.g. a query with 0 rows still gets written out to Parquet).
+    c.own->logical_type = lt;
     c.view = c.own->vec;
     return c;
 }
@@ -209,6 +215,7 @@ public:
     MorselQueue* out_q = nullptr;
     std::vector<std::string> final_names;   // terminal schema, for the empty-result morsel
     std::vector<DrakenType>  final_types;
+    std::vector<const LogicalType*> final_logical;  // parallel to final_types; nullptr = none
 
     // Plan-node identity currently being lowered. The compiler sets this once per plan
     // node (set_current_identity) before that node's builder calls; every operator/sink/
@@ -471,9 +478,27 @@ public:
         set_sink_(p, std::make_unique<HashJoinBuildSink>(key_idx, std::move(payload_idx)));
         pipelines[p]->fill_join_ref = static_cast<int>(ref);
     }
-    void set_final_schema(std::vector<std::string> names, std::vector<DrakenType> types) {
+    void set_final_schema(std::vector<std::string> names, std::vector<DrakenType> types,
+                          std::vector<int> lt_kind, std::vector<int> lt_unit,
+                          std::vector<int> lt_precision, std::vector<int> lt_scale,
+                          std::vector<int> lt_dimension) {
         final_names = std::move(names);
         final_types = std::move(types);
+        final_logical.clear();
+        final_logical.reserve(final_types.size());
+        for (size_t i = 0; i < final_types.size(); ++i) {
+            if (lt_kind[i] == 0) {
+                final_logical.push_back(nullptr);
+                continue;
+            }
+            LogicalType lt;
+            lt.kind = static_cast<LogicalKind>(lt_kind[i]);
+            lt.unit = static_cast<TimestampUnit>(lt_unit[i]);
+            lt.precision = static_cast<uint8_t>(lt_precision[i]);
+            lt.scale = static_cast<uint8_t>(lt_scale[i]);
+            lt.dimension = static_cast<uint32_t>(lt_dimension[i]);
+            final_logical.push_back(logical_type_intern(lt));
+        }
     }
 
     // ---- execution (native; called once from the detached driver task) ------------
@@ -511,7 +536,8 @@ public:
                 auto m = std::make_shared<CxxMorsel>();
                 m->columns.reserve(final_types.size());
                 for (size_t i = 0; i < final_types.size(); ++i) {
-                    m->columns.push_back(make_empty_col(final_types[i]));
+                    const LogicalType* lt = i < final_logical.size() ? final_logical[i] : nullptr;
+                    m->columns.push_back(make_empty_col(final_types[i], lt));
                 }
                 m->names = final_names;
                 out_q->put(m);

@@ -80,6 +80,17 @@ def _physical_type(schema_column):
     return ct.physical if ct is not None else None
 
 
+def _logical_tuple(ct):
+    """(kind, unit, precision, scale, dimension) ints for a ColumnType's descriptor,
+    or None when the type carries no logical type — same shape NativePlan's native
+    calls (e.g. add_expr_project) already accept, so callers pass it straight through."""
+    if ct is None or ct.logical is None:
+        return None
+    lg = ct.logical
+    return (int(lg.kind.value), int(getattr(lg.unit, "value", 0)),
+            int(lg.precision), int(lg.scale), int(getattr(lg, "dimension", 0) or 0))
+
+
 # WP-11 logical-coercion packing — mirrors the LC_* enum in
 # src/cpp/engine/native_parquet_scan_source.hpp exactly:
 #   packed = kind | (unit << 4) | (precision << 8) | (scale << 16)
@@ -1769,10 +1780,13 @@ def compile_to_native(plan, pool=None):
     nplan.set_queue_sink(p, out_q)
 
     final_types = []
+    final_logical = []
     for col in exit_node.columns:
-        pt = _physical_type(col.schema_column)
+        ct = getattr(col.schema_column, "column_type", None)
+        pt = ct.physical if ct is not None else None
         final_types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
-    nplan.set_final_schema(list(exit_node.final_names), final_types)
+        final_logical.append(_logical_tuple(ct))
+    nplan.set_final_schema(list(exit_node.final_names), final_types, final_logical)
     return (nplan, out_q, compiler.scan_sources, compiler.scan_facts,
             compiler.scan_residual_reasons, compiler.footer_fetch_ns)
 
