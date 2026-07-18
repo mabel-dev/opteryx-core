@@ -59,7 +59,7 @@ cdef extern from "interop/draken_to_arrow.h" nogil:
         const DrakenVector* dv,
         ArrowArray*         out_array,
         ArrowSchema*        out_schema,
-    )
+    ) except +
 
 
 cdef class Vector:
