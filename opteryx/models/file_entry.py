@@ -74,8 +74,7 @@ class FileEntry:
             file_size = entry.get("file_size_in_bytes", 0)
             uncompressed_size = entry.get("uncompressed_size_in_bytes")
 
-            # Convert min_values/max_values to bounds
-            # These are lists indexed by field_id
+            # Convert min_values/max_values to bounds.
             min_values = entry.get("min_values")
             max_values = entry.get("max_values")
             lower_bounds = None
@@ -83,10 +82,43 @@ class FileEntry:
 
             column_uncompressed_sizes = entry.get("column_uncompressed_sizes_in_bytes")
 
-            if min_values and isinstance(min_values, list):
-                # Build dict indexed by position (0-based field_id)
+            # `field_ids[i]` is the stable, catalog-assigned id for whichever
+            # column produced `min_values[i]`/`max_values[i]` — present for
+            # manifest rows written after field-ids existed. When present,
+            # bounds MUST be keyed by that id, not by raw list position: a
+            # file's own write-time column order need not match "position in
+            # today's schema" once schema evolution has happened (that
+            # mismatch is exactly what previously caused MIN/MAX on one
+            # column to silently read another column's bound). Fall back to
+            # positional indexing only for older manifest rows with no
+            # field_ids at all.
+            field_ids = entry.get("field_ids")
+            if (
+                field_ids
+                and isinstance(field_ids, list)
+                and isinstance(min_values, list)
+                and len(field_ids) == len(min_values)
+            ):
+                lower_bounds = {
+                    fid: val
+                    for fid, val in zip(field_ids, min_values)
+                    if fid is not None and val is not None
+                }
+            elif min_values and isinstance(min_values, list):
                 lower_bounds = {i: val for i, val in enumerate(min_values) if val is not None}
-            if max_values and isinstance(max_values, list):
+
+            if (
+                field_ids
+                and isinstance(field_ids, list)
+                and isinstance(max_values, list)
+                and len(field_ids) == len(max_values)
+            ):
+                upper_bounds = {
+                    fid: val
+                    for fid, val in zip(field_ids, max_values)
+                    if fid is not None and val is not None
+                }
+            elif max_values and isinstance(max_values, list):
                 upper_bounds = {i: val for i, val in enumerate(max_values) if val is not None}
 
         else:

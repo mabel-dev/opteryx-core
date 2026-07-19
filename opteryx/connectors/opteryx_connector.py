@@ -179,6 +179,9 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 raw_element_type = getattr(column, "element_type", None)
                 if raw_element_type is None and isinstance(column, dict):
                     raw_element_type = column.get("element_type") or column.get("element-type")
+                raw_field_id = getattr(column, "id", None)
+                if raw_field_id is None and isinstance(column, dict):
+                    raw_field_id = column.get("id")
 
                 from opteryx.types import logical_type as _lt
                 from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
@@ -200,6 +203,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
                     column_type=_ct,
                     nullable=getattr(column, "nullable", True),
                     identity=mint_column_identity(relation_name or getattr(schema, "name", None), name),
+                    field_id=raw_field_id,
                 )
 
             columns.append(normalized)

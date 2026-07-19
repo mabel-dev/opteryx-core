@@ -99,6 +99,13 @@ class SchemaColumn:
     name: str
     nullable: bool = True
     identity: Optional[bytes] = None
+    # Stable, catalog-assigned column identifier (Iceberg-style field-id),
+    # distinct from `identity` above (a random, non-persistent, engine-internal
+    # join/dedup handle re-minted on every schema normalization). Used to key
+    # per-file manifest min/max statistics so they survive schema evolution
+    # without positional drift. None for sources with no catalog-assigned id
+    # (e.g. ad-hoc Arrow/pandas inputs, or catalog schemas predating this).
+    field_id: Optional[int] = None
     default: Optional[Any] = None
     description: Optional[str] = None
     disposition: Optional[str] = None

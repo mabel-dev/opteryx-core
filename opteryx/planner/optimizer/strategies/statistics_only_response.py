@@ -454,9 +454,14 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
         if file_entry.column_stats is not None:
             file_min = file_entry.column_stats.get_min(field_id)
             file_max = file_entry.column_stats.get_max(field_id)
-        elif file_entry.min_values and field_id < len(file_entry.min_values):
-            file_min = file_entry.min_values[field_id]
-            file_max = file_entry.max_values[field_id] if file_entry.max_values and field_id < len(file_entry.max_values) else None
+        elif file_entry.lower_bounds is not None or file_entry.upper_bounds is not None:
+            # lower_bounds/upper_bounds are keyed by field_id (not raw list
+            # position) — see FileEntry.from_datafile. Indexing the positional
+            # min_values/max_values lists by field_id here would be wrong
+            # whenever field_id isn't a small schema-start-relative position,
+            # which is exactly the bug this field-id scheme fixes.
+            file_min = (file_entry.lower_bounds or {}).get(field_id)
+            file_max = (file_entry.upper_bounds or {}).get(field_id)
         else:
             continue
 

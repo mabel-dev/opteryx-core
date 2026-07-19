@@ -212,17 +212,14 @@ class Manifest:
                     if getattr(literal_value, "item", None) is not None:
                         literal_value = literal_value.item()
 
-                    # Get field_id for this column from schema
-                    # Bounds are indexed by field_id (int)
-                    field_id = None
-                    for i, col in enumerate(self.schema.columns):
-                        if col.name == column_name:
-                            field_id = i
-                            break
+                    # Resolve via the shared field-id resolution path (prefers a
+                    # real catalog field_id; falls back to load-time schema
+                    # position) — never index against `self.schema` directly
+                    # here, since projection pushdown may have pruned it to a
+                    # subset of columns by the time this runs, which would
+                    # silently resolve a different column's bounds.
+                    field_id = self._resolve_field_id(column_name)
 
-                    # For now, skip this file if we can't map column to bounds
-                    # In a full implementation, we'd need proper field_id mapping
-                    # from the schema
                     if field_id is None:
                         continue
 
@@ -261,11 +258,10 @@ class Manifest:
                     if getattr(upper, "item", None) is not None:
                         upper = upper.item()
 
-                    field_id = None
-                    for i, col in enumerate(self.schema.columns):
-                        if col.name == column_name:
-                            field_id = i
-                            break
+                    # See the comparison-operator branch above: resolve via the
+                    # shared field-id path, not a direct lookup against the
+                    # (possibly projection-pruned) live schema.
+                    field_id = self._resolve_field_id(column_name)
 
                     if field_id is None:
                         continue
