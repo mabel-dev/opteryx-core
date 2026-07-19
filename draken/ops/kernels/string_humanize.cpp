@@ -20,6 +20,13 @@
 //   non-finite floats through unchanged — not worth reproducing; see
 //   hz_format_one).
 //
+// DECIMAL (int64-backed, p<=18): the physical value is an unscaled int64, so
+// reading it needs the operand's LogicalType scale — a bind-time detail the
+// DrakenVector cannot carry. compiled_expression.pyx hands it over in a
+// binary_op_ctx (the same vehicle draken_sqrt/draken_power/draken_log use);
+// `ctx == nullptr` fails loud rather than reading raw unscaled bits.
+// DECIMAL128 stays unsupported (no int128 reader in this file).
+//
 // SHAPE-PRESERVING (the string-CAST pattern, cast_numeric.cpp's
 // draken_cast_float64_to_string): the formatted string is a pure function of one
 // physical value, so it is computed ONCE per data_length PHYSICAL unique value
@@ -38,6 +45,7 @@
 #include "ops/vec_result.h"
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/error_handling.h"
+#include "ops/kernels/kernel_context.h"   // binary_op_ctx — the DECIMAL scale vehicle
 #include "ryu.h"
 
 namespace {
@@ -65,16 +73,19 @@ inline bool hz_is_float(DrakenType t) {
 }
 
 inline bool hz_is_numeric(DrakenType t) {
-    // DECIMAL excluded deliberately: reading it correctly needs the bind-time
-    // scale context (same precedent as draken_abs rejecting unscaled DECIMAL) —
-    // out of scope for this cut. Fail loud rather than reading raw unscaled bits.
-    return hz_is_signed_int(t) || hz_is_unsigned_int(t) || hz_is_float(t);
+    // DECIMAL (int64-backed, p<=18) is readable via the bind-time scale ctx — see
+    // draken_humanize's ctx handling below, same vehicle draken_sqrt uses.
+    // DECIMAL128 stays excluded: no int128 reader in this file (same precedent as
+    // draken_sqrt/draken_abs's DECIMAL128 rejection) — out of scope for this cut.
+    return hz_is_signed_int(t) || hz_is_unsigned_int(t) || hz_is_float(t)
+        || t == DRAKEN_DECIMAL;
 }
 
 // Direct physical-slot read — j indexes data_length PHYSICAL values, not logical
 // rows (mirrors draken_cast_float64_to_string's `data[j]` access; selection is
-// re-applied afterwards by kernel_preserve_shape).
-inline double hz_read_physical(const DrakenVector* v, uint32_t j) {
+// re-applied afterwards by kernel_preserve_shape). `dec_unscale` is
+// 10^-left_scale for a DECIMAL operand (1.0 otherwise) — see draken_humanize.
+inline double hz_read_physical(const DrakenVector* v, uint32_t j, double dec_unscale) {
     switch (v->type) {
         case DRAKEN_INT8:    return static_cast<const int8_t*>(v->data)[j];
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[j];
@@ -86,6 +97,8 @@ inline double hz_read_physical(const DrakenVector* v, uint32_t j) {
         case DRAKEN_UINT64:  return static_cast<double>(static_cast<const uint64_t*>(v->data)[j]);
         case DRAKEN_FLOAT32: return static_cast<const float*>(v->data)[j];
         case DRAKEN_FLOAT64: return static_cast<const double*>(v->data)[j];
+        case DRAKEN_DECIMAL:
+            return static_cast<double>(static_cast<const int64_t*>(v->data)[j]) * dec_unscale;
         default:             return 0.0;   // unreachable: caller gates on hz_is_numeric
     }
 }
@@ -166,16 +179,32 @@ size_t hz_format_one(double value, bool src_is_int, char* out) {
 
 }  // namespace
 
-extern "C" VecResult draken_humanize(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+extern "C" VecResult draken_humanize(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     DRAKEN_KERNEL_TRY({
         if (nargs != 1u) return draken_error_sentinel("HUMANIZE: expected 1 argument");
         const DrakenVector* v = args[0];
         if (v == nullptr) return draken_error_sentinel("HUMANIZE: input vector is null");
+        if (v->type == DRAKEN_DECIMAL128)
+            return draken_error_sentinel(
+                "HUMANIZE: DECIMAL128 operand (precision > 18) is not supported by this kernel");
         if (!hz_is_numeric(v->type))
             return draken_error_sentinel_fmt(
                 "HUMANIZE: numeric input required, got type %d", static_cast<int>(v->type));
 
+        double dec_unscale = 1.0;
+        if (v->type == DRAKEN_DECIMAL) {
+            if (ctx == nullptr) {
+                return draken_error_sentinel(
+                    "HUMANIZE: DECIMAL operand needs its bind-time scale context");
+            }
+            dec_unscale = std::pow(
+                10.0, -static_cast<double>(static_cast<const binary_op_ctx*>(ctx)->left_scale));
+        }
+
         const uint32_t k = v->data_length;
+        // DECIMAL always carries fractional precision (that's the point of its
+        // scale), so it formats like a float-family source (1dp), not like an
+        // integer-family one (0dp).
         const bool src_is_int = hz_is_signed_int(v->type) || hz_is_unsigned_int(v->type);
 
         // Pass 1: format each unique physical value ONCE into a staging buffer.
@@ -185,7 +214,7 @@ extern "C" VecResult draken_humanize(void* /*ctx*/, const DrakenVector* const* a
         char tmp[48];
         size_t total_extern = 0u;
         for (uint32_t j = 0u; j < k; ++j) {
-            const double d = hz_read_physical(v, j);
+            const double d = hz_read_physical(v, j, dec_unscale);
             const size_t len = hz_format_one(d, src_is_int, tmp);
             rlen[j] = static_cast<uint32_t>(len);
             stage.insert(stage.end(), tmp, tmp + len);

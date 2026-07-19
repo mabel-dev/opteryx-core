@@ -32,6 +32,7 @@
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/glob_match.h"   // draken_glob::like_match — shared with draken_like
+#include "ops/kernels/utf8_ci_match.h" // draken_utf8ci::casefold — Unicode ci fold (NVARCHAR)
 
 namespace {
 
@@ -106,10 +107,25 @@ struct Matcher {
         return ((accept[st >> 3] >> (st & 7)) & 1u) != 0;
     }
 
+    // Does any residual glob pattern contain byte `b`? Used to reject `_`
+    // (one-BYTE wildcard) against NVARCHAR, where one byte != one codepoint —
+    // the same byte-safety contract draken_like enforces. `_`/`%` are ASCII
+    // (< 0x80) so they survive casefold unchanged and this byte scan is exact.
+    bool glob_has_byte(uint8_t b) const {
+        for (const Str& g : glob)
+            for (uint32_t i = 0; i < g.n; ++i)
+                if (g.p[i] == b) return true;
+        return false;
+    }
+
     // Raw match (real patterns only; negate/null resolved by the caller).
-    // `sl`/`sll` = case-folded subject when ci, else the raw subject; `s`/`sn` =
-    // the raw subject (the residual glob matcher folds internally via ci).
-    bool matches(const uint8_t* sl, uint32_t sll, const uint8_t* s, uint32_t sn) const {
+    // `sl`/`sll` = the subject already folded to the SAME canonical form the
+    // needle buckets were folded to at plan time (ASCII fold for VARCHAR,
+    // Unicode simple-fold for NVARCHAR; identity when not ci). Every bucket —
+    // including the residual glob — therefore matches byte-exact (ci=false):
+    // the fold already happened, so no matcher re-folds. This is why the glob
+    // needs no separate raw subject and no ASCII `ci` flag.
+    bool matches(const uint8_t* sl, uint32_t sll) const {
         if (always) return true;
         for (const Str& e : exact)
             if (e.n == sll && std::memcmp(sl, e.p, e.n) == 0) return true;
@@ -126,7 +142,7 @@ struct Matcher {
             }
         }
         for (const Str& g : glob)
-            if (draken_glob::like_match(s, sn, g.p, g.n, ci)) return true;
+            if (draken_glob::like_match(sl, sll, g.p, g.n, false)) return true;
         return false;
     }
 };
@@ -143,11 +159,20 @@ inline void la_resolve(const Matcher& m, bool hit, bool& set_bit, bool& is_null)
 }
 
 // Fold a subject into `scratch` when ci; return the (ptr,len) to match against.
-inline const uint8_t* la_fold(const Matcher& m, const uint8_t* s, uint32_t n,
+// `utf8` selects Unicode simple-fold (NVARCHAR) vs ASCII fold (VARCHAR); it MUST
+// match the fold the plan-time compiler applied to the needles (compile_like_any
+// always Unicode-folds, which equals ASCII fold on the ASCII bytes a VARCHAR
+// holds — so ASCII fold here is the same bytes, just cheaper). Both folds are
+// byte-length-preserving, so scratch stays size n.
+inline const uint8_t* la_fold(const Matcher& m, bool utf8, const uint8_t* s, uint32_t n,
                               std::vector<uint8_t>& scratch) {
     if (!m.ci) return s;
     scratch.resize(n);
-    for (uint32_t i = 0; i < n; ++i) scratch[i] = draken_glob::ascii_lower(s[i]);
+    if (utf8) {
+        draken_utf8ci::casefold(s, n, scratch.data());
+    } else {
+        for (uint32_t i = 0; i < n; ++i) scratch[i] = draken_glob::ascii_lower(s[i]);
+    }
     return scratch.empty() ? s : scratch.data();
 }
 
@@ -201,9 +226,13 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
         if (!la_is_string(child->type))
             { draken_free(out); if (validity) draken_free(validity);
               return draken_error_sentinel("draken_like_any: ARRAY elements must be string-typed"); }
-        if (m.ci && child->type != DRAKEN_VARCHAR)
+        if (m.ci && child->type == DRAKEN_VARBINARY)
             { draken_free(out); if (validity) draken_free(validity);
-              return draken_error_sentinel("draken_like_any: ILIKE needs VARCHAR (ASCII) elements"); }
+              return draken_error_sentinel("draken_like_any: ILIKE needs VARCHAR/NVARCHAR elements (not VARBINARY)"); }
+        const bool child_utf8 = child->type == DRAKEN_NVARCHAR;
+        if (child_utf8 && m.glob_has_byte('_'))
+            { draken_free(out); if (validity) draken_free(validity);
+              return draken_error_sentinel("draken_like_any: '_' against NVARCHAR (UTF-8) is not byte-safe (fail loud)"); }
         const int32_t* offsets = static_cast<const int32_t*>(subject->data);
         const auto* csa = static_cast<const DrakenStringArena*>(child->data);
         for (uint32_t i = 0; i < n; ++i) {
@@ -220,8 +249,8 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
                 const DrakenStringSlot* es = &csa->slots[child->selection[jj]];
                 const uint8_t* ed = reinterpret_cast<const uint8_t*>(str_data(es, csa->arena));
                 const uint32_t el = str_length(es);
-                const uint8_t* ef = la_fold(m, ed, el, scratch);
-                if (m.matches(ef, el, ed, el)) hit = true;
+                const uint8_t* ef = la_fold(m, child_utf8, ed, el, scratch);
+                if (m.matches(ef, el)) hit = true;
             }
             bool set_bit, is_null;
             la_resolve(m, hit, set_bit, is_null);
@@ -232,9 +261,13 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
         if (!la_is_string(subject->type))
             { draken_free(out); if (validity) draken_free(validity);
               return draken_error_sentinel("draken_like_any: string or ARRAY<string> subject required"); }
-        if (m.ci && subject->type != DRAKEN_VARCHAR)
+        if (m.ci && subject->type == DRAKEN_VARBINARY)
             { draken_free(out); if (validity) draken_free(validity);
-              return draken_error_sentinel("draken_like_any: ILIKE needs VARCHAR (ASCII)"); }
+              return draken_error_sentinel("draken_like_any: ILIKE needs VARCHAR/NVARCHAR (not VARBINARY)"); }
+        const bool subj_utf8 = subject->type == DRAKEN_NVARCHAR;
+        if (subj_utf8 && m.glob_has_byte('_'))
+            { draken_free(out); if (validity) draken_free(validity);
+              return draken_error_sentinel("draken_like_any: '_' against NVARCHAR (UTF-8) is not byte-safe (fail loud)"); }
         const auto* vsa = static_cast<const DrakenStringArena*>(subject->data);
         // §11 dict-dedup: match each distinct physical value once, scatter.
         const uint32_t k = subject->data_length;
@@ -243,8 +276,8 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
             const DrakenStringSlot* vs = &vsa->slots[j];
             const uint8_t* vd = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
             const uint32_t vl = str_length(vs);
-            const uint8_t* vf = la_fold(m, vd, vl, scratch);
-            uhit[j] = m.matches(vf, vl, vd, vl) ? 1 : 0;
+            const uint8_t* vf = la_fold(m, subj_utf8, vd, vl, scratch);
+            uhit[j] = m.matches(vf, vl) ? 1 : 0;
         }
         for (uint32_t i = 0; i < n; ++i) {
             if (!la_row_valid(subject, i)) {

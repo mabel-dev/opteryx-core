@@ -39,10 +39,19 @@ def test_group_by_single_constant_literal():
     assert rows == [{"k": 1, "s": 210}], rows
 
 
-def test_group_by_constant_matches_ungrouped_aggregate():
-    grouped = _rows("SELECT SUM(numberOfMoons) AS s FROM $planets GROUP BY 1")
-    ungrouped = _rows("SELECT SUM(numberOfMoons) AS s FROM $planets")
-    assert grouped == ungrouped == [{"s": 210}], (grouped, ungrouped)
+def test_group_by_positional_aggregate_is_rejected():
+    # `GROUP BY 1` is POSITIONAL (the 1st SELECT item), matching every peer engine
+    # (Dremio, Trino, DuckDB, ClickHouse). When position 1 is an aggregate, that is
+    # an error in all of them ("aggregates are not allowed in GROUP BY") — Opteryx
+    # rejects it the same way rather than silently collapsing to the ungrouped sum.
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    try:
+        _rows("SELECT SUM(numberOfMoons) AS s FROM $planets GROUP BY 1")
+    except UnsupportedSyntaxError:
+        pass
+    else:
+        raise AssertionError("GROUP BY on an aggregate position should be rejected")
 
 
 def test_group_by_multiple_constant_literals():
@@ -68,7 +77,7 @@ def test_constant_key_alongside_real_column_still_works():
 if __name__ == "__main__":
     for fn in [
         test_group_by_single_constant_literal,
-        test_group_by_constant_matches_ungrouped_aggregate,
+        test_group_by_positional_aggregate_is_rejected,
         test_group_by_multiple_constant_literals,
         test_group_by_constant_expression,
         test_constant_key_alongside_real_column_still_works,

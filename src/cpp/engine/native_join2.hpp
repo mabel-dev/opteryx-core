@@ -97,7 +97,6 @@ struct Join2BuildLocal : LocalSinkState {
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
     uint32_t next_row = 0;
     bool saw_null_key = false;
-    bool init = false;
     std::string scratch;
 };
 struct Join2BuildGlobal : GlobalSinkState {
@@ -107,50 +106,61 @@ struct Join2BuildGlobal : GlobalSinkState {
     std::vector<uint64_t> asof_keys;   // ASOF only: parallel to payload rows
     uint32_t total_rows = 0;
     bool saw_null_key = false;
-    bool init = false;
 };
 
 struct Join2BuildSink : Sink {
     std::vector<size_t> key_idx;
     std::vector<size_t> payload_col_idx;
+    std::vector<DrakenType> payload_types;             // PLAN-known — see engine.hpp
+    std::vector<const LogicalType*> payload_logical;   // set_join2_build_sink's comment
     int asof_idx = -1;   // >= 0: ASOF build — capture the asof column's normalized
                          // order key per row (rows with a NULL asof value are
                          // skipped: they can never satisfy the MATCH_CONDITION)
 
     Join2BuildSink(std::vector<size_t> keys, std::vector<size_t> payload_idx,
+                   std::vector<DrakenType> types, std::vector<const LogicalType*> logical,
                    int asof = -1)
         : key_idx(std::move(keys)), payload_col_idx(std::move(payload_idx)),
+          payload_types(std::move(types)), payload_logical(std::move(logical)),
           asof_idx(asof) {}
 
+    // Size+type one payload row-store from the plan-known types — called for BOTH
+    // the global and every worker-local state, so every one of them carries the
+    // full column count/type from the moment it exists, independent of whether any
+    // row ever actually reaches it (the empty-build-side case this whole scheme
+    // exists for).
+    void init_payload(std::vector<JoinPayloadColumn>& payload) const {
+        payload.resize(payload_col_idx.size());
+        for (size_t c = 0; c < payload_col_idx.size(); ++c) {
+            payload[c].type = payload_types[c];
+            payload[c].elem_size = join_elem_size(payload_types[c]);
+            payload[c].logical = payload_logical[c];
+        }
+    }
+
     std::unique_ptr<GlobalSinkState> make_global() override {
-        return std::make_unique<Join2BuildGlobal>();
+        auto g = std::make_unique<Join2BuildGlobal>();
+        init_payload(g->payload);
+        return g;
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
-        return std::make_unique<Join2BuildLocal>();
+        auto l = std::make_unique<Join2BuildLocal>();
+        init_payload(l->payload);
+        return l;
     }
 
     SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState& ls,
                     ErrCtx& err) override {
         auto& l = static_cast<Join2BuildLocal&>(ls);
-        if (in->num_rows() == 0) return SinkResult::CONTINUE;
-        if (!l.init) {
-            l.payload.resize(payload_col_idx.size());
-            for (size_t c = 0; c < payload_col_idx.size(); ++c) {
-                DrakenType t = in->columns[payload_col_idx[c]].view.type;
-                size_t es = join_elem_size(t);
-                if (es == 0) {
-                    err.code = 1;
-                    err.msg = "Join2BuildSink: unsupported payload column type";
-                    return SinkResult::CONTINUE;
-                }
-                l.payload[c].type = t;
-                l.payload[c].elem_size = es;
-                l.payload[c].logical = in->columns[payload_col_idx[c]].own
-                    ? in->columns[payload_col_idx[c]].own->logical_type : nullptr;
-            }
-            l.init = true;
-        }
         uint32_t rows = in->num_rows();
+        if (rows == 0) return SinkResult::CONTINUE;
+        for (size_t c = 0; c < l.payload.size(); ++c) {
+            if (l.payload[c].elem_size == 0) {
+                err.code = 1;
+                err.msg = "Join2BuildSink: unsupported payload column type";
+                return SinkResult::CONTINUE;
+            }
+        }
         for (uint32_t i = 0; i < rows; ++i) {
             // NULL in ANY key column: the row can never equi-match; record for the
             // null-aware ANTI contract and skip the table insert.
@@ -190,16 +200,10 @@ struct Join2BuildSink : Sink {
         auto& l = static_cast<Join2BuildLocal&>(ls);
         std::lock_guard<std::mutex> lk(g.mtx);
         g.saw_null_key = g.saw_null_key || l.saw_null_key;
-        if (!l.init) return;
-        if (!g.init) {
-            g.payload.resize(l.payload.size());
-            for (size_t c = 0; c < l.payload.size(); ++c) {
-                g.payload[c].type = l.payload[c].type;
-                g.payload[c].elem_size = l.payload[c].elem_size;
-                g.payload[c].logical = l.payload[c].logical;
-            }
-            g.init = true;
-        }
+        // g.payload and l.payload are both pre-sized/typed from the same plan-known
+        // payload_types (make_global/make_local) — always the same shape, even when
+        // this worker's local never saw a row (its raw/arena vectors are then simply
+        // empty, so the appends below are no-ops).
         uint32_t offset = g.total_rows;
         for (size_t c = 0; c < g.payload.size(); ++c) {
             JoinPayloadColumn& gcol = g.payload[c];
@@ -207,7 +211,7 @@ struct Join2BuildSink : Sink {
             if (join_type_is_string(gcol.type)) {
                 uint32_t arena_base = static_cast<uint32_t>(gcol.arena.size());
                 gcol.arena.insert(gcol.arena.end(), lcol.arena.begin(), lcol.arena.end());
-                size_t local_rows = lcol.raw.size() / lcol.elem_size;
+                size_t local_rows = lcol.elem_size ? lcol.raw.size() / lcol.elem_size : 0;
                 for (size_t r = 0; r < local_rows; ++r) {
                     const auto* slot = reinterpret_cast<const DrakenStringSlot*>(
                         lcol.raw.data() + r * lcol.elem_size);

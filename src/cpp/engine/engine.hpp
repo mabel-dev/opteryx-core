@@ -75,6 +75,33 @@ inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
     return c;
 }
 
+// Intern one LogicalType* per column from parallel (kind, unit, precision, scale,
+// dimension) int arrays — the wire shape Python's compiler passes for every
+// descriptor-carrying call (add_expr_project, set_final_schema, the join build
+// sinks below). kind == 0 means "no logical type" (nullptr, not an all-zero
+// LogicalType).
+inline std::vector<const LogicalType*> intern_logical_vec(
+        const std::vector<int>& kind, const std::vector<int>& unit,
+        const std::vector<int>& precision, const std::vector<int>& scale,
+        const std::vector<int>& dimension) {
+    std::vector<const LogicalType*> out;
+    out.reserve(kind.size());
+    for (size_t i = 0; i < kind.size(); ++i) {
+        if (kind[i] == 0) {
+            out.push_back(nullptr);
+            continue;
+        }
+        LogicalType lt;
+        lt.kind = static_cast<LogicalKind>(kind[i]);
+        lt.unit = static_cast<TimestampUnit>(unit[i]);
+        lt.precision = static_cast<uint8_t>(precision[i]);
+        lt.scale = static_cast<uint8_t>(scale[i]);
+        lt.dimension = static_cast<uint32_t>(dimension[i]);
+        out.push_back(logical_type_intern(lt));
+    }
+    return out;
+}
+
 // ---- LimitOperator: LIMIT/OFFSET over the stream ----------------------------------
 // A shared atomic claims each morsel's position in the (arbitrary at dop>1, stream
 // at dop=1) row order; rows outside [offset, offset+limit) are dropped, a partial
@@ -282,10 +309,25 @@ public:
         join2_refs.push_back(std::make_unique<Join2Ref>());
         return join2_refs.size() - 1;
     }
+    // payload_types/lt_* are the build-side payload columns' PLAN-KNOWN physical +
+    // logical types (same shape as set_final_schema) — sized/typed into the build
+    // sink's row-store up front, so a build side that streams zero rows (a filtered-
+    // to-empty subquery) still produces a correctly-shaped, correctly-typed empty
+    // payload instead of leaving it unsized. Without this, LEFT OUTER/ASOF's
+    // unmatched-row emit (which must still produce every probe row) reads past the
+    // end of an empty row-store — see ColumnSelectOperator's "layout tracking
+    // disagrees with the stream" invariant failure this fixes.
     void set_join2_build_sink(size_t p, std::vector<size_t> key_idx,
-                              std::vector<size_t> payload_idx, size_t ref) {
-        set_sink_(p,
-            std::make_unique<Join2BuildSink>(std::move(key_idx), std::move(payload_idx)));
+                              std::vector<size_t> payload_idx, size_t ref,
+                              std::vector<DrakenType> payload_types,
+                              std::vector<int> lt_kind, std::vector<int> lt_unit,
+                              std::vector<int> lt_precision, std::vector<int> lt_scale,
+                              std::vector<int> lt_dimension) {
+        auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
+                                                   lt_scale, lt_dimension);
+        set_sink_(p, std::make_unique<Join2BuildSink>(
+            std::move(key_idx), std::move(payload_idx),
+            std::move(payload_types), std::move(payload_logical)));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_join2_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
@@ -298,9 +340,16 @@ public:
     // probe side = nearest-match per MATCH_CONDITION op (0 GtEq / 1 Gt / 2 LtEq / 3 Lt).
     void set_asof_build_sink(size_t p, std::vector<size_t> key_idx,
                              std::vector<size_t> payload_idx, size_t asof_idx,
-                             size_t ref) {
+                             size_t ref, std::vector<DrakenType> payload_types,
+                             std::vector<int> lt_kind, std::vector<int> lt_unit,
+                             std::vector<int> lt_precision, std::vector<int> lt_scale,
+                             std::vector<int> lt_dimension) {
+        auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
+                                                   lt_scale, lt_dimension);
         set_sink_(p, std::make_unique<Join2BuildSink>(
-            std::move(key_idx), std::move(payload_idx), static_cast<int>(asof_idx)));
+            std::move(key_idx), std::move(payload_idx),
+            std::move(payload_types), std::move(payload_logical),
+            static_cast<int>(asof_idx)));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_asof_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
@@ -484,21 +533,8 @@ public:
                           std::vector<int> lt_dimension) {
         final_names = std::move(names);
         final_types = std::move(types);
-        final_logical.clear();
-        final_logical.reserve(final_types.size());
-        for (size_t i = 0; i < final_types.size(); ++i) {
-            if (lt_kind[i] == 0) {
-                final_logical.push_back(nullptr);
-                continue;
-            }
-            LogicalType lt;
-            lt.kind = static_cast<LogicalKind>(lt_kind[i]);
-            lt.unit = static_cast<TimestampUnit>(lt_unit[i]);
-            lt.precision = static_cast<uint8_t>(lt_precision[i]);
-            lt.scale = static_cast<uint8_t>(lt_scale[i]);
-            lt.dimension = static_cast<uint32_t>(lt_dimension[i]);
-            final_logical.push_back(logical_type_intern(lt));
-        }
+        final_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision, lt_scale,
+                                           lt_dimension);
     }
 
     // ---- execution (native; called once from the detached driver task) ------------

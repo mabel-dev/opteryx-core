@@ -20,6 +20,7 @@ from draken.morsels.cxx_morsel cimport (
 )
 from draken.vectors.vector cimport Vector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_INT64
+from draken.core.buffers cimport draken_vector_nbytes
 
 # C-level Py_DECREF: Cython 3 made cpython.ref.Py_DECREF take `object`, which
 # would re-INCREF; we need the raw PyObject* form for the C++ column store.
@@ -330,7 +331,27 @@ cdef class Morsel:
 
     @property
     def nbytes(self):
-        return self.num_rows * self._num_columns() * 8
+        """Approximate in-memory footprint (bytes): the real owned payload of every
+        column vector — fixed-width data, the string arena for the string family, and
+        validity bitmaps — summed via the native draken_vector_nbytes helper. Replaces
+        the old flat rows×cols×8 estimate, which grossly undercounted variable-length
+        string columns (a wide, string-heavy result buffered against this figure could
+        blow far past an intended memory cap). See buffers.h for the exact per-type
+        accounting and the DRAKEN_ARRAY under-count limitation."""
+        cdef Py_ssize_t n = self._num_columns()
+        cdef Py_ssize_t i
+        cdef size_t total = 0
+        cdef Vector v
+        if self._cxx is not None:
+            # Cxx-backed: read each column's DrakenVector straight off the substrate,
+            # no per-column Vector materialization.
+            for i in range(n):
+                total += draken_vector_nbytes(self._col_view(i))
+        else:
+            for i in range(n):
+                v = self._get_column(i)
+                total += draken_vector_nbytes(v._dv)
+        return total
 
     @property
     def num_columns(self):

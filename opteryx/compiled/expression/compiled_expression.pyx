@@ -2179,7 +2179,7 @@ cdef Py_ssize_t _linearize(
             # (binary_op_ctx, the same vehicle the decimal binops use):
             #   ROUND/FLOOR/CEILING/CEIL/TRUNC — round/truncate EXACTLY in the raw
             #                              int64 domain.
-            #   SQRT/POWER/LOG           — need the VALUE, not the unscaled int64.
+            #   SQRT/POWER/LOG/HUMANIZE  — need the VALUE, not the unscaled int64.
             #   ABS                      — |unscaled| is scale-free arithmetic, but the
             #                              result is DECIMAL(p, s) and the kernel stamps
             #                              that descriptor onto the VecResult, so it has
@@ -2193,7 +2193,7 @@ cdef Py_ssize_t _linearize(
             _fn_ctx_alloc = None
             _fn_ctx_arg = None
             if func_name in ("ROUND", "FLOOR", "CEILING", "CEIL", "SQRT", "ABS",
-                              "TRUNC", "POWER", "LOG") and n >= 1 \
+                              "TRUNC", "POWER", "LOG", "HUMANIZE") and n >= 1 \
                     and node.parameters[0] != NULL \
                     and node.parameters[0].schema_column != NULL:
                 _fn_p0_sc = <object>node.parameters[0].schema_column

@@ -7,8 +7,11 @@
 
 #include "ops/compare_dv.h"
 
+#include <cstring>
+
 #include "core/alloc.h"
 #include "core/frame_arena.h"
+#include "core/vector_alloc.h"   // draken_identity_sel
 #include "ops/vec_result.h"
 #include "ops/int64_compare.h"
 #include "ops/float_ops.h"
@@ -42,6 +45,7 @@ DrakenVector* finalise_result(const VecResult& vr, DrakenFrameArena* arena) {
     out->data_length  = vr.data_length;
     out->length       = vr.length;
     out->type         = vr.type;
+    out->flags        = vr.flags;
 
     // Adopt owned buffers into the arena. Selection is only adopted when
     // VecResult declares ownership — otherwise it points at a global
@@ -78,6 +82,43 @@ extern "C" DrakenVector* draken_compare_dv(
     }
     if (op_code < 0 || op_code > 5) {
         return nullptr;
+    }
+    // NULL-literal comparison: SQL three-valued logic says any comparison
+    // against a genuine NULL is UNKNOWN — never true/false, and never an
+    // error. DRAKEN_NULL (core/buffers.h) is the self-describing "every row
+    // null" sentinel an untyped NULL literal materialises to (see
+    // compiled_expression.pyx:_materialise_constant_literal). Short-circuit
+    // BEFORE the type-match gate below: an untyped NULL never matches the
+    // other side's type, so without this it always falls through to
+    // "declined" — fine for callers with a Python fallback, but the
+    // pure-nogil engine path (ExprFilterOperator) has none and would hard-
+    // error instead (err_op=11, no message). A BOOL result with every
+    // validity bit CLEARED encodes UNKNOWN for every row: WHERE-filter
+    // masking requires the data bit AND the validity bit to survive
+    // (cxx_mask/mask_indices), so the row is dropped regardless of the
+    // (unset) data bits — exactly UNKNOWN — and this propagates correctly
+    // through NOT/AND/OR, unlike folding to a definite constant FALSE would.
+    if (left->type == DRAKEN_NULL || right->type == DRAKEN_NULL) {
+        const uint32_t nbytes = ((n_rows + 7u) >> 3) > 0u ? ((n_rows + 7u) >> 3) : 1u;
+        void* data = draken_malloc(nbytes);
+        if (data == nullptr) return nullptr;
+        std::memset(data, 0, nbytes);
+        uint8_t* validity = static_cast<uint8_t*>(draken_malloc(nbytes));
+        if (validity == nullptr) {
+            draken_free(data);
+            return nullptr;
+        }
+        std::memset(validity, 0, nbytes);
+        VecResult vr;
+        vr.data           = data;
+        vr.validity       = validity;
+        vr.selection      = draken_identity_sel(n_rows);
+        vr.owns_selection = false;
+        vr.data_length    = n_rows;
+        vr.length         = n_rows;
+        vr.type           = DRAKEN_BOOL;
+        vr.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return finalise_result(vr, arena);
     }
     // Stage B: both operands must share the supported type. Cross-type
     // (e.g. INT64 vs FLOAT64) goes to Python fallback — EXCEPT the string

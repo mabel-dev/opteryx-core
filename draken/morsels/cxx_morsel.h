@@ -74,3 +74,16 @@ static inline const DrakenVector* cxx_column_child_vec(const CxxMorsel* m,
     if (!c.own || !c.own->child_owner) return nullptr;
     return &c.own->child_owner->vec;
 }
+
+// Approximate in-memory footprint (bytes) of a morsel: the sum of each column
+// view's real owned payload (draken_vector_nbytes — fixed data, string arena, and
+// validity). The C++-substrate twin of Morsel.nbytes; both count only the top-level
+// column views, so DRAKEN_ARRAY children are under-counted identically on both
+// paths (see draken_vector_nbytes in buffers.h). nogil-safe: pure field reads.
+static inline size_t cxx_morsel_nbytes(const CxxMorsel* m) noexcept {
+    if (m == nullptr) return 0u;
+    size_t total = 0u;
+    for (const CxxColumn& c : m->columns)
+        total += draken_vector_nbytes(&c.view);
+    return total;
+}

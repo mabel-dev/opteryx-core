@@ -36,6 +36,7 @@
 #include "ops/kernels/glob_match.h"      // draken_glob::like_match — shared with draken_like_any
 #include "ops/kernels/dfa_walk.h"        // draken_dfa::match — length-adaptive LIKE fast path
 #include "ops/kernels/like_program.h"    // draken_like_prog::match — SIMD op-program LIKE matcher
+#include "ops/kernels/utf8_ci_match.h"   // draken_utf8ci::* — Unicode casefold match for ci+NVARCHAR
 #include "xxhash.h"                // XXH3_64bits — long-slot hash32, same as every builder
 
 namespace {
@@ -1081,6 +1082,14 @@ inline uint8_t fk_ascii_lower(uint8_t c) { return draken_glob::ascii_lower(c); }
 inline bool fk_like_match(const uint8_t* s, uint32_t sn, const uint8_t* p, uint32_t pn, bool ci) {
     return draken_glob::like_match(s, sn, p, pn, ci);
 }
+// ci_utf8 = ci && NVARCHAR haystack — Unicode codepoint fold instead of the
+// ASCII byte fold above (draken_like's NVARCHAR+'_' guard already rejects
+// the one shape this can't express — see call sites).
+inline bool fk_like_match_ci(const uint8_t* s, uint32_t sn, const uint8_t* p, uint32_t pn,
+                             bool ci, bool ci_utf8) {
+    if (ci_utf8) return draken_utf8ci::like_match(s, sn, p, pn);
+    return draken_glob::like_match(s, sn, p, pn, ci);
+}
 
 }  // namespace
 
@@ -1088,7 +1097,8 @@ extern "C" {
 
 // STARTS_WITH / ENDS_WITH — the optimizer rewrites `LIKE 'x%'` → _STARTS_WITH,
 // `LIKE '%x'` → _ENDS_WITH (CI variants for ILIKE; negation wraps in a NOT node,
-// so no negate flag here). ctx.op_code bit1 = case-insensitive (VARCHAR ASCII only).
+// so no negate flag here). ctx.op_code bit1 = case-insensitive: ASCII byte-fold
+// on VARCHAR, Unicode codepoint-fold (draken_utf8ci) on NVARCHAR.
 VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
                    bool suffix, const char* who) {
     if (nargs != 2) return draken_error_sentinel_fmt("%s: expected 2 arguments", who);
@@ -1097,8 +1107,10 @@ VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
     const DrakenVector* p = args[1];
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel_fmt("%s: string operands required", who);
-    if (ci && v->type != DRAKEN_VARCHAR)
-        return draken_error_sentinel_fmt("%s: case-insensitive needs VARCHAR (ASCII)", who);
+    if (ci && v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
+        return draken_error_sentinel_fmt(
+            "%s: case-insensitive needs VARCHAR or NVARCHAR (not VARBINARY)", who);
+    const bool ci_utf8 = ci && v->type == DRAKEN_NVARCHAR;
     const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
     const auto* psa = static_cast<const DrakenStringArena*>(p->data);
     uint32_t n = v->length;
@@ -1124,12 +1136,20 @@ VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
         uint32_t hlen = str_length(vs), alen = str_length(ps);
         bool hit = alen <= hlen;
         if (hit) {
-            const uint8_t* base = suffix ? hay + (hlen - alen) : hay;
-            if (!ci) {
-                hit = std::memcmp(base, aff, alen) == 0;
+            if (ci_utf8) {
+                // Codepoint-based: folded byte length isn't guaranteed equal to
+                // the source, so this can't reuse the fixed byte-offset `base`
+                // the ASCII/binary paths below rely on.
+                hit = suffix ? draken_utf8ci::ends_with(hay, hlen, aff, alen)
+                             : draken_utf8ci::starts_with(hay, hlen, aff, alen);
             } else {
-                for (uint32_t k = 0; k < alen; ++k)
-                    if (fk_ascii_lower(base[k]) != fk_ascii_lower(aff[k])) { hit = false; break; }
+                const uint8_t* base = suffix ? hay + (hlen - alen) : hay;
+                if (!ci) {
+                    hit = std::memcmp(base, aff, alen) == 0;
+                } else {
+                    for (uint32_t k = 0; k < alen; ++k)
+                        if (fk_ascii_lower(base[k]) != fk_ascii_lower(aff[k])) { hit = false; break; }
+                }
             }
         }
         if (hit) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
@@ -1148,11 +1168,14 @@ VecResult draken_ends_with(void* ctx, const DrakenVector* const* args, uint32_t 
     return fk_affix(ctx, args, nargs, true, "draken_ends_with");
 }
 
-// Single haystack/needle substring verdict (memchr-anchored; ci = ASCII fold).
+// Single haystack/needle substring verdict (memchr-anchored; ci = ASCII fold,
+// or Unicode codepoint fold via draken_utf8ci::contains when ci_utf8).
 static inline bool fk_contains_hit(const uint8_t* hay, uint32_t hlen,
-                                   const uint8_t* ndl, uint32_t nlen, bool ci) {
+                                   const uint8_t* ndl, uint32_t nlen, bool ci,
+                                   bool ci_utf8) {
     if (nlen == 0) return true;
     if (nlen > hlen) return false;
+    if (ci_utf8) return draken_utf8ci::contains(hay, hlen, ndl, nlen);
     if (!ci) {
         const uint8_t first = ndl[0];
         const uint8_t* cur = hay;
@@ -1193,10 +1216,11 @@ VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t n
     const DrakenVector* p = args[1];
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_contains: string operands required");
-    if (ci && v->type != DRAKEN_VARCHAR)
+    if (ci && v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
         return draken_error_sentinel(
-            "draken_contains: case-insensitive contains needs VARCHAR (ASCII) — "
-            "NVARCHAR case folding is not implemented natively (fail loud)");
+            "draken_contains: case-insensitive contains needs VARCHAR or NVARCHAR "
+            "(not VARBINARY)");
+    const bool ci_utf8 = ci && v->type == DRAKEN_NVARCHAR;
 
     const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
     const auto* psa = static_cast<const DrakenStringArena*>(p->data);
@@ -1220,7 +1244,7 @@ VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t n
         for (uint32_t j = 0; j < v->data_length; ++j) {
             const DrakenStringSlot* vs = &vsa->slots[j];
             bool hit = fk_contains_hit(str_data(vs, vsa->arena), str_length(vs),
-                                       ndl, nlen, ci);
+                                       ndl, nlen, ci, ci_utf8);
             uhit[j] = (hit != negate) ? 1 : 0;
         }
         for (uint32_t i = 0; i < n; ++i) {
@@ -1241,7 +1265,7 @@ VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t n
             const DrakenStringSlot* ps = &psa->slots[p->selection[i]];
             bool hit = fk_contains_hit(
                 str_data(vs, vsa->arena), str_length(vs),
-                str_data(ps, psa->arena), str_length(ps), ci);
+                str_data(ps, psa->arena), str_length(ps), ci, ci_utf8);
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     }
@@ -1269,10 +1293,10 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
     const DrakenVector* p = args[1];
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_like: string operands required");
-    if (ci && v->type != DRAKEN_VARCHAR)
+    if (ci && v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
         return draken_error_sentinel(
-            "draken_like: ILIKE needs VARCHAR (ASCII) — NVARCHAR case folding is "
-            "not implemented natively (fail loud, never wrong)");
+            "draken_like: ILIKE needs VARCHAR or NVARCHAR (not VARBINARY)");
+    const bool ci_utf8 = ci && v->type == DRAKEN_NVARCHAR;
 
     const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
     const auto* psa = static_cast<const DrakenStringArena*>(p->data);
@@ -1310,9 +1334,9 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
         std::vector<uint8_t> uhit(v->data_length > 0 ? v->data_length : 1, 0);
         for (uint32_t j = 0; j < v->data_length; ++j) {
             const DrakenStringSlot* vs = &vsa->slots[j];
-            bool hit = fk_like_match(
+            bool hit = fk_like_match_ci(
                 reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena)),
-                str_length(vs), pdat, plen, ci);
+                str_length(vs), pdat, plen, ci, ci_utf8);
             uhit[j] = (hit != negate) ? 1 : 0;
         }
         for (uint32_t i = 0; i < n; ++i) {
@@ -1344,9 +1368,9 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
                     }
                 }
             }
-            bool hit = fk_like_match(
+            bool hit = fk_like_match_ci(
                 reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena)), str_length(vs),
-                pdat, plen, ci);
+                pdat, plen, ci, ci_utf8);
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     }

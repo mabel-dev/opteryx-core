@@ -69,8 +69,12 @@ class ValueRange:
         Returns:
             True if range is still valid, False if contradiction detected
         """
-        # Only handle numeric comparisons
-        if self.untrackable or operator not in ("=", ">=", "<=", ">", "<"):
+        # Only handle numeric comparisons. `col = NULL` (and any bound compared
+        # against a NULL literal) is not orderable — three-valued SQL semantics
+        # mean a NULL bound never participates in range logic — so treat it the
+        # same as an unsupported operator: bail range-tracking for this column
+        # rather than let a bare Python comparison see a `None`.
+        if self.untrackable or value is None or operator not in ("=", ">=", "<=", ">", "<"):
             self.untrackable = True
             return True
 
@@ -420,6 +424,15 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         for occurrence in occurrences:
             mapped = self._map_operator(occurrence.operator)
             if mapped is None:
+                return ColumnAnalysisResult(status="unsupported")
+
+            # `col = NULL` is not orderable (three-valued semantics) — bail before
+            # building a BoundCandidate from it, since `_is_better_lower`/
+            # `_is_better_upper` compare `.value` with a bare `>`/`<` and would
+            # otherwise see a `None`. ValueRange.update_with_predicate has the same
+            # guard for the OR-branch path (`_branch_range`), which never
+            # pre-computes bound candidates.
+            if occurrence.value is None:
                 return ColumnAnalysisResult(status="unsupported")
 
             if mapped == "=":

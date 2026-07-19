@@ -730,9 +730,8 @@ cdef class ParquetReadNode(ReaderNode):
         on the C++ carrier with NO Python Morsel and NO Python telemetry object touch
         (see `_record_morsel_emitted`'s docstring — the `object`-typed telemetry
         mirror is forbidden inside this `_scan_mtx`-held native section). `nbytes`
-        matches Morsel.nbytes' estimate (rows × cols × 8)."""
+        matches Morsel.nbytes' real per-vector footprint (via cxx_morsel_nbytes)."""
         cdef int64_t num_rows = cxm.get().num_rows()
-        cdef int64_t num_cols = cxm.get().num_columns()
         cdef int64_t files_seen
         self.scan_readings.record_row_group_complete(num_rows)
         self._mark_file_seen(path)
@@ -745,7 +744,10 @@ cdef class ParquetReadNode(ReaderNode):
             else:
                 self._records_to_read -= num_rows
         files_seen = len(self._parquet_files_seen)
-        self.scan_readings.record_morsel_yielded(num_rows, num_rows * num_cols * 8, files_seen)
+        # Real footprint of the (possibly LIMIT-sliced) emitted morsel — string
+        # arena included — not rows × cols × 8.
+        self.scan_readings.record_morsel_yielded(
+            num_rows, <int64_t>cxx_morsel_nbytes(cxm.get()), files_seen)
         return cxm
 
     cdef shared_ptr[CxxMorsel] _single_pass_finish_cxx(self):
@@ -1347,7 +1349,6 @@ cdef class ParquetReadNode(ReaderNode):
         cdef bint has_identity
         cdef int64_t rows_before_filter, surviving_rows
         cdef int64_t bytes_fetched, read_ns, decode_ns
-        cdef Morsel count_star
         while True:
             if self._limit_exhausted():
                 return self._finish_locked_cxx()
@@ -1402,15 +1403,21 @@ cdef class ParquetReadNode(ReaderNode):
                 if self._sp_output_identity_order:
                     emit_cxm = cxx_select_sp(result_cxm, self._sp_output_identity_order)
                 else:
-                    # No output columns (e.g. COUNT(*) with a filter-only read) — rare;
-                    # the bool-constant column routes through the Morsel encode.
+                    # No output columns (e.g. COUNT(*) with a filter-only read, or a
+                    # projection of only constants — `SELECT 3.14 FROM t`). Emit a
+                    # genuine ZERO-COLUMN morsel that carries the row count in
+                    # zero_col_rows (cxx_select with an empty want-list does exactly
+                    # this — cxx_morsel_ops.h). A synthetic `b'*'` bool column here
+                    # would sit at layout position 0, which the compiler's empty scan
+                    # layout does not track: a downstream ExprProject then appends its
+                    # computed column at runtime position 1 while the plan expects
+                    # position 0, so the final select reads the phantom bool column
+                    # (all-True) as the output and shifts every value by one column.
+                    # The zero_col_rows contract is the same one UngroupedAggSink's
+                    # CountStar already reads, so COUNT(*) is unaffected.
                     surviving_rows = result_cxm.get().num_rows()
                     if surviving_rows > 0:
-                        count_star = Morsel.from_vectors(
-                            [b'*'],
-                            [_draken_native_parquet.vector_from_bool_constant(True, <uint32_t>surviving_rows)],
-                        )
-                        emit_cxm = morsel_to_cxx(count_star)
+                        emit_cxm = cxx_select_sp(result_cxm, [])
 
             # ── Shared commit (under _scan_mtx; no GIL-releasing call inside) ──
             with nogil:

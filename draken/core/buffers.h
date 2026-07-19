@@ -225,6 +225,86 @@ static inline int draken_dict_sorted_dense(const DrakenVector* v) {
         && (v->flags & DRAKEN_DICT_CODES_DENSE);
 }
 
+// Physical width (bytes) of one element of a fixed-width type's `data` array.
+// Returns 0 for the non-fixed families (bool is bit-packed; string/variant use a
+// string arena; array/fp16/null/non-native have no flat per-element width) — those
+// are handled out-of-band by draken_vector_nbytes below. Values mirror
+// concat_fixed_itemsize in draken_native.cpp; keep the two in step if a type's
+// physical width ever changes. INTERVAL is 16 (== sizeof(DrakenIntervalSlot),
+// pinned by a static_assert in interval_slot.h — not included here to keep this
+// header C-compatible and dependency-light).
+static inline size_t draken_type_fixed_itemsize(DrakenType t) {
+    switch (t) {
+        case DRAKEN_INT8:
+        case DRAKEN_UINT8:       return 1u;
+        case DRAKEN_INT16:
+        case DRAKEN_UINT16:      return 2u;
+        case DRAKEN_INT32:
+        case DRAKEN_UINT32:
+        case DRAKEN_FLOAT32:
+        case DRAKEN_DATE32:
+        case DRAKEN_TIME32:      return 4u;
+        case DRAKEN_INT64:
+        case DRAKEN_UINT64:
+        case DRAKEN_FLOAT64:
+        case DRAKEN_TIMESTAMP64:
+        case DRAKEN_TIME64:
+        case DRAKEN_DECIMAL:     return 8u;
+        case DRAKEN_DECIMAL128:
+        case DRAKEN_INTERVAL:    return 16u;
+        default:                 return 0u;
+    }
+}
+
+// Approximate in-memory footprint (bytes) of ONE vector's owned payload: the
+// data buffer (dedup-aware — sized by data_length, the physical value count, so
+// dict/constant vectors are not counted at their logical row count), the string
+// arena for the string family, and the validity bitmap. Intended as an honest
+// memory-pressure signal (e.g. a result-buffer flush threshold), replacing the
+// old flat rows×8 guess that grossly undercounted variable-length strings.
+//
+// The `selection` array is deliberately EXCLUDED: for dense/constant vectors it
+// is a shared global buffer (draken_identity_sel / draken_zero_sel — not owned by
+// the vector), so counting it would both over-count shared memory and require
+// shape discrimination. Dict codes (owned, length×4) are therefore under-counted;
+// the data/arena terms dominate, so this stays a close, deliberately-conservative
+// estimate rather than an exact allocator figure.
+//
+// KNOWN LIMITATION — DRAKEN_ARRAY: an array's child values hang off the owning
+// VectorOwner, not off this DrakenVector, so they are unreachable from this
+// pointer alone and are NOT counted (only the validity bitmap is). Array-typed
+// result columns are therefore under-counted; precise array accounting needs a
+// VectorOwner-based API and is out of scope here.
+static inline size_t draken_vector_nbytes(const DrakenVector* v) {
+    if (v == NULL) return 0u;
+    size_t bytes = 0u;
+    const size_t n = (size_t)v->data_length;  // physical value count (dedup-aware)
+    switch (v->type) {
+        case DRAKEN_VARCHAR:
+        case DRAKEN_NVARCHAR:
+        case DRAKEN_VARBINARY:
+        case DRAKEN_VARIANT: {
+            // `data` is a DrakenStringArena: a slot array (16 bytes/slot) plus a
+            // byte arena for long-form (>12 byte) payloads. Both are O(1) header
+            // reads — no per-string walk.
+            const DrakenStringArena* sa = (const DrakenStringArena*)v->data;
+            if (sa != NULL)
+                bytes += sa->length * sizeof(DrakenStringSlot) + sa->arena_used;
+            break;
+        }
+        case DRAKEN_BOOL:
+            bytes += (n + 7u) >> 3;  // 1 bit per physical value
+            break;
+        default:
+            // Fixed-width families; 0 for array/fp16/null/non-native (see notes).
+            bytes += n * draken_type_fixed_itemsize(v->type);
+            break;
+    }
+    if (v->validity != NULL)
+        bytes += ((size_t)v->length + 7u) >> 3;  // 1 bit per logical row
+    return bytes;
+}
+
 // =============================================================================
 // ABI guard — frozen layout (CLAUDE.md §11, 09_delivery.md risk #1).
 // sizeof alone won't catch a field reorder, and a renumbered enum is as fatal

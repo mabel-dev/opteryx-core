@@ -137,6 +137,13 @@ cdef extern from "core/buffers.h":
         DrakenType      type
         uint8_t         flags
 
+    # Approximate in-memory footprint (bytes) of one vector's owned payload —
+    # data buffer (dedup-aware), string arena, and validity bitmap. `selection`
+    # is excluded (shared global for dense/constant). See buffers.h for the full
+    # contract and the DRAKEN_ARRAY under-count limitation. nogil: pure field
+    # reads, no allocation.
+    size_t draken_vector_nbytes(const DrakenVector* v) noexcept nogil
+
 cdef extern from "core/vector_alloc.h":
     const uint32_t* draken_identity_sel(uint32_t length) nogil
     const uint32_t* draken_zero_sel(uint32_t length) nogil

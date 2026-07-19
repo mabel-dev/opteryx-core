@@ -384,6 +384,15 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
         if node.node_type == NodeType.COMPARISON_OPERATOR and node.value in {"Eq"}:
             # Only proceed if the right side is a literal
             if node.right.node_type == NodeType.LITERAL:
+                # `col = NULL` cannot be folded into the same-column IN-list: it has
+                # three-valued (UNKNOWN) semantics distinct from a membership test,
+                # and a NULL-mixed literal array is rejected outright at parse time
+                # (ArrayWithMixedTypesError, logical_planner_builders.in_list) — the
+                # optimizer must not manufacture what the front door forbids. Leave
+                # `col = NULL` branches untouched; each compiles on its own via the
+                # native NULL-comparison short-circuit.
+                if node.right.value is None:
+                    return
                 # Get column identifier for grouping
                 col_id = None
                 if node.left.node_type == NodeType.IDENTIFIER:
@@ -452,6 +461,9 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             branch.node_type == NodeType.COMPARISON_OPERATOR
             and branch.value == "Eq"
             and branch.right.node_type == NodeType.LITERAL
+            # `col = NULL` cannot be folded into the same-column IN-list — see the
+            # matching guard in rewrite_ored_eq_to_inlist.collect_eqs above.
+            and branch.right.value is not None
         ):
             key = format_expression(branch.left)
             if key not in groups:

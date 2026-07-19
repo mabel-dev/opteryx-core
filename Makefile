@@ -251,6 +251,13 @@ clickbench-profile: ## ClickBench + per-operator self-time profile (where the ti
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
+dash: ## Run odata_dashboard benchmark vs DuckDB (real-world OData query-log shapes)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/odata_dashboard/runner.py
+
+dash-duckdb: ## Re-run DuckDB odata_dashboard calibration (regenerates duckdb/results.local.json)
+	@$(PYTHON) tests/performance/odata_dashboard/duckdb/runner.py
+
 m4-sweep: ## M4 DOP-sweep gate: serial-parity at DOP=1 + scaling above (M4_DATASET=… M4_ITERS=…)
 	@$(PYTHON) dev/m4_dop_sweep.py
 

@@ -19,6 +19,7 @@ from draken.morsels.morsel cimport Morsel, morsel_to_cxx, cxx_to_morsel
 
 from draken.morsels.morsel cimport cxx_morsel_from_vectors_sp, cxx_select_sp
 from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos, cxx_morsel_delete
+from draken.morsels.cxx_morsel cimport cxx_morsel_nbytes
 from draken.morsels.cxx_morsel cimport cxx_slice_c, cxx_hash_c, cxx_take_c, cxx_cast_column_c
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector, mix_hash
@@ -287,12 +288,19 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                  size_t ref)
         size_t new_join2_ref()
         void set_join2_build_sink(size_t p, cppvector[size_t] key_idx,
-                                  cppvector[size_t] payload_idx, size_t ref)
+                                  cppvector[size_t] payload_idx, size_t ref,
+                                  cppvector[DrakenType] payload_types,
+                                  cppvector[int] lt_kind, cppvector[int] lt_unit,
+                                  cppvector[int] lt_precision, cppvector[int] lt_scale,
+                                  cppvector[int] lt_dimension)
         void add_join2_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                              cppvector[size_t] payload_idx, int mode)
         void set_asof_build_sink(size_t p, cppvector[size_t] key_idx,
                                  cppvector[size_t] payload_idx, size_t asof_idx,
-                                 size_t ref)
+                                 size_t ref, cppvector[DrakenType] payload_types,
+                                 cppvector[int] lt_kind, cppvector[int] lt_unit,
+                                 cppvector[int] lt_precision, cppvector[int] lt_scale,
+                                 cppvector[int] lt_dimension)
         void add_asof_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                             cppvector[size_t] payload_idx, size_t asof_idx, int op)
         void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf)
@@ -991,7 +999,8 @@ cdef class BasePlanNode:
 
         if (not is_eos) and raw != NULL:
             rows = raw.num_rows()
-            nbytes = <uint64_t>rows * <uint64_t>raw.num_columns() * <uint64_t>8
+            # Real per-vector footprint (string arena included), not rows×cols×8.
+            nbytes = <uint64_t>cxx_morsel_nbytes(raw)
             self.records_in += rows
             self.bytes_in += nbytes
         self.calls += 1
@@ -1051,7 +1060,8 @@ cdef class BasePlanNode:
         cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
         if (not is_eos) and raw != NULL:
             rows = raw.num_rows()
-            nbytes = <uint64_t>rows * <uint64_t>raw.num_columns() * <uint64_t>8
+            # Real per-vector footprint (string arena included), not rows×cols×8.
+            nbytes = <uint64_t>cxx_morsel_nbytes(raw)
             self.records_out += rows
             self.bytes_out += nbytes
         if self._downstream is not None:
@@ -2282,14 +2292,33 @@ cdef class NativePlan:
     def new_join2_ref(self):
         return self._e.new_join2_ref()
 
-    def set_join2_build_sink(self, size_t p, list key_idx, list payload_idx, size_t ref):
+    def set_join2_build_sink(self, size_t p, list key_idx, list payload_idx, size_t ref,
+                             list payload_types, list payload_logical=None):
+        """``payload_types``/``payload_logical`` are the build-side payload columns'
+        PLAN-KNOWN physical (DrakenType ints) + logical ((kind, unit, precision, scale,
+        dimension) tuples or None) types — same shape as ``set_final_schema`` — so the
+        native build sink can size+type its row-store up front instead of learning it
+        from the first morsel, which never arrives when the build side streams zero
+        rows (a filtered-to-empty subquery)."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
+        cdef cppvector[DrakenType] ts
+        cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef int i
         for i in key_idx:
             keys.push_back(<size_t>i)
         for i in payload_idx:
             pay.push_back(<size_t>i)
-        self._e.set_join2_build_sink(p, keys, pay, ref)
+        for t in payload_types:
+            ts.push_back(<DrakenType><int>t)
+        for i in range(len(payload_types)):
+            entry = payload_logical[i] if payload_logical is not None and i < len(payload_logical) else None
+            if entry is None:
+                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
+            else:
+                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
+                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
+        self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld)
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                         int mode):
@@ -2303,14 +2332,29 @@ cdef class NativePlan:
         self._e.add_join2_probe(p, ref, keys, pay, mode)
 
     def set_asof_build_sink(self, size_t p, list key_idx, list payload_idx,
-                            size_t asof_idx, size_t ref):
+                            size_t asof_idx, size_t ref, list payload_types,
+                            list payload_logical=None):
+        """``payload_types``/``payload_logical``: see set_join2_build_sink — same
+        plan-known-type wiring, shared build sink implementation."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
+        cdef cppvector[DrakenType] ts
+        cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef int i
         for i in key_idx:
             keys.push_back(<size_t>i)
         for i in payload_idx:
             pay.push_back(<size_t>i)
-        self._e.set_asof_build_sink(p, keys, pay, asof_idx, ref)
+        for t in payload_types:
+            ts.push_back(<DrakenType><int>t)
+        for i in range(len(payload_types)):
+            entry = payload_logical[i] if payload_logical is not None and i < len(payload_logical) else None
+            if entry is None:
+                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
+            else:
+                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
+                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
+        self._e.set_asof_build_sink(p, keys, pay, asof_idx, ref, ts, lk, lu, lp, lsc, ld)
 
     def add_asof_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                        size_t asof_idx, int op):

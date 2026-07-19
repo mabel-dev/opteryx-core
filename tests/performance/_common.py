@@ -85,12 +85,13 @@ def format_ratio(opteryx_ms: float, duckdb_ms: float) -> str:
 # Bench-row table layout
 # ---------------------------------------------------------------------------
 
-# Field widths chosen to leave breathing room around 5-digit ms times
-# (e.g. "17106.7ms"). All cells right-align so digits line up across rows.
-_MS_W = 12
-_NAME_W = 10
-_BASELINE_W = 12
-_RATIO_W = 11
+# Field widths sized to fit 5-digit ms times (e.g. "17106.7ms" is 9 chars)
+# plus a 1-char gap so adjacent right-aligned cells don't run together.
+# All cells right-align so digits line up across rows.
+_MS_W = 10
+_NAME_W = 8
+_BASELINE_W = 10
+_RATIO_W = 9
 
 
 def print_header(name_label: str, n_iterations: int, has_baseline: bool) -> int:
@@ -99,15 +100,15 @@ def print_header(name_label: str, n_iterations: int, has_baseline: bool) -> int:
     parts: list[str] = [f"{name_label:<{_NAME_W}}"]
     for i in range(1, max(n_iterations, 1) + 1):
         parts.append(f"{f'Run {i}':>{_MS_W}}")
-    parts.append("    ")
+    parts.append("  ")
     parts.append(f"{'Min':>{_MS_W}}")
     parts.append(f"{'Avg':>{_MS_W}}")
     parts.append(f"{'Max':>{_MS_W}}")
     if has_baseline:
-        parts.append(f"   {'DuckDB':>{_BASELINE_W}}")
-        parts.append(f"   {'vs':<{_RATIO_W}}")
+        parts.append(f"  {'DuckDB':>{_BASELINE_W}}")
+        parts.append(f"  {'vs':<{_RATIO_W}}")
     line = "".join(parts)
-    width = len(line) + (10 if has_baseline else 0)
+    width = len(line) + (6 if has_baseline else 0)
     print(line)
     print("─" * width)
     return width
@@ -126,7 +127,7 @@ def print_row(
         cells.append(f"{'-':>{_MS_W}}")
     for cell in cells[:n_iterations]:
         parts.append(f"{cell:>{_MS_W}}")
-    parts.append("    ")
+    parts.append("  ")
     if iteration_times_ms:
         mn = min(iteration_times_ms)
         mx = max(iteration_times_ms)
@@ -135,8 +136,8 @@ def print_row(
         parts.append(f"{f'{avg:.1f}ms':>{_MS_W}}")
         parts.append(f"{f'{mx:.1f}ms':>{_MS_W}}")
         if duckdb_min_ms is not None:
-            parts.append(f"   {f'{duckdb_min_ms:.1f}ms':>{_BASELINE_W}}")
-            parts.append(f"   {format_ratio(mn, duckdb_min_ms)}")
+            parts.append(f"  {f'{duckdb_min_ms:.1f}ms':>{_BASELINE_W}}")
+            parts.append(f"  {format_ratio(mn, duckdb_min_ms)}")
     else:
         parts.append(f"{'-':>{_MS_W}}{'-':>{_MS_W}}{'-':>{_MS_W}}")
     print("".join(parts))
@@ -160,12 +161,12 @@ def print_total_row(
 ) -> None:
     """Bottom-line row aggregating the per-query mins."""
     parts: list[str] = [f"{'TOTAL':<{_NAME_W}}"]
-    parts.append(f"{'':>{_MS_W * n_iterations + 4}}")
+    parts.append(f"{'':>{_MS_W * n_iterations + 2}}")
     parts.append(f"{f'{opteryx_total_ms:.1f}ms':>{_MS_W}}")
     parts.append(f"{'':>{_MS_W}}")
     parts.append(f"{'':>{_MS_W}}")
-    parts.append(f"   {f'{duckdb_total_ms:.1f}ms':>{_BASELINE_W}}")
-    parts.append(f"   {format_ratio(opteryx_total_ms, duckdb_total_ms)}")
+    parts.append(f"  {f'{duckdb_total_ms:.1f}ms':>{_BASELINE_W}}")
+    parts.append(f"  {format_ratio(opteryx_total_ms, duckdb_total_ms)}")
     parts.append(f"  ({n_compared} compared)")
     print("".join(parts))
 

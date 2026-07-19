@@ -28,10 +28,14 @@ special, NO backslash escape):
   - anything else (interior `%`, any `_`, multiple segments) -> residual glob,
     matched per-row by fk_like_match — always correct, never a wrong fast path.
 
-Case-insensitive (`ILIKE`): every literal/needle is ASCII-folded to lower here,
-and the kernel folds subject bytes at match time (ASCII-only `ci`, exactly the
-semantics of draken_like / fk_like_match). A NULL pattern in the list sets the
-has_null flag (SQL three-valued ANY: a non-match becomes NULL, not false).
+Case-insensitive (`ILIKE`): every literal/needle is simple-casefolded to lower
+here, and the kernel folds subject bytes at match time with the SAME fold
+(draken_utf8ci::casefold — Unicode simple-fold, which reduces to ASCII fold on
+the ASCII bytes a VARCHAR holds). Both sides call one implementation so the
+automaton alphabet and the subject bytes are guaranteed identical — no drift.
+NVARCHAR subjects therefore fold correctly for the case-changing codepoints the
+utf8h table covers (Latin-1/Latin-ext/Greek/Cyrillic). A NULL pattern in the
+list sets the has_null flag (SQL three-valued ANY: a non-match becomes NULL).
 
 Blob format (little-endian):
     u8  version (=1)
@@ -49,8 +53,24 @@ Blob format (little-endian):
 """
 
 
-cdef bytes _ascii_lower(bytes b):
-    return bytes((c + 32) if 65 <= c <= 90 else c for c in b)
+from libc.stdint cimport uint8_t, uint32_t
+
+
+cdef extern from "ops/kernels/utf8_ci_match.h" namespace "draken_utf8ci" nogil:
+    void casefold(const uint8_t* src, uint32_t n, uint8_t* dst)
+
+
+cdef bytes _uni_lower(bytes b):
+    """Unicode simple-casefold, byte-identical to draken_utf8ci::casefold (the
+    kernel's subject fold) — MUST be the same fold or needle and subject bytes
+    diverge and ILIKE ANY silently under-matches. Length-preserving."""
+    cdef Py_ssize_t n = len(b)
+    if n == 0:
+        return b
+    cdef bytearray out = bytearray(n)
+    cdef uint8_t[::1] mv = out
+    casefold(<const uint8_t*>(<const char*>b), <uint32_t>n, &mv[0])
+    return bytes(out)
 
 
 def _classify(bytes p):
@@ -167,7 +187,7 @@ cpdef bytes compile_like_any(object patterns, bint ci, bint negate=False):
         elif not isinstance(p, bytes):
             p = str(p).encode("utf-8")
         if ci:
-            p = _ascii_lower(<bytes>p)
+            p = _uni_lower(<bytes>p)
         kind, payload = _classify(<bytes>p)
         if kind == "always":
             always_true = True

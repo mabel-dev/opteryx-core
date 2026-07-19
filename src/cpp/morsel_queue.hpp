@@ -149,9 +149,21 @@ class MorselQueue {
 
   private:
     // Poll granularity for observing close()/finish() out of a blocking wait.
-    // Morsels are coarse (thousands of rows), so a 1 ms latency ceiling is
-    // immaterial to throughput.
-    static constexpr std::int64_t kWaitUs = 1000;
+    // finish() is out-of-band (an atomic, not an enqueue — see the class doc for
+    // why), so it CANNOT wake a consumer parked in q_.wait_dequeue_timed(); the
+    // consumer only notices FINISHED after the current wait times out. That makes
+    // this value a completion-latency FLOOR paid once per query: the final get()
+    // (which returns FINISHED after the last data morsel) always sleeps out one
+    // full kWaitUs. On a large result that 1 ms was amortised to nothing, but on a
+    // metadata-only / tiny query it WAS the whole query — the dominant term in the
+    // ~2 ms fixed floor measured across the odata_dashboard + ClickBench cheap
+    // queries. Dropped 1000 → 50 µs: ~20x less end-of-query dead wait, at the cost
+    // of a genuinely-idle consumer re-checking close()/finish() 20x more often
+    // (each check is an atomic load + size_approx() — nanoseconds, and only while
+    // actually blocked with no data). Morsels are coarse enough that 50 µs is still
+    // immaterial as a throughput ceiling. The real fix (a shared wakeup channel so
+    // finish() has zero poll latency) is tracked separately.
+    static constexpr std::int64_t kWaitUs = 50;
 
     moodycamel::BlockingConcurrentQueue<std::shared_ptr<CxxMorsel>> q_;
     moodycamel::LightweightSemaphore slots_;

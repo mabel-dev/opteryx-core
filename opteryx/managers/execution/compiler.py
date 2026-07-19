@@ -24,6 +24,7 @@ reach this module; ``managers/execution/__init__.py`` routes them to serial_engi
 """
 
 import os
+import threading
 
 from draken.draken_native import DrakenType
 from opteryx.constants import ResultType
@@ -32,6 +33,37 @@ from opteryx.expression import NodeType
 
 _MAX_WORKER_CAP = 16
 _QUEUE_DEPTH = 4
+
+# Per-driver-thread engine pool cache. The engine pool is driven via
+# submit_native + wait_native — and wait_native() is a POOL-GLOBAL barrier
+# (BS::thread_pool::wait waits for EVERY task in the pool). That is only correct
+# while a pool holds ONE query's tasks at a time, so the pool cannot be shared
+# across concurrent queries. A thread-local cache preserves exactly that
+# invariant: each driver thread reuses its own pool, and because a thread is
+# occupied for the full duration of its query (the cursor blocks in out_q.get()
+# until FINISHED), that pool only ever holds one query's tasks at a time — the
+# same isolation a fresh-per-query pool gave, minus the per-query spawn/join of
+# `dop` OS threads (~0.7ms at dop=16). The pool is returned to idle (not shut
+# down) between queries and lives until its owning thread — or the interpreter —
+# exits, when CppThreadPool.__dealloc__ joins its workers.
+_engine_pool_tls = threading.local()
+
+
+def _acquire_engine_pool(dop: int):
+    """Return this driver thread's reusable engine pool for `dop` workers,
+    constructing it on first use. Keyed by dop so a config change that alters the
+    worker count yields a correctly-sized pool rather than a stale one."""
+    from opteryx.compiled.thread_pool import CppThreadPool
+
+    cache = getattr(_engine_pool_tls, "by_dop", None)
+    if cache is None:
+        cache = {}
+        _engine_pool_tls.by_dop = cache
+    pool = cache.get(dop)
+    if pool is None:
+        pool = CppThreadPool(dop, "engine")
+        cache[dop] = pool
+    return pool
 
 _INT_TYPES = (
     DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
@@ -688,6 +720,24 @@ class _Compiler:
     _ARRAY_AGG_OPERAND_TYPES = _AGG_OPERAND_TYPES + (
         DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
     )
+    # GROUP BY / DISTINCT / ORDER BY / PARTITION BY key types — mirrors
+    # sort_key_type_supported() in src/cpp/engine/native_sort.hpp exactly
+    # (native_group_sinks.hpp's key_append/key_append_phys reuse the same
+    # header's gather_elem_size() for the identical purpose, over the same
+    # excluded set). ARRAY, INTERVAL, VARIANT, NON_NATIVE, NULL, VECTOR_FP16
+    # are excluded: unhashable/unorderable as a plain key, and today they only
+    # fail loud deep in the native sink/sort with a generic RuntimeError.
+    # Catching it HERE, at plan time, names the actual column and type.
+    _KEY_COLUMN_TYPES = _NUMERIC_TYPES + (
+        DrakenType.DECIMAL, DrakenType.DECIMAL128,
+        DrakenType.DATE32, DrakenType.TIMESTAMP64, DrakenType.TIME32, DrakenType.TIME64,
+        DrakenType.BOOL,
+        DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
+    )
+
+    def _check_key_type(self, what, name, pt):
+        if pt is not None and pt not in self._KEY_COLUMN_TYPES:
+            _unsupported(f"{what} on column '{name}' ({pt})")
 
     @staticmethod
     def _array_agg_options(agg):
@@ -862,11 +912,14 @@ class _Compiler:
             # GROUP BY over a computed key (SUBSTRING(...), REGEXP_REPLACE(...)):
             # project the key expression to a stream column first, then group on it.
             computed_keys = []
+            group_key_names = {}
             for grp in getattr(node, "groups", None) or []:
+                sc = getattr(grp, "schema_column", None)
+                if sc is not None and sc.identity is not None:
+                    group_key_names[sc.identity] = getattr(sc, "name", None)
                 if getattr(grp, "node_type", None) in (None, NodeType.IDENTIFIER,
                                                        NodeType.WILDCARD):
                     continue
-                sc = getattr(grp, "schema_column", None)
                 if sc is not None and sc.identity is not None and sc.identity not in layout:
                     computed_keys.append(grp)
             if computed_keys:
@@ -880,6 +933,9 @@ class _Compiler:
             for key_identity in group_cols:
                 if key_identity not in layout:
                     _unsupported("a GROUP BY key the stream does not carry")
+                self._check_key_type(
+                    "GROUP BY", group_key_names.get(key_identity) or key_identity,
+                    self._layout_type(None, key_identity))
                 key_idx.append(layout.index(key_identity))
             # GROUP BY with NO aggregate functions is a DISTINCT over the keys —
             # route to the DistinctSink (emits the distinct key rows unchanged).
@@ -910,7 +966,20 @@ class _Compiler:
                 for identity in on:
                     if identity not in layout:
                         _unsupported("a DISTINCT ON column the stream does not carry")
+                    self._check_key_type(
+                        "DISTINCT ON", self._layout_name(identity),
+                        self._layout_type(None, identity))
                     on_idx.append(layout.index(identity))
+            else:
+                # Empty on_idx means the native DistinctSink dedups on EVERY
+                # column of the stream (native_group_sinks.hpp DistinctSink:
+                # "empty = all columns") — plain `SELECT DISTINCT ...` (no ON)
+                # takes this path, so every stream column is a key and must be
+                # checked here too, not just an explicit DISTINCT ON list.
+                for identity in layout:
+                    self._check_key_type(
+                        "DISTINCT", self._layout_name(identity),
+                        self._layout_type(None, identity))
             buf = self.nplan.new_buffer()
             self.nplan.set_distinct_sink(p, on_idx, buf)
             p2 = self.nplan.new_pipeline()
@@ -968,10 +1037,16 @@ class _Compiler:
             for identity in part_cols:
                 if identity not in layout:
                     _unsupported("a PARTITION BY column the stream does not carry")
+                self._check_key_type(
+                    "PARTITION BY", self._layout_name(identity),
+                    self._layout_type(None, identity))
                 sort_spec.append((layout.index(identity), True))
             for identity, asc in zip(order_cols, order_asc):
                 if identity not in layout:
                     _unsupported("a window ORDER BY column the stream does not carry")
+                self._check_key_type(
+                    "window ORDER BY", self._layout_name(identity),
+                    self._layout_type(None, identity))
                 sort_spec.append((layout.index(identity), bool(asc)))
             fn_kinds = [int(k) for k, _out in funcs]
             fn_names = [out for _k, out in funcs]
@@ -1053,6 +1128,9 @@ class _Compiler:
             identity = col.schema_column.identity
             if identity not in layout:
                 _unsupported("an ORDER BY key the stream does not carry")
+            self._check_key_type(
+                "ORDER BY", getattr(col.schema_column, "name", None) or identity,
+                self._layout_type(None, identity))
             spec.append((layout.index(identity), bool(ascending)))
         return spec, layout
 
@@ -1518,7 +1596,12 @@ class _Compiler:
         ref = self.nplan.new_join2_ref()
         # SEMI/ANTI emit probe rows only — no build payload needed.
         build_payload = [] if mode in (2, 3) else list(range(len(blayout)))
-        self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref)
+        if mode in (2, 3):
+            build_types, build_logical = [], []
+        else:
+            build_types, build_logical = self._payload_types(build_id, blayout)
+        self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
+                                        build_types, build_logical)
 
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
@@ -1663,8 +1746,10 @@ class _Compiler:
             _unsupported("an ASOF match column the build stream does not carry")
         ref = self.nplan.new_join2_ref()
         self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe
+        build_types, build_logical = self._payload_types(legs["right"], blayout)
         self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
-                                       blayout.index(asof_right), ref)
+                                       blayout.index(asof_right), ref,
+                                       build_types, build_logical)
 
         pp, playout = self.compile_node(legs["left"])
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
@@ -1716,6 +1801,9 @@ class _Compiler:
         cts = getattr(self, "_cts", None)
         if cts is None:
             cts = self._cts = {}
+        names = getattr(self, "_names", None)
+        if names is None:
+            names = self._names = {}
         for col in columns or []:
             sc = col.schema_column
             pt = _physical_type(sc)
@@ -1724,6 +1812,34 @@ class _Compiler:
             ct = getattr(sc, "column_type", None)
             if ct is not None:
                 cts[sc.identity] = ct
+            name = getattr(sc, "name", None)
+            if name is not None:
+                names[sc.identity] = name
+
+    def _payload_types(self, node_id, layout):
+        """Physical DrakenType (int) + logical tuple for each identity in ``layout``,
+        for the native join build sinks (``set_join2_build_sink``/``set_asof_build_sink``):
+        the compiler already knows every build-side column's type from binding — same
+        source/shape as ``compile_to_native``'s ``final_types``/``final_logical`` — so
+        it hands the type down instead of the C++ build sink ever needing to learn it
+        from data. That learn-from-first-morsel path never runs when the build side
+        genuinely streams zero rows (a filtered-to-empty subquery), which is exactly
+        the shape that broke LEFT OUTER's unmatched-row emit."""
+        node = self.plan[node_id]
+        by_identity = {}
+        for col in getattr(node, "columns", None) or []:
+            sc = getattr(col, "schema_column", None)
+            if sc is not None:
+                by_identity[sc.identity] = getattr(sc, "column_type", None)
+        cts = getattr(self, "_cts", None) or {}
+        types_map = getattr(self, "_types", None) or {}
+        types, logical = [], []
+        for identity in layout:
+            ct = by_identity.get(identity) or cts.get(identity)
+            pt = ct.physical if ct is not None else types_map.get(identity)
+            types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
+            logical.append(_logical_tuple(ct))
+        return types, logical
 
     def _layout_type(self, node, identity):
         types = getattr(self, "_types", None) or {}
@@ -1735,6 +1851,14 @@ class _Compiler:
             if sc is not None and sc.identity == identity:
                 return _physical_type(sc)
         return None
+
+    def _layout_name(self, identity):
+        """User-facing column name for an identity, when known — used only to name
+        the offending column in a plan-time NotSupportedError; falls back to the
+        (opaque) identity when no scan/materialized-source column recorded a name
+        for it (e.g. a computed key with no simple source column)."""
+        names = getattr(self, "_names", None) or {}
+        return names.get(identity, identity)
 
 
 def compile_to_native(plan, pool=None):
@@ -1797,7 +1921,6 @@ def execute_native(plan, telemetry=None):
     engine's output queue; the engine runs on its own native driver + worker pool."""
     from opteryx import config
     from opteryx.compiled.morsel_queue import MQ_FINISHED
-    from opteryx.compiled.thread_pool import CppThreadPool
     from opteryx.operators._operators import NativeErrorSlot
     from opteryx.operators._operators import build_terminal_exc
     from opteryx.operators._operators import native_plan_execute
@@ -1811,8 +1934,14 @@ def execute_native(plan, telemetry=None):
     # parquet scan's decode pool, instead of the scan self-constructing its own
     # uncoordinated one. dop does not depend on the compiled plan — only on config
     # and cpu count — so this reorder changes nothing about what dop resolves to.
+    #
+    # The pool is thread-local and REUSED across queries on this driver thread
+    # (see _acquire_engine_pool): first query on a thread pays the spawn, every
+    # subsequent one skips it — and skips the join at teardown too (~0.7ms/query
+    # at dop=16). _pool_create_ns therefore reads ~0 after the first query, which
+    # is the point.
     _pool0 = _t.perf_counter_ns()
-    pool = CppThreadPool(dop, "engine")
+    pool = _acquire_engine_pool(dop)
     _pool_create_ns = _t.perf_counter_ns() - _pool0
 
     # Native plan compilation (the _Compiler walk + bytecode lowering + operator
@@ -2015,7 +2144,15 @@ def execute_native(plan, telemetry=None):
                     telemetry._reading["worker_gil_sites"] = instr_gil_worker_report()
                 instr_gil_set_enabled(False)
             _ts0 = _t.perf_counter_ns()
-            pool.shutdown(wait=True)
+            # Return the thread-local engine pool to idle for the NEXT query on
+            # this thread — do NOT shut it down (which would join its `dop` worker
+            # threads, ~0.7ms at dop=16, only to respawn them next query). By this
+            # point the driver has signalled FINISHED (normal path) or
+            # out_q.wait_finished() confirmed it unwound (abandon path), so
+            # eng.run() has returned and every worker task this query submitted is
+            # complete — the pool holds nothing and is safe to hand to the next
+            # query. The pool's workers are joined only when its owning thread (or
+            # the interpreter) exits, via CppThreadPool.__dealloc__.
             _shutdown_ns = _t.perf_counter_ns() - _ts0
             # Per-scan IO-pipeline diagnostics (GCS/HTTP request count, retries,
             # latency histogram, worker_blocked_ns) — the scan network visibility.

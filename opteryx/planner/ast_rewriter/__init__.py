@@ -190,18 +190,21 @@ def rewrite_json_accessors(node: Dict[str, Any]) -> Dict[str, Any]:
             "RLike",
             "NotRLike",
         ):
-            element = right_node[operator]["expr"]
-            comparitor = right_node[operator]["pattern"]
-
-            return {
-                "BinaryOp": {
-                    "left": {
-                        "BinaryOp": {"left": document, "op": accessor, "right": element},
-                    },
-                    "op": operator,
-                    "right": comparitor,
-                }
+            # Rebuild as the SAME {operator: {...}} shape sqlparser itself
+            # produces for an unmangled `x LIKE y` (see logical_planner_
+            # builders.BUILDERS: "ILike" -> pattern_match), just with the
+            # accessor woven into `expr`. This — not a generic BinaryOp —
+            # is required: `negated`/`any`/`escape_char` only survive
+            # through pattern_match()'s dedicated handling (e.g. `any`
+            # needs its pattern-tuple coerced to a typed ARRAY literal,
+            # which a bare {left,op,right} triple has no way to carry;
+            # "AnyOpILike" isn't even a registered operator to fall back
+            # on — LIKE ANY only exists inside pattern_match()).
+            like_node = dict(right_node[operator])
+            like_node["expr"] = {
+                "BinaryOp": {"left": document, "op": accessor, "right": like_node["expr"]}
             }
+            return {operator: like_node}
         elif operator in ("IsNull", "IsNotFalse", "IsNotNull", "IsNotTrue", "IsTrue", "IsFalse"):
             element = right_node[operator]["Value"]
 
@@ -220,19 +223,19 @@ def rewrite_json_accessors(node: Dict[str, Any]) -> Dict[str, Any]:
                 "RLike",
                 "NotRLike",
             ):
-                element = right_node
-                comparitor = document[operator]["expr"]
-                document = document[operator]["pattern"]
-
-                return {
-                    "BinaryOp": {
-                        "left": {
-                            "BinaryOp": {"left": document, "op": accessor, "right": element},
-                        },
-                        "op": operator,
-                        "right": comparitor,
-                    }
+                # Mirror of the branch above, for `a LIKE b -> c` (parsed as
+                # `(a LIKE b) -> c`, meaning `a LIKE (b -> c)`): rewire the
+                # accessor into `pattern` instead of `expr`, and preserve the
+                # rest of the Like node the same way. The prior version here
+                # reassembled a generic BinaryOp with `expr`/`pattern` swapped
+                # onto `left`/`right` — that was backwards (LIKE isn't
+                # symmetric: `x LIKE y` means "x matched against pattern y",
+                # not the reverse) on top of dropping `negated`/`any`.
+                like_node = dict(document[operator])
+                like_node["pattern"] = {
+                    "BinaryOp": {"left": like_node["pattern"], "op": accessor, "right": right_node}
                 }
+                return {operator: like_node}
 
     # Recursively process other types of nodes if needed
     for key, value in node.items():

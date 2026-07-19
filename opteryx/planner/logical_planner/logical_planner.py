@@ -598,6 +598,60 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _aggregates, _projection = decompose_aggregates(_aggregates, _projection)
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
 
+    # Resolve positional and aliased GROUP BY into the actual projection
+    # expression, mirroring the ORDER BY resolution below:
+    #
+    #  * a bare positive integer is a 1-based position into the SELECT list
+    #    (`GROUP BY 1` = the 1st output column). This is the de-facto convention
+    #    across the analytical-engine cohort — Dremio, Trino, DuckDB, ClickHouse
+    #    (ClickHouse flipped its default TO positional in 22.7). It is not in
+    #    SQL-92 (ordinals there are an ORDER BY feature), but the whole peer set
+    #    adopted it, so Opteryx matches. A position that lands on an aggregate is
+    #    rejected, same as those engines ("aggregates are not allowed in GROUP BY").
+    #  * a bare identifier matching an output alias refers to that projection
+    #    expression (Postgres/DuckDB precedence — the output alias wins over a
+    #    same-named source column).
+    #
+    # The substitution must happen HERE, before the binder's schema-pruning
+    # (opteryx/planner/binder/aggregate.py) runs — otherwise a computed
+    # expression's (e.g. CASE) inner columns get pruned from the schema as unused
+    # and a later ColumnNotFoundError follows.
+    if isinstance(_groups, list) and _groups:
+        _rewritten_groups = []
+        for _group_expr in _groups:
+            if _group_expr.node_type == NodeType.LITERAL:
+                _expr_cat = (
+                    _group_expr.type.category
+                    if isinstance(_group_expr.type, ColumnType)
+                    else _group_expr.type
+                )
+                if _expr_cat == LogicalCategory.INTEGER:
+                    _position = int(_group_expr.value)
+                    if _position < 1 or _position > len(_projection):
+                        raise UnsupportedSyntaxError(
+                            f"GROUP BY position {_position} is out of range — SELECT has {len(_projection)} column(s)."
+                        )
+                    _target = _projection[_position - 1]
+                    if get_all_nodes_of_type(_target, select_nodes=(NodeType.AGGREGATOR,)):
+                        raise UnsupportedSyntaxError(
+                            f"GROUP BY position {_position} refers to an aggregate in the SELECT "
+                            "list — aggregates cannot appear in GROUP BY."
+                        )
+                    _group_expr = _target
+            elif _group_expr.node_type == NodeType.IDENTIFIER:
+                _alias_match = next(
+                    (
+                        p
+                        for p in _projection
+                        if p.alias and p.alias.lower() == (_group_expr.source_column or "").lower()
+                    ),
+                    None,
+                )
+                if _alias_match is not None:
+                    _group_expr = _alias_match
+            _rewritten_groups.append(_group_expr)
+        _groups = _rewritten_groups
+
     if _window_specs:
         if _groups is not None and _groups != []:
             raise UnsupportedSyntaxError("Window functions cannot be combined with GROUP BY.")

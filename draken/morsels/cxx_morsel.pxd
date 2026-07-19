@@ -49,6 +49,10 @@ cdef extern from "morsels/cxx_morsel.h" nogil:
     # column is out of range, unowned, or has no child.
     const DrakenVector* cxx_column_child_vec(const CxxMorsel* m, uint32_t idx) noexcept
 
+    # Approximate in-memory footprint (bytes): sum of each column view's real owned
+    # payload. C++-substrate twin of Morsel.nbytes; see cxx_morsel.h. nogil.
+    size_t cxx_morsel_nbytes(const CxxMorsel* m) noexcept
+
 
 cdef extern from * nogil:
     """
