@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -51,6 +52,29 @@ int http_max_retries() {
         return e ? std::atoi(e) : 2;
     }();
     return v;
+}
+// get_many()'s per-host connection cap. HttpClient is thread_local (one per BS
+// worker thread, each with its own independent CURLM), so this bounds only
+// ONE thread's own batch — it does not by itself bound the cross-thread total
+// of simultaneous new connections to one host, which is the real constraint:
+// an isolated repro (std::thread + curl_multi, no opteryx code) on dev
+// hardware (18 cores) found 252 total concurrent new connections to one host
+// succeeded, 280 started failing (CURLE_COULDNT_CONNECT, os_errno=0 — vetoed
+// above the socket layer, not a real connect() failure) — consistent with a
+// local security/VPN network extension enforcing a per-host concurrent-
+// connection ceiling. Against the real (higher-fan-out, multi-batch) engine
+// workload the safe margin was narrower than that isolated model predicted:
+// a per-thread cap of 4 was flaky (occasional failures) and 3 was clean
+// across 7/7 runs. Default of 3 trades some throughput for a real safety
+// margin below the observed edge, given the ceiling isn't a clean, jitter-
+// free cutoff in practice; override for environments with a different (or
+// no) such ceiling.
+long http_max_host_connections(long fallback) {
+    static long v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_MAX_HOST_CONNECTIONS");
+        return e ? std::atol(e) : 3L;
+    }();
+    return std::min(v, fallback);
 }
 
 std::atomic<uint64_t> g_http_retries{0};
@@ -105,6 +129,30 @@ unsigned backoff_ms(int attempt) {
     if (base > 2000u) base = 2000u;
     std::uniform_int_distribution<unsigned> d(0, base);
     return d(rng);
+}
+
+// curl_easy_init()'s implicit auto-init (CURL_GLOBAL_ALL) is documented as not
+// thread-safe. tl_http_client() is thread_local, so multiple worker threads can
+// each construct their first HttpClient — and therefore reach curl_easy_init()/
+// curl_share_init() — at nearly the same moment. Racing the implicit init
+// corrupts libcurl's resolver/TLS-backend state and surfaces as sporadic
+// CURLE_COULDNT_CONNECT. std::call_once makes the real curl_global_init() run
+// exactly once, single-threaded, before any handle is created.
+void ensure_curl_global_init() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        CURLcode rc = curl_global_init(CURL_GLOBAL_ALL);
+        if (rc != CURLE_OK) {
+            throw std::runtime_error(
+                std::string("curl_global_init() failed: ") + curl_easy_strerror(rc));
+        }
+    });
+    // No matching curl_global_cleanup(): other threads' thread_local HttpClient
+    // instances (and their live CURLSH/easy handles) have no defined shutdown
+    // order relative to each other, so calling global cleanup while any of them
+    // could still be mid-transfer is unsafe. The process exiting reclaims the
+    // resources; this trades a harmless exit-time leak for never tearing down
+    // libcurl out from under a live transfer.
 }
 
 }  // namespace
@@ -238,6 +286,8 @@ HttpClient::HttpClient(int max_connections, long timeout_ms)
       timeout_ms_(timeout_ms),
       user_agent_("opteryx/1.0"),
       ca_bundle_(find_ca_bundle()) {
+
+    ensure_curl_global_init();
 
     CURLSH* share = curl_share_init();
     if (!share) throw std::runtime_error("curl_share_init() failed");
@@ -388,6 +438,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         ResponseBuffer buf;
         CURLcode       res      = CURLE_OK;
         long           http_code = 0;
+        long           os_errno  = 0;   // DEBUG: raw connect()/socket() errno, see CURLINFO_OS_ERRNO
     };
     std::vector<RequestCtx> ctx(n);
 
@@ -401,7 +452,8 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
         CURLM* multi = curl_multi_init();
         if (!multi) throw std::runtime_error("get_many: curl_multi_init() failed");
-        curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, (long)max_connections_);
+        long host_cap = http_max_host_connections((long)max_connections_);
+        curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, host_cap);
         curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
 
         auto cleanup = [&]() {
@@ -475,6 +527,8 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 ctx[i].res = msg->data.result;
                 ctx[i].http_code = 0;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &ctx[i].http_code);
+                ctx[i].os_errno = 0;
+                curl_easy_getinfo(msg->easy_handle, CURLINFO_OS_ERRNO, &ctx[i].os_errno);
             }
         }
         cleanup();
@@ -514,7 +568,9 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         if (attempt >= max_retries) {
             size_t i = retry_next.front();
             std::string cause = (ctx[i].res != CURLE_OK)
-                ? std::string("CURL error: ") + curl_easy_strerror(ctx[i].res)
+                ? std::string("CURL error: ") + curl_easy_strerror(ctx[i].res) +
+                      " [os_errno=" + std::to_string(ctx[i].os_errno) + " (" +
+                      std::strerror(static_cast<int>(ctx[i].os_errno)) + ")]"
                 : std::string("HTTP ") + std::to_string(ctx[i].http_code);
             throw HttpError(
                 "get_many: exhausted " + std::to_string(max_retries) + " retries (" +
