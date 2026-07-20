@@ -25,7 +25,7 @@ with AVX2/NEON SIMD acceleration for uint8 codes).
 """
 
 from typing import Generator, Optional
-from opteryx.compiled.morsel_ops.sort import morsel_sort
+from draken.morsels.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append

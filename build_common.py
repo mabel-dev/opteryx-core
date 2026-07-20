@@ -588,6 +588,22 @@ def draken_rugo_extensions(parquet_created_by):
         ),
         make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
         make_draken_extension("morsels.morsel", "morsels/_morsel_shim.pyx"),
+        # Permutation-based Morsel sort (LSD radix + vergesort pre-pass). A pure
+        # Draken data-structure primitive: takes a Morsel, returns a sort
+        # permutation. Both wheels build it — opteryx's SortNode carries it to the
+        # engine, and it is available to the standalone rugo wheel with no opteryx
+        # dependency. SQL ORDER BY semantics stay in opteryx's SortNode; only the
+        # primitive lives here. Depends on the vendored draken/core/vergesort.h.
+        make_draken_extension(
+            "morsels.sort",
+            "morsels/sort.pyx",
+            depends=[
+                "draken/core/buffers.h",
+                "draken/core/vector_alloc.h",
+                "draken/core/string_slot.h",
+                "draken/core/vergesort.h",
+            ],
+        ),
     ]
     # Append shim bridge link args to each shim extension
     for _ext in shim_extensions:

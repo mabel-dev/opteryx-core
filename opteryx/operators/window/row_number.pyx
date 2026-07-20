@@ -46,7 +46,7 @@ from libc.string cimport memcpy
 
 from draken.vectors.vector cimport from_decoded
 
-from opteryx.compiled.morsel_ops.sort import morsel_sort
+from draken.morsels.sort import morsel_sort
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 

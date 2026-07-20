@@ -9,7 +9,7 @@
 # cython: optimize.unpack_method_calls=True
 # cython: freethreading_compatible=True
 
-"""opteryx.compiled.morsel_ops.sort
+"""draken.morsels.sort
 
 Permutation-based sort for Draken Morsels.
 

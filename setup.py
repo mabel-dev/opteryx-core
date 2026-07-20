@@ -699,18 +699,8 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    Extension(
-        "opteryx.compiled.morsel_ops.sort",
-        sources=[
-            "opteryx/compiled/morsel_ops/sort.pyx",
-            "src/cpp/simd_remap.cpp",
-            "src/cpp/simd_env.cpp",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
+    # NOTE: morsel_ops.sort moved to draken.morsels.sort (a Draken core primitive
+    # built by build_common.draken_rugo_extensions, shipped in both wheels).
     Extension(
         "opteryx.compiled.morsel_ops.null_filter",
         sources=["opteryx/compiled/morsel_ops/null_filter.pyx"],
@@ -1305,7 +1295,6 @@ setup(
         # DRAKEN_BUILD=1 builds everything except extensions that still
         # reference old-draken typed-vector cimports (Gap 2):
         #   - opteryx.operators._operators (whole operators bundle)
-        #   - opteryx.compiled.morsel_ops.sort (cimports StringVector)
         (
             [
                 e
@@ -1313,7 +1302,6 @@ setup(
                 if e.name
                 not in {
                     "opteryx.operators._operators",
-                    "opteryx.compiled.morsel_ops.sort",
                     "opteryx.compiled.structures.column_deserializer",
                     "opteryx.compiled.structures.bloom_filter",
                 }
