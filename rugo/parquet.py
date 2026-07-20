@@ -176,8 +176,6 @@ def _row_filter(morsel, predicates: Sequence[Predicate]):
     Multi-predicate masks are reduced with bool_and(), also native.
     Columns absent from the morsel are skipped (fail-open).
     """
-    from draken.vectors import Vector
-
     col_names = list(morsel.column_names)
     mask = None
 
@@ -197,7 +195,7 @@ def _row_filter(morsel, predicates: Sequence[Predicate]):
         if mask is None:
             mask = pred_mask
         else:
-            mask = Vector(mask._nb.bool_and(pred_mask._nb))
+            mask = mask.and_vector(pred_mask)
 
     if mask is None:
         return morsel

@@ -259,16 +259,19 @@ static inline size_t draken_type_fixed_itemsize(DrakenType t) {
 // Approximate in-memory footprint (bytes) of ONE vector's owned payload: the
 // data buffer (dedup-aware — sized by data_length, the physical value count, so
 // dict/constant vectors are not counted at their logical row count), the string
-// arena for the string family, and the validity bitmap. Intended as an honest
-// memory-pressure signal (e.g. a result-buffer flush threshold), replacing the
-// old flat rows×8 guess that grossly undercounted variable-length strings.
+// arena for the string family, the validity bitmap, and — for dict vectors — the
+// owned uint32 code array. Intended as an honest memory-pressure signal (e.g. a
+// result-buffer flush threshold), replacing the old flat rows×8 guess that
+// grossly undercounted variable-length strings.
 //
-// The `selection` array is deliberately EXCLUDED: for dense/constant vectors it
-// is a shared global buffer (draken_identity_sel / draken_zero_sel — not owned by
-// the vector), so counting it would both over-count shared memory and require
-// shape discrimination. Dict codes (owned, length×4) are therefore under-counted;
-// the data/arena terms dominate, so this stays a close, deliberately-conservative
-// estimate rather than an exact allocator figure.
+// The `selection` array is counted ONLY for dict vectors, whose codes are
+// per-vector-owned (length×4). Dense/constant vectors point `selection` at a
+// shared global (draken_identity_sel / draken_zero_sel — not owned), so counting
+// it there would over-count shared memory; draken_is_dict excludes both cleanly.
+// Counting dict codes is not optional cosmetic precision: for fan-out dict
+// results the codes DOMINATE the data/arena terms (a 10%-NDV int64 result is
+// ~0.84MB data vs ~4.19MB codes), so omitting them undercounted footprint ~5x
+// and deferred spill/flush past the safe point.
 //
 // KNOWN LIMITATION — DRAKEN_ARRAY: an array's child values hang off the owning
 // VectorOwner, not off this DrakenVector, so they are unreachable from this
@@ -302,6 +305,16 @@ static inline size_t draken_vector_nbytes(const DrakenVector* v) {
     }
     if (v->validity != NULL)
         bytes += ((size_t)v->length + 7u) >> 3;  // 1 bit per logical row
+    // Owned dict codes: a dict vector's `selection` is a per-vector-owned
+    // uint32 code array (length entries). Dense/constant vectors instead point
+    // `selection` at a shared global (draken_identity_sel / draken_zero_sel),
+    // which is NOT owned and must not be counted — draken_is_dict excludes both
+    // (data_length == length and data_length == 1 respectively). Counting the
+    // codes matters: for fan-out dict results the codes DOMINATE (e.g. a 10%-NDV
+    // int64 result is ~0.84MB data vs ~4.19MB codes), so omitting them undercounts
+    // real footprint ~5x and defers spill/flush past the safe point.
+    if (draken_is_dict(v))
+        bytes += (size_t)v->length * sizeof(uint32_t);
     return bytes;
 }
 

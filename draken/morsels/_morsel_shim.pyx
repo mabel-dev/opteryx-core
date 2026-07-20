@@ -16,8 +16,15 @@ from draken.morsels.morsel cimport Morsel
 from draken.morsels.cxx_morsel cimport (
     CxxMorsel, cxx_morsel_raw_ptr,
     cxx_morsel_shallow_copy, cxx_morsel_to_handle, cxx_morsel_delete,
-    cxx_select_c,
+    cxx_select_c, cxx_take_c,
 )
+
+# Typed-index fast path: producers (morsel_sort, join align) hand `take`/`filter`
+# an array('i') (int32). Gathering straight off its buffer via the nogil C-ABI
+# (cxx_take_c) skips the Python-list round-trip the nanobind `.take(list)` path
+# forces (measured ~7x on the take call for 1M rows). `array` is the Python type;
+# explicit isinstance/typecode dispatch keeps CLAUDE.md §9 (no try/except flow).
+from array import array as _ArrayType
 from draken.vectors.vector cimport Vector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_INT64
 from draken.core.buffers cimport draken_vector_nbytes
@@ -118,6 +125,17 @@ cdef Morsel cxx_to_morsel(shared_ptr[CxxMorsel] sp):
     cdef object handle = <object>raw                       # Cython incref -> 2
     _morsel_decref(raw)                                    # balance -> 1
     return Morsel.from_cxx(handle)
+
+
+cdef object _cxx_owned_to_handle(CxxMorsel* out):
+    """Wrap an OWNED CxxMorsel* (from a cxx_*_c transform) into a nanobind handle.
+    The shared_ptr adopts `out` (freed on release, same idiom as cxx_select_sp);
+    cxx_morsel_to_handle shallow-copies into the handle."""
+    cdef shared_ptr[CxxMorsel] sp = shared_ptr[CxxMorsel](out)
+    cdef PyObject* raw = cxx_morsel_to_handle(sp.get())   # NEW ref
+    cdef object handle = <object>raw                       # Cython incref -> 2
+    _morsel_decref(raw)                                    # balance -> 1
+    return handle
 
 
 cdef shared_ptr[CxxMorsel] cxx_morsel_from_vectors_sp(list vectors, list names):
@@ -848,9 +866,15 @@ cdef class Morsel:
     cdef void _take_inplace(self, int32_t[::1] indices):
         """Filter all columns to the given row indices, in place. Native gather
         straight off the typed memoryview — no boxed index list."""
-        if self._cxx is not None:
-            # Cxx-native: rebuild the substrate from the taken rows in place.
-            self._set_cxx(self._cxx.take(list(indices)))
+        cdef uint32_t ni2
+        cdef CxxMorsel* out
+        if self._cxx_ptr is not NULL:
+            # Cxx-native: gather via the nogil C-ABI straight off the typed
+            # memoryview — no Python-list round-trip through nanobind `.take`.
+            ni2 = <uint32_t>indices.shape[0]
+            with nogil:
+                out = cxx_take_c(self._cxx_ptr, &indices[0] if ni2 > 0 else NULL, ni2)
+            self._set_cxx(_cxx_owned_to_handle(out))
             return
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
@@ -956,6 +980,19 @@ cdef class Morsel:
         return result
 
     def take(self, indices):
+        cdef int32_t[::1] iv
+        cdef uint32_t nfast
+        cdef CxxMorsel* out
+        if self._cxx_ptr is not NULL and isinstance(indices, _ArrayType) \
+                and (<object>indices).typecode == "i":
+            # Typed fast path: gather via the nogil C-ABI straight off the int32
+            # buffer (morsel_sort / join align output) — skips the nanobind
+            # `.take(list)` round-trip. See the _ArrayType import note above.
+            iv = indices
+            nfast = <uint32_t>iv.shape[0]
+            with nogil:
+                out = cxx_take_c(self._cxx_ptr, &iv[0] if nfast > 0 else NULL, nfast)
+            return cxx_to_morsel(shared_ptr[CxxMorsel](out))
         if self._cxx is not None:
             # Cxx-native: stay Cxx-backed (no materialization).
             return Morsel.from_cxx(self._cxx.take(list(indices)))
@@ -1112,6 +1149,10 @@ cdef class Morsel:
         return result
 
     def copy(self, columns=None, mask=None):
+        cdef int32_t[::1] iv
+        cdef uint32_t nfast
+        cdef CxxMorsel* out
+        cdef const CxxMorsel* p
         if self._cxx is not None:
             # Cxx-native: project (preserving morsel column order) and/or gather
             # by index off the substrate — no materialization. CxxMorsel is
@@ -1123,7 +1164,17 @@ cdef class Morsel:
                     c.encode("utf-8") if isinstance(c, str) else c for c in columns)
                 cxx = cxx.select([nm for nm in cxx_names if nm in col_set])
             if mask is not None:
-                cxx = cxx.take(list(mask))
+                if isinstance(mask, _ArrayType) and (<object>mask).typecode == "i":
+                    # Typed fast path: gather off the int32 buffer via the nogil
+                    # C-ABI — no Python-list round-trip through nanobind `.take`.
+                    iv = mask
+                    nfast = <uint32_t>iv.shape[0]
+                    p = cxx_morsel_raw_ptr(<PyObject*>cxx)
+                    with nogil:
+                        out = cxx_take_c(p, &iv[0] if nfast > 0 else NULL, nfast)
+                    cxx = _cxx_owned_to_handle(out)
+                else:
+                    cxx = cxx.take(list(mask))
             return Morsel.from_cxx(cxx)
         cdef Morsel result = _make_morsel()
         cdef Py_ssize_t n = self._num_columns()
