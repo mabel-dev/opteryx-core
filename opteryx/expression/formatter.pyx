@@ -48,6 +48,57 @@ cpdef str _format_interval(value):
     return " ".join(parts)
 
 
+cpdef str _format_interval_iso8601(value):
+    """Render an interval (months, microseconds) as an ISO-8601 duration.
+
+    Mirrors iso8601_duration_emit in draken/ops/sql_temporal_format.h byte-for-byte
+    (used for CAST(<interval literal> AS VARCHAR) plan-time folding — the native
+    kernel handles the column case; this is the ONLY other place this format is
+    produced, so keep both in sync deliberately if either changes).
+    """
+    months, microseconds = value
+    negative = months < 0 or microseconds < 0
+    am = -months if months < 0 else months
+    au = -microseconds if microseconds < 0 else microseconds
+
+    years, months_rem = divmod(am, 12)
+    days, rem = divmod(au, 86400000000)
+    hours, rem = divmod(rem, 3600000000)
+    minutes, rem = divmod(rem, 60000000)
+    seconds, frac = divmod(rem, 1000000)
+
+    cdef list parts = ["-"] if negative else []
+    parts.append("P")
+    any_part = False
+    if years > 0:
+        parts.append(f"{years}Y")
+        any_part = True
+    if months_rem > 0:
+        parts.append(f"{months_rem}M")
+        any_part = True
+    if days > 0:
+        parts.append(f"{days}D")
+        any_part = True
+    has_time = hours > 0 or minutes > 0 or seconds > 0 or frac > 0
+    if has_time:
+        parts.append("T")
+        if hours > 0:
+            parts.append(f"{hours}H")
+            any_part = True
+        if minutes > 0:
+            parts.append(f"{minutes}M")
+            any_part = True
+        if seconds > 0 or frac > 0:
+            if frac > 0:
+                parts.append(f"{seconds}.{frac:06d}S")
+            else:
+                parts.append(f"{seconds}S")
+            any_part = True
+    if not any_part:
+        parts.append("T0S")
+    return "".join(parts)
+
+
 def format_expression(root, qualify=False, cache=None):
     """Render an expression tree as a SQL-like string.
 

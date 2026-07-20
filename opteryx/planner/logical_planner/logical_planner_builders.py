@@ -622,6 +622,29 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     if kind in {"TryCast", "SafeCast"}:
         normalized_type = "TRY_" + normalized_type
 
+    # CAST ... FORMAT '<pattern>' — the sqlparser AST already parses this (BigQuery/
+    # Snowflake syntax) into branch["format"]; only a literal string pattern is
+    # supported (no `AT TIME ZONE`, no computed pattern — the native kernel bakes
+    # the pattern into a bind-time context struct, see compiled_expression.pyx).
+    raw_format = branch.get("format")
+    format_literal_node = None
+    if raw_format is not None:
+        _stripped_type = normalized_type.replace("TRY_", "")
+        if _stripped_type not in ("VARCHAR", "BLOB", "TIMESTAMP", "DATE"):
+            raise UnsupportedSyntaxError(
+                f"CAST ... FORMAT is only supported for VARCHAR/BLOB/TIMESTAMP/DATE targets, not {_stripped_type}."
+            )
+        if "Value" not in raw_format:
+            raise UnsupportedSyntaxError("CAST ... FORMAT does not support `AT TIME ZONE`.")
+        _fmt_value = raw_format["Value"]["value"]
+        if "SingleQuotedString" in _fmt_value:
+            _fmt_str = _fmt_value["SingleQuotedString"]
+        elif "DoubleQuotedString" in _fmt_value:
+            _fmt_str = _fmt_value["DoubleQuotedString"]
+        else:
+            raise UnsupportedSyntaxError("CAST ... FORMAT requires a string literal pattern.")
+        format_literal_node = build_literal_node(_fmt_str)
+
     # Handle literal value casting at compile time.
     # NVARCHAR is routed through the runtime CAST node instead, so literals go
     # through the same UTF-8-validating kernel and materialise as a true
@@ -631,9 +654,14 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     # CAST(<lit> AS DECIMAL(p,s)) would silently drop (p,s) and skip quantization.
     # The runtime CAST node carries `parameters=[precision, scale]` and threads them
     # through _build_decimal_closure (bare DECIMAL → DECIMAL(18,6), Decision F).
-    if source_expr.node_type == NodeType.LITERAL and normalized_type.replace("TRY_", "") not in (
-        "NVARCHAR",
-        "DECIMAL",
+    # A FORMAT-bearing cast is likewise never folded: the pattern semantics live
+    # entirely in the native kernel (sql_temporal_format.h) — folding would mean a
+    # second, Python-side implementation of the same token engine (CLAUDE.md §3/§11
+    # bans duplicated logic between Python and native).
+    if (
+        source_expr.node_type == NodeType.LITERAL
+        and normalized_type.replace("TRY_", "") not in ("NVARCHAR", "DECIMAL")
+        and format_literal_node is None
     ):
         return _cast_literal_value(source_expr, normalized_type, kind, alias, cast_parameters)
 
@@ -644,6 +672,7 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
         left=source_expr,
         value=normalized_type.upper(),
         parameters=cast_parameters,
+        format=format_literal_node,
         alias=alias,
     )
 
@@ -729,6 +758,7 @@ def _normalize_cast_type(data_type: str) -> str:
     # Map of substring patterns to normalized types
     type_mappings = {
         "timestamp": "TIMESTAMP",
+        "time": "TIME",
         "date": "DATE",
         "varchar": "VARCHAR",
         "decimal": "DECIMAL",
@@ -739,6 +769,7 @@ def _normalize_cast_type(data_type: str) -> str:
         "blob": "BLOB",
         "array": "ARRAY",
         "vector": "VECTOR",
+        "interval": "INTERVAL",
     }
 
     # Check type mappings
@@ -909,7 +940,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             y = yr + (1 if m <= 2 else 0)
             hh, rem = divmod(tod, 3600)
             mm, ss = divmod(rem, 60)
-            parsed_value = f"{y:04d}-{m:02d}-{d:02d} {hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}+0000"
+            parsed_value = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}"
             return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
         if _node_cat == LogicalCategory.DATE and isinstance(literal_node.value, int):
             days = literal_node.value
@@ -924,6 +955,18 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             m = mp + 3 if mp < 10 else mp - 9
             y = yr + (1 if m <= 2 else 0)
             parsed_value = f"{y:04d}-{m:02d}-{d:02d}"
+            return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+        if _node_cat == LogicalCategory.TIME and isinstance(literal_node.value, datetime.time):
+            # Matches draken_cast_time_to_string's fixed "HH:MM:SS.ffffff" format
+            # (the runtime kernel) rather than Python's str(time), which omits
+            # the fractional part when microsecond == 0.
+            t = literal_node.value
+            parsed_value = f"{t.hour:02d}:{t.minute:02d}:{t.second:02d}.{t.microsecond:06d}"
+            return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+        if _node_cat == LogicalCategory.INTERVAL and isinstance(literal_node.value, tuple):
+            from opteryx.expression.formatter import _format_interval_iso8601
+
+            parsed_value = _format_interval_iso8601(literal_node.value)
             return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
 
     # Attempt to parse and cast the literal value

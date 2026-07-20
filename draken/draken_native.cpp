@@ -2201,6 +2201,16 @@ static VectorOwner vecresult_to_owner(VecResult r) {
         lt.offset_minutes = 0;
         owner.logical_type = logical_type_intern(lt);
     }
+    // TIME32/TIME64 results (Phase 9c cast kernels): mirrors the TIMESTAMP64
+    // block above. Both TIME tiers are parameterized-physical types — a result
+    // with no LogicalType attached would fail downstream (to_pylist etc.).
+    if ((r.type == DRAKEN_TIME32 || r.type == DRAKEN_TIME64) && r.ts_unit != 0xFFu) {
+        LogicalType lt;
+        lt.kind           = LogicalKind::TIME;
+        lt.unit           = static_cast<TimestampUnit>(r.ts_unit);
+        lt.offset_minutes = 0;
+        owner.logical_type = logical_type_intern(lt);
+    }
     // S-A.2: attach the DECIMAL precision/scale descriptor when the kernel set one
     // (dec_precision > 0). Mirrors the timestamp block; the arena DV*/VecResult
     // carry no LogicalType, so DECIMAL results would otherwise fail to_pylist.

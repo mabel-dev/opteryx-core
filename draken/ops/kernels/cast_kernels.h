@@ -46,10 +46,36 @@ VecResult draken_cast_float64_to_bool(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_decimal_to_string(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_decimal128_to_string(void* ctx, const DrakenVector* vector);
 
+// → VARBINARY (BLOB) thin retag wrappers: same formatted bytes as the `_to_string`
+// twin above, with the result retagged VARBINARY (VARCHAR and VARBINARY share the
+// identical DrakenStringArena layout — buffers.h §11). Fixes a prior mistagging
+// bug where numeric/bool/decimal -> VARBINARY casts dispatched straight to the
+// `_to_string` kernel and silently came back tagged VARCHAR.
+VecResult draken_cast_int64_to_blob(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_blob(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float64_to_blob(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_blob(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_blob(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_blob(void* ctx, const DrakenVector* vector);
+
 VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* vector);
+
+// String-family retag: VARCHAR/NVARCHAR/VARBINARY -> VARCHAR or -> VARBINARY.
+// All three share the exact DrakenStringArena byte layout (buffers.h), so this
+// is a byte-identical copy that only changes the type tag — no validation, no
+// reformatting (NVARCHAR source bytes are always valid arbitrary bytes; VARCHAR/
+// VARBINARY source bytes are passed through unchecked, matching the documented
+// "undefined behaviour for non-ASCII VARCHAR" contract).
+VecResult draken_cast_string_to_varchar(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_blob(void* ctx, const DrakenVector* vector);
+
+// -> NVARCHAR: validates UTF-8 per row (RAISES on the first invalid row), then
+// retags via string_retag_core. Plain CAST only — TRY_CAST stays on the
+// Python closure path (`_c_native_cast` returns None for safe=True).
+VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* vector);
 
 VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* vector);
@@ -96,6 +122,27 @@ VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_timestamp_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* vector);
+
+// VARCHAR/NVARCHAR/VARBINARY -> TIMESTAMP64. ctx (format_ctx*) null/fmt_len==0 ->
+// strict ISO-8601 parse; ctx->fmt_len>0 -> FORMAT-driven parse (CAST ... FORMAT).
+// Always produces microsecond-unit TIMESTAMP64.
+VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* vector);
+
+// INTERVAL -> VARCHAR. ctx (format_ctx*) null/fmt_len==0 -> ISO-8601 duration
+// default ("P1DT2H30M"); ctx->fmt_len>0 -> FORMAT tokens as duration magnitudes.
+VecResult draken_cast_interval_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_interval_to_blob(void* ctx, const DrakenVector* vector);
+
+// VARCHAR/NVARCHAR/VARBINARY -> TIME64 (int64 microseconds-since-midnight).
+// Parses "HH:MM:SS[.ffffff]"; raises on malformed input.
+VecResult draken_cast_string_to_time64(void* ctx, const DrakenVector* vector);
+// TIME64 -> VARCHAR: "HH:MM:SS.ffffff" (15 chars, extern).
+VecResult draken_cast_time_to_string(void* ctx, const DrakenVector* vector);
+
+// → VARBINARY (BLOB) thin retag wrappers — see the matching comment near the
+// numeric _to_blob declarations above.
+VecResult draken_cast_date_to_blob(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_timestamp_to_blob(void* ctx, const DrakenVector* vector);
 
 /* ============================================================================
  * Dispatch Helpers — C implementations of cast_to_* closures.

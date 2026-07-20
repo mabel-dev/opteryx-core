@@ -1,13 +1,17 @@
 #include "ops/kernels/cast_kernels.h"
 #include "ops/kernels/error_handling.h"
+#include "ops/kernels/kernel_context.h"
 #include "ops/kernels/result_helpers.h"
+#include "ops/sql_temporal_format.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
 #include "ops/float_ops.h"   // fp_canon (NaN/-0.0 canonicalization)
 #include "fast_float.h"      // string → double parse (vendored)
+#include "utf8.h"            // utf8nvalid (vendored) — CAST(... AS NVARCHAR) validation
 #include <cstring>
 #include <system_error>
+#include <string>
 #include <vector>            // liveness mask for compression-aware raising casts
 
 /**
@@ -347,6 +351,20 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
             return draken_error_sentinel_fmt("cast string->date32: expected string, got %d", v->type);
 
+        const auto* c = static_cast<const format_ctx*>(ctx);
+        const bool use_fmt = c != nullptr && c->fmt_len > 0;
+        std::vector<SqlToken> prog;
+        if (use_fmt) {
+            const std::string fmt(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
+            size_t max_len = 0;
+            const char* bad_run = nullptr;
+            uint32_t bad_run_len = 0;
+            if (!sql_compile(fmt.c_str(), fmt.size(), &prog, &max_len, &bad_run, &bad_run_len))
+                return draken_error_sentinel_fmt(
+                    "CAST ... FORMAT: unrecognized format token '%.*s'",
+                    (int)(bad_run_len < 16u ? bad_run_len : 16u), bad_run);
+        }
+
         // Compression-aware with liveness (see string->int64).
         const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
         const uint32_t k = v->data_length;
@@ -364,12 +382,25 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
             const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
             const uint32_t len = str_length(slot);
 
-            const int32_t days = parse_iso_date(s, len);
-            if (days == INT32_MIN) {
-                draken_free(out);
-                return draken_error_sentinel_fmt(
-                    "Cannot cast string to DATE: expected YYYY-MM-DD, got %.*s",
-                    (int)(len < 20u ? len : 20u), s);
+            int32_t days;
+            if (use_fmt) {
+                int year, month, day, hour, minute, second, usec;
+                if (!sql_parse_exec(prog, reinterpret_cast<const char*>(s), len,
+                                     &year, &month, &day, &hour, &minute, &second, &usec)) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "Cannot cast string to DATE: got %.*s",
+                        (int)(len < 20u ? len : 20u), s);
+                }
+                days = civil_to_days(year, month, day);
+            } else {
+                days = parse_iso_date(s, len);
+                if (days == INT32_MIN) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "Cannot cast string to DATE: expected YYYY-MM-DD, got %.*s",
+                        (int)(len < 20u ? len : 20u), s);
+                }
             }
             out[j] = days;
         }
@@ -378,6 +409,81 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         r.data = out; r.type = DRAKEN_DATE32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
         return r;
+    });
+}
+
+// String-family retag core: VARCHAR/NVARCHAR/VARBINARY -> `target` (VARCHAR or
+// VARBINARY only — casting TO NVARCHAR needs UTF-8 validation and is not this
+// kernel's job). All three share the exact DrakenStringArena layout (buffers.h
+// §11), so this is a plain byte copy of the K physical slots + arena bytes into
+// a fresh block with the new type tag — no reformatting, no validation.
+static VecResult string_retag_core(const DrakenVector* v, DrakenType target) {
+    if (!v) return draken_error_sentinel("Input vector is null");
+    if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+        return draken_error_sentinel_fmt("cast string retag: expected string, got %d", v->type);
+
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+    const uint32_t k = v->data_length;
+    const size_t arena_len = sa->arena_used;
+
+    DrakenStringSlot* slots;
+    uint8_t* arena;
+    uint8_t* vunused;
+    uint8_t* block = vecresult_string_block_alloc(k, arena_len, 0, &slots, &arena, &vunused);
+    if (!block) return draken_error_sentinel("Allocation failed");
+    (void)vunused;
+
+    if (k > 0u) std::memcpy(slots, sa->slots, static_cast<size_t>(k) * sizeof(DrakenStringSlot));
+    if (arena_len > 0u && sa->arena) std::memcpy(arena, sa->arena, arena_len);
+
+    VecResult r = vecresult_from_string_block(block, k, arena_len, 0, target);
+    kernel_preserve_shape(r, v);
+    return r;
+}
+
+VecResult draken_cast_string_to_varchar(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return string_retag_core(v, DRAKEN_VARCHAR); });
+}
+
+VecResult draken_cast_string_to_blob(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return string_retag_core(v, DRAKEN_VARBINARY); });
+}
+
+// VARCHAR/VARBINARY -> NVARCHAR: validate UTF-8 per row, then retag. NVARCHAR
+// source is already-valid UTF-8 (invariant of the type), so it skips straight
+// to string_retag_core — no re-validation. VARCHAR/VARBINARY sources are
+// validated: only the K PHYSICAL values referenced by a non-null logical row
+// are checked (a dict value used solely by null rows must not raise). This is
+// a plain CAST kernel — RAISES on the first invalid row; TRY_CAST never
+// reaches here (`_c_native_cast` returns None for safe=True and keeps the
+// Python closure, matching every other cast kernel's TRY_CAST posture).
+VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt("cast string->nvarchar: expected string, got %d", v->type);
+        if (v->type == DRAKEN_NVARCHAR)
+            return string_retag_core(v, DRAKEN_NVARCHAR);
+
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        const uint32_t n = v->length;
+
+        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+
+        for (uint32_t j = 0u; j < k; ++j) {
+            if (!live[j]) continue;
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint32_t len = str_length(slot);
+            const uint8_t* bytes = str_data(slot, sa->arena);
+            if (len != 0u &&
+                    utf8nvalid(reinterpret_cast<const utf8_int8_t*>(bytes), len) != nullptr) {
+                return draken_error_sentinel("CAST to NVARCHAR: input is not valid UTF-8");
+            }
+        }
+        return string_retag_core(v, DRAKEN_NVARCHAR);
     });
 }
 

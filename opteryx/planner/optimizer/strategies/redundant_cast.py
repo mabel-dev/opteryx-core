@@ -89,6 +89,13 @@ def _eliminate_redundant_casts(node, telemetry, in_predicate=False):
     if operand is None or operand.schema_column is None or node.schema_column is None:
         return node
 
+    # A FORMAT-bearing CAST is never a no-op even when source/target ColumnType
+    # match — the FORMAT still drives a real parse/format kernel (or, for an
+    # unsupported pairing, a deliberate fail-loud error at compile time). Eliding
+    # the node here would silently swallow both.
+    if getattr(node, "format", None) is not None:
+        return node
+
     source_type = operand.schema_column.column_type
     target_type = node.schema_column.column_type
     if source_type is None or target_type is None or source_type != target_type:

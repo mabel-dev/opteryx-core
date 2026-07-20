@@ -7,6 +7,7 @@ return the coerced value. Used by CAST, literal coercion, and array-element cast
 
 import datetime
 import decimal
+import re
 from typing import Any, Callable
 
 from opteryx.types.logical_type import LogicalCategory
@@ -14,11 +15,20 @@ from opteryx.types.logical_type import LogicalCategory
 __all__ = ["parse_value", "parser_for"]
 
 
+_BOOLEAN_TRUE_STRINGS = ("true", "1", "yes", "on")
+_BOOLEAN_FALSE_STRINGS = ("false", "0", "no", "off")
+
+
 def _parse_boolean(value):
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.lower() in ("true", "1", "yes", "on")
+        lowered = value.strip().lower()
+        if lowered in _BOOLEAN_TRUE_STRINGS:
+            return True
+        if lowered in _BOOLEAN_FALSE_STRINGS:
+            return False
+        raise ValueError(f"Cannot parse {value!r} as boolean")
     return bool(value)
 
 
@@ -88,8 +98,21 @@ def _parse_time(value):
     if isinstance(value, str):
         parts = value.strip().split(":")
         if len(parts) >= 2:
-            return datetime.time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+            second = 0
+            microsecond = 0
+            if len(parts) > 2:
+                sec_str, dot, frac_str = parts[2].partition(".")
+                second = int(sec_str)
+                if dot:
+                    microsecond = int((frac_str + "000000")[:6])
+            return datetime.time(int(parts[0]), int(parts[1]), second, microsecond)
     raise ValueError(f"Cannot parse {value} as time")
+
+
+_TIMESTAMP_RE = re.compile(
+    r"^(?P<base>\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?)"
+    r"(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
+)
 
 
 def _parse_timestamp(value):
@@ -98,13 +121,19 @@ def _parse_timestamp(value):
     if isinstance(value, datetime.date):
         return datetime.datetime.combine(value, datetime.time())
     if isinstance(value, str):
-        value_str = value.strip().replace("T", " ")
-        try:
-            if "." in value_str:
-                return datetime.datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S.%f")
-            return datetime.datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return datetime.datetime.strptime(value_str.split(" ")[0], "%Y-%m-%d")
+        value_str = value.strip()
+        match = _TIMESTAMP_RE.match(value_str)
+        if match is None:
+            raise ValueError(f"Cannot parse {value} as timestamp")
+        # A timezone offset, if present, is discarded — timestamps are stored
+        # naive (see LogicalCategory.TIMESTAMP docs); the wall-clock time as
+        # written is kept, only the offset is dropped.
+        base = match.group("base").replace("T", " ")
+        if "." in base:
+            return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M:%S.%f")
+        if " " in base:
+            return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M:%S")
+        return datetime.datetime.strptime(base, "%Y-%m-%d")
     raise ValueError(f"Cannot parse {value} as timestamp")
 
 

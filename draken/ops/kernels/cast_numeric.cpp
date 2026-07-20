@@ -498,6 +498,31 @@ VecResult draken_cast_decimal128_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({ return decimal_to_string_core(ctx, v, /*is128=*/true); });
 }
 
+// → VARBINARY (BLOB) thin wrappers. A numeric/bool/decimal-to-string cast
+// formats the exact same ASCII bytes regardless of whether the SQL target is
+// VARCHAR or VARBINARY — VARCHAR and VARBINARY share the identical
+// DrakenStringArena layout (buffers.h §11), differing only in the type tag. So
+// each wrapper below reuses the already-correct `_to_string` kernel body and
+// retags a successful result, rather than duplicating the formatting logic.
+// (Prior to this, `_c_native_cast` routed numeric->VARBINARY casts straight to
+// the `_to_string` kernel, which mistagged the result as VARCHAR — a silent
+// wrong-type bug, not just a missing-kernel gap.)
+#define DRAKEN_CAST_TO_BLOB(fn_blob, fn_string)                    \
+    VecResult fn_blob(void* ctx, const DrakenVector* v) {          \
+        VecResult r = fn_string(ctx, v);                           \
+        if (r.data != nullptr) r.type = DRAKEN_VARBINARY;          \
+        return r;                                                  \
+    }
+
+DRAKEN_CAST_TO_BLOB(draken_cast_int64_to_blob, draken_cast_int64_to_string)
+DRAKEN_CAST_TO_BLOB(draken_cast_integer_to_blob, draken_cast_integer_to_string)
+DRAKEN_CAST_TO_BLOB(draken_cast_float64_to_blob, draken_cast_float64_to_string)
+DRAKEN_CAST_TO_BLOB(draken_cast_bool_to_blob, draken_cast_bool_to_string)
+DRAKEN_CAST_TO_BLOB(draken_cast_decimal_to_blob, draken_cast_decimal_to_string)
+DRAKEN_CAST_TO_BLOB(draken_cast_decimal128_to_blob, draken_cast_decimal128_to_string)
+
+#undef DRAKEN_CAST_TO_BLOB
+
 // INTEGER (INT32/INT16/INT8) → FLOAT64: lossless widening.
 VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({

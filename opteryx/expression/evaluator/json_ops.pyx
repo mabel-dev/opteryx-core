@@ -118,10 +118,12 @@ cdef set _encode_items(right):
 cpdef _json_at_arrow(left, right):
     """ArrayVector @> any-of: True where the row's array contains any item."""
     cdef set items = _encode_items(right)
-    return vector_contains_any(left, items)
+    cdef object left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+    return BoolVector(vector_contains_any(left_nb, items))
 
 
 cpdef _json_array_contains_all(left, right):
     """ArrayVector contains-all: True where the row's array contains all items."""
     cdef set items = _encode_items(right)
-    return vector_contains_all(left, items)
+    cdef object left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+    return BoolVector(vector_contains_all(left_nb, items))

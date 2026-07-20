@@ -308,6 +308,12 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
     # a dict-shape wrong-answer bug in its first shape-preserving version.
     # int64→timestamp stays OFF (unverified against a value oracle).
     if t in ("TIMESTAMP", "TIMESTAMP64"):
+        if s in _CAST_STRINGS:
+            # Default ISO-8601 parse or CAST ... FORMAT (compiled_expression.pyx
+            # allocates the format_ctx from the CAST node's literal FORMAT pattern,
+            # or a zero-fmt_len ctx for the default — see the DATE_FORMAT-style
+            # ctx-building chain there).
+            return ("draken_cast_string_to_timestamp", 0)
         if s == "DATE32":
             return ("draken_cast_date32_to_timestamp", 0)
         if s == "INT64":
@@ -334,28 +340,67 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
         if s in ("FLOAT64", "FLOAT32"):
             return ("draken_cast_float_to_decimal", 0)
         return None
-    # → VARCHAR / BLOB (string result; executor owns it as a Vector). NVARCHAR is
-    # excluded (validate+retag, different kernel) and stays on the closure path.
+    # → VARCHAR / BLOB (string result; executor owns it as a Vector). NVARCHAR as
+    # a TARGET is handled separately below (validate+retag, a different kernel);
+    # NVARCHAR as a SOURCE is fine here (its bytes are always valid VARCHAR/
+    # VARBINARY bytes, no validation needed — see string_retag_core).
     if t in ("VARCHAR", "BLOB"):
+        if s in _CAST_STRINGS:
+            # VARCHAR/NVARCHAR/VARBINARY share the exact DrakenStringArena byte
+            # layout (buffers.h §11) — this is a retag, not a reformat.
+            return ("draken_cast_string_to_blob" if t == "BLOB"
+                    else "draken_cast_string_to_varchar", 0)
+        # Below: numeric/bool/decimal/temporal sources format to the identical
+        # ASCII bytes for either target — the `_to_blob` twin (t == "BLOB") just
+        # retags the `_to_string` kernel's result rather than reformatting (see
+        # the DRAKEN_CAST_TO_BLOB doc comment in cast_numeric.cpp). Returning the
+        # plain `_to_string` name here for a BLOB target would silently mistag
+        # the result VARCHAR — that was the bug.
         if s == "INT64":
-            return ("draken_cast_int64_to_string", 0)
+            return ("draken_cast_int64_to_blob" if t == "BLOB" else "draken_cast_int64_to_string", 0)
         if s in _CAST_NARROW_INT:
-            return ("draken_cast_integer_to_string", 0)
+            return ("draken_cast_integer_to_blob" if t == "BLOB" else "draken_cast_integer_to_string", 0)
         if s in ("FLOAT64", "FLOAT32"):
-            return ("draken_cast_float64_to_string", 0)
+            return ("draken_cast_float64_to_blob" if t == "BLOB" else "draken_cast_float64_to_string", 0)
         if s == "BOOL":
-            return ("draken_cast_bool_to_string", 0)
+            return ("draken_cast_bool_to_blob" if t == "BLOB" else "draken_cast_bool_to_string", 0)
         if s == "TIMESTAMP64":
-            return ("draken_cast_timestamp_to_string", 0)
+            return ("draken_cast_timestamp_to_blob" if t == "BLOB" else "draken_cast_timestamp_to_string", 0)
         if s == "DATE32":
-            return ("draken_cast_date_to_string", 0)
-        # DECIMAL → VARCHAR. The source scale (LogicalType, not on the vector)
+            return ("draken_cast_date_to_blob" if t == "BLOB" else "draken_cast_date_to_string", 0)
+        if s == "INTERVAL":
+            # Default ISO-8601 duration or CAST ... FORMAT (same ctx mechanism as
+            # the DATE32/TIMESTAMP64 arms above, tokens reinterpreted as duration
+            # magnitudes — see interval_to_sql_fields in sql_temporal_format.h).
+            return ("draken_cast_interval_to_blob" if t == "BLOB" else "draken_cast_interval_to_string", 0)
+        # DECIMAL → VARCHAR/BLOB. The source scale (LogicalType, not on the vector)
         # is loaded into a binary_op_ctx by the lowering (see the decimal-source
-        # `_to_string` arm in compiled_expression.pyx). Two physical tiers.
+        # `_to_string`/`_to_blob` arm in compiled_expression.pyx). Two physical tiers.
         if s == "DECIMAL":
-            return ("draken_cast_decimal_to_string", 0)
+            return ("draken_cast_decimal_to_blob" if t == "BLOB" else "draken_cast_decimal_to_string", 0)
         if s == "DECIMAL128":
-            return ("draken_cast_decimal128_to_string", 0)
+            return ("draken_cast_decimal128_to_blob" if t == "BLOB" else "draken_cast_decimal128_to_string", 0)
+        if s == "TIME64":
+            # No `_to_blob` twin kernel exists yet — VARCHAR only (falls to the
+            # resolve_cast closure path for a BLOB target rather than silently
+            # mistagging the VARCHAR-formatted result, per the DECIMAL/DATE/
+            # TIMESTAMP comment above).
+            return ("draken_cast_time_to_string", 0) if t == "VARCHAR" else None
+        return None
+    # → TIME (fixed-width TIME64; only string sources are reachable from SQL —
+    # TIME() always resolves to TIME64/microseconds, see logical_type.TIME()).
+    if t == "TIME":
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_time64", 0)
+        return None
+    # → NVARCHAR: validates UTF-8 per row (raises on the first invalid row) then
+    # retags — see draken_cast_string_to_nvarchar in cast_string.cpp. Only
+    # string-family sources are native; a non-string source (INT64 etc.) first
+    # needs VARCHAR formatting, which stays on the resolve_cast closure path
+    # (matches this function's "no chained native kernels" posture elsewhere).
+    if t == "NVARCHAR":
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_nvarchar", 0)
         return None
     return None
 
@@ -426,6 +471,8 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_string_to_date32,
         vector_cast_string_to_nvarchar,
         vector_cast_int64_to_timestamp,
+        vector_cast_string_to_time64,
+        vector_cast_time_to_string,
     )
     from opteryx.compiled.nanobind.vectors import (
         vector_date32_to_timestamp,
@@ -443,7 +490,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     # ---- Parametrized / non-native targets (separate-track + excused closures) ----
     if t == "DECIMAL":
         # DECIMAL has no native kernel yet — Python row-loop (separate track).
-        return _build_decimal_closure(args), False, True
+        return _build_decimal_closure(args, safe), False, True
     if t == "ARRAY":
         if len(args) < 1:
             raise ValueError("CAST to ARRAY requires element_type parameter")
@@ -464,6 +511,11 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     if t == "TIMESTAMP":
         if s == "TIMESTAMP64":
             return (lambda arr: arr), False, False
+        if s in _CAST_STRINGS:
+            # FORMAT (when present) only compiles through the C-native ctx path
+            # (compiled_expression.pyx) — this closure covers the no-FORMAT,
+            # default-ISO-8601 case only.
+            return _draken_native_casts.vector_cast_string_to_timestamp, True, True
         if s == "DATE32":
             return vector_date32_to_timestamp, True, True
         if s == "INT64" or s in _CAST_NARROW_INT:
@@ -488,6 +540,15 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         if s == "TIMESTAMP64":
             return vector_timestamp_to_date32, True, True
         raise NotImplementedError(f"No native CAST {source_physical} → DATE")
+
+    # ---- TIME target (string parse; only TIME64/microseconds is reachable
+    # from SQL — TIME() always resolves to TIME64, see logical_type.TIME()) ----
+    if t == "TIME":
+        if s == "TIME64":
+            return (lambda arr: arr), False, False
+        if s in _CAST_STRINGS:
+            return vector_cast_string_to_time64, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} → TIME")
 
     # ---- DOUBLE / FLOAT target (→ float64) ----
     if t in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
@@ -579,6 +640,16 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_timestamp_to_string, True, True
         if s == "DATE32":
             return vector_cast_date_to_string, True, True
+        if s == "INTERVAL":
+            # FORMAT (when present) only compiles through the C-native ctx path —
+            # this closure covers the no-FORMAT, default-ISO-8601-duration case.
+            if t == "BLOB":
+                raise NotImplementedError("No native CAST INTERVAL → VARBINARY")
+            return _draken_native_casts.vector_cast_interval_to_string, True, True
+        if s == "TIME64":
+            if t == "BLOB":
+                raise NotImplementedError("No native CAST TIME64 → VARBINARY")
+            return vector_cast_time_to_string, True, True
         if s == "ARRAY":
             return _build_array_to_json, False, True
         if s in ("DECIMAL", "DECIMAL128"):
@@ -612,8 +683,16 @@ def _decimal_to_string_native_only(arr):
     )
 
 
-def _build_decimal_closure(args):
-    """Build a closure for CAST to DECIMAL(precision, scale)."""
+def _build_decimal_closure(args, bint safe=False):
+    """Build a closure for CAST to DECIMAL(precision, scale).
+
+    A declared scale is a contract, not a hint: `CAST(x AS DECIMAL(10,2))` means
+    the caller has explicitly said "2 fractional digits" — a value with MORE
+    precision than that must not be silently rounded away. Plain CAST fails
+    loud (matches the native decimal_to_unscaled kernel's own "value has more
+    decimal places than the declared scale" check); TRY_CAST maps that row to
+    NULL, consistent with every other TRY_CAST parse-failure path in this file.
+    """
     # Only `scale` is needed here (for quantization); the precision/scale used for the
     # actual native construction are re-read (and capped at 18) inside
     # _cast_result_to_draken. Bare DECIMAL → scale 6 (Decision F: DECIMAL(18,6)).
@@ -623,7 +702,7 @@ def _build_decimal_closure(args):
         caster = parser_for(LogicalCategory.DECIMAL)
         result = [caster(i) if i is not None else None for i in arr]
 
-        # Quantize to the specified scale.
+        # Quantize to the specified scale — exactly, never lossily.
         if scale is not None:
             _quant_exp = _decimal_mod.Decimal(1).scaleb(-scale)
             def quantizer(d):
@@ -632,9 +711,25 @@ def _build_decimal_closure(args):
                 if not isinstance(d, _decimal_mod.Decimal):
                     return d
                 try:
-                    return d.quantize(_quant_exp)
+                    q = d.quantize(_quant_exp)
                 except _decimal_mod.InvalidOperation:
-                    return d
+                    if safe:
+                        return None
+                    raise ValueError(
+                        f"Cannot CAST {d} to DECIMAL(scale={scale}): value cannot be "
+                        f"represented at the declared scale."
+                    )
+                if q != d:
+                    # Numeric equality ignores trailing zeros (Decimal('1.230000') ==
+                    # Decimal('1.23')) — a mismatch here means genuine digits were
+                    # dropped, not just re-padded.
+                    if safe:
+                        return None
+                    raise ValueError(
+                        f"Cannot CAST {d} to DECIMAL(scale={scale}): value has more "
+                        f"decimal places than the declared scale."
+                    )
+                return q
             result = [quantizer(d) for d in result]
 
         return _cast_result_to_draken(result, "DECIMAL", args)

@@ -41,7 +41,7 @@ from opteryx.exceptions import (
     SqlError,
     UnsupportedSyntaxError,
 )
-from opteryx.managers.billing import BillingEventType, write_billing_event
+from opteryx.managers.billing import DEFAULT_BILLING_ACCOUNT, BillingEventType, write_billing_event
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.models.dataframe import DataFrame
 from opteryx.tracing import record_event
@@ -66,6 +66,7 @@ class Session(DataFrame):
         memberships: Optional[Iterable[str]] = None,
         schema: Optional[str] = None,
         access_policies: Optional[Iterable[dict]] = None,
+        billing_account: Optional[str] = None,
         query_id: Optional[str] = None,
         **kwargs,
     ):
@@ -82,10 +83,14 @@ class Session(DataFrame):
             raise ProgrammingError("Invalid user provided to Session")
         if access_policies and not all(isinstance(v, dict) for v in access_policies):
             raise ProgrammingError("Invalid access_policies provided to Session")
+        if billing_account and not isinstance(billing_account, str):
+            raise ProgrammingError("Invalid billing_account provided to Session")
         if memberships is None:
             memberships = ["opteryx"]
         if access_policies is None:
             access_policies = [{"pattern": "*", "role": "owner"}]
+        if not billing_account:
+            billing_account = DEFAULT_BILLING_ACCOUNT
 
         # Provide execution context expected by planner & execution code
         self.context = ExecutionContext(
@@ -94,6 +99,7 @@ class Session(DataFrame):
             access_policies=access_policies,
             schema=schema,
             memberships=memberships,
+            billing_account=billing_account,
         )
 
         # Initialize cursor-like state (merged from previous Cursor implementation)
@@ -163,7 +169,7 @@ class Session(DataFrame):
 
         write_billing_event(
             billing_event=BillingEventType.QUERY_EXECUTION,
-            billing_account="opteryx",
+            billing_account=self.context.billing_account,
             event_details={
                 "user": self.context.user,
                 "query_id": self.query_id,
@@ -184,7 +190,7 @@ class Session(DataFrame):
         """
         write_billing_event(
             billing_event=BillingEventType.DATA_PROCESSED_BYTES,
-            billing_account="opteryx",
+            billing_account=self.context.billing_account,
             event_details={
                 "user": self.context.user,
                 "query_id": self.query_id,

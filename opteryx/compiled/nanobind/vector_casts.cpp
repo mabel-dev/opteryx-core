@@ -359,6 +359,22 @@ static const DrakenVector* unwrap_timestamp(nb::object obj) {
     return dv;
 }
 
+static const DrakenVector* unwrap_interval(nb::object obj) {
+    const DrakenVector* dv = draken_vector_unwrap(obj.ptr());
+    if (!dv) throw nb::python_error();
+    if (dv->type != DRAKEN_INTERVAL)
+        throw nb::type_error("expected an INTERVAL Vector");
+    return dv;
+}
+
+static const DrakenVector* unwrap_time64(nb::object obj) {
+    const DrakenVector* dv = draken_vector_unwrap(obj.ptr());
+    if (!dv) throw nb::python_error();
+    if (dv->type != DRAKEN_TIME64)
+        throw nb::type_error("expected a TIME64 Vector");
+    return dv;
+}
+
 // ---------------------------------------------------------------------------
 // Priority 1 — numeric/temporal widening and boolean expansion.
 // ---------------------------------------------------------------------------
@@ -426,6 +442,20 @@ static nb::object date_to_string_apply(nb::object obj) {
 static nb::object timestamp_to_string_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_timestamp(obj);
     return wrap_cast_result(draken_cast_timestamp_to_string(nullptr, dv));
+}
+
+// INTERVAL → VARCHAR: ISO-8601 duration default ("P1DT2H30M"). No FORMAT — this
+// closure-fallback path only covers the no-FORMAT case (FORMAT always compiles
+// through the C-native ctx path — see compiled_expression.pyx).
+static nb::object interval_to_string_apply(nb::object obj) {
+    const DrakenVector* dv = unwrap_interval(obj);
+    return wrap_cast_result(draken_cast_interval_to_string(nullptr, dv));
+}
+
+// STRING → TIMESTAMP64: strict ISO-8601 parse (no FORMAT — see note above).
+static nb::object string_to_timestamp_apply(nb::object obj) {
+    const DrakenVector* dv = unwrap_string(obj);
+    return wrap_cast_result(draken_cast_string_to_timestamp(nullptr, dv), /*parse_error_as_value=*/true);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +562,19 @@ static nb::object string_to_date32_apply(nb::object obj) {
     return wrap_cast_result(draken_cast_string_to_date32(nullptr, dv), /*parse_error_as_value=*/true);
 }
 
+// STRING → TIME64: "HH:MM:SS[.ffffff]" → int64 microseconds-since-midnight.
+// Raises ValueError on malformed rows.
+static nb::object string_to_time64_apply(nb::object obj) {
+    const DrakenVector* dv = unwrap_string(obj);
+    return wrap_cast_result(draken_cast_string_to_time64(nullptr, dv), /*parse_error_as_value=*/true);
+}
+
+// TIME64 → VARCHAR: "HH:MM:SS.ffffff" (15 chars, extern).
+static nb::object time_to_string_apply(nb::object obj) {
+    const DrakenVector* dv = unwrap_time64(obj);
+    return wrap_cast_result(draken_cast_time_to_string(nullptr, dv));
+}
+
 // ---------------------------------------------------------------------------
 // NB_MODULE — four functions, one module.
 // ---------------------------------------------------------------------------
@@ -632,7 +675,18 @@ void register_vector_casts(nb::module_ &m) {
     m.def("vector_cast_timestamp_to_string",
         [](nb::object v) -> nb::object { return timestamp_to_string_apply(v); },
         nb::arg("v"),
-        "CAST(v AS VARCHAR): TIMESTAMP64 → 'YYYY-MM-DD HH:MM:SS.ffffff+0000'. Null rows propagate.");
+        "CAST(v AS VARCHAR): TIMESTAMP64 → 'YYYY-MM-DDTHH:MM:SS.ffffff' (ISO-8601). Null rows propagate.");
+
+    m.def("vector_cast_interval_to_string",
+        [](nb::object v) -> nb::object { return interval_to_string_apply(v); },
+        nb::arg("v"),
+        "CAST(v AS VARCHAR): INTERVAL → ISO-8601 duration ('P1DT2H30M'). Null rows propagate.");
+
+    m.def("vector_cast_string_to_timestamp",
+        [](nb::object v) -> nb::object { return string_to_timestamp_apply(v); },
+        nb::arg("v"),
+        "CAST(v AS TIMESTAMP): strict ISO-8601 ('YYYY-MM-DD[T ]HH:MM:SS[.ffffff]') → TIMESTAMP64. "
+        "Raises ValueError on malformed rows. Null rows propagate.");
 
     m.def("vector_cast_string_to_nvarchar",
         [](nb::object v, bool safe) -> nb::object { return string_to_nvarchar_apply(v, safe); },
@@ -674,4 +728,15 @@ void register_vector_casts(nb::module_ &m) {
         nb::arg("v"),
         "CAST(v AS DATE): 'YYYY-MM-DD' (and short variants 'YYYY-M-D') → DATE32 (int32 days-since-epoch). "
         "Raises ValueError on malformed rows. Null rows propagate.");
+
+    m.def("vector_cast_string_to_time64",
+        [](nb::object v) -> nb::object { return string_to_time64_apply(v); },
+        nb::arg("v"),
+        "CAST(v AS TIME): 'HH:MM:SS[.ffffff]' → TIME64 (int64 microseconds-since-midnight). "
+        "Raises ValueError on malformed rows. Null rows propagate.");
+
+    m.def("vector_cast_time_to_string",
+        [](nb::object v) -> nb::object { return time_to_string_apply(v); },
+        nb::arg("v"),
+        "CAST(v AS VARCHAR): TIME64 → 'HH:MM:SS.ffffff' (15 chars, extern). Null rows propagate.");
 }

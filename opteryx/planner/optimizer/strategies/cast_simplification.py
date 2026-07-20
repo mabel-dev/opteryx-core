@@ -41,8 +41,11 @@ def simplify_cast_node(node):
     base_target_type = target_type[4:] if is_safe_cast else target_type
 
     # Pattern 1: CAST(CAST(expr AS T1) AS T2) → CAST(expr AS T2)
-    # This collapses nested casts to a single cast to the final type
-    if source.node_type == NodeType.CAST:
+    # This collapses nested casts to a single cast to the final type. Skipped when
+    # the INNER cast carries a FORMAT: collapsing would drop the intermediate
+    # parse/format step entirely (e.g. CAST(CAST(x AS TIMESTAMP FORMAT 'DD-MM-YYYY')
+    # AS VARCHAR) needs the FORMAT-driven parse of x, not a direct x -> VARCHAR).
+    if source.node_type == NodeType.CAST and getattr(source, "format", None) is None:
         inner_target = getattr(source, "value", "").upper()
         if inner_target:
             inner_safe = inner_target.startswith("TRY_")

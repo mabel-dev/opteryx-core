@@ -39,6 +39,27 @@ static inline bool is_valid_at(const DrakenVector* dv, uint32_t i) noexcept {
     return ((dv->validity[i >> 3] >> (i & 7u)) & 1u) != 0u;
 }
 
+// UTF-8 codepoint helpers (NVARCHAR only). Mirrors fk_cp_to_byte /
+// fk_substr_range in draken/ops/kernels/function_kernels.cpp so the
+// column-arg path agrees with the literal-arg native kernel.
+static inline uint32_t cp_to_byte(const uint8_t* data, uint32_t blen, uint32_t target_cp) {
+    uint32_t cnt = 0u, bb = 0u;
+    for (; bb < blen; ++bb) {
+        if ((data[bb] & 0xC0u) != 0x80u) {
+            if (cnt == target_cp) return bb;
+            ++cnt;
+        }
+    }
+    return blen;
+}
+
+static inline uint32_t codepoint_length(const uint8_t* data, uint32_t blen) {
+    uint32_t cnt = 0u;
+    for (uint32_t b = 0u; b < blen; ++b)
+        if ((data[b] & 0xC0u) != 0x80u) ++cnt;
+    return cnt;
+}
+
 static uint8_t* alloc_validity_all_valid(uint32_t n) {
     const uint32_t nb_ = (n + 7u) >> 3;
     uint8_t* v = static_cast<uint8_t*>(draken_malloc(nb_ > 0u ? nb_ : 1u));
@@ -179,6 +200,7 @@ struct SliceOut {
 static nb::object impl_slice_left(nb::object str_obj, nb::object len_obj) {
     const DrakenVector* dv   = unwrap_str(str_obj, "vector_string_slice_left");
     const IntArg        len  = parse_int_arg(len_obj, "vector_string_slice_left");
+    const bool is_utf8 = dv->type == DRAKEN_NVARCHAR;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
     const uint32_t n = dv->length;
 
@@ -191,16 +213,18 @@ static nb::object impl_slice_left(nb::object str_obj, nb::object len_obj) {
         const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
         const uint32_t slen  = str_length(slot);
         const uint8_t* sdata = str_data(slot, sa->arena);
+        const uint32_t unit_len = is_utf8 ? codepoint_length(sdata, slen) : slen;
         int64_t take_val = int_arg_value_at(len, i);
         uint32_t take;
         if (take_val < 0) {
-            int64_t t = (int64_t)slen + take_val;
+            int64_t t = (int64_t)unit_len + take_val;
             take = (t < 0) ? 0u : (uint32_t)t;
         } else {
             take = (uint32_t)take_val;
         }
-        if (take > slen) take = slen;
-        out.emit_bytes(i, sdata, take);
+        if (take > unit_len) take = unit_len;
+        const uint32_t take_bytes = is_utf8 ? cp_to_byte(sdata, slen, take) : take;
+        out.emit_bytes(i, sdata, take_bytes);
     }
     return out.finish();
 }
@@ -212,6 +236,7 @@ static nb::object impl_slice_left(nb::object str_obj, nb::object len_obj) {
 static nb::object impl_slice_right(nb::object str_obj, nb::object len_obj) {
     const DrakenVector* dv   = unwrap_str(str_obj, "vector_string_slice_right");
     const IntArg        len  = parse_int_arg(len_obj, "vector_string_slice_right");
+    const bool is_utf8 = dv->type == DRAKEN_NVARCHAR;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
     const uint32_t n = dv->length;
 
@@ -224,6 +249,7 @@ static nb::object impl_slice_right(nb::object str_obj, nb::object len_obj) {
         const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
         const uint32_t slen  = str_length(slot);
         const uint8_t* sdata = str_data(slot, sa->arena);
+        const uint32_t unit_len = is_utf8 ? codepoint_length(sdata, slen) : slen;
         int64_t take_val = int_arg_value_at(len, i);
         uint32_t take;
         if (take_val <= 0) {
@@ -231,9 +257,14 @@ static nb::object impl_slice_right(nb::object str_obj, nb::object len_obj) {
         } else {
             take = (uint32_t)take_val;
         }
-        if (take > slen) take = slen;
-        const uint32_t start = slen - take;
-        out.emit_bytes(i, sdata + start, take);
+        if (take > unit_len) take = unit_len;
+        const uint32_t start_unit = unit_len - take;
+        if (is_utf8) {
+            const uint32_t start_byte = cp_to_byte(sdata, slen, start_unit);
+            out.emit_bytes(i, sdata + start_byte, slen - start_byte);
+        } else {
+            out.emit_bytes(i, sdata + start_unit, take);
+        }
     }
     return out.finish();
 }
@@ -248,6 +279,7 @@ static nb::object impl_substring(nb::object str_obj, nb::object from_obj, nb::ob
     const DrakenVector* dv   = unwrap_str(str_obj, "vector_string_substring");
     const IntArg        from = parse_int_arg(from_obj, "vector_string_substring");
     const IntArg        cnt  = parse_int_arg(cnt_obj, "vector_string_substring");
+    const bool is_utf8 = dv->type == DRAKEN_NVARCHAR;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
     const uint32_t n = dv->length;
 
@@ -260,30 +292,37 @@ static nb::object impl_substring(nb::object str_obj, nb::object from_obj, nb::ob
         const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
         const uint32_t slen  = str_length(slot);
         const uint8_t* sdata = str_data(slot, sa->arena);
+        const uint32_t unit_len = is_utf8 ? codepoint_length(sdata, slen) : slen;
 
         int64_t start_val = int_arg_value_at(from, i);
         uint32_t s_idx;
         if (start_val > 0)       s_idx = (uint32_t)(start_val - 1);
         else if (start_val < 0) {
-            int64_t t = (int64_t)slen + start_val;
+            int64_t t = (int64_t)unit_len + start_val;
             s_idx = (t < 0) ? 0u : (uint32_t)t;
         } else                   s_idx = 0u;
-        if (s_idx > slen) s_idx = slen;
+        if (s_idx > unit_len) s_idx = unit_len;
 
         uint32_t take;
         if (cnt.is_null) {
-            take = slen - s_idx;
+            take = unit_len - s_idx;
         } else {
             if (int_arg_null_at(cnt, i)) { out.emit_null(i); continue; }
             int64_t cnt_val = int_arg_value_at(cnt, i);
             if (cnt_val <= 0) { take = 0u; }
             else {
                 take = (uint32_t)cnt_val;
-                if (s_idx + take > slen) take = slen - s_idx;
+                if (s_idx + take > unit_len) take = unit_len - s_idx;
             }
         }
 
-        out.emit_bytes(i, sdata + s_idx, take);
+        if (is_utf8) {
+            const uint32_t s_byte = cp_to_byte(sdata, slen, s_idx);
+            const uint32_t e_byte = cp_to_byte(sdata, slen, s_idx + take);
+            out.emit_bytes(i, sdata + s_byte, e_byte - s_byte);
+        } else {
+            out.emit_bytes(i, sdata + s_idx, take);
+        }
     }
     return out.finish();
 }

@@ -388,6 +388,15 @@ STATEMENTS = [
         ("SELECT p.name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity = p2.gravity)", None, None, UnsupportedSyntaxError),
         # ASOF rejects not-equal in MATCH_CONDITION — must raise UnsupportedSyntaxError
         ("SELECT p.name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity != p2.gravity)", None, None, UnsupportedSyntaxError),
+
+        # Array-literal operand to @>/@>> in a WHERE clause (regression: constant
+        # folding used to hand vector_contains_any/all the Cython shim Vector
+        # instead of the raw nanobind Vector, crashing with a TypeError from
+        # draken_vector_unwrap).
+        ("SELECT * FROM $planets WHERE ['a', 'b', 'c'] @> ['a']", 9, 20, None),
+        ("SELECT * FROM $planets WHERE ['a', 'b', 'c'] @>> ['a', 'b']", 9, 20, None),
+        ("SELECT ['a', 'b', 'c'] @> ['a']", 1, 1, None),
+        ("SELECT ['a', 'b', 'c'] @>> ['a', 'b']", 1, 1, None),
 ]
 
 # fmt:on

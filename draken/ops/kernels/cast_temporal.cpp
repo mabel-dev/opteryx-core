@@ -2,11 +2,15 @@
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"
 #include "ops/kernels/result_helpers.h"
+#include "ops/sql_temporal_format.h"
+#include "ops/temporal_arith.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
+#include "core/interval_slot.h"
 #include "logical_type.h"
 #include <cstring>
+#include <vector>
 
 /**
  * Cast kernels: temporal conversions (Phase 9c).
@@ -15,6 +19,74 @@
  * int64->timestamp carries its unit via VecResult.ts_unit (see vec_result.h);
  * vecresult_to_owner interns it into the VectorOwner's LogicalType.
  */
+
+// Shared "compile the FORMAT pattern, walk it per physical row, build a
+// variable-width string result" helper for the FORMAT-bearing branch of the
+// DATE32/TIMESTAMP64/INTERVAL -> VARCHAR kernels below. Mirrors draken_date_format's
+// arena-growth Guard pattern (function_temporal.cpp) — not reused directly
+// since that kernel speaks strftime tokens, this speaks SQL tokens. A template
+// (not extern "C" — templates cannot have C linkage), called only from the
+// extern "C" kernels below.
+template <typename RowFieldsFn>
+static VecResult sql_format_to_string(const DrakenVector* v, const format_ctx* c, RowFieldsFn row_fields) {
+    const uint32_t k = v->data_length;
+    const std::string fmt(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
+
+    std::vector<SqlToken> prog;
+    size_t max_row_len = 0;
+    const char* bad_run = nullptr;
+    uint32_t bad_run_len = 0;
+    if (!sql_compile(fmt.c_str(), fmt.size(), &prog, &max_row_len, &bad_run, &bad_run_len))
+        return draken_error_sentinel_fmt(
+            "CAST ... FORMAT: unrecognized format token '%.*s'",
+            (int)(bad_run_len < 16u ? bad_run_len : 16u), bad_run);
+
+    std::vector<char> row_vec(max_row_len);
+    char* const row_buf = row_vec.data();
+
+    const size_t slots_sz = (k > 0u ? k : 1u) * sizeof(DrakenStringSlot);
+    auto* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+    if (!slots) return draken_error_sentinel("Allocation failed");
+    std::memset(slots, 0, slots_sz);
+
+    size_t arena_cap = (k > 0u ? static_cast<size_t>(k) * 32u : 32u);
+    auto* arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
+    if (!arena) { draken_free(slots); return draken_error_sentinel("Allocation failed"); }
+
+    struct Guard {
+        DrakenStringSlot* s; uint8_t* a;
+        ~Guard() { if (s) draken_free(s); if (a) draken_free(a); }
+    } g{slots, arena};
+
+    size_t arena_used = 0u;
+    for (uint32_t j = 0u; j < k; ++j) {
+        const SqlFields f = row_fields(j);
+        char* p = sql_emit(row_buf, prog, f);
+        const uint32_t slen = static_cast<uint32_t>(p - row_buf);
+        if (slen <= STR_INLINE_MAX) {
+            str_init_inline(&slots[j], reinterpret_cast<const uint8_t*>(row_buf), slen);
+        } else {
+            if (arena_used + slen > arena_cap) {
+                arena_cap = (arena_used + slen) * 2u;
+                auto* new_arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
+                if (!new_arena) throw std::bad_alloc();
+                std::memcpy(new_arena, g.a, arena_used);
+                draken_free(g.a);
+                g.a = new_arena;
+            }
+            const uint32_t arena_off = static_cast<uint32_t>(arena_used);
+            std::memcpy(g.a + arena_off, row_buf, slen);
+            draken_build_string_slot(&slots[j], reinterpret_cast<const uint8_t*>(row_buf), slen, arena_off);
+            arena_used += slen;
+        }
+    }
+
+    DrakenStringSlot* out_slots = g.s;
+    uint8_t*          out_arena = g.a;
+    g.s = nullptr; g.a = nullptr;
+
+    return vecresult_from_string_buffers(out_slots, out_arena, arena_used, nullptr, k, DRAKEN_VARCHAR);
+}
 
 extern "C" {
 
@@ -154,14 +226,26 @@ VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* v) {
     });
 }
 
-// DATE32 → VARCHAR: "YYYY-MM-DD" (10 chars, always inline). Fixed-width: every
-// output is 10 bytes, so no arena and the block size is known up front — write
-// slots straight into the consolidated block (no separate-buffers consolidation).
+// DATE32 → VARCHAR: default "YYYY-MM-DD" (10 chars, always inline, fixed-width
+// fast path — every output is 10 bytes so the block size is known up front).
+// ctx (format_ctx*) may be null (fixed default) or carry a FORMAT pattern
+// (variable-width, via sql_format_to_string).
 VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
         if (v->type != DRAKEN_DATE32)
             return draken_error_sentinel_fmt("cast date->string: expected DATE32, got %d", v->type);
+
+        const auto* c = static_cast<const format_ctx*>(ctx);
+        if (c != nullptr && c->fmt_len > 0) {
+            const int32_t* src = static_cast<const int32_t*>(v->data);
+            VecResult r = sql_format_to_string(v, c, [&](uint32_t j) {
+                return sql_calendar_fields(static_cast<int64_t>(src[j]), 0);
+            });
+            kernel_preserve_shape(r, v);
+            return r;
+        }
+
         const uint32_t k = v->data_length;
         const int32_t* src = static_cast<const int32_t*>(v->data);
 
@@ -194,7 +278,14 @@ VecResult draken_cast_date_to_string(void* ctx, const DrakenVector* v) {
     });
 }
 
-// TIMESTAMP64 → VARCHAR: "YYYY-MM-DD HH:MM:SS.ffffff+0000" (31 chars, extern).
+// TIMESTAMP64 → VARCHAR: default "YYYY-MM-DDTHH:MM:SS.ffffff" (26 chars, extern,
+// true ISO-8601 — no separator/offset fabrication; naive timestamps carry no
+// offset to report). ctx (format_ctx*) carries the operand's TimestampUnit
+// (0=s,1=ms,2=us,3=ns) — REQUIRED even for the no-FORMAT default, since the raw
+// int64 payload's scale depends on it (a prior version of this kernel always
+// treated the payload as microseconds, which was silently wrong for non-us
+// TIMESTAMP64 columns). ctx == nullptr falls back to microseconds (defensive
+// only — the compiler always allocates a ctx for this kernel).
 // Compression-aware: format the K physical values into a K-slot value block, then
 // preserve the input's selection + validity (dict timestamp → dict string).
 VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
@@ -202,12 +293,32 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
         if (!v) return draken_error_sentinel("Input vector is null");
         if (v->type != DRAKEN_TIMESTAMP64)
             return draken_error_sentinel_fmt("cast timestamp->string: expected TIMESTAMP64, got %d", v->type);
-        const uint32_t k = v->data_length;
-        const int64_t* src = static_cast<const int64_t*>(v->data);
 
-        // Every physical value formats to exactly 31 bytes (extern), so the K-slot
-        // value block size is known up front: K slots + K*31 arena, no embedded validity.
-        const size_t total_arena = static_cast<size_t>(k) * 31u;
+        const auto* c = static_cast<const format_ctx*>(ctx);
+        const int unit_code = c ? static_cast<int>(c->ts_unit) : 2;
+        const int64_t tps = ta_ticks_per_second(unit_code);
+        const int64_t* src0 = static_cast<const int64_t*>(v->data);
+
+        if (c != nullptr && c->fmt_len > 0) {
+            VecResult r = sql_format_to_string(v, c, [&](uint32_t j) {
+                const int64_t sec = ta_floor_div(src0[j], tps);
+                const int64_t days = ta_floor_div(sec, 86400LL);
+                const int64_t tod  = sec - days * 86400LL;
+                const int64_t frac_ticks = src0[j] - sec * tps;   // remainder in source ticks
+                const int64_t usec = ta_floor_div(frac_ticks * 1000000LL, tps);
+                SqlFields f = sql_calendar_fields(days, tod * 1000000LL + usec);
+                return f;
+            });
+            kernel_preserve_shape(r, v);
+            return r;
+        }
+
+        const uint32_t k = v->data_length;
+        const int64_t* src = src0;
+
+        // Every physical value formats to exactly 26 bytes (extern), so the K-slot
+        // value block size is known up front: K slots + K*26 arena, no embedded validity.
+        const size_t total_arena = static_cast<size_t>(k) * 26u;
         DrakenStringSlot* slots;
         uint8_t* arena;
         uint8_t* vunused;
@@ -216,15 +327,14 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
         (void)vunused;
 
         size_t arena_used = 0u;
-        uint8_t buf[31];
+        uint8_t buf[26];
         for (uint32_t j = 0u; j < k; ++j) {
-            int64_t us = src[j];
-            int64_t sec = us / 1000000LL;
-            int32_t usec = static_cast<int32_t>(us % 1000000LL);
-            if (usec < 0) { sec -= 1; usec += 1000000; }
-            int64_t days64 = sec / 86400LL;
-            int32_t tod = static_cast<int32_t>(sec % 86400LL);
-            if (tod < 0) { days64 -= 1; tod += 86400; }
+            const int64_t raw = src[j];
+            const int64_t sec_ticks = ta_floor_div(raw, tps);
+            const int64_t frac_ticks = raw - sec_ticks * tps;
+            const int32_t usec = static_cast<int32_t>(ta_floor_div(frac_ticks * 1000000LL, tps));
+            int64_t days64 = ta_floor_div(sec_ticks, 86400LL);
+            int32_t tod = static_cast<int32_t>(sec_ticks - days64 * 86400LL);
             int32_t y; int32_t m; int32_t d;
             days_to_ymd(static_cast<int32_t>(days64), y, m, d);
             const int32_t hh = tod / 3600;
@@ -234,22 +344,425 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
             buf[2]=static_cast<uint8_t>('0'+(y/10)%10);   buf[3]=static_cast<uint8_t>('0'+y%10);
             buf[4]='-'; buf[5]=static_cast<uint8_t>('0'+m/10); buf[6]=static_cast<uint8_t>('0'+m%10);
             buf[7]='-'; buf[8]=static_cast<uint8_t>('0'+d/10); buf[9]=static_cast<uint8_t>('0'+d%10);
-            buf[10]=' '; buf[11]=static_cast<uint8_t>('0'+hh/10); buf[12]=static_cast<uint8_t>('0'+hh%10);
+            buf[10]='T'; buf[11]=static_cast<uint8_t>('0'+hh/10); buf[12]=static_cast<uint8_t>('0'+hh%10);
             buf[13]=':'; buf[14]=static_cast<uint8_t>('0'+mm/10); buf[15]=static_cast<uint8_t>('0'+mm%10);
             buf[16]=':'; buf[17]=static_cast<uint8_t>('0'+ss/10); buf[18]=static_cast<uint8_t>('0'+ss%10);
             buf[19]='.';
             buf[20]=static_cast<uint8_t>('0'+(usec/100000)%10); buf[21]=static_cast<uint8_t>('0'+(usec/10000)%10);
             buf[22]=static_cast<uint8_t>('0'+(usec/1000)%10);   buf[23]=static_cast<uint8_t>('0'+(usec/100)%10);
             buf[24]=static_cast<uint8_t>('0'+(usec/10)%10);     buf[25]=static_cast<uint8_t>('0'+usec%10);
-            buf[26]='+'; buf[27]='0'; buf[28]='0'; buf[29]='0'; buf[30]='0';
-            std::memcpy(arena + arena_used, buf, 31u);
-            draken_build_string_slot(&slots[j], buf, 31u, static_cast<uint32_t>(arena_used));
-            arena_used += 31u;
+            std::memcpy(arena + arena_used, buf, 26u);
+            draken_build_string_slot(&slots[j], buf, 26u, static_cast<uint32_t>(arena_used));
+            arena_used += 26u;
         }
         VecResult r = vecresult_from_string_block(block, k, total_arena, 0, DRAKEN_VARCHAR);
         kernel_preserve_shape(r, v);
         return r;
     });
+}
+
+// Howard Hinnant civil-days, local copy for TIMESTAMP parsing (same algorithm as
+// cast_string.cpp's civil_to_days, kept as an internal-linkage duplicate per this
+// file's own days_to_ymd precedent above — no cross-TU header exists for it yet).
+static int64_t civil_to_days(int y, int m, int d) noexcept {
+    y -= (m <= 2);
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = static_cast<int64_t>(y) - era * 400;
+    const int64_t doy = (153 * static_cast<int64_t>(m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+// VARCHAR/NVARCHAR/VARBINARY → TIMESTAMP64. ctx (format_ctx*) null or fmt_len==0
+// -> strict ISO-8601 parse ("YYYY-MM-DDTHH:MM:SS[.ffffff]" or with a space
+// separator; no timezone offset — Opteryx timestamps are always naive, so an
+// offset suffix is a parse error, matching the plan-time literal parser's
+// intent rather than silently discarding it). ctx->fmt_len > 0 -> FORMAT-driven
+// parse via sql_parse_exec. Always produces microsecond-unit TIMESTAMP64.
+static bool parse_iso_timestamp(const uint8_t* s, uint32_t len,
+                                 int* year, int* month, int* day,
+                                 int* hour, int* minute, int* second, int* usec) {
+    *hour = 0; *minute = 0; *second = 0; *usec = 0;
+    uint32_t k = 0;
+    int y = 0, m = 0, d = 0;
+    while (k < len && s[k] != '-') {
+        if (s[k] < '0' || s[k] > '9') return false;
+        y = y * 10 + (s[k] - '0'); ++k;
+    }
+    if (k >= len || s[k] != '-') return false;
+    ++k;
+    while (k < len && s[k] != '-') {
+        if (s[k] < '0' || s[k] > '9') return false;
+        m = m * 10 + (s[k] - '0'); ++k;
+    }
+    if (k >= len || s[k] != '-') return false;
+    ++k;
+    while (k < len && (s[k] >= '0' && s[k] <= '9')) {
+        d = d * 10 + (s[k] - '0'); ++k;
+    }
+    *year = y; *month = m; *day = d;
+    if (k == len) return (m >= 1 && m <= 12 && d >= 1 && d <= 31);
+    if (s[k] != 'T' && s[k] != ' ') return false;
+    ++k;
+
+    int hh = 0, mi = 0, ss = 0, us = 0;
+    uint32_t hstart = k;
+    while (k < len && s[k] != ':') {
+        if (s[k] < '0' || s[k] > '9') return false;
+        hh = hh * 10 + (s[k] - '0'); ++k;
+    }
+    if (k == hstart || k >= len || s[k] != ':') return false;
+    ++k;
+    uint32_t mstart = k;
+    while (k < len && s[k] != ':') {
+        if (s[k] < '0' || s[k] > '9') return false;
+        mi = mi * 10 + (s[k] - '0'); ++k;
+    }
+    if (k == mstart) return false;
+    if (k < len && s[k] == ':') {
+        ++k;
+        uint32_t sstart = k;
+        while (k < len && s[k] != '.') {
+            if (s[k] < '0' || s[k] > '9') return false;
+            ss = ss * 10 + (s[k] - '0'); ++k;
+        }
+        if (k == sstart) return false;
+        if (k < len && s[k] == '.') {
+            ++k;
+            int ndigits = 0;
+            while (k < len) {
+                if (s[k] < '0' || s[k] > '9') return false;
+                if (ndigits >= 6) return false;
+                us = us * 10 + (s[k] - '0'); ++ndigits; ++k;
+            }
+            if (ndigits == 0) return false;
+            for (int p = ndigits; p < 6; ++p) us *= 10;
+        }
+    }
+    if (k != len) return false;  // trailing offset/'Z' etc. -> not supported
+    if (hh > 23 || mi > 59 || ss > 59) return false;
+    *hour = hh; *minute = mi; *second = ss; *usec = us;
+    return m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt("cast string->timestamp: expected string, got %d", v->type);
+
+        const auto* c = static_cast<const format_ctx*>(ctx);
+        std::vector<SqlToken> prog;
+        bool use_fmt = c != nullptr && c->fmt_len > 0;
+        if (use_fmt) {
+            const std::string fmt(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
+            size_t max_len = 0;
+            const char* bad_run = nullptr;
+            uint32_t bad_run_len = 0;
+            if (!sql_compile(fmt.c_str(), fmt.size(), &prog, &max_len, &bad_run, &bad_run_len))
+                return draken_error_sentinel_fmt(
+                    "CAST ... FORMAT: unrecognized format token '%.*s'",
+                    (int)(bad_run_len < 16u ? bad_run_len : 16u), bad_run);
+        }
+
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        const uint32_t n = v->length;
+        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+
+        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+
+        for (uint32_t j = 0u; j < k; ++j) {
+            if (!live[j]) { out[j] = 0; continue; }
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint8_t* s = str_data(slot, sa->arena);
+            const uint32_t len = str_length(slot);
+
+            int year, month, day, hour, minute, second, usec;
+            bool ok;
+            if (use_fmt) {
+                ok = sql_parse_exec(prog, reinterpret_cast<const char*>(s), len,
+                                     &year, &month, &day, &hour, &minute, &second, &usec);
+            } else {
+                ok = parse_iso_timestamp(s, len, &year, &month, &day, &hour, &minute, &second, &usec);
+            }
+            if (!ok) {
+                draken_free(out);
+                return draken_error_sentinel_fmt(
+                    "Cannot cast string to TIMESTAMP: got %.*s",
+                    (int)(len < 32u ? len : 32u), s);
+            }
+            const int64_t days = civil_to_days(year, month, day);
+            out[j] = days * 86400000000LL
+                   + static_cast<int64_t>(hour) * 3600000000LL
+                   + static_cast<int64_t>(minute) * 60000000LL
+                   + static_cast<int64_t>(second) * 1000000LL
+                   + usec;
+        }
+
+        VecResult r;
+        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
+        r.ts_unit = static_cast<uint8_t>(TimestampUnit::MICROSECONDS);
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+// INTERVAL → VARCHAR: default ISO-8601 duration ("P1DT2H30M"). ctx (format_ctx*)
+// null or fmt_len==0 -> ISO-8601 default (iso8601_duration_emit). ctx->fmt_len>0
+// -> FORMAT tokens reinterpreted as duration magnitudes (interval_to_sql_fields) —
+// there is no INTERVAL parse direction (CAST FROM another type into INTERVAL
+// stays rejected — see logical_planner_builders.py's _normalize_cast_type).
+VecResult draken_cast_interval_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_INTERVAL)
+            return draken_error_sentinel_fmt("cast interval->string: expected INTERVAL, got %d", v->type);
+
+        const auto* c = static_cast<const format_ctx*>(ctx);
+        const uint32_t k = v->data_length;
+        const auto* src = static_cast<const DrakenIntervalSlot*>(v->data);
+
+        if (c != nullptr && c->fmt_len > 0) {
+            VecResult r = sql_format_to_string(v, c, [&](uint32_t j) {
+                return interval_to_sql_fields(src[j].months, src[j].us);
+            });
+            kernel_preserve_shape(r, v);
+            return r;
+        }
+
+        char buf[96];
+        std::vector<char> row_vec;
+        DrakenStringSlot* slots;
+        uint8_t* arena;
+        uint8_t* vunused;
+        // Worst case per row is small but not fixed-width; use the arena-growth
+        // helper's shape (separately-allocated then consolidated) rather than a
+        // fixed-width block since duration text length varies by magnitude.
+        const size_t slots_sz = (k > 0u ? k : 1u) * sizeof(DrakenStringSlot);
+        slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+        if (!slots) return draken_error_sentinel("Allocation failed");
+        std::memset(slots, 0, slots_sz);
+        size_t arena_cap = (k > 0u ? static_cast<size_t>(k) * 24u : 24u);
+        arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
+        if (!arena) { draken_free(slots); return draken_error_sentinel("Allocation failed"); }
+
+        struct Guard {
+            DrakenStringSlot* s; uint8_t* a;
+            ~Guard() { if (s) draken_free(s); if (a) draken_free(a); }
+        } g{slots, arena};
+
+        size_t arena_used = 0u;
+        for (uint32_t j = 0u; j < k; ++j) {
+            const uint32_t slen = iso8601_duration_emit(buf, src[j].months, src[j].us);
+            if (slen <= STR_INLINE_MAX) {
+                str_init_inline(&slots[j], reinterpret_cast<const uint8_t*>(buf), slen);
+            } else {
+                if (arena_used + slen > arena_cap) {
+                    arena_cap = (arena_used + slen) * 2u;
+                    auto* new_arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
+                    if (!new_arena) throw std::bad_alloc();
+                    std::memcpy(new_arena, g.a, arena_used);
+                    draken_free(g.a);
+                    g.a = new_arena;
+                }
+                const uint32_t arena_off = static_cast<uint32_t>(arena_used);
+                std::memcpy(g.a + arena_off, buf, slen);
+                draken_build_string_slot(&slots[j], reinterpret_cast<const uint8_t*>(buf), slen, arena_off);
+                arena_used += slen;
+            }
+        }
+        DrakenStringSlot* out_slots = g.s;
+        uint8_t*          out_arena = g.a;
+        g.s = nullptr; g.a = nullptr;
+        (void)vunused; (void)row_vec;
+
+        VecResult r = vecresult_from_string_buffers(out_slots, out_arena, arena_used, nullptr, k, DRAKEN_VARCHAR);
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+VecResult draken_cast_interval_to_blob(void* ctx, const DrakenVector* v) {
+    VecResult r = draken_cast_interval_to_string(ctx, v);
+    if (r.data != nullptr) r.type = DRAKEN_VARBINARY;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// TIME64 (int64 microseconds-since-midnight) casts.
+//
+// Parses/formats "HH:MM:SS[.ffffff]" — no date, no timezone. Fixed-width
+// output (15 bytes, always includes the fractional part) mirrors the
+// TIMESTAMP64 -> VARCHAR kernel above; parsing mirrors parse_iso_date.
+// Returns INT64_MIN on any parse error (never a valid microseconds-since-
+// midnight value, which is in [0, 86_400_000_000)).
+// ---------------------------------------------------------------------------
+static inline int64_t parse_iso_time(const uint8_t* s, uint32_t len) noexcept {
+    uint32_t k = 0;
+    int hour = 0, minute = 0, second = 0;
+
+    uint32_t hstart = k;
+    while (k < len && s[k] != ':') {
+        if (s[k] < '0' || s[k] > '9') return INT64_MIN;
+        hour = hour * 10 + (s[k] - '0');
+        ++k;
+    }
+    if (k == hstart || k - hstart > 2 || k >= len || s[k] != ':') return INT64_MIN;
+    ++k;
+
+    uint32_t mstart = k;
+    while (k < len && s[k] != ':') {
+        if (s[k] < '0' || s[k] > '9') return INT64_MIN;
+        minute = minute * 10 + (s[k] - '0');
+        ++k;
+    }
+    if (k == mstart || k - mstart > 2) return INT64_MIN;
+
+    int frac_us = 0;
+    if (k < len && s[k] == ':') {
+        ++k;
+        uint32_t sstart = k;
+        while (k < len && s[k] != '.') {
+            if (s[k] < '0' || s[k] > '9') return INT64_MIN;
+            second = second * 10 + (s[k] - '0');
+            ++k;
+        }
+        if (k == sstart || k - sstart > 2) return INT64_MIN;
+
+        if (k < len && s[k] == '.') {
+            ++k;
+            uint32_t fstart = k;
+            int ndigits = 0;
+            while (k < len) {
+                if (s[k] < '0' || s[k] > '9') return INT64_MIN;
+                if (ndigits >= 6) return INT64_MIN;  // >6 fractional digits: fail loud
+                frac_us = frac_us * 10 + (s[k] - '0');
+                ++ndigits;
+                ++k;
+            }
+            if (ndigits == 0) return INT64_MIN;
+            for (int p = ndigits; p < 6; ++p) frac_us *= 10;
+            (void)fstart;
+        }
+    }
+    if (k != len) return INT64_MIN;
+    if (hour > 23 || minute > 59 || second > 59) return INT64_MIN;
+
+    return (static_cast<int64_t>(hour) * 3600LL
+            + static_cast<int64_t>(minute) * 60LL
+            + static_cast<int64_t>(second)) * 1000000LL
+           + frac_us;
+}
+
+VecResult draken_cast_string_to_time64(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt("cast string->time: expected string, got %d", v->type);
+
+        // Compression-aware with liveness (see draken_cast_string_to_date32).
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        const uint32_t n = v->length;
+        int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+
+        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+
+        for (uint32_t j = 0u; j < k; ++j) {
+            if (!live[j]) { out[j] = 0; continue; }
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
+            const uint32_t len = str_length(slot);
+
+            const int64_t us = parse_iso_time(s, len);
+            if (us == INT64_MIN) {
+                draken_free(out);
+                return draken_error_sentinel_fmt(
+                    "Cannot cast string to TIME: expected HH:MM:SS[.ffffff], got %.*s",
+                    (int)(len < 20u ? len : 20u), s);
+            }
+            out[j] = us;
+        }
+
+        VecResult r;
+        r.data = out; r.type = DRAKEN_TIME64; r.validity_embedded = 0u;
+        r.ts_unit = static_cast<uint8_t>(TimestampUnit::MICROSECONDS);
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+// TIME64 -> VARCHAR: "HH:MM:SS.ffffff" (15 chars, extern — over the 12-byte
+// inline threshold, so this needs an arena, like the TIMESTAMP64 formatter
+// above). Values are int64 microseconds-since-midnight; the source unit is
+// always microseconds (draken_cast_string_to_time64 is TIME64's only
+// producer reachable from SQL CAST — TIME32 has no cast path).
+VecResult draken_cast_time_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_TIME64)
+            return draken_error_sentinel_fmt("cast time->string: expected TIME64, got %d", v->type);
+        const uint32_t k = v->data_length;
+        const int64_t* src = static_cast<const int64_t*>(v->data);
+
+        const size_t total_arena = static_cast<size_t>(k) * 15u;
+        DrakenStringSlot* slots;
+        uint8_t* arena;
+        uint8_t* vunused;
+        uint8_t* block = vecresult_string_block_alloc(k, total_arena, 0, &slots, &arena, &vunused);
+        if (!block) return draken_error_sentinel("Allocation failed");
+        (void)vunused;
+
+        size_t arena_used = 0u;
+        uint8_t buf[15];
+        for (uint32_t j = 0u; j < k; ++j) {
+            int64_t us = src[j];
+            int64_t sec = us / 1000000LL;
+            int32_t usec = static_cast<int32_t>(us % 1000000LL);
+            if (usec < 0) { sec -= 1; usec += 1000000; }
+            int32_t tod = static_cast<int32_t>(sec % 86400LL);
+            if (tod < 0) tod += 86400;
+            const int32_t hh = tod / 3600;
+            const int32_t mm = (tod % 3600) / 60;
+            const int32_t ss = tod % 60;
+            buf[0]=static_cast<uint8_t>('0'+hh/10); buf[1]=static_cast<uint8_t>('0'+hh%10);
+            buf[2]=':'; buf[3]=static_cast<uint8_t>('0'+mm/10); buf[4]=static_cast<uint8_t>('0'+mm%10);
+            buf[5]=':'; buf[6]=static_cast<uint8_t>('0'+ss/10); buf[7]=static_cast<uint8_t>('0'+ss%10);
+            buf[8]='.';
+            buf[9]=static_cast<uint8_t>('0'+(usec/100000)%10); buf[10]=static_cast<uint8_t>('0'+(usec/10000)%10);
+            buf[11]=static_cast<uint8_t>('0'+(usec/1000)%10);  buf[12]=static_cast<uint8_t>('0'+(usec/100)%10);
+            buf[13]=static_cast<uint8_t>('0'+(usec/10)%10);    buf[14]=static_cast<uint8_t>('0'+usec%10);
+            std::memcpy(arena + arena_used, buf, 15u);
+            draken_build_string_slot(&slots[j], buf, 15u, static_cast<uint32_t>(arena_used));
+            arena_used += 15u;
+        }
+        VecResult r = vecresult_from_string_block(block, k, total_arena, 0, DRAKEN_VARCHAR);
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+// → VARBINARY (BLOB) thin wrappers — see the matching comment in cast_numeric.cpp
+// (DRAKEN_CAST_TO_BLOB): DATE32/TIMESTAMP64 format to the identical ASCII bytes
+// for VARCHAR and VARBINARY targets, so these just retag the `_to_string`
+// kernel's result rather than reformatting.
+VecResult draken_cast_date_to_blob(void* ctx, const DrakenVector* v) {
+    VecResult r = draken_cast_date_to_string(ctx, v);
+    if (r.data != nullptr) r.type = DRAKEN_VARBINARY;
+    return r;
+}
+
+VecResult draken_cast_timestamp_to_blob(void* ctx, const DrakenVector* v) {
+    VecResult r = draken_cast_timestamp_to_string(ctx, v);
+    if (r.data != nullptr) r.type = DRAKEN_VARBINARY;
+    return r;
 }
 
 namespace {

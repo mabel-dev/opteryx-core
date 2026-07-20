@@ -69,6 +69,13 @@ VecResult draken_is_not_empty(void* ctx, const DrakenVector* const* args, uint32
 VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// Column-valued SUBSTRING/LEFT/RIGHT (function_kernels.cpp) — the vector-operand
+// sibling of draken_substring above; start/count are read per-row from DrakenVector
+// args instead of a bind-time ctx. Three thin entry points sharing one impl, keyed
+// by mode (see the file's comment above fk_substring_dynamic_impl).
+VecResult draken_substring_dynamic(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_left_dynamic(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_right_dynamic(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_starts_with(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_ends_with(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -227,6 +234,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_numeric_cmp", (kernel_fn_t)&draken_numeric_cmp},
     {"draken_temporal_cmp", (kernel_fn_t)&draken_temporal_cmp},
     {"draken_substring", (kernel_fn_t)&draken_substring},
+    {"draken_substring_dynamic", (kernel_fn_t)&draken_substring_dynamic},
+    {"draken_left_dynamic", (kernel_fn_t)&draken_left_dynamic},
+    {"draken_right_dynamic", (kernel_fn_t)&draken_right_dynamic},
     {"draken_contains", (kernel_fn_t)&draken_contains},
     {"draken_starts_with", (kernel_fn_t)&draken_starts_with},
     {"draken_ends_with", (kernel_fn_t)&draken_ends_with},
@@ -277,6 +287,15 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_decimal_to_string", (kernel_fn_t)&draken_cast_decimal_to_string},
     {"draken_cast_decimal128_to_string", (kernel_fn_t)&draken_cast_decimal128_to_string},
 
+    // → VARBINARY (BLOB) retag wrappers — same bytes as the _to_string twin,
+    // result retagged VARBINARY (see cast_kernels.h doc comment).
+    {"draken_cast_int64_to_blob", (kernel_fn_t)&draken_cast_int64_to_blob},
+    {"draken_cast_integer_to_blob", (kernel_fn_t)&draken_cast_integer_to_blob},
+    {"draken_cast_float64_to_blob", (kernel_fn_t)&draken_cast_float64_to_blob},
+    {"draken_cast_bool_to_blob", (kernel_fn_t)&draken_cast_bool_to_blob},
+    {"draken_cast_decimal_to_blob", (kernel_fn_t)&draken_cast_decimal_to_blob},
+    {"draken_cast_decimal128_to_blob", (kernel_fn_t)&draken_cast_decimal128_to_blob},
+
     // Narrow-integer widening (INT32/INT16/INT8 → FLOAT64 / INT64) + direct → string
     {"draken_cast_integer_to_float64", (kernel_fn_t)&draken_cast_integer_to_float64},
     {"draken_cast_integer_to_int64", (kernel_fn_t)&draken_cast_integer_to_int64},
@@ -308,6 +327,12 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_string_to_date32", (kernel_fn_t)&draken_cast_string_to_date32},
     {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},
 
+    // String-family retag (byte-identical copy, new type tag only) — see the
+    // doc comment on string_retag_core in cast_string.cpp.
+    {"draken_cast_string_to_varchar", (kernel_fn_t)&draken_cast_string_to_varchar},
+    {"draken_cast_string_to_blob", (kernel_fn_t)&draken_cast_string_to_blob},
+    {"draken_cast_string_to_nvarchar", (kernel_fn_t)&draken_cast_string_to_nvarchar},
+
     // E33 — VARCHAR/NVARCHAR/VARBINARY → the named unsigned target (parse +
     // range-check via composition with draken_cast_string_to_int64).
     {"draken_cast_string_to_uint8", (kernel_fn_t)&draken_cast_string_to_uint8},
@@ -326,6 +351,17 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},
     {"draken_cast_timestamp_to_string", (kernel_fn_t)&draken_cast_timestamp_to_string},
+    {"draken_cast_string_to_time64", (kernel_fn_t)&draken_cast_string_to_time64},
+    {"draken_cast_time_to_string", (kernel_fn_t)&draken_cast_time_to_string},
+    // VARCHAR -> TIMESTAMP64 (default ISO-8601 or CAST ... FORMAT).
+    {"draken_cast_string_to_timestamp", (kernel_fn_t)&draken_cast_string_to_timestamp},
+    // INTERVAL -> VARCHAR (default ISO-8601 duration or CAST ... FORMAT).
+    {"draken_cast_interval_to_string", (kernel_fn_t)&draken_cast_interval_to_string},
+
+    // → VARBINARY (BLOB) retag wrappers for DATE32/TIMESTAMP64/INTERVAL sources.
+    {"draken_cast_date_to_blob", (kernel_fn_t)&draken_cast_date_to_blob},
+    {"draken_cast_timestamp_to_blob", (kernel_fn_t)&draken_cast_timestamp_to_blob},
+    {"draken_cast_interval_to_blob", (kernel_fn_t)&draken_cast_interval_to_blob},
     // P9.0: draken_cast_timestamp_to_date32 stays unregistered — it is still a STUB
     // (cast_temporal.cpp returns "not yet implemented"). The registry holds ONLY real,
     // nogil, byte-identical kernels; a registered stub is a trap (the binder would mark

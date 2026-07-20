@@ -267,7 +267,7 @@ static bool draken_export_to_arrow(const DrakenVector* dv,
 
     // INTERVAL: Draken [months:int64][us:int64] → Arrow month_day_nano [months:int32][days:int32][ns:int64]
     if (dt == DRAKEN_INTERVAL) {
-        init_schema(out_schema, "tiM");
+        init_schema(out_schema, "tin");  // month_day_nano
         auto* priv = init_array(out_array, n, null_count, 2);
         if (dv->validity)
             out_array->buffers[0] = own_copy(priv, 0, dv->validity, (n + 7) / 8);

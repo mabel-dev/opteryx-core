@@ -36,12 +36,14 @@ from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16, DRAKEN_ARRAY
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
+from draken.core.buffers cimport DRAKEN_DECIMAL128
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
 
 
-cdef Vector _materialise_constant_literal(object value, int physical_type):
+cdef Vector _materialise_constant_literal(object value, int physical_type,
+                                           int precision=-1, int scale=-1):
     """Materialise a scalar literal into a constant-shape Draken Vector ONCE at
     bind time (data_length==1, length==1). The executor re-stamps only the
     logical length per morsel — no per-morsel Python object, isinstance, or
@@ -53,10 +55,20 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
     UTF-8 inside the native constructor. Non-string scalars dispatch on the Python
     value type, preserving the existing INT64/FLOAT64/DECIMAL/DATE32/TIMESTAMP
     mappings exactly.
+
+    precision/scale (Decimal only): the bind-time DECLARED (precision, scale) —
+    e.g. from `CAST(x AS DECIMAL(38,6))` — passed by the caller when known.
+    -1 means undeclared: fall back to deriving them from the value's own digit
+    count. This matters because the parsed Decimal value is NOT re-quantized to
+    the declared scale upstream (parser_for(DECIMAL) leaves '1.23' as-is even
+    when CAST to DECIMAL(38,6)) — deriving from the value alone silently picks
+    the wrong physical tier (DECIMAL vs DECIMAL128) and the wrong stored
+    magnitude whenever the value's natural scale differs from the declared one.
     """
     cdef long long ordinal
     cdef bytes raw
     cdef object int_vec
+    cdef int use_precision, use_scale
     if value is None:
         # A typed NULL literal (e.g. CAST(NULL AS VARCHAR)) must materialise a
         # null constant of its declared physical type, NOT an untyped DRAKEN_NULL
@@ -138,12 +150,16 @@ cdef Vector _materialise_constant_literal(object value, int physical_type):
         # Default (VARCHAR and any unspecified physical tag): raw bytes verbatim.
         return Vector(_draken_native.vector_varchar_from_constant(raw, 1))
     if isinstance(value, _decimal.Decimal):
-        sign, digits, exponent = value.as_tuple()
-        scale = max(0, -int(exponent))
-        precision = max(len(digits), scale + 1)
-        if precision > 18:
-            return Vector(_draken_native.vector_decimal128_from_constant(value, 1, precision, scale))
-        return Vector(_draken_native.vector_decimal_from_constant(value, 1, precision, scale))
+        if precision >= 1:
+            use_precision = precision
+            use_scale = scale if scale >= 0 else 0
+        else:
+            sign, digits, exponent = value.as_tuple()
+            use_scale = max(0, -int(exponent))
+            use_precision = max(len(digits), use_scale + 1)
+        if physical_type == <int>DRAKEN_DECIMAL128 or use_precision > 18:
+            return Vector(_draken_native.vector_decimal128_from_constant(value, 1, use_precision, use_scale))
+        return Vector(_draken_native.vector_decimal_from_constant(value, 1, use_precision, use_scale))
     if physical_type == <int>DRAKEN_INTERVAL:
         # INTERVAL literals are (months, microseconds) tuples (see
         # logical_planner_builders.literal_interval). Materialise a constant-shape
@@ -328,6 +344,17 @@ DEF _NT_AGGREGATOR = 41
 DEF _NT_LITERAL = 42
 DEF _NT_EVALUATED = 44
 DEF _NT_CAST = 45
+
+# CAST ... FORMAT '<pattern>' (default ISO-8601 when absent) — kernel names that
+# read a format_ctx (draken/ops/kernels/kernel_context.h). Referenced both to
+# fail loud when FORMAT is given for an unsupported pairing, and to build the
+# ctx for the ones that do support it — see the _NT_CAST case below.
+cdef frozenset _CAST_FORMAT_AWARE_KERNELS = frozenset((
+    "draken_cast_date_to_string", "draken_cast_date_to_blob",
+    "draken_cast_timestamp_to_string", "draken_cast_timestamp_to_blob",
+    "draken_cast_string_to_date32", "draken_cast_string_to_timestamp",
+    "draken_cast_interval_to_string", "draken_cast_interval_to_blob",
+))
 DEF _NT_EXTRACTION_OPERATOR = 46
 # NT_BETWEEN (47) has no lowering arm — `lower()` expands BETWEEN into a pair of
 # compares before the C node tree is built (see `expand_between`).
@@ -995,7 +1022,25 @@ cdef Py_ssize_t _linearize(
             else:
                 # Genuine scalar literal — materialise the native constant ONCE.
                 # The executor re-stamps only the logical length per morsel.
-                const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                if isinstance(value_obj, _decimal.Decimal):
+                    # Thread the bind-time DECLARED (precision, scale) through —
+                    # e.g. CAST(1.23 AS DECIMAL(38,6)) — since the parsed Decimal
+                    # value itself is never re-quantized to it upstream. Without
+                    # this, _materialise_constant_literal falls back to deriving
+                    # (precision, scale) from the value's own digit count, which
+                    # silently picks the wrong physical tier (DECIMAL vs
+                    # DECIMAL128) and the wrong stored magnitude.
+                    _lit_py_node = <object>node.source_node
+                    _lit_ct = getattr(_lit_py_node, "type", None)
+                    _lit_lg = getattr(_lit_ct, "logical", None) if _lit_ct is not None else None
+                    if _lit_lg is not None and getattr(_lit_lg, "precision", None):
+                        const_lit = _materialise_constant_literal(
+                            value_obj, node.physical_type,
+                            int(_lit_lg.precision), int(_lit_lg.scale))
+                    else:
+                        const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                else:
+                    const_lit = _materialise_constant_literal(value_obj, node.physical_type)
                 slot.opcode = BC_LOAD_LIT_CONST
                 bc._hold(const_lit)
                 slot.literal_obj = <PyObject*>const_lit
@@ -1738,13 +1783,20 @@ cdef Py_ssize_t _linearize(
             _sb_start_obj = <object>node.parameters[1].value
             if isinstance(_sb_start_obj, (int, float)) and not isinstance(_sb_start_obj, bool):
                 _sb_start = int(_sb_start_obj)
-                if n == 3 and node.parameters[2] != NULL \
-                        and node.parameters[2].node_type == _NT_LITERAL:
+                if n == 2:
+                    _sb_ok = True
+                # n == 3: only take the literal-ctx fast path when `count` is ALSO a
+                # literal. A non-literal (column) count used to fall through here with
+                # _sb_ok unconditionally True, silently dropping the count operand
+                # (has_count stayed 0 -> ran to end) instead of routing to the
+                # column-valued dynamic kernel below. Bug fixed alongside adding that
+                # kernel, since it's the same "count is a column" case.
+                elif node.parameters[2] != NULL and node.parameters[2].node_type == _NT_LITERAL:
                     _sb_count_obj = <object>node.parameters[2].value
                     if _sb_count_obj is not None:
                         _sb_count = int(_sb_count_obj)
                         _sb_has_count = 1
-                _sb_ok = True
+                    _sb_ok = True
         elif _sub_func in ("LEFT", "RIGHT") and n == 2 \
                 and node.parameters[1] != NULL \
                 and node.parameters[1].node_type == _NT_LITERAL:
@@ -1775,6 +1827,42 @@ cdef Py_ssize_t _linearize(
                 # fallback, and every VM arm gates on BC_INSTR_C_NATIVE before ever
                 # reading callable_ref.
                 return sub_depth   # operand pushed, fn pops 1 pushes 1
+
+        # Column-valued SUBSTRING/LEFT/RIGHT — reached only when _sb_ok above didn't
+        # fire (start/count aren't both compile-time literals). draken_substring_dynamic
+        # / draken_left_dynamic / draken_right_dynamic (function_kernels.cpp) read
+        # start/count per-row from vector operands instead of a literal ctx; a literal
+        # operand still works here too (it linearizes to a constant-shape vector), so
+        # mixed literal+column args (e.g. SUBSTRING(col, 2, count_col)) are supported
+        # for free via the uniform data[selection[i]] access pattern — no special-casing
+        # needed. No ctx: mode is carried by which of the three entry points is resolved.
+        if _sub_func in ("SUBSTRING", "SUBSTR") and 2 <= n <= 3:
+            _sbd_fn, _sbd_unused = _resolve_kernel_and_context("draken_substring_dynamic", None, None)
+            if _sbd_fn is not None:
+                sub_depth = _linearize(node.parameters[0], bc, depth)
+                sub_depth = _linearize(node.parameters[1], bc, sub_depth)
+                if n == 3:
+                    sub_depth = _linearize(node.parameters[2], bc, sub_depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = <int>n
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE
+                slot.kernel_fn = <void*>(<unsigned long long>_sbd_fn)
+                return sub_depth - n + 1
+        elif _sub_func in ("LEFT", "RIGHT") and n == 2:
+            _sbd_kernel_name = "draken_left_dynamic" if _sub_func == "LEFT" else "draken_right_dynamic"
+            _sbd_fn, _sbd_unused = _resolve_kernel_and_context(_sbd_kernel_name, None, None)
+            if _sbd_fn is not None:
+                sub_depth = _linearize(node.parameters[0], bc, depth)
+                sub_depth = _linearize(node.parameters[1], bc, sub_depth)
+                slot = bc._push_instr()
+                slot.opcode = BC_FUNCTION
+                slot.arity = 2
+                slot.bool_value = 0
+                slot.flags = BC_INSTR_C_NATIVE
+                slot.kernel_fn = <void*>(<unsigned long long>_sbd_fn)
+                return sub_depth - 2 + 1
 
         # STARTS_WITH / ENDS_WITH (the optimizer's `LIKE 'x%'` / `LIKE '%x'` rewrite;
         # CI variants for ILIKE; negation already wrapped in a NOT node) → C-ABI bool
@@ -2233,6 +2321,19 @@ cdef Py_ssize_t _linearize(
             # operand), fall through to the Python callable_ref, never here.
             if func_name in ("DATEDIFF", "TIMEDIFF", "UNIXTIME", "TIME_BUCKET", "DATE_FORMAT"):
                 _fn_skip_lookup = True
+            # SUBSTRING/SUBSTR: the dedicated literal-ctx arm above (_sb_ok) already
+            # returned when start/count were literals. Reaching here means it wasn't
+            # eligible (a non-literal from_pos/count — a column, say), so this generic
+            # name-only lookup would otherwise still match "draken_substring_2"/
+            # "draken_substring_3" in the registry (registered for the literal-ctx
+            # kernel draken_substring) with NO ctx and arity=n — same
+            # "expected N arguments" crash class as DATEDIFF/TIMEDIFF above. Fall
+            # through to the Python callable_ref path (currently unsupported at PLAN
+            # time — no C-native kernel handles column-valued from_pos/count yet)
+            # rather than dispatch the literal-only kernel against operands it cannot
+            # read.
+            if func_name in ("SUBSTRING", "SUBSTR"):
+                _fn_skip_lookup = True
             # Unary ARRAY reducers — SORT(arr) -> ARRAY, GREATEST/LEAST(arr) ->
             # element scalar. All three read the array's elements from the column
             # owner's child vector (draken_sort/greatest/least read it exactly like
@@ -2505,13 +2606,28 @@ cdef Py_ssize_t _linearize(
         # late-bound escape hatch). _c_native_cast is the single source of truth.
         from opteryx.expression.casts import _c_native_cast
         _cn = _c_native_cast(source_phys_name, cast_target_type, safe=cast_is_try)
+
+        # CAST ... FORMAT is only meaningful (and only compiles) for the kernels
+        # that read a format_ctx — fail loud rather than silently drop the pattern
+        # for any other (source, target) pairing.
+        if getattr(cast_py_node, "format", None) is not None and (
+            _cn is None or _cn[0] not in _CAST_FORMAT_AWARE_KERNELS
+        ):
+            raise ValueError(
+                f"CAST ... FORMAT is not supported for {source_phys_name} → {cast_target_type}"
+            )
+
         if _cn is not None:
             # TIMESTAMP-producing casts need the target unit in a cast_timestamp_ctx
             # (1 ns / 2 us / 3 ms / 4 s / 5 days); default us when the cast left it
             # implicit. Everything else is unit-less (None ctx).
             _cn_alloc = None
             _cn_arg = None
-            if _cn[0].endswith("_to_timestamp"):
+            # draken_cast_string_to_timestamp also ends with "_to_timestamp" but is
+            # NOT one of the int64/date32-source unit-conversion kernels below — it
+            # takes the FORMAT-pattern ctx branch further down. Must be excluded
+            # here or it would be misrouted into alloc_cast_timestamp_ctx.
+            if _cn[0].endswith("_to_timestamp") and _cn[0] not in _CAST_FORMAT_AWARE_KERNELS:
                 # Target unit = binder-declared result unit (see the rescale branch
                 # below for why the SQL suffix is NOT the target). "days" has no
                 # TimestampUnit representation and keeps its special scaling code.
@@ -2561,13 +2677,42 @@ cdef Py_ssize_t _linearize(
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
                 _cn_arg = (0, 0, 0, int(cast_params[1]), int(cast_params[0]), 0, 0)
             elif _cn[0] in ("draken_cast_decimal_to_string",
-                            "draken_cast_decimal128_to_string"):
-                # DECIMAL → VARCHAR: the SOURCE scale (LogicalType, absent from the
-                # runtime vector) rides in binary_op_ctx.left_scale. Read it off the
-                # bound source ColumnType (source_sql is set for any typed decimal
-                # source — the only way _cn selected this kernel).
+                            "draken_cast_decimal128_to_string",
+                            "draken_cast_decimal_to_blob",
+                            "draken_cast_decimal128_to_blob"):
+                # DECIMAL → VARCHAR/BLOB: the SOURCE scale (LogicalType, absent from
+                # the runtime vector) rides in binary_op_ctx.left_scale. Read it off
+                # the bound source ColumnType (source_sql is set for any typed decimal
+                # source — the only way _cn selected this kernel). The _to_blob twin
+                # forwards this same ctx straight into decimal_to_string_core before
+                # retagging the result (see cast_numeric.cpp), so it needs the
+                # identical ctx shape as its _to_string sibling.
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
                 _cn_arg = (0, _binop_dec_scale(source_sql), 0, 0, 0, 0, 0)
+            elif _cn[0] in _CAST_FORMAT_AWARE_KERNELS:
+                # CAST ... FORMAT '<pattern>' (or the ISO-8601 default when absent) —
+                # the pattern must be a compile-time literal (enforced in
+                # logical_planner_builders.cast()); baked into a format_ctx exactly
+                # like DATE_FORMAT's pattern (same struct, same allocator — see
+                # draken/ops/kernels/kernel_context.h). Always allocated (even with
+                # an empty pattern) for the two TIMESTAMP64 kernels: the ctx also
+                # carries the source's TimestampUnit, which the raw int64 payload's
+                # scale depends on — a null ctx previously meant "always treat as
+                # microseconds", silently wrong for non-us TIMESTAMP64 columns.
+                _fc_fmt_node = getattr(cast_py_node, "format", None)
+                _fc_fmt_bytes = b""
+                if _fc_fmt_node is not None:
+                    _fc_fmt_val = _fc_fmt_node.value
+                    if isinstance(_fc_fmt_val, str):
+                        _fc_fmt_bytes = _fc_fmt_val.encode("utf-8")
+                    elif isinstance(_fc_fmt_val, bytes):
+                        _fc_fmt_bytes = _fc_fmt_val
+                _fc_ts_unit = 2
+                if _cn[0] in ("draken_cast_timestamp_to_string", "draken_cast_timestamp_to_blob"):
+                    if source_sql is not None and source_sql.logical is not None:
+                        _fc_ts_unit = int(source_sql.logical.unit.value)
+                from draken.ops.kernels._kernel_registry import alloc_format_ctx as _cn_alloc
+                _cn_arg = (_fc_ts_unit, _fc_fmt_bytes)
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(_cn[0], _cn_alloc, _cn_arg)
             if fn_ptr is not None:
                 slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
@@ -2575,11 +2720,15 @@ cdef Py_ssize_t _linearize(
                 if ctx_wrapper is not None:
                     bc._hold(ctx_wrapper)
                     slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
-                # S2: string-result cast kernels are named `..._to_string`;
-                # their canonical-block results fold nogil too (S6). TIMESTAMP
-                # results are DESC (unit re-attached at the ExprProject boundary);
-                # everything else is plain fixed-width.
-                if _cn[0].endswith("_to_string"):
+                # S2: string-result cast kernels are named `..._to_string`
+                # (VARCHAR target), `..._to_varchar`/`..._to_blob` (the
+                # string-family retag, VARCHAR/BLOB target), or `..._to_nvarchar`
+                # (validate+retag, NVARCHAR target); their canonical-block
+                # results fold nogil too (S6). TIMESTAMP results are DESC (unit
+                # re-attached at the ExprProject boundary); everything else is
+                # plain fixed-width.
+                if (_cn[0].endswith("_to_string") or _cn[0].endswith("_to_varchar")
+                        or _cn[0].endswith("_to_blob") or _cn[0].endswith("_to_nvarchar")):
                     slot.flags |= BC_C_NATIVE_STRING
                 elif (_cn[0].endswith("_to_timestamp") or _cn[0].endswith("_to_decimal")
                         or _cn[0] == "draken_cast_timestamp_rescale"):

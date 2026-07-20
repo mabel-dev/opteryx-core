@@ -85,10 +85,16 @@ def session(
     memberships: Optional[Iterable[str]] = None,
     schema: Optional[str] = None,
     access_policies: Optional[Iterable[str]] = None,
+    billing_account: Optional[str] = None,
     query_id: Optional[str] = None,
 ) -> "Session":
     """
     Create and return a new `Session` object (the canonical execution object).
+
+    `billing_account` is who pays for the usage this session generates, which is
+    not the same thing as `user` — many users may bill to one account. Callers
+    holding a caller identity (e.g. a service handling an authenticated request)
+    should supply it; omitting it attributes usage to the house account.
 
     Example:
         session = opteryx.session(user="alice", memberships=["opteryx"])
@@ -101,6 +107,7 @@ def session(
         memberships=memberships,
         schema=schema,
         access_policies=access_policies,
+        billing_account=billing_account,
         query_id=query_id,
     )
 

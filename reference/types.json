@@ -16,11 +16,12 @@
             "description": "An ordered sequence of elements, all of the same type. Array columns appear when reading Parquet or JSONL files that contain repeated/array fields. The element type is declared as `ARRAY<type>` (e.g. `ARRAY<INTEGER>`, `ARRAY<VARCHAR>`).",
             "cast_to": [],
             "comparable_with": [],
-            "notes": "Individual elements are accessed with subscript notation: `arr[0]` returns the first element (zero-indexed).",
+            "notes": "Individual elements are accessed with subscript notation: `arr[0]` returns the first element (zero-indexed, negative indices count from the end). Array literals (`[1, 2, 3]`) are valid as an operand of `IN`, `@>`, `@>>`, or `CAST(... AS VECTOR(n))` \u2014 just not as a bare item in the SELECT list.",
             "limitations": [
-                "There is no standalone array literal syntax. `SELECT [1, 2, 3]` is not valid.",
-                "Arrays cannot be used in WHERE clauses or JOIN conditions directly. Use UNNEST or element access.",
-                "You cannot CAST a scalar value to ARRAY."
+                "There is no standalone array literal syntax in the SELECT list. `SELECT [1, 2, 3]` is not valid, though `[1, 2, 3]` is valid as an operand elsewhere (see notes).",
+                "Array EQUALITY is not supported (no `=` operator registered for ARRAY = ARRAY). Membership/containment checks (`col IN (...)`, `@>`, `@>>`) DO work directly in a WHERE clause \u2014 the array itself just can't be compared for equality.",
+                "You cannot CAST a scalar value to ARRAY.",
+                "Element access (`arr[i]`) is unsupported for VECTOR_FP16 and DECIMAL128 element types \u2014 it fails loud rather than returning a stripped or misread value."
             ]
         },
         "parameterized_forms": [
@@ -89,7 +90,7 @@
             ],
             "limitations": [
                 "BOOLEAN cannot be compared to numeric types directly. Cast first: `col::INTEGER = 1`.",
-                "Casting an unrecognised string to BOOLEAN raises an error, not NULL. There is no silent fallback."
+                "Plain `CAST(... AS BOOLEAN)` / `::BOOLEAN` raises on an unrecognised string \u2014 there is no silent fallback. However `TRY_CAST(... AS BOOLEAN)` and element parsing inside `CAST(... AS ARRAY<BOOLEAN>)` do NOT raise and do NOT return NULL for garbage input \u2014 they silently coerce any unrecognised string to FALSE."
             ]
         },
         "parameterized_forms": [],
@@ -125,19 +126,24 @@
                 {
                     "format": "YYYY-MM-DD",
                     "example": "'2024-01-15'::DATE",
-                    "note": "Only this format is accepted \u2014 ISO 8601 date"
+                    "note": "ISO 8601 date; components are not required to be zero-padded (e.g. '2024-1-5' is also accepted)"
                 }
             ],
             "cast_to": [
                 {
                     "type": "from VARCHAR",
                     "example": "'2024-01-15'::DATE",
-                    "note": "String must be in YYYY-MM-DD format"
+                    "note": "String must be in YYYY-MM-DD (or unpadded YYYY-M-D) format"
                 },
                 {
                     "type": "from TIMESTAMP",
                     "example": "ts_col::DATE",
                     "note": "Truncates the time component; returns the date portion only"
+                },
+                {
+                    "type": "from INTEGER (literal only)",
+                    "example": "1::DATE",
+                    "note": "An integer *literal* is interpreted as days since the Unix epoch. This does NOT work for an integer column \u2014 casting a column raises NotImplementedError; convert via `FROM_UNIXTIME(n)::DATE` instead"
                 }
             ],
             "comparable_with": [
@@ -162,8 +168,8 @@
                 }
             ],
             "limitations": [
-                "You cannot cast an integer to DATE directly. To convert a Unix epoch value, cast to TIMESTAMP first then to DATE: `FROM_UNIXTIME(n)::DATE`.",
-                "Only YYYY-MM-DD string format is accepted. Formats like MM/DD/YYYY or DD-MM-YYYY will fail."
+                "You cannot cast an integer COLUMN to DATE directly (only integer literals are accepted). To convert an epoch column, cast to TIMESTAMP first then to DATE: `FROM_UNIXTIME(n)::DATE`.",
+                "MM/DD/YYYY or DD-MM-YYYY string formats will fail \u2014 only YYYY-MM-DD ordering is accepted."
             ]
         },
         "parameterized_forms": [],
@@ -214,10 +220,9 @@
                 "INTEGER",
                 "FLOAT"
             ],
-            "notes": "Precision 1\u201318 uses 64-bit integer storage. Precision 19\u201338 uses 128-bit integer storage. Precision above 38 is not supported. Arithmetic result precision follows SQL Server rules: addition/subtraction scales as `max(s1,s2)` with precision `max(p1-s1, p2-s2) + max(s1,s2) + 1`; multiplication gives `p1+p2` precision and `s1+s2` scale.",
+            "notes": "Precision 1\u201318 uses 64-bit integer storage. Precision 19\u201338 uses 128-bit integer storage. Precision above 38 is not supported. Arithmetic result precision follows SQL Server rules: addition/subtraction scales as `max(s1,s2)` with precision `max(p1-s1, p2-s2) + max(s1,s2) + 1`; multiplication gives `p1+p2` precision and `s1+s2` scale; division gives `p1+6` precision and `max(s1+6, 6)` scale. FLOAT \u2192 DECIMAL casts round half-away-from-zero, not banker's rounding. Unlike INTEGER, DECIMAL arithmetic overflow (result too wide for the storage tier) raises an error rather than wrapping silently.",
             "limitations": [
-                "SUM, AVG, and MEDIAN do not support DECIMAL columns \u2014 cast to FLOAT first: `SUM(col::FLOAT)`.",
-                "DECIMAL columns from Parquet files are read correctly but aggregate functions reject them."
+                "MEDIAN does not support DECIMAL columns \u2014 cast to FLOAT/DOUBLE first: `MEDIAN(col::DOUBLE)`. SUM, AVG, MIN, and MAX all support DECIMAL natively and preserve exactness (SUM/MIN/MAX stay DECIMAL; AVG returns DOUBLE)."
             ]
         },
         "parameterized_forms": [
@@ -283,7 +288,8 @@
             "notes": "NaN sorts highest (appears after all real numbers). -0.0 and 0.0 compare as equal. Infinity is representable but not directly writable as a literal.",
             "limitations": [
                 "Floating-point arithmetic is inexact. Use DECIMAL for financial calculations.",
-                "NaN comparisons: NaN = NaN is FALSE in SQL; NaN appears at the top when sorting."
+                "NaN comparisons: NaN = NaN is FALSE in SQL; NaN appears at the top when sorting.",
+                "GROUP BY SUM/AVG over FLOAT is computed by parallel workers whose summation order is not fixed, so re-running the identical query against unchanged data can return different low-order digits between runs. INTEGER SUM/COUNT are exact and unaffected."
             ]
         },
         "parameterized_forms": [],
@@ -337,7 +343,7 @@
                 {
                     "type": "from VARCHAR",
                     "example": "'42'::INTEGER",
-                    "note": "String must contain only digits with an optional leading minus sign"
+                    "note": "String must contain only digits with an optional leading minus sign \u2014 unlike FLOAT's VARCHAR cast, a leading '+' and surrounding whitespace are NOT tolerated"
                 },
                 {
                     "type": "from TIMESTAMP",
@@ -357,7 +363,8 @@
             ],
             "limitations": [
                 "Cannot compare INTEGER to VARCHAR or temporal types \u2014 cast first.",
-                "Overflow is not detected at runtime: values outside the \u00b19,223,372,036,854,775,807 range wrap silently."
+                "Overflow is not detected at runtime: values outside the \u00b19,223,372,036,854,775,807 range wrap silently.",
+                "Division and modulo by zero do not raise \u2014 `INTEGER / 0` and `INTEGER % 0` silently return 0."
             ]
         },
         "parameterized_forms": [],
@@ -395,7 +402,13 @@
         "metadata": {
             "description": "A duration or period of time. Written as `INTERVAL 'value' UNIT` where UNIT is one of `DAY`, `MONTH`, `YEAR`, `HOUR`, `MINUTE`, `SECOND`, or `MICROSECOND`.",
             "example": "INTERVAL '7' DAY",
-            "cast_to": [],
+            "cast_to": [
+                {
+                    "type": "to VARCHAR",
+                    "example": "(INTERVAL '1' DAY)::VARCHAR",
+                    "note": "Renders as a human-readable interval string, e.g. '1 DAY'"
+                }
+            ],
             "comparable_with": [
                 "INTERVAL"
             ],
@@ -419,7 +432,7 @@
             "notes": "Sub-month components (days, hours, minutes, seconds, microseconds) are stored as a microsecond count. Month and year components are stored separately and applied calendar-accurately during arithmetic. You cannot mix month-based and sub-month intervals in a single expression.",
             "limitations": [
                 "There is no INTERVAL literal that combines months and days in one expression (e.g. '1 month 3 days' is not supported). Use separate additions.",
-                "INTERVAL cannot be cast to or from other types."
+                "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type."
             ]
         },
         "parameterized_forms": [],
@@ -448,7 +461,7 @@
             "comparable_with": [],
             "limitations": [
                 "You cannot CAST to NULL.",
-                "NULL = NULL is always false; use IS NULL instead."
+                "`NULL = NULL` evaluates to NULL (unknown, per SQL three-valued logic) \u2014 not TRUE and not FALSE. It never matches in a WHERE clause, which looks like FALSE from the outside, but the value itself is NULL; use IS NULL instead."
             ]
         },
         "parameterized_forms": [],
@@ -488,9 +501,10 @@
             ],
             "comparable_with": [
                 "NVARCHAR",
-                "VARCHAR"
+                "VARCHAR",
+                "VARBINARY"
             ],
-            "notes": "Supports `LIKE`, `ILIKE`, and `RLIKE` pattern matching. String functions that operate on character positions (e.g. SUBSTRING) count Unicode code points, not bytes.",
+            "notes": "Supports `LIKE`, `ILIKE`, and `RLIKE` pattern matching. String functions that operate on character positions (e.g. SUBSTRING, LEFT, RIGHT) count Unicode code points, not bytes, ONLY when the position/length argument is a literal \u2014 when it comes from a column expression, the same functions currently fall back to a byte-based kernel and give wrong offsets for non-ASCII text.",
             "limitations": [
                 "Casting from VARBINARY will fail if the bytes are not valid UTF-8.",
                 "There is no structured STRUCT or JSONB type. JSON data lands as NVARCHAR \u2014 use `->` and `->>` to navigate it."
@@ -523,34 +537,35 @@
             "parameterized": false
         },
         "metadata": {
-            "description": "A time of day with no date component. Stores hours, minutes, seconds, and microseconds.",
-            "example": "'12:30:00'::TIME",
+            "description": "A time of day with no date component. Stored as microseconds since midnight (TIME64).",
+            "example": "'09:30:45'::TIME",
             "string_formats": [
-                {
-                    "format": "HH:MM",
-                    "example": "'09:30'::TIME",
-                    "note": "Hour and minute only; seconds default to 0"
-                },
                 {
                     "format": "HH:MM:SS",
                     "example": "'09:30:45'::TIME",
-                    "note": "Hour, minute, and second"
+                    "note": "Hours, minutes, seconds"
+                },
+                {
+                    "format": "HH:MM:SS.ffffff",
+                    "example": "'09:30:45.123456'::TIME",
+                    "note": "With up to 6 fractional-second digits"
                 }
             ],
             "cast_to": [
                 {
                     "type": "from VARCHAR",
                     "example": "'09:30:45'::TIME",
-                    "note": "String must be HH:MM or HH:MM:SS"
+                    "note": "String must be in HH:MM:SS[.ffffff] format"
                 }
             ],
             "comparable_with": [
                 "TIME"
             ],
             "limitations": [
+                "TIME literal-prefix syntax (`TIME '09:30:00'`) is not accepted \u2014 type-prefixed string literals are rejected for every type except INTERVAL; use `'09:30:00'::TIME` or `CAST('09:30:00' AS TIME)` instead.",
                 "TIME cannot be compared to DATE or TIMESTAMP.",
                 "No timezone support \u2014 TIME is always local/naive.",
-                "You cannot cast an integer to TIME."
+                "There is no CAST from TIMESTAMP, DATE, or INTEGER to TIME yet \u2014 only VARCHAR sources are supported."
             ]
         },
         "parameterized_forms": [],
@@ -654,11 +669,10 @@
                     "desc": "Difference between two timestamps"
                 }
             ],
-            "notes": "All scales are stored as INT64. At the default microsecond scale, the representable range is approximately 1677-09-21 to 2262-04-11. Timezone information is not stored \u2014 all timestamps are naive (no offset). String parsing accepts a space or T as the date/time separator. Timezone suffixes (Z, +01:00) in strings are ignored \u2014 only the local time portion is parsed.",
+            "notes": "All scales are stored as INT64. The 1677-09-21 to 2262-04-11 range applies only to `TIMESTAMP[ns]`; the default microsecond scale covers a far wider range (tested from at least year 1500 to year 9999). Timezone information is not stored \u2014 all timestamps are naive (no offset). A trailing timezone suffix (`Z`, `+01:00`) in a string literal is accepted and discarded \u2014 the wall-clock date/time as written is kept, only the offset is dropped. String parsing accepts a space or T as the date/time separator.",
             "limitations": [
-                "Timezone offsets in string literals are silently ignored. Convert to UTC before storing if timezone matters.",
                 "`1::TIMESTAMP` is not valid \u2014 you must specify the scale: `1::TIMESTAMP[s]`.",
-                "Timestamps outside 1677\u20132262 are not representable at microsecond scale."
+                "Timestamps outside 1677\u20132262 are not representable at `TIMESTAMP[ns]` scale (nanosecond storage overflows outside that range); the default microsecond scale does not have this restriction."
             ]
         },
         "parameterized_forms": [],
@@ -706,8 +720,10 @@
             ],
             "comparable_with": [
                 "VARBINARY",
-                "VARCHAR"
+                "VARCHAR",
+                "NVARCHAR"
             ],
+            "notes": "LIKE and RLIKE work on VARBINARY. ILIKE does not \u2014 `col ILIKE pattern` on a VARBINARY column is rejected at bind time, since case-insensitive matching is not defined for raw bytes.",
             "limitations": [
                 "There is no binary literal syntax. Use HEX_DECODE(), BASE64_DECODE(), or cast from a hex string."
             ]
@@ -784,7 +800,8 @@
             ],
             "notes": "Supports `LIKE` (case-sensitive), `ILIKE` (case-insensitive), and `RLIKE` (regular expression) pattern matching.",
             "limitations": [
-                "Non-ASCII bytes stored in a VARCHAR column produce undefined behaviour \u2014 use NVARCHAR for Unicode."
+                "Non-ASCII bytes stored in a VARCHAR column produce undefined behaviour \u2014 use NVARCHAR for Unicode.",
+                "String values (VARCHAR/NVARCHAR/VARBINARY alike) are length-capped at just under 4 GiB per value (length is stored as uint32)."
             ]
         },
         "parameterized_forms": [],
@@ -812,10 +829,10 @@
             "parameterized": false
         },
         "metadata": {
-            "description": "A semi-structured type for heterogeneous or schema-on-read data. VARIANT values are typically produced by reading JSON columns. Use the `->` operator to extract a field as NVARCHAR, or `->>` to extract as plain text.",
+            "description": "A semi-structured type produced exclusively by the `->` operator when extracting a JSON field from a VARCHAR/NVARCHAR/VARBINARY column. Use `->` to extract a field as VARIANT (a JSON value), or `->>` to extract the same field as NVARCHAR (JSON strings unquoted to plain text).",
             "cast_to": [],
             "comparable_with": [],
-            "notes": "VARIANT is produced automatically when reading JSON/NVARCHAR columns that contain structured data. Use `->` and `->>` operators to navigate the structure.",
+            "notes": "VARIANT is NOT produced by reading JSON files/columns directly \u2014 file connectors map JSON object/struct columns to NVARCHAR. VARIANT only appears as the result of the `->` operator; there is no PARSE_JSON()/TO_VARIANT() function.",
             "limitations": [
                 "You cannot CAST any value to VARIANT \u2014 it is read-only at the SQL level.",
                 "VARIANT values cannot be compared with = or <. Extract a field first.",
@@ -846,9 +863,9 @@
             "description": "A fixed-length vector of FP16 (half-precision) floating-point values. Used for similarity search and ML embedding workloads. Declared as `VECTOR(n)` where n is the number of dimensions.",
             "cast_to": [
                 {
-                    "type": "from ARRAY<FLOAT>",
-                    "example": "float_array_col::VECTOR(384)",
-                    "note": "Quantizes each element to FP16"
+                    "type": "from ARRAY<FLOAT> literal",
+                    "example": "[1.0, 0.5, 0.25]::VECTOR(3)",
+                    "note": "Quantizes each element to FP16. Only a literal array of non-null numeric values is currently supported by CAST \u2014 casting an arbitrary ARRAY<FLOAT> column is not covered by this path."
                 }
             ],
             "comparable_with": [],

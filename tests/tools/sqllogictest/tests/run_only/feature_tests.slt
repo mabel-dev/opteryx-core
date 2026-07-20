@@ -417,70 +417,70 @@ statement ok
 SELECT E() * PI() * PHI()
 
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> ['g', 'h', 'a']
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> ['a', 'a', 'a']
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> ('a', 'a', 'a')
 
-statement error AttributeError
+statement ok
 SELECT ('a', 'b', 'c') @> ('a', 'a', 'a')
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> ['a', 'x']
 
-statement error AttributeError
+statement ok
 SELECT ['apple', 'banana', 'cherry'] @> ['dragonfruit']
 
-statement error AttributeError
+statement ok
 SELECT ['alpha', 'beta', 'gamma'] @> ['gamma', 'beta']
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> []
 
-statement error AttributeError
+statement ok
 SELECT [] @> ['x']
 
-statement error AttributeError
+statement ok
 SELECT ('a', 'b', 'c') @> ['b']
 
-statement error AttributeError
+statement ok
 SELECT ('a', 'b', 'c') @> ('b', 'a')
 
-statement error AttributeError
+statement ok
 SELECT ['one'] @> ['one']
 
-statement error IncorrectTypeError
+statement ok
 SELECT [1, 2, 3] @> [2]
 
-statement error IncorrectTypeError
+statement ok
 SELECT (1.1, 2.2, 3.3) @> [3.3]
 
-statement error AttributeError
+statement ok
 SELECT ['z', 'z', 'z'] @> ['z']
 
-statement error AttributeError
+statement ok
 SELECT ['a'] @> ['a', 'b']
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> ['a', 'a', 'b']
 
-statement error AttributeError
+statement ok
 SELECT ['a', 'b', 'c'] @> ('a', 'a')
 
-statement error AttributeError
+statement error NotSupportedError
 SELECT missions @> ('STS-1 (Columbia)', 'STS-9 (Columbia)') FROM testdata.astronauts
 
-statement error AttributeError
+statement error NotSupportedError
 SELECT missions @> ['STS-77'] FROM testdata.astronauts
 
-statement error AttributeError
+statement error NotSupportedError
 SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM testdata.astronauts
 
-statement error AttributeError
+statement error NotSupportedError
 SELECT missions @> [] FROM testdata.astronauts
 
 

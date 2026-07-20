@@ -1966,6 +1966,150 @@ VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t 
     return r;
 }
 
+// SUBSTRING(str, start_col, count_col) / LEFT(str, n_col) / RIGHT(str, n_col) — the
+// column-valued sibling of draken_substring above. That kernel's ctx bakes start/count
+// in at COMPILE time and reduces work over data_length PHYSICAL uniques (shape-
+// preserving); here start/count come from vector OPERANDS and vary per LOGICAL row,
+// so neither the ctx nor the physical-dict reduction applies — every row is resolved
+// independently and the output is built dense over `length`, mirroring
+// draken_random_string's two-pass (size-then-emit) pattern. `mode` distinguishes how
+// the 1-2 non-string args map to (start, has_count, count), matching the three shapes
+// draken_substring's literal callers already use:
+//   SUBSTRING: args = [str, start, count?]  — start from args[1], optional count args[2]
+//   LEFT:      args = [str, n]              — start fixed at 0 (SQL 1), count = n
+//   RIGHT:     args = [str, n]              — start = -n, no count (runs to end)
+// Three tiny extern "C" entry points (draken_substring_dynamic/_left_dynamic/
+// _right_dynamic) share one implementation and carry the mode — no ctx needed.
+enum FkSubstrDynMode : uint8_t {
+    FK_SUBSTR_DYN_SUBSTRING = 0,
+    FK_SUBSTR_DYN_LEFT = 1,
+    FK_SUBSTR_DYN_RIGHT = 2,
+};
+
+// Resolve one logical row's (start0, has_count, count) per `mode` and compute its
+// substring [off, len) via fk_substr_range. Returns false (row is NULL) when the
+// string, start, or count operand is NULL at this row — TVL null propagation.
+inline bool fk_substr_dyn_row(const DrakenVector* sv, const DrakenVector* a1,
+                              const DrakenVector* a2, FkSubstrDynMode mode, bool is_utf8,
+                              uint32_t row, uint32_t* out_off, uint32_t* out_len) {
+    if (!fk_row_valid(sv, row)) return false;
+    long start0;
+    bool has_count;
+    long count = 0;
+    switch (mode) {
+        case FK_SUBSTR_DYN_LEFT: {
+            if (!fk_row_valid(a1, row)) return false;
+            start0 = 0;   // SQL start=1 -> 0-based 0 (matches literal LEFT: start=1)
+            has_count = true;
+            count = static_cast<long>(fk_read_int64(a1, row));
+            break;
+        }
+        case FK_SUBSTR_DYN_RIGHT: {
+            if (!fk_row_valid(a1, row)) return false;
+            const long n = static_cast<long>(fk_read_int64(a1, row));
+            start0 = -n;   // matches literal RIGHT: start=-n, has_count=0 (runs to end)
+            has_count = false;
+            break;
+        }
+        default: {   // FK_SUBSTR_DYN_SUBSTRING
+            if (!fk_row_valid(a1, row)) return false;
+            const long start = static_cast<long>(fk_read_int64(a1, row));
+            start0 = start > 0 ? start - 1 : start;
+            has_count = (a2 != nullptr);
+            if (has_count) {
+                if (!fk_row_valid(a2, row)) return false;
+                count = static_cast<long>(fk_read_int64(a2, row));
+            }
+            break;
+        }
+    }
+    const uint32_t phys = sv->selection[row];
+    const auto* sa = static_cast<const DrakenStringArena*>(sv->data);
+    const DrakenStringSlot* slot = &sa->slots[phys];
+    fk_substr_range(str_data(slot, sa->arena), str_length(slot), is_utf8,
+                    start0, has_count, count, out_off, out_len);
+    return true;
+}
+
+VecResult fk_substring_dynamic_impl(FkSubstrDynMode mode, const DrakenVector* const* args,
+                                    uint32_t nargs) {
+    if (mode == FK_SUBSTR_DYN_SUBSTRING) {
+        if (nargs != 2 && nargs != 3)
+            return draken_error_sentinel("draken_substring_dynamic: expected 2 or 3 arguments");
+    } else if (nargs != 2) {
+        return draken_error_sentinel("draken_substring_dynamic: expected 2 arguments");
+    }
+    const DrakenVector* sv = args[0];
+    if (!fk_is_string(sv->type))
+        return draken_error_sentinel("draken_substring_dynamic: string operand required");
+    const DrakenVector* a1 = args[1];
+    const DrakenVector* a2 = (mode == FK_SUBSTR_DYN_SUBSTRING && nargs == 3) ? args[2] : nullptr;
+    const bool is_utf8 = (sv->type == DRAKEN_NVARCHAR);
+    const uint32_t n = sv->length;
+
+    try {
+        std::vector<uint8_t> row_valid(n);
+        std::vector<uint32_t> row_off(n), row_len(n);
+        size_t arena_cap = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t off = 0, len = 0;
+            const bool valid = fk_substr_dyn_row(sv, a1, a2, mode, is_utf8, i, &off, &len);
+            row_valid[i] = valid ? 1 : 0;
+            row_off[i] = off;
+            row_len[i] = len;
+            if (valid && len > STR_INLINE_MAX) arena_cap += len;
+        }
+
+        DrakenStringSlot* slots;
+        uint8_t* arena;
+        uint8_t* validity;
+        uint8_t* block = vecresult_string_block_alloc(n, arena_cap, /*want_validity=*/1,
+                                                       &slots, &arena, &validity);
+        if (block == nullptr)
+            return draken_error_sentinel("draken_substring_dynamic: allocation failed");
+
+        const auto* sa = static_cast<const DrakenStringArena*>(sv->data);
+        std::memset(validity, 0, (static_cast<size_t>(n) + 7) / 8);
+        size_t arena_pos = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!row_valid[i]) { str_init_null(&slots[i]); continue; }
+            validity[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+            const uint32_t phys = sv->selection[i];
+            const DrakenStringSlot* src_slot = &sa->slots[phys];
+            const uint8_t* src = str_data(src_slot, sa->arena) + row_off[i];
+            const uint32_t len = row_len[i];
+            if (len <= STR_INLINE_MAX) {
+                str_init_inline(&slots[i], src, len);
+            } else {
+                uint8_t* dst = arena + arena_pos;
+                std::memcpy(dst, src, len);
+                str_init_extern(&slots[i], dst, len,
+                                static_cast<uint32_t>(XXH3_64bits(dst, len)),
+                                static_cast<uint32_t>(arena_pos));
+                arena_pos += len;
+            }
+        }
+        return vecresult_from_string_block(block, n, arena_cap, /*has_validity=*/1, sv->type);
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("draken_substring_dynamic: unknown error");
+    }
+}
+
+VecResult draken_substring_dynamic(void* /*ctx*/, const DrakenVector* const* args,
+                                   uint32_t nargs) {
+    return fk_substring_dynamic_impl(FK_SUBSTR_DYN_SUBSTRING, args, nargs);
+}
+
+VecResult draken_left_dynamic(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+    return fk_substring_dynamic_impl(FK_SUBSTR_DYN_LEFT, args, nargs);
+}
+
+VecResult draken_right_dynamic(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
+    return fk_substring_dynamic_impl(FK_SUBSTR_DYN_RIGHT, args, nargs);
+}
+
 VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 1)
         return draken_error_sentinel("draken_in_list: expected 1 argument");

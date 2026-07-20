@@ -34,6 +34,9 @@ class ExecutionContext:
             System variables available during execution.
         access_policies: Optional[List[dict]]
             Policies defining access to datasets
+        billing_account: str, optional
+            Account usage from this execution is billed to. Distinct from `user`:
+            many users can bill to one account.
     """
 
     query_id: str = None
@@ -45,6 +48,7 @@ class ExecutionContext:
     memberships: Iterable[str] = None
     variables: SystemVariablesContainer = field(init=False)
     access_policies: List[dict] = field(default_factory=list)
+    billing_account: str = None
 
     def __post_init__(self):
         """

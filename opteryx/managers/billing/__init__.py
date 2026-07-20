@@ -5,6 +5,12 @@ from enum import Enum
 from opteryx.third_party.yyjson import dumps as json_dumps
 
 
+# Usage which arrives without an identified billing account is attributed here.
+# This is the house account: internal queries, system tasks and anything running
+# without a caller-supplied account land on it rather than going unattributed.
+DEFAULT_BILLING_ACCOUNT = "opteryx"
+
+
 class BillingEventType(Enum):
     QUERY_EXECUTION = "QUERY_EXECUTION"
     DATA_PROCESSED_BYTES = "DATA_PROCESSED_BYTES"
