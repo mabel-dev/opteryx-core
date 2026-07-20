@@ -384,7 +384,13 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
 
             int32_t days;
             if (use_fmt) {
-                int year, month, day, hour, minute, second, usec;
+                int year;
+                int month;
+                int day;
+                int hour;
+                int minute;
+                int second;
+                int usec;
                 if (!sql_parse_exec(prog, reinterpret_cast<const char*>(s), len,
                                      &year, &month, &day, &hour, &minute, &second, &usec)) {
                     draken_free(out);

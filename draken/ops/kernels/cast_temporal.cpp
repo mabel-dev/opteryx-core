@@ -481,7 +481,13 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
             const uint8_t* s = str_data(slot, sa->arena);
             const uint32_t len = str_length(slot);
 
-            int year, month, day, hour, minute, second, usec;
+            int year;
+            int month;
+            int day;
+            int hour;
+            int minute;
+            int second;
+            int usec;
             bool ok;
             if (use_fmt) {
                 ok = sql_parse_exec(prog, reinterpret_cast<const char*>(s), len,
@@ -535,25 +541,26 @@ VecResult draken_cast_interval_to_string(void* ctx, const DrakenVector* v) {
         }
 
         char buf[96];
-        std::vector<char> row_vec;
-        DrakenStringSlot* slots;
-        uint8_t* arena;
-        uint8_t* vunused;
-        // Worst case per row is small but not fixed-width; use the arena-growth
-        // helper's shape (separately-allocated then consolidated) rather than a
-        // fixed-width block since duration text length varies by magnitude.
-        const size_t slots_sz = (k > 0u ? k : 1u) * sizeof(DrakenStringSlot);
-        slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-        if (!slots) return draken_error_sentinel("Allocation failed");
-        std::memset(slots, 0, slots_sz);
-        size_t arena_cap = (k > 0u ? static_cast<size_t>(k) * 24u : 24u);
-        arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
-        if (!arena) { draken_free(slots); return draken_error_sentinel("Allocation failed"); }
-
+        // Worst case per row is small but not fixed-width; use an arena-growth
+        // shape (separately-allocated then consolidated) rather than a fixed-width
+        // block since duration text length varies by magnitude. Guard uses default
+        // member initializers + post-construction assignment (not a brace-init with
+        // a top-level comma) — DRAKEN_KERNEL_TRY's argument scanning tracks ()
+        // nesting, not {}, so a `T g{a, b};` here would be misread as two macro
+        // arguments (see the fk_ts_ticks_per_sec comment above for the same trap).
         struct Guard {
-            DrakenStringSlot* s; uint8_t* a;
+            DrakenStringSlot* s = nullptr;
+            uint8_t* a = nullptr;
             ~Guard() { if (s) draken_free(s); if (a) draken_free(a); }
-        } g{slots, arena};
+        } g;
+        const size_t slots_sz = (k > 0u ? k : 1u) * sizeof(DrakenStringSlot);
+        g.s = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+        if (!g.s) return draken_error_sentinel("Allocation failed");
+        std::memset(g.s, 0, slots_sz);
+        size_t arena_cap = (k > 0u ? static_cast<size_t>(k) * 24u : 24u);
+        g.a = static_cast<uint8_t*>(draken_malloc(arena_cap));
+        if (!g.a) return draken_error_sentinel("Allocation failed");
+        DrakenStringSlot* const slots = g.s;
 
         size_t arena_used = 0u;
         for (uint32_t j = 0u; j < k; ++j) {
@@ -577,8 +584,8 @@ VecResult draken_cast_interval_to_string(void* ctx, const DrakenVector* v) {
         }
         DrakenStringSlot* out_slots = g.s;
         uint8_t*          out_arena = g.a;
-        g.s = nullptr; g.a = nullptr;
-        (void)vunused; (void)row_vec;
+        g.s = nullptr;
+        g.a = nullptr;
 
         VecResult r = vecresult_from_string_buffers(out_slots, out_arena, arena_used, nullptr, k, DRAKEN_VARCHAR);
         kernel_preserve_shape(r, v);

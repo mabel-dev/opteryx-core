@@ -473,6 +473,8 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_int64_to_timestamp,
         vector_cast_string_to_time64,
         vector_cast_time_to_string,
+        vector_cast_interval_to_string,
+        vector_cast_string_to_timestamp,
     )
     from opteryx.compiled.nanobind.vectors import (
         vector_date32_to_timestamp,
@@ -515,7 +517,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             # FORMAT (when present) only compiles through the C-native ctx path
             # (compiled_expression.pyx) — this closure covers the no-FORMAT,
             # default-ISO-8601 case only.
-            return _draken_native_casts.vector_cast_string_to_timestamp, True, True
+            return vector_cast_string_to_timestamp, True, True
         if s == "DATE32":
             return vector_date32_to_timestamp, True, True
         if s == "INT64" or s in _CAST_NARROW_INT:
@@ -645,7 +647,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             # this closure covers the no-FORMAT, default-ISO-8601-duration case.
             if t == "BLOB":
                 raise NotImplementedError("No native CAST INTERVAL → VARBINARY")
-            return _draken_native_casts.vector_cast_interval_to_string, True, True
+            return vector_cast_interval_to_string, True, True
         if s == "TIME64":
             if t == "BLOB":
                 raise NotImplementedError("No native CAST TIME64 → VARBINARY")

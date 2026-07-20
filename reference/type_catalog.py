@@ -150,6 +150,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "limitations": [
             "You cannot cast an integer COLUMN to DATE directly (only integer literals are accepted). To convert an epoch column, cast to TIMESTAMP first then to DATE: `FROM_UNIXTIME(n)::DATE`.",
             "MM/DD/YYYY or DD-MM-YYYY string formats fail against the default parser — use `CAST(... AS DATE FORMAT 'MM/DD/YYYY')` (or the matching pattern) instead.",
+            "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST.",
         ],
     },
     "time": {
@@ -211,6 +212,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "limitations": [
             "`1::TIMESTAMP` is not valid — you must specify the scale: `1::TIMESTAMP[s]`.",
             "Timestamps outside 1677–2262 are not representable at `TIMESTAMP[ns]` scale (nanosecond storage overflows outside that range); the default microsecond scale does not have this restriction.",
+            "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST.",
         ],
     },
     "interval": {
@@ -237,6 +239,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "limitations": [
             "There is no INTERVAL literal that combines months and days in one expression (e.g. '1 month 3 days' is not supported). Use separate additions.",
             "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type.",
+            "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST.",
         ],
     },
     "varchar": {

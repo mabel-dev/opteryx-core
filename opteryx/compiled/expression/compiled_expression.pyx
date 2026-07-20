@@ -2609,10 +2609,18 @@ cdef Py_ssize_t _linearize(
 
         # CAST ... FORMAT is only meaningful (and only compiles) for the kernels
         # that read a format_ctx — fail loud rather than silently drop the pattern
-        # for any other (source, target) pairing.
+        # for any other (source, target) pairing. TRY_CAST/SAFE_CAST never reach
+        # the C-native path at all (_c_native_cast returns None whenever
+        # safe=True, by design — see its docstring), so FORMAT is not yet
+        # supported combined with TRY_CAST/SAFE_CAST; call that out specifically
+        # rather than reporting it as an unsupported (source, target) pairing.
         if getattr(cast_py_node, "format", None) is not None and (
             _cn is None or _cn[0] not in _CAST_FORMAT_AWARE_KERNELS
         ):
+            if cast_is_try:
+                raise ValueError(
+                    "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST"
+                )
             raise ValueError(
                 f"CAST ... FORMAT is not supported for {source_phys_name} → {cast_target_type}"
             )

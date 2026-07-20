@@ -133,7 +133,12 @@
                 {
                     "type": "from VARCHAR",
                     "example": "'2024-01-15'::DATE",
-                    "note": "String must be in YYYY-MM-DD (or unpadded YYYY-M-D) format"
+                    "note": "String must be in YYYY-MM-DD (or unpadded YYYY-M-D) format by default"
+                },
+                {
+                    "type": "from VARCHAR (FORMAT)",
+                    "example": "CAST('15-01-2024' AS DATE FORMAT 'DD-MM-YYYY')",
+                    "note": "Parses against an explicit SQL-style pattern (tokens: YYYY, YY, MM, DD, HH24, HH12/HH, MI, SS, FF) instead of the YYYY-MM-DD default"
                 },
                 {
                     "type": "from TIMESTAMP",
@@ -144,6 +149,11 @@
                     "type": "from INTEGER (literal only)",
                     "example": "1::DATE",
                     "note": "An integer *literal* is interpreted as days since the Unix epoch. This does NOT work for an integer column \u2014 casting a column raises NotImplementedError; convert via `FROM_UNIXTIME(n)::DATE` instead"
+                },
+                {
+                    "type": "to VARCHAR",
+                    "example": "date_col::VARCHAR",
+                    "note": "Renders as 'YYYY-MM-DD' (ISO 8601). `CAST(date_col AS VARCHAR FORMAT '...')` renders against an explicit pattern instead"
                 }
             ],
             "comparable_with": [
@@ -169,7 +179,8 @@
             ],
             "limitations": [
                 "You cannot cast an integer COLUMN to DATE directly (only integer literals are accepted). To convert an epoch column, cast to TIMESTAMP first then to DATE: `FROM_UNIXTIME(n)::DATE`.",
-                "MM/DD/YYYY or DD-MM-YYYY string formats will fail \u2014 only YYYY-MM-DD ordering is accepted."
+                "MM/DD/YYYY or DD-MM-YYYY string formats fail against the default parser \u2014 use `CAST(... AS DATE FORMAT 'MM/DD/YYYY')` (or the matching pattern) instead.",
+                "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
             ]
         },
         "parameterized_forms": [],
@@ -406,7 +417,12 @@
                 {
                     "type": "to VARCHAR",
                     "example": "(INTERVAL '1' DAY)::VARCHAR",
-                    "note": "Renders as a human-readable interval string, e.g. '1 DAY'"
+                    "note": "Renders as an ISO-8601 duration by default, e.g. 'P1DT2H30M'"
+                },
+                {
+                    "type": "to VARCHAR (FORMAT)",
+                    "example": "CAST(INTERVAL '1' DAY AS VARCHAR FORMAT 'DD HH24:MI:SS')",
+                    "note": "Renders against an explicit SQL-style pattern; tokens (YYYY, MM, DD, HH24, MI, SS, FF) are reinterpreted as duration magnitudes (years/months-remainder/days/hours/minutes/seconds), not calendar fields"
                 }
             ],
             "comparable_with": [
@@ -432,7 +448,8 @@
             "notes": "Sub-month components (days, hours, minutes, seconds, microseconds) are stored as a microsecond count. Month and year components are stored separately and applied calendar-accurately during arithmetic. You cannot mix month-based and sub-month intervals in a single expression.",
             "limitations": [
                 "There is no INTERVAL literal that combines months and days in one expression (e.g. '1 month 3 days' is not supported). Use separate additions.",
-                "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type."
+                "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type.",
+                "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
             ]
         },
         "parameterized_forms": [],
@@ -623,6 +640,11 @@
                     "note": "Accepts the string formats listed above"
                 },
                 {
+                    "type": "from VARCHAR (FORMAT)",
+                    "example": "CAST('15-01-2024 09:30' AS TIMESTAMP FORMAT 'DD-MM-YYYY HH24:MI')",
+                    "note": "Parses against an explicit SQL-style pattern (tokens: YYYY, YY, MM, DD, HH24, HH12/HH, MI, SS, FF) instead of the ISO-8601 default"
+                },
+                {
                     "type": "from DATE",
                     "example": "date_col::TIMESTAMP",
                     "note": "Fills time as midnight (00:00:00)"
@@ -646,6 +668,11 @@
                     "type": "from INTEGER (nanoseconds)",
                     "example": "epoch_col::TIMESTAMP[ns]",
                     "note": "Nanoseconds since Unix epoch"
+                },
+                {
+                    "type": "to VARCHAR",
+                    "example": "ts_col::VARCHAR",
+                    "note": "Renders as 'YYYY-MM-DDTHH:MM:SS.ffffff' (ISO 8601, no offset \u2014 timestamps are naive). `CAST(ts_col AS VARCHAR FORMAT '...')` renders against an explicit pattern instead"
                 }
             ],
             "comparable_with": [
@@ -672,7 +699,8 @@
             "notes": "All scales are stored as INT64. The 1677-09-21 to 2262-04-11 range applies only to `TIMESTAMP[ns]`; the default microsecond scale covers a far wider range (tested from at least year 1500 to year 9999). Timezone information is not stored \u2014 all timestamps are naive (no offset). A trailing timezone suffix (`Z`, `+01:00`) in a string literal is accepted and discarded \u2014 the wall-clock date/time as written is kept, only the offset is dropped. String parsing accepts a space or T as the date/time separator.",
             "limitations": [
                 "`1::TIMESTAMP` is not valid \u2014 you must specify the scale: `1::TIMESTAMP[s]`.",
-                "Timestamps outside 1677\u20132262 are not representable at `TIMESTAMP[ns]` scale (nanosecond storage overflows outside that range); the default microsecond scale does not have this restriction."
+                "Timestamps outside 1677\u20132262 are not representable at `TIMESTAMP[ns]` scale (nanosecond storage overflows outside that range); the default microsecond scale does not have this restriction.",
+                "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
             ]
         },
         "parameterized_forms": [],
