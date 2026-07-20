@@ -1,0 +1,31 @@
+name: Semgrep Scan
+
+on:
+  - workflow_call
+  - push
+  - pull_request
+
+jobs:
+  semgrep:
+    name: Semgrep Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Semgrep and upload client
+        run: python -m pip install --no-cache-dir semgrep opteryx-upload
+
+      - name: Run Semgrep
+        run: semgrep scan --config=auto --json --output=semgrep-report.json
+
+      - name: Upload results to Opteryx
+        env:
+          UPLOAD_CLIENT: ${{ secrets.UPLOAD_CLIENT }}
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+        run: python scripts/upload_semgrep_results.py semgrep-report.json
