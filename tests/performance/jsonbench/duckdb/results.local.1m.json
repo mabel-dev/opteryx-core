@@ -1,0 +1,35 @@
+{
+  "system": "DuckDB (NDJSON, single JSON column)",
+  "date": "2026-07-21",
+  "machine": "Justins-MacBook-Pro.local (arm)",
+  "size_millions": 1,
+  "load_time_s": 0.231,
+  "data_size": 480778277,
+  "result": [
+    [
+      0.028,
+      0.026,
+      0.025
+    ],
+    [
+      0.099,
+      0.098,
+      0.097
+    ],
+    [
+      0.097,
+      0.093,
+      0.092
+    ],
+    [
+      0.09,
+      0.075,
+      0.077
+    ],
+    [
+      0.079,
+      0.078,
+      0.079
+    ]
+  ]
+}

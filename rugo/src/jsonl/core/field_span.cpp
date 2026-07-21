@@ -148,7 +148,6 @@ static void finalize_records(
         }
         if (!passes) continue;
 
-        const uint32_t start = static_cast<uint32_t>(out.spans.size());
         if (context.projected_columns.empty()) {
             for (const auto& f : rec) out.spans.push_back(f);  // predicates only — keep all cols
         } else {
@@ -157,10 +156,11 @@ static void finalize_records(
                 if (f != nullptr) out.spans.push_back(*f);
             }
         }
-        if (out.spans.size() > start) {
-            out.offsets.push_back(static_cast<uint32_t>(out.spans.size()));
-            ++result.num_records_passed;
-        }
+        // A record that passed predicates is kept even if none of the projected columns
+        // are present on it (all-null row) — dropping it here would desync every column's
+        // row count from the others (see rugo #jsonl-single-col-projection-drop).
+        out.offsets.push_back(static_cast<uint32_t>(out.spans.size()));
+        ++result.num_records_passed;
     }
 }
 

@@ -276,11 +276,12 @@ struct MapBuilder {
         return commit_field();
     }
 
-    // Close the in-progress record. Bank: record its end offset (dropping empty records,
-    // matching prior finalize semantics). Discard: drop its partial spans (predicate failed).
+    // Close the in-progress record. Bank: record its end offset — always, even with zero
+    // spans (an empty object `{}`, or a record with none of the wanted/projected columns,
+    // is still one NDJSON row and must not desync from the other columns' row counts).
+    // Discard: drop its partial spans (predicate failed).
     inline void bank_record() {
-        if (rs.spans.size() > record_start())
-            rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
+        rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
     }
     inline void discard_record() { rs.spans.resize(record_start()); }
 

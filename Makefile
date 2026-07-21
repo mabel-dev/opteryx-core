@@ -172,6 +172,11 @@ dt: ## Run draken unit tests
 	@clear || true
 	@$(PYTEST) draken/tests/ -v --tb=short
 
+rt: ## Run rugo unit tests
+	$(call print_blue,"Running rugo unit tests...")
+	@clear || true
+	@$(PYTEST) tests/rugo/ -v --tb=short
+
 et: compile ## Run expression engine tests (value-checked gates)
 	$(call print_blue,"Running expression engine tests...")
 	@clear || true
@@ -250,6 +255,16 @@ clickbench-profile: ## ClickBench + per-operator self-time profile (where the ti
 
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
+
+jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via rugo's JSONL reader (JSONBENCH_SIZE=1|10|100, default 10)
+	@clear || true
+	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
+
+jsonbench-data: ## Fetch + decompress the JSONBench Bluesky dataset (JSONBENCH_SIZE=1|10|100, default 10)
+	@$(PYTHON) tests/performance/jsonbench/fetch_data.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
+
+jsonbench-duckdb: ## Re-run DuckDB JSONBench calibration (regenerates duckdb/results.local.<N>m.json)
+	@$(PYTHON) tests/performance/jsonbench/duckdb/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
 
 dash: ## Run odata_dashboard benchmark vs DuckDB (real-world OData query-log shapes)
 	@clear || true

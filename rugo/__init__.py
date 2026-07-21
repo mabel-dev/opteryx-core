@@ -11,6 +11,11 @@ writers consume Draken Morsels — the bundled ``draken`` columnar substrate.
             ...
 """
 
+try:
+    import pyarrow  # noqa: F401  # pyarrow has a load-order bug: it must be imported before rugo's native extensions
+except ImportError:
+    pass
+
 import draken  # load draken_native.so before rugo_native.so resolves its symbols
 
 from rugo.__version__ import __version__
