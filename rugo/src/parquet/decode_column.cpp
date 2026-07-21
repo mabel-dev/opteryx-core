@@ -483,10 +483,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
     // Guard: at least one supported encoding.
     // IDs use Parquet spec values (post ZigZag-decode fix in metadata.cpp):
-    //   0=PLAIN, 2=PLAIN_DICTIONARY, 3=RLE, 8=RLE_DICTIONARY
+    //   0=PLAIN, 2=PLAIN_DICTIONARY, 3=RLE, 5=DELTA_BINARY_PACKED,
+    //   7=DELTA_BYTE_ARRAY, 8=RLE_DICTIONARY.
+    // This set MUST match the CanDecode admission gate (decode.cpp) and the
+    // per-page value-encoding gate below — a column whose ONLY listed encoding
+    // is delta (5/7), as emitted for DELTA-encoded OPTIONAL columns, must clear
+    // this guard too. Omitting 5/7 here silently returned an empty (success=false,
+    // no error_message) column for such files, dropping it from the result.
     bool has_supported_encoding = false;
     for (int32_t enc : target_col->encodings) {
-      if (enc == 0 || enc == 2 || enc == 3 || enc == 8) {
+      if (enc == 0 || enc == 2 || enc == 3 || enc == 5 || enc == 7 || enc == 8) {
         has_supported_encoding = true;
         break;
       }

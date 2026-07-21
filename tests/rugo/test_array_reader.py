@@ -138,7 +138,49 @@ def test_read_pyarrow_float_and_bool_and_nested_float():
         assert _read_pyarrow(arrow_type, data) == data, arrow_type
 
 
+def test_leading_list_column_does_not_inflate_scalar_lengths():
+    """A dense LIST column (avg > 1 element/row) placed FIRST in the schema must
+    not make sibling scalar columns over-decode.
+
+    A repeated column's decoded `num_rows` is the leaf/level-pair count, not the
+    logical record count. `_decode_from_buffer` used to size every scalar column
+    from the first successful column's `num_rows`; when that column was a list
+    with an element surplus, the scalars over-read, and a predicate mask derived
+    from an over-long scalar then indexed past the (correctly sized) array column
+    -> "take: array index out of range". This reproduces the real test.tweets
+    crash locally (array column first, > 1 element/row) and asserts every
+    decoded column reports the same length.
+    """
+    import io
+    import pyarrow as pa
+
+    n = 3000
+    # Dense list: every row has 2 elements -> leaf count (6000) exceeds the
+    # record count (3000). List column deliberately FIRST in the schema.
+    tags = [[f"t{i}a", f"t{i}b"] for i in range(n)]
+    ids = list(range(n))
+    tbl = pa.table({"tags": pa.array(tags, pa.list_(pa.string())),
+                    "id": pa.array(ids, pa.int64())})
+    buf = io.BytesIO()
+    pq.write_table(tbl, buf, row_group_size=1000, compression=None)
+
+    morsels = pr.read_parquet(buf.getvalue())
+    total = 0
+    for m in morsels:
+        lengths = {(nm.decode() if isinstance(nm, bytes) else nm):
+                   m.column(nm)._nb.length for nm in m.column_names}
+        assert len(set(lengths.values())) == 1, lengths
+        total += next(iter(set(lengths.values())))
+    assert total == n
+
+    # And the predicate/filter path (the crash site) must run clean.
+    got = _morsels_to_dict(
+        pr.read_parquet(buf.getvalue(), predicates=[("id", ">=", 1500)]))
+    assert len(got["id"]) == n - 1500
+
+
 if __name__ == "__main__":
+    test_leading_list_column_does_not_inflate_scalar_lengths()
     test_manifest_all_columns_match_pyarrow()
     test_roundtrip_int_list_with_empty_and_null()
     test_roundtrip_string_list_with_empty_and_null()

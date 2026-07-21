@@ -164,6 +164,13 @@ with parquet.read_parquet(
 data = parquet.write_parquet(morsel, compression="zstd")
 with open("out.parquet", "wb") as f:
     f.write(data)
+
+# Stream several morsels to a file at constant memory — one row group per
+# write_row_group() call, bytes pushed to `sink` as they're produced.
+with open("out.parquet", "wb") as f:
+    with parquet.open_parquet_writer(f.write) as writer:
+        for batch in batches:
+            writer.write_row_group(batch)
 ```
 
 ### `rugo.parquet` API
@@ -174,6 +181,8 @@ with open("out.parquet", "wb") as f:
 | `read_metadata(source)`                      | `ParquetMetadata` (`num_rows`, `schema_columns`)           |
 | `write_parquet(morsel, compression="zstd")` | `bytes` (whole file)                                        |
 | `write_parquet_with_bounds(morsel)`         | `(bytes, {col_index: (min, max)})`                         |
+| `open_parquet_writer(sink, compression="zstd")` | context manager; `sink` is a callable taking bytes. `writer.write_row_group(morsel)` streams one row group per call at constant memory |
+| `write_parquet_stream(morsel_iter, sink)`   | `int` (row groups written); thin wrapper over `open_parquet_writer` — one row group per yielded morsel |
 
 `source` is a filename (`str`) or `bytes`/`bytearray`/`memoryview`. `predicates` is a list of `(column, op, value)`; row groups are pruned by footer statistics (and bloom filters for equality on file sources), then surviving rows are filtered exactly.
 
@@ -264,6 +273,8 @@ data, bounds = write_parquet_with_bounds(morsel)           # + per-column min/ma
 | Layout             | single row group per Morsel                                                                                    |
 
 Unsupported column types fail loud (no silent skip). Nested LIST/MAP/STRUCT and dictionary-encoded *output* are not yet implemented.
+
+**Streaming writer:** `parquet.open_parquet_writer(sink, ...)` writes the same column types/encoding/compression/statistics/bloom-filter support above, but as one row group per `write_row_group(morsel)` call, pushing each chunk of bytes to `sink` (a callable taking bytes) as it's produced — footer/statistics accumulate incrementally and are emitted on `close()`. Peak memory is ~one row group regardless of the total file size, independent of `write_parquet`'s whole-morsel-in/whole-file-out shape. Every batch passed to the same writer must share the same column schema.
 
 ---
 

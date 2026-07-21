@@ -386,3 +386,51 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
                                              dictionary=dictionary,
                                              max_rows_per_row_group=max_rows_per_row_group,
                                              max_page_bytes=max_page_bytes)
+
+
+def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
+                        dictionary: bool = True, max_page_bytes: int = 0):
+    """Open a streaming, constant-memory Parquet writer.
+
+    Unlike write_parquet (whole morsel in, whole file out), this writes one row
+    group per write_row_group(morsel) call, pushing each produced chunk of bytes
+    to `sink` as it goes, so peak memory stays ~one row group regardless of the
+    total file size. The footer/statistics are accumulated incrementally and
+    emitted on close().
+
+    Args:
+        sink: a callable taking bytes. Called with each chunk of the file as row
+            groups are written, and once more with the footer on close. A file
+            object's .write bound method, or a GCS resumable-upload adapter, both
+            satisfy this.
+        compression: "zstd" (default) or "none".
+        bloom_filters / dictionary / max_page_bytes: as write_parquet; applied to
+            every row group.
+
+    Returns a context manager:
+
+        with open_parquet_writer(f.write) as w:
+            for batch in batches:
+                w.write_row_group(batch)   # one row group per call
+
+    Every batch must share the same column schema (names/types).
+    """
+    return _native.open_parquet_writer(sink, compression=compression,
+                                       bloom_filters=bloom_filters,
+                                       dictionary=dictionary,
+                                       max_page_bytes=max_page_bytes)
+
+
+def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
+                         bloom_filters=True, dictionary: bool = True,
+                         max_page_bytes: int = 0) -> int:
+    """Stream an iterable of Morsels to a byte-chunk `sink` as one Parquet file.
+
+    Thin wrapper over open_parquet_writer: one row group per yielded morsel,
+    constant memory. Empty morsels (no rows) are skipped. Returns the number of
+    row groups written. See open_parquet_writer for the `sink` contract.
+    """
+    return _native.write_parquet_stream(morsel_iter, sink, compression=compression,
+                                        bloom_filters=bloom_filters,
+                                        dictionary=dictionary,
+                                        max_page_bytes=max_page_bytes)

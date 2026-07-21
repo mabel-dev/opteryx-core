@@ -1490,10 +1490,21 @@ cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_grou
         # no Morsel for it.
         if result.row_groups[rg_idx].size() == 0:
             continue
-        # Get row count from first successful column in this row group
+        # Get the logical row count from the first successful NON-REPEATED column.
+        # A repeated (LIST) column's `num_rows` is the leaf-level value/level-pair
+        # count (accumulated per page as page_header.num_values), NOT the logical
+        # record count — for a list averaging >1 element/row it overshoots. That
+        # count is only correct for flat columns, and it is what sizes every
+        # scalar/string materializer below (arrays build their own length via
+        # _make_array_vector). Picking it off a leading ARRAY column made the flat
+        # columns over-read by the element surplus, so the derived filter mask then
+        # indexed past the (correctly sized) array column — "take: array index out
+        # of range". Skip repeated columns here; if every projected column is
+        # repeated, no materializer consumes num_rows so 0 is harmless.
         num_rows = 0
         for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):
-            if result.row_groups[rg_idx][col_idx].success:
+            if (result.row_groups[rg_idx][col_idx].success
+                    and result.row_groups[rg_idx][col_idx].rep_levels.size() == 0):
                 num_rows = result.row_groups[rg_idx][col_idx].num_rows
                 if num_rows > 0:
                     break

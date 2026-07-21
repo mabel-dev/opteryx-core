@@ -86,6 +86,25 @@ def rugo_reread_rewrite(data: bytes) -> dict:
     return pa_read(out_bytes)
 
 
+def rugo_reread_stream_rewrite(data: bytes) -> dict:
+    """PyArrow bytes → rugo read → rugo STREAMING write → PyArrow read.
+
+    Same guarantee as rugo_reread_rewrite but through open_parquet_writer. The
+    streaming writer shares _encode's morsel→ColumnInput conversion with the
+    one-shot write_parquet but diverges in row-group/footer assembly (see
+    StreamingParquetWriter in _parquet_writer.hpp) — this floor test exists so a
+    regression specific to that assembly can't slip past a rugo release.
+    """
+    morsels = _morsels(data)
+    assert len(morsels) == 1, (
+        f"oracle expects small single-row-group fixtures, got {len(morsels)} morsels"
+    )
+    chunks = []
+    with rp.open_parquet_writer(chunks.append, compression="none", bloom_filters=False) as w:
+        w.write_row_group(morsels[0])
+    return pa_read(b"".join(chunks))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Logical-value normalisation (by kind)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,6 +248,29 @@ def test_write_roundtrips_through_pyarrow(case, shape):
     assert "c" in got, f"rugo write dropped column for {case_id}/{shape}"
     assert normalise(kind, got["c"]) == normalise(kind, values), (
         f"WRITE round-trip mismatch {case_id}/{shape}: rugo→pa={got['c']!r} expected={values!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STREAMING WRITE oracle: rugo streams (open_parquet_writer) → PyArrow reads →
+# values match. Mirrors test_write_roundtrips_through_pyarrow exactly but over
+# the streaming encode path, since it diverges from the one-shot writer in
+# row-group/footer assembly (not in per-column encoding).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("case", ALL_CASES, ids=[c[0] for c in ALL_CASES])
+@pytest.mark.parametrize("shape", ["dense", "sparse", "allnull"])
+def test_streaming_write_roundtrips_through_pyarrow(case, shape):
+    case_id, pa_type, kind, dense = case
+    values = _shape_values(dense, shape)
+    data = pa_write(_make_table(pa_type, values))
+
+    got = rugo_reread_stream_rewrite(data)
+    assert "c" in got, f"rugo streaming write dropped column for {case_id}/{shape}"
+    assert normalise(kind, got["c"]) == normalise(kind, values), (
+        f"STREAMING WRITE round-trip mismatch {case_id}/{shape}: "
+        f"rugo→pa={got['c']!r} expected={values!r}"
     )
 
 

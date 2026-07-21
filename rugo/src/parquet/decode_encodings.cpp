@@ -557,8 +557,22 @@ static const uint8_t *SkipDeltaBinaryPacked(const uint8_t *ptr,
     ReadZigZagVarint(ptr, end);  // min_delta
     if (ptr > end) break;
 
-    for (uint64_t mb = 0; mb < num_miniblocks && ptr < end; mb++) {
-      uint8_t bit_width = *ptr++;
+    // Every block carries a bit-width byte for ALL num_miniblocks miniblocks,
+    // even in the final (short) block where trailing miniblocks hold no values
+    // (Parquet DELTA_BINARY_PACKED spec). Consume the full bit-width list up
+    // front — exactly as DecodeDeltaBinaryPacked does — so ptr lands on the
+    // true end of this stream; consuming only the used miniblocks' widths would
+    // leave the following stream (e.g. DELTA_BYTE_ARRAY suffix lengths)
+    // misaligned and its decode would fail.
+    if (ptr + num_miniblocks > end) break;
+    const uint8_t *bit_widths = ptr;
+    ptr += num_miniblocks;
+
+    // Only miniblocks that actually hold values have data bytes; a fully-unused
+    // trailing miniblock in the last block writes no body (its width byte is
+    // present but its body is omitted). Skip bodies until num_values is reached.
+    for (uint64_t mb = 0; mb < num_miniblocks && skipped < num_values; mb++) {
+      uint8_t bit_width = bit_widths[mb];
       if (bit_width > 0) {
         int32_t bytes_needed =
             ((int32_t)values_per_miniblock * bit_width + 7) / 8;
@@ -566,7 +580,6 @@ static const uint8_t *SkipDeltaBinaryPacked(const uint8_t *ptr,
         ptr += bytes_needed;
       }
       skipped += (int32_t)values_per_miniblock;
-      if (skipped >= num_values) break;
     }
   }
 
