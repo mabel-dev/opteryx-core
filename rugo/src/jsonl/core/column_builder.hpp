@@ -8,6 +8,7 @@
 #include "markers.hpp"
 #include "value_parser.hpp"
 #include "field_span.hpp"
+#include "parse_context.hpp"
 #include "buffers.h"       // DrakenType
 #include "string_slot.h"   // DrakenStringSlot
 
@@ -28,6 +29,8 @@ enum class ColumnType : uint8_t {
     Bool    = 2,
     String  = 3,
     Null    = 4,
+    Array   = 5,  // first sampled value was a JSON array; see parse_context's parse_arrays
+    Variant = 6,  // first sampled value was a JSON object; see parse_context's parse_objects
 };
 
 // String column result: raw bytes extracted from JSON (no parsing)
@@ -39,6 +42,8 @@ struct StringColumnResult {
     std::vector<uint32_t> lengths;    // length of each row's value
     std::vector<uint8_t>  null_bitmap; // null marker: bit=1 (valid), bit=0 (null)
     bool data_owned = false;          // offsets index into `data` (copy/unescape), not the buffer
+    bool any_value_seen = false;      // true iff at least one row resolved a non-null value
+                                       // (false => the column is absent/null on every row)
 
     uint8_t*  data_ptr()   { return data.empty() ? nullptr : data.data(); }
     uint32_t* offset_ptr() { return offsets.empty() ? nullptr : offsets.data(); }
@@ -63,7 +68,15 @@ StringColumnResult extract_column(
     const std::string&                         column_name,
     OrdinalPredictor&                         predictor,
     bool                                       copy_bytes = true,
-    bool                                       may_have_escapes = false
+    bool                                       may_have_escapes = false,
+    // Only the first `sample_size` rows are consulted for the type hint
+    // (ParseContext.infer_sample_size), taken from the first non-null value in that
+    // window. parse_typed_column always validates the WHOLE column against whatever
+    // hint (if any) is chosen and falls back to VARCHAR on a mismatch, so no value is
+    // ever misparsed — but if the sample window is entirely null, no hint forms at all
+    // and the column is typed VARCHAR even where a larger sample would have picked a
+    // narrower type.
+    size_t                                     sample_size = SIZE_MAX
 );
 
 // Build an owned Draken VARCHAR Vector from an extracted column. Slice bytes are read
@@ -90,21 +103,51 @@ struct ParsedColumn {
     uint32_t          length   = 0;
     uint8_t*          validity = nullptr;          // draken_malloc'd or NULL (all valid)
     bool              is_string = false;
+    bool              all_null = false;             // every row absent/null (schema reporting)
     void*             data     = nullptr;          // typed buffer (own_raw)
     DrakenStringSlot* slots    = nullptr;          // string slots (own_string)
     uint8_t*          arena    = nullptr;
     size_t            arena_len = 0;
+
+    // ARRAY-only fields (type == DRAKEN_ARRAY): child element buffers, one parent-offset
+    // pair per row. Child is EITHER a string-family vector (child_slots/child_arena, when
+    // child_type is VARCHAR/NVARCHAR/VARBINARY) OR a fixed-width numeric/bool vector
+    // (child_data, when child_type is INT64/FLOAT64/BOOL) — never both.
+    int32_t*          array_parent_offsets = nullptr;  // draken_malloc'd int32_t[length+1]
+    DrakenType         array_child_type = DRAKEN_VARCHAR;
+    uint32_t           array_child_length = 0;
+    uint8_t*           array_child_validity = nullptr;
+    DrakenStringSlot*  array_child_slots = nullptr;
+    uint8_t*           array_child_arena = nullptr;
+    size_t             array_child_arena_len = 0;
+    void*              array_child_data = nullptr;
+
+    // Set when a column's first-sampled value was a JSON array, parse_arrays was
+    // requested, but some row's array contained nested containers or a heterogeneous
+    // mix of scalar element types (out of v1 scope) — the column fell back to raw
+    // JSON text (DRAKEN_VARCHAR) instead, same as parse_arrays=False. The caller
+    // (Cython edge, under the GIL) surfaces this as a Python warning; C++ itself never
+    // warns because parse_all_columns runs off the GIL.
+    bool              array_fallback = false;
 };
 
 // Parse every named column from the document map in parallel (one task per column,
 // thread pool capped at max_threads / hardware_concurrency / column count). Pure C++,
 // no Python — safe to call with the GIL released. Returns one ParsedColumn per name.
+//
+// context.explicit_schema: a column named here skips speculative type inference entirely
+// and is parsed STRICTLY as the declared type ("int64" | "double" | "boolean" | "string");
+// a value that doesn't fit throws std::invalid_argument (caller must catch/translate —
+// unlike the default speculative path, a declared-schema mismatch is a real data/schema
+// error, not something to silently fall back past). context.infer_sample_size bounds the
+// speculative-path type hint window for undeclared columns (see extract_column).
 std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
     const RecordSet& records,
     const std::vector<std::string>&            column_names,
     size_t                                     max_threads,
-    bool                                       may_have_escapes = false
+    bool                                       may_have_escapes,
+    const ParseContext&                        context
 );
 
 // Wrap a ParsedColumn into an owned Draken Vector. Creates a Python object — call under

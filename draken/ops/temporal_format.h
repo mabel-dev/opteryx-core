@@ -1,8 +1,8 @@
 #pragma once
-// draken/ops/temporal_format.h — compiled token-program DATE_FORMAT formatter.
+// draken/ops/temporal_format.h — compiled token-program FORMAT_TIMESTAMP formatter.
 //
 // Extracted from opteryx/compiled/nanobind/vector_temporal_arith.cpp (Milestone
-// E.13, Phase 12) so both the nanobind DATE_FORMAT path and the C-ABI
+// E.13, Phase 12) so both the nanobind FORMAT_TIMESTAMP/FORMAT_DATE path and the C-ABI
 // draken_date_format kernel (draken/ops/kernels/function_temporal.cpp) share ONE
 // formatter — per the "no duplicated logic between paths" rule, this is the sole
 // definition; do not re-implement it in either caller.
@@ -14,8 +14,12 @@
 // the in-tree branchless ta_days_to_ymd (draken/ops/temporal_arith.h — same path
 // DATE_PART/DATE_TRUNC use, no gmtime_r), and bytes are emitted directly.
 //
-// The engine always operates in UTC under the C locale, so every whitelisted
-// specifier has a fixed, locale-independent definition. Deliberate pins:
+// Specifiers follow POSIX/C99 strftime semantics — the same convention BigQuery's
+// FORMAT_TIMESTAMP/FORMAT_DATE use (this formatter is meant to match BigQuery,
+// not MySQL's DATE_FORMAT, which redefines %M/%W/%u/%x/%X/%c and adds a MySQL-only
+// %i; none of that applies here). The engine always operates in UTC under the C
+// locale, so every whitelisted specifier has a fixed, locale-independent
+// definition. Deliberate pins:
 //   %z -> "+0000", %Z -> "GMT"  (UTC — the only timezone-coupled specifiers)
 //   %q -> quarter (1-4)          (Opteryx extension; %q is not a real strftime spec)
 
@@ -117,8 +121,7 @@ static inline char* tf_emit_spec(char* p, char c, const TfFields& f) {
         case 'k': return tf_put2sp(p, f.hour);
         case 'I': return tf_put2(p, ((f.hour + 11) % 12) + 1);
         case 'l': return tf_put2sp(p, ((f.hour + 11) % 12) + 1);
-        case 'M': return tf_puts(p, TF_MON_FULL[f.month - 1]);   // MySQL: month name
-        case 'i': return tf_put2(p, f.minute);                   // MySQL: minutes 00-59
+        case 'M': return tf_put2(p, f.minute);
         case 'S': return tf_put2(p, f.second);
         case 'p': return tf_puts(p, f.hour < 12 ? "AM" : "PM");
         case 'P': return tf_puts(p, f.hour < 12 ? "am" : "pm");
@@ -128,12 +131,13 @@ static inline char* tf_emit_spec(char* p, char c, const TfFields& f) {
         case 'b': return tf_puts(p, TF_MON_ABBR[f.month - 1]);
         case 'B': return tf_puts(p, TF_MON_FULL[f.month - 1]);
         case 'w': *p++ = static_cast<char>('0' + f.wday); return p;
-        case 'u': return tf_put2(p, (f.yday0 - (f.wday + 6) % 7 + 7) / 7); // MySQL: week 00-53, Monday-first
+        case 'u': { const int iso_dow = (f.wday == 0) ? 7 : f.wday;   // ISO weekday: Mon=1..Sun=7
+                    *p++ = static_cast<char>('0' + iso_dow); return p; }
         case 'q': *p++ = static_cast<char>('0' + (f.month - 1) / 3 + 1); return p;
         case 'Z': return tf_puts(p, "GMT");
         case 'z': return tf_puts(p, "+0000");
         case 'U': return tf_put2(p, (f.yday0 - f.wday + 7) / 7);
-        case 'W': return tf_puts(p, TF_WDAY_FULL[f.wday]);        // MySQL: weekday name
+        case 'W': return tf_put2(p, (f.yday0 - (f.wday + 6) % 7 + 7) / 7);  // week 00-53, Monday-first
         case 'V': { int iy, iw; tf_iso_week(f.days, f.wday, &iy, &iw);
                     return tf_put2(p, iw); }
         case 'G': { int iy, iw; tf_iso_week(f.days, f.wday, &iy, &iw);
@@ -153,14 +157,20 @@ static inline char* tf_emit_spec(char* p, char c, const TfFields& f) {
                   p = tf_put2(p, f.minute); *p++ = ':';
                   p = tf_put2(p, f.second); *p++ = ' ';
                   return tf_puts(p, f.hour < 12 ? "AM" : "PM");
-        case 'x': { int iy, iw; tf_iso_week(f.days, f.wday, &iy, &iw);  // MySQL: year for Monday-first week (= %G)
-                    return tf_put_year(p, iy, 4); }
-        case 'X': return tf_put_year(p, tf_sunday_week_year(f.days, f.wday), 4); // MySQL: year for Sunday-first week
-        case 'c': {                                                       // MySQL: month number 0-12 (no zero-pad)
-                    const int mo = f.month;
-                    if (mo >= 10) *p++ = static_cast<char>('0' + mo / 10);
-                    *p++ = static_cast<char>('0' + mo % 10);
-                    return p; }
+        // %x, %X, %c: locale date/time representation (C locale, matching glibc strftime).
+        case 'x': p = tf_put2(p, f.month); *p++ = '/';
+                  p = tf_put2(p, f.day); *p++ = '/';
+                  return tf_put2(p, ((f.year % 100) + 100) % 100);
+        case 'X': p = tf_put2(p, f.hour); *p++ = ':';
+                  p = tf_put2(p, f.minute); *p++ = ':';
+                  return tf_put2(p, f.second);
+        case 'c': p = tf_puts(p, TF_WDAY_ABBR[f.wday]); *p++ = ' ';
+                  p = tf_puts(p, TF_MON_ABBR[f.month - 1]); *p++ = ' ';
+                  p = tf_put2sp(p, f.day); *p++ = ' ';
+                  p = tf_put2(p, f.hour); *p++ = ':';
+                  p = tf_put2(p, f.minute); *p++ = ':';
+                  p = tf_put2(p, f.second); *p++ = ' ';
+                  return tf_put_year(p, f.year, 4);
         default:  *p++ = c; return p;   // unreachable after validation
     }
 }
@@ -168,15 +178,17 @@ static inline char* tf_emit_spec(char* p, char c, const TfFields& f) {
 // Worst-case bytes a single specifier can emit (used to size the row buffer).
 static inline uint32_t tf_spec_max_width(char c) {
     switch (c) {
-        case 'Y': case 'G': case 'X': case 'x': return 12;  // sign + large year
-        case 'A': case 'B': case 'M': case 'W': return 9;   // "Wednesday" / "September"
+        case 'Y': case 'G': return 12;  // sign + large year
+        case 'A': case 'B': return 9;   // "Wednesday" / "September"
         case 'F': return 20;       // year(≤12) + "-MM-DD"
         case 'r': return 12;
         case 'T': return 10;
         case 'z': return 5;
         case 'a': case 'b': case 'Z': case 'j': return 3;
         case 'R': return 5;
-        case 'c': case 'w': case 'q': return 2;  // %c = month num 1-12, %w/%q = 1 digit (2 is safe)
+        case 'X': case 'x': return 10;  // "HH:MM:SS" / "MM/DD/YY"
+        case 'c': return 32;        // "Thu Jan  1 00:00:00 1970" (+ slack for extreme years)
+        case 'w': case 'q': case 'u': return 2;  // 1 digit (2 is safe)
         default:  return 2;                // numeric 2-wide fields
     }
 }
@@ -220,9 +232,9 @@ static inline std::vector<TfToken> tf_compile(const char* fmt, size_t* max_len) 
 // offending specifier char via *bad_spec (0 if fmt is valid) instead of raising —
 // callers own the fail-loud policy (Python ValueError vs. a draken_error_sentinel).
 static inline bool tf_validate(const char* fmt, char* bad_spec) {
-    // MySQL DATE_FORMAT specifiers (superset of the POSIX tokens exposed).
-    // %i = minutes (MySQL); the rest are POSIX/C99 aliases with MySQL semantics.
-    static const char* known = "YymdHIMSpjAaBbZenwtuVUWcxXFTRzGgklPqri";
+    // POSIX/C99 strftime specifiers (BigQuery FORMAT_TIMESTAMP/FORMAT_DATE
+    // convention), plus %q (Opteryx quarter extension — see file header).
+    static const char* known = "YymdHIMSpjAaBbZenwtuVUWcxXFTRrzGgklPq";
     for (const char* p = fmt; *p; ++p) {
         if (*p != '%') continue;
         ++p;

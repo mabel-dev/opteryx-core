@@ -22,28 +22,10 @@ This Node eliminates columns that are not needed in a Relation. This is also the
 that performs column renames.
 """
 
-from typing import Generator, Optional
-from collections.abc import Iterable
-
-from draken.core.buffers cimport DrakenVector
-from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
-from opteryx.models import QueryProperties
+from opteryx.expression.evaluator import compile_eval_nodes
 
 # BasePlanNode in scope via textual include from _operators.pyx.
-
-
-cdef inline bint _is_constant_vector(Vector vec) noexcept:
-    """Telemetry-only observation of constant layout. Do not use for dispatch.
-
-    Reads the unified view's data_length; constant layout means
-    data_length == 1 regardless of vector type.
-    """
-    if vec is None:
-        return False
-    return vec.unified().data_length == 1
 
 
 cdef class ProjectionNode(BasePlanNode):
@@ -108,37 +90,3 @@ cdef class ProjectionNode(BasePlanNode):
     @property
     def name(self):  # pragma: no cover
         return "Projection"
-
-    cdef Py_ssize_t _count_emitted_constant_literals(self, Morsel morsel) except -1:
-        cdef Py_ssize_t emitted = 0
-        for identity in self._literal_identities:
-            try:
-                col = morsel.column(identity)
-            except Exception:
-                continue
-            if _is_constant_vector(col):
-                emitted += 1
-        return emitted
-
-    cdef Morsel _execute_morsel_projection(self, Morsel morsel):
-        cdef Py_ssize_t emitted
-        morsel = execute_and_append(self._compiled_evals, morsel)
-        emitted = self._count_emitted_constant_literals(morsel)
-        if emitted:
-            self.readings["draken_constant_columns_emitted"] = \
-                self.readings.get("draken_constant_columns_emitted", 0) + emitted
-        return morsel.select(self.projection)
-
-    cpdef void _push_impl(self, Morsel morsel) except *:
-        # Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
-        # carrier and calls this, surfacing any exception via the ErrCtx path.
-        if morsel is _EOS_SENTINEL:
-            self.emit(morsel)
-            return
-
-        # Single-morsel case is the only path the push pipeline uses; the
-        # legacy iterable-of-morsels handling came from streaming from old
-        # scan APIs and is no longer reachable here.
-        if morsel.num_rows == 0:
-            return
-        self.emit(self._execute_morsel_projection(morsel))

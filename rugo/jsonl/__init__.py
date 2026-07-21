@@ -73,7 +73,16 @@ class _JsonlReader:
             use_threads=self._use_threads,
         )
         if not result["success"]:
-            raise RuntimeError(result.get("error", "JSONL read failed"))
+            # The native reader raises directly (OSError, NotImplementedError, ...)
+            # on genuine failures -- it never reaches this line to report one via
+            # the result dict. `success=False` here only ever means "zero rows
+            # survived parsing/predicate filtering" (see read_jsonl's C
+            # implementation: `result['success']` is set True only inside the
+            # `total_rows > 0` branch, and is otherwise left at its False default
+            # with no error populated). Treating that as an error broke predicate
+            # pushdown for any chunk a predicate filters down to zero rows -- a
+            # legitimate, common outcome, not a failure. Yield nothing instead.
+            return
         from draken.morsels.morsel import Morsel
         yield Morsel.from_vectors(result["column_names"], result["columns"])
 
@@ -94,6 +103,41 @@ def read_jsonl(
 
     Returns a context manager that yields one Morsel of the (projected, filtered) result.
     predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=.
+
+    explicit_schema: optional {column_name: type} dict, type one of "int64", "double",
+        "boolean", "string". A named column is parsed STRICTLY as that type — no
+        speculative inference, no fallback — and raises ValueError if any value doesn't
+        fit. Declared columns are always reported back in the returned schema dict
+        (see read_metadata / get_jsonl_schema), independent of infer_schema.
+    infer_schema: whether non-declared columns appear in the returned schema dict at all
+        (the underlying Draken vectors are always typed the same way regardless — this
+        only gates the reported metadata). Declared (explicit_schema) columns are always
+        reported.
+    infer_sample_size: caps how many leading rows of a non-declared column are consulted
+        for its type hint (the first non-null value in that window). Whatever hint is
+        picked, the WHOLE column is still validated against it and falls back to VARCHAR
+        on any mismatch, so no value is ever misparsed or lost — but if the sample window
+        contains no non-null value at all (e.g. a column that's null for its first N rows
+        then numeric), no hint is ever formed and the column reports/renders as VARCHAR
+        even though a larger sample would have typed it as int64/double/boolean.
+    fail_on_error: when True, a malformed line (one that never opens a record, an object/
+        key abandoned by an unexpected newline, or a truncated/unterminated array or
+        object) raises ValueError naming the 1-based line number, byte offset, and a
+        snippet. When False (or a malformed line occurs elsewhere in a larger class of
+        inputs this detector doesn't cover — e.g. a record truncated at end-of-file with
+        no closing brace and no trailing newline), the malformed line is silently
+        dropped, matching this reader's original lenient behaviour.
+    parse_objects: when True, a column whose sampled value is a JSON object is returned
+        as a VARIANT vector (same raw-JSON-text storage as VARCHAR, just tagged
+        differently) instead of VARCHAR. When False, objects are returned as VARCHAR raw
+        JSON text.
+    parse_arrays: when True, a column whose sampled value is a JSON array is materialized
+        as an ARRAY vector, PROVIDED every element across every row is a uniform scalar
+        kind (all-int/double, all-boolean, all-string, or all-null/empty; ints widen to
+        double). Nested containers (an array inside an array) or a genuine mix of scalar
+        kinds (e.g. [1, "a", true]) are out of scope: that column falls back to raw JSON
+        text (VARCHAR, same as parse_arrays=False) and raises a RuntimeWarning naming the
+        column. When False, arrays are always returned as VARCHAR raw JSON text.
     """
     return _JsonlReader(
         source, columns, predicates, explicit_schema,

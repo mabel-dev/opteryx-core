@@ -6,7 +6,7 @@
 // Dispatched DIRECTLY from the nogil DV* VM (evaluation.pyx's BC_FUNCTION C-native
 // arm) — no Python, no nanobind, no GIL.
 //
-// UNIT PROBLEM — how DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET solve it.
+// UNIT PROBLEM — how DATEDIFF/TIMEDIFF/FORMAT_TIMESTAMP/UNIXTIME/TIME_BUCKET solve it.
 // All five need the *input* TIMESTAMP64 operand's TimestampUnit (s/ms/us/ns) to
 // compute a correct answer, and that unit is a LogicalType descriptor that lives on
 // the Python Vector object — NOT on the DrakenVector a C ABI kernel receives. A
@@ -30,7 +30,7 @@
 //   draken_date_format — format_ctx{ts_unit, fmt_len} + trailing pattern bytes
 //     (kernel_context.h); the pattern LITERAL is consumed into the ctx — only
 //     the `date` operand is pushed. Reuses the compiled token-program formatter
-//     in draken/ops/temporal_format.h (shared with the nanobind DATE_FORMAT path
+//     in draken/ops/temporal_format.h (shared with the nanobind FORMAT_TIMESTAMP path
 //     — one formatter, not two).
 //
 // FROM_UNIXTIME is the exception needing no ctx: its operand is a plain NUMERIC
@@ -42,7 +42,7 @@
 // pure function of one physical value, computed once per data_length PHYSICAL
 // value, kernel_preserve_shape carries selection+validity). The other five are
 // NOT shape-specialized: DATEDIFF/TIMEDIFF are a function of TWO operands (no
-// single physical value to preserve shape over), and DATE_FORMAT/UNIXTIME/
+// single physical value to preserve shape over), and FORMAT_TIMESTAMP/UNIXTIME/
 // TIME_BUCKET follow the existing draken_date_part/draken_date_trunc precedent —
 // dense over `length` via the uniform data[selection[i]] access pattern.
 
@@ -59,7 +59,7 @@
 #include "core/string_slot.h"
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx, cast_timestamp_ctx, time_bucket_ctx, format_ctx
 #include "ops/temporal_arith.h"           // ta_floor_div, ta_ticks_per_second, date_diff_batch
-#include "ops/temporal_format.h"          // shared compiled-token DATE_FORMAT formatter
+#include "ops/temporal_format.h"          // shared compiled-token FORMAT_TIMESTAMP formatter
 #include "ops/vec_result.h"
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/error_handling.h"
@@ -551,9 +551,9 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
     }
 }
 
-// DATE_FORMAT(date, pattern) — TIMESTAMP64|DATE32 -> VARCHAR via the shared
+// FORMAT_TIMESTAMP(pattern, date) — TIMESTAMP64|DATE32 -> VARCHAR via the shared
 // compiled token-program formatter (draken/ops/temporal_format.h — the SAME
-// formatter the nanobind DATE_FORMAT path uses; not re-implemented here).
+// formatter the nanobind FORMAT_TIMESTAMP path uses; not re-implemented here).
 // ctx = format_ctx{ts_unit, fmt_len} + pattern bytes trailing the struct.
 VecResult draken_date_format(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
   try {

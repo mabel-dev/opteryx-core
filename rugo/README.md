@@ -350,11 +350,10 @@ read_jsonl(
     explicit_schema=None,        # provide a schema dict instead of inferring
     infer_schema=True,
     infer_sample_size=5,         # rows sampled for type inference
-    parse_arrays=True,
-    parse_objects=True,
+    parse_arrays=True,            # materialize uniform-scalar JSON arrays as ARRAY vectors
+    parse_objects=True,           # materialize JSON objects as VARIANT vectors
     fail_on_error=True,
     use_threads=True,            # SIMD-accelerated parallel scan/interpret
-    min_rows_per_thread=2048,
 )
 ```
 
@@ -369,7 +368,11 @@ Return dict:
 | `schema`         | `dict[str, str]` — column name → inferred type string    |
 | `error`          | `str` — present only when `success` is `False`          |
 
-Inferred type strings: `int64`, `double`, `boolean`, `string`, `bytes`, `object`, `null`, `array[T]`.
+Inferred type strings: `int64`, `double`, `boolean`, `string`, `null` (a column absent/null on every row), plus `array` and `variant` when `parse_arrays`/`parse_objects` materialize a column (see below). `explicit_schema` columns are echoed back verbatim rather than inferred; other columns appear only when `infer_schema=True` (it does not change how the returned Draken vectors are typed, only whether they're reported here).
+
+`parse_objects` (default `True`): a column whose sampled value is a JSON object is returned as a `DRAKEN_VARIANT` vector — the same raw-JSON-text storage as `string`, just tagged as `variant` rather than decomposed into fields. Set `parse_objects=False` to get the old `string`/`DRAKEN_VARCHAR` behaviour instead.
+
+`parse_arrays` (default `True`): a column whose sampled value is a JSON array is materialized as a `DRAKEN_ARRAY` vector when every element across every row is a uniform scalar kind (all-int/double, all-boolean, all-string, or all-null/empty — ints widen to double like the scalar-column path). Nested containers (an array inside an array) or a genuine mix of scalar kinds (e.g. `[1, "a", true]`) are out of scope: the column falls back to raw JSON text (`string`/`DRAKEN_VARCHAR`, same as `parse_arrays=False`) and a `RuntimeWarning` is raised naming the column.
 
 ---
 
@@ -409,7 +412,8 @@ Bulk `SELECT *` is materialiser-bound — PyArrow has an edge. The analytical sh
 
 - String/object-heavy fields are often returned as `bytes` (binary-preserving), not eagerly decoded Python `str`/`dict` values.
 - Mixed or deeply nested array-object content may fall back to raw JSON text/bytes in edge cases.
-- Schema inference is sampled (`infer_sample_size` rows only); pass `explicit_schema` when the schema is known to avoid mismatches on heterogeneous files.
+- Schema inference's type *hint* is capped at `infer_sample_size` leading rows (the first non-null value in that window), and every row is still validated against the chosen hint (falling back to VARCHAR on a mismatch) — so a small sample never corrupts or loses a value. It CAN change the reported/stored type, though: if the sample window is all-null (e.g. a column that's null for its first N rows then numeric), no hint ever forms and the column is typed VARCHAR even where a larger sample would have picked int64/double/boolean. `explicit_schema` skips inference for named columns and enforces the declared type strictly: a value that doesn't fit raises `ValueError` rather than silently falling back.
+- `fail_on_error=True` catches a malformed line that never opens a record, a `{`/key abandoned by an unexpected newline, and a truncated/unterminated array or object — raising `ValueError` with the line number, byte offset, and a snippet. It is not a full JSON validator: some malformed shapes (e.g. a value truncated at end-of-file with no trailing newline) still parse leniently either way.
 
 ---
 

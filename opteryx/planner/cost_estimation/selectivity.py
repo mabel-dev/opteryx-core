@@ -115,6 +115,18 @@ def _selectivity_comparison(node, stats: RelationStatistics) -> float:
         return _selectivity_like(literal_value)
     if op in ("NotLike", "NotILike", "NotRLike"):
         return 1.0 - _selectivity_like(literal_value)
+    if op in ("InStr", "IInStr"):
+        # predicate_rewriter.INSTR_REWRITES only ever produces these from
+        # "x LIKE '%pattern%'" / "x ILIKE '%pattern%'" (wildcards stripped from
+        # the literal on rewrite) -- same infix-substring semantics as
+        # _selectivity_like's fallback. Without this, InStr/IInStr fell
+        # through to the "unknown predicate -> assume everything matches"
+        # default (1.0), understating how selective these actually are for any
+        # caller (e.g. a two-pass scan eligibility check) trying to estimate
+        # whether a LIKE '%x%' predicate is worth pruning on.
+        return _LIKE_INFIX_SELECTIVITY
+    if op in ("NotInStr", "NotIInStr"):
+        return 1.0 - _LIKE_INFIX_SELECTIVITY
     return 1.0
 
 
@@ -285,18 +297,28 @@ def _count_up_to(dgram, value: float) -> float:
     return count_up_to(dgram, value)
 
 
+# Textbook constant fallbacks for LIKE-family predicates the estimator has no
+# real content stats for. "Prefix" = pattern like 'foo%' (still bounds a range,
+# a bit more selective); "infix" = pattern like '%foo%' or unrecognized shapes
+# (no positional anchor at all, least selective). Named so InStr/IInStr (the
+# rewritten form of an infix LIKE -- see predicate_rewriter.INSTR_REWRITES)
+# can reuse the infix constant directly instead of re-deriving one.
+_LIKE_PREFIX_SELECTIVITY = 0.25
+_LIKE_INFIX_SELECTIVITY = 0.1
+
+
 def _selectivity_like(literal_value) -> float:
     if isinstance(literal_value, bytes):
         try:
             literal_value = literal_value.decode("utf-8")
         except UnicodeDecodeError:
-            return 0.1
+            return _LIKE_INFIX_SELECTIVITY
     if not isinstance(literal_value, str):
-        return 0.1
+        return _LIKE_INFIX_SELECTIVITY
     if (
         literal_value.endswith("%")
         and "%" not in literal_value[:-1]
         and "_" not in literal_value
     ):
-        return 0.25
-    return 0.1
+        return _LIKE_PREFIX_SELECTIVITY
+    return _LIKE_INFIX_SELECTIVITY

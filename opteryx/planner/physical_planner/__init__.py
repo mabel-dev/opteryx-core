@@ -32,10 +32,48 @@ The Physical Planner does NOT optimize, bind, or rewrite the plan.
 
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.expression import NodeType
 from opteryx.models import PhysicalPlan
 from opteryx.operators.catalog import get_registry
 from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+
+# Inverse of a comparison op, for normalizing `literal OP column` to
+# `column OP literal` (rugo's predicate tuples are always column-relative).
+_INVERT_COMPARISON_OP = {
+    "Gt": "Lt", "GtEq": "LtEq", "Lt": "Gt", "LtEq": "GtEq", "Eq": "Eq", "NotEq": "NotEq",
+}
+
+
+def _translate_jsonl_predicates(predicates, physical_by_identity):
+    """Translate pushed-down predicate condition Nodes into rugo's
+    ``(physical_column_name, op, value)`` tuple form (see
+    opteryx.connectors.jsonl_io.JSONL_OP_XLAT).
+
+    Every entry here was already gated by JsonlPredicatePushable.can_push at
+    optimizer time to be exactly a `column OP literal` COMPARISON_OPERATOR with
+    op in JSONL_OP_XLAT -- this only re-derives that shape to build the tuple,
+    it does not re-validate it. A predicate can_push declined is never in this
+    list; it stays behind as an ordinary Filter node above the scan instead.
+    """
+    from opteryx.connectors.jsonl_io import JSONL_OP_XLAT
+
+    translated = []
+    for condition in predicates or []:
+        left, right = condition.left, condition.right
+        if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
+            ident, literal, op = left, right, condition.value
+        elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
+            ident, literal, op = right, left, _INVERT_COMPARISON_OP[condition.value]
+        else:  # pragma: no cover -- can_push only admits this shape
+            raise InvalidInternalStateError(
+                "READ_JSONL received a pushed predicate that is not a plain "
+                "column-vs-literal comparison; JsonlPredicatePushable.can_push "
+                "should have declined it."
+            )
+        physical_name = physical_by_identity[ident.schema_column.identity]
+        translated.append((physical_name, JSONL_OP_XLAT[op], literal.value))
+    return translated
 
 
 def _manifest_is_all_parquet(manifest) -> bool:
@@ -109,6 +147,35 @@ def _create_filter_node(logical_node, query_properties, registry):
 
 
 def _create_function_dataset_node(logical_node, query_properties, registry):
+    if logical_node.function == "READ_JSONL":
+        # READ_JSONL streams morsels from a real file via rugo -- it does not fit
+        # the generic single-Morsel DATASET_FUNCTIONS path (VALUES/UNNEST/
+        # GENERATE_SERIES), so it gets its own scan operator, the same way
+        # Parquet scans are routed to "Parquet Reader" in _create_scan_node.
+        node_config = dict(logical_node.properties)
+        physical_by_identity = node_config.get("jsonl_physical_by_identity") or {}
+        # `logical_node.columns` reflects whatever projection_pushdown pruned it
+        # to; re-derive the matching physical (pre-alias) names by identity --
+        # the bind-time `jsonl_physical_columns` list is the FULL, unpruned file
+        # column order and would go stale/misaligned once columns are pruned.
+        node_config["jsonl_physical_columns"] = [
+            physical_by_identity[column.schema_column.identity]
+            for column in (logical_node.columns or [])
+        ]
+        node_config["jsonl_predicates"] = _translate_jsonl_predicates(
+            node_config.get("predicates"), physical_by_identity
+        )
+        return registry.create("JSONL Reader", query_properties, **node_config)
+    if logical_node.function == "READ_PARQUET":
+        # Unlike READ_JSONL, READ_PARQUET reuses the existing native ParquetReadNode
+        # wholesale (opteryx.planner.binder.dataset's READ_PARQUET branch builds a
+        # real FileSystemTable connector + Manifest at bind time, exactly like a
+        # catalog-backed/ad-hoc Scan) -- no bespoke operator, no predicate
+        # translation; node_config["predicates"]/["columns"] are already real column
+        # identifiers (not JSONL's raw-key remap), and the manifest/connector are
+        # already fully resolved.
+        node_config = dict(logical_node.properties)
+        return registry.create("Parquet Reader", query_properties, **node_config)
     return registry.create("Function Dataset", query_properties, **logical_node.properties)
 
 

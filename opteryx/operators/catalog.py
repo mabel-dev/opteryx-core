@@ -189,6 +189,7 @@ def _build_registry() -> OperatorRegistry:
         GroupedAggregateHashedNode as DrakenAggregateAndGroupNode,
     )
     from opteryx.operators.heap_sort import HeapSortNode
+    from opteryx.operators.jsonl_read import JsonlReadNode
     from opteryx.operators.limit import LimitNode
     from opteryx.operators.window import WindowNode
     from opteryx.operators.nested_loop_join import NestedLoopJoinNode
@@ -234,6 +235,14 @@ def _build_registry() -> OperatorRegistry:
         name="Null Reader",
         category=OperatorCategory.SCAN,
         parallelism=OperatorParallelism.STATELESS,
+        is_scan=True,
+    )
+    r.register(
+        JsonlReadNode,
+        name="JSONL Reader",
+        category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
+        parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_scan=True,
     )
     r.register(

@@ -149,7 +149,7 @@ VecResult draken_greatest(void* ctx, const DrakenVector* const* args, uint32_t n
 VecResult draken_least(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs);
-// Phase 9a-fn: DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
+// Phase 9a-fn: DATEDIFF/TIMEDIFF/FORMAT_TIMESTAMP/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
 VecResult draken_datediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_timediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_date_format(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -560,7 +560,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_least", (kernel_fn_t)&draken_least},
     {"draken_split", (kernel_fn_t)&draken_split},
 
-    // DATEDIFF/TIMEDIFF/DATE_FORMAT/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
+    // DATEDIFF/TIMEDIFF/FORMAT_TIMESTAMP/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
     {"draken_datediff", (kernel_fn_t)&draken_datediff},
     {"draken_timediff", (kernel_fn_t)&draken_timediff},
     {"draken_date_format", (kernel_fn_t)&draken_date_format},

@@ -78,7 +78,8 @@ enum class Action : uint8_t {
     END_UNQUOTED_VAL         = 6,   // comma / } ending an unquoted value
     END_UNQUOTED_VAL_NEWLINE = 7,   // newline ending an unquoted value + finish record
     PUSH_RECORD              = 8,   // }
-    SET_COLON                = 9    // remember ':' position — anchors the unquoted slice
+    SET_COLON                = 9,   // remember ':' position — anchors the unquoted slice
+    ABANDON_RECORD           = 10   // newline before the first key closed the record early
 };
 
 struct Transition {
@@ -109,7 +110,7 @@ constexpr std::array<std::array<Transition, 13>, 8> build_transition_table() {
     // State 1: EXPECT_KEY_QUOTE
     t[1][int(K::QUOTE)]  = { S::IN_KEY,            A::START_KEY };
     t[1][int(K::RBRACE)] = { S::EXPECT_RECORD_START, A::PUSH_RECORD };
-    t[1][int(K::NEWLINE)]= { S::EXPECT_RECORD_START, A::NONE };  // unexpected newline -> reset
+    t[1][int(K::NEWLINE)]= { S::EXPECT_RECORD_START, A::ABANDON_RECORD };  // unexpected newline -> reset
 
     // State 2: IN_KEY
     t[2][int(K::QUOTE)]  = { S::EXPECT_COLON,      A::END_KEY };
@@ -157,8 +158,9 @@ inline bool is_ws(uint8_t c) {
 // Bound a container value whose opening '[' or '{' is at `start`. Walks raw bytes
 // tracking string state and backslash escapes so interior commas, brackets and braces
 // — including those inside quoted strings — do not close it early. Returns the index of
-// the matching closing bracket/brace, or `limit - 1` if the container never closes.
-inline uint32_t scan_container(const uint8_t* buf, uint32_t start, uint32_t limit) {
+// the matching closing bracket/brace, or `limit - 1` if the container never closes (and
+// sets `closed` to false in that case — a truncated/unterminated array or object).
+inline uint32_t scan_container(const uint8_t* buf, uint32_t start, uint32_t limit, bool& closed) {
     int depth = 0;
     bool in_string = false;
     bool escaped = false;
@@ -173,9 +175,10 @@ inline uint32_t scan_container(const uint8_t* buf, uint32_t start, uint32_t limi
         } else if (c == '[' || c == '{') {
             ++depth;
         } else if (c == ']' || c == '}') {
-            if (--depth == 0) return p;
+            if (--depth == 0) { closed = true; return p; }
         }
     }
+    closed = false;
     return limit - 1;
 }
 
@@ -225,6 +228,25 @@ struct MapBuilder {
     bool skip_rest = false;
     bool record_dead = false;
     uint32_t escaped_until = 0xFFFFFFFFu;  // byte escaped by a preceding '\' in a key/string
+
+    // Malformed-input tracking (fail_on_error support). `line_start` is the byte position
+    // right after the previous top-level newline (or 0); it lets a NEWLINE marker hit while
+    // still EXPECT_RECORD_START cheaply check whether the "line" it just closed held any
+    // non-whitespace content that never opened a record (a garbage line, e.g. "NOT JSON").
+    // Only the FIRST occurrence is kept — this is a detector, not a full diagnostic pass.
+    uint32_t line_start = 0;
+    uint32_t cur_record_start_pos = 0;  // position of the current record's '{'
+    // EXPECT_RECORD_START is BOTH "nothing has happened yet" and "a record just closed
+    // and we're ready for the next one" — state alone can't tell a garbage line ("NOT
+    // JSON") apart from a line that legitimately opened and closed a record. This tracks
+    // whether a '{' was seen since the last top-level newline, so the garbage check below
+    // only fires when NO record was ever attempted on this line.
+    bool saw_open_brace_since_newline = false;
+    bool malformed_found = false;
+    uint32_t malformed_at = 0;
+    inline void flag_malformed(uint32_t pos) {
+        if (!malformed_found) { malformed_found = true; malformed_at = pos; }
+    }
 
     MapBuilder(const uint8_t* buf, const MapProjection* p)
         : buffer(buf), proj(p), num_wanted(p ? p->num_wanted : 0) {
@@ -295,10 +317,32 @@ struct MapBuilder {
             if (ch == '\\') { escaped_until = pos + 1; return; }               // escapes next byte
         }
         CharClass cls = char_class_table[ch];
+        if (cls == CharClass::NEWLINE) {
+            // A top-level newline (still EXPECT_RECORD_START) that closes a line which
+            // never even opened a record, yet held non-whitespace content, is a line that
+            // was never JSON at all — e.g. "NOT JSON AT ALL". Today that's silently
+            // dropped either way; this only records where it happened so fail_on_error
+            // can raise on it. Must gate on saw_open_brace_since_newline, not just state:
+            // EXPECT_RECORD_START is equally the state right after a record legitimately
+            // closed on this same line.
+            if (state == State::EXPECT_RECORD_START && !saw_open_brace_since_newline) {
+                for (uint32_t p = line_start; p < pos; ++p) {
+                    if (!is_ws(buffer[p])) { flag_malformed(line_start); break; }
+                }
+            }
+            line_start = pos + 1;
+            saw_open_brace_since_newline = false;
+        }
         const Transition& tr = transition_table[static_cast<int>(state)][static_cast<int>(cls)];
         switch (tr.action) {
         case Action::START_RECORD:
-            ordinal = 0; found = 0; record_dead = false; escaped_until = 0xFFFFFFFFu; break;
+            ordinal = 0; found = 0; record_dead = false; escaped_until = 0xFFFFFFFFu;
+            cur_record_start_pos = pos;
+            saw_open_brace_since_newline = true;
+            break;
+        case Action::ABANDON_RECORD:
+            flag_malformed(cur_record_start_pos);
+            break;
         case Action::SET_COLON:
             colon_pos = pos; break;
         case Action::START_KEY:
@@ -369,7 +413,9 @@ RecordSet build_map(
         // escape-aware byte scan (interior commas/brackets must not truncate it), emit
         // the whole slice, then skip every marker the container swallowed.
         if ((ch == '[' || ch == '{') && b.state == State::EXPECT_VALUE) {
-            const uint32_t close = scan_container(buffer, pos, static_cast<uint32_t>(buffer_length));
+            bool closed = false;
+            const uint32_t close = scan_container(buffer, pos, static_cast<uint32_t>(buffer_length), closed);
+            if (!closed) b.flag_malformed(pos);  // truncated/unterminated array or object
             if (b.emit_container(pos, close, ch == '[' ? ValueType::Array : ValueType::Object))
                 b.skip_rest = true;
             b.state = State::EXPECT_SEPARATOR;
@@ -389,6 +435,7 @@ RecordSet build_map(
         }
     }
     b.finish(true);
+    if (b.malformed_found) { b.rs.malformed = true; b.rs.malformed_pos = b.malformed_at; }
     return std::move(b.rs);
 }
 

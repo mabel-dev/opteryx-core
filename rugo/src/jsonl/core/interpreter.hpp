@@ -57,6 +57,14 @@ struct RecordSet {
     std::vector<FieldSpan> spans;     // all fields of all records, contiguous
     std::vector<uint32_t>  offsets;   // size = num_records + 1; starts {0}
 
+    // First malformed input detected while building this set (dropped/abandoned line,
+    // unterminated container, ...). `malformed_pos` is the absolute byte offset of the
+    // FIRST such occurrence, valid iff `malformed` is true. Only ever consulted when
+    // ParseContext.fail_on_error is true — otherwise the record producing it was already
+    // silently skipped, matching pre-existing lenient behaviour.
+    bool     malformed = false;
+    uint32_t malformed_pos = 0;
+
     size_t     num_records() const { return offsets.empty() ? 0 : offsets.size() - 1; }
     size_t     size()        const { return num_records(); }
     RecordView operator[](size_t r) const {
@@ -69,6 +77,10 @@ struct RecordSet {
         if (offsets.empty()) offsets.push_back(0);
         for (size_t i = 1; i < other.offsets.size(); ++i)
             offsets.push_back(base + other.offsets[i]);
+        if (other.malformed && (!malformed || other.malformed_pos < malformed_pos)) {
+            malformed = true;
+            malformed_pos = other.malformed_pos;
+        }
     }
 };
 

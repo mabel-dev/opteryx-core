@@ -183,7 +183,7 @@ struct time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude,
                                                       uint8_t ts_unit);
 
 /**
- * Context for draken_date_format — DATE_FORMAT(date, pattern). `pattern` is a
+ * Context for draken_date_format — FORMAT_TIMESTAMP(pattern, date). `pattern` is a
  * LITERAL, consumed here (not pushed); only the `date` operand is pushed.
  * ts_unit: TimestampUnit of a TIMESTAMP64 operand (0=s,1=ms,2=us,3=ns); DATE32
  * operands pass 2 (unused by the kernel, which switches on the operand's

@@ -2136,22 +2136,23 @@ cdef Py_ssize_t _linearize(
                             slot.ctx_ptr = <void*>(<unsigned long long>_tb_ctx.ctx_ptr)
                         return sub_depth
 
-        # DATE_FORMAT(date, pattern) — bind-time lowering to the C-ABI
-        # draken_date_format kernel. `pattern` is a LITERAL, consumed HERE (never
+        # FORMAT_TIMESTAMP(pattern, date) / FORMAT_DATE(pattern, date) — bind-time
+        # lowering to the C-ABI draken_date_format kernel (BigQuery argument
+        # order: pattern first). `pattern` is a LITERAL, consumed HERE (never
         # pushed) into a format_ctx (kernel_context.h: ts_unit + pattern bytes
         # trailing the struct) — only `date` is pushed. Reuses the SAME compiled
-        # token-program formatter as the nanobind DATE_FORMAT path
+        # token-program formatter as the nanobind FORMAT_TIMESTAMP path
         # (draken/ops/temporal_format.h) — one formatter, not two.
         _fmt_func = func_val.upper() if func_val else ""
-        if _fmt_func == "DATE_FORMAT" and n == 2 \
+        if _fmt_func == "FORMAT_TIMESTAMP" and n == 2 \
                 and node.parameters[0] != NULL and node.parameters[1] != NULL \
-                and node.parameters[0].schema_column != NULL \
-                and node.parameters[1].node_type == _NT_LITERAL:
-            _fmt_pat_val = <object>node.parameters[1].value
+                and node.parameters[0].node_type == _NT_LITERAL \
+                and node.parameters[1].schema_column != NULL:
+            _fmt_pat_val = <object>node.parameters[0].value
             if isinstance(_fmt_pat_val, str):
                 _fmt_pat_val = _fmt_pat_val.encode("utf-8")
             if isinstance(_fmt_pat_val, bytes):
-                _fmt_sc = <object>node.parameters[0].schema_column
+                _fmt_sc = <object>node.parameters[1].schema_column
                 _fmt_ct = getattr(_fmt_sc, "column_type", None)
                 _fmt_phys = getattr(getattr(_fmt_ct, "physical", None), "name", "")
                 if _fmt_phys in ("DATE32", "TIMESTAMP64"):
@@ -2160,7 +2161,7 @@ cdef Py_ssize_t _linearize(
                     _fmt_fn, _fmt_ctx = _resolve_kernel_and_context(
                         "draken_date_format", _fmt_alloc, (_fmt_unit, _fmt_pat_val))
                     if _fmt_fn is not None:
-                        sub_depth = _linearize(node.parameters[0], bc, depth)
+                        sub_depth = _linearize(node.parameters[1], bc, depth)
                         slot = bc._push_instr()
                         slot.opcode = BC_FUNCTION
                         slot.arity = 1
@@ -2308,7 +2309,7 @@ cdef Py_ssize_t _linearize(
                 func_name == "TRUNC"
                 and getattr(func_ref_meta.selected_overload.kernel, "id", None) != "numeric"
             )
-            # DATEDIFF/TIMEDIFF/UNIXTIME/TIME_BUCKET/DATE_FORMAT are ONLY ever
+            # DATEDIFF/TIMEDIFF/UNIXTIME/TIME_BUCKET/FORMAT_TIMESTAMP are ONLY ever
             # correct via their dedicated lowering arms above (binary_op_ctx/
             # time_bucket_ctx/format_ctx built from the operands' TimestampUnit —
             # a days-vs-micros mixup is a wrong-answer bug, not a missing
@@ -2319,7 +2320,7 @@ cdef Py_ssize_t _linearize(
             # ("expected N arguments") or read ctx==NULL. When the dedicated arm
             # didn't fire (its eligibility check failed — e.g. a NULL/untyped
             # operand), fall through to the Python callable_ref, never here.
-            if func_name in ("DATEDIFF", "TIMEDIFF", "UNIXTIME", "TIME_BUCKET", "DATE_FORMAT"):
+            if func_name in ("DATEDIFF", "TIMEDIFF", "UNIXTIME", "TIME_BUCKET", "FORMAT_TIMESTAMP"):
                 _fn_skip_lookup = True
             # SUBSTRING/SUBSTR: the dedicated literal-ctx arm above (_sb_ok) already
             # returned when start/count were literals. Reaching here means it wasn't
@@ -2701,7 +2702,7 @@ cdef Py_ssize_t _linearize(
                 # CAST ... FORMAT '<pattern>' (or the ISO-8601 default when absent) —
                 # the pattern must be a compile-time literal (enforced in
                 # logical_planner_builders.cast()); baked into a format_ctx exactly
-                # like DATE_FORMAT's pattern (same struct, same allocator — see
+                # like FORMAT_TIMESTAMP's pattern (same struct, same allocator — see
                 # draken/ops/kernels/kernel_context.h). Always allocated (even with
                 # an empty pattern) for the two TIMESTAMP64 kernels: the ctx also
                 # carries the source's TimestampUnit, which the raw int64 payload's

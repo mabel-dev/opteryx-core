@@ -141,7 +141,60 @@ def render_function_dataset(node: LogicalPlanNode) -> str:
         return f"VALUES (({column_names}) x {len(node.values)} AS {node.alias})"
     if node.function == "UNNEST":
         return f"UNNEST ({', '.join(format_expression(arg) for arg in node.args)}{alias})"
+    if node.function == "READ_JSONL":
+        return _render_bare_reader(node, "READ_JSONL", "$read_jsonl-")
+    if node.function == "READ_PARQUET":
+        return _render_bare_reader(node, "READ_PARQUET", "$read_parquet-")
     return node.function
+
+
+def _render_bare_reader(node: LogicalPlanNode, label: str, auto_alias_prefix: str) -> str:
+    """READ_JSONL and READ_PARQUET are bare dataset functions with a real backing
+    reader (rugo's JSONL decoder / the native ParquetReadNode), so their plan line
+    carries the same detail a Scan's does -- file path (or glob), columns actually
+    read (projected, plus any filter-only columns not otherwise projected, marked
+    with ~), and any pushed-down predicate -- rather than just the bare function
+    name every other FunctionDataset case renders as.
+    """
+    from opteryx.expression import NodeType, get_all_nodes_of_type
+
+    dataset = getattr(node, "dataset", None)
+    path = f" ('{dataset}')" if dataset else ""
+
+    # node.alias is never None by render time (opteryx.planner.binder.dataset always
+    # sets it, minting an auto_alias_prefix-prefixed name when the user gave none) --
+    # unlike render_scan's `relation != alias` check, so an unstable internal name
+    # isn't shown as if the user had written it. AS alias(col1, col2, ...) is not
+    # supported (rejected at bind time), so alias is always a plain relation name,
+    # never a column-rename list.
+    node_alias = getattr(node, "alias", None)
+    alias = f" AS {node_alias}" if node_alias and not node_alias.startswith(auto_alias_prefix) else ""
+
+    proj_names = [c.source_column for c in node.columns] if node.columns else []
+    proj_set = set(proj_names)
+
+    # Columns referenced only in a pushed-down predicate are not in node.columns
+    # (ProjectionPushdown removed them because they're not output columns), but
+    # the reader still has to decode them from the file. Marked with ~, same
+    # convention render_scan uses, so the plan makes clear what is actually read
+    # vs projected.
+    filter_only_names = []
+    if node.predicates:
+        for pred in node.predicates:
+            for ident in get_all_nodes_of_type(pred, (NodeType.IDENTIFIER,)):
+                name = getattr(ident, "source_column", None) or getattr(ident, "value", None)
+                if name and name not in proj_set and name not in filter_only_names:
+                    filter_only_names.append(name)
+
+    all_col_parts = proj_names + [f"~{n}" for n in filter_only_names]
+    columns = " [" + ", ".join(all_col_parts) + "]" if all_col_parts else ""
+
+    predicates = (
+        " (" + " AND ".join(map(format_expression, node.predicates)) + ")"
+        if node.predicates
+        else ""
+    )
+    return f"{label}{path}{alias}{columns}{predicates}"
 
 
 @register_render(LogicalPlanStepType.HeapSort)

@@ -133,6 +133,8 @@ static void finalize_records(
     RecordSet& out = result.all_records;
     out.offsets.clear();
     out.offsets.push_back(0);
+    out.malformed = all_records.malformed;
+    out.malformed_pos = all_records.malformed_pos;
     out.spans.reserve(all_records.spans.size());
     const size_t nrec = all_records.num_records();
     for (size_t r = 0; r < nrec; ++r) {

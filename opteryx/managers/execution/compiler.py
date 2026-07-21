@@ -1466,7 +1466,12 @@ class _Compiler:
         # sample/virtual/in-memory relations). Its content is fully read either way
         # (no native streaming exists for it); materializing at plan time keeps
         # execution 100%% native.
-        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode"):
+        # JsonlReadNode (READ_JSONL, Stage 1): no native JSONL scan source exists
+        # yet either, so it goes through the same materialize-at-compile-time path
+        # -- read_morsels() streams newline-chunk Morsels out of rugo, and every
+        # one is buffered here before native execution starts (same legitimacy as
+        # the virtual datasets above; true native streaming is a later stage).
+        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")

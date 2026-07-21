@@ -14,20 +14,18 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Cross Join Node - Draken-Native Implementation (Session 46)
+Cross Join Node
 
 This is a SQL Query Execution Plan Node.
 
-This performs a CROSS JOIN - CROSS JOIN is not natively supported by PyArrow so this is written
-here rather than calling the join() functions.
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+_compile_join, which treats CROSS as a zero-key inner join keyed only on the
+class-level `join_type = "cross"`). This class is plan-time config only.
 
-REFACTORED (Session 46): Draken-native Cartesian product
-- Replaced NumPy index generation with Draken-native build_cartesian_indices
-- Eliminated PyArrow table alignment in hot path in favor of Morsel.take
-- Removed NumPy imports and dependency in hot paths
+`build_cartesian_indices` below is a standalone Draken-native utility (not
+execution-path config) and is kept — it builds Cartesian-product row indices
+independent of this Node's (removed) push execution.
 """
-
-from typing import Generator, Optional
 
 from libc.stdint cimport int64_t, uint32_t
 from libc.stddef cimport size_t
@@ -38,10 +36,6 @@ from draken.core.buffers cimport DRAKEN_INT64
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
-
-from opteryx.models import QueryProperties
-
-# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
@@ -108,104 +102,24 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
 
     return (left_vec, right_vec)
 
-INTERNAL_BATCH_SIZE: int = 10000  # config
-MAX_JOIN_SIZE: int = 1_000_000  # config
-
-def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, None, None]:
-    """
-    A cross join is the cartesian product of two tables.
-    Draken-native implementation using Morsel.take().
-    """
-
-    # Optimization for COUNT(*) queries
-    # Note: identity for $COUNT(*) is a known constant
-    encoded_count_identity = b"$COUNT(*)"
-    if left_morsel.column_names == [encoded_count_identity] and right_morsel.column_names == [encoded_count_identity]:
-        left_count = left_morsel._cxx_column(encoded_count_identity)[0]
-        right_count = right_morsel._cxx_column(encoded_count_identity)[0]
-
-        res = Morsel.from_vectors(
-            [encoded_count_identity],
-            [_draken_native.vector_from_sequence([left_count * right_count])]
-        )
-        yield res
-        return
-
-    if left_morsel.column_names == [encoded_count_identity]:
-        left_count = left_morsel._cxx_column(encoded_count_identity)[0]
-        for _ in range(left_count):
-            yield right_morsel.copy()
-        return
-
-    if right_morsel.column_names == [encoded_count_identity]:
-        right_count = right_morsel._cxx_column(encoded_count_identity)[0]
-        for _ in range(right_count):
-            yield left_morsel.copy()
-        return
-
-    cdef Py_ssize_t left_rows = left_morsel.num_rows
-    cdef Py_ssize_t right_rows = right_morsel.num_rows
-
-    if left_rows == 0 or right_rows == 0:
-        # Return empty morsel with combined schema
-        res = left_morsel.copy()
-        res._empty_inplace()
-        for col_name in right_morsel.column_names:
-            if col_name not in res.column_names:
-                res.append_vector(col_name, right_morsel._cxx_column(col_name).slice(0, 0))
-        yield res
-        return
-
-    # Generate Cartesian product indices using Draken-native helper
-    left_indices, right_indices = build_cartesian_indices(left_rows, right_rows)
-
-    # Take rows from both morsels to create the join result
-    res_morsel = left_morsel.copy().take(left_indices)
-
-    # Take from right
-    right_taken = right_morsel.copy().take(right_indices)
-
-    # Merge columns
-    left_names = set(left_morsel.column_names)
-    for col_name in right_morsel.column_names:
-        if col_name not in left_names:
-            res_morsel.append_vector(col_name, right_taken._cxx_column(col_name))
-
-    yield res_morsel
 
 cdef class CrossJoinNode(JoinNode):
     """
-    Implements a SQL CROSS JOIN (Draken-native)
+    Implements a SQL CROSS JOIN (plan-time config only — see module docstring).
     """
-
-    cdef public object source
-    cdef public list left_morsels
-    cdef public list right_morsels
-    cdef public Morsel left_table
-    cdef public CarcharSetWrapper hash_set
-    cdef public bint continue_executing
-    cdef public bint _build_phase
 
     join_type = "cross"
 
     def __init__(self, properties=None, **parameters):
         JoinNode.__init__(self, properties=properties, **parameters)
 
-        self.source = parameters.get("column")
-
-        # JoinNode expects these to be set for label_join_legs
+        # JoinNode expects these to be set for label_join_legs (called for
+        # every query — opteryx/managers/execution/__init__.py — regardless
+        # of which execution path runs).
         self.left_readers = parameters.get("left_readers")
         self.right_readers = parameters.get("right_readers")
         self.left_relation_names = parameters.get("left_relation_names") or []
         self.right_relation_names = parameters.get("right_relation_names") or []
-
-        self.left_morsels = []
-        self.right_morsels = []
-        self.left_table = None  # Now stores a combined Morsel
-        self.hash_set = CarcharSetWrapper()
-
-        self.continue_executing = True
-        self._build_phase = True
 
     @property
     def name(self):  # pragma: no cover
@@ -214,65 +128,3 @@ cdef class CrossJoinNode(JoinNode):
     @property
     def config(self):  # pragma: no cover
         return f"CROSS JOIN"
-
-    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        cdef CxxMorsel* raw = m.get()
-        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        with gil:
-            try:
-                if is_eos:
-                    self._push_left_gil(_EOS_SENTINEL)
-                else:
-                    self._push_left_gil(cxx_to_morsel(m))
-            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
-                self._stash_exc(exc, err)
-        return err.code if err != NULL else 0
-
-    cdef void _push_left_gil(self, Morsel morsel) except *:
-        if not self.continue_executing:
-            return
-        if morsel is _EOS_SENTINEL:
-            self._build_complete = True
-            if self.left_morsels:
-                self.left_table = Morsel.combine(self.left_morsels)
-                self.left_morsels = []
-            else:
-                self.left_table = None
-            return
-        if morsel is not None and len(morsel) > 0:
-            self.left_morsels.append(morsel)
-
-    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        cdef CxxMorsel* raw = m.get()
-        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        with gil:
-            try:
-                if is_eos:
-                    self._push_right_gil(_EOS_SENTINEL)
-                else:
-                    self._push_right_gil(cxx_to_morsel(m))
-            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx
-                self._stash_exc(exc, err)
-        return err.code if err != NULL else 0
-
-    cdef void _push_right_gil(self, Morsel morsel) except *:
-        cdef Morsel right_table
-        if not self.continue_executing:
-            return
-        self._require_build_complete()
-        if morsel is _EOS_SENTINEL:
-            if self.left_table is None:
-                self.emit(_EOS_SENTINEL)
-                return
-            if self.right_morsels:
-                right_table = Morsel.combine(self.right_morsels)
-                self.right_morsels = []
-            else:
-                self.emit(_EOS_SENTINEL)
-                return
-            for chunk in _cross_join(self.left_table, right_table):
-                self.emit(chunk)
-            self.emit(_EOS_SENTINEL)
-            return
-        if morsel is not None and len(morsel) > 0:
-            self.right_morsels.append(morsel)

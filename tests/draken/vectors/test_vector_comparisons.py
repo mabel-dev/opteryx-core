@@ -1,228 +1,147 @@
 """Tests for vector-vector comparison operations.
 
-This module tests the vector-vector comparison operations for Int64Vector and Float64Vector,
-including equals, not_equals, greater_than, greater_than_or_equals, less_than, and 
-less_than_or_equals operations.
+This module tests the vector-vector and vector-scalar comparison operations
+for Int64Vector and Float64Vector via compare_vector(other, op) /
+compare_scalar(scalar, op), where op is 0=eq 1=ne 2=gt 3=ge 4=lt 5=le. Vector
+has no equals_vector/not_equals_vector/greater_than_vector/etc. — those are
+all the single compare_vector/compare_scalar entry point, dispatched by op
+code (see draken/draken_native.cpp).
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-import pyarrow as pa
 import pytest
 
-from draken import Vector
+from draken.draken_native import DrakenType
+from draken.interop.vector_sequence import vector_from_sequence
+
+EQ, NE, GT, GE, LT, LE = 0, 1, 2, 3, 4, 5
 
 
 class TestInt64VectorComparisons:
     """Test Int64Vector vector-vector and vector-scalar comparison operations."""
-    
+
     def test_equals_vector(self):
-        """Test Int64Vector equals_vector operation."""
-        arr1 = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        arr2 = pa.array([1, 3, 3, 2, 6], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.equals_vector(vec2)
-        expected = [1, 0, 1, 0, 0]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 3, 3, 2, 6], dtype=DrakenType.INT64)
+
+        result = vec1.compare_vector(vec2, EQ)
+        assert result.to_pylist() == [True, False, True, False, False]
+
     def test_not_equals_vector(self):
-        """Test Int64Vector not_equals_vector operation."""
-        arr1 = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        arr2 = pa.array([1, 3, 3, 2, 6], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.not_equals_vector(vec2)
-        expected = [0, 1, 0, 1, 1]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 3, 3, 2, 6], dtype=DrakenType.INT64)
+
+        result = vec1.compare_vector(vec2, NE)
+        assert result.to_pylist() == [False, True, False, True, True]
+
     def test_greater_than_vector(self):
-        """Test Int64Vector greater_than_vector operation."""
-        arr1 = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        arr2 = pa.array([1, 3, 3, 2, 6], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.greater_than_vector(vec2)
-        expected = [0, 0, 0, 1, 0]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 3, 3, 2, 6], dtype=DrakenType.INT64)
+
+        result = vec1.compare_vector(vec2, GT)
+        assert result.to_pylist() == [False, False, False, True, False]
+
     def test_greater_than_or_equals_vector(self):
-        """Test Int64Vector greater_than_or_equals_vector operation."""
-        arr1 = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        arr2 = pa.array([1, 3, 3, 2, 6], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.greater_than_or_equals_vector(vec2)
-        expected = [1, 0, 1, 1, 0]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 3, 3, 2, 6], dtype=DrakenType.INT64)
+
+        result = vec1.compare_vector(vec2, GE)
+        assert result.to_pylist() == [True, False, True, True, False]
+
     def test_less_than_vector(self):
-        """Test Int64Vector less_than_vector operation."""
-        arr1 = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        arr2 = pa.array([1, 3, 3, 2, 6], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.less_than_vector(vec2)
-        expected = [0, 1, 0, 0, 1]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 3, 3, 2, 6], dtype=DrakenType.INT64)
+
+        result = vec1.compare_vector(vec2, LT)
+        assert result.to_pylist() == [False, True, False, False, True]
+
     def test_less_than_or_equals_vector(self):
-        """Test Int64Vector less_than_or_equals_vector operation."""
-        arr1 = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        arr2 = pa.array([1, 3, 3, 2, 6], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.less_than_or_equals_vector(vec2)
-        expected = [1, 1, 1, 0, 1]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 3, 3, 2, 6], dtype=DrakenType.INT64)
+
+        result = vec1.compare_vector(vec2, LE)
+        assert result.to_pylist() == [True, True, True, False, True]
+
     def test_vector_length_mismatch(self):
-        """Test that vector-vector comparisons raise error on length mismatch."""
-        arr1 = pa.array([1, 2, 3], type=pa.int64())
-        arr2 = pa.array([1, 2], type=pa.int64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        with pytest.raises(ValueError, match="Vectors must have the same length"):
-            vec1.equals_vector(vec2)
-    
+        vec1 = vector_from_sequence([1, 2, 3], dtype=DrakenType.INT64)
+        vec2 = vector_from_sequence([1, 2], dtype=DrakenType.INT64)
+
+        with pytest.raises(ValueError, match="lengths must match"):
+            vec1.compare_vector(vec2, EQ)
+
     def test_scalar_comparisons_still_work(self):
-        """Test that scalar comparisons still work after adding vector comparisons."""
-        arr = pa.array([1, 2, 3, 4, 5], type=pa.int64())
-        vec = Vector.from_arrow(arr)
-        
-        assert list(vec.equals(3)) == [0, 0, 1, 0, 0]
-        assert list(vec.not_equals(3)) == [1, 1, 0, 1, 1]
-        assert list(vec.greater_than(3)) == [0, 0, 0, 1, 1]
-        assert list(vec.less_than(3)) == [1, 1, 0, 0, 0]
+        vec = vector_from_sequence([1, 2, 3, 4, 5], dtype=DrakenType.INT64)
+
+        assert vec.compare_scalar(3, EQ).to_pylist() == [False, False, True, False, False]
+        assert vec.compare_scalar(3, NE).to_pylist() == [True, True, False, True, True]
+        assert vec.compare_scalar(3, GT).to_pylist() == [False, False, False, True, True]
+        assert vec.compare_scalar(3, LT).to_pylist() == [True, True, False, False, False]
 
 
 class TestFloat64VectorComparisons:
     """Test Float64Vector vector-vector and vector-scalar comparison operations."""
-    
+
     def test_equals_vector(self):
-        """Test Float64Vector equals_vector operation."""
-        arr1 = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        arr2 = pa.array([1.5, 3.0, 3.3, 2.0, 6.0], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.equals_vector(vec2)
-        expected = [1, 0, 1, 0, 0]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 3.0, 3.3, 2.0, 6.0], dtype=DrakenType.FLOAT64)
+
+        result = vec1.compare_vector(vec2, EQ)
+        assert result.to_pylist() == [True, False, True, False, False]
+
     def test_not_equals_vector(self):
-        """Test Float64Vector not_equals_vector operation."""
-        arr1 = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        arr2 = pa.array([1.5, 3.0, 3.3, 2.0, 6.0], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.not_equals_vector(vec2)
-        expected = [0, 1, 0, 1, 1]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 3.0, 3.3, 2.0, 6.0], dtype=DrakenType.FLOAT64)
+
+        result = vec1.compare_vector(vec2, NE)
+        assert result.to_pylist() == [False, True, False, True, True]
+
     def test_greater_than_vector(self):
-        """Test Float64Vector greater_than_vector operation."""
-        arr1 = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        arr2 = pa.array([1.5, 3.0, 3.3, 2.0, 6.0], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.greater_than_vector(vec2)
-        expected = [0, 0, 0, 1, 0]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 3.0, 3.3, 2.0, 6.0], dtype=DrakenType.FLOAT64)
+
+        result = vec1.compare_vector(vec2, GT)
+        assert result.to_pylist() == [False, False, False, True, False]
+
     def test_greater_than_or_equals_vector(self):
-        """Test Float64Vector greater_than_or_equals_vector operation."""
-        arr1 = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        arr2 = pa.array([1.5, 3.0, 3.3, 2.0, 6.0], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.greater_than_or_equals_vector(vec2)
-        expected = [1, 0, 1, 1, 0]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 3.0, 3.3, 2.0, 6.0], dtype=DrakenType.FLOAT64)
+
+        result = vec1.compare_vector(vec2, GE)
+        assert result.to_pylist() == [True, False, True, True, False]
+
     def test_less_than_vector(self):
-        """Test Float64Vector less_than_vector operation."""
-        arr1 = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        arr2 = pa.array([1.5, 3.0, 3.3, 2.0, 6.0], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.less_than_vector(vec2)
-        expected = [0, 1, 0, 0, 1]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 3.0, 3.3, 2.0, 6.0], dtype=DrakenType.FLOAT64)
+
+        result = vec1.compare_vector(vec2, LT)
+        assert result.to_pylist() == [False, True, False, False, True]
+
     def test_less_than_or_equals_vector(self):
-        """Test Float64Vector less_than_or_equals_vector operation."""
-        arr1 = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        arr2 = pa.array([1.5, 3.0, 3.3, 2.0, 6.0], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        result = vec1.less_than_or_equals_vector(vec2)
-        expected = [1, 1, 1, 0, 1]
-        
-        assert list(result) == expected
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 3.0, 3.3, 2.0, 6.0], dtype=DrakenType.FLOAT64)
+
+        result = vec1.compare_vector(vec2, LE)
+        assert result.to_pylist() == [True, True, True, False, True]
+
     def test_vector_length_mismatch(self):
-        """Test that vector-vector comparisons raise error on length mismatch."""
-        arr1 = pa.array([1.5, 2.7, 3.3], type=pa.float64())
-        arr2 = pa.array([1.5, 2.7], type=pa.float64())
-        
-        vec1 = Vector.from_arrow(arr1)
-        vec2 = Vector.from_arrow(arr2)
-        
-        with pytest.raises(ValueError, match="Vectors must have the same length"):
-            vec1.equals_vector(vec2)
-    
+        vec1 = vector_from_sequence([1.5, 2.7, 3.3], dtype=DrakenType.FLOAT64)
+        vec2 = vector_from_sequence([1.5, 2.7], dtype=DrakenType.FLOAT64)
+
+        with pytest.raises(ValueError, match="lengths must match"):
+            vec1.compare_vector(vec2, EQ)
+
     def test_scalar_comparisons_still_work(self):
-        """Test that scalar comparisons still work after adding vector comparisons."""
-        arr = pa.array([1.5, 2.7, 3.3, 4.1, 5.9], type=pa.float64())
-        vec = Vector.from_arrow(arr)
-        
-        assert list(vec.equals(3.3)) == [0, 0, 1, 0, 0]
-        assert list(vec.not_equals(3.3)) == [1, 1, 0, 1, 1]
-        assert list(vec.greater_than(3.3)) == [0, 0, 0, 1, 1]
-        assert list(vec.less_than(3.3)) == [1, 1, 0, 0, 0]
+        vec = vector_from_sequence([1.5, 2.7, 3.3, 4.1, 5.9], dtype=DrakenType.FLOAT64)
+
+        assert vec.compare_scalar(3.3, EQ).to_pylist() == [False, False, True, False, False]
+        assert vec.compare_scalar(3.3, NE).to_pylist() == [True, True, False, True, True]
+        assert vec.compare_scalar(3.3, GT).to_pylist() == [False, False, False, True, True]
+        assert vec.compare_scalar(3.3, LT).to_pylist() == [True, True, False, False, False]
 
 
 if __name__ == "__main__":  # pragma: no cover
-    from tests import run_tests
-    
-    run_tests()
+    pytest.main([__file__])

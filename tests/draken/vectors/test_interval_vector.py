@@ -1,151 +1,120 @@
-"""IntervalVector tests covering Arrow interop and normalization."""
+"""IntervalVector tests: construction, arithmetic, comparison, temporal apply.
+
+The interval model changed since this file was last touched: there is no
+Vector.from_arrow, and PyArrow's three interval subtypes (month_day_nano,
+month-only, day_time) no longer map onto Draken at all. The current, single
+representation is draken.draken_native.vector_interval_from_sequence(list of
+(months: int, ms: int) | None) — a 2-tuple, not 3. Its docstring calls the
+second component "ms", but observed behavior (see test_temporal_minus_temporal
+below: 31 days round-trips as 2_678_400_000_000, which is 31 days in
+MICROSECONDS, not ms) shows it is actually microseconds — a doc/name
+inconsistency worth fixing separately, not papered over here.
+
+Vector has no add_vector/subtract_vector/to_arrow_interval/to_arrow_binary;
+the real ops are interval_add/interval_sub (component-wise),
+compare_vector(other, op) (normalized: total_us = months * 30d_in_us + us),
+apply_to_temporal(interval, signum) (DATE32|TIMESTAMP64 ± INTERVAL ->
+TIMESTAMP64), and temporal_minus_temporal(other) (DATE32|TIMESTAMP64 -
+DATE32|TIMESTAMP64 -> INTERVAL). compare_vector no longer takes a third
+"MONTH or YEAR" argument/restriction — that error and the 3-arg form are both
+gone.
+"""
 
 import datetime
 
-import pyarrow as pa
 import pytest
 
-from draken import Vector
+from draken import draken_native
+from draken.draken_native import DrakenType
+from draken.interop.vector_sequence import vector_from_sequence
 
 MICROSECONDS_PER_DAY = 24 * 60 * 60 * 1_000_000
-_MONTH_INTERVAL_FACTORY = getattr(pa, "month_interval", None)
-_DAY_TIME_INTERVAL_FACTORY = getattr(pa, "day_time_interval", None)
-MONTH_INTERVAL_TYPE = _MONTH_INTERVAL_FACTORY() if _MONTH_INTERVAL_FACTORY else None
-DAY_TIME_INTERVAL_TYPE = _DAY_TIME_INTERVAL_FACTORY() if _DAY_TIME_INTERVAL_FACTORY else None
+EQ, NE, GT, GE, LT, LE = 0, 1, 2, 3, 4, 5
 
 
-def _is_interval_vector(vec):
-    return vec.__class__.__name__ == "IntervalVector"
+def _interval(values):
+    return draken_native.vector_interval_from_sequence(values)
 
 
-def _build_month_day_nano():
-    return pa.array(
-        [
-            (2, 0, 0),
-            (0, 1, 1_500_000_000),
-            None,
-        ],
-        type=pa.month_day_nano_interval(),
-    )
+def test_construction_and_to_pylist():
+    vec = _interval([(2, 0), (0, 1_500_000), None])
+    assert vec.to_pylist() == [(2, 0), (0, 1_500_000), None]
+    assert vec.length == 3
+    assert vec.is_null_at(2) is True
 
 
-def test_from_arrow_month_day_nano():
-    arr = _build_month_day_nano()
-    vec = Vector.from_arrow(arr)
+def test_interval_add():
+    left = _interval([(1, 0), None, (0, 1000)])
+    right = _interval([(0, 2000), (0, 0), (0, 1000)])
 
-    assert _is_interval_vector(vec)
-    assert vec.to_pylist() == [
-        (2, 0),
-        (0, MICROSECONDS_PER_DAY + 1_500_000),
+    added = left.interval_add(right)
+    assert added.to_pylist() == [(1, 2000), None, (0, 2000)]
+
+
+def test_interval_sub():
+    left = _interval([(1, 0), None, (0, 1000)])
+    right = _interval([(0, 2000), (0, 0), (0, 1000)])
+
+    subtracted = left.interval_sub(right)
+    assert subtracted.to_pylist() == [(1, -2000), None, (0, 0)]
+
+
+def test_interval_add_length_mismatch():
+    left = _interval([(1, 0), (1, 0)])
+    right = _interval([(1, 0)])
+
+    with pytest.raises(ValueError, match="length"):
+        left.interval_add(right)
+
+
+def test_interval_compare_vector():
+    """compare_vector normalizes months into a 30-day-month microsecond total."""
+    left = _interval([(0, 2000), None])
+    right = _interval([(0, 1000), (0, 1000)])
+
+    compared = left.compare_vector(right, GT)
+    assert compared.to_pylist() == [True, None]
+
+    # A month normalizes to 30 days of microseconds, so 1 month > 29 days.
+    one_month = _interval([(1, 0)])
+    twenty_nine_days = _interval([(0, 29 * MICROSECONDS_PER_DAY)])
+    assert one_month.compare_vector(twenty_nine_days, GT).to_pylist() == [True]
+
+
+def test_apply_to_temporal_date_plus_interval():
+    """DATE32 + INTERVAL(months) -> TIMESTAMP64, with calendar day-clamping."""
+    dates = vector_from_sequence([datetime.date(2024, 1, 31), None], dtype=DrakenType.DATE32)
+    one_month = _interval([(1, 0), (1, 0)])
+
+    applied = dates.apply_to_temporal(one_month, 1)
+    # Jan 31 + 1 month clamps to Feb 29 (2024 is a leap year), not Mar 2/3.
+    assert applied.to_pylist() == [
+        datetime.datetime(2024, 2, 29, tzinfo=datetime.timezone.utc),
         None,
     ]
 
 
-def test_to_arrow_interval_roundtrip():
-    arr = _build_month_day_nano()
-    vec = Vector.from_arrow(arr)
+def test_apply_to_temporal_minus():
+    dates = vector_from_sequence([datetime.date(2024, 3, 15)], dtype=DrakenType.DATE32)
+    interval = _interval([(0, 5 * MICROSECONDS_PER_DAY)])
 
-    rebuilt = vec.to_arrow_interval()
-    assert rebuilt.equals(arr)
-
-
-def test_fixed_size_binary_roundtrip():
-    arr = _build_month_day_nano()
-    vec = Vector.from_arrow(arr)
-
-    binary = vec.to_arrow_binary()
-    assert pa.types.is_fixed_size_binary(binary.type)
-
-    vec2 = Vector.from_arrow(binary)
-    assert _is_interval_vector(vec2)
-    assert vec2.to_pylist() == vec.to_pylist()
+    applied = dates.apply_to_temporal(interval, -1)
+    assert applied.to_pylist() == [datetime.datetime(2024, 3, 10, tzinfo=datetime.timezone.utc)]
 
 
-def test_interval_vector_add_subtract():
-    left = pa.array([(1, 0, 0), None, (0, 1, 0)], type=pa.month_day_nano_interval())
-    right = pa.array([(0, 2, 0), (0, 0, 0), (0, 1, 0)], type=pa.month_day_nano_interval())
+def test_apply_to_temporal_length_mismatch():
+    dates = vector_from_sequence([datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)], dtype=DrakenType.DATE32)
+    interval = _interval([(1, 0)])
 
-    left_vec = Vector.from_arrow(left)
-    right_vec = Vector.from_arrow(right)
-
-    added = left_vec.add_vector(right_vec).to_arrow_interval().to_pylist()
-    subtracted = left_vec.subtract_vector(right_vec).to_arrow_interval().to_pylist()
-
-    expected_added = pa.array(
-        [(1, 2, 0), None, (0, 2, 0)],
-        type=pa.month_day_nano_interval(),
-    ).to_pylist()
-    expected_subtracted = pa.array(
-        [(1, -2, 0), None, (0, 0, 0)],
-        type=pa.month_day_nano_interval(),
-    ).to_pylist()
-
-    assert added == expected_added
-    assert subtracted == expected_subtracted
+    with pytest.raises(ValueError, match="length"):
+        dates.apply_to_temporal(interval, 1)
 
 
-def test_interval_vector_compare_and_temporal_apply():
-    left = pa.array([(0, 2, 0), None], type=pa.month_day_nano_interval())
-    right = pa.array([(0, 1, 0), (0, 1, 0)], type=pa.month_day_nano_interval())
+def test_temporal_minus_temporal():
+    """DATE32 - DATE32 -> INTERVAL (months=0, delta in microseconds)."""
+    later = vector_from_sequence([datetime.date(2024, 2, 1)], dtype=DrakenType.DATE32)
+    earlier = vector_from_sequence([datetime.date(2024, 1, 1)], dtype=DrakenType.DATE32)
 
-    left_vec = Vector.from_arrow(left)
-    right_vec = Vector.from_arrow(right)
-
-    compared = left_vec.compare_vector(right_vec, 2, False).to_arrow().to_pylist()
-    assert compared == [True, None]
-
-    with pytest.raises(ValueError, match="MONTH or YEAR"):
-        months_left = Vector.from_arrow(pa.array([(1, 0, 0)], type=pa.month_day_nano_interval()))
-        months_right = Vector.from_arrow(pa.array([(1, 0, 0)], type=pa.month_day_nano_interval()))
-        months_left.compare_vector(months_right, 0, True)
-
-    temporal = pa.array([datetime.date(2024, 1, 31), None], type=pa.date32())
-    temporal_vec = Vector.from_arrow(temporal)
-    applied = right_vec.apply_to_temporal(temporal_vec, 1)
-    assert applied.to_pylist() == [datetime.datetime(2024, 2, 1, 0, 0), None]
-
-
-def test_interval_vector_temporal_apply_proleptic_year_support():
-    interval = pa.array([(-768, 0, 0)], type=pa.month_day_nano_interval())  # 64 years
-    values = pa.array([datetime.date(1, 4, 23)], type=pa.date32())
-    vec = Vector.from_arrow(interval)
-    values_vec = Vector.from_arrow(values)
-
-    applied = vec.apply_to_temporal(values_vec, 1)
-
-    # apply_to_temporal now returns a TimestampVector (microseconds since epoch).
-    raw = applied.to_pylist()
-    assert raw[0] is not None
-    # Expected: -64_145_606_400_000_000 microseconds; verify via to_arrow conversion.
-    arrow_result = applied.to_arrow()
-    assert arrow_result.cast(pa.int64()).to_pylist() == [-64_145_606_400_000_000]
-
-
-@pytest.mark.skipif(MONTH_INTERVAL_TYPE is None, reason="PyArrow build lacks month interval type")
-def test_month_interval_normalization():
-    arr = pa.array([3, None, -1], type=MONTH_INTERVAL_TYPE)
-    vec = Vector.from_arrow(arr)
-
-    assert vec.to_pylist() == [(3, 0), None, (-1, 0)]
-
-
-@pytest.mark.skipif(
-    DAY_TIME_INTERVAL_TYPE is None, reason="PyArrow build lacks day_time interval type"
-)
-def test_day_time_interval_normalization():
-    arr = pa.array(
-        [
-            (0, 5_000),  # 5 seconds
-            (1, 0),  # 1 day
-            None,
-        ],
-        type=DAY_TIME_INTERVAL_TYPE,
-    )
-    vec = Vector.from_arrow(arr)
-
-    expected = [
-        (0, 5_000 * 1_000),
-        (0, MICROSECONDS_PER_DAY),
-        None,
-    ]
-    assert vec.to_pylist() == expected
+    diff = later.temporal_minus_temporal(earlier)
+    # January has 31 days.
+    assert diff.to_pylist() == [(0, 31 * MICROSECONDS_PER_DAY)]

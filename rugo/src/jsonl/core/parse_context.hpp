@@ -42,8 +42,14 @@ struct ParseContext {
     size_t infer_sample_size = 5;
 
     // Parsing options
-    bool parse_arrays = true;  // Parse arrays into Python lists or leave as spans
-    bool parse_objects = true;  // Parse objects into Python dicts or leave as bytes
+    // parse_arrays: materialize a uniform-scalar-element JSON array column as a
+    // DRAKEN_ARRAY vector (column_builder.cpp's parse_array_column); nested containers or
+    // a heterogeneous mix of element kinds fall back to raw JSON text (DRAKEN_VARCHAR),
+    // same as parse_arrays=false. When false, arrays are always raw JSON text.
+    bool parse_arrays = true;
+    // parse_objects: tag a JSON-object column as DRAKEN_VARIANT instead of DRAKEN_VARCHAR
+    // (identical raw-JSON-text storage either way — only the type tag differs).
+    bool parse_objects = true;
     bool fail_on_error = true;  // Raise on malformed JSON or warn and continue
 };
 

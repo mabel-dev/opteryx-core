@@ -675,7 +675,7 @@ static nb::object dispatch_time_diff(nb::object time1, nb::object time2) {
     return impl_date_diff(time1, time2, "hours");
 }
 
-static nb::object dispatch_date_format(nb::object dates, nb::object pattern_seq) {
+static nb::object dispatch_date_format(nb::object pattern_seq, nb::object dates) {
     const std::string fmt = extract_scalar_string(pattern_seq);
     return impl_date_format(dates, fmt.c_str());
 }
@@ -773,6 +773,7 @@ void register_vector_temporal_arith(nb::module_ &m) {
     m.def("time_diff", &dispatch_time_diff, nb::arg("time1"), nb::arg("time2"),
         "Time difference in hours (dispatcher wrapper).");
 
-    m.def("date_format", &dispatch_date_format, nb::arg("dates"), nb::arg("pattern"),
-        "Format dates using pattern (dispatcher for constant-wrapped pattern).");
+    m.def("date_format", &dispatch_date_format, nb::arg("pattern"), nb::arg("dates"),
+        "Format dates using pattern (dispatcher for constant-wrapped pattern). "
+        "BigQuery FORMAT_TIMESTAMP/FORMAT_DATE argument order: pattern first, dates second.");
 }

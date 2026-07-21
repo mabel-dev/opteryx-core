@@ -1,11 +1,15 @@
-"""Join/scan timing coverage: joins and scans are not driven via push(), so
-before this fix they reported 0ms in EXPLAIN ANALYZE.
+"""Scan timing coverage: scans are not driven via push(), so before this fix
+they reported 0ms in EXPLAIN ANALYZE.
 
   * Scans are driven via drive_scan -> scan.next_morsel(); drive_scan now times
     that call into the scan's execution_time.
-  * Joins are driven via JoinLeft/RightAdapter calling push_left/push_right
-    directly; the adapters' push() now attributes time + input counters to the
-    JOIN (not the hidden, is_not_explained adapter).
+
+(Join timing-attribution coverage — JoinLeft/RightAdapter calling
+push_left/push_right and attributing time to the join, not the adapter — was
+dropped with CrossJoinNode's push_left/push_right execution body, which is
+dead in production: the native engine never drives it. push_left/push_right
+are `cdef` methods, so a lightweight Python-level synthetic JoinNode subclass
+can't override them the way `_Scan`/`_Sink` below override plain methods.)
 """
 
 import os
@@ -19,44 +23,12 @@ from draken.morsels.morsel import Morsel
 from draken.draken_native import vector_from_sequence
 
 from opteryx import EOS
-from opteryx.models import QueryProperties
-from opteryx.operators import BasePlanNode, JoinLeftAdapter, PipelineContext
-from opteryx.operators._operators import drive_scan, push_one
-from opteryx.operators.cross_join import CrossJoinNode
+from opteryx.operators import BasePlanNode, PipelineContext
+from opteryx.operators._operators import drive_scan
 
 
 def _morsel(n=3):
     return Morsel.from_vectors([b"c"], [vector_from_sequence(list(range(n)))])
-
-
-# ---------------------------------------------------------------------------
-# Joins: adapter attributes timing + input counters to the join, not itself.
-# ---------------------------------------------------------------------------
-
-def test_join_adapter_attributes_to_join_not_adapter():
-    join = CrossJoinNode(properties=QueryProperties("t", {}), columns=[])
-    adapter = JoinLeftAdapter(join)
-    adapter.enable_tracing(True)
-    join.enable_tracing(True)
-
-    # Push enough build-side data that the EOS combine does measurable work
-    # (the timing assertion below would be flaky on a trivial single morsel).
-    n_morsels, rows = 50, 1000
-    for _ in range(n_morsels):
-        push_one(adapter, _morsel(rows))
-    push_one(adapter, EOS)            # build EOS -> combine + _build_complete
-
-    s_join = join.sensors()
-    # Input counters are attributed to the join (deterministic).
-    assert s_join["records_in"] == n_morsels * rows
-    assert s_join["calls"] == n_morsels + 1    # data pushes + one EOS push
-    # And the timed work lands on the join, not the hidden adapter.
-    assert s_join["execution_time"] > 0
-
-    # The adapter itself stays at zero — its work was attributed to the join.
-    assert adapter.execution_time == 0
-    assert adapter.records_in == 0
-    assert adapter.calls == 0
 
 
 # ---------------------------------------------------------------------------

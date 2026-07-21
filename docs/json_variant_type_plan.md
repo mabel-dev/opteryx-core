@@ -200,6 +200,8 @@ Verified: `->`→VARIANT (`"café"`), `->>`→NVARCHAR unquoted (`café`), `->>`
 → stringified text, chaining `-> -> ->>`, missing key → NULL, `@?` present/missing/null,
 `LENGTH(->> )` counts codepoints, VARIANT in a comparison raises (extraction-only).
 
-Still not done (out of scope / future): readers don't emit VARIANT (only `->`); VARIANT
+Still not done (out of scope / future): rugo's JSONL reader now emits VARIANT for object
+columns (`parse_objects=True`, the default — see rugo/src/jsonl/core/column_builder.cpp's
+parse_typed_column and rugo/README.md), but no other reader (Parquet, CSV) does; VARIANT
 literal constant materialisation (hence the no-fold guard); `CAST` to/from VARIANT (by
 decision, none).

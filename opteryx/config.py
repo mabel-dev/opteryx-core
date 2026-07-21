@@ -365,4 +365,17 @@ features = Features()
 PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER: int = int(get("PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER", 5))
 """Consecutive fully-passing row groups before abandoning two-pass mode for the rest of the query."""
 
+PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY: float = float(
+    get("PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY", 0.7)
+)
+"""Skip two-pass late materialization when the manifest's cheap, file-stats-based
+selectivity estimate for the pushed predicate exceeds this (i.e. the predicate is
+expected to prune too little to justify the pass-1/pass-2 split). Two-pass buys
+nothing when almost every row survives pass 1 -- it still pays the full cost of
+decoding pass-1 columns for the whole table before pass 2 can even start, which
+for a wide/string filter column can cost more memory than reading everything in
+one single pass would have. Estimation failures fail open (two-pass stays
+eligible) rather than silently disabling the optimization for well-behaved
+predicates the estimator just doesn't model."""
+
 # fmt:on

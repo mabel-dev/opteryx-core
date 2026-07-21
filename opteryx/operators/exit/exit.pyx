@@ -25,38 +25,24 @@ This does two things that the projection node doesn't do:
     - removes all columns not being returned to the user
 
 This node doesn't do any calculations, it is a pure Projection.
+
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+_compile_plan, which reads `.final_columns`/`.final_names`/`.columns` off this
+class and wires the native queue sink directly — results are drained from a
+PyMorselQueue, not from this class). This class is plan-time config only.
 """
 
-from collections import deque
-from typing import Generator, Optional
-from collections.abc import Iterable
-
 from opteryx.exceptions import AmbiguousIdentifierError
-from opteryx.exceptions import InvalidInternalStateError
-from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 
 cdef class ExitNode(BasePlanNode):
-    """Terminal operator of the push pipeline. Buffers formatted result
-    morsels in `_pending`; the engine drains and yields them to the caller
-    one at a time (streaming, not materialised).
-
-    `_pending` is a deque so the engine's drain (`pop_pending` = popleft) is
-    O(1) per morsel rather than O(n) — a plain list's pop(0) shifts every
-    remaining element. Single-producer/single-consumer under the serial
-    engine; making this drain safe for concurrent producers is deferred to
-    the parallel-execution work."""
-    cdef public bint at_least_one
     cdef public list final_columns
     cdef public list final_names
-    cdef public object _pending
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.at_least_one = False
-        self._pending = deque()
 
         final_columns = []
         final_names = []
@@ -83,13 +69,10 @@ cdef class ExitNode(BasePlanNode):
     cdef BasePlanNode make_worker(self):
         # SPEC: final_columns/final_names (the validated output identities + names —
         # the ambiguous-name check ran once at __init__, not re-run per worker).
-        # STATE: fresh _pending deque + at_least_one flag.
         cdef ExitNode w = ExitNode.__new__(ExitNode)
         self._copy_worker_base(w)
         w.final_columns = self.final_columns
         w.final_names = self.final_names
-        w.at_least_one = False
-        w._pending = deque()
         return w
 
     @property
@@ -99,43 +82,3 @@ cdef class ExitNode(BasePlanNode):
     @property
     def name(self):  # pragma: no cover
         return "Exit"
-
-    cpdef bint has_pending(self):
-        return len(self._pending) > 0
-
-    cpdef object pop_pending(self):
-        return self._pending.popleft()
-
-    cpdef void _push_impl(self, Morsel morsel) except *:
-        # Cursor materialization point: this is where the C++ carrier becomes the
-        # Python Morsel the caller consumes (via pop_pending). The base nogil
-        # `_dispatch_push` decodes the carrier (recovering the EOS sentinel) and
-        # calls this; select/rename build the final result Morsel into _pending.
-        if morsel is _EOS_SENTINEL:
-            if not self.at_least_one:
-                vectors = [_draken_native.vector_from_sequence([]) for _ in self.columns]
-                empty = Morsel.from_vectors(self.final_names, vectors)
-                self._pending.append(empty)
-            return
-
-        if morsel.num_rows == 0:
-            return
-
-        self.at_least_one = True
-
-        morsel_column_names = morsel.column_names
-        if not set(self.final_columns).issubset(morsel_column_names):  # pragma: no cover
-            mapping = {
-                name: int_name for name, int_name in zip(self.final_columns, self.final_names)
-            }
-            missing_references = {
-                mapping.get(ref): ref
-                for ref in self.final_columns
-                if ref not in morsel_column_names
-            }
-            raise InvalidInternalStateError(
-                f"The following fields were not in the resultset - {', '.join(missing_references.keys())}"
-            )
-
-        out = morsel.select(self.final_columns).rename(self.final_names)
-        self._pending.append(out)

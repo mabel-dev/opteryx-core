@@ -17,10 +17,11 @@
 Union Node
 
 This is a SQL Query Execution Plan Node.
-"""
 
-from typing import Generator, Optional
-from opteryx.models import QueryProperties
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+UnionNode branch, which reads `.column_ids` off this class). This class is
+plan-time config only.
+"""
 
 # BasePlanNode in scope via _operators.pyx include.
 
@@ -28,12 +29,6 @@ from opteryx.models import QueryProperties
 cdef class UnionNode(BasePlanNode):
     cdef public list column_ids
     cdef public list schema
-
-    cdef bint is_partition_parallel(self):
-        # Union captures the output schema from the FIRST morsel and counts input
-        # leg closes — both assume a single instance coordinating all legs; cloning
-        # across workers would desync them. Serial/merge-only — never fanned out.
-        return False
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -48,25 +43,3 @@ cdef class UnionNode(BasePlanNode):
     @property
     def config(self):  # pragma: no cover
         return ""
-
-    cpdef void _push_impl(self, Morsel morsel) except *:
-        """Union receives one EOS per input leg. The pipeline compiler stamps
-        the expected leg count via set_expected_input_closes; emit the single
-        downstream EOS only after every leg has closed.
-
-        Body runs GIL-held: the base nogil `_dispatch_push` decodes the C++
-        carrier (recovering the EOS sentinel) and calls this."""
-        if morsel is _EOS_SENTINEL:
-            if self._record_input_close():
-                self.emit(_EOS_SENTINEL)
-            return
-
-        if self.schema is None:
-            self.schema = list(morsel.column_names)
-        else:
-            morsel = morsel.rename(self.schema)
-
-        if morsel.num_columns != len(self.column_ids):
-            morsel = morsel.select(self.schema[: len(self.column_ids)])
-        morsel = morsel.rename(self.column_ids)
-        self.emit(morsel.select(self.column_ids))

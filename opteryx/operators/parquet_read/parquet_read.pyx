@@ -464,6 +464,18 @@ cdef class ParquetReadNode(ReaderNode):
     cdef object _lm_topn_winners          # {(path,rg_idx): [survivor_idx]} or None
     cdef list _lm_pass1_names_bytes
     cdef list _lm_pass2_names_bytes
+    # ── Chunked (non-topn) pass-1/pass-2 pipelining ────────────────────────────
+    # topn_active scans need every row group's sort key before the global top-n
+    # cutoff is known, so _run_pass1's full drain-then-open-pass2 barrier is a
+    # real requirement there. Without topn, each row group's pass-1 survival is
+    # already a local decision — draining all of pass1_src before pass 2 can
+    # start buys nothing and holds the whole table's filter-column data (e.g. a
+    # wide VARCHAR predicate column) in _lm_p1_cache when the predicate has weak
+    # selectivity. _run_pass1_chunk flushes pass 1 -> pass 2 in small chunks
+    # instead, bounding that buffer to PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER
+    # row groups regardless of table size or selectivity.
+    cdef list _lm_pending_morsels         # combined morsels ready to return, FIFO
+    cdef bint _lm_chunked_pass1_exhausted # pass1_src truly out of row groups (chunked path only)
     cdef int64_t _decode_start_ns
     cdef int64_t _total_rows_before_filter
     cdef bint _scan_finished              # decode-telemetry flushed once
@@ -538,6 +550,8 @@ cdef class ParquetReadNode(ReaderNode):
         self._lm_topn_winners = None
         self._lm_pass1_names_bytes = None
         self._lm_pass2_names_bytes = None
+        self._lm_pending_morsels = []
+        self._lm_chunked_pass1_exhausted = False
         self._decode_start_ns = 0
         self._total_rows_before_filter = 0
         self._scan_finished = False
@@ -1123,11 +1137,42 @@ cdef class ParquetReadNode(ReaderNode):
         if topn_active:
             _pass1_only_names = _pass1_only_names | {self._topn_sort_name}
         _pass2_names = _projected_names - _pass1_only_names
+
+        # Cheap, file-stats-based selectivity estimate (no I/O beyond what's
+        # already in the manifest) -- skip two-pass when the predicate isn't
+        # expected to prune enough of the table to be worth the pass-1/pass-2
+        # split. A weak predicate still forces pass 1 to decode its filter
+        # columns for essentially the whole table before pass 2 can start; for
+        # a wide/string filter column that can cost more than just reading
+        # everything in one single pass. Estimation failures fail open.
+        #
+        # self.predicates is a list of separately-pushed conjuncts (implicitly
+        # ANDed), not a single Node -- Manifest.estimate_selectivity expects one
+        # Node with .node_type/.left/.right etc. Passing the list directly makes
+        # getattr(list, 'node_type', None) return None, which silently falls
+        # through to the estimator's "unknown -> assume everything matches"
+        # default (1.0) regardless of the actual predicate. Estimate each
+        # conjunct separately and combine like AND does elsewhere in
+        # cost_estimation/selectivity.py (multiply independent selectivities).
+        cdef object _selectivity_estimate = None
+        cdef object _pred_node
+        if has_predicates and self.manifest is not None:
+            try:
+                _selectivity_estimate = 1.0
+                for _pred_node in self.predicates:
+                    _selectivity_estimate *= self.manifest.estimate_selectivity(_pred_node)
+            except Exception:
+                _selectivity_estimate = None
+
         two_pass_eligible = (
             config.features.parquet_late_materialization
             and has_predicates
             and bool(_filter_names)
             and bool(_pass2_names)
+            and (
+                _selectivity_estimate is None
+                or _selectivity_estimate <= config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY
+            )
         )
         topn_active = topn_active and two_pass_eligible
         self._sp_topn_active = topn_active
@@ -1535,17 +1580,234 @@ cdef class ParquetReadNode(ReaderNode):
         )
         self._lm_pass1_done = True
 
-    cdef Morsel _latmat_next(self):
-        """Native two-pass latmat: run pass-1 to completion on first call, then
-        stream pass-2 row groups, combining each with its pass-1 survivors and
-        returning one morsel per call. Replaces the read_morsels generator's
-        latmat body — no generator frame. Returns None on exhaustion."""
-        cdef tuple pulled
-        cdef list vectors, combined_identity_names, combined_vectors
-        cdef object path, rg_idx, identity, p1_filtered, p1_identity_names
+    cdef Morsel _combine_pass1_pass2_row_group(self, object path, object rg_idx, list vectors, dict p1_cache):
+        """Combine one row group's pass-2 (projection) vectors with its cached
+        pass-1 (filter) result into a single output Morsel, in
+        _sp_output_identity_order. Pops the row group's entry out of p1_cache —
+        each row group's pass-1 result is consumed exactly once, by whichever
+        caller (the topn_active whole-scan drain, or a chunk flush) reaches it.
+        Shared by _latmat_next's topn_active path and _flush_pass1_chunk so the
+        two can't silently diverge."""
         cdef dict row_group, p1_vectors_by_identity, p2_vectors_by_identity
+        cdef list combined_identity_names, combined_vectors
+        cdef object identity, p1_filtered, p1_identity_names
+        cdef Py_ssize_t i, n = len(vectors)
+
+        row_group = {self._lm_pass2_names_bytes[i]: vectors[i] for i in range(n)}
+        _coerce_logical_types(
+            row_group, self._sp_decimal_col_map,
+            self._sp_date_col_set, self._sp_timestamp_col_set,
+            self._sp_timestamp_unit_map, self._sp_array_ts_unit_map,
+        )
+
+        p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
+        # WP-2: reduce pass-1 survivors to the same top-n winners pass 2 decoded.
+        # _lm_topn_winners is always None on the chunked (non-topn) path, so this
+        # is a no-op there.
+        if self._lm_topn_winners is not None:
+            p1_filtered = p1_filtered.take(self._lm_topn_winners[(path, rg_idx)])
+
+        p1_vectors_by_identity = {nm: p1_filtered.column(nm) for nm in p1_identity_names}
+        # Positional pairing: pass2_column_names order == row_group.values() order.
+        p2_vectors_by_identity = {
+            self._sp_pass2_name_to_identity[col]: vec
+            for col, vec in zip(self._sp_pass2_column_names, row_group.values())
+        }
+
+        if self._sp_output_identity_order:
+            combined_identity_names = []
+            combined_vectors = []
+            for identity in self._sp_output_identity_order:
+                if identity in p1_vectors_by_identity:
+                    combined_identity_names.append(identity)
+                    combined_vectors.append(p1_vectors_by_identity[identity])
+                elif identity in p2_vectors_by_identity:
+                    combined_identity_names.append(identity)
+                    combined_vectors.append(p2_vectors_by_identity[identity])
+        else:
+            combined_identity_names = list(p1_identity_names)
+            combined_identity_names.extend(p2_vectors_by_identity.keys())
+            combined_vectors = list(p1_vectors_by_identity.values())
+            combined_vectors.extend(p2_vectors_by_identity.values())
+
+        return Morsel.from_vectors(combined_identity_names, combined_vectors)
+
+    cdef void _flush_pass1_chunk(self, list pass2_work, dict p1_cache) except *:
+        """Open a pass-2 source scoped to just this chunk's survivors, drain it
+        fully, and append each combined morsel to _lm_pending_morsels.
+
+        Unlike the topn_active path (one pass-2 source for the whole scan,
+        opened once _run_pass1 fully drains pass1_src), this opens+drains+closes
+        a pass-2 source per chunk — trading some CppIOPipeline construction
+        overhead (bounded by chunk count, not row-group count) for never holding
+        more than one chunk's pass-1 survivor data in memory at once."""
+        cdef object pass2_src
+        cdef tuple pulled
+        cdef list vectors
+        cdef object path, rg_idx
         cdef Morsel result_morsel
+
+        if not pass2_work:
+            return
+
+        pass2_src = open_pass2_source(
+            self._sp_filesystem,
+            pass2_work,
+            self._sp_pass2_column_names,
+            file_sizes=self._sp_file_sizes or None,
+            connector=self._sp_connector_type,
+            query_id=self._sp_query_id,
+            footer_bytes_cache=_FOOTER_CACHE,
+            null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
+            string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
+        )
+        try:
+            while True:
+                if self._limit_exhausted():
+                    break
+                pulled = pass2_src.next_vectors()
+                if pulled is None:
+                    break
+                vectors = pulled[0]
+                path = pulled[4]
+                rg_idx = pulled[5]
+                if vectors is None:
+                    continue
+                self.scan_readings.record_pass2_decoded(pulled[1])
+                self.bytes_in += pulled[1]
+
+                result_morsel = self._combine_pass1_pass2_row_group(path, rg_idx, vectors, p1_cache)
+
+                with nogil:
+                    self._scan_mtx.lock()
+                result_morsel = self._commit_morsel(result_morsel, path)
+                self._emitted_any = True
+                self._scan_mtx.unlock()
+                self._lm_pending_morsels.append(result_morsel)
+        finally:
+            pass2_src.close()
+
+    cdef void _run_pass1_chunk(self) except *:
+        """Chunked (non-topn) pass-1 driver: pull row groups from pass1_src,
+        accumulating survivors, until PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER
+        consecutive fully-passing row groups accumulate (the predicate isn't
+        pruning anything — no reason to keep buffering before pass 2 can start)
+        or pass1_src is exhausted — then flush that chunk through pass 2
+        immediately via _flush_pass1_chunk. One call produces at most one
+        chunk's worth of pending morsels; _latmat_next calls this again only
+        once _lm_pending_morsels has been fully drained back to the caller, so
+        the previous chunk's data is already gone (consumed by HeapSort et al.)
+        before the next chunk's pass-1 work even starts."""
+        cdef object pass1_src = self._lm_pass1_src
+        cdef tuple pulled
+        cdef list vectors
+        cdef object path, rg_idx
+        cdef dict row_group
+        cdef _Pass1Result result
         cdef Py_ssize_t i, n
+        cdef list pass2_work = []
+        cdef dict p1_cache = {}
+        cdef Py_ssize_t consecutive_full_pass = 0
+        cdef Py_ssize_t abandon_after = config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER
+        cdef bint abandoned = False
+        # This chunked path is a secondary safety net: the primary defense against
+        # a non-selective predicate is the selectivity-gated two_pass_eligible
+        # check in _ensure_scan_started, which keeps queries like this on the
+        # cheaper _SCAN_SINGLE path entirely (measured ~2x less peak memory and
+        # ~2x faster than any two-pass variant for a ~0-selectivity predicate --
+        # see the WP-2 selectivity gate). This path only runs when that estimate
+        # turned out to be wrong (predicate looked selective enough on manifest
+        # stats but isn't at the row level), so it doesn't need to be tuned for
+        # the fully-degenerate case -- abandon_after's existing chunk size is
+        # fine, and empirically outperformed a much larger chunk size when tested
+        # directly against the degenerate case (smaller chunks -> less pass-1
+        # survivor data held in _lm_p1_cache at once; larger chunks did not
+        # meaningfully reduce total CppIOPipeline construction cost either).
+        cdef Py_ssize_t min_chunk_row_groups = abandon_after
+
+        while True:
+            pulled = pass1_src.next_vectors()
+            if pulled is None:
+                self._lm_chunked_pass1_exhausted = True
+                pass1_src.close()
+                self._lm_pass1_src = None
+                break
+            vectors = pulled[0]
+            self.bytes_in += pulled[1]
+            self.scan_readings.time_parquet_read_ranges_ns += pulled[2]
+            self.scan_readings.time_parquet_decode_columns_ns += pulled[3]
+            path = pulled[4]
+            rg_idx = pulled[5]
+            if vectors is None:
+                self._total_rows_before_filter += pulled[6]
+                self.scan_readings.record_pass1_skipped()
+                consecutive_full_pass = 0
+                continue
+            n = len(vectors)
+            row_group = {self._lm_pass1_names_bytes[i]: vectors[i] for i in range(n)}
+            result = _evaluate_pass1_row_group(
+                path, rg_idx, row_group, self.compiled_predicate,
+                self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
+                self._sp_date_col_set, self._sp_timestamp_col_set,
+                self._sp_timestamp_unit_map,
+                self._sp_array_ts_unit_map,
+                self._sp_pass1_column_names,
+                <bytes>pulled[6] if pulled[6] is not None else None,
+            )
+            if result.empty:
+                continue
+            self._total_rows_before_filter += result.rows_before_filter
+            if result.survived:
+                self._record_pass1_survivor(result, pass2_work, p1_cache)
+                if result.p1_filtered.num_rows == result.rows_before_filter:
+                    consecutive_full_pass += 1
+                else:
+                    consecutive_full_pass = 0
+                if not abandoned and consecutive_full_pass >= abandon_after:
+                    abandoned = True
+                    self.readings["parquet_latmat_abandoned_files"] = (
+                        self.readings.get("parquet_latmat_abandoned_files", 0) + 1
+                    )
+                if abandoned and len(pass2_work) >= min_chunk_row_groups:
+                    break
+            else:
+                self._record_pass1_skip(result)
+                consecutive_full_pass = 0
+
+        self._flush_pass1_chunk(pass2_work, p1_cache)
+
+    cdef Morsel _latmat_next(self):
+        """Native two-pass latmat: stream row groups, combining each with its
+        pass-1 survivors and returning one morsel per call. Returns None on
+        exhaustion.
+
+        topn_active runs the original whole-scan drain: _run_pass1 fully drains
+        pass1_src once (required — the global top-n cutoff needs every row
+        group's sort key), then this method streams the resulting single
+        pass-2 source.
+
+        Otherwise runs the chunked path: _run_pass1_chunk produces (at most)
+        PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER morsels' worth of
+        _lm_pending_morsels at a time, refilled only once the previous chunk
+        has been fully returned to the caller."""
+        cdef tuple pulled
+        cdef list vectors
+        cdef object path, rg_idx
+        cdef Morsel result_morsel
+
+        if not self._sp_topn_active:
+            if self._limit_exhausted():
+                return self._finish_locked()
+            while not self._lm_pending_morsels:
+                if self._lm_chunked_pass1_exhausted:
+                    return self._finish_locked()
+                self._run_pass1_chunk()
+                if self._limit_exhausted():
+                    break
+            if not self._lm_pending_morsels:
+                return self._finish_locked()
+            return self._lm_pending_morsels.pop(0)
+
         if not self._lm_pass1_done:
             self._run_pass1()
         while True:
@@ -1565,43 +1827,7 @@ cdef class ParquetReadNode(ReaderNode):
             self.scan_readings.record_pass2_decoded(pulled[1])
             self.bytes_in += pulled[1]
 
-            n = len(vectors)
-            row_group = {self._lm_pass2_names_bytes[i]: vectors[i] for i in range(n)}
-            _coerce_logical_types(
-                row_group, self._sp_decimal_col_map,
-                self._sp_date_col_set, self._sp_timestamp_col_set,
-                self._sp_timestamp_unit_map, self._sp_array_ts_unit_map,
-            )
-
-            p1_filtered, p1_identity_names = self._lm_p1_cache.pop((path, rg_idx))
-            # WP-2: reduce pass-1 survivors to the same top-n winners pass 2 decoded.
-            if self._lm_topn_winners is not None:
-                p1_filtered = p1_filtered.take(self._lm_topn_winners[(path, rg_idx)])
-
-            p1_vectors_by_identity = {nm: p1_filtered.column(nm) for nm in p1_identity_names}
-            # Positional pairing: pass2_column_names order == row_group.values() order.
-            p2_vectors_by_identity = {
-                self._sp_pass2_name_to_identity[col]: vec
-                for col, vec in zip(self._sp_pass2_column_names, row_group.values())
-            }
-
-            if self._sp_output_identity_order:
-                combined_identity_names = []
-                combined_vectors = []
-                for identity in self._sp_output_identity_order:
-                    if identity in p1_vectors_by_identity:
-                        combined_identity_names.append(identity)
-                        combined_vectors.append(p1_vectors_by_identity[identity])
-                    elif identity in p2_vectors_by_identity:
-                        combined_identity_names.append(identity)
-                        combined_vectors.append(p2_vectors_by_identity[identity])
-            else:
-                combined_identity_names = list(p1_identity_names)
-                combined_identity_names.extend(p2_vectors_by_identity.keys())
-                combined_vectors = list(p1_vectors_by_identity.values())
-                combined_vectors.extend(p2_vectors_by_identity.values())
-
-            result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
+            result_morsel = self._combine_pass1_pass2_row_group(path, rg_idx, vectors, self._lm_p1_cache)
 
             with nogil:
                 self._scan_mtx.lock()

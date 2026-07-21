@@ -16,6 +16,25 @@ from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
 from libcpp.utility cimport move
 
+from draken.core.buffers cimport (
+    DrakenType,
+    DRAKEN_INT64,
+    DRAKEN_FLOAT64,
+    DRAKEN_BOOL,
+    DRAKEN_VARCHAR,
+    DRAKEN_ARRAY,
+    DRAKEN_VARIANT,
+)
+
+import warnings
+
+# Type strings accepted by explicit_schema and reported in result['schema'] for inferred
+# columns. Deliberately narrower than the DrakenType universe: explicit_schema only ever
+# declares one of the first four (see parse_column_explicit); "array"/"variant" are
+# inference-only outcomes (parse_arrays/parse_objects — see parse_array_column /
+# ColumnType::Variant in column_builder.cpp) and are never valid explicit_schema entries.
+_JSONL_SCHEMA_TYPES = ("int64", "double", "boolean", "string")
+
 # Typed-vector cimports removed as part of E.31 migration (same gap registry as E.28):
 #   E.28-gap-1: Integer64Vector dense constructor + ptr.data write access
 #   E.28-gap-2: Float64Vector dense constructor + ptr.data write access
@@ -32,6 +51,7 @@ cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
     struct ParseContext:
         vector[string] projected_columns
         vector[Predicate] predicates
+        cmap[string, string] explicit_schema
         bint infer_schema
         uint32_t infer_sample_size
         bint parse_arrays
@@ -60,6 +80,8 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
     # through first_record_keys().
     cppclass RecordSet:
         size_t num_records()
+        bint malformed
+        uint32_t malformed_pos
 
     vector[string] first_record_keys(const RecordSet& rs, const uint8_t* buffer) nogil
 
@@ -112,15 +134,22 @@ cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
 
 cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
     # Parsed column buffers (no Python); produced in parallel off the GIL, then wrapped.
+    # `type`/`all_null` are read back (not opaque) to build result['schema'] without a
+    # second pass over the data.
     cppclass ParsedColumn:
-        pass
+        DrakenType type
+        bint all_null
+        bint array_fallback
+    # except + : parse_column_explicit (explicit_schema strict typing) throws
+    # std::invalid_argument on a declared-type mismatch -> translated to Python ValueError.
     vector[ParsedColumn] parse_all_columns(
         const uint8_t* buffer,
         const RecordSet& records,
         const vector[string]& column_names,
         size_t max_threads,
-        bint may_have_escapes
-    ) nogil
+        bint may_have_escapes,
+        const ParseContext& context
+    ) except + nogil
     object wrap_column(ParsedColumn& pc)
 
 
@@ -193,6 +222,27 @@ cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
     return (<char*>r.candidates.data())[:r.candidates.size()]
 
 
+cdef str _jsonl_malformed_error(const uint8_t* buf_data, size_t buf_len, uint32_t offset):
+    """Build a 1-based-line-number error message for the first malformed record detected
+    by the C++ parser. Only ever called on the fail_on_error=True error path (not hot),
+    so a full scan of the bytes before `offset` to count newlines is fine."""
+    cdef size_t i
+    cdef size_t line = 1
+    cdef size_t limit = offset if <size_t>offset < buf_len else buf_len
+    cdef size_t snippet_end = offset
+    cdef bytes snippet
+    for i in range(limit):
+        if buf_data[i] == c'\n':
+            line += 1
+    while snippet_end < buf_len and buf_data[snippet_end] != c'\n':
+        snippet_end += 1
+    snippet = (<const char*>buf_data)[offset:snippet_end][:200]
+    return (
+        f"Malformed JSONL at line {line} (byte offset {offset}): "
+        f"{snippet.decode('utf-8', 'replace')!r}"
+    )
+
+
 def read_jsonl(
     data,
     columns=None,
@@ -238,7 +288,7 @@ def read_jsonl(
     cdef vector[string] column_names_cpp
     cdef RecordSet records
     cdef size_t total_rows = 0
-    cdef cmap[string, string] schema_cpp
+    cdef dict declared_schema = {}
     cdef const uint8_t* buf_data = NULL
     cdef size_t buf_len = 0
     cdef InterpreterResult interp_result
@@ -275,6 +325,16 @@ def read_jsonl(
             pred.op = <uint8_t>_jsonl_parse_op(op)
             pred.value = str(val).encode('utf-8')
             context.predicates.push_back(pred)
+
+    if explicit_schema:
+        for col, declared_type in explicit_schema.items():
+            if declared_type not in _JSONL_SCHEMA_TYPES:
+                raise ValueError(
+                    f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
+                    f"supported type; must be one of {_JSONL_SCHEMA_TYPES}"
+                )
+            context.explicit_schema[col.encode('utf-8')] = declared_type.encode('utf-8')
+        declared_schema = dict(explicit_schema)
 
     context.infer_schema = infer_schema
     context.infer_sample_size = infer_sample_size
@@ -344,6 +404,11 @@ def read_jsonl(
                     buf_data, buf_len, context, predictor, 0
                 )
 
+            if context.fail_on_error and interp_result.all_records.malformed:
+                raise ValueError(_jsonl_malformed_error(
+                    buf_data, buf_len, interp_result.all_records.malformed_pos
+                ))
+
             if interp_result.all_records.num_records() > 0:
                 # Read column names from the first record BEFORE moving the
                 # records out (no projection = all columns).
@@ -356,11 +421,13 @@ def read_jsonl(
         # Build Draken vectors — buf_data/buf_len are still valid here (mmap released,
         # or in_memory_data kept alive, only in the finally below).
         if total_rows > 0 and not column_names_cpp.empty():
-            vectors = _build_vectors(buf_data, buf_len, records, column_names_cpp)
+            vectors = _build_vectors(
+                buf_data, buf_len, records, column_names_cpp,
+                context, infer_schema, declared_schema, result['schema']
+            )
             result['columns'] = vectors
             result['column_names'] = [col.decode('utf-8') for col in column_names_cpp]
             result['num_rows'] = total_rows
-            result['schema'] = {k.decode('utf-8'): v.decode('utf-8') for k, v in schema_cpp}
             result['success'] = True
 
         return result
@@ -435,11 +502,34 @@ cdef uint8_t _jsonl_parse_op(str op):
     return ops.get(op, 0)
 
 
+cdef str _jsonl_schema_type_name(DrakenType t):
+    # parse_typed_column/parse_column_explicit produce one of these DrakenTypes.
+    # DRAKEN_ARRAY/DRAKEN_VARIANT only appear when parse_arrays/parse_objects
+    # materialized the column; when either flag is False (or an array's elements were
+    # out of v1 scope — nested/mixed — see array_fallback), the column falls back to
+    # DRAKEN_VARCHAR ("string"), per README.md's documented JSONL caveats.
+    if t == DRAKEN_INT64:
+        return "int64"
+    if t == DRAKEN_FLOAT64:
+        return "double"
+    if t == DRAKEN_BOOL:
+        return "boolean"
+    if t == DRAKEN_ARRAY:
+        return "array"
+    if t == DRAKEN_VARIANT:
+        return "variant"
+    return "string"
+
+
 cdef list _build_vectors(
     const uint8_t* buf_ptr,
     size_t buf_len,
     RecordSet& records,
-    vector[string]& column_names
+    vector[string]& column_names,
+    ParseContext& context,
+    bint infer_schema,
+    dict declared_schema,
+    dict schema_out
 ):
     """
     Parse every column of the buffer produced by the threaded scan+interpret path
@@ -447,11 +537,17 @@ cdef list _build_vectors(
     its internal newline-range parallelism is orthogonal to this). No Python per-row
     iteration. `buf_ptr` may point into an mmap'd file or an in-memory bytes buffer; the
     caller is responsible for keeping it mapped/alive for the duration of this call.
+
+    schema_out is populated in place: every column named in declared_schema (explicit_schema)
+    is echoed back verbatim — it was declared, not inferred, so infer_schema does not gate
+    it — and every other column is included only when infer_schema is true, reported as
+    "null" when the column was absent/null on every row, else its resolved type.
     """
     cdef list vectors = []
     cdef size_t pi
     cdef vector[ParsedColumn] parsed
     cdef bint may_esc
+    cdef str name
 
     if records.num_records() == 0:
         return vectors
@@ -460,11 +556,26 @@ cdef list _build_vectors(
     # memchr instead of Python `in` — buf_ptr may not be backed by a Python bytes object.
     may_esc = memchr(buf_ptr, 0x5C, buf_len) != NULL
     with nogil:
-        parsed = parse_all_columns(buf_ptr, records, column_names, 0, may_esc)
+        parsed = parse_all_columns(buf_ptr, records, column_names, 0, may_esc, context)
     for pi in range(parsed.size()):
         vec = wrap_column(parsed[pi])
         if vec is not None:
             vectors.append(vec)
+        name = column_names[pi].decode('utf-8')
+        if parsed[pi].array_fallback:
+            # parse_array_column (column_builder.cpp) runs off the GIL and cannot warn
+            # itself; it flags this instead. Nested containers or a heterogeneous mix of
+            # scalar kinds inside the array are out of v1 scope — the column was returned
+            # as raw JSON text (DRAKEN_VARCHAR), same as parse_arrays=False.
+            warnings.warn(
+                f"JSONL column '{name}': array elements were nested or of mixed scalar "
+                f"types (unsupported by parse_arrays); returned as raw JSON text instead",
+                RuntimeWarning,
+            )
+        if name in declared_schema:
+            schema_out[name] = declared_schema[name]
+        elif infer_schema:
+            schema_out[name] = "null" if parsed[pi].all_null else _jsonl_schema_type_name(parsed[pi].type)
     return vectors
 
 

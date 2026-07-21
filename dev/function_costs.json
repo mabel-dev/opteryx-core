@@ -258,10 +258,10 @@
         "error": null
       }
     ],
-    "DATE_FORMAT": [
+    "FORMAT_TIMESTAMP": [
       {
-        "function_name": "DATE_FORMAT",
-        "overload_id": "DATE_FORMAT_default",
+        "function_name": "FORMAT_TIMESTAMP",
+        "overload_id": "FORMAT_TIMESTAMP_default",
         "kernel": "date_format",
         "current_cost": 31113.8,
         "cost_us_per_million": 31651.724,

@@ -5,7 +5,7 @@
 //
 // This is a SIBLING to temporal_format.h, not a variant of it: temporal_format.h
 // speaks strftime tokens (`%Y-%m-%d`, `%`-escaped, single-char specifiers) for
-// DATE_FORMAT(); this header speaks SQL format elements (`YYYY-MM-DD`, no escape
+// FORMAT_TIMESTAMP()/FORMAT_DATE(); this header speaks SQL format elements (`YYYY-MM-DD`, no escape
 // character, multi-char keyword tokens) for CAST ... FORMAT — the two vocabularies
 // are unrelated and must not be conflated (CLAUDE.md §11: a shape/vocabulary
 // discriminant must not silently change under the other's rules). Calendar math

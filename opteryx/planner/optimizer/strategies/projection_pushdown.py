@@ -75,12 +75,28 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 collected_columns = self.collect_columns(node)
                 context.collected_identities.update(collected_columns)
 
+        # READ_JSONL and READ_PARQUET are included narrowly (by function name, not
+        # node type alone): unlike VALUES/UNNEST/GENERATE_SERIES -- the other
+        # LogicalPlanStepType.FunctionDataset shapes -- they have a real backing
+        # reader (rugo's JSONL decoder / the native ParquetReadNode) that can honor
+        # a reduced column list, so pruning `node.columns` here is safe and lets
+        # physical_planner push the surviving projection into the scan. The other
+        # FunctionDataset kinds are deliberately left out: they build a single
+        # in-memory Morsel from `node.columns` directly and pruning their behavior
+        # hasn't been vetted against this pass.
+        is_pushable_function_dataset = (
+            node.node_type == LogicalPlanStepType.FunctionDataset
+            and getattr(node, "function", None) in ("READ_JSONL", "READ_PARQUET")
+        )
         if (
-            node.node_type
-            in (
-                LogicalPlanStepType.Scan,
-                LogicalPlanStepType.Subquery,
-                LogicalPlanStepType.Union,
+            (
+                node.node_type
+                in (
+                    LogicalPlanStepType.Scan,
+                    LogicalPlanStepType.Subquery,
+                    LogicalPlanStepType.Union,
+                )
+                or is_pushable_function_dataset
             )
             and getattr(node.schema, "columns", None) is not None
         ):

@@ -1378,13 +1378,13 @@ query error io failed
 SELECT EXTRACT(YEAR FROM CURRENT_TIMESTAMP), EXTRACT(MONTH FROM CURRENT_TIMESTAMP), EXTRACT(DAY FROM CURRENT_TIMESTAMP), EXTRACT(HOUR FROM CURRENT_TIMESTAMP), EXTRACT(MINUTE FROM CURRENT_TIMESTAMP), EXTRACT(SECOND FROM CURRENT_TIMESTAMP) FROM $planets
 
 query error io failed
-SELECT DATE_FORMAT(birth_date, '%d-%Y') FROM testdata.astronauts
+SELECT FORMAT_TIMESTAMP('%d-%Y', birth_date) FROM testdata.astronauts
 
 query error io failed
-SELECT DATE_FORMAT(birth_date, 'dddd') FROM testdata.astronauts
+SELECT FORMAT_TIMESTAMP('dddd', birth_date) FROM testdata.astronauts
 
 query error io failed
-SELECT DATE_FORMAT(death_date, '%Y') FROM testdata.astronauts
+SELECT FORMAT_TIMESTAMP('%Y', death_date) FROM testdata.astronauts
 
 query error io failed
 SELECT count(*), VARCHAR(year) FROM testdata.astronauts GROUP BY VARCHAR(year)

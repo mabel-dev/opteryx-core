@@ -133,6 +133,10 @@ STATEMENTS = [
         ("SELECT DISTINCT ON (id) * FROM $planets", 9, 20, None),
         ("SELECT DISTINCT name FROM $planets", 9, 1, None),
         ("SELECT DISTINCT id, name FROM $planets", 9, 2, None),
+        # ORDER BY column must appear in the SELECT DISTINCT list — the ordering
+        # value is ambiguous once rows collapse into a DISTINCT group.
+        ("SELECT DISTINCT name FROM $planets ORDER BY id DESC", None, None, UnsupportedSyntaxError),
+        ("SELECT DISTINCT name FROM $planets ORDER BY name DESC", 9, 1, None),
 
         # Basic aggregations
         ("SELECT COUNT(*) FROM $planets", 1, 1, None),

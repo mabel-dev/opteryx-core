@@ -49,12 +49,13 @@ def get_builtin_temporal_functions() -> list:
             summary="Difference between two times.",
         ),
         _make(
-            "DATE_FORMAT",
+            "FORMAT_TIMESTAMP",
             date_functions.date_format,
             _CT_VARCHAR,
-            (_date, ParameterSpec(name="pattern", type_family="string", constant_only=True)),
+            (ParameterSpec(name="pattern", type_family="string", constant_only=True), _date),
+            aliases=("FORMAT_DATE",),
             cost=31651.72,
-            summary="Format date/timestamp as string.",
+            summary="Format date/timestamp as string (BigQuery FORMAT_TIMESTAMP/FORMAT_DATE convention: pattern first).",
         ),
         _make(
             "FROM_UNIXTIME",

@@ -311,7 +311,7 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
         if s in _CAST_STRINGS:
             # Default ISO-8601 parse or CAST ... FORMAT (compiled_expression.pyx
             # allocates the format_ctx from the CAST node's literal FORMAT pattern,
-            # or a zero-fmt_len ctx for the default — see the DATE_FORMAT-style
+            # or a zero-fmt_len ctx for the default — see the FORMAT_TIMESTAMP-style
             # ctx-building chain there).
             return ("draken_cast_string_to_timestamp", 0)
         if s == "DATE32":

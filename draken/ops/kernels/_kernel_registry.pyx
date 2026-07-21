@@ -290,7 +290,7 @@ def alloc_time_bucket_ctx(long long magnitude, int unit_kind, int ts_unit):
 
 
 def alloc_format_ctx(int ts_unit, bytes fmt):
-    """Allocate context for the DATE_FORMAT kernel (draken_date_format).
+    """Allocate context for the FORMAT_TIMESTAMP kernel (draken_date_format).
 
     Args:
         ts_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of the `date` operand; DATE32

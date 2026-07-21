@@ -1300,72 +1300,6 @@
             }
         ]
     },
-    "DATE_FORMAT": {
-        "catalog_name": "DATE_FORMAT",
-        "aliases": [],
-        "summary": "Format date/timestamp as string.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "DATE_FORMAT_default",
-                "label": "DATE_FORMAT(date, pattern)",
-                "category": "Date & Time Functions",
-                "documentation": "Format date/timestamp as string.",
-                "related_functions": [
-                    "CURRENT_DATE",
-                    "CURRENT_TIME",
-                    "CURRENT_TIMESTAMP",
-                    "TODAY",
-                    "DATE"
-                ],
-                "return_type": "VARCHAR",
-                "returns": {
-                    "type": "VARCHAR",
-                    "documentation": "Returns the computed result as `VARCHAR`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 31651.72
-                },
-                "parameters": [
-                    {
-                        "label": "date",
-                        "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict"
-                    },
-                    {
-                        "label": "pattern",
-                        "type": "varchar",
-                        "documentation": "Format string used to render the temporal value as text. Must be a constant expression.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": true,
-                        "null_handling": "strict"
-                    }
-                ]
-            }
-        ]
-    },
     "E": {
         "catalog_name": "E",
         "aliases": [],
@@ -1648,6 +1582,74 @@
                     }
                 ],
                 "notes": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions."
+            }
+        ]
+    },
+    "FORMAT_TIMESTAMP": {
+        "catalog_name": "FORMAT_TIMESTAMP",
+        "aliases": [
+            "FORMAT_DATE"
+        ],
+        "summary": "Format date/timestamp as string (BigQuery FORMAT_TIMESTAMP/FORMAT_DATE convention: pattern first).",
+        "volatility": "immutable",
+        "deterministic": true,
+        "foldable": false,
+        "pushdown_safe": false,
+        "lifecycle": {
+            "status": "active",
+            "introduced": null,
+            "deprecated_in": null,
+            "remove_after": null,
+            "replacement": null
+        },
+        "overloads": [
+            {
+                "id": "FORMAT_TIMESTAMP_default",
+                "label": "FORMAT_TIMESTAMP(pattern, date)",
+                "category": "Date & Time Functions",
+                "documentation": "Format date/timestamp as string (BigQuery FORMAT_TIMESTAMP/FORMAT_DATE convention: pattern first).",
+                "related_functions": [
+                    "CURRENT_DATE",
+                    "CURRENT_TIME",
+                    "CURRENT_TIMESTAMP",
+                    "TODAY",
+                    "DATE"
+                ],
+                "return_type": "VARCHAR",
+                "returns": {
+                    "type": "VARCHAR",
+                    "documentation": "Returns the computed result as `VARCHAR`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": 2,
+                    "variadic": false
+                },
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 31651.72
+                },
+                "parameters": [
+                    {
+                        "label": "pattern",
+                        "type": "varchar",
+                        "documentation": "Format string used to render the temporal value as text. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict"
+                    },
+                    {
+                        "label": "date",
+                        "type": "temporal",
+                        "documentation": "Date, time, or timestamp value to evaluate.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict"
+                    }
+                ]
             }
         ]
     },

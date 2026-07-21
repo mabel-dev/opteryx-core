@@ -927,6 +927,13 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             distinct_step.on = logical_planner_builders.build(
                 ast_branch["Select"]["distinct"]["On"]
             )
+        elif project_step is not None and project_step.order_by_columns:
+            # the ORDER BY value is ambiguous once rows collapse into a DISTINCT
+            # group - the column must appear in the SELECT list so the ordering
+            # value is well-defined per output row.
+            raise UnsupportedSyntaxError(
+                "for SELECT DISTINCT, ORDER BY expressions must appear in select list"
+            )
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, distinct_step)
         if previous_step_id is not None:
@@ -1156,7 +1163,12 @@ def create_node_relation(relation: dict):
         function = relation["relation"]["Table"]
         function_name = relation_name.upper()
 
-        if function["alias"] is None:
+        # READ_JSONL/READ_PARQUET derive their column names from the file's schema at
+        # bind time (not yet implemented), so unlike UNNEST/VALUES/GENERATE_SERIES they
+        # don't require an AS alias(columns) clause to name their output columns.
+        requires_column_alias = function_name not in ("READ_JSONL", "READ_PARQUET")
+
+        if function["alias"] is None and requires_column_alias:
             from opteryx.exceptions import UnnamedColumnError
 
             raise UnnamedColumnError(
@@ -1170,13 +1182,23 @@ def create_node_relation(relation: dict):
             function_step.alias = f"$unnest-{random_string(6)}"
             function_step.relation = function_step.alias
             function_step.unnest_target = function["alias"]["name"]["value"]
-        else:
+        elif function["alias"] is not None:
             function_step.alias = function["alias"]["name"]["value"]
 
-        function_step.args = [
-            logical_planner_builders.build(arg) for arg in function["args"]["args"]
-        ]
-        function_step.columns = tuple(col["name"]["value"] for col in function["alias"]["columns"])
+        args = []
+        named_args = {}
+        for arg in function["args"]["args"]:
+            if "Named" in arg:
+                named = arg["Named"]
+                named_args[named["name"]["value"]] = logical_planner_builders.build(named["arg"])
+            else:
+                args.append(logical_planner_builders.build(arg))
+        function_step.args = args
+        function_step.named_args = named_args
+        if function["alias"] is not None:
+            function_step.columns = tuple(
+                col["name"]["value"] for col in function["alias"]["columns"]
+            )
 
         step_id = random_string()
         sub_plan.add_node(step_id, function_step)

@@ -58,7 +58,8 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "SECOND",
                 "WEEK",
                 "QUARTER",
-                "DATE_FORMAT",
+                "FORMAT_TIMESTAMP",
+                "FORMAT_DATE",
                 "TRUNC",
                 "DATEDIFF",
                 "TIMEDIFF",
@@ -311,7 +312,7 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
     "EXTRACT": {
         "part": "Date or time part to extract, such as `year`, `month`, `day`, or `epoch`.",
     },
-    "DATE_FORMAT": {
+    "FORMAT_TIMESTAMP": {
         "pattern": "Format string used to render the temporal value as text.",
     },
     "DATEDIFF": {
