@@ -1,0 +1,42 @@
+# Regression: a LEFT OUTER JOIN whose ON clause combines a real join-key
+# equality with a literal-comparison conjunct on the build (right) side used
+# to return ZERO rows instead of preserving every left-side row. The literal
+# conjunct is a match-candidate filter (applies before the join), not a
+# WHERE-style post-join filter — see predicate_pushdown.py's from_join_on
+# handling. Mercury has no moons, so no satellite has planetId=1: every
+# planet row must still be preserved, all with a NULL moon.
+query TT rowsort
+SELECT p.name AS planet, s.name AS moon FROM $planets AS p LEFT JOIN testdata.satellites AS s ON p.id = s.planetId AND s.planetId = 1
+----
+Earth NULL
+Jupiter NULL
+Mars NULL
+Mercury NULL
+Neptune NULL
+Pluto NULL
+Saturn NULL
+Uranus NULL
+Venus NULL
+
+# Same shape, but planetId=3 (Earth) has a real match (Moon) — that row
+# should match while every other planet remains preserved with NULL.
+query TT rowsort
+SELECT p.name AS planet, s.name AS moon FROM $planets AS p LEFT JOIN testdata.satellites AS s ON p.id = s.planetId AND s.planetId = 3
+----
+Earth Moon
+Jupiter NULL
+Mars NULL
+Mercury NULL
+Neptune NULL
+Pluto NULL
+Saturn NULL
+Uranus NULL
+Venus NULL
+
+# Contrast: a genuine WHERE predicate on the build side of a LEFT OUTER JOIN
+# is standard SQL post-join filtering and correctly drops unmatched rows —
+# this must NOT change with the ON-clause fix above.
+query TT rowsort
+SELECT p.name AS planet, s.name AS moon FROM $planets AS p LEFT JOIN testdata.satellites AS s ON p.id = s.planetId WHERE s.planetId = 3
+----
+Earth Moon

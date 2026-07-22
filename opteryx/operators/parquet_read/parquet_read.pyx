@@ -1317,6 +1317,7 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
+            limit=self.limit if not has_predicates else None,
         )
 
     cdef void _coerce_vectors(self, list vectors):

@@ -4,29 +4,45 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-IO Waterfall Visualization Tools
+Execution Waterfall Visualization Tools
 
-This package provides tools for reading, analyzing, and visualizing
-IO trace files from Opteryx queries. It includes:
+Reads and visualizes the native execution-tracing span stream
+(docs/EXECUTION_TRACING_DESIGN.md). Includes:
 
-- TraceReader: Parse JSONLines trace files
-- generate_waterfall_html: Generate interactive HTML waterfall charts
-- CLI interface: Command-line tool for trace analysis
+- SpanTraceReader / dump_trace / load_trace: read the span blob + symbol
+  tables (from QueryTelemetry, or a persisted .trace.json file)
+- generate_waterfall_html: generate an interactive HTML waterfall chart
+- CLI interface: command-line tool for trace analysis
 
 Usage:
-    # Generate chart from trace file
-    PYTHONPATH=dev python -m io_waterfall trace /path/to/trace.jsonl
+    # After running a query with OPTERYX_TRACE=1:
+    from io_waterfall.span_reader import dump_trace
+    blob, node_symbols, file_symbols = session.trace()
+    dump_trace(blob, node_symbols, file_symbols, "q.trace.json", query_text=sql)
+
+    # Generate chart from the dumped trace
+    PYTHONPATH=dev python -m io_waterfall trace q.trace.json
 
     # View statistics
-    PYTHONPATH=dev python -m io_waterfall stats /path/to/trace.jsonl
+    PYTHONPATH=dev python -m io_waterfall stats q.trace.json
 
-    # Programmatic access
-    from io_waterfall import TraceReader, generate_waterfall_html
-    reader = TraceReader("trace.jsonl")
-    html_path = generate_waterfall_html("trace.jsonl")
+    # Programmatic access, no file round-trip
+    from io_waterfall import SpanTraceReader, generate_waterfall_html_from_reader
+    blob, node_symbols, file_symbols = session.trace()
+    reader = SpanTraceReader(blob, node_symbols, file_symbols)
+    html_path = generate_waterfall_html_from_reader(reader, "q.html")
 """
 
 from .generator import generate_waterfall_html
-from .reader import TraceReader
+from .generator import generate_waterfall_html_from_reader
+from .span_reader import SpanTraceReader
+from .span_reader import dump_trace
+from .span_reader import load_trace
 
-__all__ = ["TraceReader", "generate_waterfall_html"]
+__all__ = [
+    "SpanTraceReader",
+    "dump_trace",
+    "load_trace",
+    "generate_waterfall_html",
+    "generate_waterfall_html_from_reader",
+]

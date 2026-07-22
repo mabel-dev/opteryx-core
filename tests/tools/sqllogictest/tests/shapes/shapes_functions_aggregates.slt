@@ -548,3 +548,15 @@ SELECT d.birth_place->'town' FROM testdata.astronauts AS d
 
 query shape 1 2
 SELECT COUNT(*), COUNT_DISTINCT(id) FROM $planets
+
+# COUNT(DISTINCT *) needs the VALUE of every column, not just presence — a
+# planner column-pruning bug once dropped every $planets column ahead of this
+# node (since a WILDCARD operand isn't an IDENTIFIER the pruner's walk sees),
+# collapsing every row to one empty key and answering 1 instead of 9.
+query I
+SELECT COUNT(DISTINCT *) FROM $planets
+----
+9
+
+query shape 9 2
+SELECT id, COUNT(DISTINCT *) FROM $planets GROUP BY id

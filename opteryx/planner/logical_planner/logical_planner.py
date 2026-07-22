@@ -307,11 +307,18 @@ def _table_name(branch):
     return ".".join(part["Identifier"]["value"] for part in branch["relation"][key]["name"])
 
 
-def _validate_where_clause_expression(node: Node) -> None:
-    """Validate that a WHERE clause contains a valid boolean expression.
+def _validate_where_clause_expression(
+    node: Node, clause_label: str = "WHERE clause", example_prefix: str = "WHERE "
+) -> None:
+    """Validate that a WHERE clause (or JOIN ON condition) contains a valid boolean
+    expression.
 
-    WHERE clauses must contain explicit comparisons or boolean operators, not bare literals
-    or identifiers. This prevents ambiguity and silent incorrect results.
+    WHERE/ON clauses must contain explicit comparisons or boolean operators, not bare
+    literals or identifiers. This prevents ambiguity and silent incorrect results — a
+    bare-literal conjunct (e.g. `ON a.x = b.y AND FALSE`) has no column to key a join
+    on and no column for a Filter step to reference, so it cannot be routed through
+    the optimizer's predicate-pushdown machinery and would otherwise be silently
+    dropped between planning and execution instead of failing loud.
 
     Allowed expressions:
     - COMPARISON_OPERATOR (=, <>, <, >, etc.)
@@ -350,18 +357,18 @@ def _validate_where_clause_expression(node: Node) -> None:
 
     # Allowed: logical operators applied to valid expressions
     if node_type in (NodeType.AND, NodeType.OR, NodeType.XOR):
-        _validate_where_clause_expression(node.left)
-        _validate_where_clause_expression(node.right)
+        _validate_where_clause_expression(node.left, clause_label, example_prefix)
+        _validate_where_clause_expression(node.right, clause_label, example_prefix)
         return
 
     # NOT is allowed if applied to a valid boolean expression
     if node_type == NodeType.NOT:
-        _validate_where_clause_expression(node.centre)
+        _validate_where_clause_expression(node.centre, clause_label, example_prefix)
         return
 
     # Allowed: nested expressions
     if node_type == NodeType.NESTED:
-        _validate_where_clause_expression(node.centre)
+        _validate_where_clause_expression(node.centre, clause_label, example_prefix)
         return
 
     # Binary/unary operators that might return boolean (like LIKE)
@@ -375,21 +382,23 @@ def _validate_where_clause_expression(node: Node) -> None:
     # Disallowed: bare literals
     if node_type == NodeType.LITERAL:
         raise UnsupportedSyntaxError(
-            f"WHERE clause cannot be a bare literal ({node.value!r}). "
-            "Use a comparison (e.g., 'WHERE column = {value}') or IS operator (e.g., 'WHERE column IS TRUE')."
+            f"{clause_label} cannot be a bare literal ({node.value!r}). "
+            f"Use a comparison (e.g., '{example_prefix}column = {{value}}') or IS operator "
+            f"(e.g., '{example_prefix}column IS TRUE')."
         )
 
     # Disallowed: bare identifiers (column names without comparison)
     if node_type == NodeType.IDENTIFIER:
         raise UnsupportedSyntaxError(
-            f"WHERE clause cannot be a bare column name ({node.value!r}). "
-            "Use a comparison (e.g., 'WHERE {node.value} = value') or IS operator (e.g., 'WHERE {node.value} IS TRUE')."
+            f"{clause_label} cannot be a bare column name ({node.value!r}). "
+            f"Use a comparison (e.g., '{example_prefix}{node.value} = value') or IS operator "
+            f"(e.g., '{example_prefix}{node.value} IS TRUE')."
         )
 
-    # Any other node type in WHERE is unsupported
+    # Any other node type in WHERE/ON is unsupported
     raise UnsupportedSyntaxError(
-        f"WHERE clause contains unsupported expression type: {node_type}. "
-        "WHERE requires a boolean comparison or function."
+        f"{clause_label} contains unsupported expression type: {node_type}. "
+        f"{clause_label} requires a boolean comparison or function."
     )
 
 
@@ -1033,6 +1042,15 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         if join_condition == "On":
             join_on = logical_planner_builders.build(
                 join["join_operator"][join_operator][join_condition]
+            )
+            # A conjunct with no column reference at all (a bare literal like
+            # `AND FALSE`, anywhere in the AND-tree) has no join key to extract
+            # and no column for a Filter step to carry it on — the optimizer's
+            # predicate-pushdown machinery has nowhere to route it and silently
+            # drops it between planning and execution. Reject at plan time
+            # instead, mirroring the same rule already enforced for WHERE.
+            _validate_where_clause_expression(
+                join_on, clause_label="JOIN condition", example_prefix="ON "
             )
         if join_condition == "Using":
             join_using = [

@@ -4,16 +4,28 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Opteryx IO Layer Tracing System
+Native execution-trace interpretation (docs/EXECUTION_TRACING_DESIGN.md).
 
-Provides low-overhead event recording for tracking IO operations (file discovery,
-downloading, buffering, decoding) using # TRACE: comments in source code.
+``Session.trace()`` is the capture/retrieval surface: it returns the raw
+``(blob, node_symbols, file_symbols)`` bundle for a query run with
+``OPTERYX_TRACE=1``, produced natively (Cython/C++) since it records
+per-operator and per-IO-request timing from the GIL-free execution engine.
 
-When OPTERYX_TRACE=1, the import system removes these comments and events are recorded.
-When disabled, the comments remain and have zero overhead.
+This package is the interpretation surface: ``interpret_trace()`` turns that
+raw bundle into a flat, JSON-serializable list of resolved span dicts. A
+consumer that only needs to PERSIST a trace (e.g. a worker service uploading
+it alongside a query's results) never needs to import this — it can treat the
+bundle as opaque bytes + two small dicts. A consumer that wants to actually
+look at a trace calls interpret_trace().
+
+A prior version of this package held a completely different, coarser
+mechanism (dataset/file-discovery events keyed by session id, "Session.trace()
+yields those events" instead of the span bundle). It added no real diagnostic
+value over the native span waterfall and has been removed.
 """
 
-from opteryx.tracing.event_recorder import flush_all
-from opteryx.tracing.event_recorder import record_event
+from opteryx.tracing.spans import CATEGORY_NAMES
+from opteryx.tracing.spans import interpret_trace
+from opteryx.tracing.spans import parse_spans
 
-__all__ = ["record_event", "flush_all"]
+__all__ = ["interpret_trace", "parse_spans", "CATEGORY_NAMES"]

@@ -27,7 +27,13 @@ def _with_optional_gc_disabled(
             gc.enable()
 
 
-def execute(plan, telemetry):
+def execute(plan, telemetry, trace_sink=None):
+    # trace_sink: an optional opteryx.models.trace_bundle.TraceBundle the native
+    # engine populates as a side effect of teardown, when tracing is armed — see
+    # docs/EXECUTION_TRACING_DESIGN.md. Deliberately NOT part of telemetry (see
+    # TraceBundle's docstring for why); only execute_native's data pipeline path
+    # produces spans, so it is the only branch below that receives it.
+
     # Check if this plan has a statistics-only result (no execution needed)
     stats_result = getattr(plan, "_statistics_only_result", None)
     if stats_result is not None:
@@ -58,7 +64,7 @@ def execute(plan, telemetry):
     else:
         from .compiler import execute_native
 
-        results, result_type = execute_native(plan, telemetry=telemetry)
+        results, result_type = execute_native(plan, telemetry=telemetry, trace_sink=trace_sink)
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type

@@ -6,21 +6,40 @@
 """
 Optimization Rule - Join Ordering
 
-Type: Cost-Based
+Type: Cost-Based / Correctness
 Goal: Faster Joins
 
 Build a left-deep join tree, where the left relation of any pair is the smaller relation.
 
-We also decide if we should use a nested loop join or a hash join based on the size of the left relation.
+We also decide whether a join needs the nested-loop strategy: a non-equi conjunct
+(pure theta, or mixed equi+theta) has no hash key to build from, so nested loop is
+the only correct execution — never a cost-based choice. A PURE equi join always
+uses the hash-join mode; there is no longer a nested-loop-vs-hash-join cost
+trade-off to make for equi joins in the native engine (see below).
 
 Join Ordering Rules (from COST-BASED-OPTIMIZER.md):
 1. If one table is more than 3x the bytes of the other, larger table goes right (memory pressure heuristic)
 2. If cardinalities are within 1%, larger table goes right
 3. Otherwise, use cardinality estimation of join column(s) to decide left/right tables
 4. If table sizes and cardinalities are the same (e.g. self join), don't change order
+
+Historical note: this strategy used to ALSO route a pure equi join to
+"nested loop" when the smaller side was tiny and the larger side was in a
+calibrated size window (see scratch/.archive/_sweep_join_crossover.py). That
+sweep measured the OLD Cython nested_loop_join.pyx (a genuine O(n*m) loop)
+against hashed_inner_join.pyx (a genuine hash join) — two different
+algorithms with a real crossover. In the native engine, "inner" and
+"nested_loop" compile to the IDENTICAL native join2 build/probe mechanism
+(opteryx/managers/execution/compiler.py's `_compile_join`, both mode 0); the
+only difference is that "nested_loop" pays for an extra, wholly redundant
+residual re-check of the equi condition it already keyed on. There is no
+longer a scenario where choosing nested_loop over hash for a pure equi join
+helps — confirmed empirically (forced hash vs forced nested_loop across the
+old calibrated window showed no measurable difference) — so the heuristic
+was removed rather than re-tuned.
 """
 
-from opteryx.config import features
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -30,13 +49,28 @@ from .optimization_strategy import OptimizerContext
 from .optimization_strategy import flip_join_leg_labels
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
-DISABLE_NESTED_LOOP_JOIN: bool = features.disable_nested_loop_join
-FORCE_NESTED_LOOP_JOIN: bool = features.force_nested_loop_join
+_NON_EQUI_COMPARATORS = ("NotEq", "Lt", "Gt", "LtEq", "GtEq")
 
 
 def _col_value(col):
     """Return the underlying column identifier regardless of object shape."""
     return getattr(col, "value", col)
+
+
+def _contains_non_equi_comparator(condition) -> bool:
+    """True if `condition` (a join ON expression) contains a non-equi comparison
+    anywhere in its AND-tree — either the whole predicate is a pure theta
+    comparison (`a > b`), or it's compound with at least one non-equi conjunct
+    (`a = b AND c != d`). Both shapes are inexpressible as a hash-join key: a
+    hash join has nothing to build a key from for the non-equi part, so nested
+    loop (keyed build when an equi conjunct exists, cartesian otherwise, always
+    with the residual filter) is the only correct strategy — not a cost-based
+    choice, so this must never be gated by row-count."""
+    if getattr(condition, "node_type", None) == NodeType.AND:
+        return _contains_non_equi_comparator(condition.left) or _contains_non_equi_comparator(
+            condition.right
+        )
+    return _col_value(condition) in _NON_EQUI_COMPARATORS
 
 
 def _join_key_name(col):
@@ -144,22 +178,13 @@ class JoinOrderingStrategy(OptimizationStrategy):
                 self.telemetry.optimization_inner_join_smallest_table_left += 1
                 context.optimized_plan[context.node_id] = node
 
-            # if any of the comparisons are other than "equal", we cannot use a hash join
-            comparator = _col_value(node.on)
-            if comparator in ("NotEq", "Lt", "Gt", "LtEq", "GtEq"):
-                node.type = "non equi"
-                context.optimized_plan[context.node_id] = node
-            # Nested-loop join wins when the smaller side is tiny enough that
-            # building a hash table doesn't amortize, AND the larger side is
-            # big enough that the bloom prefilter pays off. The upper bound
-            # is a safety bound against extrapolation outside the calibrated
-            # range; see scratch/_sweep_join_crossover.py for the empirical
-            # crossover sweep that produced these thresholds.
-            elif (
-                not DISABLE_NESTED_LOOP_JOIN
-                and min(node.left_size, node.right_size) <= 500
-                and 1_000 <= max(node.left_size, node.right_size) <= 1_000_000
-            ) or FORCE_NESTED_LOOP_JOIN:
+            # A non-equi conjunct anywhere (pure theta, or mixed equi+theta) can't be
+            # expressed as a hash-join key — nested loop is the only correct execution
+            # strategy, unconditionally, regardless of row count. A PURE equi join
+            # never takes this branch and always stays "inner" (hash join) — see the
+            # module docstring for why there is no longer a nested-loop-vs-hash-join
+            # cost trade-off to make for equi joins in the native engine.
+            if _contains_non_equi_comparator(node.on):
                 node.type = "nested loop"
                 context.optimized_plan[context.node_id] = node
 

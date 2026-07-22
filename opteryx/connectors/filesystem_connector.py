@@ -18,7 +18,6 @@ from opteryx.exceptions import (
     EmptyDatasetError,
     UnsupportedSyntaxError,
 )
-from opteryx.tracing import record_event
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import RelationSchema
 
@@ -220,24 +219,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         """
         blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
         blob_names = [name for name in blob_names if name.lower().endswith(PARQUET_SUFFIX)]
-
-        from opteryx import config as _config
-
-        if _config.OPTERYX_TRACE:
-            # include storage type/connector so traces can be filtered by backend
-            record_event(
-                "dataset_discovered",
-                dataset=self.dataset,
-                file_count=len(blob_names),
-                connector=self.__type__,
-            )
-            for blob_name in blob_names:
-                record_event(
-                    "file_discovered",
-                    file_id=blob_name,
-                    blob_name=blob_name,
-                    connector=self.__type__,
-                )
 
         if just_schema:
             for blob_name in blob_names:

@@ -35,6 +35,10 @@ using MorselPtr = std::shared_ptr<CxxMorsel>;
 // recursive forward), so exec_ns is this operator's SELF time.
 struct OpStats {
     std::string           identity;      // plan-node identity; empty = untagged (demos)
+    uint32_t               node_id{0};   // trace.hpp span identity; assigned once at plan
+                                          // build time (Engine::add_op_/set_sink_/set_
+                                          // source_), read-only during execution — safe
+                                          // without atomics. 0 = untagged.
     std::atomic<uint64_t> calls{0};      // input morsels handled
     std::atomic<uint64_t> rows_in{0};
     std::atomic<uint64_t> rows_out{0};

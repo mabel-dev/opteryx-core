@@ -27,6 +27,7 @@ class LogicalColumn:
         source: Optional[str] = None,
         alias: Optional[str] = None,
         schema_column=None,
+        query_column: Optional[str] = None,
     ):
         self.node_type = node_type
         self.source_column = source_column
@@ -34,6 +35,7 @@ class LogicalColumn:
         self.source = source
         self.alias = alias
         self.schema_column = schema_column
+        self.query_column = query_column
 
     @property
     def qualified_name(self) -> str:
@@ -75,6 +77,7 @@ class LogicalColumn:
             schema_column=(
                 None if self.schema_column is None else self.schema_column.to_schema_column()
             ),
+            query_column=self.query_column,
         )
 
     def __repr__(self) -> str:

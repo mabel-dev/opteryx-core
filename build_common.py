@@ -632,6 +632,14 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/vector_alloc.cpp",
                 "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
                 "draken/core/frame_arena.cpp",  # per-frame allocator for native eval engine
+                # docs/EXECUTION_TRACING_DESIGN.md: the ONE compiled home of the shared
+                # execution-tracer state (draken/core/trace.hpp) — rugo (pool_reader.so)
+                # and the opteryx engine (_operators.so) are separate .so's and must not
+                # each get their own copy (the BS::thread_pool trap; see
+                # draken/core/trace_bridge_c.h). Belongs in THIS extension so it is
+                # loaded RTLD_GLOBAL by draken/__init__.py alongside draken_vector_unwrap
+                # et al.
+                "draken/core/trace_bridge.cpp",
                 "draken/ops/compare_dv.cpp",  # arena-backed compare entry point
                 "draken/ops/arithmetic_dv.cpp",  # arena-backed arithmetic entry point
                 # Phase 9a: C kernel ABI implementations
@@ -711,6 +719,8 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/buffers.h",
                 "draken/core/alloc.h",
                 "draken/core/vector_alloc.h",
+                "draken/core/trace.hpp",
+                "draken/core/trace_bridge_c.h",
                 "draken/ops/hash.h",
                 "src/cpp/simd_hash.h",
                 # Phase 9a: kernel ABI headers

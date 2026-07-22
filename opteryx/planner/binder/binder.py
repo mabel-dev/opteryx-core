@@ -156,6 +156,14 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
                 LogicalCategory.DECIMAL,
             ):
                 return _CT_FLOAT64
+            if name == "SUM" and param_type.category == LogicalCategory.INTEGER:
+                # SUM over integer-family operands always accumulates and emits
+                # INT64 at runtime (native_group_sinks.hpp: exact int64 sum),
+                # regardless of the input column's width (INT8/16/32). Binding
+                # the result to the narrower input type is a lie that later
+                # breaks callers (e.g. UNION type-unification) which pick a
+                # cast kernel from the bound type but receive INT64 data.
+                return _CT_INT64
             return param_type  # ColumnType
     return None
 

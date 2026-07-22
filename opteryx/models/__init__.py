@@ -12,6 +12,7 @@ from opteryx.models.non_tabular_result import NonTabularResult
 from opteryx.models.physical_plan import PhysicalPlan
 from opteryx.models.query_properties import QueryProperties
 from opteryx.models.query_telemetry import QueryTelemetry
+from opteryx.models.trace_bundle import TraceBundle
 
 __all__ = (
     "ExecutionContext",
@@ -23,4 +24,5 @@ __all__ = (
     "PhysicalPlan",
     "QueryProperties",
     "QueryTelemetry",
+    "TraceBundle",
 )

@@ -39,6 +39,7 @@
 #include "scan_aggregate_demo.hpp"  // NULL-aware agg helpers (agg_is_valid et al.)
 #include "scan_filter_demo.hpp"     // NumericFilterOperator, SimplePredicate, QueueSink/Global
 #include "streaming_scan_source.hpp"
+#include "trace.hpp"                 // TraceSpan/trace_begin/trace_drain — execution tracing
 
 namespace opteryx::engine {
 
@@ -251,6 +252,10 @@ public:
     std::string current_identity_;
     void set_current_identity(std::string s) { current_identity_ = std::move(s); }
 
+    // Monotonic per-Engine (i.e. per-query) counter for OpStats.node_id — see
+    // trace.hpp. Starts at 1; 0 is reserved for "untagged".
+    uint32_t next_trace_node_id_ = 1;
+
     // One harvested reading row (per operator/source/sink). Several may share an identity
     // (a plan node lowered to multiple operators, or operator fusion) — the Python side
     // sums them per identity.
@@ -276,21 +281,50 @@ public:
         return out;
     }
 
+    // node_id -> identity, for resolving trace.hpp spans (which carry only the
+    // compact node_id, not the string) back to plan-node identity at drain time.
+    // Same iteration shape as collect_op_stats — one row per tagged operator/
+    // source/sink, several may share an identity.
+    std::vector<std::pair<uint32_t, std::string>> collect_trace_symbols() const {
+        std::vector<std::pair<uint32_t, std::string>> out;
+        auto emit = [&out](const OpStats& s) {
+            if (s.node_id != 0 && !s.identity.empty()) out.emplace_back(s.node_id, s.identity);
+        };
+        for (const auto& pn : pipelines) {
+            if (pn->source) emit(pn->source->stats);
+            for (const auto& op : pn->operators) emit(op->stats);
+            if (pn->sink) emit(pn->sink->stats);
+        }
+        return out;
+    }
+
     // ---- builder edge (called from Cython at plan-build time; not the hot path) ----
     // Stamp the current plan-node identity onto a freshly built operator/source/sink and
     // install it. Every builder below routes through these so no reading goes untagged.
+    // node_id is assigned here too (monotonic per Engine instance, i.e. per query) so
+    // trace.hpp spans can carry a compact id instead of copying the identity string
+    // onto every span.
     Operator* add_op_(size_t p, std::unique_ptr<Operator> op) {
         op->stats.identity = current_identity_;
+        op->stats.node_id = next_trace_node_id_++;
         pipelines[p]->operators.push_back(std::move(op));
         return pipelines[p]->operators.back().get();
     }
     void set_sink_(size_t p, std::unique_ptr<Sink> s) {
         s->stats.identity = current_identity_;
+        s->stats.node_id = next_trace_node_id_++;
         pipelines[p]->sink = std::move(s);
     }
-    void set_source_(size_t p, std::unique_ptr<Source> s) {
+    // Returns the node_id it assigned — set_native_scan_source uses this to tag
+    // the underlying ParquetIOPipeline's trace spans with the same identity the
+    // wrapping Source's OpStats carries (see set_trace_node_id below). Every
+    // other caller ignores the return value.
+    uint32_t set_source_(size_t p, std::unique_ptr<Source> s) {
         s->stats.identity = current_identity_;
+        s->stats.node_id = next_trace_node_id_++;
+        uint32_t node_id = s->stats.node_id;
         pipelines[p]->source = std::move(s);
+        return node_id;
     }
 
     size_t new_pipeline() {
@@ -388,9 +422,18 @@ public:
                                 const std::vector<int>* string_types = nullptr,
                                 const std::vector<uint8_t>* decimal_columns = nullptr,
                                 const std::vector<int>* logical_coerce = nullptr) {
-        set_source_(p, std::make_unique<NativeParquetScanSource>(
+        // docs/EXECUTION_TRACING_DESIGN.md: tag the rugo pipeline's trace spans
+        // (TC_QUEUE_WAIT/TC_IO_REQUEST/TC_DECODE — currently node_id=0/untagged,
+        // see io_pipeline.hpp's set_trace_node_id) with the SAME node_id this
+        // scan's Source/OpStats gets, so a query with more than one scan can
+        // attribute IO spans back to the right plan node. The pipeline was
+        // already constructed (in Python, before this call) with no node_id
+        // available yet — this is the first point node_id exists, so it's set
+        // here rather than threaded through the Cython/Python construction path.
+        uint32_t node_id = set_source_(p, std::make_unique<NativeParquetScanSource>(
             pipeline, footer_map, work_items, column_names, in_flight_limit,
             pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce));
+        if (pipeline != nullptr) pipeline->set_trace_node_id(node_id);
     }
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));

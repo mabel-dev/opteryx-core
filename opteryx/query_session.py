@@ -42,9 +42,8 @@ from opteryx.exceptions import (
     UnsupportedSyntaxError,
 )
 from opteryx.managers.billing import DEFAULT_BILLING_ACCOUNT, BillingEventType, write_billing_event
-from opteryx.models import ExecutionContext, QueryTelemetry
+from opteryx.models import ExecutionContext, QueryTelemetry, TraceBundle
 from opteryx.models.dataframe import DataFrame
-from opteryx.tracing import record_event
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
 from opteryx.utils import sql
@@ -109,6 +108,12 @@ class Session(DataFrame):
         self._plan = None
         self._query_id = query_id if query_id is not None else random_string(32)
         self._telemetry = QueryTelemetry(self._query_id)
+        self._trace = TraceBundle()
+        # Set fresh per query in _execute_statements (mirrors self._telemetry.reset()
+        # there) — a long-lived Session can run many queries, and OPTERYX_TRACE could
+        # in principle change between them, so this must not be a __init__-time
+        # snapshot. False here is just the pre-first-query default.
+        self._trace_armed = False
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED
         self._rowcount = None
@@ -118,21 +123,6 @@ class Session(DataFrame):
         self._executed = False
 
         DataFrame.__init__(self, rows=[], schema=[])
-
-        # Initialize IO tracing state.  Tracing is governed solely by the
-        # global ``config.OPTERYX_TRACE`` flag and events are kept in memory.
-        # The engine no longer supports writing to a file, and there is no
-        # per-session path.  ``_tracing_enabled`` controls whether the session
-        # will emit start/end markers and allow ``session.trace()`` to run.
-        self._tracing_enabled = bool(config.OPTERYX_TRACE)
-
-        # if tracing is active, register our session id so the recorder can
-        # tag subsequent events automatically.  We push the id globally and
-        # clear it on close.
-        if self._tracing_enabled:
-            from opteryx.tracing import event_recorder
-
-            event_recorder._current_session_id = self._query_id
 
     @property
     def query_id(self) -> str:
@@ -165,7 +155,7 @@ class Session(DataFrame):
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
-        results = execute(self._plan, telemetry=self._telemetry)
+        results = execute(self._plan, telemetry=self._telemetry, trace_sink=self._trace)
 
         write_billing_event(
             billing_event=BillingEventType.QUERY_EXECUTION,
@@ -207,6 +197,8 @@ class Session(DataFrame):
     ):
         self._telemetry.reset()
         self._telemetry.start_time = time.time_ns()
+        self._trace.reset()
+        self._trace_armed = bool(config.OPTERYX_TRACE)
 
         if getattr(operation, "decode", None) is not None:
             operation = operation.decode()
@@ -630,27 +622,25 @@ class Session(DataFrame):
         return self._telemetry.messages
 
     # ------------------------------------------------------------------
-    def trace(self) -> Iterator[dict]:
-        """Yield trace events for this session.
+    def trace(self) -> Tuple[bytes, Dict[int, str], Dict[int, str]]:
+        """Return this query's raw native execution trace: ``(blob,
+        node_symbols, file_symbols)``.
 
-        The method will flush any pending events to disk before reading the
-        trace file.  It filters on ``session_id`` so you only see events
-        emitted by this session.  If tracing was never enabled for the
-        session a ``RuntimeError`` is raised.
+        ``blob`` is a packed array of fixed-layout span records (see
+        ``opteryx.tracing`` / docs/EXECUTION_TRACING_DESIGN.md); ``node_symbols``
+        resolves a span's ``node_id`` to its plan-node identity, ``file_symbols``
+        resolves a span's ``file_id`` to a file path. Deliberately returned raw,
+        not interpreted — a caller that only needs to persist the trace (e.g.
+        alongside a query's results) pays no per-span Python object cost, and a
+        caller that wants to look at it calls ``opteryx.tracing.interpret_trace``
+        (or ``opteryx.tracing.parse_spans`` for the unresolved fields).
+
+        Raises ``RuntimeError`` if tracing was not armed for this query
+        (``OPTERYX_TRACE`` unset when the query ran).
         """
-        if not self._tracing_enabled:
-            raise RuntimeError("IO tracing not enabled for this session")
-
-        from opteryx.tracing import event_recorder, flush_all
-
-        # flush any pending in‑memory events so they appear in the result
-        _ = flush_all()
-
-        # simply iterate the global buffer; file support has been removed.
-        with event_recorder._global_lock:
-            for ev in event_recorder._global_events:
-                if ev.get("session_id") == self._query_id:
-                    yield ev
+        if not self._trace_armed:
+            raise RuntimeError("Execution tracing not enabled for this query (set OPTERYX_TRACE=1)")
+        return self._trace.blob, self._trace.node_symbols, self._trace.file_symbols
 
     def close(self):
         if self._closed:
@@ -662,23 +652,5 @@ class Session(DataFrame):
             self._close_all_cursors()
         except Exception:
             pass
-
-        # Flush any pending trace events and emit end marker
-        if self._tracing_enabled:
-            try:
-                from opteryx.tracing import event_recorder, record_event
-
-                record_event("trace_session_end", session_id=self._query_id)
-                event_recorder.flush_all()
-            except Exception:
-                pass  # Don't let tracing errors affect query close
-            finally:
-                # clear the global session id if it's still pointing at us
-                from opteryx.tracing import event_recorder as _er
-
-                if _er._current_session_id == self._query_id:
-                    _er._current_session_id = None
-
-        # _old_trace_state is no longer used; there is nothing to restore.
 
         self._closed = True

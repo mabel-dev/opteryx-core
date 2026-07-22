@@ -37,7 +37,7 @@ from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from cpython.array cimport array
 import draken.draken_native as _draken_native
 
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t, uint8_t, uint32_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t, uint8_t, uint16_t, uint32_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
 from cpython.ref cimport PyObject
@@ -233,6 +233,38 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         int64_t aa_limit
         int64_t aa_max_per_group
 
+cdef extern from "core/alloc.h" nogil:
+    void draken_free(void* ptr)
+
+# The bridge is the ONLY correct way to reach the shared execution tracer
+# state from this .so — see draken/core/trace_bridge_c.h's header comment.
+# Do NOT `cdef extern from "engine/trace.hpp"` any of draken_trace's own
+# functions here: that header is a thin per-.so wrapper around this exact
+# bridge, precisely so nothing (including this file) ends up compiling its
+# own independent copy of the tracer's mutable state.
+cdef extern from "core/trace_bridge_c.h" nogil:
+    ctypedef struct DrakenTraceSpanC:
+        uint64_t t_start_ns
+        uint64_t t_end_ns
+        uint32_t query_seq
+        uint16_t category
+        uint16_t worker_id
+        uint32_t node_id
+        uint32_t corr_id
+        uint32_t rg_idx
+        uint32_t rows
+        uint32_t bytes
+        uint32_t detail
+        uint32_t file_id
+    ctypedef struct DrakenFileSymbolC:
+        uint32_t file_id
+        char* path
+    void draken_trace_set_enabled(int on)
+    int draken_trace_enabled()
+    uint32_t draken_trace_start_query()
+    DrakenTraceSpanC* draken_trace_drain(uint32_t query_seq, size_t* out_count, int* out_truncated)
+    DrakenFileSymbolC* draken_trace_drain_file_symbols(size_t* out_count)
+
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
         string identity
@@ -248,6 +280,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         Engine() except +
         void set_current_identity(string s)
         cppvector[OpReading] collect_op_stats()
+        cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
         size_t new_buffer()
         size_t new_join_ref()
@@ -620,6 +653,77 @@ def instr_gil_worker_report():
             "calls": <long long>_gil_instr_sites[i].calls,
             "ns": <long long>_gil_instr_sites[i].ns,
         })
+    return out
+
+
+# -----------------------------------------------------------------------------
+# Native execution tracing (docs/EXECUTION_TRACING_DESIGN.md) — Phase 1.
+#
+# Distinct from the per-morsel ``TraceEvent`` packed struct below (EXPLAIN
+# ANALYZE's own, unrelated buffer): this is the engine-wide span waterfall
+# gated by config.OPTERYX_TRACE. All recording happens in engine/trace.hpp
+# (nogil, no Python touched — the old opteryx/tracing/ died from trying to
+# call Python per-span from this path). These wrappers only arm/disarm the
+# runtime gate and drain the already-closed spans into one bytes blob at
+# query teardown, mirroring collect_op_stats' single boundary crossing.
+# -----------------------------------------------------------------------------
+
+# Field layout of one TraceSpan (draken/core/trace.hpp), little-endian, matching
+# the native struct's own (compiler-inserted) tail padding to 64 bytes. Exposed
+# so callers parse the drained blob with struct.iter_unpack instead of
+# duplicating the layout by hand: (t_start_ns, t_end_ns, query_seq, category,
+# worker_id, node_id, corr_id, rg_idx, rows, bytes, detail, file_id,
+# reserved0, reserved1). file_id resolves via native_trace_drain_file_symbols();
+# node_id resolves via NativePlan.collect_trace_symbols().
+TRACE_SPAN_STRUCT_FORMAT = "<QQIHHIIIIIII2I4x"
+TRACE_SPAN_SIZE = 64
+
+
+def native_trace_set_enabled(bint on):
+    """Arm/disarm native span recording, engine- and rugo-side alike (the shared
+    bridge in draken/core/trace_bridge_c.h). Driven by config.OPTERYX_TRACE."""
+    draken_trace_set_enabled(1 if on else 0)
+
+
+def native_trace_start_query():
+    """Bump the trace generation for a new query. Returns the query_seq to pass to
+    native_trace_drain() at teardown. Call before the driver dispatches workers so
+    every worker's arena — engine and rugo — lazily resets under the new
+    generation on first touch."""
+    return draken_trace_start_query()
+
+
+def native_trace_drain(uint32_t query_seq):
+    """Walk every thread's arena (engine's and rugo's alike) for ``query_seq``,
+    concatenate into one contiguous blob, and return ``(blob: bytes, truncated:
+    bool)``. Must be called AFTER every worker that could still be recording has
+    joined — same precondition collect_op_stats documents at its own call site."""
+    cdef size_t n = 0
+    cdef int truncated = 0
+    cdef DrakenTraceSpanC* buf = draken_trace_drain(query_seq, &n, &truncated)
+    if buf == NULL or n == 0:
+        return b"", bool(truncated)
+    blob = (<char*>buf)[:n * sizeof(DrakenTraceSpanC)]
+    draken_free(<void*>buf)
+    return blob, bool(truncated)
+
+
+def native_trace_drain_file_symbols():
+    """file_id -> path for every file interned this query (draken_trace_intern_file,
+    called from rugo's io_pipeline.hpp at row-group submission). Resolves the
+    file_id carried on IO/decode trace spans. Same call-after-run precondition
+    as native_trace_drain — the intern table resets on the next
+    native_trace_start_query()."""
+    cdef size_t n = 0
+    cdef DrakenFileSymbolC* rows = draken_trace_drain_file_symbols(&n)
+    if rows == NULL or n == 0:
+        return {}
+    out = {}
+    cdef size_t i
+    for i in range(n):
+        out[int(rows[i].file_id)] = (<bytes>rows[i].path).decode("utf-8")
+        draken_free(<void*>rows[i].path)
+    draken_free(<void*>rows)
     return out
 
 
@@ -2177,6 +2281,17 @@ cdef class NativePlan:
             })
         return out
 
+    def collect_trace_symbols(self):
+        """node_id -> identity for this plan's operators/sources/sinks, resolving the
+        compact ids carried on drained TraceSpans (see native_trace_drain) back to
+        plan-node identity. Same call-after-run precondition as collect_op_stats."""
+        cdef cppvector[pair[uint32_t, string]] rows = self._e.collect_trace_symbols()
+        cdef pair[uint32_t, string] kv
+        out = {}
+        for kv in rows:
+            out[int(kv.first)] = kv.second.decode("utf-8")
+        return out
+
     def new_pipeline(self):
         return self._e.new_pipeline()
 
@@ -2523,8 +2638,12 @@ cdef cppvector[SortKeySpec] _sort_spec_from_list(list spec) except *:
 
 
 cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
-    """``spec`` = [(name:bytes|str, fn:str, col_idx:int|-1[, options:dict]), ...]
-    in output order. ``options`` is ARRAY_AGG-only; every other function ignores it.
+    """``spec`` = [(name:bytes|str, fn:str, col_idx:int[, options:dict]), ...]
+    in output order. ``col_idx`` is a real column index (>= 0), or one of the
+    named sentinels compiler.py mirrors from native_group_sinks.hpp:
+    ``_AGG_NO_OPERAND`` (-1, CountStar) / ``_AGG_WHOLE_ROW`` (-2, whole-row
+    CountDistinct — COUNT(DISTINCT *)). ``options`` is ARRAY_AGG-only; every
+    other function ignores it.
     """
     cdef cppvector[AggSpec2] out
     cdef AggSpec2 s

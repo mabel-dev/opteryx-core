@@ -34,7 +34,7 @@ import struct as _struct
 
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16, DRAKEN_ARRAY
-from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_DECIMAL128
 
@@ -85,6 +85,44 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
             return Vector(_draken_native.vector_nvarchar_from_constant(None, 1))
         if physical_type == <int>DRAKEN_VARBINARY:
             return Vector(_draken_native.vector_varbinary_from_constant(None, 1))
+        # Scalar numeric/date physical tags — e.g. a FULL OUTER JOIN rewritten as a
+        # UNION synthesises a typed NULL for the non-preserved side's columns (see
+        # opteryx/planner/binder/set_ops.py's `_cast_leg_columns_to`), which retypes
+        # the literal to the leg's coerced column type. Concatenating that leg's
+        # output with the other leg's real column of the same type (Morsel.combine)
+        # requires both sides to carry the SAME physical tag, not an untyped
+        # DRAKEN_NULL. Each of these constant constructors already accepts
+        # value=None (an all-null constant of its own type); no descriptor
+        # (precision/scale/unit) is needed for any of them.
+        if physical_type == <int>DRAKEN_INT8:
+            return Vector(_draken_native.vector_int8_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_INT16:
+            return Vector(_draken_native.vector_int16_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_INT32:
+            return Vector(_draken_native.vector_int32_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_INT64:
+            return Vector(_draken_native.vector_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_UINT8:
+            return Vector(_draken_native.vector_uint8_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_UINT16:
+            return Vector(_draken_native.vector_uint16_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_UINT32:
+            return Vector(_draken_native.vector_uint32_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_UINT64:
+            return Vector(_draken_native.vector_uint64_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_FLOAT32:
+            return Vector(_draken_native.vector_float32_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_FLOAT64:
+            return Vector(_draken_native.vector_float64_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_DATE32:
+            return Vector(_draken_native.vector_date32_from_constant(None, 1))
+        # DECIMAL/DECIMAL128/TIMESTAMP64/TIME32/TIME64 need a declared descriptor
+        # (precision/scale/unit) this function is never called with for a NULL
+        # literal (precision/scale default -1, no unit param at all) — left as
+        # untyped DRAKEN_NULL rather than guessing a descriptor. BOOL has no
+        # constant constructor in draken_native at all. Numeric and genuinely
+        # untyped (physical_type == -1) NULLs also keep DRAKEN_NULL — their
+        # kernels short-circuit on the DRAKEN_NULL tag.
         return Vector(_draken_native.vector_null_from_length(1))
     if isinstance(value, bool):
         # Bools are handled upstream by BC_LOAD_LIT_BOOL; reaching here is a bug.

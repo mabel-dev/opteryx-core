@@ -1235,6 +1235,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     footer_bytes_cache=None,
     null_fillers=None,
     string_types=None,
+    limit=None,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -1244,7 +1245,15 @@ cpdef IpcRowGroupSource open_ipc_source(
     ``string_types``, when given, is a list of declared DrakenType tags (VARCHAR/
     NVARCHAR/VARBINARY) parallel to ``column_names`` — the schema's physical type
     for each projected column, used to tag decoded string columns instead of
-    always defaulting to VARCHAR (all three share the same byte layout)."""
+    always defaulting to VARCHAR (all three share the same byte layout).
+
+    ``limit``, when given with no predicates, stops row-group enumeration once
+    the accumulated footer ``num_rows`` across selected row groups covers it —
+    exact because with nothing filtering a kept row group, its footer row count
+    IS its row contribution. Callers must pass None whenever the scan carries
+    predicates: a row group's rows can still be filtered downstream even when
+    stats-based pruning can't prove it's excluded, so footer row counts alone
+    would overstate what a LIMIT has actually satisfied."""
     from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
     cdef IpcRowGroupSource src = IpcRowGroupSource()
@@ -1390,13 +1399,26 @@ cpdef IpcRowGroupSource open_ipc_source(
         if footer_remote is not None and pending_remote:
             footer_remote.put_many(pending_remote)
 
+    # Sound only with zero predicates: a kept row group's footer num_rows IS its
+    # exact row contribution when nothing filters it downstream. Running total is
+    # across the whole scan (not reset per file) since the LIMIT applies to the
+    # scan as a whole.
+    cdef bint limit_gate = (limit is not None) and not predicates
+    cdef int64_t limit_rows_seen = 0
+
     for path in paths:
+        if limit_gate and limit_rows_seen >= limit:
+            break
         if prefetched_footers and path in prefetched_footers:
             meta = prefetched_footers[path]
             for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
                 if predicates and not row_group_may_satisfy(rg_meta, predicates):
                     continue
                 work_items.append((path, rg_idx))
+                if limit_gate:
+                    limit_rows_seen += rg_meta.get("num_rows", 0)
+                    if limit_rows_seen >= limit:
+                        break
         else:
             path_bytes_cpp = path.encode('utf-8')
             if src.footer_map[0].count(path_bytes_cpp) == 0:
@@ -1422,6 +1444,10 @@ cpdef IpcRowGroupSource open_ipc_source(
                 ):
                     continue
                 work_items.append((path, rg_i))
+                if limit_gate:
+                    limit_rows_seen += src.footer_map[0][path_bytes_cpp].row_groups[rg_i].num_rows
+                    if limit_rows_seen >= limit:
+                        break
 
     src.work_items = work_items
     src.n_items = len(work_items)

@@ -46,6 +46,14 @@
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
 #include "core/buffers.h"       // DrakenVector / DrakenStringArena — worker-side pass-1 predicate view
 #include "core/vector_alloc.h"  // draken_identity_sel — dense selection for the view
+// docs/EXECUTION_TRACING_DESIGN.md: rugo calls the extern "C" bridge
+// (trace_bridge_c.h), NEVER draken/core/trace.hpp directly — this file
+// compiles into pool_reader.so (a separate .so from _operators.so, which
+// also pulls this same io_pipeline.hpp via native_parquet_scan_source.hpp),
+// and header-only inline/static C++ state does not merge across .so
+// boundaries. See src/cpp/engine/trace.hpp's header comment for the same
+// rule on the engine side, and trace_bridge_c.h for why the bridge exists.
+#include "core/trace_bridge_c.h"
 
 namespace rugo {
 
@@ -830,6 +838,13 @@ class ParquetIOPipeline {
         std::vector<std::string> column_names;
         std::vector<ColumnStats> column_stats;  // absolute file offsets
         std::vector<uint8_t> row_mask;           // empty = no mask (decode all rows)
+        // docs/EXECUTION_TRACING_DESIGN.md: 0 unless tracing is armed at enqueue
+        // time (enqueue_pending stamps both together) — decode_row_group treats
+        // issued_ns == 0 as "don't record spans for this item", so a query that
+        // starts untraced never pays for a corr_id allocation either.
+        uint64_t issued_ns = 0;
+        uint32_t corr_id = 0;
+        uint32_t file_id = 0;  // draken_trace_intern_file(path); 0 == untraced
     };
 
     // Priority-capable pool (Gap #3 Phase 2b): same vendored BS::thread_pool template
@@ -907,6 +922,16 @@ class ParquetIOPipeline {
     // is out of scope) but its result is dropped at the enqueue guard.
     std::atomic<bool> cancelled_{false};
     std::atomic<uint64_t> cancelled_skips_{0};
+
+    // docs/EXECUTION_TRACING_DESIGN.md: per-row-group correlation id source
+    // (starts at 1; 0 == "no trace" sentinel on WorkItem::corr_id). trace_node_id_
+    // is the plan-node identity this pipeline's spans should carry — NOT wired
+    // from the compiler yet (each ParquetIOPipeline backs one scan, so a future
+    // pass can set_trace_node_id() from the same identity compile_to_native
+    // already tags the scan's OpStats with); spans record node_id=0 (untagged)
+    // until that wiring lands. Documented gap, not a silent omission.
+    std::atomic<uint32_t> next_trace_corr_id_{1};
+    uint32_t trace_node_id_ = 0;
 
     // Destination pool for serialized columns. Set once before any submit via
     // set_pool_sink(); workers reserve+serialize+finalize through it.
@@ -1075,6 +1100,15 @@ class ParquetIOPipeline {
     // run_one_pending (hence after decode_row_group's trailing queue_cv_.notify) —
     // so tickets_inflight_==0 guarantees no ticket will touch `this` again.
     void enqueue_pending(WorkItem&& item) {
+        // docs/EXECUTION_TRACING_DESIGN.md: stamp the gather's issue time (queue-
+        // wait span start) and mint its correlation id here, once, rather than in
+        // every submit_row_group() overload. Skipped entirely when tracing is
+        // off — one relaxed atomic load, no clock read, no counter bump.
+        if (draken_trace_enabled()) {
+            item.issued_ns = draken_trace_now_ns();
+            item.corr_id = next_trace_corr_id_.fetch_add(1, std::memory_order_relaxed);
+            item.file_id = draken_trace_intern_file(item.path.data(), item.path.size());
+        }
         pending_work_++;
         {
             std::lock_guard<std::mutex> lk(queue_mutex_);
@@ -1145,6 +1179,15 @@ class ParquetIOPipeline {
             queue_cv_.notify_one();
             return;
         }
+
+        // docs/EXECUTION_TRACING_DESIGN.md: t_dequeue closes the queue-wait span
+        // opened at enqueue_pending's issued_ns — this worker is now actually
+        // starting on the item, having claimed it from pending_items_ (whether
+        // via a pool ticket's run_one_pending or a blocked puller's inline-help
+        // path in wait_and_get_result; both funnel through here). Zero-cost when
+        // item.issued_ns == 0 (tracing was off at enqueue time).
+        const uint64_t _tr_t_dequeue =
+            item.issued_ns != 0 ? draken_trace_now_ns() : 0;
 
         MorselRef result;
         result.path = item.path;
@@ -1537,6 +1580,43 @@ class ParquetIOPipeline {
         if (result.bytes_fetched > 0)
             bytes_fetched_.fetch_add(static_cast<uint64_t>(result.bytes_fetched),
                                      std::memory_order_relaxed);
+
+        // docs/EXECUTION_TRACING_DESIGN.md: reconstruct this row group's spans
+        // from the timestamps/durations already computed above — no additional
+        // clock reads inside the fetch/decode loop itself. TC_QUEUE_WAIT is the
+        // real gap (issued -> a worker actually claimed it); TC_IO_REQUEST and
+        // TC_DECODE are total_read_ns/total_decode_ns placed back-to-back after
+        // it. There is currently no distinct "bytes arrived but decode hasn't
+        // started" stage in this implementation (fetch and decode happen
+        // column-by-column in the same loop, immediately adjacent) — so
+        // TC_BUFFER_RESIDENT is NOT emitted here; it would always read ~0 and
+        // add noise rather than signal. It becomes meaningful if a real
+        // buffering stage (e.g. a bounded pending-decode queue) is introduced.
+        if (item.issued_ns != 0) {
+            const auto _tr_idx = BS::this_thread::get_index();
+            const uint16_t _tr_worker =
+                _tr_idx.has_value() ? static_cast<uint16_t>(*_tr_idx) : 0xFFFFu;
+            const uint32_t _tr_rg = static_cast<uint32_t>(item.rg_idx);
+            // Row-group row count from the manifest metadata (stable, known
+            // before decode starts) — every column chunk in one row group
+            // shares it, so column_stats[0] is representative.
+            const uint32_t _tr_rows =
+                (!item.column_stats.empty() && item.column_stats[0].num_values >= 0)
+                    ? static_cast<uint32_t>(item.column_stats[0].num_values) : 0;
+            draken_trace_record(DRAKEN_TC_QUEUE_WAIT, trace_node_id_,
+                item.corr_id, _tr_rg, _tr_worker, item.issued_ns, _tr_t_dequeue,
+                0, 0, 0, item.file_id);
+            const uint64_t t_read_end = _tr_t_dequeue + total_read_ns;
+            if (total_read_ns > 0)
+                draken_trace_record(DRAKEN_TC_IO_REQUEST, trace_node_id_,
+                    item.corr_id, _tr_rg, _tr_worker, _tr_t_dequeue, t_read_end,
+                    0, static_cast<uint32_t>(result.bytes_fetched), 0, item.file_id);
+            if (total_decode_ns > 0)
+                draken_trace_record(DRAKEN_TC_DECODE, trace_node_id_,
+                    item.corr_id, _tr_rg, _tr_worker, t_read_end,
+                    t_read_end + total_decode_ns, _tr_rows, 0, 0, item.file_id);
+        }
+
         // Q24 latmat: evaluate the pushed pass-1 predicate on this worker thread
         // (parallel across the decode pool) and attach the survivor bitmap. No-op if
         // no predicate pushed / unsupported shape → consumer falls back to serial.
@@ -1603,6 +1683,15 @@ class ParquetIOPipeline {
     // workers serialize decoded columns directly into pool-reserved regions.
     void set_pool_sink(PoolSink sink) {
         pool_sink_ = sink;
+    }
+
+    // docs/EXECUTION_TRACING_DESIGN.md: tag this pipeline's trace spans with the
+    // plan-node identity of the scan it backs (id space is opteryx::engine::
+    // Engine's node_id counter, shared for the query — the caller passes the
+    // same id compile_to_native tagged the scan's OpStats with). 0 (default) =
+    // untagged. Call before any submit; not currently wired from the compiler.
+    void set_trace_node_id(uint32_t node_id) {
+        trace_node_id_ = node_id;
     }
 
     // Phase 2: register a pushed dictionary decode-skip predicate for a column.

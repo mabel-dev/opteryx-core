@@ -6,8 +6,8 @@
 """
 Optimization Rule - Join Rewriter
 
-Type: Heuristic
-Goal: Faster Joins
+Type: Heuristic / Correctness
+Goal: Faster Joins, and closing the "no RIGHT OUTER JOIN operator" native gap
 
 Recognise the SQL anti-join idiom and rewrite to a native LEFT ANTI JOIN:
 
@@ -26,6 +26,19 @@ The rewrite is sound iff:
      the runtime LEFT ANTI operator emits only the preserved side.
 
 The runtime support already exists (filter_join.pyx, "left anti").
+
+Second, unconditional rewrite: any RIGHT OUTER JOIN that survives the pass
+above (i.e. didn't match the anti-join idiom) is canonicalised to LEFT OUTER
+with its legs swapped:
+
+    A RIGHT OUTER JOIN B ON ...  →  B LEFT OUTER JOIN A ON ...  (legs swapped)
+
+"RIGHT OUTER JOIN B preserving A's unmatched rows" and "LEFT OUTER JOIN A
+preserving A's unmatched rows" are the same relation with the leg labels
+swapped — there is no native RIGHT OUTER operator (the engine only implements
+LEFT OUTER: the preserved leg is always the probe), so every right-outer join
+must be expressed this way to run at all. This is a correctness rewrite, not
+a cost heuristic — it always applies, regardless of join size.
 """
 
 from opteryx.expression import NodeType
@@ -183,6 +196,33 @@ class JoinRewriteStrategy(OptimizationStrategy):
                 plan[filter_nid] = filter_node
 
             self.telemetry.optimization_join_rewrite_anti += 1
+
+        # Unconditional canonicalisation: any RIGHT OUTER join not already turned
+        # into a LEFT ANTI above (which itself does not stay "right outer") is
+        # rewritten to LEFT OUTER with its legs swapped — see module docstring.
+        # This always runs (not gated by size/idiom-matching): it's the only way
+        # a right-outer join can execute at all, since the engine has no native
+        # RIGHT OUTER mode.
+        for join_nid, join_node in get_nodes_of_type_from_logical_plan(
+            plan, (LogicalPlanStepType.Join,)
+        ):
+            if join_node.type != "right outer":
+                continue
+            join_node.type = "left outer"
+            join_node.left_relation_names, join_node.right_relation_names = (
+                join_node.right_relation_names,
+                join_node.left_relation_names,
+            )
+            join_node.left_columns, join_node.right_columns = (
+                join_node.right_columns,
+                join_node.left_columns,
+            )
+            left_readers = getattr(join_node, "left_readers", None)
+            right_readers = getattr(join_node, "right_readers", None)
+            join_node.left_readers, join_node.right_readers = right_readers, left_readers
+            flip_join_leg_labels(plan, join_nid)
+            plan[join_nid] = join_node
+            self.telemetry.optimization_join_rewrite_right_to_left_outer += 1
 
         return plan
 

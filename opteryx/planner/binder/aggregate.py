@@ -9,6 +9,7 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import derived
+from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
@@ -62,6 +63,37 @@ def visit_aggregate_and_group(
     identifier_columns = get_all_nodes_of_type(
         node.aggregates + node.groups, select_nodes=(NodeType.IDENTIFIER,)
     )
+    # COUNT(DISTINCT *): whole-row dedup needs the VALUE of every column in
+    # scope, unlike COUNT(*) which needs none — a WILDCARD operand is never an
+    # IDENTIFIER, so the walk above sees no dependency and the trim below (and
+    # the optimizer's projection pushdown, which reads node.columns too) would
+    # otherwise prune every source column out from under the dedup key. Retain
+    # them the same way a bare `SELECT *` does (project.py's wildcard
+    # expansion): one bound IDENTIFIER per schema column, deduped by identity.
+    if any(
+        agg.value == "COUNT"
+        and getattr(agg, "duplicate_treatment", None) == "Distinct"
+        and agg.parameters
+        and agg.parameters[0].node_type == NodeType.WILDCARD
+        for agg in node.aggregates
+    ):
+        seen_identities = {col.schema_column.identity for col in identifier_columns}
+        for schema_name, schema in context.schemas.items():
+            if schema_name == "$derived":
+                continue
+            for schema_col in schema.columns:
+                if schema_col.identity in seen_identities:
+                    continue
+                identifier_columns.append(
+                    LogicalColumn(
+                        node_type=NodeType.IDENTIFIER,
+                        source_column=schema_col.name,
+                        source=None,
+                        alias=schema_col.name,
+                        schema_column=schema_col,
+                    )
+                )
+                seen_identities.add(schema_col.identity)
     node.columns = list(node.aggregates) + identifier_columns
     all_identifiers = [node.schema_column.identity for node in node.columns]
     columns_to_keep = columns_to_keep.union(all_identifiers)

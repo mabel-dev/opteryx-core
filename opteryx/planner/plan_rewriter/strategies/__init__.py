@@ -15,6 +15,9 @@ from opteryx.planner.plan_rewriter.strategies.except_to_anti_join import (
 from opteryx.planner.plan_rewriter.strategies.exists_subquery_to_join import (
     ExistsSubqueryToJoinStrategy,
 )
+from opteryx.planner.plan_rewriter.strategies.full_outer_to_union import (
+    FullOuterToUnionStrategy,
+)
 from opteryx.planner.plan_rewriter.strategies.in_subquery_to_join import (
     InSubqueryToJoinStrategy,
 )
@@ -30,6 +33,7 @@ STRATEGIES: list = [
     WindowToJoinStrategy,          # runs first — aggregate Window nodes must be eliminated before join planning
     ExceptToAntiJoinStrategy,
     ExistsSubqueryToJoinStrategy,
+    FullOuterToUnionStrategy,
     IntersectToSemiJoinStrategy,
     IntersectExceptAllToWindowJoinStrategy,  # INTERSECT/EXCEPT ALL -> ROW_NUMBER + semi/anti join
     InSubqueryToJoinStrategy,

@@ -5,7 +5,7 @@
 
 from typing import List, Tuple
 
-from opteryx.expression import NodeType
+from opteryx.expression import ExpressionColumn, NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
@@ -41,6 +41,30 @@ def _columns_for_side(
     happens, some names resolve and some don't — the resolvable schemas already
     hold the merged columns, so trust them and ignore the collapsed siblings.
     Only fall back to the graph walk when *nothing* resolves.
+
+    A relation's `context.schemas` entry can carry duplicate SchemaColumn entries
+    for the same underlying column: `visit_project` merges one context snapshot
+    per projected column (`merge_schemas(*[ctx.schemas for ctx in group_contexts])`),
+    and `inner_binder` returns the *same* context object, unchanged, for every
+    already-resolvable column (a plain identifier, or a column bound earlier) —
+    so a Project with N such columns over one relation merges that relation's
+    schema with itself N times. Most consumers of `context.schemas` are immune
+    (they search-and-stop, or dedupe by identity during wildcard expansion), but
+    this function returns a flat, ordered column list whose *length* the caller
+    validates positionally — so the duplication must be undone here, by identity,
+    rather than fixed at the merge site (which many other paths depend on).
+
+    Summing per-relation schemas also can't see a projected column that isn't
+    backed by any relation — a literal or other computed expression (`1 AS a`,
+    `NULL AS a`) mixed in alongside real relation columns. `resolved_any` stays
+    True (the branch's real relations DO resolve), so the "nothing resolved"
+    fallback below never fires, and the literal silently drops out of the count.
+    Guard against that by also trying the graph-walk-to-Project lookup (the
+    branch's own bound `.columns`, unambiguously its true output) and preferring
+    it ONLY when it reports MORE columns than the schema-sum — i.e. only in
+    exactly this under-count case. This leaves every path where the schema-sum
+    already agrees (the common case, and the nested-set-op leg-collapse
+    tolerance this function was built for) byte-for-byte unchanged.
     """
     columns = []
     resolved_any = False
@@ -49,12 +73,39 @@ def _columns_for_side(
         if schema is not None:
             columns.extend(schema.columns)
             resolved_any = True
-    if resolved_any:
-        return columns
 
+    deduped = None
+    if resolved_any:
+        seen_identities = set()
+        deduped = []
+        for col in columns:
+            if col.identity in seen_identities:
+                continue
+            seen_identities.add(col.identity)
+            deduped.append(col)
+
+    branch_columns = _branch_project_columns(self, node, relation_names, context)
+
+    if deduped is not None:
+        if branch_columns is not None and len(branch_columns) > len(deduped):
+            return branch_columns
+        return deduped
+
+    if branch_columns is not None:
+        return branch_columns
+
+    raise KeyError(relation_names)
+
+
+def _branch_project_columns(self, node: Node, relation_names: List[str], context: BindingContext):
+    """Find a set-op branch's own bound Project columns by walking the graph.
+
+    Returns None if the branch (or a Project within it) cannot be located —
+    the caller decides what that means for its own resolution strategy.
+    """
     graph = getattr(self, "graph", None)
     if graph is None:
-        raise KeyError(relation_names)
+        return None
 
     set_op_nid = None
     for nid, n in graph.nodes(True):
@@ -62,7 +113,7 @@ def _columns_for_side(
             set_op_nid = nid
             break
     if set_op_nid is None:
-        raise KeyError(relation_names)
+        return None
 
     rel_set = set(relation_names)
     for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
@@ -104,7 +155,107 @@ def _columns_for_side(
                 for upstream_nid, _, _ in graph.ingoing_edges(cur):
                     descent.append(upstream_nid)
 
-    raise KeyError(relation_names)
+    return None
+
+
+def _branch_project_node(self, node: Node, relation_names: List[str]):
+    """Find a set-op branch's own Project (or Project-like) node by walking the graph.
+
+    Same matching/descent as `_branch_project_columns`, but returns the actual
+    graph node — so its `.columns` can be mutated in place — instead of a copy
+    of its bound SchemaColumns. Returns None if no such node can be located.
+    """
+    graph = getattr(self, "graph", None)
+    if graph is None:
+        return None
+
+    set_op_nid = None
+    for nid, n in graph.nodes(True):
+        if n is node:
+            set_op_nid = nid
+            break
+    if set_op_nid is None:
+        return None
+
+    rel_set = set(relation_names)
+    for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
+        stack = [child_nid]
+        seen = set()
+        matched = False
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            cur_node = graph[cur]
+            if getattr(cur_node, "alias", None) in rel_set:
+                matched = True
+                break
+            for upstream_nid, _, _ in graph.ingoing_edges(cur):
+                stack.append(upstream_nid)
+        if matched:
+            descent = [child_nid]
+            descent_seen = set()
+            while descent:
+                cur = descent.pop(0)
+                if cur in descent_seen:
+                    continue
+                descent_seen.add(cur)
+                cur_node = graph[cur]
+                if any(getattr(col, "schema_column", None) is not None for col in (cur_node.columns or [])):
+                    return cur_node
+                for upstream_nid, _, _ in graph.ingoing_edges(cur):
+                    descent.append(upstream_nid)
+
+    return None
+
+
+def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -> None:
+    """Wrap each of a UNION leg's bound columns in a CAST when it doesn't already
+    match the position's coerced (unified-across-both-legs) type.
+
+    Inserted fully bound (own `schema_column`) rather than through the binder's
+    CAST handling in `inner_binder`: this runs after the leg's own Project has
+    already been bound, so nothing will traverse into a freshly-inserted raw
+    CAST node to bind it. Mirrors the same pattern used for the CONCAT-argument
+    CAST wrapper in optimizer/strategies/predicate_rewriter.py.
+
+    `.value` is set to `str(target)` — the canonical ColumnType string form,
+    `parse_column_type`'s documented inverse — so anything that re-reads it
+    (EXPLAIN, re-serialization) sees a real, round-trippable type name rather
+    than a guessed keyword.
+
+    A NULL-typed LITERAL is retyped in place instead of CAST-wrapped: there is
+    no NULL-to-anything native cast kernel (a NULL literal carries no value to
+    convert), and none is needed — `CAST(NULL AS VARCHAR)` and "a VARCHAR-typed
+    NULL literal" are the same thing. `visit_case`'s LITERAL-branch coercion
+    (binder.py, "Coerce LITERAL branches to the resolved result type") is the
+    same idea for CASE branches; this is that pattern's NULL case.
+    """
+    for i, col in enumerate(columns):
+        if i >= len(coerced_types):
+            return
+        target = coerced_types[i]
+        if target is None:
+            continue
+        schema_column = getattr(col, "schema_column", None)
+        if schema_column is None:
+            continue
+        current_type = schema_column.column_type
+        if current_type is not None and current_type.category == target.category:
+            continue
+        if col.node_type == NodeType.LITERAL and col.value is None:
+            col.type = target
+            schema_column.column_type = target
+            continue
+        columns[i] = Node(
+            node_type=NodeType.CAST,
+            left=col,
+            value=str(target),
+            parameters=(),
+            alias=getattr(col, "alias", None),
+            schema_column=ExpressionColumn(name="", column_type=target),
+        )
 
 
 def _validate_set_operation_types(
@@ -138,6 +289,46 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
     # Validate and determine coerced types for UNION/INTERSECT/EXCEPT
     coerced_types = _validate_set_operation_types(self, node, context, "UNION")
     node.coerced_types = coerced_types
+
+    # Physically enforce the coercion: the executor concatenates each leg's
+    # columns by position with no type check of its own (UnionNode just selects
+    # column indices into a shared buffer — see compiler.py's UnionNode handling),
+    # so two legs whose actual column types differ (most commonly: a NULL literal
+    # on one side, a real typed column on the other) crash at morsel-combine time.
+    # `coerced_types` was computed but never applied anywhere else in the
+    # codebase.
+    #
+    # NOT reused here: `coerced_types` above is built from `_columns_for_side`,
+    # which (in its primary, non-fallback path) sums `context.schemas[rel].columns`
+    # — RELATION SCHEMA order, not the branch's actual SELECT-list order. Those
+    # only coincide when a branch happens to project columns in the underlying
+    # table's declared order; `SELECT name, id FROM $planets` (name before id,
+    # the schema's order is id-then-name) already disagrees. Applying that
+    # mis-ordered list positionally against `project.columns` silently pairs the
+    # wrong target type with the wrong column — caught by `make q` regressing
+    # `... UNION ...` with a `name, id` projection into an
+    # "Invalid digit in integer literal" CAST failure.
+    #
+    # Recompute per-position types directly from each side's own located Project
+    # (`_branch_project_node`), which is unambiguously in the branch's real
+    # output order. Best-effort: only touches a leg whose own Project node can
+    # be confidently located AND whose sibling side is too — anything else is
+    # left exactly as before, i.e. no behaviour change beyond fixing the
+    # concrete mismatch case.
+    left_project = _branch_project_node(self, node, node.left_relation_names)
+    right_project = _branch_project_node(self, node, node.right_relation_names)
+    if left_project is not None and right_project is not None:
+        left_cols, right_cols = left_project.columns, right_project.columns
+        if len(left_cols) == len(right_cols):
+            leg_coerced_types = []
+            for left_col, right_col in zip(left_cols, right_cols):
+                left_sc = getattr(left_col, "schema_column", None)
+                right_sc = getattr(right_col, "schema_column", None)
+                left_type = left_sc.column_type if left_sc is not None else None
+                right_type = right_sc.column_type if right_sc is not None else None
+                leg_coerced_types.append(find_compatible_type([left_type, right_type]))
+            _cast_leg_columns_to(left_cols, leg_coerced_types)
+            _cast_leg_columns_to(right_cols, leg_coerced_types)
 
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)

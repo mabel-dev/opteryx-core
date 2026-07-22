@@ -57,9 +57,18 @@ enum class AggFn : uint8_t {
     ArrayAgg = 7,        // ARRAY_AGG(col): one ARRAY per group; GROUP BY only
 };
 
+// AggSpec2.col_idx sentinels — named so a bare -1/-2 is never left for a future
+// reader to decode. Both are negative (never a real column index, which is
+// always >= 0), but each names a DIFFERENT "no single operand column" case —
+// disambiguated together with `fn`, never by value alone.
+constexpr int kAggNoOperand = -1;   // CountStar: no operand column
+constexpr int kAggWholeRow  = -2;   // CountDistinct: dedup over EVERY column in
+                                     // the stream (COUNT(DISTINCT *))
+
 struct AggSpec2 {
     AggFn fn;
-    int col_idx;        // operand column; < 0 only for CountStar
+    int col_idx;        // operand column; kAggNoOperand for CountStar,
+                         // kAggWholeRow for whole-row CountDistinct
     std::string name;   // output column identity
     // ARRAY_AGG modifiers — ignored by every other fn. DISTINCT/ORDER BY/LIMIT
     // all apply at finalize, AFTER the per-partition lists are merged: a worker
@@ -1176,7 +1185,10 @@ struct UngroupedAggSink : Sink {
     bool capture_meta(std::vector<AggColMeta>& meta, const MorselPtr& in, ErrCtx& err) {
         meta.resize(specs.size());
         for (size_t s = 0; s < specs.size(); ++s) {
-            if (specs[s].col_idx < 0) continue;   // CountStar
+            // CountStar (kAggNoOperand) and whole-row CountDistinct
+            // (kAggWholeRow) both have no SINGLE operand column to capture a
+            // type for — whole-row dedup keys every column at sink() time.
+            if (specs[s].col_idx < 0) continue;
             if (static_cast<size_t>(specs[s].col_idx) >= in->columns.size()) {
                 err.code = 1;
                 err.msg = "native engine: aggregate operand column missing from "
@@ -1236,7 +1248,29 @@ struct UngroupedAggSink : Sink {
         for (size_t s = 0; s < specs.size(); ++s) {
             AggCell& c = l.cells[s];
             c.rows += rows;
-            if (specs[s].col_idx < 0) continue;
+            if (specs[s].fn == AggFn::CountDistinct && specs[s].col_idx == kAggWholeRow) {
+                // COUNT(DISTINCT *): dedup key is every column in the stream,
+                // same per-column key_append DistinctSink's whole-row (empty
+                // on_idx) path uses — always the general partitioned table,
+                // never the typed-pair fast path (multi-column, mixed types).
+                // NULL participates as a normal value: whole-row identity,
+                // not the per-column NULL exclusion COUNT(DISTINCT col) does.
+                std::string dkey;
+                std::array<GBDedup, kGBParts>& DP = l.dparts[s];
+                size_t ncols = in->columns.size();
+                for (uint32_t i = 0; i < rows; ++i) {
+                    dkey.clear();
+                    for (size_t col = 0; col < ncols; ++col) {
+                        if (!key_append(dkey, in->columns[col].view, i, err))
+                            return SinkResult::CONTINUE;
+                    }
+                    uint64_t dh = XXH3_64bits(dkey.data(), dkey.size());
+                    DP[dh >> kGBPartShift].upsert(
+                        dh, 0, dkey.data(), static_cast<uint32_t>(dkey.size()));
+                }
+                continue;
+            }
+            if (specs[s].col_idx == kAggNoOperand) continue;
             const DrakenVector& v = in->columns[static_cast<size_t>(specs[s].col_idx)].view;
             if (specs[s].fn == AggFn::Count) {
                 for (uint32_t i = 0; i < v.length; ++i) {
@@ -1878,9 +1912,15 @@ struct GroupBySink : Sink {
         l.kinds.resize(specs.size());
         l.has_rows = false;
         for (size_t s = 0; s < specs.size(); ++s) {
-            if (specs[s].col_idx < 0) {
+            if (specs[s].col_idx == kAggNoOperand) {
                 l.kinds[s] = GBKind::Rows;
                 l.has_rows = true;
+                continue;
+            }
+            if (specs[s].fn == AggFn::CountDistinct && specs[s].col_idx == kAggWholeRow) {
+                // Whole-row dedup key is built from every input column at
+                // sink() time — no single operand column/type to capture.
+                l.kinds[s] = GBKind::CountDistinct;
                 continue;
             }
             const CxxColumn& c = in->columns[static_cast<size_t>(specs[s].col_idx)];
@@ -2140,6 +2180,43 @@ struct GroupBySink : Sink {
         for (size_t s = 0; s < nspecs; ++s) {
             GBKind kind = l.kinds[s];
             if (kind == GBKind::Rows) continue;
+            if (kind == GBKind::CountDistinct && specs[s].col_idx == kAggWholeRow) {
+                // COUNT(DISTINCT *) per group: same two-pass (serialize then
+                // probe) shape as the single-column serialized-bytes arm
+                // below, but the key loops EVERY column, group-entry-prefixed
+                // like the single-column case. NULL participates as a normal
+                // value (whole-row identity) — no sort_row_valid() skip.
+                l.cd_bytes.clear();
+                l.cd_off.clear(); l.cd_len.clear();
+                l.cd_ent.clear(); l.cd_hash.clear(); l.cd_part.clear();
+                size_t ncols = in->columns.size();
+                for (uint32_t i = 0; i < rows; ++i) {
+                    uint32_t e = l.mk_ent[i];
+                    uint32_t off0 = static_cast<uint32_t>(l.cd_bytes.size());
+                    l.cd_bytes.append(reinterpret_cast<const char*>(&e), sizeof(e));
+                    for (size_t col = 0; col < ncols; ++col) {
+                        if (!key_append(l.cd_bytes, in->columns[col].view, i, err))
+                            return SinkResult::CONTINUE;
+                    }
+                    uint32_t klen = static_cast<uint32_t>(l.cd_bytes.size()) - off0;
+                    l.cd_off.push_back(off0);
+                    l.cd_len.push_back(klen);
+                    l.cd_ent.push_back(e);
+                    l.cd_hash.push_back(
+                        XXH3_64bits(l.cd_bytes.data() + off0, klen));
+                    l.cd_part.push_back(
+                        static_cast<uint8_t>(l.mk_hash[i] >> kGBPartShift));
+                }
+                uint32_t npairs = static_cast<uint32_t>(l.cd_hash.size());
+                for (uint32_t k2 = 0; k2 < npairs; ++k2) {
+                    GBPartition& P = l.parts[l.cd_part[k2]];
+                    if (P.dedup[s].upsert(l.cd_hash[k2], l.cd_ent[k2],
+                                          l.cd_bytes.data() + l.cd_off[k2],
+                                          l.cd_len[k2]))
+                        P.lanes[s].valid[l.cd_ent[k2]] += 1;
+                }
+                continue;
+            }
             const DrakenVector& v =
                 in->columns[static_cast<size_t>(specs[s].col_idx)].view;
             bool want_max = specs[s].fn == AggFn::Max;
@@ -2554,7 +2631,14 @@ struct GroupBySink : Sink {
                         // renumbers under the merged partition, and the same
                         // pair may arrive from several workers — only a
                         // merged-table MISS counts.
-                        if (gb_cd_fixed(g.meta[s].type)) {
+                        //
+                        // Whole-row (kAggWholeRow) never captured a single
+                        // operand type, so g.meta[s] is the default
+                        // (DRAKEN_INT64) — gb_cd_fixed() on it would
+                        // misroute to the typed-pair table it never filled.
+                        // Always the general byte-serialized table for it.
+                        if (specs[s].col_idx != kAggWholeRow
+                                && gb_cd_fixed(g.meta[s].type)) {
                             GBDedupF& SF = src.dedupf[s];
                             GBDedupF& DF = merged.dedupf[s];
                             for (uint32_t pi = 0;

@@ -196,3 +196,11 @@ SELECT COUNT(DISTINCT val) FROM (VALUES (1), (1), (NULL), (NULL)) AS test(val)
 ----
 2
 
+# COUNT(DISTINCT *): whole-row identity, NOT COUNT(DISTINCT col)'s per-column
+# NULL exclusion — NULL is a normal value here. (1,'a') collapses to one row,
+# (NULL,'a') is a DIFFERENT, distinct row (not excluded), so the answer is 2.
+query I rowsort
+SELECT COUNT(DISTINCT *) FROM (VALUES (1, 'a'), (1, 'a'), (NULL, 'a'), (NULL, 'a')) AS test(a, b)
+----
+2
+

@@ -3,215 +3,128 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""Integration tests for IO waterfall tracing."""
+"""Integration tests for the execution-tracing waterfall (docs/EXECUTION_TRACING_DESIGN.md).
 
-import json
+Session.trace() is the single trace contact surface: it returns the raw
+``(blob, node_symbols, file_symbols)`` bundle for a query run with
+OPTERYX_TRACE=1. It is NOT part of QueryTelemetry (bytes read, time executing,
+etc. — always present; the trace bundle only exists when tracing is armed).
+``opteryx.tracing.interpret_trace()`` turns the raw bundle into meaningful,
+JSON-serializable span records. A prior version of both this test file and
+Session.trace() covered a different, coarser mechanism (dataset/file-discovery
+events keyed by session id) — that added no diagnostic value over the span
+waterfall and has been removed.
+"""
+
 import os
 import sys
-import tempfile
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../dev"))
 
 import pytest
-from io_waterfall.reader import TraceReader
+
+from io_waterfall.span_reader import SpanTraceReader
 
 from opteryx import config
 from opteryx.query_session import Session
+from opteryx.tracing import interpret_trace
 
 
 @pytest.mark.integration
 class TestIOWaterfallIntegration:
-    """Integration tests for complete IO waterfall tracing system."""
+    """Integration tests for the execution-tracing waterfall."""
 
-    def test_trace_buffering_on_query(self):
-        """When tracing is enabled the events produced by a real session are
-        retained in memory and accessible via ``session.trace()``.
-        """
+    def test_trace_not_armed_raises(self):
+        """Session.trace() raises when tracing was not enabled for the query,
+        rather than returning an empty/misleading bundle."""
+        original_trace = config.OPTERYX_TRACE
+        try:
+            config.OPTERYX_TRACE = False
+
+            session = Session()
+            for _ in session.execute_to_morsels("SELECT * FROM $planets"):
+                pass
+
+            with pytest.raises(RuntimeError):
+                session.trace()
+        finally:
+            config.OPTERYX_TRACE = original_trace
+
+    def test_trace_not_in_telemetry(self):
+        """Trace data must never appear in QueryTelemetry — it is a
+        different concern (an event stream that only exists when tracing is
+        on) from telemetry's always-present aggregates."""
         original_trace = config.OPTERYX_TRACE
         try:
             config.OPTERYX_TRACE = True
 
             session = Session()
-            session.execute("SELECT 1")
-            session.close()
+            for _ in session.execute_to_morsels("SELECT * FROM $planets"):
+                pass
 
-            events = list(session.trace())
-            assert len(events) >= 2
-            types = {e["type"] for e in events}
-            assert "trace_session_start" in types
-            assert "trace_session_end" in types
+            reading = session._telemetry._reading
+            assert "trace_spans" not in reading
+            assert "trace_symbols" not in reading
+            assert "trace_file_symbols" not in reading
+
+            telemetry_dict = session.telemetry
+            assert "trace_spans" not in telemetry_dict
         finally:
             config.OPTERYX_TRACE = original_trace
 
-    def test_trace_reader_parses_complete_trace(self):
-        """Test that TraceReader correctly parses a complete trace file."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            # Write a complete trace sequence
-            events = [
-                {
-                    "type": "trace_session_start",
-                    "timestamp": 0,
-                    "session_id": "test-1",
-                    "query": "SELECT * FROM data",
-                },
-                {
-                    "type": "file_discovered",
-                    "timestamp": 100,
-                    "file_id": "file1.parquet",
-                    "bytes_total": 1024,
-                },
-                {"type": "download_start", "timestamp": 101, "file_id": "file1.parquet"},
-                {
-                    "type": "download_complete",
-                    "timestamp": 150,
-                    "file_id": "file1.parquet",
-                    "bytes_received": 1024,
-                },
-                {"type": "decode_start", "timestamp": 151, "file_id": "file1.parquet"},
-                {
-                    "type": "decode_complete",
-                    "timestamp": 200,
-                    "file_id": "file1.parquet",
-                    "rows_decoded": 100,
-                },
-                {
-                    "type": "file_discovered",
-                    "timestamp": 102,
-                    "file_id": "file2.parquet",
-                    "bytes_total": 2048,
-                },
-                {"type": "download_start", "timestamp": 110, "file_id": "file2.parquet"},
-                {
-                    "type": "download_complete",
-                    "timestamp": 160,
-                    "file_id": "file2.parquet",
-                    "bytes_received": 2048,
-                },
-                {"type": "decode_start", "timestamp": 161, "file_id": "file2.parquet"},
-                {
-                    "type": "decode_complete",
-                    "timestamp": 220,
-                    "file_id": "file2.parquet",
-                    "rows_decoded": 200,
-                },
-            ]
-
-            for event in events:
-                f.write(json.dumps(event) + "\n")
-
-            trace_file = Path(f.name)
-
-        try:
-            reader = TraceReader(trace_file)
-
-            # Test metadata extraction
-            metadata = reader.metadata()
-            assert metadata["session_id"] == "test-1"
-            assert metadata["query"] == "SELECT * FROM data"
-
-            # Test file timelines
-            timelines = reader.file_timelines()
-            assert len(timelines) == 2
-            assert "file1.parquet" in timelines
-            assert "file2.parquet" in timelines
-
-            file1_timeline = timelines["file1.parquet"]
-            assert file1_timeline["discovered"] == 100
-            assert file1_timeline["download_start"] == 101
-            assert file1_timeline["download_complete"] == 150
-            assert file1_timeline["decode_start"] == 151
-            assert file1_timeline["decode_complete"] == 200
-
-            # Test statistics
-            stats = reader.statistics()
-            assert stats["total_files"] == 2
-            assert stats["total_bytes"] == 3072  # 1024 + 2048
-            assert stats["total_rows"] == 300  # 100 + 200
-            assert stats["download_phase_duration_ms"] > 0
-            assert stats["max_concurrent_downloads"] in [1, 2]  # Could be 1 or 2
-
-        finally:
-            trace_file.unlink()
-
-    def test_real_query_generates_rich_trace(self):
-        """Execute a simple parquet scan and confirm footer/column/rowgroup events."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            parquet_file = Path(tmpdir) / "data.parquet"
-
-            # write a tiny parquet
-            import pandas as pd
-            import pyarrow as pa
-            import pyarrow.parquet as pq
-
-            df = pd.DataFrame({"x": [1, 2, 3]})
-            pq.write_table(pa.Table.from_pandas(df), parquet_file)
-
-            original_trace = config.OPTERYX_TRACE
-            try:
-                config.OPTERYX_TRACE = True
-
-                session = Session()
-                # execute the query and drain results
-                list(session.execute(f"SELECT * FROM '{parquet_file}'"))
-
-                # pull the in‑memory trace events
-                events = list(session.trace())
-
-                # we expect at least one footer event and one column decode event
-                assert any(e.get("component") == "footer" for e in events), events
-                assert any(e.get("component") == "column" for e in events), events
-                assert any(e.get("component") == "rowgroup" for e in events), events
-                # connector tag should be added by filesystem telemetry
-                assert any(
-                    e.get("connector") == "LOCAL" or e.get("connector") == "FILESYSTEM"
-                    for e in events
-                ), events
-            finally:
-                config.OPTERYX_TRACE = original_trace
-
-    def test_sampling_rate(self):
-        """Sample rate 0 should suppress file-level events entirely."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            parquet_file = Path(tmpdir) / "data.parquet"
-
-            import pandas as pd
-            import pyarrow as pa
-            import pyarrow.parquet as pq
-
-            df = pd.DataFrame({"x": [1, 2]})
-            pq.write_table(pa.Table.from_pandas(df), parquet_file)
-
-            original_trace = config.OPTERYX_TRACE
-            original_rate = config.OPTERYX_TRACE_SAMPLE_RATE
-            try:
-                config.OPTERYX_TRACE = True
-                config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
-
-                session = Session()
-                list(session.execute(f"SELECT * FROM '{parquet_file}'"))
-
-                events = list(session.trace())
-                # expect only session events when sample rate is zero
-                assert all(e["type"].startswith("trace_session") for e in events), events
-            finally:
-                config.OPTERYX_TRACE = original_trace
-
-    def test_tracing_disabled_has_no_overhead(self):
-        """Test that when tracing is disabled, there's minimal overhead."""
-        # This test verifies the pattern: when disabled, record_event is a no-op
+    def test_real_query_generates_span_waterfall(self):
+        """Execute a real parquet scan with tracing on and confirm the native
+        span waterfall carries IO and operator activity, correlated and
+        resolvable back to plan-node identity / file path."""
         original_trace = config.OPTERYX_TRACE
         try:
-            config.OPTERYX_TRACE = False
+            config.OPTERYX_TRACE = True
 
-            from opteryx.tracing.event_recorder import record_event
+            session = Session()
+            for _ in session.execute_to_morsels(
+                "SELECT * FROM testdata.satellites WHERE planetId > 3"
+            ):
+                pass
 
-            # Recording events when disabled should be instant
-            for _ in range(1000):
-                record_event("test", value=1)
+            blob, node_symbols, file_symbols = session.trace()
+            assert blob, "expected a non-empty span blob"
 
-            # No exception should be raised
-            # This is more of a smoke test to ensure disabled mode works
+            # opteryx.tracing.interpret_trace() is the canonical binary ->
+            # meaningful conversion — exercise it directly, not just through
+            # the dev-tool reader built on top of it.
+            resolved = interpret_trace(blob, node_symbols, file_symbols)
+            assert resolved
+            assert any(r["type"] == "op_exec" and r["operator_name"] for r in resolved)
+            assert any(
+                r["type"] == "decode" and r["file"] and r["file"].endswith("satellites.parquet")
+                for r in resolved
+            )
 
+            reader = SpanTraceReader(blob, node_symbols, file_symbols)
+
+            # IO waterfall rows: at least one row-group gather, resolvable to a
+            # real file path and carrying decoded row/byte counts.
+            operations = reader.operation_timelines()
+            assert operations, "expected at least one row-group operation"
+            op = operations[0]
+            assert op["file_id"] and op["file_id"].endswith("satellites.parquet")
+            assert op["rows_decoded"] > 0
+            assert op["bytes_received"] > 0
+            assert op["download_start"] is not None
+            assert op["decode_start"] is not None
+
+            # Operator execution waterfall: at least one operator span,
+            # resolvable to a plan-node identity via node_symbols.
+            exec_ops, _t0, total_duration = reader.exec_timelines()
+            assert exec_ops, "expected at least one operator span"
+            assert total_duration is not None and total_duration >= 0
+            assert all(op["operator_name"] != "unknown" for op in exec_ops)
+
+            profiles = reader.operator_profiles()
+            assert profiles
+
+            stats = reader.statistics()
+            assert stats["total_files"] == 1
+            assert stats["total_rows"] > 0
         finally:
             config.OPTERYX_TRACE = original_trace

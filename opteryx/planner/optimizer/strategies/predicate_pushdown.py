@@ -680,6 +680,17 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         relations={
                             n.source for n in get_all_nodes_of_type(node, (NodeType.IDENTIFIER,))
                         },
+                        # Marks this Filter as carved out of THIS join's own ON
+                        # clause (as opposed to a genuine WHERE-clause predicate
+                        # collected from above). OUTER-join handling below must
+                        # tell the two apart: a WHERE predicate on the build side
+                        # correctly applies post-join (SQL WHERE semantics — see
+                        # the `problematic`/`_dump_above` handling), but an ON
+                        # conjunct on the build side is a match-candidate filter
+                        # and must apply BEFORE the join, or it wrongly collapses
+                        # LEFT OUTER to INNER (NULL build columns on unmatched
+                        # preserved rows fail the literal comparison).
+                        from_join_on=True,
                     )
                     for node in new_predicates
                 )
@@ -705,19 +716,44 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     return False
 
                 if node.type.startswith("left"):
+                    # An ON-clause conjunct that references only the build
+                    # (right) side is a match-candidate filter, not a WHERE
+                    # predicate — it must apply BEFORE the join (a pre-filter
+                    # on the right leg), never via _dump_above (post-join),
+                    # which would apply `NULL op literal` to every unmatched
+                    # preserved row and silently turn LEFT OUTER into INNER.
+                    # Leave it uncollected here so it keeps flowing down the
+                    # traversal like any ordinary single-relation predicate,
+                    # landing at the right relation's scan.
+                    on_clause_build_filters = [
+                        p
+                        for p in context.collected_predicates
+                        if getattr(p, "from_join_on", False)
+                        and all(
+                            i.source in node.right_relation_names
+                            for i in get_all_nodes_of_type(p.condition, (NodeType.IDENTIFIER,))
+                        )
+                    ]
+                    other_predicates = [
+                        p
+                        for p in context.collected_predicates
+                        if p not in on_clause_build_filters
+                    ]
+
                     problematic = any(
                         i.source in node.right_relation_names
                         or i.source not in node.all_relations
-                        for predicate in context.collected_predicates
+                        for predicate in other_predicates
                         for i in get_all_nodes_of_type(predicate.condition, (NodeType.IDENTIFIER,))
                     )
                     # 1887 - if anything can't be pushed past this (outer) join, keep the
                     # pushable-here ones above it and let the rest fall through to be
                     # restored to their valid origins.
                     if problematic:
-                        context.collected_predicates = [
-                            p for p in context.collected_predicates if not _dump_above(p)
+                        other_predicates = [
+                            p for p in other_predicates if not _dump_above(p)
                         ]
+                    context.collected_predicates = on_clause_build_filters + other_predicates
                 elif node.type not in ("cross join", "inner"):
                     # dump all the predicates
                     # IMPROVE: push past SEMI and ANTI joins

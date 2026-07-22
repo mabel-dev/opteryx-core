@@ -128,8 +128,20 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     uuid_remap = {}  # old_uuid -> new_uuid for updating join readers
 
     # first we collection the relations
+    #
+    # Scan is the common case (a real dataset), but FunctionDataset (VALUES, UNNEST,
+    # GENERATE_SERIES, ...) also introduces a relation alias that column references and
+    # join/union relation-name lists can point at — it must be renamed too, or a clone of
+    # a subplan whose only relations are FunctionDataset nodes (e.g. a FULL OUTER JOIN
+    # between two VALUES clauses) collides with the original names it was cloned from.
+    # Guard on a non-empty alias: some FunctionDataset nodes (READ_JSONL/READ_PARQUET) are
+    # not required to carry one, and mapping `None` as a relations-dict key would make
+    # every unrelated `.source is None` column reference match it.
     for nid, node in [
-        (nid, node) for (nid, node) in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan
+        (nid, node)
+        for (nid, node) in plan.nodes(True)
+        if node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset)
+        and node.alias
     ]:
         alias = f"{prefix}{random_string(4)}"
         unique_id = random_string(32)

@@ -4,11 +4,17 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-CLI tool for generating waterfall charts from IO traces.
+CLI tool for generating waterfall charts from execution traces
+(docs/EXECUTION_TRACING_DESIGN.md).
 
 Usage:
-    PYTHONPATH=dev python -m io_waterfall <trace_file> [--output OUTPUT]
-    PYTHONPATH=dev python -m io_waterfall stats <trace_file>
+    PYTHONPATH=dev python -m io_waterfall <trace_file.trace.json> [--output OUTPUT]
+    PYTHONPATH=dev python -m io_waterfall stats <trace_file.trace.json>
+
+A .trace.json file is produced by dev.io_waterfall.span_reader.dump_trace()
+right after running a query with OPTERYX_TRACE=1 — see that module's
+docstring. This is NOT the old .jsonl event format (removed; its emitters
+were dead code with zero call sites).
 """
 
 import argparse
@@ -16,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .generator import generate_waterfall_html
-from .reader import TraceReader
+from .span_reader import load_trace
 
 
 def main():
@@ -32,14 +38,14 @@ def main():
     trace_parser = subparsers.add_parser(
         "trace", help="Generate waterfall HTML chart from trace file"
     )
-    trace_parser.add_argument("trace_file", help="Path to .jsonl trace file")
+    trace_parser.add_argument("trace_file", help="Path to .trace.json trace file")
     trace_parser.add_argument(
         "--output", "-o", help="Output HTML file path (default: trace_file.html)"
     )
 
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Print statistics from trace file")
-    stats_parser.add_argument("trace_file", help="Path to .jsonl trace file")
+    stats_parser.add_argument("trace_file", help="Path to .trace.json trace file")
 
     # Handle positional argument without subcommand (for convenience)
     parser.add_argument(
@@ -88,10 +94,10 @@ def cmd_trace(trace_file: str, output_file: str = None) -> None:
 
 def cmd_stats(trace_file: str) -> None:
     """Print statistics from trace file."""
-    reader = TraceReader(trace_file)
+    reader = load_trace(trace_file)
     stats = reader.statistics()
 
-    print("\nIO Trace Statistics")
+    print("\nExecution Trace Statistics")
     print("=" * 50)
     print()
     print(f"  Total Files:             {stats['total_files']}")
@@ -110,11 +116,10 @@ def cmd_stats(trace_file: str) -> None:
     print()
     print(f"  Avg Download/Op:         {_format_ms(stats['avg_download_time_ms'])}")
     print(f"  Avg Decode/Op:           {_format_ms(stats['avg_decode_time_ms'])}")
-    print(f"  Max Concurrent Downloads: {stats['max_concurrent_downloads']}")
-    if stats.get("max_concurrent_downloads_by_component"):
-        print("  Max Concurrent by Component:")
-        for component, count in sorted(stats["max_concurrent_downloads_by_component"].items()):
-            print(f"    - {component}: {count}")
+    print()
+    print(f"  Peak Queued:             {stats.get('max_concurrent_queued', 0)}")
+    print(f"  Peak Downloading:        {stats['max_concurrent_downloads']}")
+    print(f"  Peak Decoding:           {stats.get('max_concurrent_decodes', 0)}")
     print()
 
 

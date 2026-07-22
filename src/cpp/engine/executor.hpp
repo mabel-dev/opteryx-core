@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "operator.hpp"
+#include "trace.hpp"
 #include "../bs_pool_bridge_c.h"
 
 namespace opteryx::engine {
@@ -95,9 +96,16 @@ inline void run_worker(WorkerCtx* ctx) {
             ss.bytes_in.fetch_add(telem_nbytes(m), relaxed);
             uint64_t t0 = telem_now_ns();
             uint64_t c0 = telem_cpu_now_ns();
+            // TC_SINK: closes the "operator waterfall goes blank for a plan
+            // with no Operator-role nodes" gap — a Source->Sink-only pipeline
+            // (e.g. scan with a baked-in residual filter -> TopN/Sort) had
+            // NOTHING to show before this, even on real, expensive queries.
+            TraceHandle sh = trace_begin(TC_SINK, ss.node_id, 0, 0xFFFFFFFFu, ctx->w);
             p.sink->sink(m, *ctx->gsink, *lsink, e);
             ss.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
             ss.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
+            trace_end(sh, m ? static_cast<uint32_t>(m->num_rows()) : 0,
+                      static_cast<uint32_t>(telem_nbytes(m)));
             return;
         }
         OpStats& os = p.operators[stage]->stats;
@@ -108,9 +116,16 @@ inline void run_worker(WorkerCtx* ctx) {
         while (true) {
             uint64_t t0 = telem_now_ns();
             uint64_t c0 = telem_cpu_now_ns();
+            // Phase 1 of docs/EXECUTION_TRACING_DESIGN.md: TC_OP_EXEC span, same
+            // bracket as the always-on exec_ns/cpu_ns sums above — a no-op branch
+            // when OPTERYX_TRACE is off (trace_begin short-circuits on the disabled
+            // gate before touching the clock).
+            TraceHandle th = trace_begin(TC_OP_EXEC, os.node_id, 0, 0xFFFFFFFFu, ctx->w);
             OpResult orr = p.operators[stage]->execute(m, *op_states[stage], out, e);
             os.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);  // SELF time — excludes forward
             os.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
+            trace_end(th, out ? static_cast<uint32_t>(out->num_rows()) : 0,
+                      static_cast<uint32_t>(telem_nbytes(out)));
             if (e.code != 0) return;
             if (orr == OpResult::NEED_INPUT) return;       // consumed, no output
             os.rows_out.fetch_add(out ? out->num_rows() : 0, relaxed);
@@ -128,9 +143,15 @@ inline void run_worker(WorkerCtx* ctx) {
         if (p.halt != nullptr && p.halt->load(std::memory_order_relaxed)) break;
         uint64_t t0 = telem_now_ns();
         uint64_t c0 = telem_cpu_now_ns();
+        // TC_SOURCE_PULL: same gap-closing rationale as TC_SINK above — this
+        // is the ONLY per-morsel timing signal for a scan whose predicate is
+        // baked in rather than a separate Operator (GCS/trampoline scans).
+        TraceHandle sph = trace_begin(TC_SOURCE_PULL, src.node_id, 0, 0xFFFFFFFFu, ctx->w);
         SourceResult sr = p.source->get_morsel(*ctx->gsrc, *lsrc, in, e);
         src.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
         src.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
+        trace_end(sph, in ? static_cast<uint32_t>(in->num_rows()) : 0,
+                  static_cast<uint32_t>(telem_nbytes(in)));
         if (e.code != 0) return;
         if (sr == SourceResult::FINISHED) break;
         src.calls.fetch_add(1, relaxed);

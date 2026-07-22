@@ -708,6 +708,12 @@ class _Compiler:
 
     # ---- aggregate parsing --------------------------------------------------------
 
+    # AggSpec2.col_idx sentinels — MUST match src/cpp/engine/native_group_sinks.hpp's
+    # kAggNoOperand / kAggWholeRow exactly (named there for the same reason: a bare
+    # -1/-2 is never left for a future reader to decode). Never a real column index.
+    _AGG_NO_OPERAND = -1   # CountStar: no operand column
+    _AGG_WHOLE_ROW = -2    # CountDistinct: dedup over every column (COUNT(DISTINCT *))
+
     _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG"}
     _AGG_OPERAND_TYPES = _NUMERIC_TYPES + (
         DrakenType.DECIMAL, DrakenType.DECIMAL128, DrakenType.DATE32,
@@ -808,8 +814,17 @@ class _Compiler:
                 _unsupported(f"{func}(DISTINCT ...)")
             if func == "COUNT" and operand.node_type == NodeType.WILDCARD:
                 if distinct:
-                    _unsupported("COUNT(DISTINCT *)")
-                specs.append((sc.identity, "CountStar", -1))
+                    # COUNT(DISTINCT *): whole-row dedup — the native sink
+                    # key_appends EVERY stream column (same as plain SELECT
+                    # DISTINCT's empty on_idx path), so every column must
+                    # clear the same key-type gate DISTINCT/GROUP BY do.
+                    for identity in layout:
+                        self._check_key_type(
+                            "COUNT(DISTINCT *)", self._layout_name(identity),
+                            self._layout_type(None, identity))
+                    specs.append((sc.identity, "CountDistinct", self._AGG_WHOLE_ROW))
+                    continue
+                specs.append((sc.identity, "CountStar", self._AGG_NO_OPERAND))
                 continue
             psc = getattr(operand, "schema_column", None)
             if psc is None:
@@ -1566,9 +1581,17 @@ class _Compiler:
 
         left_cols = list(getattr(node, "left_columns", None) or [])
         right_cols = list(getattr(node, "right_columns", None) or [])
-        if is_cross:
-            # No keys: build the RIGHT leg (typically the small/scalar side, e.g.
-            # a single-row aggregate) and probe with the LEFT.
+        # A pure theta nested_loop join (e.g. `ON a > b`, no equi conjunct at all) has
+        # no columns to key on — extract_join_fields only ever populates left_columns/
+        # right_columns from Eq conjuncts (opteryx/planner/binder/join_helpers.py), so
+        # this is the same zero-key shape CROSS already uses (every build row shares
+        # one empty key -> every probe row matches every build row); the nested_loop
+        # residual filter below then narrows that cartesian product down to the real
+        # theta predicate. A MIXED equi+theta join still has real keys here and takes
+        # the normal keyed path, with the untouched theta conjunct applied as the same
+        # residual filter.
+        zero_key = is_cross or (join_type == "nested_loop" and not left_cols and not right_cols)
+        if zero_key:
             left_cols, right_cols = [], []
         elif not left_cols or len(left_cols) != len(right_cols):
             _unsupported("a join without aligned key lists")
@@ -1920,15 +1943,24 @@ def compile_to_native(plan, pool=None):
             compiler.scan_residual_reasons, compiler.footer_fetch_ns)
 
 
-def execute_native(plan, telemetry=None):
+def execute_native(plan, telemetry=None, trace_sink=None):
     """THE data executor: compile to the native pipeline graph and run it. Returns the
     ``(generator, ResultType)`` contract the cursor consumes. The generator drains the
-    engine's output queue; the engine runs on its own native driver + worker pool."""
+    engine's output queue; the engine runs on its own native driver + worker pool.
+
+    ``trace_sink``: an optional opteryx.models.trace_bundle.TraceBundle. When
+    tracing is armed (config.OPTERYX_TRACE), the drained span blob and symbol
+    tables are written onto it at teardown — NOT onto ``telemetry`` (see
+    TraceBundle's docstring for why trace data must not live in telemetry)."""
     from opteryx import config
     from opteryx.compiled.morsel_queue import MQ_FINISHED
     from opteryx.operators._operators import NativeErrorSlot
     from opteryx.operators._operators import build_terminal_exc
     from opteryx.operators._operators import native_plan_execute
+    from opteryx.operators._operators import native_trace_drain
+    from opteryx.operators._operators import native_trace_drain_file_symbols
+    from opteryx.operators._operators import native_trace_set_enabled
+    from opteryx.operators._operators import native_trace_start_query
 
     import time as _t
 
@@ -1989,6 +2021,13 @@ def execute_native(plan, telemetry=None):
     # span of this run when the config flag is set. Disarmed by default → the
     # instrumented sites pay a single-branch check and nothing else.
     instrument_gil = bool(config.OPTERYX_INSTRUMENT_ENGINE)
+    # docs/EXECUTION_TRACING_DESIGN.md: arm native span recording for this run when
+    # OPTERYX_TRACE is set AND the caller gave us somewhere to put the result
+    # (trace_sink) — recording with nowhere to drain to would just be wasted
+    # work. Runtime-gated (the bridge's g_trace_enabled), not compile-time —
+    # off by default costs one predicted atomic-load branch per span site and
+    # nothing else.
+    trace_enabled = bool(config.OPTERYX_TRACE) and trace_sink is not None
 
     # Completion + terminal-error coordination is fully native: the detached driver
     # signals completion by finishing ``out_q`` (its last act) and records any terminal
@@ -2023,6 +2062,13 @@ def execute_native(plan, telemetry=None):
             # Arm BEFORE the driver submits so every worker sees the flag set.
             instr_gil_reset()
             instr_gil_set_enabled(True)
+        _trace_query_seq = 0
+        if trace_enabled:
+            # Bump the generation and arm the gate BEFORE the driver submits, same
+            # ordering requirement as the GIL instrument above — every worker must
+            # see the new generation/enabled flag before it starts recording.
+            _trace_query_seq = native_trace_start_query()
+            native_trace_set_enabled(True)
         _t0 = _t.perf_counter_ns()
         handle = native_plan_execute(pool, nplan, dop, out_q, errslot)
         _submit_ns = _t.perf_counter_ns() - _t0
@@ -2148,6 +2194,29 @@ def execute_native(plan, telemetry=None):
                     telemetry._reading["gil_held_ns"] = instr_gil_total_ns()
                     telemetry._reading["worker_gil_sites"] = instr_gil_worker_report()
                 instr_gil_set_enabled(False)
+            if trace_enabled:
+                # Drain after every worker has joined — the same precondition
+                # collect_op_stats relies on below, so this reads finalized arenas.
+                # Disarm before draining is unnecessary (drain doesn't race new
+                # spans: no worker is running), but disarm promptly regardless so a
+                # pooled worker picking up the NEXT (untraced) query's first task
+                # can't record into a stale generation before that query arms its
+                # own start_query().
+                native_trace_set_enabled(False)
+                _trace_blob, _trace_truncated = native_trace_drain(_trace_query_seq)
+                if trace_sink is not None:
+                    trace_sink.blob = _trace_blob
+                    trace_sink.node_symbols = nplan.collect_trace_symbols()
+                    trace_sink.file_symbols = native_trace_drain_file_symbols()
+                    trace_sink.truncated = _trace_truncated
+                if _trace_truncated and telemetry is not None:
+                    # Truncation is a fact about how the query ran (a warning),
+                    # not trace payload — reported through telemetry.messages
+                    # like any other execution warning, not onto trace_sink.
+                    telemetry.add_message(
+                        "trace truncated: a worker exceeded its span arena "
+                        "capacity (OPTERYX_TRACE_ARENA_SPANS) — timeline is incomplete"
+                    )
             _ts0 = _t.perf_counter_ns()
             # Return the thread-local engine pool to idle for the NEXT query on
             # this thread — do NOT shut it down (which would join its `dop` worker

@@ -144,14 +144,12 @@ after every strategy and raises (naming the offending strategy) on corruption.
 Off by default — adds per-strategy validation cost only when enabled."""
 
 OPTERYX_TRACE: bool = bool(get("OPTERYX_TRACE", "").lower() in ("1", "true", "yes"))
-"""Enable IO layer tracing.  When true, events are recorded in memory and
-can be retrieved via :func:`~opteryx.query_session.Session.trace`."""
-OPTERYX_TRACE_SAMPLE_RATE: float = float(get("OPTERYX_TRACE_SAMPLE_RATE", 1.0))
-"""Sampling rate for traced files (0.0–1.0). Defaults to 1.0 (100%).
-When tracing is enabled, each event carrying a ``file_id`` will be skipped
-with probability ``1 - OPTERYX_TRACE_SAMPLE_RATE``.  This provides a simple
-way to reduce overhead on large scans by only recording a fraction of files.
-"""
+"""Arm the native execution-trace span waterfall for the span of one query
+(docs/EXECUTION_TRACING_DESIGN.md). When true, IO/operator spans are recorded
+natively and retrievable via :func:`~opteryx.query_session.Session.trace`.
+Truncation (per-thread span arena capacity) is controlled by
+``OPTERYX_TRACE_ARENA_SPANS``, not a sampling rate — see
+draken/core/trace.hpp's trace_arena_capacity()."""
 OPTERYX_INSTRUMENT_ENGINE: bool = str(
     get("OPTERYX_INSTRUMENT_ENGINE", "0")
 ).lower() in (
@@ -349,8 +347,6 @@ LOCAL_STORE_ROOT: str = get("OPTERYX_LOCAL_STORE", "./.opteryx")
 # FEATURE FLAGS
 class Features:
     # Feature flags are used to enable or disable experimental features.
-    disable_nested_loop_join = get_bool("FEATURE_DISABLE_NESTED_LOOP_JOIN", False)
-    force_nested_loop_join = get_bool("FEATURE_FORCE_NESTED_LOOP_JOIN", False)
     use_draken_ops_kernels = get_bool("FEATURE_USE_DRAKEN_OPS_KERNELS", False)
     disable_predicate_ordering = get_bool("FEATURE_DISABLE_PREDICATE_ORDERING", False)
     disable_predicate_pushdown = get_bool("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False)

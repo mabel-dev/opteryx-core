@@ -4,34 +4,50 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-HTML waterfall chart generator for IO traces.
+HTML waterfall chart generator for execution traces.
 
-Creates an interactive ECharts-based visualization showing file operations
-on a timeline (like Chrome DevTools Network tab).
+Creates an interactive ECharts-based visualization showing IO and operator
+activity on a timeline (like Chrome DevTools Network tab).
+
+Reads the native span format (docs/EXECUTION_TRACING_DESIGN.md) via
+SpanTraceReader/load_trace — NOT the old .jsonl event stream (dead: the
+emitters it expected had zero call sites and have been removed). See
+dev/io_waterfall/span_reader.py's module docstring for how to produce a
+.trace.json file to point this at.
 """
 
 import json
 from pathlib import Path
 from typing import Optional
 
-from .reader import TraceReader
+from .span_reader import SpanTraceReader
+from .span_reader import load_trace
 
 
 def generate_waterfall_html(trace_file: str, output_file: Optional[str] = None) -> str:
     """
-    Generate an interactive HTML waterfall chart from a trace file.
+    Generate an interactive HTML waterfall chart from a .trace.json file
+    (dev.io_waterfall.span_reader.dump_trace's output).
 
     Args:
-        trace_file: Path to .jsonl trace file
-        output_file: Output HTML path (default: trace_file.html)
+        trace_file: Path to .trace.json trace file
+        output_file: Output HTML path (default: trace_file with .html suffix)
 
     Returns:
         Path to the generated HTML file
     """
     trace_path = Path(trace_file)
-    output_path = Path(output_file or str(trace_path).replace(".jsonl", ".html"))
+    output_path = Path(output_file or str(trace_path).replace(".trace.json", "").replace(".json", "") + ".html")
 
-    reader = TraceReader(trace_file)
+    reader = load_trace(trace_file)
+    return generate_waterfall_html_from_reader(reader, output_path)
+
+
+def generate_waterfall_html_from_reader(reader: SpanTraceReader, output_path: str) -> str:
+    """Generate the HTML waterfall directly from an in-memory SpanTraceReader —
+    the no-file-round-trip path for a script that just ran a traced query and
+    has ``session.trace()``'s (blob, node_symbols, file_symbols) in hand."""
+    output_path = Path(output_path)
     metadata = reader.metadata()
     operations = reader.operation_timelines()
     stats = reader.statistics()
@@ -106,7 +122,12 @@ def _build_echarts_config(operations: list, metadata: dict) -> dict:
         """Normalize a timestamp to seconds relative to first event."""
         return (v - min_time) if v is not None else None
 
-    # Short names for y-axis labels
+    # Short names for y-axis labels — index i here is the STABLE base order
+    # (span_reader.py's operation_timelines() sorts by corr_id, i.e. gather-
+    # issue order) that every catIndex below refers to. Display order (the
+    # queue/download/decode dropdown) is a client-side remap on top of this
+    # fixed base — see sort_orders/pos_in_mode below and the JS in
+    # _render_html_template.
     short_names = [op.get("label", "unknown") for op in operations]
 
     # Data format (array per operation):
@@ -142,7 +163,27 @@ def _build_echarts_config(operations: list, metadata: dict) -> dict:
             ]
         )
 
+    # Three display orderings (dropdown modes), each a permutation of base
+    # indices [0, len(operations)) sorted by that phase's start time — rows
+    # with no timestamp for that phase (e.g. never got as far as decoding)
+    # sort to the end rather than colliding at t=0. pos_in_mode is the
+    # inverse (base index -> display position) so the JS can remap a row's
+    # catIndex in O(1) instead of re-deriving the sort per redraw.
+    def _sort_key(field):
+        return lambda i: operations[i].get(field) if operations[i].get(field) is not None else float("inf")
+
+    sort_orders = {
+        "queue": sorted(range(len(operations)), key=_sort_key("buffer_start")),
+        "download": sorted(range(len(operations)), key=_sort_key("download_start")),
+        "decode": sorted(range(len(operations)), key=_sort_key("decode_start")),
+    }
+    pos_in_mode = {
+        mode: {orig: pos for pos, orig in enumerate(order)} for mode, order in sort_orders.items()
+    }
+
     return {
+        "sort_orders": sort_orders,
+        "pos_in_mode": pos_in_mode,
         "title": {
             "text": "IO Waterfall Chart",
             "subtext": f"Query: {metadata.get('query', 'Unknown')[:120]}",
@@ -479,6 +520,15 @@ def _render_html_template(
             </div>
         </div>
 
+        <div class="io-controls" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <label for="io-sort-mode" style="font-size:13px;color:#666;">Order rows by:</label>
+            <select id="io-sort-mode" style="font-size:13px;padding:3px 6px;">
+                <option value="queue">Queue wait start</option>
+                <option value="download">Download start</option>
+                <option value="decode">Decode start</option>
+            </select>
+        </div>
+
         <div id="io-chart"></div>
 
         <div class="legend">
@@ -488,7 +538,7 @@ def _render_html_template(
             </div>
             <div class="legend-item">
                 <div class="legend-color" style="background:#F5A623"></div>
-                <span>Buffer Phase</span>
+                <span>Queue Wait</span>
             </div>
             <div class="legend-item">
                 <div class="legend-color" style="background:#7ED321"></div>
@@ -569,7 +619,7 @@ def _render_html_template(
                  + 'Component: ' + component + '<br/>'
                  + 'Row Group: ' + rg + '<br/>'
                  + 'Download: ' + dl + '<br/>'
-                 + 'Buffer: '   + buf + '<br/>'
+                 + 'Queue: '    + buf + '<br/>'
                  + 'Decode: '   + dec + '<br/>'
                  + 'Bytes: ' + bytes.toLocaleString() + '<br/>'
                  + 'Rows: '     + rows;
@@ -579,7 +629,38 @@ def _render_html_template(
         option.series[0].renderItem = renderItem;
         option.series[0].tooltip = {{ formatter: tooltipFmt }};
 
+        // Row ORDER is a client-side concern (the "Order rows by" dropdown) —
+        // option.yAxis.data / option.series[0].data arrive in a fixed base
+        // order (span_reader.py sorts by corr_id, i.e. gather-issue order);
+        // sort_orders/pos_in_mode (built in generator.py's
+        // _build_echarts_config) are permutations over that base order for
+        // each phase. Pull them out before handing option to ECharts — it
+        // doesn't know about these keys — and keep the untouched base copies
+        // so switching modes never needs to re-derive anything.
+        var sortOrders = option.sort_orders;
+        var posInMode = option.pos_in_mode;
+        delete option.sort_orders;
+        delete option.pos_in_mode;
+        var baseLabels = option.yAxis.data.slice();
+        var baseSeriesData = option.series[0].data.map(function(row) {{ return row.slice(); }});
+
+        function applyIoSortMode(mode) {{
+            var order = sortOrders[mode] || sortOrders.queue;
+            var posMap = posInMode[mode] || posInMode.queue;
+            var newLabels = order.map(function(origIdx) {{ return baseLabels[origIdx]; }});
+            var newData = baseSeriesData.map(function(row) {{
+                var newRow = row.slice();
+                newRow[0] = posMap[row[0]];  // remap catIndex: base index -> display position
+                return newRow;
+            }});
+            ioChart.setOption({{ yAxis: {{ data: newLabels }}, series: [{{ data: newData }}] }});
+        }}
+
         ioChart.setOption(option);
+        applyIoSortMode('queue');  // default — matches the previous fixed sort order
+        document.getElementById('io-sort-mode').addEventListener('change', function(e) {{
+            applyIoSortMode(e.target.value);
+        }});
         window.addEventListener('resize', function() {{ ioChart.resize(); }});
 
         // ── Operator Execution Waterfall ──────────────────────────────────
@@ -737,7 +818,9 @@ def _format_stats(stats: dict) -> str:
         ("Decode Phase", format_time(stats["decode_phase_duration_ms"]), ""),
         ("Avg Download/Op", format_time(stats["avg_download_time_ms"]), ""),
         ("Avg Decode/Op", format_time(stats["avg_decode_time_ms"]), ""),
-        ("Max Concurrent", str(stats["max_concurrent_downloads"]), "downloads"),
+        ("Peak Queued", str(stats.get("max_concurrent_queued", 0)), "row groups"),
+        ("Peak Downloading", str(stats["max_concurrent_downloads"]), "row groups"),
+        ("Peak Decoding", str(stats.get("max_concurrent_decodes", 0)), "row groups"),
     ]
 
     for label, value, unit in stats_items:

@@ -138,6 +138,12 @@ SELECT * FROM (SELECT 42 AS id) AS X SEMI JOIN $planets AS S USING(id)
 query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
 SELECT * FROM $planets AS P ANTI JOIN (SELECT id FROM testdata.satellites WHERE FALSE) AS S ON P.id = S.id
 
+query error sql failed UnsupportedSyntaxError: JOIN condition cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'ON column = \{value\}'\) or IS operator \(e\.g\., 'ON column IS TRUE'\)\.
+SELECT p.name, s.name FROM $planets AS p JOIN testdata.satellites AS s ON p.id = s.planetId AND FALSE
+
+query error sql failed UnsupportedSyntaxError: JOIN condition cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'ON column = \{value\}'\) or IS operator \(e\.g\., 'ON column IS TRUE'\)\.
+SELECT p.name, s.name FROM $planets AS p LEFT JOIN testdata.satellites AS s ON p.id = s.planetId AND FALSE
+
 query shape 0
 SELECT * FROM $planets ANTI JOIN testdata.satellites USING(id) WHERE name IS NOT NULL
 
