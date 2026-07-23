@@ -31,7 +31,7 @@ class TraceBundle:
     """One query's raw trace payload: the span blob plus the id->name symbol
     tables needed to interpret it. Session.trace() is the read surface."""
 
-    __slots__ = ("blob", "node_symbols", "file_symbols", "truncated")
+    __slots__ = ("blob", "node_symbols", "file_symbols", "truncated", "host_info")
 
     def __init__(self):
         self.reset()
@@ -41,3 +41,9 @@ class TraceBundle:
         self.node_symbols: Dict[int, str] = {}
         self.file_symbols: Dict[int, str] = {}
         self.truncated: bool = False
+        # "arch=...;host=..." identity of the process that captured this
+        # trace — see native_trace_host_info(). Lets two trace bundles be
+        # compared honestly (e.g. telling a genuine perf difference apart
+        # from an ARM-vs-x86 difference) without out-of-band knowledge of
+        # where each one came from.
+        self.host_info: str = ""

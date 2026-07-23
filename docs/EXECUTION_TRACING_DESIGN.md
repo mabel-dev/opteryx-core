@@ -528,6 +528,46 @@ query went from 1 exec span (the whole "Operator Execution Waterfall" was
 empty) to 206 real spans across source/sink activity, visibly spread across
 the query's full 6.7s wall time. `make q` 197/197 after.
 
+## 9d. Bug found and fixed: `corr_id` collided across `ParquetIOPipeline` instances (2026-07-23)
+
+Rendering a real trace persisted by `worker.opteryx` (two files,
+`trace.spans.bin` + `trace.symbols.json` — see §9a) surfaced another real
+correctness bug: `total_operations` (distinct `corr_id`s) was half of
+`total_download_ops`/`total_decode_ops` — meaning multiple genuinely
+distinct row-group gathers shared the same `corr_id`, and
+`operation_timelines()`'s per-`corr_id` grouping (which does plain field
+assignment, not append) silently kept only the last one, discarding the
+rest. Confirmed by clustering spans into time windows: `corr_id` values 1-10
+appeared in an early window, then 1-5 repeated in two later windows roughly
+300-400ms apart — three separate passes, each restarting its own counter
+from 1.
+
+**Root cause:** `next_trace_corr_id_` (`rugo/src/parquet/io_pipeline.hpp`)
+was a counter *member of the `ParquetIOPipeline` instance* — correct only if
+a query opens exactly one pipeline instance. It doesn't always: this trace
+shows a query opening (at least) three, each minting its own colliding
+`corr_id` sequence.
+
+**Fix:** moved `corr_id` minting to the same query-wide bridge state
+`query_seq` and the file-intern table already use —
+`draken_trace_next_corr_id()` (`draken/core/trace_bridge_c.h` /
+`draken/core/trace.hpp`'s `g_trace_next_corr_id`), reset alongside
+`query_seq` on `trace_start_query()`. `io_pipeline.hpp` now calls this
+instead of a local counter; the per-pipeline `next_trace_corr_id_` member is
+gone. Same "one shared home in the bridge, not a per-object counter"
+pattern §9's cross-.so fix already established — this is the same category
+of mistake (state assumed to be query-scoped that was actually
+object-scoped) one level up.
+
+**Verified**: same-shape check as §9b — `total_operations ==
+total_download_ops == total_decode_ops == telemetry's row_groups_read`
+(90 = 90 = 90 = 90) on a real query, confirming exact 1:1 correlation with
+no silent overwrites. `make q` 197/197 after. Not verified: a live repro of
+the exact multi-pipeline-instance scenario the prod trace exhibited (why a
+single query opened 3 pipeline instances ~300-400ms apart is itself
+unexplained — worth investigating separately, but orthogonal to the
+correlation-id fix, which is correct regardless of why that happens).
+
 ## 10. Settled decisions
 
 - Gate: **runtime, env-driven** (`OPTERYX_TRACE=1`). No compile-out.

@@ -109,10 +109,11 @@ class Session(DataFrame):
         self._query_id = query_id if query_id is not None else random_string(32)
         self._telemetry = QueryTelemetry(self._query_id)
         self._trace = TraceBundle()
-        # Set fresh per query in _execute_statements (mirrors self._telemetry.reset()
-        # there) — a long-lived Session can run many queries, and OPTERYX_TRACE could
-        # in principle change between them, so this must not be a __init__-time
-        # snapshot. False here is just the pre-first-query default.
+        # Set fresh per STATEMENT in _inner_execute (not once per _execute_statements()
+        # batch) — the `trace` session variable (opteryx/variables.py) can be changed
+        # by a `SET trace TO ...` earlier in the same semicolon-separated batch, so
+        # this must not be a __init__-time or once-per-batch snapshot. False here is
+        # just the pre-first-statement default.
         self._trace_armed = False
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED
@@ -155,7 +156,17 @@ class Session(DataFrame):
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
-        results = execute(self._plan, telemetry=self._telemetry, trace_sink=self._trace)
+        # Read fresh per statement (not once per _execute_statements() batch): a
+        # `SET trace TO true` earlier in the same semicolon-separated batch must
+        # be visible to this statement's execute() call, not just to the next
+        # batch — see docs/EXECUTION_TRACING_DESIGN.md.
+        self._trace.reset()
+        self._trace_armed = bool(self.context.variables["trace"])
+        results = execute(
+            self._plan,
+            telemetry=self._telemetry,
+            trace_sink=self._trace if self._trace_armed else None,
+        )
 
         write_billing_event(
             billing_event=BillingEventType.QUERY_EXECUTION,
@@ -197,8 +208,6 @@ class Session(DataFrame):
     ):
         self._telemetry.reset()
         self._telemetry.start_time = time.time_ns()
-        self._trace.reset()
-        self._trace_armed = bool(config.OPTERYX_TRACE)
 
         if getattr(operation, "decode", None) is not None:
             operation = operation.decode()
@@ -622,14 +631,18 @@ class Session(DataFrame):
         return self._telemetry.messages
 
     # ------------------------------------------------------------------
-    def trace(self) -> Tuple[bytes, Dict[int, str], Dict[int, str]]:
+    def trace(self) -> Tuple[bytes, Dict[int, str], Dict[int, str], str]:
         """Return this query's raw native execution trace: ``(blob,
-        node_symbols, file_symbols)``.
+        node_symbols, file_symbols, host_info)``.
 
         ``blob`` is a packed array of fixed-layout span records (see
         ``opteryx.tracing`` / docs/EXECUTION_TRACING_DESIGN.md); ``node_symbols``
         resolves a span's ``node_id`` to its plan-node identity, ``file_symbols``
-        resolves a span's ``file_id`` to a file path. Deliberately returned raw,
+        resolves a span's ``file_id`` to a file path. ``host_info`` is an
+        ``"arch=...;host=..."`` identity of the process that captured this
+        trace, so two trace bundles can be compared honestly (e.g. telling a
+        genuine perf difference apart from an ARM-vs-x86 difference) without
+        out-of-band knowledge of where each one ran. Deliberately returned raw,
         not interpreted — a caller that only needs to persist the trace (e.g.
         alongside a query's results) pays no per-span Python object cost, and a
         caller that wants to look at it calls ``opteryx.tracing.interpret_trace``
@@ -640,7 +653,12 @@ class Session(DataFrame):
         """
         if not self._trace_armed:
             raise RuntimeError("Execution tracing not enabled for this query (set OPTERYX_TRACE=1)")
-        return self._trace.blob, self._trace.node_symbols, self._trace.file_symbols
+        return (
+            self._trace.blob,
+            self._trace.node_symbols,
+            self._trace.file_symbols,
+            self._trace.host_info,
+        )
 
     def close(self):
         if self._closed:

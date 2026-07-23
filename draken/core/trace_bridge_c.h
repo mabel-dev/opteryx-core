@@ -76,9 +76,28 @@ int draken_trace_enabled(void);
 uint32_t draken_trace_start_query(void);
 uint32_t draken_trace_current_query_seq(void);
 
+// Query-wide row-group gather correlation id — mint one PER GATHER via this,
+// never a pipeline-local counter (see draken/core/trace.hpp's
+// g_trace_next_corr_id for why: a query can open more than one
+// rugo::ParquetIOPipeline instance, and a local counter restarting at 1 per
+// instance collides across them). 1-based; 0 is the "no correlation"
+// sentinel used elsewhere (WorkItem::corr_id, TraceSpan::corr_id). Resets
+// alongside the query generation on draken_trace_start_query().
+uint32_t draken_trace_next_corr_id(void);
+
 // The single shared monotonic clock every span — engine and rugo alike —
 // timestamps against.
 uint64_t draken_trace_now_ns(void);
+
+// One-line, semicolon-separated "key=value" environment identity for this
+// process: build arch (aarch64/x86_64/...) and hostname. Exists so a trace
+// captured on one host is self-describing when compared against a trace from
+// another — e.g. distinguishing a genuine decode-speed regression from an
+// ARM-vs-x86 SIMD dispatch difference, without the comparer having to know
+// or remember out-of-band which host produced which trace. Computed once
+// (lazily, on first call) and cached — cheap to call every query.
+// Returns a static, non-owned, NUL-terminated string; never NULL.
+const char* draken_trace_host_info(void);
 
 // Record a span whose [t_start_ns, t_end_ns) is already known. No clock read
 // happens here; callers get their timestamps from draken_trace_now_ns().

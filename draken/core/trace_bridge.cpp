@@ -14,6 +14,18 @@
 #include "core/alloc.h"
 
 #include <cstring>
+#include <string>
+#include <unistd.h>
+
+#if defined(__aarch64__) || defined(__arm64__)
+#define DRAKEN_TRACE_ARCH "aarch64"
+#elif defined(__x86_64__) || defined(__amd64__)
+#define DRAKEN_TRACE_ARCH "x86_64"
+#elif defined(__riscv)
+#define DRAKEN_TRACE_ARCH "riscv"
+#else
+#define DRAKEN_TRACE_ARCH "unknown"
+#endif
 
 extern "C" {
 
@@ -33,8 +45,23 @@ uint32_t draken_trace_current_query_seq(void) {
     return draken_trace::trace_current_query_seq();
 }
 
+uint32_t draken_trace_next_corr_id(void) {
+    return draken_trace::trace_next_corr_id();
+}
+
 uint64_t draken_trace_now_ns(void) {
     return draken_trace::trace_now_ns();
+}
+
+const char* draken_trace_host_info(void) {
+    static const std::string info = [] {
+        char host[256] = {0};
+        if (gethostname(host, sizeof(host) - 1) != 0) {
+            std::strcpy(host, "unknown");
+        }
+        return std::string("arch=") + DRAKEN_TRACE_ARCH + ";host=" + host;
+    }();
+    return info.c_str();
 }
 
 void draken_trace_record(uint16_t category, uint32_t node_id, uint32_t corr_id,

@@ -384,6 +384,7 @@ def _render_html_template(
 
     query_text = metadata.get("query", "No query text available")
     session_id = metadata.get("session_id", "Unknown")
+    host_info = metadata.get("host_info", "") or "Unknown (trace predates host_info)"
 
     stats_html = _format_stats(stats)
 
@@ -513,6 +514,10 @@ def _render_html_template(
             <div class="metadata-item">
                 <span class="metadata-label">Session ID:</span>
                 <code>{session_id}</code>
+            </div>
+            <div class="metadata-item">
+                <span class="metadata-label">Host:</span>
+                <code>{host_info}</code>
             </div>
             <div class="metadata-item">
                 <span class="metadata-label">Query:</span>

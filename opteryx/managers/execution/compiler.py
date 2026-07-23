@@ -1959,6 +1959,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     from opteryx.operators._operators import native_plan_execute
     from opteryx.operators._operators import native_trace_drain
     from opteryx.operators._operators import native_trace_drain_file_symbols
+    from opteryx.operators._operators import native_trace_host_info
     from opteryx.operators._operators import native_trace_set_enabled
     from opteryx.operators._operators import native_trace_start_query
 
@@ -2022,12 +2023,15 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     # instrumented sites pay a single-branch check and nothing else.
     instrument_gil = bool(config.OPTERYX_INSTRUMENT_ENGINE)
     # docs/EXECUTION_TRACING_DESIGN.md: arm native span recording for this run when
-    # OPTERYX_TRACE is set AND the caller gave us somewhere to put the result
-    # (trace_sink) — recording with nowhere to drain to would just be wasted
-    # work. Runtime-gated (the bridge's g_trace_enabled), not compile-time —
-    # off by default costs one predicted atomic-load branch per span site and
-    # nothing else.
-    trace_enabled = bool(config.OPTERYX_TRACE) and trace_sink is not None
+    # the caller gave us somewhere to put the result (trace_sink) — recording
+    # with nowhere to drain to would just be wasted work. The `trace` session
+    # variable decision (opteryx/variables.py; defaults to OPTERYX_TRACE, settable
+    # per-statement via `SET trace TO ...`) already happened in query_session's
+    # _inner_execute: trace_sink is None here unless that check passed, so this
+    # is the only gate needed. Runtime-gated (the bridge's g_trace_enabled), not
+    # compile-time — off by default costs one predicted atomic-load branch per
+    # span site and nothing else.
+    trace_enabled = trace_sink is not None
 
     # Completion + terminal-error coordination is fully native: the detached driver
     # signals completion by finishing ``out_q`` (its last act) and records any terminal
@@ -2209,6 +2213,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                     trace_sink.node_symbols = nplan.collect_trace_symbols()
                     trace_sink.file_symbols = native_trace_drain_file_symbols()
                     trace_sink.truncated = _trace_truncated
+                    trace_sink.host_info = native_trace_host_info()
                 if _trace_truncated and telemetry is not None:
                     # Truncation is a fact about how the query ran (a warning),
                     # not trace payload — reported through telemetry.messages

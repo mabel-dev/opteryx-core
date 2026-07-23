@@ -17,8 +17,8 @@ Reads and visualizes the native execution-tracing span stream
 Usage:
     # After running a query with OPTERYX_TRACE=1:
     from io_waterfall.span_reader import dump_trace
-    blob, node_symbols, file_symbols = session.trace()
-    dump_trace(blob, node_symbols, file_symbols, "q.trace.json", query_text=sql)
+    blob, node_symbols, file_symbols, host_info = session.trace()
+    dump_trace(blob, node_symbols, file_symbols, "q.trace.json", query_text=sql, host_info=host_info)
 
     # Generate chart from the dumped trace
     PYTHONPATH=dev python -m io_waterfall trace q.trace.json
@@ -28,8 +28,8 @@ Usage:
 
     # Programmatic access, no file round-trip
     from io_waterfall import SpanTraceReader, generate_waterfall_html_from_reader
-    blob, node_symbols, file_symbols = session.trace()
-    reader = SpanTraceReader(blob, node_symbols, file_symbols)
+    blob, node_symbols, file_symbols, host_info = session.trace()
+    reader = SpanTraceReader(blob, node_symbols, file_symbols, host_info=host_info)
     html_path = generate_waterfall_html_from_reader(reader, "q.html")
 """
 

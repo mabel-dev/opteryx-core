@@ -96,12 +96,30 @@ inline bool trace_enabled() {
 // at teardown.
 inline void trace_intern_reset();  // forward decl; defined below with the intern table
 
+// Query-wide row-group gather correlation id. MUST be minted here, not by
+// each rugo::ParquetIOPipeline instance locally (that was the bug: a
+// per-instance counter restarting at 1 for every new pipeline object — and a
+// single query can open more than one, e.g. across scan passes/retries —
+// collided corr_id 1..N from one instance with 1..N from another, silently
+// conflating unrelated row groups' spans in interpret_trace()/dev/io_waterfall's
+// grouping). One shared counter, reset alongside query_seq, guarantees
+// uniqueness across every pipeline instance touched by one query, in
+// whichever .so recorded them (this lives in the same bridge-owned state as
+// trace_intern_* — see docs/EXECUTION_TRACING_DESIGN.md).
+inline std::atomic<uint32_t> g_trace_next_corr_id{1};
+
 inline uint32_t trace_start_query() {
     trace_intern_reset();
+    g_trace_next_corr_id.store(1, std::memory_order_relaxed);
     return g_trace_query_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 inline uint32_t trace_current_query_seq() {
     return g_trace_query_seq.load(std::memory_order_relaxed);
+}
+// 1-based (0 == "no correlation" sentinel, matching WorkItem::corr_id's
+// existing convention). Thread-safe; called once per row-group submission.
+inline uint32_t trace_next_corr_id() {
+    return g_trace_next_corr_id.fetch_add(1, std::memory_order_relaxed);
 }
 
 // ---- File-path interning ----------------------------------------------------------

@@ -264,6 +264,7 @@ cdef extern from "core/trace_bridge_c.h" nogil:
     uint32_t draken_trace_start_query()
     DrakenTraceSpanC* draken_trace_drain(uint32_t query_seq, size_t* out_count, int* out_truncated)
     DrakenFileSymbolC* draken_trace_drain_file_symbols(size_t* out_count)
+    const char* draken_trace_host_info()
 
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
@@ -691,6 +692,14 @@ def native_trace_start_query():
     every worker's arena — engine and rugo — lazily resets under the new
     generation on first touch."""
     return draken_trace_start_query()
+
+
+def native_trace_host_info():
+    """"arch=...;host=..." identity of the process that captured this trace —
+    lets a comparison between two trace bundles tell a genuine performance
+    difference apart from an ARM-vs-x86 (or machine-vs-machine) difference
+    without out-of-band knowledge of where each trace came from."""
+    return draken_trace_host_info().decode("utf-8")
 
 
 def native_trace_drain(uint32_t query_seq):

@@ -27,5 +27,6 @@ value over the native span waterfall and has been removed.
 from opteryx.tracing.spans import CATEGORY_NAMES
 from opteryx.tracing.spans import interpret_trace
 from opteryx.tracing.spans import parse_spans
+from opteryx.tracing.timelines import TraceTimelines
 
-__all__ = ["interpret_trace", "parse_spans", "CATEGORY_NAMES"]
+__all__ = ["interpret_trace", "parse_spans", "CATEGORY_NAMES", "TraceTimelines"]

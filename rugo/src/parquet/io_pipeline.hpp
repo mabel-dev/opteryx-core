@@ -923,14 +923,14 @@ class ParquetIOPipeline {
     std::atomic<bool> cancelled_{false};
     std::atomic<uint64_t> cancelled_skips_{0};
 
-    // docs/EXECUTION_TRACING_DESIGN.md: per-row-group correlation id source
-    // (starts at 1; 0 == "no trace" sentinel on WorkItem::corr_id). trace_node_id_
-    // is the plan-node identity this pipeline's spans should carry — NOT wired
-    // from the compiler yet (each ParquetIOPipeline backs one scan, so a future
-    // pass can set_trace_node_id() from the same identity compile_to_native
-    // already tags the scan's OpStats with); spans record node_id=0 (untagged)
-    // until that wiring lands. Documented gap, not a silent omission.
-    std::atomic<uint32_t> next_trace_corr_id_{1};
+    // docs/EXECUTION_TRACING_DESIGN.md: trace_node_id_ is the plan-node
+    // identity this pipeline's spans carry, set once via set_trace_node_id()
+    // by Engine::set_native_scan_source (engine.hpp) when this pipeline backs
+    // a native scan. Row-group correlation ids are NOT minted here — see
+    // draken_trace_next_corr_id() (core/trace_bridge_c.h): a per-pipeline
+    // counter restarting at 1 for every instance collided across queries that
+    // open more than one pipeline (multiple scan passes/retries sharing one
+    // query), silently conflating unrelated row groups in the drained trace.
     uint32_t trace_node_id_ = 0;
 
     // Destination pool for serialized columns. Set once before any submit via
@@ -1104,9 +1104,12 @@ class ParquetIOPipeline {
         // wait span start) and mint its correlation id here, once, rather than in
         // every submit_row_group() overload. Skipped entirely when tracing is
         // off — one relaxed atomic load, no clock read, no counter bump.
+        // corr_id comes from the QUERY-WIDE bridge counter (draken_trace_next_corr_id),
+        // not a pipeline-local one — see trace_node_id_'s comment above for why
+        // that used to collide.
         if (draken_trace_enabled()) {
             item.issued_ns = draken_trace_now_ns();
-            item.corr_id = next_trace_corr_id_.fetch_add(1, std::memory_order_relaxed);
+            item.corr_id = draken_trace_next_corr_id();
             item.file_id = draken_trace_intern_file(item.path.data(), item.path.size());
         }
         pending_work_++;

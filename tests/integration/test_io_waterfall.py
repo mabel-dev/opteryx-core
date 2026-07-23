@@ -25,7 +25,6 @@ import pytest
 
 from io_waterfall.span_reader import SpanTraceReader
 
-from opteryx import config
 from opteryx.query_session import Session
 from opteryx.tracing import interpret_trace
 
@@ -36,95 +35,83 @@ class TestIOWaterfallIntegration:
 
     def test_trace_not_armed_raises(self):
         """Session.trace() raises when tracing was not enabled for the query,
-        rather than returning an empty/misleading bundle."""
-        original_trace = config.OPTERYX_TRACE
-        try:
-            config.OPTERYX_TRACE = False
+        rather than returning an empty/misleading bundle. Set explicitly via
+        the `trace` session variable (opteryx/variables.py) rather than
+        mutating config.OPTERYX_TRACE — the `trace` variable's default is
+        only read from config once, when the process's SystemVariables
+        singleton is built, so mutating config after import has no live
+        effect; `SET trace TO ...` is the actual per-run control surface."""
+        session = Session()
+        for _ in session.execute_to_morsels("SET trace TO false; SELECT * FROM $planets;"):
+            pass
 
-            session = Session()
-            for _ in session.execute_to_morsels("SELECT * FROM $planets"):
-                pass
-
-            with pytest.raises(RuntimeError):
-                session.trace()
-        finally:
-            config.OPTERYX_TRACE = original_trace
+        with pytest.raises(RuntimeError):
+            session.trace()
 
     def test_trace_not_in_telemetry(self):
         """Trace data must never appear in QueryTelemetry — it is a
         different concern (an event stream that only exists when tracing is
         on) from telemetry's always-present aggregates."""
-        original_trace = config.OPTERYX_TRACE
-        try:
-            config.OPTERYX_TRACE = True
+        session = Session()
+        for _ in session.execute_to_morsels("SET trace TO true; SELECT * FROM $planets;"):
+            pass
 
-            session = Session()
-            for _ in session.execute_to_morsels("SELECT * FROM $planets"):
-                pass
+        reading = session._telemetry._reading
+        assert "trace_spans" not in reading
+        assert "trace_symbols" not in reading
+        assert "trace_file_symbols" not in reading
 
-            reading = session._telemetry._reading
-            assert "trace_spans" not in reading
-            assert "trace_symbols" not in reading
-            assert "trace_file_symbols" not in reading
-
-            telemetry_dict = session.telemetry
-            assert "trace_spans" not in telemetry_dict
-        finally:
-            config.OPTERYX_TRACE = original_trace
+        telemetry_dict = session.telemetry
+        assert "trace_spans" not in telemetry_dict
 
     def test_real_query_generates_span_waterfall(self):
         """Execute a real parquet scan with tracing on and confirm the native
         span waterfall carries IO and operator activity, correlated and
         resolvable back to plan-node identity / file path."""
-        original_trace = config.OPTERYX_TRACE
-        try:
-            config.OPTERYX_TRACE = True
+        session = Session()
+        for _ in session.execute_to_morsels(
+            "SET trace TO true; SELECT * FROM testdata.satellites WHERE planetId > 3;"
+        ):
+            pass
 
-            session = Session()
-            for _ in session.execute_to_morsels(
-                "SELECT * FROM testdata.satellites WHERE planetId > 3"
-            ):
-                pass
+        blob, node_symbols, file_symbols, host_info = session.trace()
+        assert blob, "expected a non-empty span blob"
+        assert host_info, "expected a non-empty host_info identity"
 
-            blob, node_symbols, file_symbols = session.trace()
-            assert blob, "expected a non-empty span blob"
+        # opteryx.tracing.interpret_trace() is the canonical binary ->
+        # meaningful conversion — exercise it directly, not just through
+        # the dev-tool reader built on top of it.
+        resolved = interpret_trace(blob, node_symbols, file_symbols)
+        assert resolved
+        assert any(r["type"] == "op_exec" and r["operator_name"] for r in resolved)
+        assert any(
+            r["type"] == "decode" and r["file"] and r["file"].endswith("satellites.parquet")
+            for r in resolved
+        )
 
-            # opteryx.tracing.interpret_trace() is the canonical binary ->
-            # meaningful conversion — exercise it directly, not just through
-            # the dev-tool reader built on top of it.
-            resolved = interpret_trace(blob, node_symbols, file_symbols)
-            assert resolved
-            assert any(r["type"] == "op_exec" and r["operator_name"] for r in resolved)
-            assert any(
-                r["type"] == "decode" and r["file"] and r["file"].endswith("satellites.parquet")
-                for r in resolved
-            )
+        reader = SpanTraceReader(blob, node_symbols, file_symbols, host_info=host_info)
 
-            reader = SpanTraceReader(blob, node_symbols, file_symbols)
+        # IO waterfall rows: at least one row-group gather, resolvable to a
+        # real file path and carrying decoded row/byte counts.
+        operations = reader.operation_timelines()
+        assert operations, "expected at least one row-group operation"
+        op = operations[0]
+        assert op["file_id"] and op["file_id"].endswith("satellites.parquet")
+        assert op["rows_decoded"] > 0
+        assert op["bytes_received"] > 0
+        assert op["download_start"] is not None
+        assert op["decode_start"] is not None
 
-            # IO waterfall rows: at least one row-group gather, resolvable to a
-            # real file path and carrying decoded row/byte counts.
-            operations = reader.operation_timelines()
-            assert operations, "expected at least one row-group operation"
-            op = operations[0]
-            assert op["file_id"] and op["file_id"].endswith("satellites.parquet")
-            assert op["rows_decoded"] > 0
-            assert op["bytes_received"] > 0
-            assert op["download_start"] is not None
-            assert op["decode_start"] is not None
+        # Operator execution waterfall: at least one operator span,
+        # resolvable to a plan-node identity via node_symbols.
+        exec_ops, _t0, total_duration = reader.exec_timelines()
+        assert exec_ops, "expected at least one operator span"
+        assert total_duration is not None and total_duration >= 0
+        assert all(op["operator_name"] != "unknown" for op in exec_ops)
 
-            # Operator execution waterfall: at least one operator span,
-            # resolvable to a plan-node identity via node_symbols.
-            exec_ops, _t0, total_duration = reader.exec_timelines()
-            assert exec_ops, "expected at least one operator span"
-            assert total_duration is not None and total_duration >= 0
-            assert all(op["operator_name"] != "unknown" for op in exec_ops)
+        profiles = reader.operator_profiles()
+        assert profiles
 
-            profiles = reader.operator_profiles()
-            assert profiles
-
-            stats = reader.statistics()
-            assert stats["total_files"] == 1
-            assert stats["total_rows"] > 0
-        finally:
-            config.OPTERYX_TRACE = original_trace
+        stats = reader.statistics()
+        assert stats["total_files"] == 1
+        assert stats["total_rows"] > 0

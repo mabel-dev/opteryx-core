@@ -7,17 +7,19 @@
 Chart-shaped views over the native execution-trace span stream
 (docs/EXECUTION_TRACING_DESIGN.md).
 
-The wire format and the "make it meaningful" interpreter live in
-``opteryx.tracing`` (production code, importable by any consumer — not just
-this dev tool). This module builds the grouped/chart-shaped views
-dev/io_waterfall/generator.py's ECharts builders need on top of
-``opteryx.tracing.parse_spans()`` — that boundary is deliberate: opteryx owns
-"binary -> meaningful", this dev tool owns "meaningful -> visualization".
+The wire format, the "make it meaningful" interpreter, and the grouped/
+chart-shaped views themselves all live in ``opteryx.tracing`` (production
+code, importable by any consumer — not just this dev tool; e.g. a
+job-results API endpoint needs the same row-group/operator grouping this
+tool's ECharts builders do). ``SpanTraceReader`` here is a thin subclass of
+``opteryx.tracing.TraceTimelines`` that adds only what's specific to this
+dev tool: the .trace.json sidecar format and query-text/session-id/host-info
+bookkeeping for the chart header.
 
 Usage — after running a query with OPTERYX_TRACE=1:
 
-    blob, node_symbols, file_symbols = session.trace()
-    reader = SpanTraceReader(blob, node_symbols, file_symbols)
+    blob, node_symbols, file_symbols, host_info = session.trace()
+    reader = SpanTraceReader(blob, node_symbols, file_symbols, host_info=host_info)
 
 Or persist first and reload later — see dump_trace()/load_trace() below.
 """
@@ -28,29 +30,15 @@ import json
 from pathlib import Path
 from typing import Any
 from typing import Dict
-from typing import List
 from typing import Optional
 
-from opteryx.tracing import interpret_trace
-from opteryx.tracing import parse_spans
-from opteryx.tracing.spans import TC_DECODE
-from opteryx.tracing.spans import TC_IO_REQUEST
-from opteryx.tracing.spans import TC_OP_EXEC
-from opteryx.tracing.spans import TC_QUEUE_WAIT
-from opteryx.tracing.spans import TC_SINK
-from opteryx.tracing.spans import TC_SOURCE_PULL
-from opteryx.tracing.spans import strip_signed_url_query
+from opteryx.tracing import TraceTimelines
 
 
-class SpanTraceReader:
+class SpanTraceReader(TraceTimelines):
     """
-    Reads the native span blob + symbol tables and exposes the same shapes
-    dev/io_waterfall/generator.py's chart builders consume.
-
-    Unlike the old JSONL reader, spans arrive already start/end-paired (one
-    record per unit of work, not a start event and a separate complete event
-    to match up) — so building operation/exec timelines here is mostly
-    grouping and unit conversion, not the old event-pairing state machine.
+    Adds this dev tool's chart-header bookkeeping (query text, session id,
+    host info) on top of ``opteryx.tracing.TraceTimelines``'s grouped views.
     """
 
     def __init__(
@@ -60,23 +48,20 @@ class SpanTraceReader:
         file_symbols: Optional[Dict[int, str]] = None,
         query_text: str = "",
         session_id: str = "",
+        host_info: str = "",
     ):
-        self.spans = parse_spans(blob or b"")
-        self.node_symbols = {int(k): v for k, v in (node_symbols or {}).items()}
-        self.file_symbols = {int(k): v for k, v in (file_symbols or {}).items()}
+        super().__init__(blob, node_symbols, file_symbols)
         self._query_text = query_text
         self._session_id = session_id
-        self._t0_ns = min((s["t_start_ns"] for s in self.spans), default=0)
-        # Resolved once here (not duplicated field-by-field) — events() below
-        # just adds a normalized-seconds timestamp on top.
-        self._resolved = interpret_trace(blob or b"", self.node_symbols, self.file_symbols)
+        self._host_info = host_info
 
     # ------------------------------------------------------------------
-    def _seconds(self, ns: int) -> float:
-        return (ns - self._t0_ns) / 1e9
-
     def metadata(self) -> Dict[str, Any]:
-        return {"query": self._query_text, "session_id": self._session_id}
+        return {
+            "query": self._query_text,
+            "session_id": self._session_id,
+            "host_info": self._host_info,
+        }
 
     def events(self):
         """One resolved dict per span (opteryx.tracing.interpret_trace()),
@@ -88,239 +73,6 @@ class SpanTraceReader:
             out["timestamp"] = self._seconds(ev["t_start_ns"])
             out["file_id"] = ev.get("file")
             yield out
-
-    # ------------------------------------------------------------------
-    def operation_timelines(self) -> List[Dict[str, Any]]:
-        """One row per row-group gather (grouped by corr_id): queue-wait,
-        download (TC_IO_REQUEST), and decode (TC_DECODE) phases. The
-        "buffer" lane — free in the old event vocabulary — carries
-        TC_QUEUE_WAIT here (a real, measured gap; the old "buffer" concept,
-        bytes-arrived-but-not-yet-decoding, isn't emitted — see
-        docs/EXECUTION_TRACING_DESIGN.md §9).
-        """
-        groups: Dict[int, Dict[str, Any]] = {}
-        for s in self.spans:
-            corr_id = s["corr_id"]
-            if corr_id == 0 or s["category"] not in (TC_QUEUE_WAIT, TC_IO_REQUEST, TC_DECODE):
-                continue
-            row = groups.get(corr_id)
-            if row is None:
-                path = self.file_symbols.get(s["file_id"])
-                # Strip a signed URL's query string (a live, time-boxed bearer
-                # credential — see opteryx.tracing.spans.strip_signed_url_query) before
-                # it becomes a chart label or a stored "file_id" field.
-                path = strip_signed_url_query(path) if path else path
-                base = Path(path).name if path else f"corr {corr_id}"
-                rg_idx = s["rg_idx"] if s["rg_idx"] != 0xFFFFFFFF else None
-                row = {
-                    "id": corr_id,
-                    "file_id": path,
-                    "rg_idx": rg_idx,
-                    "component": "rowgroup",
-                    "label": f"{base} [rg {rg_idx}]" if rg_idx is not None else base,
-                    "download_start": None,
-                    "download_complete": None,
-                    "buffer_start": None,
-                    "buffer_complete": None,
-                    "decode_start": None,
-                    "decode_complete": None,
-                    "bytes_received": 0,
-                    "rows_decoded": 0,
-                }
-                groups[corr_id] = row
-
-            start_s, end_s = self._seconds(s["t_start_ns"]), self._seconds(s["t_end_ns"])
-            if s["category"] == TC_QUEUE_WAIT:
-                row["buffer_start"], row["buffer_complete"] = start_s, end_s
-            elif s["category"] == TC_IO_REQUEST:
-                row["download_start"], row["download_complete"] = start_s, end_s
-                row["bytes_received"] += int(s["bytes"])
-            elif s["category"] == TC_DECODE:
-                row["decode_start"], row["decode_complete"] = start_s, end_s
-                row["rows_decoded"] += int(s["rows"])
-
-        # Stable base order (by corr_id, i.e. gather-issue order) — NOT a
-        # display order. generator.py computes the queue/download/decode
-        # display orderings (the dropdown) as permutations over this base
-        # list, so every mode maps consistently back to the same rows.
-        rows = list(groups.values())
-        rows.sort(key=lambda r: r["id"])
-        return rows
-
-    # ------------------------------------------------------------------
-    # Pipeline-stage roles this waterfall covers — every stage a morsel can
-    # pass through, not just the Operator role. A plan with no Operator-role
-    # nodes (e.g. a scan with its predicate baked in, feeding straight into a
-    # Sort/TopN sink — see docs/EXECUTION_TRACING_DESIGN.md's "operator
-    # waterfall goes blank" gap) still has Source/Sink activity to show.
-    _EXEC_CATEGORIES = {TC_SOURCE_PULL: "source", TC_OP_EXEC: "operator", TC_SINK: "sink"}
-
-    def exec_timelines(self) -> tuple:
-        """(ops, t0, total_duration) for the pipeline-stage execution
-        waterfall. One row per TC_SOURCE_PULL/TC_OP_EXEC/TC_SINK span
-        (already start/end-paired — no phase="start"/"end" matching
-        needed)."""
-        ops: List[Dict[str, Any]] = []
-        t_max_ns = self._t0_ns
-        for s in self.spans:
-            role = self._EXEC_CATEGORIES.get(s["category"])
-            if role is None:
-                continue
-            t_max_ns = max(t_max_ns, s["t_end_ns"])
-            name = self.node_symbols.get(s["node_id"], "unknown")
-            ops.append(
-                {
-                    "operator_id": str(s["node_id"]),
-                    "operator_name": f"{name} [{role}]",
-                    "wall_start": self._seconds(s["t_start_ns"]),
-                    "wall_end": self._seconds(s["t_end_ns"]),
-                    "rows_out": s["rows"],
-                    "duration_ns": s["t_end_ns"] - s["t_start_ns"],
-                    "produced_rows": s["rows"] > 0,
-                }
-            )
-        ops.sort(key=lambda row: (row["wall_start"], row["operator_name"]))
-        total_duration = self._seconds(t_max_ns) if ops else None
-        return ops, 0.0, total_duration
-
-    def operator_profiles(self) -> List[Dict[str, Any]]:
-        """Per-node_id aggregated stats, across all three pipeline-stage
-        roles (source/operator/sink — see exec_timelines). rows_in is not
-        tracked at span granularity (only rows OUT is recorded) — left at 0,
-        which the caller already treats as "selectivity unknown"."""
-        agg: Dict[int, Dict[str, Any]] = {}
-        order: List[int] = []
-        for s in self.spans:
-            role = self._EXEC_CATEGORIES.get(s["category"])
-            if role is None:
-                continue
-            nid = s["node_id"]
-            if nid not in agg:
-                agg[nid] = {
-                    "role": role,
-                    "total_duration_ns": 0,
-                    "total_rows_in": 0,
-                    "total_rows_out": 0,
-                    "call_count": 0,
-                    "producing_calls": 0,
-                }
-                order.append(nid)
-            a = agg[nid]
-            a["total_duration_ns"] += s["t_end_ns"] - s["t_start_ns"]
-            a["total_rows_out"] += s["rows"]
-            a["call_count"] += 1
-            if s["rows"] > 0:
-                a["producing_calls"] += 1
-
-        result = []
-        for nid in order:
-            a = agg[nid]
-            name = self.node_symbols.get(nid, "unknown")
-            result.append(
-                {
-                    "operator_id": str(nid),
-                    "operator_name": f"{name} [{a['role']}]",
-                    "total_duration_ns": a["total_duration_ns"],
-                    "total_rows_in": a["total_rows_in"],
-                    "total_rows_out": a["total_rows_out"],
-                    "call_count": a["call_count"],
-                    "producing_calls": a["producing_calls"],
-                    "selectivity": None,
-                }
-            )
-        return result
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _max_concurrent(spans: List[Dict[str, Any]]) -> int:
-        """Sweep-line peak overlap count over a set of spans' [start, end)
-        intervals — how many were simultaneously in flight at any instant.
-        Works for any phase (queue-wait, download, decode); the caller picks
-        which spans to pass in."""
-        if not spans:
-            return 0
-        points = []
-        for s in spans:
-            points.append((s["t_start_ns"], 1))
-            points.append((s["t_end_ns"], -1))
-        # Ends applied before starts at the same timestamp — a span closing
-        # and another opening at the identical instant aren't "overlapping".
-        points.sort(key=lambda p: (p[0], p[1]))
-        current = peak = 0
-        for _, delta in points:
-            current += delta
-            peak = max(peak, current)
-        return peak
-
-    def statistics(self) -> Dict[str, Any]:
-        queue_spans = [s for s in self.spans if s["category"] == TC_QUEUE_WAIT]
-        io_spans = [s for s in self.spans if s["category"] == TC_IO_REQUEST]
-        decode_spans = [s for s in self.spans if s["category"] == TC_DECODE]
-
-        if not self.spans:
-            return {
-                "total_files": 0,
-                "total_bytes": 0,
-                "total_rows": 0,
-                "total_operations": 0,
-                "total_download_ops": 0,
-                "total_decode_ops": 0,
-                "footer_download_ops": 0,
-                "rowgroup_download_ops": 0,
-                "rowgroup_decode_ops": 0,
-                "download_phase_duration_ms": 0,
-                "decode_phase_duration_ms": 0,
-                "query_duration_ms": 0,
-                "max_concurrent_queued": 0,
-                "max_concurrent_downloads": 0,
-                "max_concurrent_decodes": 0,
-                "avg_download_time_ms": 0,
-                "avg_decode_time_ms": 0,
-            }
-
-        def phase_duration_ms(spans):
-            if not spans:
-                return 0
-            start = min(s["t_start_ns"] for s in spans)
-            end = max(s["t_end_ns"] for s in spans)
-            return (end - start) / 1e6
-
-        def avg_duration_ms(spans):
-            if not spans:
-                return 0
-            return sum(s["t_end_ns"] - s["t_start_ns"] for s in spans) / len(spans) / 1e6
-
-        t_min = min(s["t_start_ns"] for s in self.spans)
-        t_max = max(s["t_end_ns"] for s in self.spans)
-
-        distinct_files = {s["file_id"] for s in self.spans if s["file_id"]}
-        distinct_corr = {s["corr_id"] for s in self.spans if s["corr_id"]}
-
-        return {
-            "total_files": len(distinct_files),
-            "total_bytes": sum(int(s["bytes"]) for s in io_spans),
-            "total_rows": sum(int(s["rows"]) for s in decode_spans),
-            "total_operations": len(distinct_corr),
-            "total_download_ops": len(io_spans),
-            "total_decode_ops": len(decode_spans),
-            # Footer fetches aren't span-recorded (they land in
-            # telemetry["time_engine_footer_fetch"] instead) — every
-            # TC_IO_REQUEST span today is a row-group fetch.
-            "footer_download_ops": 0,
-            "rowgroup_download_ops": len(io_spans),
-            "rowgroup_decode_ops": len(decode_spans),
-            "download_phase_duration_ms": phase_duration_ms(io_spans),
-            "decode_phase_duration_ms": phase_duration_ms(decode_spans),
-            "query_duration_ms": (t_max - t_min) / 1e6,
-            # Peak simultaneous count per phase — three independent sweeps,
-            # since a row group can be queued while others are still
-            # downloading/decoding, so these do not need to sum to anything.
-            "max_concurrent_queued": self._max_concurrent(queue_spans),
-            "max_concurrent_downloads": self._max_concurrent(io_spans),
-            "max_concurrent_decodes": self._max_concurrent(decode_spans),
-            "avg_download_time_ms": avg_duration_ms(io_spans),
-            "avg_decode_time_ms": avg_duration_ms(decode_spans),
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -341,12 +93,14 @@ def dump_trace(
     path: str,
     query_text: str = "",
     session_id: str = "",
+    host_info: str = "",
 ) -> str:
     """Persist a trace bundle (as returned by Session.trace()) to `path`
     (.trace.json). Call right after a traced query, e.g.:
 
-        blob, node_symbols, file_symbols = session.trace()
-        dump_trace(blob, node_symbols, file_symbols, "out.trace.json", query_text=sql)
+        blob, node_symbols, file_symbols, host_info = session.trace()
+        dump_trace(blob, node_symbols, file_symbols, "out.trace.json",
+                    query_text=sql, host_info=host_info)
     """
     import base64
 
@@ -356,6 +110,7 @@ def dump_trace(
         "file_symbols": file_symbols or {},
         "query": query_text,
         "session_id": session_id,
+        "host_info": host_info,
     }
     out_path = Path(path)
     out_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -374,4 +129,5 @@ def load_trace(path: str) -> SpanTraceReader:
         file_symbols=payload.get("file_symbols", {}),
         query_text=payload.get("query", ""),
         session_id=payload.get("session_id", ""),
+        host_info=payload.get("host_info", ""),
     )
