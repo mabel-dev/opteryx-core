@@ -141,26 +141,53 @@ inline uint8_t* join_alloc_bool_bits(uint32_t n) {
 // One materialized payload column: `raw` holds `elem_size` bytes per row,
 // densely packed in row-store order (NOT the original morsel's own row
 // order — rows are appended as build morsels stream in).
+//
+// `validity` mirrors the DrakenVector convention (1 bit/row, 1 = valid, bit
+// index == row-store row index) but is LAZY: as long as every row appended
+// so far is valid it stays empty ("empty = all valid"), matching a NULL
+// DrakenVector::validity. The first NULL payload value seen allocates it,
+// backfilling every prior row as valid — so the common NOT-NULL case pays
+// zero bitmap cost.
 struct JoinPayloadColumn {
     DrakenType type = DRAKEN_INT64;
     size_t elem_size = 0;
     const LogicalType* logical = nullptr;  // borrowed; carried to output columns
     std::vector<uint8_t> raw;    // elem_size bytes/row (slots for strings)
     std::vector<uint8_t> arena;  // strings only: consolidated long-string bytes
+    std::vector<uint8_t> validity;  // lazy — see comment above
 
-    void append_row(const DrakenVector& v, uint32_t row, ErrCtx& err, const char* who) {
-        if (v.validity != nullptr && !((v.validity[row >> 3] >> (row & 7)) & 1u)) {
-            err.code = 1;
-            err.msg = who;  // "<Sink>: NULL payload value is not supported"
-            return;
-        }
+    size_t row_count() const { return elem_size ? raw.size() / elem_size : 0; }
+
+    // Record row-store row `row`'s null-ness. A no-op while every row so far
+    // has been valid (the lazy "empty = all valid" state).
+    void note_null(size_t row, bool is_null) {
+        if (validity.empty() && !is_null) return;
+        size_t nbytes = (row / 8) + 1;
+        if (validity.size() < nbytes) validity.resize(nbytes, 0xFF);
+        if (is_null) validity[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7)));
+        else validity[row >> 3] |= static_cast<uint8_t>(1u << (row & 7));
+    }
+
+    void append_row(const DrakenVector& v, uint32_t row, ErrCtx&, const char*) {
+        size_t out_row = row_count();
+        bool is_null = v.validity != nullptr
+            && !((v.validity[row >> 3] >> (row & 7)) & 1u);
         uint32_t phys = v.selection[row];
         if (join_type_is_bool(type)) {
             // Bit-packed on the way in, one unpacked 0/1 byte per row in the store.
-            raw.push_back(join_read_bool_bit(v, phys));
+            raw.push_back(is_null ? 0 : join_read_bool_bit(v, phys));
+            note_null(out_row, is_null);
             return;
         }
         if (join_type_is_string(type)) {
+            if (is_null) {
+                DrakenStringSlot zero;
+                std::memset(&zero, 0, sizeof(zero));
+                const uint8_t* rb = reinterpret_cast<const uint8_t*>(&zero);
+                raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
+                note_null(out_row, true);
+                return;
+            }
             // CANONICAL layout (buffers.h): a string vector's `data` points at a
             // DrakenStringArena STRUCT — slots and arena resolve through it.
             const auto* sa = static_cast<const DrakenStringArena*>(v.data);
@@ -177,12 +204,33 @@ struct JoinPayloadColumn {
             }
             const uint8_t* rb = reinterpret_cast<const uint8_t*>(&rebased);
             raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
+            note_null(out_row, false);
             return;
         }
-        const uint8_t* src = static_cast<const uint8_t*>(v.data) + static_cast<size_t>(phys) * elem_size;
-        raw.insert(raw.end(), src, src + elem_size);
+        if (is_null) {
+            raw.resize(raw.size() + elem_size, 0);
+        } else {
+            const uint8_t* src = static_cast<const uint8_t*>(v.data) + static_cast<size_t>(phys) * elem_size;
+            raw.insert(raw.end(), src, src + elem_size);
+        }
+        note_null(out_row, is_null);
     }
 };
+
+// Merge `lcol`'s per-row validity into `gcol`'s, at global row offset
+// `offset` (the global row-store row each local row `r` lands at is
+// `offset + r`) — used by every build sink's combine() after it has already
+// bulk-copied `lcol.raw`/`lcol.arena` into `gcol`. A no-op when neither side
+// has ever seen a NULL (both stay in the lazy "empty = all valid" state).
+inline void merge_payload_validity(JoinPayloadColumn& gcol, const JoinPayloadColumn& lcol,
+                                   size_t local_rows, uint32_t offset) {
+    if (lcol.validity.empty() && gcol.validity.empty()) return;
+    for (size_t r = 0; r < local_rows; ++r) {
+        bool valid = lcol.validity.empty()
+            || ((lcol.validity[r >> 3] >> (r & 7)) & 1u);
+        gcol.note_null(offset + r, !valid);
+    }
+}
 
 // ---- BUILD SIDE ------------------------------------------------------------
 
@@ -301,6 +349,7 @@ struct HashJoinBuildSink : Sink {
             } else {
                 gcol.raw.insert(gcol.raw.end(), lcol.raw.begin(), lcol.raw.end());
             }
+            merge_payload_validity(gcol, lcol, lcol.row_count(), offset);
         }
         for (auto& [key, rows] : l.key_to_rows) {
             auto& dst = g.key_to_rows[key];
@@ -353,16 +402,29 @@ struct JoinProbeOperator : Operator {
                                  // (e.g. a bare COUNT(*) over the join needs no payload columns at all)
         out->columns.reserve(build_payload->size() + probe_payload_col_idx.size());
 
-        // ---- build-side columns: gathered from the row-store (dense, no NULLs —
-        //      append_row rejects them at build time). String output is written in
-        //      the CANONICAL layout: one consolidated [DrakenStringArena | slots |
-        //      arena] block with `data` at the header (buffers.h contract).
+        // ---- build-side columns: gathered from the row-store. String output is
+        //      written in the CANONICAL layout: one consolidated [DrakenStringArena
+        //      | slots | arena] block with `data` at the header (buffers.h contract).
         for (const JoinPayloadColumn& col : *build_payload) {
+            uint8_t* vbits = nullptr;
+            auto mark_null = [&](uint32_t i) {
+                if (vbits == nullptr) {
+                    size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
+                    vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
+                    std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
+                }
+                vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+            };
+            auto src_is_null = [&](uint32_t build_row) {
+                return !col.validity.empty()
+                    && !((col.validity[build_row >> 3] >> (build_row & 7)) & 1u);
+            };
             if (join_type_is_string(col.type)) {
                 const auto* src_slots = reinterpret_cast<const DrakenStringSlot*>(col.raw.data());
                 const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
                 size_t total_arena = 0;
                 for (uint32_t i = 0; i < n; ++i) {
+                    if (src_is_null(matches[i].first)) continue;
                     const auto* slot = src_slots + matches[i].first;
                     if (!str_is_inline(slot)) total_arena += str_length(slot);
                 }
@@ -378,6 +440,11 @@ struct JoinProbeOperator : Operator {
                 sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
                 size_t arena_pos = 0;
                 for (uint32_t i = 0; i < n; ++i) {
+                    if (src_is_null(matches[i].first)) {
+                        std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
+                        mark_null(i);
+                        continue;
+                    }
                     const auto* slot = src_slots + matches[i].first;
                     if (str_is_inline(slot)) {
                         dst[i] = *slot;
@@ -393,11 +460,11 @@ struct JoinProbeOperator : Operator {
                 for (uint32_t i = 0; i < n; ++i) sel[i] = i;
                 DrakenVector v;
                 v.data = sa; v.selection = sel; v.data_length = n; v.length = n;
-                v.validity = nullptr; v.type = col.type;
+                v.validity = vbits; v.type = col.type;
                 v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
                 CxxColumn c;
                 c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
-                                                      OwnedBuffer<uint8_t>(nullptr),
+                                                      OwnedBuffer<uint8_t>(vbits),
                                                       OwnedBuffer<void>(sel));
                 c.own->logical_type = col.logical;
                 c.view = c.own->vec;
@@ -409,6 +476,7 @@ struct JoinProbeOperator : Operator {
                 // Re-pack the row-store's unpacked bytes into the canonical bit layout.
                 uint8_t* bits = join_alloc_bool_bits(n);
                 for (uint32_t i = 0; i < n; ++i) {
+                    if (src_is_null(matches[i].first)) { mark_null(i); continue; }
                     if (col.raw[matches[i].first])
                         bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
                 }
@@ -418,6 +486,11 @@ struct JoinProbeOperator : Operator {
                 uint8_t* dst = static_cast<uint8_t*>(data);
                 for (uint32_t i = 0; i < n; ++i) {
                     uint32_t br = matches[i].first;
+                    if (src_is_null(br)) {
+                        std::memset(dst + static_cast<size_t>(i) * col.elem_size, 0, col.elem_size);
+                        mark_null(i);
+                        continue;
+                    }
                     std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
                                col.raw.data() + static_cast<size_t>(br) * col.elem_size, col.elem_size);
                 }
@@ -427,11 +500,11 @@ struct JoinProbeOperator : Operator {
             for (uint32_t i = 0; i < n; ++i) sel[i] = i;
             DrakenVector v;
             v.data = data; v.selection = sel; v.data_length = n; v.length = n;
-            v.validity = nullptr; v.type = col.type;
+            v.validity = vbits; v.type = col.type;
             v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             CxxColumn c;
             c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                                  OwnedBuffer<uint8_t>(nullptr),
+                                                  OwnedBuffer<uint8_t>(vbits),
                                                   OwnedBuffer<void>(sel));
             c.own->logical_type = col.logical;
             c.view = c.own->vec;

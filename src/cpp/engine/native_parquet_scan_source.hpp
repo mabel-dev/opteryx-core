@@ -86,6 +86,7 @@
 #include <vector>
 
 #include "operator.hpp"
+#include "trace.hpp"              // TC_IO_WAIT / trace_begin / trace_end
 #include "io_pipeline.hpp"        // rugo::ParquetIOPipeline, MorselRef, ColumnOut, DK_*
 #include "metadata.hpp"           // FileStats, RowGroupStats, ColumnStats
 #include "core/vector_alloc.h"    // draken_vector_from_dense / draken_vector_from_dict
@@ -506,7 +507,19 @@ struct NativeParquetScanSource : Source {
             }
 
             rugo::MorselRef result;
+            // Splits TC_SOURCE_PULL (the whole get_morsel() call, timed by
+            // executor.hpp around this Source) into "waiting on the pipeline"
+            // vs. everything after — output-column materialization below.
+            // Without this, a stall showing up as TC_SOURCE_PULL taking far
+            // longer than every row group's own download+decode spans is
+            // ambiguous: this pins it to one side or the other.
+            const auto _tr_idx = BS::this_thread::get_index();
+            const uint16_t _tr_worker =
+                _tr_idx.has_value() ? static_cast<uint16_t>(*_tr_idx) : 0xFFFFu;
+            TraceHandle _tr_wait = trace_begin(TC_IO_WAIT, pipeline->trace_node_id(), 0,
+                                                0xFFFFFFFFu, _tr_worker);
             bool got = pipeline->wait_and_get_result(result);
+            trace_end(_tr_wait, 0, 0);
             if (!got) {
                 err.code = 1;
                 err.msg = "NativeParquetScanSource: pipeline drained with result(s) missing";

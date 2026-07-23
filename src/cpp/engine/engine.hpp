@@ -252,6 +252,13 @@ public:
     std::string current_identity_;
     void set_current_identity(std::string s) { current_identity_ = std::move(s); }
 
+    // Human-readable plan-node kind (e.g. "FilterNode") for the SAME plan node
+    // set_current_identity just tagged — set alongside it, never alone. Purely
+    // a display concern (see OpStats::display_name / collect_trace_symbols):
+    // identity stays the correlation key, this never gets compared/summed on.
+    std::string current_display_name_;
+    void set_current_display_name(std::string s) { current_display_name_ = std::move(s); }
+
     // Monotonic per-Engine (i.e. per-query) counter for OpStats.node_id — see
     // trace.hpp. Starts at 1; 0 is reserved for "untagged".
     uint32_t next_trace_node_id_ = 1;
@@ -281,14 +288,18 @@ public:
         return out;
     }
 
-    // node_id -> identity, for resolving trace.hpp spans (which carry only the
-    // compact node_id, not the string) back to plan-node identity at drain time.
+    // node_id -> display name, for resolving trace.hpp spans (which carry only
+    // the compact node_id) back to a human-readable plan-node kind at drain
+    // time. Falls back to identity (the opaque correlation key) only for
+    // call sites that never set a display name — never the normal case.
     // Same iteration shape as collect_op_stats — one row per tagged operator/
-    // source/sink, several may share an identity.
+    // source/sink, several may share a name.
     std::vector<std::pair<uint32_t, std::string>> collect_trace_symbols() const {
         std::vector<std::pair<uint32_t, std::string>> out;
         auto emit = [&out](const OpStats& s) {
-            if (s.node_id != 0 && !s.identity.empty()) out.emplace_back(s.node_id, s.identity);
+            if (s.node_id == 0) return;
+            const std::string& name = s.display_name.empty() ? s.identity : s.display_name;
+            if (!name.empty()) out.emplace_back(s.node_id, name);
         };
         for (const auto& pn : pipelines) {
             if (pn->source) emit(pn->source->stats);
@@ -306,12 +317,14 @@ public:
     // onto every span.
     Operator* add_op_(size_t p, std::unique_ptr<Operator> op) {
         op->stats.identity = current_identity_;
+        op->stats.display_name = current_display_name_;
         op->stats.node_id = next_trace_node_id_++;
         pipelines[p]->operators.push_back(std::move(op));
         return pipelines[p]->operators.back().get();
     }
     void set_sink_(size_t p, std::unique_ptr<Sink> s) {
         s->stats.identity = current_identity_;
+        s->stats.display_name = current_display_name_;
         s->stats.node_id = next_trace_node_id_++;
         pipelines[p]->sink = std::move(s);
     }
@@ -321,6 +334,7 @@ public:
     // other caller ignores the return value.
     uint32_t set_source_(size_t p, std::unique_ptr<Source> s) {
         s->stats.identity = current_identity_;
+        s->stats.display_name = current_display_name_;
         s->stats.node_id = next_trace_node_id_++;
         uint32_t node_id = s->stats.node_id;
         pipelines[p]->source = std::move(s);

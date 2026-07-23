@@ -1696,6 +1696,9 @@ class ParquetIOPipeline {
     void set_trace_node_id(uint32_t node_id) {
         trace_node_id_ = node_id;
     }
+    uint32_t trace_node_id() const {
+        return trace_node_id_;
+    }
 
     // Phase 2: register a pushed dictionary decode-skip predicate for a column.
     // Call once per column before any submit. One predicate per column (last

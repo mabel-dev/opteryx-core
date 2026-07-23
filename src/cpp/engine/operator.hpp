@@ -34,7 +34,14 @@ using MorselPtr = std::shared_ptr<CxxMorsel>;
 // each operator/sink times just its own execute()/sink() call (the driver excludes the
 // recursive forward), so exec_ns is this operator's SELF time.
 struct OpStats {
-    std::string           identity;      // plan-node identity; empty = untagged (demos)
+    std::string           identity;      // plan-node identity; empty = untagged (demos).
+                                          // An opaque correlation key (several rows can
+                                          // share one), NOT for display — see display_name.
+    std::string           display_name;  // human-readable plan-node kind (e.g. "FilterNode",
+                                          // "ScanNode") — what trace.hpp span consumers show,
+                                          // via Engine::collect_trace_symbols(). Empty falls
+                                          // back to identity (untagged demos/call sites that
+                                          // never call set_current_display_name).
     uint32_t               node_id{0};   // trace.hpp span identity; assigned once at plan
                                           // build time (Engine::add_op_/set_sink_/set_
                                           // source_), read-only during execution — safe

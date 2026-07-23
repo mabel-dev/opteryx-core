@@ -280,6 +280,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass Engine:
         Engine() except +
         void set_current_identity(string s)
+        void set_current_display_name(string s)
         cppvector[OpReading] collect_op_stats()
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
@@ -2268,6 +2269,15 @@ cdef class NativePlan:
         cdef string s = (ident if isinstance(ident, bytes) else (<str>ident).encode("utf-8"))
         self._e.set_current_identity(s)
 
+    def set_current_display_name(self, name):
+        """Tag every operator/source/sink built after this call with ``name`` (a
+        human-readable plan-node kind, e.g. "FilterNode") for trace-symbol display —
+        see collect_trace_symbols. Purely cosmetic: identity (set_current_identity)
+        stays the correlation key; this is never compared or summed on. Call
+        alongside set_current_identity for the same plan node, not instead of it."""
+        cdef string s = (name if isinstance(name, bytes) else (<str>name).encode("utf-8"))
+        self._e.set_current_display_name(s)
+
     def collect_op_stats(self):
         """Harvest the per-operator execution telemetry accumulated during ``run``.
         Returns a list of dicts, one per source/operator/sink; callers sum by
@@ -2291,9 +2301,11 @@ cdef class NativePlan:
         return out
 
     def collect_trace_symbols(self):
-        """node_id -> identity for this plan's operators/sources/sinks, resolving the
-        compact ids carried on drained TraceSpans (see native_trace_drain) back to
-        plan-node identity. Same call-after-run precondition as collect_op_stats."""
+        """node_id -> human-readable display name (e.g. "FilterNode", set via
+        set_current_display_name) for this plan's operators/sources/sinks, resolving
+        the compact ids carried on drained TraceSpans (see native_trace_drain).
+        Falls back to identity (the opaque correlation key) only for untagged call
+        sites. Same call-after-run precondition as collect_op_stats."""
         cdef cppvector[pair[uint32_t, string]] rows = self._e.collect_trace_symbols()
         cdef pair[uint32_t, string] kv
         out = {}

@@ -225,6 +225,7 @@ struct Join2BuildSink : Sink {
             } else {
                 gcol.raw.insert(gcol.raw.end(), lcol.raw.begin(), lcol.raw.end());
             }
+            merge_payload_validity(gcol, lcol, lcol.row_count(), offset);
         }
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
         for (auto& [key, rows] : l.key_to_rows) {
@@ -289,13 +290,22 @@ struct Join2ProbeOperator : Operator {
                 }
                 vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
             };
+            // kNoBuildRow: LEFT OUTER's unmatched probe row (no build row at all).
+            // Otherwise NULL iff the build row's own payload value was NULL — the
+            // build side's own validity bitmap (lazily allocated, see
+            // JoinPayloadColumn::note_null), not the row-store row's absence.
+            auto row_is_null = [&](uint32_t build_row) {
+                return build_row == kNoBuildRow
+                    || (!col.validity.empty()
+                        && !((col.validity[build_row >> 3] >> (build_row & 7)) & 1u));
+            };
             if (join_type_is_string(col.type)) {
                 const auto* src_slots =
                     reinterpret_cast<const DrakenStringSlot*>(col.raw.data());
                 const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
                 size_t total_arena = 0;
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (matches[i].first == kNoBuildRow) continue;
+                    if (row_is_null(matches[i].first)) continue;
                     const auto* slot = src_slots + matches[i].first;
                     if (!str_is_inline(slot)) total_arena += str_length(slot);
                 }
@@ -311,7 +321,7 @@ struct Join2ProbeOperator : Operator {
                 sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
                 size_t arena_pos = 0;
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (matches[i].first == kNoBuildRow) {
+                    if (row_is_null(matches[i].first)) {
                         std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
                         mark_null(i);
                         continue;
@@ -349,7 +359,7 @@ struct Join2ProbeOperator : Operator {
                 // the validity mask, not the bit, carries "no build row".
                 uint8_t* bits = join_alloc_bool_bits(n);
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (matches[i].first == kNoBuildRow) {
+                    if (row_is_null(matches[i].first)) {
                         mark_null(i);
                         continue;
                     }
@@ -362,7 +372,7 @@ struct Join2ProbeOperator : Operator {
                     static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
                 uint8_t* dst = static_cast<uint8_t*>(data);
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (matches[i].first == kNoBuildRow) {
+                    if (row_is_null(matches[i].first)) {
                         std::memset(dst + static_cast<size_t>(i) * col.elem_size, 0,
                                     col.elem_size);
                         mark_null(i);

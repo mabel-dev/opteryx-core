@@ -29,6 +29,7 @@ from typing import Optional
 
 from opteryx.tracing.spans import TC_DECODE
 from opteryx.tracing.spans import TC_IO_REQUEST
+from opteryx.tracing.spans import TC_IO_WAIT
 from opteryx.tracing.spans import TC_OP_EXEC
 from opteryx.tracing.spans import TC_QUEUE_WAIT
 from opteryx.tracing.spans import TC_SINK
@@ -134,7 +135,19 @@ class TraceTimelines:
     # nodes (e.g. a scan with its predicate baked in, feeding straight into a
     # Sort/TopN sink — see docs/EXECUTION_TRACING_DESIGN.md's "operator
     # waterfall goes blank" gap) still has Source/Sink activity to show.
-    _EXEC_CATEGORIES = {TC_SOURCE_PULL: "source", TC_OP_EXEC: "operator", TC_SINK: "sink"}
+    # TC_IO_WAIT ("io_wait") is a sub-span nested inside TC_SOURCE_PULL — the
+    # portion of one get_morsel() call spent blocked in
+    # ParquetIOPipeline::wait_and_get_result(), as distinct from the
+    # column-materialization work around it (native_parquet_scan_source.hpp).
+    # Rendered as its own row here so a stall can be pinned to "waiting on the
+    # pipeline" vs. "everything else in the source pull" instead of being one
+    # opaque TC_SOURCE_PULL duration.
+    _EXEC_CATEGORIES = {
+        TC_SOURCE_PULL: "source",
+        TC_OP_EXEC: "operator",
+        TC_SINK: "sink",
+        TC_IO_WAIT: "io_wait",
+    }
 
     def exec_timelines(self) -> tuple:
         """(ops, t0, total_duration) for the pipeline-stage execution

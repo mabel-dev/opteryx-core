@@ -1104,9 +1104,11 @@ class _Compiler:
                 # The per-leg align/append is this UNION's plumbing — attribute it here,
                 # not to the leg whose identity compile_node just left current.
                 self.nplan.set_current_identity(node.identity)
+                self.nplan.set_current_display_name(type(node).__name__)
                 self.nplan.add_select(lp, list(range(len(ids))), ids)
                 self.nplan.set_buffer_append_sink(lp, buf)
             self.nplan.set_current_identity(node.identity)
+            self.nplan.set_current_display_name(type(node).__name__)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             return p2, ids
@@ -1156,6 +1158,7 @@ class _Compiler:
         # The child's own compile stamped ITS identity as current; restore this node's
         # so the operators/sink this branch is about to build are attributed here.
         self.nplan.set_current_identity(node.identity)
+        self.nplan.set_current_display_name(type(node).__name__)
         return result
 
     def _native_scan_plan(self, scan):
@@ -1477,6 +1480,7 @@ class _Compiler:
         # Tag the scan Source (and any materialized buffer source) with the scan node's
         # identity so its per-operator readings attribute back to the ReadRel node.
         self.nplan.set_current_identity(scan.identity)
+        self.nplan.set_current_display_name(type(scan).__name__)
         # ReaderNode = the generic non-parquet connector scan ($planets and the other
         # sample/virtual/in-memory relations). Its content is fully read either way
         # (no native streaming exists for it); materializing at plan time keeps
@@ -1616,6 +1620,7 @@ class _Compiler:
 
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(node.identity)  # own the build sink + probe below
+        self.nplan.set_current_display_name(type(node).__name__)
         build_key_idx = []
         for identity in build_keys:
             if identity not in blayout:
@@ -1633,6 +1638,7 @@ class _Compiler:
 
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
+        self.nplan.set_current_display_name(type(node).__name__)
         probe_key_idx = []
         for identity in probe_keys:
             if identity not in playout:
@@ -1774,6 +1780,7 @@ class _Compiler:
             _unsupported("an ASOF match column the build stream does not carry")
         ref = self.nplan.new_join2_ref()
         self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe
+        self.nplan.set_current_display_name(type(node).__name__)
         build_types, build_logical = self._payload_types(legs["right"], blayout)
         self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
                                        blayout.index(asof_right), ref,
@@ -1781,6 +1788,7 @@ class _Compiler:
 
         pp, playout = self.compile_node(legs["left"])
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
+        self.nplan.set_current_display_name(type(node).__name__)
         probe_key_idx = []
         for identity in left_cols:
             if identity not in playout:
@@ -1919,6 +1927,7 @@ def compile_to_native(plan, pool=None):
         _unsupported(f"an Exit with {len(in_edges)} inputs")
     p, layout = compiler.compile_node(in_edges[0][0])
     nplan.set_current_identity(exit_node.identity)  # exit select + queue sink
+    nplan.set_current_display_name(type(exit_node).__name__)
 
     # Exit semantics: select final_columns (identities) in order, rename to final_names.
     indices = []
