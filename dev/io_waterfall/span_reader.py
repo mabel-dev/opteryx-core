@@ -18,8 +18,8 @@ bookkeeping for the chart header.
 
 Usage — after running a query with OPTERYX_TRACE=1:
 
-    blob, node_symbols, file_symbols, host_info = session.trace()
-    reader = SpanTraceReader(blob, node_symbols, file_symbols, host_info=host_info)
+    blob, node_symbols, file_symbols, host_info, truncated = session.trace()
+    reader = SpanTraceReader(blob, node_symbols, file_symbols, host_info=host_info, truncated=truncated)
 
 Or persist first and reload later — see dump_trace()/load_trace() below.
 """
@@ -49,11 +49,13 @@ class SpanTraceReader(TraceTimelines):
         query_text: str = "",
         session_id: str = "",
         host_info: str = "",
+        truncated: bool = False,
     ):
         super().__init__(blob, node_symbols, file_symbols)
         self._query_text = query_text
         self._session_id = session_id
         self._host_info = host_info
+        self._truncated = truncated
 
     # ------------------------------------------------------------------
     def metadata(self) -> Dict[str, Any]:
@@ -61,6 +63,12 @@ class SpanTraceReader(TraceTimelines):
             "query": self._query_text,
             "session_id": self._session_id,
             "host_info": self._host_info,
+            # True if some worker's span arena filled up mid-query — every
+            # count/statistic derived from this trace is then a floor, not a
+            # true total, and which spans got dropped is a scheduling race
+            # (so re-running the identical query can undercount differently
+            # each time). See Session.trace()'s docstring in opteryx-core.
+            "truncated": self._truncated,
         }
 
     def events(self):
@@ -94,13 +102,14 @@ def dump_trace(
     query_text: str = "",
     session_id: str = "",
     host_info: str = "",
+    truncated: bool = False,
 ) -> str:
     """Persist a trace bundle (as returned by Session.trace()) to `path`
     (.trace.json). Call right after a traced query, e.g.:
 
-        blob, node_symbols, file_symbols, host_info = session.trace()
+        blob, node_symbols, file_symbols, host_info, truncated = session.trace()
         dump_trace(blob, node_symbols, file_symbols, "out.trace.json",
-                    query_text=sql, host_info=host_info)
+                    query_text=sql, host_info=host_info, truncated=truncated)
     """
     import base64
 
@@ -111,6 +120,7 @@ def dump_trace(
         "query": query_text,
         "session_id": session_id,
         "host_info": host_info,
+        "truncated": truncated,
     }
     out_path = Path(path)
     out_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -130,4 +140,5 @@ def load_trace(path: str) -> SpanTraceReader:
         query_text=payload.get("query", ""),
         session_id=payload.get("session_id", ""),
         host_info=payload.get("host_info", ""),
+        truncated=payload.get("truncated", False),
     )

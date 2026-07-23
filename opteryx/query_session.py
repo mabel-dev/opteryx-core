@@ -631,9 +631,9 @@ class Session(DataFrame):
         return self._telemetry.messages
 
     # ------------------------------------------------------------------
-    def trace(self) -> Tuple[bytes, Dict[int, str], Dict[int, str], str]:
+    def trace(self) -> Tuple[bytes, Dict[int, str], Dict[int, str], str, bool]:
         """Return this query's raw native execution trace: ``(blob,
-        node_symbols, file_symbols, host_info)``.
+        node_symbols, file_symbols, host_info, truncated)``.
 
         ``blob`` is a packed array of fixed-layout span records (see
         ``opteryx.tracing`` / docs/EXECUTION_TRACING_DESIGN.md); ``node_symbols``
@@ -642,11 +642,18 @@ class Session(DataFrame):
         ``"arch=...;host=..."`` identity of the process that captured this
         trace, so two trace bundles can be compared honestly (e.g. telling a
         genuine perf difference apart from an ARM-vs-x86 difference) without
-        out-of-band knowledge of where each one ran. Deliberately returned raw,
-        not interpreted — a caller that only needs to persist the trace (e.g.
-        alongside a query's results) pays no per-span Python object cost, and a
-        caller that wants to look at it calls ``opteryx.tracing.interpret_trace``
-        (or ``opteryx.tracing.parse_spans`` for the unresolved fields).
+        out-of-band knowledge of where each one ran. ``truncated`` is True when
+        some worker's span arena (``OPTERYX_TRACE_ARENA_SPANS``) filled up
+        mid-query — every downstream number (file/row/byte counts, concurrency,
+        throughput, …) is then a floor, not a true total, and WHICH spans got
+        dropped is a scheduling race, so the undercount varies run to run even
+        for an identical query. A caller that ignores this flag will see
+        numbers that look plausible but silently aren't the whole picture.
+        Deliberately returned raw, not interpreted — a caller that only needs
+        to persist the trace (e.g. alongside a query's results) pays no
+        per-span Python object cost, and a caller that wants to look at it
+        calls ``opteryx.tracing.interpret_trace`` (or ``opteryx.tracing.parse_spans``
+        for the unresolved fields).
 
         Raises ``RuntimeError`` if tracing was not armed for this query
         (``OPTERYX_TRACE`` unset when the query ran).
@@ -658,6 +665,7 @@ class Session(DataFrame):
             self._trace.node_symbols,
             self._trace.file_symbols,
             self._trace.host_info,
+            self._trace.truncated,
         )
 
     def close(self):

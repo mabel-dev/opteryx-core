@@ -385,6 +385,17 @@ def _render_html_template(
     query_text = metadata.get("query", "No query text available")
     session_id = metadata.get("session_id", "Unknown")
     host_info = metadata.get("host_info", "") or "Unknown (trace predates host_info)"
+    truncated = metadata.get("truncated", False)
+    truncated_banner_html = (
+        '<div class="banner banner--warning" style="margin-bottom:12px;padding:8px 12px;'
+        'border-radius:6px;background:#fff3cd;color:#664d03;font-size:12.5px;">'
+        "⚠ Trace truncated — a worker's span arena filled up mid-query. Every count below "
+        "is a floor, not a true total, and which spans got dropped is a scheduling race, so "
+        "an identical query can undercount differently on each run."
+        "</div>"
+        if truncated
+        else ""
+    )
 
     stats_html = _format_stats(stats)
 
@@ -510,6 +521,7 @@ def _render_html_template(
 <body>
     <div class="container">
         <h1>IO Waterfall Chart</h1>
+        {truncated_banner_html}
         <div class="metadata">
             <div class="metadata-item">
                 <span class="metadata-label">Session ID:</span>

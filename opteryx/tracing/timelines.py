@@ -153,7 +153,12 @@ class TraceTimelines:
         """(ops, t0, total_duration) for the pipeline-stage execution
         waterfall. One row per TC_SOURCE_PULL/TC_OP_EXEC/TC_SINK span
         (already start/end-paired — no phase="start"/"end" matching
-        needed)."""
+        needed). ``worker_id`` is the executing worker's index (stamped at
+        every trace_begin() call site in executor.hpp) — a caller wanting a
+        by-thread swimlane view (grouping spans by which worker ran them,
+        rather than by which plan node) groups on this instead of
+        operator_id. It's a small, config-bounded number (MAX_EXECUTION_WORKERS),
+        unlike operator_id/node_id which can be in the hundreds for a large plan."""
         ops: List[Dict[str, Any]] = []
         t_max_ns = self._t0_ns
         for s in self.spans:
@@ -166,6 +171,7 @@ class TraceTimelines:
                 {
                     "operator_id": str(s["node_id"]),
                     "operator_name": f"{name} [{role}]",
+                    "worker_id": s["worker_id"],
                     "wall_start": self._seconds(s["t_start_ns"]),
                     "wall_end": self._seconds(s["t_end_ns"]),
                     "rows_out": s["rows"],

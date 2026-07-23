@@ -74,9 +74,10 @@ class TestIOWaterfallIntegration:
         ):
             pass
 
-        blob, node_symbols, file_symbols, host_info = session.trace()
+        blob, node_symbols, file_symbols, host_info, truncated = session.trace()
         assert blob, "expected a non-empty span blob"
         assert host_info, "expected a non-empty host_info identity"
+        assert truncated is False, "a tiny test query should never truncate the trace"
 
         # opteryx.tracing.interpret_trace() is the canonical binary ->
         # meaningful conversion — exercise it directly, not just through
