@@ -78,11 +78,13 @@ cdef extern from "core/draken_bridge.h":
     int draken_vector_mark_dict_sorted(PyObject* obj)
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
-        uint8_t* validity, uint32_t length, DrakenType vec_type)
+        uint8_t* validity, uint32_t length, DrakenType vec_type,
+        const uint64_t* keyhash)
     PyObject* draken_vector_own_string_dict(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint32_t* codes, uint32_t data_length,
-        uint8_t* validity, uint32_t length, DrakenType vec_type)
+        uint8_t* validity, uint32_t length, DrakenType vec_type,
+        const uint64_t* keyhash)
     PyObject* draken_vector_own_dict_i64(
         void* data, uint32_t data_length,
         uint32_t* codes, uint32_t length, uint8_t* validity)
@@ -139,9 +141,10 @@ cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType w
     cdef Vector vec
     slots_ptr = morsel_take_direct(result[0], i, &dval)
     morsel_take_string(result[0], i, &arena_ptr, &codes_ptr)
+    # E37: keyhash is COPIED by own_string (not taken) — MorselRef dtor frees it.
     raw = draken_vector_own_string(
         <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
-        dval, dlen, want_type)
+        dval, dlen, want_type, <const uint64_t*>result.columns[i].keyhash)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string failed")
     vec = Vector.__new__(Vector)
@@ -171,7 +174,7 @@ cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i, DrakenT
     raw = draken_vector_own_string_dict(
         <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
         <uint32_t*>codes_ptr, data_length,
-        dval, dlen, want_type)
+        dval, dlen, want_type, <const uint64_t*>result.columns[i].keyhash)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string_dict failed")
     vec = Vector.__new__(Vector)
@@ -1704,6 +1707,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     string_types=None,
     decimal_columns=None,
     logical_coerce=None,
+    hash_key_columns=None,
     pool=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
@@ -1734,6 +1738,14 @@ cpdef NativeScanPlan open_native_scan_plan(
     else:
         for _sti in range(len(column_names)):
             plan.string_types.push_back(0)
+    # E37: per-column key flag (1 = this column is a GROUP BY/JOIN/DISTINCT key
+    # downstream → carry its hash seed). Default all-zero → no sidecar built.
+    if hash_key_columns is not None:
+        for _sti in range(len(column_names)):
+            plan.hash_key_columns.push_back(<uint8_t>hash_key_columns[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.hash_key_columns.push_back(0)
     # WP-11: parallel decimal-routing flags + packed logical-coercion plan. Both
     # default to all-zero (no coercion) so pre-WP-11 callers are unchanged.
     if decimal_columns is not None:
@@ -1815,6 +1827,9 @@ cpdef NativeScanPlan open_native_scan_plan(
         plan.pipeline_ptr = new ParquetIOPipeline(_shared_handle, 1024)
     else:
         plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
+    # E37: hand the per-column key flags to the decoder so non-key string columns
+    # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
+    plan.pipeline_ptr.set_hash_key_columns(plan.hash_key_columns)
     # A pool sink must be wired regardless — the decode worker's pool-path
     # (dk=0) branch expects one to exist even though this plan's Source never
     # routes a column there deliberately (it fails loud on dk=0 instead).

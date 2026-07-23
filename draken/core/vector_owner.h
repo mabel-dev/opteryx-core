@@ -52,6 +52,16 @@ using OwnedBuffer = std::unique_ptr<T, DrakenFree>;
 //   child_owner  — Non-null only for DRAKEN_ARRAY. Owns the child DrakenVector
 //                  (and transitively its subtree). Destructor chains recursively,
 //                  so freeing the parent frees the whole subtree. No back-pointers.
+//   keyhash_buf  — E37 carried key-hash. Non-null only when a producer (a string
+//                  decoder) has pre-computed the per-data-element hash SEED
+//                  (str_hash_seed) for this vector: one uint64_t per data-element
+//                  (data_length entries), addressed as keyhash_buf[selection[i]]
+//                  exactly like data. Lets the GROUP BY / JOIN / DISTINCT key hash
+//                  skip re-seeding from the arena (see draken/docs/design/
+//                  E37_carried_key_hash.md). Presence == validity: any op that does
+//                  not explicitly propagate it yields nullptr, and the consumer
+//                  falls back to recomputing str_hash_seed. Purely additive
+//                  (default nullptr): every consumer that ignores it is unchanged.
 //
 // RAII: all unique_ptrs call draken_free via DrakenFree on destruction.
 // No owns_* flags anywhere — the unique_ptr itself IS the ownership record.
@@ -63,6 +73,7 @@ struct VectorOwner {
     OwnedBuffer<uint8_t> arena_buf;   // non-null only for non-inline VARCHAR/NVARCHAR/VARBINARY
     const LogicalType*   logical_type = nullptr;  // borrowed; registry-interned
     std::unique_ptr<VectorOwner> child_owner;     // non-null only for DRAKEN_ARRAY
+    OwnedBuffer<uint64_t> keyhash_buf;            // E37: non-null only when seed pre-computed
 
     VectorOwner(DrakenVector v,
                 OwnedBuffer<void>    d,

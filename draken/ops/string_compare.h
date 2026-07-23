@@ -116,7 +116,10 @@ static inline int str_eq_slots(const DrakenStringSlot* a,
         // Short: full inline content in raw.hi (zero-padded beyond length).
         return a->raw.hi == b->raw.hi;
     }
-    if (a->ext.hash32 != b->ext.hash32) return 0;
+    // E37: length+first4 (raw.lo) match, then authoritative byte compare. The old
+    // hash32 fast-reject was removed — it is dead in every hash-bucketed caller
+    // (str_eq_slots is only reached on same-64-bit-hash candidates, so hash32 always
+    // matches) and negligible elsewhere. See draken/docs/design/E37_carried_key_hash.md.
     return std::memcmp(arena_a + a->ext.arena_offset,
                        arena_b + b->ext.arena_offset,
                        a->ext.length) == 0;

@@ -107,7 +107,8 @@ inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint
 // Dense (positional) string column: nslots == length, selection = global identity.
 inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t length,
                                      uint8_t* src_arena, size_t arena_len,
-                                     uint8_t* validity, DrakenType type, CxxColumn& out) {
+                                     uint8_t* validity, DrakenType type, CxxColumn& out,
+                                     uint64_t* keyhash = nullptr) {
     DrakenStringArena* sa = nullptr;
     uint8_t* block = consolidate_string_block(src_slots, length, src_arena, arena_len, type, &sa);
     draken_free(src_slots);
@@ -115,6 +116,8 @@ inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t lengt
     DrakenVector v = draken_vector_from_dense(sa, length, type, validity);
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
                                             OwnedBuffer<uint8_t>(validity));
+    // E37: attach the scan-carried seed (length entries), taking ownership.
+    if (keyhash) out.own->keyhash_buf = OwnedBuffer<uint64_t>(keyhash);
     out.view = out.own->vec;
 }
 
@@ -126,7 +129,7 @@ inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_l
                                     uint8_t* src_arena, size_t arena_len,
                                     uint32_t* codes, uint32_t length,
                                     uint8_t* validity, DrakenType type, CxxColumn& out,
-                                    bool sorted = false) {
+                                    bool sorted = false, uint64_t* keyhash = nullptr) {
     DrakenStringArena* sa = nullptr;
     uint8_t* block = consolidate_string_block(src_slots, data_length, src_arena, arena_len,
                                               type, &sa);
@@ -138,6 +141,8 @@ inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_l
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
                                             OwnedBuffer<uint8_t>(validity),
                                             OwnedBuffer<void>(codes));
+    // E37: attach the scan-carried seed (data_length distinct entries), taking ownership.
+    if (keyhash) out.own->keyhash_buf = OwnedBuffer<uint64_t>(keyhash);
     out.view = out.own->vec;
 }
 

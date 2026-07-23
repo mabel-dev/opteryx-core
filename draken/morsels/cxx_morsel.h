@@ -83,7 +83,13 @@ static inline const DrakenVector* cxx_column_child_vec(const CxxMorsel* m,
 static inline size_t cxx_morsel_nbytes(const CxxMorsel* m) noexcept {
     if (m == nullptr) return 0u;
     size_t total = 0u;
-    for (const CxxColumn& c : m->columns)
+    for (const CxxColumn& c : m->columns) {
         total += draken_vector_nbytes(&c.view);
+        // E37: carried key-hash seed buffer (one uint64 per data-element) is
+        // owner-held, invisible to the view-only draken_vector_nbytes, so add it
+        // here to keep the morsel footprint (and the OOM guard) honest.
+        if (c.own && c.own->keyhash_buf)
+            total += static_cast<size_t>(c.view.data_length) * sizeof(uint64_t);
+    }
     return total;
 }

@@ -331,7 +331,6 @@ VecResult draken_replace(void* /*ctx*/, const DrakenVector* const* args, uint32_
             uint8_t* dst = arena + arena_pos;
             rs_build_replaced(hd, hl, ndl_data, ndl_len, rep_data, rep_len, dst);
             str_init_extern(&slots[j], dst, out_len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, out_len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += out_len;
         }

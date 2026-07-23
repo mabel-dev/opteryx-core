@@ -92,9 +92,8 @@ static draken::ops::ArrScalar build_scalar(nb::object lit,
         if (len <= STR_INLINE_MAX) {
             str_init_inline(&slot_storage, data, len);
         } else {
-            const uint32_t hash32 = static_cast<uint32_t>(XXH3_64bits(data, len));
             // arena_offset == 0: str_data(&slot, data) returns data directly.
-            str_init_extern(&slot_storage, data, len, hash32, 0u);
+            str_init_extern(&slot_storage, data, len, 0u);  // E37: no hash32/XXH3
         }
 
         s.type      = DRAKEN_VARCHAR;

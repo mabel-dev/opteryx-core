@@ -46,6 +46,10 @@
 #include "core/vector_owner.h"
 #include "logical_type.h"        // LogicalType definition (owner only forward-declares it)
 #include "xxhash.h"              // XXH3_64bits — long-slot hash32 (same as draken's builders)
+#include "morsels/cxx_hash.h"    // cxx_hash_c — draken owns the key hash (DISTINCT/GROUP BY)
+#include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
+#include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
+#include "native_hash_join.hpp"  // JoinPayloadColumn (per-group key store), compute_row_hashes
 
 namespace opteryx::engine {
 
@@ -311,7 +315,6 @@ inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
         } else {
             std::memcpy(out_arena + arena_pos, bytes, len);
             str_init_extern(&dst[g], out_arena + arena_pos, len,
-                            static_cast<uint32_t>(XXH3_64bits(bytes, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }
@@ -484,15 +487,6 @@ struct GBArrayAggState {
     }
 };
 
-// COUNT(DISTINCT) value fits the typed (u32 entry, u64 widened value) pair
-// tables — everything fixed-width up to 8 bytes; strings and DECIMAL128 take
-// the serialized-bytes tables.
-inline bool gb_cd_fixed(DrakenType t) {
-    if (sort_type_is_string(t) || t == DRAKEN_DECIMAL128) return false;
-    if (t == DRAKEN_BOOL) return true;
-    size_t es = gather_elem_size(t);
-    return es > 0 && es <= 8;
-}
 
 inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
     switch (sp.fn) {
@@ -795,80 +789,6 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
     return CxxColumn{};   // unreachable
 }
 
-// ---- serialized row keys (GROUP BY keys / DISTINCT rows) ---------------------------
-// Per column: 1 null byte; valid fixed-width appends its raw native bytes (bitwise
-// equality — draken canonicalizes -0.0/NaN at storage); valid string appends
-// u32 length + bytes. BOOL appends one byte.
-
-inline bool key_append(std::string& buf, const DrakenVector& v, uint32_t row,
-                       ErrCtx& err) {
-    if (!sort_row_valid(v, row)) {
-        buf.push_back('\0');
-        return true;
-    }
-    buf.push_back('\1');
-    if (sort_type_is_string(v.type)) {
-        const DrakenStringArena* sa = string_arena_of(v);
-        const DrakenStringSlot* slot = &sa->slots[v.selection[row]];
-        uint32_t len = str_length(slot);
-        buf.append(reinterpret_cast<const char*>(&len), sizeof(len));
-        if (len > 0)
-            buf.append(reinterpret_cast<const char*>(str_data(slot, sa->arena)), len);
-        return true;
-    }
-    if (v.type == DRAKEN_BOOL) {
-        uint32_t phys = v.selection[row];
-        buf.push_back(static_cast<char>(
-            (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u));
-        return true;
-    }
-    size_t es = gather_elem_size(v.type);
-    if (es == 0) {
-        err.code = 1;
-        err.msg = "native engine: unsupported GROUP BY/DISTINCT key column type — "
-                  "fail loud, never a silent wrong grouping";
-        return false;
-    }
-    buf.append(reinterpret_cast<const char*>(static_cast<const uint8_t*>(v.data))
-                   + static_cast<size_t>(v.selection[row]) * es,
-               es);
-    return true;
-}
-
-// key_append for a PHYSICAL value index: byte-identical to key_append's valid
-// arm ('\1' + payload), but addressed by data slot instead of logical row —
-// the §11-sanctioned dict-shape fast paths serialize each UNIQUE value once
-// and must land in the same dedup universe as the per-row path. Caller has
-// already established the value is referenced by at least one valid row.
-inline bool key_append_phys(std::string& buf, const DrakenVector& v, uint32_t phys,
-                            ErrCtx& err) {
-    buf.push_back('\1');
-    if (sort_type_is_string(v.type)) {
-        const DrakenStringArena* sa = string_arena_of(v);
-        const DrakenStringSlot* slot = &sa->slots[phys];
-        uint32_t len = str_length(slot);
-        buf.append(reinterpret_cast<const char*>(&len), sizeof(len));
-        if (len > 0)
-            buf.append(reinterpret_cast<const char*>(str_data(slot, sa->arena)), len);
-        return true;
-    }
-    if (v.type == DRAKEN_BOOL) {
-        buf.push_back(static_cast<char>(
-            (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u));
-        return true;
-    }
-    size_t es = gather_elem_size(v.type);
-    if (es == 0) {
-        err.code = 1;
-        err.msg = "native engine: unsupported GROUP BY/DISTINCT key column type — "
-                  "fail loud, never a silent wrong grouping";
-        return false;
-    }
-    buf.append(reinterpret_cast<const char*>(static_cast<const uint8_t*>(v.data))
-                   + static_cast<size_t>(phys) * es,
-               es);
-    return true;
-}
 
 // Mark which PHYSICAL dict slots are referenced by at least one VALID logical
 // row — one cheap O(rows) pass, no hashing, no set probes. The dict-shape fast
@@ -888,130 +808,6 @@ struct KeyColMeta {
     bool captured = false;
 };
 
-// Lightweight view of a serialized group key (bytes may live in a per-partition
-// arena rather than an owning std::string).
-struct GBKeyRef {
-    const char* d;
-    size_t n;
-};
-
-// `null_rows_carry_bytes`: fixed-stride packed keys (v3 all-fixed-width mode)
-// write zeroed value bytes after a '\0' null marker so every key is the same
-// length — the parser must skip them. The variable (string-key) format writes
-// nothing after '\0'.
-inline void emit_key_columns(const std::vector<GBKeyRef>& keys,
-                             const std::vector<KeyColMeta>& meta,
-                             bool null_rows_carry_bytes,
-                             CxxMorsel& out, ErrCtx& err) {
-    uint32_t n = static_cast<uint32_t>(keys.size());
-    size_t ncols = meta.size();
-    // Per-group cursor into its serialized buffer, advanced column by column.
-    std::vector<size_t> pos(n, 0);
-    for (size_t kc = 0; kc < ncols; ++kc) {
-        DrakenType t = meta[kc].type;
-        if (sort_type_is_string(t)) {
-            // Pass 1: arena size + slot count. Pass 2: fill canonical block.
-            size_t total_arena = 0;
-            std::vector<size_t> starts(n);
-            for (uint32_t g = 0; g < n; ++g) {
-                const GBKeyRef& b = *(&keys[g]);
-                starts[g] = pos[g];
-                if (b.d[pos[g]++] == '\0') continue;
-                uint32_t len;
-                std::memcpy(&len, b.d + pos[g], sizeof(len));
-                pos[g] += sizeof(len) + len;
-                if (len > STR_INLINE_MAX) total_arena += len;   // long-form slots only
-            }
-            size_t slots_off = sizeof(DrakenStringArena);
-            size_t arena_off = slots_off
-                + static_cast<size_t>(n == 0 ? 1 : n) * sizeof(DrakenStringSlot);
-            uint8_t* blk = static_cast<uint8_t*>(draken_malloc(arena_off + total_arena));
-            auto* sa = reinterpret_cast<DrakenStringArena*>(blk);
-            auto* dst = reinterpret_cast<DrakenStringSlot*>(blk + slots_off);
-            uint8_t* out_arena = total_arena > 0 ? blk + arena_off : nullptr;
-            sa->slots = dst; sa->arena = out_arena; sa->length = n;
-            sa->arena_used = total_arena; sa->arena_cap = total_arena;
-            sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = t;
-            size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
-            uint8_t* vbits = nullptr;
-            size_t arena_pos = 0;
-            for (uint32_t g = 0; g < n; ++g) {
-                const GBKeyRef& b = *(&keys[g]);
-                size_t q = starts[g];
-                if (b.d[q++] == '\0') {
-                    std::memset(&dst[g], 0, sizeof(DrakenStringSlot));
-                    if (vbits == nullptr) {
-                        vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
-                        std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
-                    }
-                    vbits[g >> 3] &= static_cast<uint8_t>(~(1u << (g & 7)));
-                    continue;
-                }
-                uint32_t len;
-                std::memcpy(&len, b.d + q, sizeof(len));
-                q += sizeof(len);
-                const uint8_t* bytes = reinterpret_cast<const uint8_t*>(b.d + q);
-                if (len <= STR_INLINE_MAX) {
-                    str_init_inline(&dst[g], bytes, len);
-                } else {
-                    std::memcpy(out_arena + arena_pos, bytes, len);
-                    str_init_extern(&dst[g], bytes, len,
-                                    static_cast<uint32_t>(XXH3_64bits(bytes, len)),
-                                    static_cast<uint32_t>(arena_pos));
-                    arena_pos += len;
-                }
-            }
-            uint32_t* sel = static_cast<uint32_t*>(
-                draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-            for (uint32_t i = 0; i < n; ++i) sel[i] = i;
-            DrakenVector v;
-            v.data = sa; v.selection = sel; v.data_length = n; v.length = n;
-            v.validity = vbits; v.type = t;
-            v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-            CxxColumn c;
-            c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
-                                                  OwnedBuffer<uint8_t>(vbits),
-                                                  OwnedBuffer<void>(sel));
-            c.own->logical_type = meta[kc].logical;
-            c.view = c.own->vec;
-            out.columns.push_back(std::move(c));
-            continue;
-        }
-        size_t es = (t == DRAKEN_BOOL) ? 1 : gather_elem_size(t);
-        if (es == 0) {
-            err.code = 1;
-            err.msg = "native engine: unsupported key column type at materialization";
-            return;
-        }
-        std::vector<int64_t> raws(n, 0);
-        std::vector<uint8_t> ok(n, 1);
-        for (uint32_t g = 0; g < n; ++g) {
-            const GBKeyRef& b = *(&keys[g]);
-            if (b.d[pos[g]++] == '\0') {
-                ok[g] = 0;
-                if (null_rows_carry_bytes) pos[g] += es;
-                continue;
-            }
-            int64_t raw = 0;
-            std::memcpy(&raw, b.d + pos[g], es);
-            pos[g] += es;
-            if (t == DRAKEN_FLOAT32) {
-                // stored as raw 4-byte float; widen to the double-bit container
-                float f;
-                std::memcpy(&f, &raw, sizeof(f));
-                double d = static_cast<double>(f);
-                std::memcpy(&raw, &d, sizeof(d));
-            } else if (t != DRAKEN_FLOAT64 && es < 8) {
-                // sign-extend narrow integers stored as raw bytes
-                int shift = static_cast<int>((8 - es) * 8);
-                raw = (raw << shift) >> shift;
-            }
-            raws[g] = raw;
-        }
-        out.columns.push_back(emit_fixed_column(raws.data(), ok.data(), n, t,
-                                                meta[kc].logical));
-    }
-}
 
 // ---- shared partitioned-dedup machinery (GroupBy + ungrouped COUNT DISTINCT) -------
 
@@ -1027,118 +823,51 @@ constexpr int kGBPartShift = 58;   // top 6 bits pick the partition
 constexpr size_t kGBFlushEntries = 65536;
 constexpr size_t kGBArenaChunk = 1u << 20;   // 1 MiB key-arena chunks (string-key mode)
 
-// Per-(spec, partition) dedup table for COUNT(DISTINCT): keys are
-// [4-byte group entry || serialized value bytes], full byte identity (stored
-// hash + memcmp — never hash-only). pair_ent/val slices are kept so the merge
-// can RE-KEY every pair against the merged partition's group entries.
-struct GBDedup {
-    std::vector<uint32_t> table;      // open addressing; value = pair index + 1
-    std::vector<uint64_t> hashes;
-    std::vector<uint32_t> pair_ent;   // group entry per pair (pre-merge numbering)
-    std::vector<uint64_t> key_off;    // (chunk << 20) | offset — full key bytes
-    std::vector<uint32_t> key_len;
-    std::vector<std::unique_ptr<char[]>> arena_chunks;
-    size_t arena_used = kGBArenaChunk;
+// Combine a group id with a value hash into one 64-bit dedup key. Both the sink
+// and the merge derive the SAME key for the SAME (group, value) pair, so a
+// distinct value is counted once per group regardless of which worker saw it.
+inline uint64_t gb_mix2(uint64_t a, uint64_t b) {
+    uint64_t h = a * 0x9E3779B97F4A7C15ULL + 1u;
+    h ^= h >> 32;
+    h ^= b;
+    h = h * 0x9E3779B97F4A7C15ULL + 1u;
+    h ^= h >> 32;
+    return h;
+}
 
-    size_t size() const { return hashes.size(); }
-    const char* key_ptr(uint32_t e) const {
-        uint64_t off = key_off[e];
-        return arena_chunks[off >> 20].get() + (off & (kGBArenaChunk - 1));
-    }
-    void rehash(size_t want) {
-        size_t cap = 16;
-        while (cap < want * 2) cap <<= 1;
-        table.assign(cap, 0);
-        size_t mask = cap - 1;
-        for (uint32_t e = 0; e < hashes.size(); ++e) {
-            size_t slot = hashes[e] & mask;
-            while (table[slot] != 0) slot = (slot + 1) & mask;
-            table[slot] = e + 1;
+// Per-(spec, partition) COUNT(DISTINCT) dedup. Draken owns the value hash
+// (cxx_hash_c over the operand column, or every column for COUNT(DISTINCT *));
+// the (group_id, value_hash) pair is deduped by 64-bit hash identity in a
+// CarcharSet. pair_gid/pair_vhash keep the DISTINCT pairs so the merge can
+// RE-KEY each against the merged partition's renumbered group ids.
+struct GBCountDistinct {
+    opteryx::carchar::CarcharSet seen;   // dedup on gb_mix2(gid, value_hash)
+    std::vector<uint32_t> pair_gid;      // group id per distinct pair (pre-merge)
+    std::vector<uint64_t> pair_vhash;    // value hash per distinct pair
+
+    size_t size() const { return pair_gid.size(); }
+    // Record (gid, vhash); returns true iff this pair is NEW to the set.
+    bool insert(uint32_t gid, uint64_t vhash) {
+        if (seen.insert_or_ignore(gb_mix2(gid, vhash))) {
+            pair_gid.push_back(gid);
+            pair_vhash.push_back(vhash);
+            return true;
         }
-    }
-    // Insert (ent, key bytes); returns true iff the pair is NEW.
-    bool upsert(uint64_t h, uint32_t ent, const char* key, uint32_t klen) {
-        if (table.empty() || hashes.size() * 2 >= table.size())
-            rehash(hashes.size() + 8);
-        size_t mask = table.size() - 1;
-        size_t slot = h & mask;
-        while (true) {
-            uint32_t e1 = table[slot];
-            if (e1 == 0) break;
-            uint32_t e = e1 - 1;
-            if (hashes[e] == h && key_len[e] == klen
-                    && std::memcmp(key_ptr(e), key, klen) == 0)
-                return false;
-            slot = (slot + 1) & mask;
-        }
-        if (klen >= kGBArenaChunk) {
-            arena_chunks.push_back(std::unique_ptr<char[]>(new char[klen]));
-            std::memcpy(arena_chunks.back().get(), key, klen);
-            key_off.push_back(static_cast<uint64_t>(arena_chunks.size() - 1) << 20);
-            arena_used = kGBArenaChunk;
-        } else {
-            if (arena_used + klen > kGBArenaChunk) {
-                arena_chunks.push_back(std::unique_ptr<char[]>(new char[kGBArenaChunk]));
-                arena_used = 0;
-            }
-            std::memcpy(arena_chunks.back().get() + arena_used, key, klen);
-            key_off.push_back(
-                (static_cast<uint64_t>(arena_chunks.size() - 1) << 20) | arena_used);
-            arena_used += klen;
-        }
-        table[slot] = static_cast<uint32_t>(hashes.size()) + 1;
-        hashes.push_back(h);
-        pair_ent.push_back(ent);
-        key_len.push_back(klen);
-        return true;
+        return false;
     }
 };
 
-// Fixed-width COUNT(DISTINCT) pair dedup: (u32 group entry, u64 widened value)
-// in typed lanes — no serialization, no arena, exact integer identity. The
-// value is agg2_read_raw's widened container (raw-byte equality is the dedup
-// contract; draken canonicalizes -0.0/NaN at storage).
-struct GBDedupF {
-    std::vector<uint32_t> table;      // open addressing; value = pair index + 1
-    std::vector<uint64_t> hashes;     // stored — no later phase re-hashes
-    std::vector<uint32_t> pent;       // group entry per pair
-    std::vector<uint64_t> pval;       // widened value per pair
-
-    size_t size() const { return hashes.size(); }
-    void rehash(size_t want) {
-        size_t cap = 16;
-        while (cap < want * 2) cap <<= 1;
-        table.assign(cap, 0);
-        size_t mask = cap - 1;
-        for (uint32_t e = 0; e < hashes.size(); ++e) {
-            size_t slot = hashes[e] & mask;
-            while (table[slot] != 0) slot = (slot + 1) & mask;
-            table[slot] = e + 1;
-        }
-    }
-    static uint64_t hash_pair(uint32_t ent, uint64_t val) {
-        struct { uint32_t e; uint64_t v; } kb;
-        kb.e = ent; kb.v = val;
-        return XXH3_64bits(&kb, sizeof(kb));
-    }
-    // Insert (ent, val); returns true iff the pair is NEW.
-    bool upsert(uint64_t h, uint32_t ent, uint64_t val) {
-        if (table.empty() || hashes.size() * 2 >= table.size())
-            rehash(hashes.size() + 8);
-        size_t mask = table.size() - 1;
-        size_t slot = h & mask;
-        while (true) {
-            uint32_t e1 = table[slot];
-            if (e1 == 0) break;
-            uint32_t e = e1 - 1;
-            if (hashes[e] == h && pent[e] == ent && pval[e] == val) return false;
-            slot = (slot + 1) & mask;
-        }
-        table[slot] = static_cast<uint32_t>(hashes.size()) + 1;
-        hashes.push_back(h);
-        pent.push_back(ent);
-        pval.push_back(val);
-        return true;
+// Ungrouped COUNT(DISTINCT): per-spec, per-hash-partition dedup of distinct VALUE
+// hashes (draken owns the value hash via cxx_hash_c). Partitioned by hash so the
+// distinct sets union in parallel at finalize; `distinct` keeps the set's hashes
+// for that merge. Ungrouped has no group id, so this is a plain value-hash set.
+struct UCDPartition {
+    opteryx::carchar::CarcharSet seen;
+    std::vector<uint64_t> distinct;
+    size_t size() const { return distinct.size(); }
+    bool insert(uint64_t h) {
+        if (seen.insert_or_ignore(h)) { distinct.push_back(h); return true; }
+        return false;
     }
 };
 
@@ -1147,12 +876,9 @@ struct GBDedupF {
 struct UngroupedAggLocal : LocalSinkState {
     std::vector<AggCell> cells;
     std::vector<std::string> strs;   // string MIN/MAX extremes, parallel to cells
-    // COUNT(DISTINCT): per-spec hash-PARTITIONED flat dedup tables (stored hash
-    // + arena + memcmp — profiled: unordered_set<string> was the Q05 wall via
-    // per-node malloc, string hashing, and a ~1s destructor). Fixed-width
-    // values take the typed GBDedupF twin (no serialization, entry always 0).
-    std::vector<std::array<GBDedup, kGBParts>> dparts;
-    std::vector<std::array<GBDedupF, kGBParts>> dfparts;
+    // COUNT(DISTINCT): per-spec, hash-partitioned CarcharSet dedup on draken value
+    // hashes (partitioned for the parallel union at finalize).
+    std::vector<std::array<UCDPartition, kGBParts>> dparts;
     std::vector<AggColMeta> meta;
     bool init = false;
 };
@@ -1162,8 +888,7 @@ struct UngroupedAggGlobal : GlobalSinkState {
     std::vector<std::string> strs;
     // per spec, per partition: queued worker tables (disjoint by hash — merged
     // AND counted in parallel at finalize, mirroring GroupBySink).
-    std::vector<std::array<std::vector<GBDedup>, kGBParts>> dpending;
-    std::vector<std::array<std::vector<GBDedupF>, kGBParts>> dfpending;
+    std::vector<std::array<std::vector<UCDPartition>, kGBParts>> dpending;
     std::vector<AggColMeta> meta;
     bool init = false;
 };
@@ -1241,7 +966,6 @@ struct UngroupedAggSink : Sink {
             l.cells.assign(specs.size(), AggCell{});
             l.strs.assign(specs.size(), std::string());
             l.dparts.resize(specs.size());
-            l.dfparts.resize(specs.size());
             l.init = true;
         }
         uint32_t rows = in->num_rows();
@@ -1249,25 +973,18 @@ struct UngroupedAggSink : Sink {
             AggCell& c = l.cells[s];
             c.rows += rows;
             if (specs[s].fn == AggFn::CountDistinct && specs[s].col_idx == kAggWholeRow) {
-                // COUNT(DISTINCT *): dedup key is every column in the stream,
-                // same per-column key_append DistinctSink's whole-row (empty
-                // on_idx) path uses — always the general partitioned table,
-                // never the typed-pair fast path (multi-column, mixed types).
-                // NULL participates as a normal value: whole-row identity,
-                // not the per-column NULL exclusion COUNT(DISTINCT col) does.
-                std::string dkey;
-                std::array<GBDedup, kGBParts>& DP = l.dparts[s];
+                // COUNT(DISTINCT *): draken hashes EVERY column into one value hash
+                // per row; NULL participates as a normal value (whole-row identity),
+                // so no per-row null skip. Distinct value hashes are hash-partitioned
+                // for the parallel union at finalize.
+                std::array<UCDPartition, kGBParts>& DP = l.dparts[s];
                 size_t ncols = in->columns.size();
-                for (uint32_t i = 0; i < rows; ++i) {
-                    dkey.clear();
-                    for (size_t col = 0; col < ncols; ++col) {
-                        if (!key_append(dkey, in->columns[col].view, i, err))
-                            return SinkResult::CONTINUE;
-                    }
-                    uint64_t dh = XXH3_64bits(dkey.data(), dkey.size());
-                    DP[dh >> kGBPartShift].upsert(
-                        dh, 0, dkey.data(), static_cast<uint32_t>(dkey.size()));
-                }
+                std::vector<size_t> allcols(ncols);
+                for (size_t col = 0; col < ncols; ++col) allcols[col] = col;
+                std::vector<uint64_t> vh;
+                if (!compute_row_hashes(in, allcols, vh, err)) return SinkResult::CONTINUE;
+                for (uint32_t i = 0; i < rows; ++i)
+                    DP[vh[i] >> kGBPartShift].insert(vh[i]);
                 continue;
             }
             if (specs[s].col_idx == kAggNoOperand) continue;
@@ -1276,48 +993,18 @@ struct UngroupedAggSink : Sink {
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) c.valid += 1;
                 }
-            } else if (specs[s].fn == AggFn::CountDistinct
-                       && gb_cd_fixed(l.meta[s].type)) {
-                // typed value path: u64 widened values, no serialization.
-                std::array<GBDedupF, kGBParts>& DF = l.dfparts[s];
-                bool is_f = l.meta[s].is_float;
+            } else if (specs[s].fn == AggFn::CountDistinct) {
+                // Draken hashes the operand value per row; dedup distinct value
+                // hashes, hash-partitioned for the parallel union at finalize.
+                // COUNT(DISTINCT col) ignores NULLs (c.valid unused; count is the
+                // union of the partitioned sets).
+                std::array<UCDPartition, kGBParts>& DP = l.dparts[s];
+                std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                std::vector<uint64_t> vh;
+                if (!compute_row_hashes(in, vcol, vh, err)) return SinkResult::CONTINUE;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (!sort_row_valid(v, i)) continue;
-                    uint64_t val = static_cast<uint64_t>(agg2_read_raw(v, i, is_f));
-                    uint64_t dh = GBDedupF::hash_pair(0, val);
-                    DF[dh >> kGBPartShift].upsert(dh, 0, val);
-                }
-            } else if (specs[s].fn == AggFn::CountDistinct) {
-                // dedup on serialized value bytes; the count is the union of
-                // the partitioned tables, taken at finalize (c.valid unused).
-                std::string dkey;
-                std::array<GBDedup, kGBParts>& DP = l.dparts[s];
-                if (v.data_length < v.length) {
-                    // dict/constant shape (§11, architect-approved): serialize +
-                    // insert each REFERENCED unique value once — rows sharing a
-                    // dict code are known equal without hashing. Bytes are
-                    // identical to the per-row path (key_append_phys), so the
-                    // dedup universe is exact across shapes and morsels.
-                    std::vector<uint8_t> ref;
-                    mark_referenced_valid(v, ref);
-                    for (uint32_t j = 0; j < v.data_length; ++j) {
-                        if (ref[j] == 0) continue;
-                        dkey.clear();
-                        if (!key_append_phys(dkey, v, j, err))
-                            return SinkResult::CONTINUE;
-                        uint64_t dh = XXH3_64bits(dkey.data(), dkey.size());
-                        DP[dh >> kGBPartShift].upsert(
-                            dh, 0, dkey.data(), static_cast<uint32_t>(dkey.size()));
-                    }
-                } else {
-                    for (uint32_t i = 0; i < v.length; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        dkey.clear();
-                        if (!key_append(dkey, v, i, err)) return SinkResult::CONTINUE;
-                        uint64_t dh = XXH3_64bits(dkey.data(), dkey.size());
-                        DP[dh >> kGBPartShift].upsert(
-                            dh, 0, dkey.data(), static_cast<uint32_t>(dkey.size()));
-                    }
+                    DP[vh[i] >> kGBPartShift].insert(vh[i]);
                 }
             } else if (l.meta[s].is_string) {
                 bool want_max = specs[s].fn == AggFn::Max;
@@ -1353,7 +1040,6 @@ struct UngroupedAggSink : Sink {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
             g.dpending.resize(specs.size());
-            g.dfpending.resize(specs.size());
             g.meta.resize(specs.size());
             g.init = true;
         }
@@ -1368,9 +1054,6 @@ struct UngroupedAggSink : Sink {
                         if (l.dparts[s][part].size() > 0)
                             g.dpending[s][part].push_back(
                                 std::move(l.dparts[s][part]));
-                        if (l.dfparts[s][part].size() > 0)
-                            g.dfpending[s][part].push_back(
-                                std::move(l.dfparts[s][part]));
                     }
                 }
                 if (l.meta[s].captured && !g.meta[s].captured) g.meta[s] = l.meta[s];
@@ -1384,30 +1067,22 @@ struct UngroupedAggSink : Sink {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
             g.dpending.resize(specs.size());
-            g.dfpending.resize(specs.size());
             g.meta.resize(specs.size());
         }
-        // COUNT(DISTINCT): union each spec's queued worker tables. Partitions
-        // are disjoint by hash, so (spec, partition) cells union AND count in
-        // parallel (one-shot pool-let, same pattern as GroupBySink::finalize).
+        // COUNT(DISTINCT): union each spec's queued worker sets. Partitions are
+        // disjoint by hash, so (spec, partition) sets union AND count in parallel
+        // (one-shot pool-let, same pattern as GroupBySink::finalize).
         std::vector<std::atomic<int64_t>> dcounts(specs.size());
         for (auto& dc : dcounts) dc.store(0);
         {
-            // (spec, partition, fixed?) — byte tables and typed tables union
-            // through the same pool-let.
-            std::vector<std::tuple<size_t, size_t, bool>> items;
+            std::vector<std::pair<size_t, size_t>> items;   // (spec, partition)
             size_t queued = 0;
             for (size_t s = 0; s < specs.size(); ++s) {
                 if (specs[s].fn != AggFn::CountDistinct) continue;
                 for (size_t part = 0; part < kGBParts; ++part) {
                     if (!g.dpending[s][part].empty()) {
-                        items.emplace_back(s, part, false);
-                        for (const GBDedup& d : g.dpending[s][part])
-                            queued += d.size();
-                    }
-                    if (!g.dfpending[s][part].empty()) {
-                        items.emplace_back(s, part, true);
-                        for (const GBDedupF& d : g.dfpending[s][part])
+                        items.emplace_back(s, part);
+                        for (const UCDPartition& d : g.dpending[s][part])
                             queued += d.size();
                     }
                 }
@@ -1423,38 +1098,16 @@ struct UngroupedAggSink : Sink {
                     for (;;) {
                         size_t it = next.fetch_add(1);
                         if (it >= items.size()) break;
-                        size_t sp = std::get<0>(items[it]);
-                        size_t part = std::get<1>(items[it]);
-                        int64_t cnt = 0;
-                        if (std::get<2>(items[it])) {
-                            auto& list = g.dfpending[sp][part];
-                            GBDedupF merged = std::move(list[0]);
-                            cnt = static_cast<int64_t>(merged.size());
-                            for (size_t i = 1; i < list.size(); ++i) {
-                                GBDedupF& src = list[i];
-                                for (uint32_t e = 0;
-                                     e < static_cast<uint32_t>(src.size()); ++e) {
-                                    if (merged.upsert(src.hashes[e], 0,
-                                                      src.pval[e]))
-                                        cnt += 1;
-                                }
-                                src = GBDedupF();
-                            }
-                        } else {
-                            auto& list = g.dpending[sp][part];
-                            GBDedup merged = std::move(list[0]);
-                            cnt = static_cast<int64_t>(merged.size());
-                            for (size_t i = 1; i < list.size(); ++i) {
-                                GBDedup& src = list[i];
-                                for (uint32_t e = 0;
-                                     e < static_cast<uint32_t>(src.size()); ++e) {
-                                    if (merged.upsert(src.hashes[e], 0,
-                                                      src.key_ptr(e),
-                                                      src.key_len[e]))
-                                        cnt += 1;
-                                }
-                                src = GBDedup();
-                            }
+                        size_t sp = items[it].first;
+                        size_t part = items[it].second;
+                        auto& list = g.dpending[sp][part];
+                        UCDPartition merged = std::move(list[0]);
+                        int64_t cnt = static_cast<int64_t>(merged.size());
+                        for (size_t i = 1; i < list.size(); ++i) {
+                            UCDPartition& src = list[i];
+                            for (uint64_t h : src.distinct)
+                                if (merged.insert(h)) cnt += 1;
+                            src = UCDPartition();
                         }
                         dcounts[sp].fetch_add(cnt);
                     }
@@ -1584,258 +1237,152 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
     }
 }
 
+// Key element size for the per-group key store (JoinPayloadColumn): BOOL is one
+// unpacked byte, strings a slot, DECIMAL128 16 raw bytes, everything else the
+// gather element width — covers every GROUP BY key type draken can hash.
+inline size_t gb_key_elem_size(DrakenType t) {
+    if (t == DRAKEN_BOOL) return 1;
+    if (sort_type_is_string(t)) return sizeof(DrakenStringSlot);
+    if (t == DRAKEN_DECIMAL128) return 16;
+    return gather_elem_size(t);
+}
+
+// Materialize rows [start, start+n) of a per-group key store (JoinPayloadColumn) as
+// an output column — the group-key emit path, replacing emit_key_columns. Mirrors
+// the join's build_output per-column materialization over a contiguous range; a
+// group whose key value is NULL is emitted NULL via the validity bitmap.
+inline CxxColumn jpc_emit_range(const JoinPayloadColumn& col, size_t start,
+                                uint32_t n, ErrCtx& err) {
+    (void)err;
+    size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
+    uint8_t* vbits = nullptr;
+    auto mark_null = [&](uint32_t i) {
+        if (vbits == nullptr) {
+            vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
+            std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
+        }
+        vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+    };
+    auto row_is_null = [&](size_t g) {
+        return !col.validity.empty() && !((col.validity[g >> 3] >> (g & 7)) & 1u);
+    };
+    if (join_type_is_string(col.type)) {
+        const auto* src_slots = reinterpret_cast<const DrakenStringSlot*>(col.raw.data());
+        const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
+        size_t total_arena = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            size_t g = start + i;
+            if (row_is_null(g)) continue;
+            const auto* slot = src_slots + g;
+            if (!str_is_inline(slot)) total_arena += str_length(slot);
+        }
+        size_t slots_off = sizeof(DrakenStringArena);
+        size_t arena_off = slots_off + static_cast<size_t>(n == 0 ? 1 : n) * sizeof(DrakenStringSlot);
+        uint8_t* blk = static_cast<uint8_t*>(draken_malloc(arena_off + total_arena));
+        auto* sa = reinterpret_cast<DrakenStringArena*>(blk);
+        auto* dst = reinterpret_cast<DrakenStringSlot*>(blk + slots_off);
+        uint8_t* out_arena = total_arena > 0 ? blk + arena_off : nullptr;
+        sa->slots = dst; sa->arena = out_arena; sa->length = n;
+        sa->arena_used = total_arena; sa->arena_cap = total_arena;
+        sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
+        size_t arena_pos = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            size_t g = start + i;
+            if (row_is_null(g)) {
+                std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
+                mark_null(i);
+                continue;
+            }
+            const auto* slot = src_slots + g;
+            if (str_is_inline(slot)) dst[i] = *slot;
+            else {
+                uint32_t slen = str_length(slot);
+                std::memcpy(out_arena + arena_pos, str_data(slot, src_arena), slen);
+                str_clone_with_offset(&dst[i], slot, static_cast<uint32_t>(arena_pos));
+                arena_pos += slen;
+            }
+        }
+        uint32_t* sel = static_cast<uint32_t*>(draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
+        for (uint32_t i = 0; i < n; ++i) sel[i] = i;
+        DrakenVector v;
+        v.data = sa; v.selection = sel; v.data_length = n; v.length = n;
+        v.validity = vbits; v.type = col.type;
+        v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        CxxColumn c;
+        c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
+                                              OwnedBuffer<uint8_t>(vbits),
+                                              OwnedBuffer<void>(sel));
+        c.own->logical_type = col.logical;
+        c.view = c.own->vec;
+        return c;
+    }
+    void* data;
+    if (join_type_is_bool(col.type)) {
+        uint8_t* bits = join_alloc_bool_bits(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            size_t g = start + i;
+            if (row_is_null(g)) { mark_null(i); continue; }
+            if (col.raw[g]) bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+        data = bits;
+    } else {
+        data = draken_malloc(static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
+        uint8_t* d = static_cast<uint8_t*>(data);
+        for (uint32_t i = 0; i < n; ++i) {
+            size_t g = start + i;
+            if (row_is_null(g)) {
+                std::memset(d + static_cast<size_t>(i) * col.elem_size, 0, col.elem_size);
+                mark_null(i);
+                continue;
+            }
+            std::memcpy(d + static_cast<size_t>(i) * col.elem_size,
+                        col.raw.data() + g * col.elem_size, col.elem_size);
+        }
+    }
+    uint32_t* sel = static_cast<uint32_t*>(draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
+    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
+    DrakenVector v;
+    v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+    v.validity = vbits; v.type = col.type;
+    v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
+                                          OwnedBuffer<uint8_t>(vbits),
+                                          OwnedBuffer<void>(sel));
+    c.own->logical_type = col.logical;
+    c.view = c.own->vec;
+    return c;
+}
+
+// Per-partition group table. The ad-hoc open-addressing GBPartition (table + stored
+// key bytes + inline lanes) is replaced by: a CarcharIndex (draken hash → dense group
+// id, hash identity), per-group key VALUES for emit (JoinPayloadColumn per key col),
+// and the aggregate lanes indexed by group id. hashes[] keeps each group's key hash
+// so the parallel merge can re-insert it into the merged partition.
 struct GBPartition {
-    std::vector<uint32_t> table;      // open addressing; value = entry index + 1; 0 empty
-    std::vector<uint64_t> hashes;     // per entry: full 64-bit key hash (never re-hash)
-    // fixed-key mode: packed keys at entry * kstride
-    std::vector<char> kfix;
-    // int-key mode (fixed keys, RAW width <= 16): the key's raw value bytes
-    // (no per-column null framing) packed into an __int128, upper bytes zero.
-    // Null-ness is carried out of band in knull (bit k = column k is NULL) so a
-    // 16-raw-byte key like (i64,i64) still fits. Identity is a 128-bit compare
-    // plus a 1-byte mask compare — no memcmp, no variable-length byte append.
-    std::vector<__int128> kint;
-    std::vector<uint8_t>   knull;
-    // string-key mode: bump arenas + per-entry (chunk << 20 | offset, length)
-    std::vector<uint64_t> key_off;
-    std::vector<uint32_t> key_len;
-    std::vector<std::unique_ptr<char[]>> arena_chunks;
-    size_t arena_used = kGBArenaChunk;            // forces first-chunk alloc
+    opteryx::carchar::CarcharIndex index;
+    std::vector<uint64_t> hashes;
+    std::vector<JoinPayloadColumn> keycols;
     std::vector<int64_t> grows;       // COUNT(*) rows lane (any Rows spec)
     std::vector<GBLanes> lanes;       // one per spec
-    std::vector<GBDedup> dedup;       // CountDistinct over string values
-    std::vector<GBDedupF> dedupf;     // CountDistinct over fixed-width values
+    std::vector<GBCountDistinct> cd;  // one per spec (only CountDistinct fills it)
 
     size_t size() const { return hashes.size(); }
-
-    const char* key_ptr_var(uint32_t e) const {
-        uint64_t off = key_off[e];
-        return arena_chunks[off >> 20].get() + (off & (kGBArenaChunk - 1));
-    }
-
-    void rehash(size_t want) {
-        size_t cap = 16;
-        while (cap < want * 2) cap <<= 1;
-        table.assign(cap, 0);
-        size_t mask = cap - 1;
-        for (uint32_t e = 0; e < hashes.size(); ++e) {
-            size_t slot = hashes[e] & mask;
-            while (table[slot] != 0) slot = (slot + 1) & mask;
-            table[slot] = e + 1;
-        }
-    }
-
-    // Find-or-insert a constant-stride packed key; returns the entry index.
-    uint32_t upsert_fixed(uint64_t h, const char* key, size_t kstride) {
-        if (table.empty() || hashes.size() * 2 >= table.size())
-            rehash(hashes.size() + 8);   // rehash() sizes to >= 2x want (pow2)
-        size_t mask = table.size() - 1;
-        size_t slot = h & mask;
-        while (true) {
-            uint32_t e1 = table[slot];
-            if (e1 == 0) break;
-            uint32_t e = e1 - 1;
-            if (hashes[e] == h
-                    && std::memcmp(kfix.data() + static_cast<size_t>(e) * kstride,
-                                   key, kstride) == 0)
-                return e;
-            slot = (slot + 1) & mask;
-        }
-        uint32_t e = static_cast<uint32_t>(hashes.size());
-        hashes.push_back(h);
-        kfix.insert(kfix.end(), key, key + kstride);
-        table[slot] = e + 1;
-        return e;
-    }
-
-    // Find-or-insert an integer-packed key (int-key mode; kstride <= 16 bytes
-    // memcpy'd into an __int128, upper bytes zero). The packed integer IS the
-    // identity, so a single 128-bit compare replaces the per-row memcmp into the
-    // byte-key store AND the variable-length kfix append (profiled together at
-    // ~59% of sink time on high-cardinality Q33-class groupings). Hash is
-    // unchanged (XXH3 over the same kstride bytes) so partition/slot placement
-    // is bit-identical to the byte path.
-    uint32_t upsert_int(uint64_t h, __int128 ikey, uint8_t nmask) {
-        if (table.empty() || hashes.size() * 2 >= table.size())
-            rehash(hashes.size() + 8);
-        size_t mask = table.size() - 1;
-        size_t slot = h & mask;
-        while (true) {
-            uint32_t e1 = table[slot];
-            if (e1 == 0) break;
-            uint32_t e = e1 - 1;
-            if (kint[e] == ikey && knull[e] == nmask) return e;
-            slot = (slot + 1) & mask;
-        }
-        uint32_t e = static_cast<uint32_t>(hashes.size());
-        hashes.push_back(h);
-        kint.push_back(ikey);
-        knull.push_back(nmask);
-        table[slot] = e + 1;
-        return e;
-    }
-
-    // Find-or-insert a variable-length key (string-key mode; v2 arena format).
-    uint32_t upsert_var(uint64_t h, const char* key, uint32_t klen) {
-        if (table.empty() || hashes.size() * 2 >= table.size())
-            rehash(hashes.size() + 8);
-        size_t mask = table.size() - 1;
-        size_t slot = h & mask;
-        while (true) {
-            uint32_t e1 = table[slot];
-            if (e1 == 0) break;
-            uint32_t e = e1 - 1;
-            if (hashes[e] == h && key_len[e] == klen
-                    && std::memcmp(key_ptr_var(e), key, klen) == 0)
-                return e;
-            slot = (slot + 1) & mask;
-        }
-        uint32_t e = static_cast<uint32_t>(hashes.size());
-        // key bytes: bump-allocate; a key never spans chunks (pad to next chunk).
-        // A key >= 1 MiB gets its own exactly-sized chunk (within-offset 0).
-        if (klen >= kGBArenaChunk) {
-            arena_chunks.push_back(std::unique_ptr<char[]>(new char[klen]));
-            std::memcpy(arena_chunks.back().get(), key, klen);
-            key_off.push_back(static_cast<uint64_t>(arena_chunks.size() - 1) << 20);
-            arena_used = kGBArenaChunk;   // force a fresh chunk for the next key
-        } else {
-            if (arena_used + klen > kGBArenaChunk) {
-                arena_chunks.push_back(std::unique_ptr<char[]>(new char[kGBArenaChunk]));
-                arena_used = 0;
-            }
-            std::memcpy(arena_chunks.back().get() + arena_used, key, klen);
-            key_off.push_back(
-                (static_cast<uint64_t>(arena_chunks.size() - 1) << 20) | arena_used);
-            arena_used += klen;
-        }
-        hashes.push_back(h);
-        key_len.push_back(klen);
-        table[slot] = e + 1;
-        return e;
-    }
 };
 
-// One columnar pass: pack a fixed-width key column into the constant-stride key
-// buffer (1 null byte + `es` raw bytes; NULL rows write zeros so every packed
-// key is exactly kstride bytes and hash/memcmp stay well-defined).
-inline void gb_pack_fixed_key(const DrakenVector& v, char* base, size_t kstride,
-                              size_t col_off, uint32_t rows) {
-    size_t es = (v.type == DRAKEN_BOOL) ? 1 : gather_elem_size(v.type);
-    for (uint32_t i = 0; i < rows; ++i) {
-        char* p = base + static_cast<size_t>(i) * kstride + col_off;
-        if (!sort_row_valid(v, i)) {
-            std::memset(p, 0, 1 + es);
-            continue;
-        }
-        p[0] = '\1';
-        if (v.type == DRAKEN_BOOL) {
-            uint32_t phys = v.selection[i];
-            p[1] = static_cast<char>(
-                (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u);
-        } else {
-            std::memcpy(p + 1,
-                        static_cast<const uint8_t*>(v.data)
-                            + static_cast<size_t>(v.selection[i]) * es,
-                        es);
-        }
-    }
-}
-
-// Pack ONE PHYSICAL unique value into a single-column fixed key — byte-identical
-// to gb_pack_fixed_key's per-row valid arm, addressed by data slot instead of
-// logical row, so the compressed-shape fast path lands in the same key universe
-// as the per-row path. `p` has 1 + es bytes. NULL is handled by the caller
-// (memset 0 over 1 + es, matching gb_pack_fixed_key's invalid arm).
-inline void gb_pack_fixed_phys(const DrakenVector& v, char* p, size_t es,
-                               uint32_t phys) {
-    p[0] = '\1';
-    if (v.type == DRAKEN_BOOL) {
-        p[1] = static_cast<char>(
-            (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u);
-    } else {
-        std::memcpy(p + 1,
-                    static_cast<const uint8_t*>(v.data)
-                        + static_cast<size_t>(phys) * es,
-                    es);
-    }
-}
-
-// ---- int-key mode packing (raw value bytes, no null framing) -----------------------
-// One columnar pass for the int-key path: write column k's RAW value bytes at
-// raw offset `roff` into each row's kraw-strided slot, and set bit k of that
-// row's null mask when the row is NULL (its value bytes stay zero). No per-column
-// null byte — the mask lives out of band (mk_null / knull), so a 16-raw-byte key
-// like (i64,i64) fits an __int128 exactly.
-inline void gb_pack_raw_key(const DrakenVector& v, char* base, size_t kraw,
-                            size_t roff, size_t kbit, uint32_t rows,
-                            uint8_t* nmask) {
-    size_t es = (v.type == DRAKEN_BOOL) ? 1 : gather_elem_size(v.type);
-    for (uint32_t i = 0; i < rows; ++i) {
-        char* p = base + static_cast<size_t>(i) * kraw + roff;
-        if (!sort_row_valid(v, i)) {
-            std::memset(p, 0, es);
-            nmask[i] |= static_cast<uint8_t>(1u << kbit);
-            continue;
-        }
-        if (v.type == DRAKEN_BOOL) {
-            uint32_t phys = v.selection[i];
-            p[0] = static_cast<char>(
-                (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u);
-        } else {
-            std::memcpy(p,
-                        static_cast<const uint8_t*>(v.data)
-                            + static_cast<size_t>(v.selection[i]) * es,
-                        es);
-        }
-    }
-}
-
-// Load a row's raw key slot (kraw <= 16 bytes) into an __int128 (upper bytes 0).
-inline __int128 gb_int_load(const char* raw, size_t kraw) {
-    __int128 ik = 0;
-    std::memcpy(&ik, raw, kraw);
-    return ik;
-}
-
-// Hash a raw int key: XXH3 over the kraw value bytes, folded with the null mask
-// so keys that differ only in null-ness hash apart.
-inline uint64_t gb_int_hash(const char* raw, size_t kraw, uint8_t nmask) {
-    uint64_t h = XXH3_64bits(raw, kraw);
-    if (nmask) h ^= (0x9E3779B97F4A7C15ull * (nmask + 1u));
-    return h;
-}
 
 struct GroupByLocal : LocalSinkState {
     std::array<GBPartition, kGBParts> parts;
     std::vector<AggColMeta> meta;
     std::vector<GBKind> kinds;
     std::vector<KeyColMeta> key_meta;
-    bool fixed_keys = true;           // no string key column
-    bool int_keys = false;            // fixed_keys && kraw <= 16 (raw int-packed)
-    size_t kstride = 0;               // packed key bytes (framed fixed mode)
-    size_t kraw = 0;                  // raw key bytes (int-key mode, no framing)
-    std::vector<size_t> key_col_off;  // per key column offset into the framed key
-    std::vector<size_t> key_raw_off;  // per key column offset into the raw int key
     bool has_rows = false;            // any COUNT(*) spec
     bool init = false;
     size_t entries_total = 0;         // Σ partition sizes (adaptive flush trigger)
-    // per-morsel two-pass ingest scratch (serialize+hash all rows, then a
-    // tight probe pass — the pass separation is the measured win)
-    std::string mk_bytes;
-    std::vector<uint32_t> mk_off, mk_len, mk_ent;
-    std::vector<uint64_t> mk_hash;
-    std::vector<uint8_t> mk_null;   // per-row null mask (int-key mode)
-    // COUNT(DISTINCT) pair scratch (pass 1 serialize+hash, pass 2 probe)
-    std::string cd_bytes;
-    std::vector<uint32_t> cd_off, cd_len, cd_ent;
-    std::vector<uint64_t> cd_hash;
-    std::vector<uint8_t> cd_part;
-    // single-column compressed-key fast path: per-PHYSICAL-slot hash/entry map
-    // (sized data_length) + the referenced-slot mask + a reusable key buffer.
-    std::vector<uint64_t> u_hash;
-    std::vector<uint32_t> u_ent;
-    std::vector<uint8_t> u_ref;
-    std::string u_key;
+    // per-morsel ingest scratch
+    std::vector<uint64_t> mk_hash;    // per row: draken key hash
+    std::vector<uint32_t> mk_ent;     // per row: group id within its partition
+    std::vector<uint64_t> cd_vhash;   // per row: value hash for a CountDistinct spec
 };
 struct GroupByGlobal : GlobalSinkState {
     std::mutex mtx;
@@ -1843,11 +1390,6 @@ struct GroupByGlobal : GlobalSinkState {
     std::vector<AggColMeta> meta;
     std::vector<GBKind> kinds;
     std::vector<KeyColMeta> key_meta;
-    bool fixed_keys = true;
-    bool int_keys = false;
-    size_t kstride = 0;
-    size_t kraw = 0;
-    std::vector<size_t> key_raw_off;
     bool has_rows = false;
     bool init = false;
 };
@@ -1869,13 +1411,20 @@ struct GroupBySink : Sink {
         return std::make_unique<GroupByLocal>();
     }
 
+    // Type a partition's per-group key store from the captured key metadata. Called
+    // in capture() for all 64 partitions and again after a partition is reset by an
+    // adaptive flush (GBPartition() clears the keycol types).
+    void type_keycols(GBPartition& P, const std::vector<KeyColMeta>& km) {
+        P.keycols.resize(key_idx.size());
+        for (size_t k = 0; k < key_idx.size(); ++k) {
+            P.keycols[k].type = km[k].type;
+            P.keycols[k].elem_size = gb_key_elem_size(km[k].type);
+            P.keycols[k].logical = km[k].logical;
+        }
+    }
+
     bool capture(GroupByLocal& l, const MorselPtr& in, ErrCtx& err) {
         l.key_meta.resize(key_idx.size());
-        l.key_col_off.resize(key_idx.size());
-        l.key_raw_off.resize(key_idx.size());
-        l.fixed_keys = true;
-        l.kstride = 0;
-        l.kraw = 0;
         for (size_t k = 0; k < key_idx.size(); ++k) {
             if (key_idx[k] >= in->columns.size()) {
                 err.code = 1;
@@ -1885,8 +1434,7 @@ struct GroupBySink : Sink {
             }
             const CxxColumn& c = in->columns[key_idx[k]];
             DrakenType t = c.view.type;
-            if ((!sort_type_is_string(t) && t != DRAKEN_BOOL && gather_elem_size(t) == 0)
-                    || t == DRAKEN_DECIMAL128) {
+            if (gb_key_elem_size(t) == 0) {
                 err.code = 1;
                 err.msg = "native engine: unsupported GROUP BY key column type";
                 return false;
@@ -1894,20 +1442,9 @@ struct GroupBySink : Sink {
             l.key_meta[k].type = t;
             l.key_meta[k].logical = c.own ? c.own->logical_type : nullptr;
             l.key_meta[k].captured = true;
-            if (sort_type_is_string(t)) {
-                l.fixed_keys = false;
-            } else {
-                size_t es = (t == DRAKEN_BOOL) ? 1 : gather_elem_size(t);
-                l.key_col_off[k] = l.kstride;
-                l.kstride += 1 + es;
-                l.key_raw_off[k] = l.kraw;
-                l.kraw += es;
-            }
         }
-        // All-fixed-width keys whose RAW value bytes fit an __int128 take the
-        // integer-key probe: raw pack (no null framing) + 128-bit compare, with
-        // null-ness carried out of band. Capped at 8 columns (null mask width).
-        l.int_keys = l.fixed_keys && l.kraw <= 16 && key_idx.size() <= 8;
+        // Type every partition's per-group key store (JoinPayloadColumn per key col).
+        for (size_t p = 0; p < kGBParts; ++p) type_keycols(l.parts[p], l.key_meta);
         l.meta.resize(specs.size());
         l.kinds.resize(specs.size());
         l.has_rows = false;
@@ -1965,11 +1502,6 @@ struct GroupBySink : Sink {
             g.meta = l.meta;
             g.kinds = l.kinds;
             g.key_meta = l.key_meta;
-            g.fixed_keys = l.fixed_keys;
-            g.int_keys = l.int_keys;
-            g.kstride = l.kstride;
-            g.kraw = l.kraw;
-            g.key_raw_off = l.key_raw_off;
             g.has_rows = l.has_rows;
             g.init = true;
         }
@@ -1977,6 +1509,7 @@ struct GroupBySink : Sink {
             if (l.parts[p].size() > 0) {
                 g.pending[p].push_back(std::move(l.parts[p]));
                 l.parts[p] = GBPartition();
+                type_keycols(l.parts[p], l.key_meta);   // fresh partition needs key types
             }
         }
         l.entries_total = 0;
@@ -1993,172 +1526,34 @@ struct GroupBySink : Sink {
         uint32_t rows = in->num_rows();
         size_t nspecs = specs.size();
 
-        // §11-sanctioned compressed-shape fast path (single key column only):
-        // key each of the data_length PHYSICAL uniques (+ NULL) once instead of
-        // per row — rows sharing a selection code are known-equal without
-        // re-serializing/hashing/probing. Produces the same mk_hash/mk_ent
-        // contract the per-row path does (identical grouping), so the entire
-        // downstream (lane grow + Pass C aggregate updates) is unchanged.
-        // draken_is_compressed covers both dict and constant layouts.
-        bool keyed_fast = false;
-        if (key_idx.size() == 1
-                && draken_is_compressed(&in->columns[key_idx[0]].view)) {
-            const DrakenVector& v = in->columns[key_idx[0]].view;
-            uint32_t dl = v.data_length;
-            mark_referenced_valid(v, l.u_ref);   // sizes to dl; 1 = referenced+valid
-            l.u_hash.assign(dl, 0);
-            l.u_ent.assign(dl, 0);
-            uint64_t null_hash = 0;
-            uint32_t null_ent = 0;
-            bool have_null = false;
-            uint32_t null_row = 0;
-            for (uint32_t i = 0; i < rows; ++i) {
-                if (!sort_row_valid(v, i)) { have_null = true; null_row = i; break; }
-            }
-            if (l.int_keys) {
-                // single-column raw int key: kraw == es, mask is bit 0.
-                size_t es = l.kraw;   // single col: kraw == es
-                char rawb[16];
-                for (uint32_t j = 0; j < dl; ++j) {
-                    if (!l.u_ref[j]) continue;
-                    std::memset(rawb, 0, l.kraw);
-                    if (v.type == DRAKEN_BOOL) {
-                        rawb[0] = static_cast<char>(
-                            (static_cast<const uint8_t*>(v.data)[j >> 3] >> (j & 7)) & 1u);
-                    } else {
-                        std::memcpy(rawb,
-                                    static_cast<const uint8_t*>(v.data)
-                                        + static_cast<size_t>(j) * es,
-                                    es);
-                    }
-                    uint64_t h = gb_int_hash(rawb, l.kraw, 0);
-                    l.u_hash[j] = h;
-                    l.u_ent[j] = l.parts[h >> kGBPartShift].upsert_int(
-                        h, gb_int_load(rawb, l.kraw), 0);
-                }
-                if (have_null) {
-                    std::memset(rawb, 0, l.kraw);
-                    null_hash = gb_int_hash(rawb, l.kraw, 1);
-                    null_ent = l.parts[null_hash >> kGBPartShift].upsert_int(
-                        null_hash, gb_int_load(rawb, l.kraw), 1);
-                }
-            } else if (l.fixed_keys) {
-                size_t es = l.kstride - 1;   // single col: kstride == 1 + es
-                l.u_key.resize(l.kstride);
-                char* kb = &l.u_key[0];
-                for (uint32_t j = 0; j < dl; ++j) {
-                    if (!l.u_ref[j]) continue;
-                    gb_pack_fixed_phys(v, kb, es, j);
-                    uint64_t h = XXH3_64bits(kb, l.kstride);
-                    l.u_hash[j] = h;
-                    l.u_ent[j] =
-                        l.parts[h >> kGBPartShift].upsert_fixed(h, kb, l.kstride);
-                }
-                if (have_null) {
-                    std::memset(kb, 0, l.kstride);   // matches gb_pack_fixed_key NULL arm
-                    null_hash = XXH3_64bits(kb, l.kstride);
-                    null_ent =
-                        l.parts[null_hash >> kGBPartShift].upsert_fixed(
-                            null_hash, kb, l.kstride);
-                }
-            } else {
-                for (uint32_t j = 0; j < dl; ++j) {
-                    if (!l.u_ref[j]) continue;
-                    l.u_key.clear();
-                    if (!key_append_phys(l.u_key, v, j, err))
-                        return SinkResult::CONTINUE;
-                    uint64_t h = XXH3_64bits(l.u_key.data(), l.u_key.size());
-                    l.u_hash[j] = h;
-                    l.u_ent[j] = l.parts[h >> kGBPartShift].upsert_var(
-                        h, l.u_key.data(), static_cast<uint32_t>(l.u_key.size()));
-                }
-                if (have_null) {
-                    l.u_key.clear();
-                    if (!key_append(l.u_key, v, null_row, err))
-                        return SinkResult::CONTINUE;
-                    null_hash = XXH3_64bits(l.u_key.data(), l.u_key.size());
-                    null_ent = l.parts[null_hash >> kGBPartShift].upsert_var(
-                        null_hash, l.u_key.data(),
-                        static_cast<uint32_t>(l.u_key.size()));
-                }
-            }
-            l.mk_hash.resize(rows);
-            l.mk_ent.resize(rows);
-            for (uint32_t i = 0; i < rows; ++i) {
-                if (sort_row_valid(v, i)) {
-                    uint32_t phys = v.selection[i];
-                    l.mk_hash[i] = l.u_hash[phys];
-                    l.mk_ent[i] = l.u_ent[phys];
-                } else {
-                    l.mk_hash[i] = null_hash;
-                    l.mk_ent[i] = null_ent;
-                }
-            }
-            keyed_fast = true;
-        }
+        // Pass A: draken owns the key hash for the whole morsel (cxx_hash_c is
+        // shape-preserving for a single key — it hashes each distinct value once).
+        if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
+            return SinkResult::CONTINUE;
 
-        if (!keyed_fast) {
-        // Pass A: serialize + hash every row (sequential writes — cheap).
-        l.mk_hash.resize(rows);
-        if (l.int_keys) {
-            // int-key packing: RAW value bytes (kraw stride, no null framing) +
-            // an out-of-band per-row null mask. Hash folds the mask in.
-            l.mk_bytes.resize(static_cast<size_t>(rows) * l.kraw);
-            l.mk_null.assign(rows, 0);
-            char* base = l.mk_bytes.data();
-            for (size_t k = 0; k < key_idx.size(); ++k)
-                gb_pack_raw_key(in->columns[key_idx[k]].view, base, l.kraw,
-                                l.key_raw_off[k], k, rows, l.mk_null.data());
-            for (uint32_t i = 0; i < rows; ++i)
-                l.mk_hash[i] = gb_int_hash(base + static_cast<size_t>(i) * l.kraw,
-                                           l.kraw, l.mk_null[i]);
-        } else if (l.fixed_keys) {
-            // columnar packing: one type-dispatched pass per key column
-            l.mk_bytes.resize(static_cast<size_t>(rows) * l.kstride);
-            char* base = l.mk_bytes.data();
-            for (size_t k = 0; k < key_idx.size(); ++k)
-                gb_pack_fixed_key(in->columns[key_idx[k]].view, base, l.kstride,
-                                  l.key_col_off[k], rows);
-            for (uint32_t i = 0; i < rows; ++i)
-                l.mk_hash[i] = XXH3_64bits(base + static_cast<size_t>(i) * l.kstride,
-                                           l.kstride);
-        } else {
-            l.mk_bytes.clear();
-            l.mk_off.clear(); l.mk_len.clear();
-            l.mk_off.reserve(rows); l.mk_len.reserve(rows);
-            for (uint32_t i = 0; i < rows; ++i) {
-                uint32_t off0 = static_cast<uint32_t>(l.mk_bytes.size());
-                for (size_t k = 0; k < key_idx.size(); ++k) {
-                    if (!key_append(l.mk_bytes, in->columns[key_idx[k]].view, i, err)) {
-                        return SinkResult::CONTINUE;
-                    }
-                }
-                l.mk_off.push_back(off0);
-                l.mk_len.push_back(static_cast<uint32_t>(l.mk_bytes.size()) - off0);
-                l.mk_hash[i] = XXH3_64bits(l.mk_bytes.data() + off0,
-                                           l.mk_bytes.size() - off0);
-            }
-        }
-        // Pass B: tight probe loop. NO software prefetch — measured a no-op on
-        // this machine (repeatedly); the serialize/probe pass SEPARATION is
-        // what pays, never the prefetch.
+        // Pass B: find-or-insert each row's group into its partition (partition =
+        // hash >> kGBPartShift; group id from CarcharIndex, equality by 64-bit hash
+        // identity). A NEW group appends its key VALUES (this representative row) to
+        // the partition's per-column key store — NULL keys collapse to one group via
+        // the NULL_HASH sentinel, exactly as SQL GROUP BY requires.
         l.mk_ent.resize(rows);
-        const char* ibase = l.mk_bytes.data();
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
             GBPartition& P = l.parts[h >> kGBPartShift];
-            l.mk_ent[i] = l.int_keys
-                ? P.upsert_int(h,
-                               gb_int_load(ibase + static_cast<size_t>(i) * l.kraw,
-                                           l.kraw),
-                               l.mk_null[i])
-                : l.fixed_keys
-                    ? P.upsert_fixed(h, l.mk_bytes.data()
-                                            + static_cast<size_t>(i) * l.kstride,
-                                     l.kstride)
-                    : P.upsert_var(h, l.mk_bytes.data() + l.mk_off[i], l.mk_len[i]);
+            int64_t gid;
+            bool is_new = P.index.find_or_insert_id(
+                h, static_cast<int64_t>(P.hashes.size()), gid);
+            if (is_new) {
+                P.hashes.push_back(h);
+                for (size_t k = 0; k < key_idx.size(); ++k) {
+                    P.keycols[k].append_row(in->columns[key_idx[k]].view, i, err,
+                                            "GROUP BY key value");
+                    if (err.code != 0) return SinkResult::CONTINUE;
+                }
+            }
+            l.mk_ent[i] = static_cast<uint32_t>(gid);
         }
-        }  // !keyed_fast
+
         // Grow lanes ONCE per morsel to each partition's new entry count
         // (resize zero-fills new groups — the correct initial state).
         for (size_t p = 0; p < kGBParts; ++p) {
@@ -2167,8 +1562,7 @@ struct GroupBySink : Sink {
             size_t n = P.size();
             if (l.has_rows) P.grows.resize(n);
             if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
-            if (P.dedup.size() != nspecs) P.dedup.resize(nspecs);
-            if (P.dedupf.size() != nspecs) P.dedupf.resize(nspecs);
+            if (P.cd.size() != nspecs) P.cd.resize(nspecs);
             for (size_t s = 0; s < nspecs; ++s)
                 gb_lanes_resize(P.lanes[s], l.kinds[s], n);
         }
@@ -2181,39 +1575,19 @@ struct GroupBySink : Sink {
             GBKind kind = l.kinds[s];
             if (kind == GBKind::Rows) continue;
             if (kind == GBKind::CountDistinct && specs[s].col_idx == kAggWholeRow) {
-                // COUNT(DISTINCT *) per group: same two-pass (serialize then
-                // probe) shape as the single-column serialized-bytes arm
-                // below, but the key loops EVERY column, group-entry-prefixed
-                // like the single-column case. NULL participates as a normal
-                // value (whole-row identity) — no sort_row_valid() skip.
-                l.cd_bytes.clear();
-                l.cd_off.clear(); l.cd_len.clear();
-                l.cd_ent.clear(); l.cd_hash.clear(); l.cd_part.clear();
+                // COUNT(DISTINCT *) per group: draken hashes EVERY column into one
+                // value hash per row (NULL participates as a normal value — no
+                // sort_row_valid skip), then dedup (group, value_hash) per group.
                 size_t ncols = in->columns.size();
+                std::vector<size_t> allcols(ncols);
+                for (size_t c = 0; c < ncols; ++c) allcols[c] = c;
+                if (!compute_row_hashes(in, allcols, l.cd_vhash, err))
+                    return SinkResult::CONTINUE;
                 for (uint32_t i = 0; i < rows; ++i) {
+                    GBPartition& P = l.parts[l.mk_hash[i] >> kGBPartShift];
                     uint32_t e = l.mk_ent[i];
-                    uint32_t off0 = static_cast<uint32_t>(l.cd_bytes.size());
-                    l.cd_bytes.append(reinterpret_cast<const char*>(&e), sizeof(e));
-                    for (size_t col = 0; col < ncols; ++col) {
-                        if (!key_append(l.cd_bytes, in->columns[col].view, i, err))
-                            return SinkResult::CONTINUE;
-                    }
-                    uint32_t klen = static_cast<uint32_t>(l.cd_bytes.size()) - off0;
-                    l.cd_off.push_back(off0);
-                    l.cd_len.push_back(klen);
-                    l.cd_ent.push_back(e);
-                    l.cd_hash.push_back(
-                        XXH3_64bits(l.cd_bytes.data() + off0, klen));
-                    l.cd_part.push_back(
-                        static_cast<uint8_t>(l.mk_hash[i] >> kGBPartShift));
-                }
-                uint32_t npairs = static_cast<uint32_t>(l.cd_hash.size());
-                for (uint32_t k2 = 0; k2 < npairs; ++k2) {
-                    GBPartition& P = l.parts[l.cd_part[k2]];
-                    if (P.dedup[s].upsert(l.cd_hash[k2], l.cd_ent[k2],
-                                          l.cd_bytes.data() + l.cd_off[k2],
-                                          l.cd_len[k2]))
-                        P.lanes[s].valid[l.cd_ent[k2]] += 1;
+                    if (P.cd[s].insert(e, l.cd_vhash[i]))
+                        P.lanes[s].valid[e] += 1;
                 }
                 continue;
             }
@@ -2302,74 +1676,18 @@ struct GroupBySink : Sink {
                     }
                     break;
                 case GBKind::CountDistinct: {
-                    // Count a group's (group, value) pair only on FIRST sighting.
-                    if (gb_cd_fixed(l.meta[s].type)) {
-                        // typed pair path: (u32 entry, u64 widened value) —
-                        // no serialization, no arena, exact integer identity.
-                        bool is_f = l.meta[s].is_float;
-                        for (uint32_t i = 0; i < rows; ++i) {
-                            if (!sort_row_valid(v, i)) continue;
-                            GBPartition& P =
-                                l.parts[l.mk_hash[i] >> kGBPartShift];
-                            uint32_t e = l.mk_ent[i];
-                            uint64_t val = static_cast<uint64_t>(
-                                agg2_read_raw(v, i, is_f));
-                            uint64_t dh = GBDedupF::hash_pair(e, val);
-                            if (P.dedupf[s].upsert(dh, e, val))
-                                P.lanes[s].valid[e] += 1;
-                        }
-                        break;
-                    }
-                    // serialized-bytes path (string / DECIMAL128 values).
-                    // TWO passes: (1) serialize + hash every valid row's pair
-                    // (sequential appends), (2) a tight probe loop — measured
-                    // ~30% faster than probing inline with serialization.
-                    // Dict shape (§11-approved) serializes each referenced
-                    // unique value ONCE and memcpys it per row — bytes
-                    // identical to the per-row arm, dedup exact across shapes.
-                    l.cd_bytes.clear();
-                    l.cd_off.clear(); l.cd_len.clear();
-                    l.cd_ent.clear(); l.cd_hash.clear(); l.cd_part.clear();
-                    std::vector<std::string> uv;
-                    bool dict_shape = v.data_length < v.length;
-                    if (dict_shape) {
-                        std::vector<uint8_t> ref;
-                        mark_referenced_valid(v, ref);
-                        uv.resize(v.data_length);
-                        for (uint32_t j = 0; j < v.data_length; ++j) {
-                            if (ref[j] == 0) continue;
-                            if (!key_append_phys(uv[j], v, j, err))
-                                return SinkResult::CONTINUE;
-                        }
-                    }
+                    // Draken hashes the operand value per row; dedup (group,
+                    // value_hash) per group by 64-bit hash identity. COUNT(DISTINCT
+                    // col) ignores NULLs (sort_row_valid skip), matching SQL.
+                    std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                    if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
+                        return SinkResult::CONTINUE;
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!sort_row_valid(v, i)) continue;
+                        GBPartition& P = l.parts[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        uint32_t off0 = static_cast<uint32_t>(l.cd_bytes.size());
-                        l.cd_bytes.append(reinterpret_cast<const char*>(&e),
-                                          sizeof(e));
-                        if (dict_shape) {
-                            l.cd_bytes.append(uv[v.selection[i]]);
-                        } else if (!key_append(l.cd_bytes, v, i, err)) {
-                            return SinkResult::CONTINUE;
-                        }
-                        uint32_t klen =
-                            static_cast<uint32_t>(l.cd_bytes.size()) - off0;
-                        l.cd_off.push_back(off0);
-                        l.cd_len.push_back(klen);
-                        l.cd_ent.push_back(e);
-                        l.cd_hash.push_back(
-                            XXH3_64bits(l.cd_bytes.data() + off0, klen));
-                        l.cd_part.push_back(
-                            static_cast<uint8_t>(l.mk_hash[i] >> kGBPartShift));
-                    }
-                    uint32_t npairs = static_cast<uint32_t>(l.cd_hash.size());
-                    for (uint32_t k2 = 0; k2 < npairs; ++k2) {
-                        GBPartition& P = l.parts[l.cd_part[k2]];
-                        if (P.dedup[s].upsert(l.cd_hash[k2], l.cd_ent[k2],
-                                              l.cd_bytes.data() + l.cd_off[k2],
-                                              l.cd_len[k2]))
-                            P.lanes[s].valid[l.cd_ent[k2]] += 1;
+                        if (P.cd[s].insert(e, l.cd_vhash[i]))
+                            P.lanes[s].valid[e] += 1;
                     }
                     break;
                 }
@@ -2438,8 +1756,7 @@ struct GroupBySink : Sink {
             // COUNT(DISTINCT) pair tables ride the same cache-residency
             // economics: a 25M-pair table (Q09: few groups, many pairs) is the
             // same DRAM-probe wall the group tables had.
-            for (const GBDedup& d : P.dedup) l.entries_total += d.size();
-            for (const GBDedupF& d : P.dedupf) l.entries_total += d.size();
+            for (const GBCountDistinct& d : P.cd) l.entries_total += d.size();
         }
         if (l.entries_total > kGBFlushEntries)
             flush_locals(static_cast<GroupByGlobal&>(gs), l);
@@ -2466,35 +1783,32 @@ struct GroupBySink : Sink {
         size_t merge_total = merged.size();
         for (size_t i = 1; i < list.size(); ++i) merge_total += list[i].size();
         if (merge_total > merged.size()) {
-            merged.rehash(merge_total);
+            merged.index.reserve(merge_total);
             merged.hashes.reserve(merge_total);
-            if (g.int_keys) { merged.kint.reserve(merge_total); merged.knull.reserve(merge_total); }
-            else if (g.fixed_keys) merged.kfix.reserve(merge_total * g.kstride);
-            else { merged.key_off.reserve(merge_total); merged.key_len.reserve(merge_total); }
         }
         std::vector<uint32_t> ge;
         for (size_t i = 1; i < list.size(); ++i) {
             GBPartition& src = list[i];
             uint32_t sn = static_cast<uint32_t>(src.size());
-            // Columnar merge: map every src entry to its merged entry first, then
-            // combine lane by lane (kind dispatched once per spec).
+            // Columnar merge: map every src group to its merged group first (hash
+            // identity via CarcharIndex; a new merged group copies its key VALUES
+            // from src), then combine lane by lane (kind dispatched once per spec).
             ge.resize(sn);
             for (uint32_t e = 0; e < sn; ++e) {
-                ge[e] = g.int_keys
-                    ? merged.upsert_int(src.hashes[e], src.kint[e], src.knull[e])
-                    : g.fixed_keys
-                        ? merged.upsert_fixed(src.hashes[e],
-                                              src.kfix.data()
-                                                  + static_cast<size_t>(e) * g.kstride,
-                                              g.kstride)
-                        : merged.upsert_var(src.hashes[e], src.key_ptr_var(e),
-                                            src.key_len[e]);
+                int64_t mg;
+                bool is_new = merged.index.find_or_insert_id(
+                    src.hashes[e], static_cast<int64_t>(merged.hashes.size()), mg);
+                if (is_new) {
+                    merged.hashes.push_back(src.hashes[e]);
+                    for (size_t k = 0; k < merged.keycols.size(); ++k)
+                        merged.keycols[k].append_from(src.keycols[k], e);
+                }
+                ge[e] = static_cast<uint32_t>(mg);
             }
             size_t mn = merged.size();
             if (g.has_rows) merged.grows.resize(mn);
             if (merged.lanes.size() != nspecs) merged.lanes.resize(nspecs);
-            if (merged.dedup.size() != nspecs) merged.dedup.resize(nspecs);
-            if (merged.dedupf.size() != nspecs) merged.dedupf.resize(nspecs);
+            if (merged.cd.size() != nspecs) merged.cd.resize(nspecs);
             for (size_t s = 0; s < nspecs; ++s)
                 gb_lanes_resize(merged.lanes[s], g.kinds[s], mn);
             if (g.has_rows) {
@@ -2627,45 +1941,14 @@ struct GroupBySink : Sink {
                         break;
                     }
                     case GBKind::CountDistinct: {
-                        // Re-key each (group, value) pair: the group entry
-                        // renumbers under the merged partition, and the same
-                        // pair may arrive from several workers — only a
-                        // merged-table MISS counts.
-                        //
-                        // Whole-row (kAggWholeRow) never captured a single
-                        // operand type, so g.meta[s] is the default
-                        // (DRAKEN_INT64) — gb_cd_fixed() on it would
-                        // misroute to the typed-pair table it never filled.
-                        // Always the general byte-serialized table for it.
-                        if (specs[s].col_idx != kAggWholeRow
-                                && gb_cd_fixed(g.meta[s].type)) {
-                            GBDedupF& SF = src.dedupf[s];
-                            GBDedupF& DF = merged.dedupf[s];
-                            for (uint32_t pi = 0;
-                                 pi < static_cast<uint32_t>(SF.size()); ++pi) {
-                                uint32_t m = ge[SF.pent[pi]];
-                                uint64_t val = SF.pval[pi];
-                                uint64_t dh = GBDedupF::hash_pair(m, val);
-                                if (DF.upsert(dh, m, val)) D.valid[m] += 1;
-                            }
-                            break;
-                        }
-                        GBDedup& SD = src.dedup[s];
-                        GBDedup& DD = merged.dedup[s];
-                        std::string dkey;
-                        for (uint32_t pi = 0; pi < SD.size(); ++pi) {
-                            uint32_t m = ge[SD.pair_ent[pi]];
-                            const char* k = SD.key_ptr(pi);
-                            uint32_t kl = SD.key_len[pi];
-                            dkey.clear();
-                            dkey.append(reinterpret_cast<const char*>(&m),
-                                        sizeof(m));
-                            dkey.append(k + sizeof(uint32_t),
-                                        kl - sizeof(uint32_t));
-                            uint64_t dh = XXH3_64bits(dkey.data(), dkey.size());
-                            if (DD.upsert(dh, m, dkey.data(),
-                                          static_cast<uint32_t>(dkey.size())))
-                                D.valid[m] += 1;
+                        // Re-key each distinct (group, value_hash) pair under the
+                        // merged partition's renumbered group ids; the same pair may
+                        // arrive from several workers — only a merged-set MISS counts.
+                        GBCountDistinct& SC = src.cd[s];
+                        GBCountDistinct& DC = merged.cd[s];
+                        for (size_t pi = 0; pi < SC.size(); ++pi) {
+                            uint32_t m = ge[SC.pair_gid[pi]];
+                            if (DC.insert(m, SC.pair_vhash[pi])) D.valid[m] += 1;
                         }
                         break;
                     }
@@ -2682,47 +1965,12 @@ struct GroupBySink : Sink {
             uint32_t n = static_cast<uint32_t>(std::min(chunk_rows, total - start));
             auto m = std::make_shared<CxxMorsel>();
             m->zero_col_rows = n;
-            std::vector<GBKeyRef> chunk_keys(n);
-            // int-key mode: rebuild the framed kstride-strided key bytes
-            // (per column: '\1'|'\0' + es value/zero bytes) from the raw
-            // __int128 store + out-of-band null mask, so emit_key_columns'
-            // fixed-stride parser is byte-identical to the kfix path.
-            std::vector<char> kint_bytes;
-            if (g.int_keys) {
-                kint_bytes.assign(static_cast<size_t>(n) * g.kstride, 0);
-                for (uint32_t i = 0; i < n; ++i) {
-                    uint32_t e = static_cast<uint32_t>(start) + i;
-                    const unsigned char* raw =
-                        reinterpret_cast<const unsigned char*>(&merged.kint[e]);
-                    uint8_t nm = merged.knull[e];
-                    char* dst = kint_bytes.data() + static_cast<size_t>(i) * g.kstride;
-                    size_t co = 0;
-                    for (size_t k = 0; k < g.key_meta.size(); ++k) {
-                        DrakenType t = g.key_meta[k].type;
-                        size_t es = (t == DRAKEN_BOOL) ? 1 : gather_elem_size(t);
-                        if ((nm >> k) & 1u) {
-                            dst[co] = '\0';   // value bytes already zero-filled
-                        } else {
-                            dst[co] = '\1';
-                            std::memcpy(dst + co + 1, raw + g.key_raw_off[k], es);
-                        }
-                        co += 1 + es;
-                    }
-                }
+            // Group-key columns: materialize a contiguous [start, start+n) slice of
+            // each per-group key store (JoinPayloadColumn) into the output morsel.
+            for (size_t k = 0; k < merged.keycols.size(); ++k) {
+                m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
+                if (err.code != 0) return;
             }
-            for (uint32_t i = 0; i < n; ++i) {
-                uint32_t e = static_cast<uint32_t>(start) + i;
-                chunk_keys[i] = g.int_keys
-                    ? GBKeyRef{kint_bytes.data() + static_cast<size_t>(i) * g.kstride,
-                               g.kstride}
-                    : g.fixed_keys
-                        ? GBKeyRef{merged.kfix.data()
-                                       + static_cast<size_t>(e) * g.kstride,
-                                   g.kstride}
-                        : GBKeyRef{merged.key_ptr_var(e), merged.key_len[e]};
-            }
-            emit_key_columns(chunk_keys, g.key_meta, g.fixed_keys, *m, err);
-            if (err.code != 0) return;
             for (size_t s = 0; s < nspecs; ++s) {
                 GBKind kind = g.kinds[s];
                 const GBLanes& L = merged.lanes[s];
@@ -2795,15 +2043,16 @@ struct GroupBySink : Sink {
 // ---- DistinctSink -------------------------------------------------------------------
 
 struct DistinctLocal : LocalSinkState {
-    std::unordered_set<std::string> seen;
-    std::vector<MorselPtr> morsels;
-    std::vector<std::string> kept_keys;   // parallel to kept refs
-    std::vector<uint32_t> ref_m, ref_r;
-    std::string scratch;
+    opteryx::carchar::CarcharSet seen;    // per-worker dedup on the 64-bit key hash
+    std::vector<MorselPtr> morsels;       // source morsels a kept row references
+    std::vector<uint64_t> kept_hashes;    // parallel to (ref_m,ref_r); carried to combine
+    std::vector<uint32_t> ref_m, ref_r;   // (morsel, row) of each locally-new row
+    std::vector<uint64_t> rowh;           // per-morsel scratch: dense per-row hash
+    std::vector<int32_t> newidx;          // per-morsel scratch: indices of locally-new rows
 };
 struct DistinctGlobal : GlobalSinkState {
     std::mutex mtx;
-    std::unordered_set<std::string> seen;
+    opteryx::carchar::CarcharSet seen;    // global dedup on the 64-bit key hash
     std::vector<MorselPtr> morsels;
     std::vector<uint32_t> ref_m, ref_r;
 };
@@ -2828,77 +2077,50 @@ struct DistinctSink : Sink {
         auto& l = static_cast<DistinctLocal&>(ls);
         uint32_t rows = in->num_rows();
         if (rows == 0) return SinkResult::CONTINUE;
+
+        // Key columns: explicit on_idx, or every column when empty (SELECT DISTINCT *).
         size_t ncols = in->columns.size();
+        size_t nkey = on_idx.empty() ? ncols : on_idx.size();
+        std::vector<int32_t> col_idxs(nkey);
+        if (on_idx.empty())
+            for (size_t c = 0; c < ncols; ++c) col_idxs[c] = static_cast<int32_t>(c);
+        else
+            for (size_t c = 0; c < nkey; ++c) col_idxs[c] = static_cast<int32_t>(on_idx[c]);
+
+        // Draken owns the hash: cxx_hash_c hashes the key columns into one INT64 hash
+        // column. Equality is 64-bit hash identity (the sanctioned contract) — the
+        // CarcharSet stores no key bytes. Null rows collapse to the NULL_HASH sentinel,
+        // so all-NULL keys form one distinct row exactly as SQL DISTINCT requires.
+        CxxMorsel* hashm = cxx_hash_c(in.get(), col_idxs.data(),
+                                      static_cast<uint32_t>(nkey));
+        if (hashm == nullptr) {
+            err.code = 1;
+            err.msg = "native DISTINCT: cxx_hash_c allocation failed";
+            return SinkResult::CONTINUE;
+        }
+        const DrakenVector& hv = hashm->columns[0].view;
+        const uint64_t* khashes = static_cast<const uint64_t*>(hv.data);
+        const uint32_t* codes = hv.selection;   // never NULL (draken invariant)
+        // Densify to one hash per row for the batch dedup probe. (The shape-preserving
+        // k-probe fast path for a single compressed key — hashing each distinct value
+        // once — is a deferred optimization; the uniform path is correct for all shapes.)
+        l.rowh.resize(rows);
+        for (uint32_t i = 0; i < rows; ++i) l.rowh[i] = khashes[codes[i]];
+        cxx_morsel_delete(hashm);
+
+        // Local dedup: the indices of rows whose hash is new to THIS worker.
+        l.newidx.resize(rows);
+        size_t nnew = l.seen.mark_new_indices_32(l.rowh.data(), l.newidx.data(), rows);
+        if (nnew == 0) return SinkResult::CONTINUE;
+
         uint32_t mi = static_cast<uint32_t>(l.morsels.size());
-        bool used = false;
-
-        size_t dedup_ncols = on_idx.empty() ? ncols : on_idx.size();
-        if (dedup_ncols == 1) {
-            const DrakenVector& v =
-                in->columns[on_idx.empty() ? 0 : on_idx[0]].view;
-            if (draken_is_compressed(&v)) {
-                // §11-sanctioned dict-shape fast path: one key per PHYSICAL
-                // unique value (+ one for NULL if present) instead of per row —
-                // rows sharing a dict code are known equal without hashing.
-                std::vector<uint32_t> first_row(v.data_length, UINT32_MAX);
-                uint32_t null_row = UINT32_MAX;
-                for (uint32_t i = 0; i < rows; ++i) {
-                    if (!sort_row_valid(v, i)) {
-                        if (null_row == UINT32_MAX) null_row = i;
-                        continue;
-                    }
-                    uint32_t phys = v.selection[i];
-                    if (first_row[phys] == UINT32_MAX) first_row[phys] = i;
-                }
-                if (null_row != UINT32_MAX) {
-                    l.scratch.clear();
-                    if (!key_append(l.scratch, v, null_row, err))
-                        return SinkResult::CONTINUE;
-                    if (l.seen.insert(l.scratch).second) {
-                        l.kept_keys.push_back(l.scratch);
-                        l.ref_m.push_back(mi);
-                        l.ref_r.push_back(null_row);
-                        used = true;
-                    }
-                }
-                for (uint32_t j = 0; j < v.data_length; ++j) {
-                    if (first_row[j] == UINT32_MAX) continue;
-                    l.scratch.clear();
-                    if (!key_append_phys(l.scratch, v, j, err))
-                        return SinkResult::CONTINUE;
-                    if (l.seen.insert(l.scratch).second) {
-                        l.kept_keys.push_back(l.scratch);
-                        l.ref_m.push_back(mi);
-                        l.ref_r.push_back(first_row[j]);
-                        used = true;
-                    }
-                }
-                if (used) l.morsels.push_back(in);
-                return SinkResult::CONTINUE;
-            }
+        l.morsels.push_back(in);   // retain: a kept row references it
+        for (size_t j = 0; j < nnew; ++j) {
+            uint32_t row = static_cast<uint32_t>(l.newidx[j]);
+            l.ref_m.push_back(mi);
+            l.ref_r.push_back(row);
+            l.kept_hashes.push_back(l.rowh[row]);
         }
-
-        for (uint32_t i = 0; i < rows; ++i) {
-            l.scratch.clear();
-            if (on_idx.empty()) {
-                for (size_t c = 0; c < ncols; ++c) {
-                    if (!key_append(l.scratch, in->columns[c].view, i, err))
-                        return SinkResult::CONTINUE;
-                }
-            } else {
-                for (size_t c : on_idx) {
-                    if (!key_append(l.scratch, in->columns[c].view, i, err))
-                        return SinkResult::CONTINUE;
-                }
-            }
-            if (l.seen.insert(l.scratch).second) {
-                l.kept_keys.push_back(l.scratch);
-                l.ref_m.push_back(mi);
-                l.ref_r.push_back(i);
-                used = true;
-            }
-        }
-        if (used) l.morsels.push_back(in);   // only retain morsels a kept row references
         return SinkResult::CONTINUE;
     }
 
@@ -2908,8 +2130,8 @@ struct DistinctSink : Sink {
         std::lock_guard<std::mutex> lk(g.mtx);
         uint32_t base = static_cast<uint32_t>(g.morsels.size());
         for (MorselPtr& m : l.morsels) g.morsels.push_back(std::move(m));
-        for (size_t i = 0; i < l.kept_keys.size(); ++i) {
-            if (g.seen.insert(std::move(l.kept_keys[i])).second) {
+        for (size_t i = 0; i < l.kept_hashes.size(); ++i) {
+            if (g.seen.insert_or_ignore(l.kept_hashes[i])) {
                 g.ref_m.push_back(base + l.ref_m[i]);
                 g.ref_r.push_back(l.ref_r[i]);
             }

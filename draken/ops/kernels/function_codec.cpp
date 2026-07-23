@@ -157,7 +157,6 @@ VecResult codec_kernel(const DrakenVector* v, MaxOutFn max_out_fn, CodecFn codec
             uint8_t* dst = arena + arena_pos;
             std::memcpy(dst, tmp, actual_len);
             str_init_extern(&slots[j], dst, actual_len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, actual_len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += actual_len;
         }

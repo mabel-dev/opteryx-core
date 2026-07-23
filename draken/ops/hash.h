@@ -800,6 +800,114 @@ static inline VecResult draken_hash_shaped(const DrakenVector& v) {
 }
 
 // ---------------------------------------------------------------------------
+// E37 carried key-hash — the reuse twins of draken_hash / draken_hash_shaped.
+//
+// When a producer has pre-computed the per-data-element hash SEED
+// (str_hash_seed) into keyhash[k], these skip re-seeding from the arena and only
+// run the identical simd_hash_i64 mix + NULL baking. The output is byte-identical
+// to draken_hash / draken_hash_shaped by construction (pure hoisting of the seed
+// step). keyhash is indexed by data-element: keyhash[selection[i]] is row i's
+// seed, so it is uniform across dense/dict/constant shapes. See
+// draken/docs/design/E37_carried_key_hash.md.
+// ---------------------------------------------------------------------------
+
+// Dense per-column hash from carried seeds: out[i] = simd_hash_i64(seed_i),
+// NULL_HASH baked for null rows. Mirrors hash_string's dense loop exactly, with
+// the str_hash_seed(...) call replaced by a keyhash[selection[i]] load. Used both
+// by the multi-column key mix and the dense branch of draken_hash_shaped_carried.
+static inline void draken_hash_carried_dense(const DrakenVector& v,
+                                             const uint64_t* keyhash,
+                                             uint64_t* out, uint32_t n) {
+    if (n == 0u) return;
+    const uint8_t*  val = v.validity;
+    const uint32_t* sel = v.selection;
+    uint64_t scratch[1024];
+    uint32_t i = 0u;
+    while (i < n) {
+        const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+        if (val != nullptr) {
+            for (uint32_t j = 0u; j < block; ++j) {
+                const uint32_t lr = i + j;
+                const uint64_t ok = (val[lr >> 3] >> (lr & 7u)) & 1u;
+                scratch[j] = ok ? keyhash[sel[lr]] : static_cast<uint64_t>(NULL_HASH);
+            }
+        } else {
+            for (uint32_t j = 0u; j < block; ++j) scratch[j] = keyhash[sel[i + j]];
+        }
+        simd_hash_i64(scratch, out + i, block);
+        i += block;
+    }
+}
+
+// Shape-preserving twin of draken_hash_shaped sourcing seeds from keyhash. Same
+// dense/compressed output contract, same null baking and owned-codes remap.
+static inline VecResult draken_hash_shaped_carried(const DrakenVector& v,
+                                                   const uint64_t* keyhash) {
+    VecResult r;
+    r.type              = DRAKEN_INT64;
+    r.flags             = 0u;
+    r.owns_selection    = false;
+    r.validity          = nullptr;
+    r.validity_embedded = 0u;
+    r.ts_unit           = 0xFFu;
+    const uint32_t n    = v.length;
+
+    if (n == 0u || draken_is_dense(&v)) {
+        uint64_t* data = static_cast<uint64_t*>(
+            draken_malloc((n > 0u ? n : 1u) * sizeof(uint64_t)));
+        if (data == nullptr) throw std::bad_alloc();
+        draken_hash_carried_dense(v, keyhash, data, n);
+        r.data           = data;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return r;
+    }
+
+    // Compressed: mix the k distinct seeds once (draken_hash_distinct builds a
+    // synthetic identity/no-validity view, so distinct hashing reads keyhash[j]).
+    const uint32_t k = v.data_length;
+    const bool nullable = (v.validity != nullptr);
+    const uint32_t out_k = nullable ? (k + 1u) : k;
+
+    uint64_t* data = static_cast<uint64_t*>(draken_malloc(out_k * sizeof(uint64_t)));
+    if (data == nullptr) throw std::bad_alloc();
+    {
+        uint64_t scratch[1024];
+        uint32_t j = 0u;
+        while (j < k) {
+            const uint32_t block = (k - j < 1024u) ? (k - j) : 1024u;
+            for (uint32_t t = 0u; t < block; ++t) scratch[t] = keyhash[j + t];
+            simd_hash_i64(scratch, data + j, block);
+            j += block;
+        }
+    }
+
+    uint32_t* codes = static_cast<uint32_t*>(draken_malloc(n * sizeof(uint32_t)));
+    if (codes == nullptr) { draken_free(data); throw std::bad_alloc(); }
+    if (!nullable) {
+        std::memcpy(codes, v.selection, static_cast<size_t>(n) * sizeof(uint32_t));
+    } else {
+        uint64_t null_seed = static_cast<uint64_t>(NULL_HASH);
+        simd_hash_i64(&null_seed, &data[k], 1u);
+        const uint8_t* val = v.validity;
+        for (uint32_t i = 0u; i < n; ++i) {
+            const uint64_t is_valid = (val[i >> 3] >> (i & 7u)) & 1u;
+            codes[i] = is_valid ? v.selection[i] : k;
+        }
+    }
+
+    r.data           = data;
+    r.selection      = codes;
+    r.owns_selection = true;
+    r.data_length    = out_k;
+    r.length         = n;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // C.2 dispatch entry points — one indirect table lookup, then typed kernel.
 // All throw std::invalid_argument for unsupported types.
 // ---------------------------------------------------------------------------

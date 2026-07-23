@@ -242,7 +242,6 @@ VecResult pad_kernel(const DrakenVector* const* args, uint32_t nargs, bool is_lp
             uint8_t* dst = arena + arena_pos;
             pad_emit(dst, p, is_lpad, is_utf8, src, fill, flen, fill_units);
             str_init_extern(&slots[j], dst, total,
-                            static_cast<uint32_t>(XXH3_64bits(dst, total)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += total;
         }

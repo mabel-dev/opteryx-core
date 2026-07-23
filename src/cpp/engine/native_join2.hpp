@@ -26,84 +26,39 @@
 #include <vector>
 
 #include "operator.hpp"
-#include "native_group_sinks.hpp"   // key_append — THE row-key encoding
+#include "native_group_sinks.hpp"   // shared engine helpers
 #include "native_hash_join.hpp"     // JoinPayloadColumn, join_elem_size
 #include "native_sort.hpp"          // gather_rows, sort_row_valid, string helpers
+#include "morsels/cxx_hash.h"       // cxx_hash_c — draken owns the join-key hash
+#include "carchar_join_index.hpp"   // opteryx::carchar::CarcharJoinIndex
 
 namespace opteryx::engine {
 
 enum class JoinMode : uint8_t { Inner = 0, LeftOuter = 1, Semi = 2, Anti = 3 };
 
-// Join-key serialization — WIDTH-NORMALIZED (unlike GROUP BY's key_append, which
-// never crosses streams): the two sides of an equi-join may carry different
-// integer widths (INT8 dimension key vs INT64 fact key — same value domain, no
-// binder cast), so integer-family values widen to 8 bytes, floats to double bits.
-// Strings stay length-prefixed; DECIMAL is raw int64 (the binder aligns scales);
-// DECIMAL128 is raw 16 bytes. Caller has already excluded NULL keys.
-inline bool join_key_append(std::string& buf, const DrakenVector& v, uint32_t row,
-                            ErrCtx& err) {
-    uint32_t phys = v.selection[row];
-    int64_t widened;
-    switch (v.type) {
-        case DRAKEN_INT8:   widened = static_cast<const int8_t*>(v.data)[phys]; break;
-        case DRAKEN_INT16:  widened = static_cast<const int16_t*>(v.data)[phys]; break;
-        case DRAKEN_INT32:
-        case DRAKEN_DATE32:
-        case DRAKEN_TIME32: widened = static_cast<const int32_t*>(v.data)[phys]; break;
-        case DRAKEN_INT64:
-        case DRAKEN_DECIMAL:
-        case DRAKEN_TIMESTAMP64:
-        case DRAKEN_TIME64: widened = static_cast<const int64_t*>(v.data)[phys]; break;
-        case DRAKEN_BOOL:
-            widened = (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u;
-            break;
-        case DRAKEN_FLOAT32: {
-            double d = static_cast<const float*>(v.data)[phys];
-            std::memcpy(&widened, &d, sizeof(widened));
-            break;
-        }
-        case DRAKEN_FLOAT64: {
-            double d = static_cast<const double*>(v.data)[phys];
-            std::memcpy(&widened, &d, sizeof(widened));
-            break;
-        }
-        case DRAKEN_DECIMAL128: {
-            buf.append(reinterpret_cast<const char*>(static_cast<const uint8_t*>(v.data))
-                           + static_cast<size_t>(phys) * 16u,
-                       16u);
-            return true;
-        }
-        case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR: case DRAKEN_VARBINARY: {
-            const DrakenStringArena* sa = string_arena_of(v);
-            const DrakenStringSlot* slot = &sa->slots[phys];
-            uint32_t len = str_length(slot);
-            buf.append(reinterpret_cast<const char*>(&len), sizeof(len));
-            if (len > 0)
-                buf.append(reinterpret_cast<const char*>(str_data(slot, sa->arena)), len);
-            return true;
-        }
-        default:
-            err.code = 1;
-            err.msg = "native engine: unsupported join key column type — fail loud";
-            return false;
-    }
-    buf.append(reinterpret_cast<const char*>(&widened), sizeof(widened));
-    return true;
-}
+// compute_row_hashes (draken-owned key hash) is shared from native_hash_join.hpp.
 
 struct Join2BuildLocal : LocalSinkState {
-    std::unordered_map<std::string, std::vector<uint32_t>> key_to_rows;
     std::vector<JoinPayloadColumn> payload;
+    std::vector<uint64_t> row_hashes;  // parallel to payload rows: the 64-bit key hash
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
     uint32_t next_row = 0;
     bool saw_null_key = false;
-    std::string scratch;
+    bool types_learned = false;        // corrected payload types from the first real morsel
 };
 struct Join2BuildGlobal : GlobalSinkState {
     std::mutex mtx;
-    std::unordered_map<std::string, std::vector<uint32_t>> key_to_rows;
+    // Global build table, keyed on the 64-bit draken hash → build-row-list. Built in
+    // combine() under the mutex (single-threaded index construction, exactly as the
+    // old unordered_map merge did); probed read-only/concurrently via const methods.
+    opteryx::carchar::CarcharJoinIndex index;
     std::vector<JoinPayloadColumn> payload;
     std::vector<uint64_t> asof_keys;   // ASOF only: parallel to payload rows
+    // ASOF only: draken hash → index into asof_sorted, materialized once at first
+    // probe (ensure_sorted). CarcharJoinIndex stores each key's rows unsorted, so the
+    // bisect needs this sorted view — keyed on the same 64-bit hash via a CarcharIndex.
+    opteryx::carchar::CarcharIndex asof_index;
+    std::vector<std::vector<int64_t>> asof_sorted;
     uint32_t total_rows = 0;
     bool saw_null_key = false;
 };
@@ -154,6 +109,19 @@ struct Join2BuildSink : Sink {
         auto& l = static_cast<Join2BuildLocal&>(ls);
         uint32_t rows = in->num_rows();
         if (rows == 0) return SinkResult::CONTINUE;
+        // The plan-known payload types (init_payload) exist for the empty-build case,
+        // but the DATA is authoritative: learn each payload column's real type from the
+        // first non-empty morsel. This corrects a plan that couldn't resolve a build
+        // column's type and defaulted it (e.g. an aggregate output → VARCHAR), which
+        // would otherwise materialize the column through the wrong type arm.
+        if (!l.types_learned) {
+            for (size_t c = 0; c < l.payload.size(); ++c) {
+                DrakenType t = in->columns[payload_col_idx[c]].view.type;
+                l.payload[c].type = t;
+                l.payload[c].elem_size = join_elem_size(t);
+            }
+            l.types_learned = true;
+        }
         for (size_t c = 0; c < l.payload.size(); ++c) {
             if (l.payload[c].elem_size == 0) {
                 err.code = 1;
@@ -161,6 +129,10 @@ struct Join2BuildSink : Sink {
                 return SinkResult::CONTINUE;
             }
         }
+        // Draken owns the key hash for the whole morsel; per-row nullness is read from
+        // the key columns (not the hash) so NULL keys are excluded as before.
+        std::vector<uint64_t> rowh;
+        if (!compute_row_hashes(in, key_idx, rowh, err)) return SinkResult::CONTINUE;
         for (uint32_t i = 0; i < rows; ++i) {
             // NULL in ANY key column: the row can never equi-match; record for the
             // null-aware ANTI contract and skip the table insert.
@@ -175,11 +147,6 @@ struct Join2BuildSink : Sink {
             if (asof_idx >= 0
                     && !sort_row_valid(in->columns[static_cast<size_t>(asof_idx)].view, i))
                 continue;   // NULL asof value never satisfies the MATCH_CONDITION
-            l.scratch.clear();
-            for (size_t k : key_idx) {
-                if (!join_key_append(l.scratch, in->columns[k].view, i, err))
-                    return SinkResult::CONTINUE;
-            }
             for (size_t c = 0; c < payload_col_idx.size(); ++c) {
                 l.payload[c].append_row(in->columns[payload_col_idx[c]].view, i, err,
                                         "Join2BuildSink: NULL payload value is not "
@@ -189,7 +156,7 @@ struct Join2BuildSink : Sink {
             if (asof_idx >= 0)
                 l.asof_keys.push_back(
                     sort_num_key(in->columns[static_cast<size_t>(asof_idx)].view, i));
-            l.key_to_rows[l.scratch].push_back(l.next_row);
+            l.row_hashes.push_back(rowh[i]);   // parallel to the payload row just added
             ++l.next_row;
         }
         return SinkResult::CONTINUE;
@@ -200,6 +167,15 @@ struct Join2BuildSink : Sink {
         auto& l = static_cast<Join2BuildLocal&>(ls);
         std::lock_guard<std::mutex> lk(g.mtx);
         g.saw_null_key = g.saw_null_key || l.saw_null_key;
+        // Adopt the data-learned payload types (a worker that saw rows is authoritative;
+        // all workers see the same column types). The global keeps the plan types only
+        // when NO worker ever saw a row (the empty-build case init_payload exists for).
+        if (l.types_learned) {
+            for (size_t c = 0; c < g.payload.size(); ++c) {
+                g.payload[c].type = l.payload[c].type;
+                g.payload[c].elem_size = l.payload[c].elem_size;
+            }
+        }
         // g.payload and l.payload are both pre-sized/typed from the same plan-known
         // payload_types (make_global/make_local) — always the same shape, even when
         // this worker's local never saw a row (its raw/arena vectors are then simply
@@ -228,10 +204,11 @@ struct Join2BuildSink : Sink {
             merge_payload_validity(gcol, lcol, lcol.row_count(), offset);
         }
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
-        for (auto& [key, rows] : l.key_to_rows) {
-            auto& dst = g.key_to_rows[key];
-            for (uint32_t r : rows) dst.push_back(r + offset);
-        }
+        // Insert this worker's rows into the global index at the global row offset.
+        // row_hashes[r] is the key hash of local payload row r → global row offset+r.
+        g.index.reserve(g.total_rows + l.next_row);
+        for (uint32_t r = 0; r < l.next_row; ++r)
+            g.index.insert_row(l.row_hashes[r], static_cast<int64_t>(offset + r));
         g.total_rows += l.next_row;
     }
 
@@ -248,9 +225,7 @@ struct Join2Ref {
 struct Join2ProbeState : OperatorState {
     MorselPtr pending_in;
     uint32_t row = 0;
-    const std::vector<uint32_t>* current_matches = nullptr;
-    size_t match_idx = 0;
-    std::string scratch;
+    std::vector<uint64_t> rowh;   // per-morsel probe-key hashes (draken-owned)
 };
 
 struct Join2ProbeOperator : Operator {
@@ -270,12 +245,15 @@ struct Join2ProbeOperator : Operator {
         return std::make_unique<Join2ProbeState>();
     }
 
-    // Build one output morsel for `matches` ((build_row | kNoBuildRow, probe_row)).
+    // Build one output morsel for the parallel (build_row | kNoBuildRow, probe_row)
+    // arrays. build_rows/probe_rows are int64 (CarcharJoinIndex row ids); an unmatched
+    // LEFT/ASOF row carries kNoBuildRow in build_rows.
     MorselPtr build_output(const MorselPtr& probe_in,
-                           const std::vector<std::pair<uint32_t, uint32_t>>& matches,
+                           const std::vector<int64_t>& build_rows,
+                           const std::vector<int64_t>& probe_rows,
                            ErrCtx& err) {
         const Join2BuildGlobal& g = *ref->g;
-        uint32_t n = static_cast<uint32_t>(matches.size());
+        uint32_t n = static_cast<uint32_t>(build_rows.size());
         auto out = std::make_shared<CxxMorsel>();
         out->zero_col_rows = n;
         out->columns.reserve(g.payload.size() + probe_payload_idx.size());
@@ -305,8 +283,8 @@ struct Join2ProbeOperator : Operator {
                 const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
                 size_t total_arena = 0;
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(matches[i].first)) continue;
-                    const auto* slot = src_slots + matches[i].first;
+                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) continue;
+                    const auto* slot = src_slots + static_cast<uint32_t>(build_rows[i]);
                     if (!str_is_inline(slot)) total_arena += str_length(slot);
                 }
                 size_t slots_off = sizeof(DrakenStringArena);
@@ -321,12 +299,12 @@ struct Join2ProbeOperator : Operator {
                 sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
                 size_t arena_pos = 0;
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(matches[i].first)) {
+                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) {
                         std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
                         mark_null(i);
                         continue;
                     }
-                    const auto* slot = src_slots + matches[i].first;
+                    const auto* slot = src_slots + static_cast<uint32_t>(build_rows[i]);
                     if (str_is_inline(slot)) dst[i] = *slot;
                     else {
                         uint32_t slen = str_length(slot);
@@ -359,11 +337,11 @@ struct Join2ProbeOperator : Operator {
                 // the validity mask, not the bit, carries "no build row".
                 uint8_t* bits = join_alloc_bool_bits(n);
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(matches[i].first)) {
+                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) {
                         mark_null(i);
                         continue;
                     }
-                    if (col.raw[matches[i].first])
+                    if (col.raw[static_cast<uint32_t>(build_rows[i])])
                         bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
                 }
                 data = bits;
@@ -372,7 +350,7 @@ struct Join2ProbeOperator : Operator {
                     static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
                 uint8_t* dst = static_cast<uint8_t*>(data);
                 for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(matches[i].first)) {
+                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) {
                         std::memset(dst + static_cast<size_t>(i) * col.elem_size, 0,
                                     col.elem_size);
                         mark_null(i);
@@ -380,7 +358,7 @@ struct Join2ProbeOperator : Operator {
                     }
                     std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
                                 col.raw.data()
-                                    + static_cast<size_t>(matches[i].first) * col.elem_size,
+                                    + static_cast<size_t>(static_cast<uint32_t>(build_rows[i])) * col.elem_size,
                                 col.elem_size);
                 }
             }
@@ -409,7 +387,7 @@ struct Join2ProbeOperator : Operator {
             view->names.resize(view->columns.size());
             view->zero_col_rows = pn;
             std::vector<uint32_t> order(n);
-            for (uint32_t i = 0; i < n; ++i) order[i] = matches[i].second;
+            for (uint32_t i = 0; i < n; ++i) order[i] = static_cast<uint32_t>(probe_rows[i]);
             std::vector<uint32_t> row_m(pn, 0), row_r(pn);
             for (uint32_t i = 0; i < pn; ++i) row_r[i] = i;
             std::vector<MorselPtr> ms{view};
@@ -427,52 +405,46 @@ struct Join2ProbeOperator : Operator {
         if (st.pending_in != in) {
             st.pending_in = in;
             st.row = 0;
-            st.current_matches = nullptr;
-            st.match_idx = 0;
+            if (!compute_row_hashes(in, probe_key_idx, st.rowh, err))
+                return OpResult::NEED_INPUT;
         }
         uint32_t n = in->num_rows();
-        std::vector<std::pair<uint32_t, uint32_t>> matches;
-        matches.reserve(kBatch);
+        std::vector<int64_t> build_rows, probe_rows;
+        build_rows.reserve(kBatch);
+        probe_rows.reserve(kBatch);
 
         while (st.row < n) {
-            if (st.current_matches == nullptr && st.match_idx == 0) {
-                bool any_null = false;
-                for (size_t k : probe_key_idx) {
-                    if (!sort_row_valid(in->columns[k].view, st.row)) { any_null = true; break; }
+            uint32_t row = st.row;
+            bool any_null = false;
+            for (size_t k : probe_key_idx) {
+                if (!sort_row_valid(in->columns[k].view, row)) { any_null = true; break; }
+            }
+            if (any_null) {
+                if (left_outer) {   // unmatched preserved-side row → NULL build payload
+                    build_rows.push_back(static_cast<int64_t>(kNoBuildRow));
+                    probe_rows.push_back(static_cast<int64_t>(row));
                 }
-                if (!any_null) {
-                    st.scratch.clear();
-                    for (size_t k : probe_key_idx) {
-                        if (!join_key_append(st.scratch, in->columns[k].view, st.row, err))
-                            return OpResult::NEED_INPUT;
-                    }
-                    auto it = g.key_to_rows.find(st.scratch);
-                    st.current_matches = (it == g.key_to_rows.end()) ? nullptr : &it->second;
-                }
-                if (st.current_matches == nullptr) {
-                    if (left_outer) matches.emplace_back(kNoBuildRow, st.row);
-                    ++st.row;
-                    if (matches.size() >= kBatch) {
-                        out = build_output(in, matches, err);
-                        return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::HAVE_MORE;
-                    }
-                    continue;
+            } else {
+                size_t before = build_rows.size();
+                // const + thread-safe fan-out: appends (build_row, probe_row) for every
+                // build row whose key hash matches. Equality is 64-bit hash identity.
+                g.index.append_probe_matches(st.rowh[row], static_cast<int64_t>(row),
+                                             build_rows, probe_rows);
+                if (build_rows.size() == before && left_outer) {
+                    build_rows.push_back(static_cast<int64_t>(kNoBuildRow));
+                    probe_rows.push_back(static_cast<int64_t>(row));
                 }
             }
-            matches.emplace_back((*st.current_matches)[st.match_idx], st.row);
-            ++st.match_idx;
-            if (st.match_idx >= st.current_matches->size()) {
-                st.current_matches = nullptr;
-                st.match_idx = 0;
-                ++st.row;
-            }
-            if (matches.size() >= kBatch) {
-                out = build_output(in, matches, err);
+            ++st.row;
+            // Flush a batch after a full probe row (a single high-fan-out row may push
+            // slightly past kBatch — correct, just a larger morsel).
+            if (build_rows.size() >= kBatch) {
+                out = build_output(in, build_rows, probe_rows, err);
                 return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::HAVE_MORE;
             }
         }
-        if (!matches.empty()) {
-            out = build_output(in, matches, err);
+        if (!build_rows.empty()) {
+            out = build_output(in, build_rows, probe_rows, err);
             return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::EMIT;
         }
         return OpResult::NEED_INPUT;
@@ -505,38 +477,48 @@ struct AsofProbeOperator : Join2ProbeOperator {
 
     // Sort every equi group's row list by asof key, once, before the first probe.
     // Runs under the ref's once_flag: exactly one thread mutates; the rest wait.
+    // Materialize, once, a hash → build-rows-sorted-by-asof-key view. CarcharJoinIndex
+    // stores each key's rows unsorted; the bisect below needs them ordered.
     void ensure_sorted() {
         auto* mref = const_cast<Join2Ref*>(ref);
         std::call_once(mref->asof_sorted, [&]() {
             auto* g = const_cast<Join2BuildGlobal*>(ref->g);
-            for (auto& [key, rows] : g->key_to_rows) {
-                std::sort(rows.begin(), rows.end(), [&](uint32_t a, uint32_t b) {
+            auto items = g->index.items();
+            g->asof_sorted.reserve(items.size());
+            g->asof_index.reserve(items.size());
+            for (const auto& kv : items) {
+                std::vector<int64_t> rows = g->index.rows_from_payload(kv.second);
+                std::sort(rows.begin(), rows.end(), [&](int64_t a, int64_t b) {
                     return g->asof_keys[a] < g->asof_keys[b];
                 });
+                g->asof_index.insert_new(kv.first,
+                                         static_cast<int64_t>(g->asof_sorted.size()));
+                g->asof_sorted.push_back(std::move(rows));
             }
         });
     }
 
-    uint32_t match_row(const std::vector<uint32_t>& rows, uint64_t k,
-                       const std::vector<uint64_t>& keys) const {
-        auto cmp = [&](uint32_t r, uint64_t v) { return keys[r] < v; };
-        auto cmp2 = [&](uint64_t v, uint32_t r) { return v < keys[r]; };
+    int64_t match_row(const std::vector<int64_t>& rows, uint64_t k,
+                      const std::vector<uint64_t>& keys) const {
+        const int64_t none = static_cast<int64_t>(kNoBuildRow);
+        auto cmp = [&](int64_t r, uint64_t v) { return keys[r] < v; };
+        auto cmp2 = [&](uint64_t v, int64_t r) { return v < keys[r]; };
         switch (op) {
             case AsofOp::GtEq: {   // largest build <= k
                 auto it = std::upper_bound(rows.begin(), rows.end(), k, cmp2);
-                return it == rows.begin() ? kNoBuildRow : *(it - 1);
+                return it == rows.begin() ? none : *(it - 1);
             }
             case AsofOp::Gt: {     // largest build < k
                 auto it = std::lower_bound(rows.begin(), rows.end(), k, cmp);
-                return it == rows.begin() ? kNoBuildRow : *(it - 1);
+                return it == rows.begin() ? none : *(it - 1);
             }
             case AsofOp::LtEq: {   // smallest build >= k
                 auto it = std::lower_bound(rows.begin(), rows.end(), k, cmp);
-                return it == rows.end() ? kNoBuildRow : *it;
+                return it == rows.end() ? none : *it;
             }
             default: {             // Lt: smallest build > k
                 auto it = std::upper_bound(rows.begin(), rows.end(), k, cmp2);
-                return it == rows.end() ? kNoBuildRow : *it;
+                return it == rows.end() ? none : *it;
             }
         }
     }
@@ -549,44 +531,39 @@ struct AsofProbeOperator : Join2ProbeOperator {
         if (st.pending_in != in) {
             st.pending_in = in;
             st.row = 0;
+            if (!compute_row_hashes(in, probe_key_idx, st.rowh, err))
+                return OpResult::NEED_INPUT;
         }
         uint32_t n = in->num_rows();
-        std::vector<std::pair<uint32_t, uint32_t>> matches;
-        matches.reserve(kBatch);
+        std::vector<int64_t> build_rows, probe_rows;
+        build_rows.reserve(kBatch);
+        probe_rows.reserve(kBatch);
         const DrakenVector& av = in->columns[asof_probe_idx].view;
 
         while (st.row < n) {
-            uint32_t build_row = kNoBuildRow;
-            bool usable = sort_row_valid(av, st.row);
+            uint32_t row = st.row;
+            int64_t build_row = static_cast<int64_t>(kNoBuildRow);
+            bool usable = sort_row_valid(av, row);
             for (size_t k : probe_key_idx) {
                 if (!usable) break;
-                if (!sort_row_valid(in->columns[k].view, st.row)) usable = false;
+                if (!sort_row_valid(in->columns[k].view, row)) usable = false;
             }
             if (usable) {
-                st.scratch.clear();
-                bool ok = true;
-                for (size_t k : probe_key_idx) {
-                    if (!join_key_append(st.scratch, in->columns[k].view, st.row, err)) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (!ok) return OpResult::NEED_INPUT;
-                auto it = g.key_to_rows.find(st.scratch);
-                if (it != g.key_to_rows.end()) {
-                    build_row = match_row(it->second, sort_num_key(av, st.row),
-                                          g.asof_keys);
-                }
+                int64_t idx = -1;
+                if (g.asof_index.lookup_fast(st.rowh[row], idx))
+                    build_row = match_row(g.asof_sorted[static_cast<size_t>(idx)],
+                                          sort_num_key(av, row), g.asof_keys);
             }
-            matches.emplace_back(build_row, st.row);
+            build_rows.push_back(build_row);
+            probe_rows.push_back(static_cast<int64_t>(row));
             ++st.row;
-            if (matches.size() >= kBatch) {
-                out = build_output(in, matches, err);
+            if (build_rows.size() >= kBatch) {
+                out = build_output(in, build_rows, probe_rows, err);
                 return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::HAVE_MORE;
             }
         }
-        if (!matches.empty()) {
-            out = build_output(in, matches, err);
+        if (!build_rows.empty()) {
+            out = build_output(in, build_rows, probe_rows, err);
             return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::EMIT;
         }
         return OpResult::NEED_INPUT;
@@ -595,9 +572,7 @@ struct AsofProbeOperator : Join2ProbeOperator {
 
 // ---- SEMI / ANTI probe: existence filter over the probe stream ---------------------
 
-struct SemiAntiProbeState : OperatorState {
-    std::string scratch;
-};
+struct SemiAntiProbeState : OperatorState {};   // whole-morsel filter; no resume state
 
 struct SemiAntiProbeOperator : Operator {
     std::vector<size_t> probe_key_idx;
@@ -612,13 +587,17 @@ struct SemiAntiProbeOperator : Operator {
     }
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
-        auto& st = static_cast<SemiAntiProbeState&>(st_);
+        (void)st_;
         const Join2BuildGlobal& g = *ref->g;
         uint32_t n = in->num_rows();
         if (n == 0) return OpResult::NEED_INPUT;
 
         if (anti && g.saw_null_key) return OpResult::NEED_INPUT;   // x NOT IN {…,NULL} → never true
         bool build_empty = (g.total_rows == 0 && !g.saw_null_key);
+
+        std::vector<uint64_t> rowh;
+        if (!build_empty && !compute_row_hashes(in, probe_key_idx, rowh, err))
+            return OpResult::NEED_INPUT;
 
         std::vector<uint32_t> survivors;
         survivors.reserve(n);
@@ -633,15 +612,8 @@ struct SemiAntiProbeOperator : Operator {
                 if (anti && build_empty) survivors.push_back(i);
                 continue;
             }
-            bool found = false;
-            if (!build_empty) {
-                st.scratch.clear();
-                for (size_t k : probe_key_idx) {
-                    if (!join_key_append(st.scratch, in->columns[k].view, i, err))
-                        return OpResult::NEED_INPUT;
-                }
-                found = g.key_to_rows.find(st.scratch) != g.key_to_rows.end();
-            }
+            // Existence by 64-bit hash identity (const, thread-safe probe).
+            bool found = !build_empty && g.index.row_count_for(rowh[i]) > 0;
             if (found != anti) survivors.push_back(i);
         }
         if (survivors.empty()) return OpResult::NEED_INPUT;

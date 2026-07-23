@@ -190,8 +190,7 @@ static nb::object codec_apply(
         } else {
             const uint32_t off = static_cast<uint32_t>(out_sa->arena_used);
             std::memcpy(out_arena + off, tmp_buf, actual_len);
-            str_init_extern(&out_slots[i], tmp_buf, actual_len,
-                            (uint32_t)XXH3_64bits(tmp_buf, actual_len), off);
+            str_init_extern(&out_slots[i], tmp_buf, actual_len, off);
             out_sa->arena_used += actual_len;
         }
     }

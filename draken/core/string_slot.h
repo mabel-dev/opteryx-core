@@ -11,9 +11,13 @@
 //   prefix       = first 4 payload bytes stored as a big-endian uint32_t so that
 //                  unsigned-integer comparison of prefix values gives lexicographic
 //                  order: prefix_a < prefix_b ↔ first_4_bytes(a) < first_4_bytes(b).
-//   hash32       = full-content XXH3 32-bit hash (lower 32 bits of XXH3_64bits);
-//                  equal values → identical hash. Used by higher-level kernels for
-//                  fast inequality rejection.
+//   hash32       = DEAD FIELD (E37). Was a full-content XXH3 32-bit hash used for
+//                  equality fast-reject; that reject was removed (dead in every
+//                  hash-bucketed caller, negligible on filters), so builders now
+//                  leave this 0 and compute NO XXH3. The 4 bytes are reserved (the
+//                  16-byte slot floor is set by the short form, so reclaiming them
+//                  buys nothing). The keying hash lives in VectorOwner::keyhash_buf
+//                  for downstream key columns. See docs/design/E37_carried_key_hash.md.
 //   arena_offset = u32 byte offset into the enclosing arena; max 4 GB per vector.
 //                  Overflow is a hard error — never wraps silently.
 //
@@ -84,14 +88,15 @@ static inline void str_init_inline(DrakenStringSlot* s, const uint8_t* src, uint
 }
 
 static inline void str_init_extern(DrakenStringSlot* s, const uint8_t* src,
-                                   uint32_t length, uint32_t hash32, uint32_t arena_offset) {
+                                   uint32_t length, uint32_t arena_offset) {
     // Precondition: length > STR_INLINE_MAX, src has >= length bytes already written
-    // to the arena at arena_offset. All four fields are set explicitly — no memset needed.
+    // to the arena at arena_offset. E37: hash32 is a dead field — always 0, and NO
+    // XXH3 is computed for it (the equality fast-reject that used it was removed).
     s->ext.length = length;
     // Prefix: first 4 bytes stored big-endian so uint32 comparison gives lex order.
     s->ext.prefix = ((uint32_t)src[0] << 24) | ((uint32_t)src[1] << 16)
                   | ((uint32_t)src[2] << 8)  | ((uint32_t)src[3]);
-    s->ext.hash32 = hash32;
+    s->ext.hash32 = 0u;
     s->ext.arena_offset = arena_offset;
 }
 
@@ -147,9 +152,12 @@ static inline uint64_t gs_lp_word(const DrakenStringSlot* s) { return s->raw.lo;
 // draken_build_string_slot — convenience builder for consumers producing new string Vectors.
 //
 // For short (len <= STR_INLINE_MAX): initialises an inline slot; arena_offset ignored.
-// For long  (len >  STR_INLINE_MAX): initialises an extern slot with XXH3 hash;
-//   bytes[0..len) MUST already be written to the enclosing arena at arena_offset
-//   before this is called. The hash is computed from bytes, not from the arena copy.
+// For long  (len >  STR_INLINE_MAX): initialises an extern slot. hash32 is set to 0
+//   (E37: the field is dead — no reader remains — so NO XXH3 is computed here; this
+//   is the "hash only when a query needs it" default). A column that IS a downstream
+//   GROUP BY/JOIN/DISTINCT key gets its 64-bit hash seed from
+//   draken_build_string_slot_seed (string_hash.h) into VectorOwner::keyhash_buf.
+//   bytes[0..len) MUST already be written to the enclosing arena at arena_offset.
 //
 // Caller is responsible for writing bytes into the arena and tracking arena_offset.
 // This helper does NOT write to the arena — that is the caller's job.
@@ -159,8 +167,7 @@ static inline void draken_build_string_slot(
     if (len <= STR_INLINE_MAX) {
         str_init_inline(slot, bytes, len);
     } else {
-        str_init_extern(slot, bytes, len,
-                        (uint32_t)XXH3_64bits(bytes, len), arena_offset);
+        str_init_extern(slot, bytes, len, arena_offset);  // E37: no XXH3 (hash32 dead)
     }
 }
 
@@ -168,8 +175,18 @@ static inline void draken_build_string_slot(
 // Equality and comparison
 // ---------------------------------------------------------------------------
 
-// Strict equality. Hot path: short-circuit on lp_word; for long strings also
-// checks hash32 before falling to full byte compare.
+// Strict equality. Hot path: short-circuit on lp_word (length + first-4-bytes);
+// long strings then do an authoritative arena byte compare.
+//
+// E37: the long-string hash32 fast-reject was REMOVED. It was dead in every
+// hash-bucketed caller — GROUP BY / JOIN / DISTINCT and the dict-dedup all reach
+// this only after a 64-bit-hash bucket match, and hash32 (the low 32 bits of that
+// same hash) therefore always matches, never rejecting — and its value on the one
+// live path, an equality filter vs a long literal, was measured negligible
+// (length+first4 already rejects ~99.9% before hash32 is consulted). With no
+// reader left, the slot no longer computes or carries hash32. The 64-bit keying
+// hash lives in VectorOwner::keyhash_buf when a column is a downstream key (E37
+// carried seed). See draken/docs/design/E37_carried_key_hash.md.
 static inline int str_equals(const DrakenStringSlot* a, const uint8_t* arena_a,
                              const DrakenStringSlot* b, const uint8_t* arena_b) {
     if (a->raw.lo != b->raw.lo) return 0;  // length or first-4-bytes differ
@@ -178,9 +195,9 @@ static inline int str_equals(const DrakenStringSlot* a, const uint8_t* arena_a,
         // Inline: raw.hi covers inline bytes 4..11 (zero-padded beyond length).
         return a->raw.hi == b->raw.hi;
     }
-    // Long: same length + same prefix. Use hash32 for fast rejection.
-    if (a->ext.hash32 != b->ext.hash32) return 0;
-    // Same hash — full byte compare (only strings > 12 bytes reach here).
+    // Long: same length + same first-4 bytes → authoritative byte compare
+    // (only strings > 12 bytes reach here). The old hash32 fast-reject was removed
+    // (E37): dead in hash-bucketed callers, negligible on equality filters.
     return memcmp(arena_a + a->ext.arena_offset,
                   arena_b + b->ext.arena_offset, len) == 0;
 }

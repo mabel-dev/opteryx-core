@@ -66,7 +66,7 @@ cdef extern from *:
 cdef extern from "core/draken_bridge.h":
     # Wrap hand-built German-string buffers (slots + arena + validity, all
     # draken_malloc'd) into a new string-family Vector. Ownership of all three
-    # transfers on call; slots' precomputed hash32 is trusted (no rehash).
+    # transfers on call; slots are copied verbatim (no rehash — hash32 is a dead
     # Returns a NEW reference to a Python Vector, or NULL on failure.
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
@@ -200,8 +200,9 @@ cdef Vector _ks_consume_timestamp_buffer(DrakenFixedBuffer* buf, bytes unit) exc
 # Group keys are accumulated DIRECTLY in the engine's native string format
 # (DrakenStringSlot[] + arena), not as an intermediate Arrow-varlen buffer.
 # Each new group copies its source slot verbatim — preserving the precomputed
-# prefix and hash32 — and, for long (>12B) strings, copies the payload bytes
-# once into the accumulator arena. Inline (<=12B) strings need no arena copy.
+# prefix (hash32 rides along in the same 16-byte copy but is a dead field since
+# E37: no reader, always 0) — and, for long (>12B) strings, copies the payload
+# bytes once into the accumulator arena. Inline (<=12B) strings need no arena copy.
 #
 # At finalize the buffers transfer straight into a Vector via
 # draken_vector_own_string with NO second copy and NO hash recomputation.

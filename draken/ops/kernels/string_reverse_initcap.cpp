@@ -138,7 +138,6 @@ VecResult sri_transform(const DrakenVector* v, DrakenType out_type, const char* 
             uint8_t* dst = arena + arena_pos;
             fn(src, len, dst);
             str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }

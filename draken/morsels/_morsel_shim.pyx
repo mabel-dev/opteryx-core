@@ -1023,9 +1023,10 @@ cdef class Morsel:
         """Partition rows into `n_bins` sub-morsels by hash(col_names) bucket.
 
         The routing hash is the existing keying hash (the nogil `c_hash` path):
-        for a single string key it folds the german-string slot hash32 (no arena
-        re-hash); for multi-column / fixed-width keys it mixes the per-column
-        hashes. Identical keys always route to the same bin (deterministic per
+        for a single string key it is the 64-bit str_hash_seed (XXH3 for long
+        values, folded slot words for short) run through the keying mix — NOT the
+        slot's dead hash32 field (E37); for multi-column / fixed-width keys it mixes
+        the per-column hashes. Identical keys always route to the same bin (per
         key value); NULL keys collide to one bin. `n_bins` MUST be a power of two
         (bucket = hash & (n_bins - 1)).
 

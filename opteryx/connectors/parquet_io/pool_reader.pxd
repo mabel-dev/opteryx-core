@@ -36,6 +36,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         void* codes          # DK_VARCHAR_DICT: uint32 code per row
         uint32_t data_length # DK_VARCHAR_DICT: unique-value slot count
         bint dict_sorted     # dict shapes: `data` is ascending (is_sorted)
+        void* keyhash        # E37: per-data-element hash seed (uint64), or NULL
 
     cdef cppclass MorselRef:
         string path
@@ -64,6 +65,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # exec CppThreadPool) instead of self-constructing one — see the injecting
         # constructor in io_pipeline.hpp for the ownership/lifetime contract.
         ParquetIOPipeline(shared_ptr[PriorityPool] pool, size_t queue_capacity) except +
+        # E37: per-projected-column key flag; 1 = build the hash seed for this
+        # string column. Set once at plan time; empty → no string hashing.
+        void set_hash_key_columns(const vector[uint8_t]& v)
         void submit_row_group(
             const string& path, int rg_idx,
             const vector[string]& column_names,
@@ -145,6 +149,10 @@ cdef class NativeScanPlan:
     # precision-scale (see LC_* packing in native_parquet_scan_source.hpp). 0 = none.
     cdef vector[uint8_t] decimal_columns
     cdef vector[int] logical_coerce
+    # E37: parallel to column_names. 1 = this column is a GROUP BY/JOIN/DISTINCT key
+    # downstream, so the native Source carries its hash seed (keyhash_buf). All-zero
+    # (the default) → no sidecar built — the pay-for-use gate.
+    cdef vector[uint8_t] hash_key_columns
     cdef int in_flight_limit
     cdef int n_items
     # WP-02: row groups excluded by pushed-predicate min/max + bloom pruning at
@@ -171,6 +179,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     string_types=*,
     decimal_columns=*,
     logical_coerce=*,
+    hash_key_columns=*,
     pool=*,
 )
 

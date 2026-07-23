@@ -89,54 +89,16 @@ cdef extern from "engine/scan_aggregate_demo.hpp" namespace "opteryx::engine" no
         int dop, ErrCtx& err
     )
 
-# Slice 5c: REAL scanned data, GROUP BY a real numeric key column, REAL C++-native
-# NULL-aware SUM/COUNT per group (combines slice 2's hash-map breaker pattern with
-# slice 5b's NULL-aware reduction).
-cdef extern from "engine/scan_groupby_demo.hpp" namespace "opteryx::engine" nogil:
-    cdef struct GroupRow:
-        long long key
-        double sum
-        long long count
-    void run_group_sum_count(
-        const cppvector[shared_ptr[CxxMorsel]]& morsels, size_t key_col_idx,
-        size_t val_col_idx, int dop, ErrCtx& err, cppvector[GroupRow]& out
-    )
-
-# Slice 5d: REAL scanned data on BOTH sides of a hash join — build pipeline's Sink
-# builds the hash table over a real on-disk key column, probe pipeline's Operator fans
-# out matches via HAVE_MORE (the proven slice-4 mechanic) over a real on-disk probe key
-# column, NULL-aware on both sides.
-cdef extern from "engine/scan_join_demo.hpp" namespace "opteryx::engine" nogil:
-    long long run_hash_join_count(
-        const cppvector[shared_ptr[CxxMorsel]]& build_morsels, size_t build_key_col_idx,
-        const cppvector[shared_ptr[CxxMorsel]]& probe_morsels, size_t probe_key_col_idx,
-        int dop, ErrCtx& err
-    )
-
 # ScanPullFn: the streaming scan pull-on-demand callback. LIVE — ``_scan_pull_trampoline``
 # implements it and ``NativePlan.set_scan_source`` hands it to the engine. (The former
-# narrow ``native_engine_real_*`` Python wrappers that also used it were removed as dead
-# code once the general ``NativePlan``/``native_plan_execute`` engine subsumed them; the
-# ``run_real_*``/demo ``cdef extern`` declarations below are now unused Cython bindings,
-# retained only because their C++ impls back the engine slice unit tests.)
+# narrow ``native_engine_real_*`` wrappers and the ``run_real_*``/demo fused pipelines
+# that also used it were removed as dead code once the general ``NativePlan``/
+# ``native_plan_execute`` engine subsumed them.)
 ctypedef void (*ScanPullFn)(void* scan_ptr, shared_ptr[CxxMorsel]* out,
                             int* finished, int* err_code) noexcept nogil
 
 cdef extern from "engine/streaming_scan_source.hpp" namespace "opteryx::engine" nogil:
-    pass  # ScanPullFn / StreamingScanSource are consumed only via real_filter_pipeline.hpp
-
-cdef extern from "engine/real_filter_pipeline.hpp" namespace "opteryx::engine" nogil:
-    cdef struct RealFilterStats:
-        long long rows_out
-    RealFilterStats run_real_filter_to_queue(
-        void* scan_ptr, ScanPullFn pull_fn, size_t col_idx, double threshold,
-        int dop, MorselQueue* out_q, ErrCtx& err, void* pool
-    )
-
-# ---- Genuinely native (zero-Python) engine cutover: NativeParquetScanSource ->
-# NumericFilterOperator -> queue. No PyObject anywhere in this pipeline's run —
-# see native_parquet_scan_source.hpp / native_filter_pipeline.hpp for the scope
-# boundary (fixed-width numeric columns, single-pass, no schema evolution).
+    pass  # makes StreamingScanSource's header available; the engine drives it via ScanPullFn
 cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil:
     cdef enum class CompareOp "opteryx::engine::CompareOp":
         Gt "opteryx::engine::CompareOp::Gt"
@@ -149,43 +111,6 @@ cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil
         size_t col_idx
         CompareOp op
         double threshold
-
-# ---- REAL (non-demo) engine cutover, piece 2: scan -> [filter]* -> SUM/COUNT, streamed
-# on demand (no pre-materialization) — the ungrouped-aggregate counterpart of piece 1.
-# BLOCKING (an aggregate result is a handful of scalars, not a morsel stream), unlike
-# piece 1's streaming queue hand-off. (Unused Cython binding — see the ScanPullFn note.)
-cdef extern from "engine/real_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
-    AggDemoStats run_real_aggregate_to_result(
-        void* scan_ptr, ScanPullFn pull_fn, cppvector[SimplePredicate] predicates,
-        size_t col_idx, int dop, ErrCtx& err, void* pool
-    )
-
-# ---- REAL (non-demo) engine cutover, piece 3: scan -> [filter]* -> GROUP BY key ->
-# SUM/COUNT, streamed on demand (no pre-materialization) — the grouped-aggregate
-# counterpart of piece 2. BLOCKING (a grouped result is a handful of rows, not a morsel
-# stream). (Unused Cython binding — see the ScanPullFn note.)
-cdef extern from "engine/real_groupby_pipeline.hpp" namespace "opteryx::engine" nogil:
-    void run_real_groupby_to_result(
-        void* scan_ptr, ScanPullFn pull_fn, cppvector[SimplePredicate] predicates,
-        size_t key_col_idx, size_t val_col_idx, int dop, ErrCtx& err, void* pool,
-        cppvector[GroupRow]& out
-    )
-
-# ---- REAL (non-demo) engine cutover, piece 4: scan -> [filter]* -> build hash table;
-# scan -> [filter]* -> probe -> SUM/COUNT over one join-output column, streamed on demand
-# (no pre-materialization, BOTH sides) — the inner-equi-join counterpart of pieces 2/3.
-# BLOCKING (an aggregate result is a handful of scalars). (Unused Cython binding — see
-# the ScanPullFn note.)
-cdef extern from "engine/real_join_pipeline.hpp" namespace "opteryx::engine" nogil:
-    AggDemoStats run_real_join_aggregate_to_result(
-        void* build_scan_ptr, ScanPullFn build_pull_fn,
-        cppvector[SimplePredicate] build_predicates,
-        size_t build_key_col_idx, cppvector[size_t] build_payload_col_idx,
-        void* probe_scan_ptr, ScanPullFn probe_pull_fn,
-        cppvector[SimplePredicate] probe_predicates,
-        size_t probe_key_col_idx, cppvector[size_t] probe_payload_col_idx,
-        size_t agg_col_idx, int dop, ErrCtx& err, void* pool
-    )
 
 # ---- THE ENGINE: the pipeline-graph runner (engine.hpp). The plan compiler
 # (opteryx/managers/execution/compiler.py — planning, Python) builds the graph through
@@ -295,7 +220,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     CppMemoryPool* pool,
                                     const cppvector[int]* string_types,
                                     const cppvector[uint8_t]* decimal_columns,
-                                    const cppvector[int]* logical_coerce)
+                                    const cppvector[int]* logical_coerce,
+                                    const cppvector[uint8_t]* hash_key_columns)
         void set_buffer_source(size_t p, size_t buf)
         void add_filter(size_t p, cppvector[SimplePredicate] preds)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
@@ -347,19 +273,6 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               cppvector[int] lt_precision, cppvector[int] lt_scale,
                               cppvector[int] lt_dimension)
         void run(int dop, void* pool, ErrCtx& err)
-
-
-cdef extern from "engine/native_filter_pipeline.hpp" namespace "opteryx::engine" nogil:
-    cdef struct NativeFilterStats:
-        long long rows_out
-    NativeFilterStats run_native_filter_to_queue(
-        ParquetIOPipeline* pipeline,
-        const unordered_map[string, FileStats]* footer_map,
-        const cppvector[pair[string, int]]* work_items,
-        const cppvector[string]* column_names,
-        int in_flight_limit, cppvector[SimplePredicate] predicates, int dop,
-        MorselQueue* out_q, ErrCtx& err, void* pool
-    )
 
 # ---- Genuinely native (zero-Python) UNGROUPED aggregate: NativeParquetScanSource ->
 # [NumericFilterOperator] -> NativeAggregateSink. See native_aggregate.hpp for the
@@ -425,70 +338,6 @@ cdef extern from "engine/native_decimal.hpp" namespace "opteryx::engine" nogil:
         shared_ptr[DecimalExpr] make_case(size_t cond_idx, string prefix,
                                           shared_ptr[DecimalExpr] then_expr,
                                           shared_ptr[DecimalExpr] else_expr)
-
-cdef extern from "engine/native_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
-    cdef struct NativeAggregateStats:
-        cppvector[double] result
-        cppvector[int64_t] decimal_hi
-        cppvector[uint64_t] decimal_lo
-        cppvector[uint8_t] decimal_scale
-    NativeAggregateStats run_native_aggregate_to_result(
-        ParquetIOPipeline* pipeline,
-        const unordered_map[string, FileStats]* footer_map,
-        const cppvector[pair[string, int]]* work_items,
-        const cppvector[string]* column_names,
-        int in_flight_limit, cppvector[SimplePredicate] predicates,
-        cppvector[AggregateSpec] specs, int dop, ErrCtx& err, void* thread_pool,
-        CppMemoryPool* decimal_pool, const cppvector[uint8_t]* decimal_columns
-    )
-
-cdef extern from "engine/native_grouped_aggregate_pipeline.hpp" namespace "opteryx::engine" nogil:
-    cdef struct NativeGroupedAggregateStats:
-        uint32_t num_groups
-        cppvector[string] group_key_values
-        cppvector[double] result
-        cppvector[int64_t] decimal_hi
-        cppvector[uint64_t] decimal_lo
-        cppvector[uint8_t] decimal_scale
-    NativeGroupedAggregateStats run_native_grouped_aggregate_to_result(
-        ParquetIOPipeline* pipeline,
-        const unordered_map[string, FileStats]* footer_map,
-        const cppvector[pair[string, int]]* work_items,
-        const cppvector[string]* column_names,
-        int in_flight_limit, cppvector[SimplePredicate] predicates,
-        cppvector[size_t] group_col_idx,
-        cppvector[AggregateSpec] specs, int dop, ErrCtx& err, void* thread_pool,
-        CppMemoryPool* decimal_pool, const cppvector[uint8_t]* decimal_columns,
-        const cppvector[uint8_t]* varchar_columns
-    )
-
-cdef extern from "engine/native_hash_join_pipeline.hpp" namespace "opteryx::engine" nogil:
-    cdef struct NativeHashJoinAggregateStats:
-        cppvector[double] result
-        cppvector[int64_t] decimal_hi
-        cppvector[uint64_t] decimal_lo
-        cppvector[uint8_t] decimal_scale
-    NativeHashJoinAggregateStats run_native_hash_join_aggregate_to_result(
-        ParquetIOPipeline* build_pipeline,
-        const unordered_map[string, FileStats]* build_footer_map,
-        const cppvector[pair[string, int]]* build_work_items,
-        const cppvector[string]* build_column_names,
-        int build_in_flight_limit,
-        CppMemoryPool* build_decimal_pool, const cppvector[uint8_t]* build_decimal_columns,
-        const cppvector[uint8_t]* build_varchar_columns,
-        size_t build_key_col_idx, cppvector[size_t] build_payload_col_idx,
-        cppvector[SimplePredicate] build_predicates,
-        ParquetIOPipeline* probe_pipeline,
-        const unordered_map[string, FileStats]* probe_footer_map,
-        const cppvector[pair[string, int]]* probe_work_items,
-        const cppvector[string]* probe_column_names,
-        int probe_in_flight_limit,
-        CppMemoryPool* probe_decimal_pool, const cppvector[uint8_t]* probe_decimal_columns,
-        const cppvector[uint8_t]* probe_varchar_columns,
-        size_t probe_key_col_idx, cppvector[size_t] probe_payload_col_idx,
-        cppvector[SimplePredicate] probe_predicates,
-        cppvector[AggregateSpec] specs, int dop, ErrCtx& err, void* thread_pool
-    )
 
 
 # -----------------------------------------------------------------------------
@@ -2355,7 +2204,8 @@ cdef class NativePlan:
                                        &splan.work_items, &splan.column_names,
                                        splan.in_flight_limit,
                                        pool_ptr, &splan.string_types,
-                                       &splan.decimal_columns, &splan.logical_coerce)
+                                       &splan.decimal_columns, &splan.logical_coerce,
+                                       &splan.hash_key_columns)
 
     def close_scan_plans(self):
         """Cancel + shut down every NativeScanPlan's IO pipeline. MUST only run

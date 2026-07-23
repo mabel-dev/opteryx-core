@@ -44,6 +44,7 @@
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
+#include "ops/string_hash.h"    // E37: draken_build_string_slot_seed — slot + carried hash seed
 #include "core/buffers.h"       // DrakenVector / DrakenStringArena — worker-side pass-1 predicate view
 #include "core/vector_alloc.h"  // draken_identity_sel — dense selection for the view
 // docs/EXECUTION_TRACING_DESIGN.md: rugo calls the extern "C" bridge
@@ -129,6 +130,11 @@ struct ColumnOut {
     void*    codes = nullptr;        // DK_VARCHAR_DICT: uint32 code per row
     uint32_t data_length = 0;        // DK_VARCHAR_DICT: number of unique-value slots
     bool     dict_sorted = false;    // dict shapes: `data` is ascending (is_sorted)
+    // E37 carried key-hash: per-data-element hash seed (str_hash_seed) computed
+    // during slot build, one uint64 per slot (plain: length; dict: data_length).
+    // draken_vector_own_string* COPIES it, so unlike the buffers above this is NOT
+    // "taken" — the MorselRef dtor always frees it. nullptr for non-string columns.
+    void*    keyhash = nullptr;
 };
 
 // Owns the direct-path Draken buffers (data + validity) it carries: any not
@@ -169,6 +175,7 @@ struct MorselRef {
                 if (c.validity) free_fn(c.validity);
                 if (c.arena) free_fn(c.arena);
                 if (c.codes) free_fn(c.codes);
+                if (c.keyhash) free_fn(c.keyhash);   // E37: always ours (own_string COPIES)
             }
         }
     }
@@ -370,7 +377,7 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
 // has one entry per row. Allocates via `alloc`; frees what it took on failure.
 static inline bool build_direct_string_plain(const DecodedColumn& d,
                                              void* (*alloc)(size_t), void (*freefn)(void*),
-                                             ColumnOut& out) {
+                                             ColumnOut& out, bool want_seed = false) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
@@ -395,13 +402,23 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
         if (!validity) { freefn(arena); freefn(slots); return false; }
         std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
     }
+    // E37: build the hash seed ONLY when the plan marks this column a downstream
+    // key (want_seed). Non-key columns take the cheap builder — NO XXH3 at all —
+    // which is the whole point of the plan-gated hashing. null-row seeds stay 0
+    // (the consumer bakes NULL_HASH from validity, so they are never read).
+    uint64_t* keyhash = nullptr;
+    if (want_seed) {
+        keyhash = static_cast<uint64_t*>(alloc((n ? n : 1u) * sizeof(uint64_t)));
+        if (!keyhash) { if (validity) freefn(validity); freefn(arena); freefn(slots); return false; }
+    }
 
-    // Pass 2: fill arena + build slots.
+    // Pass 2: fill arena + build slots (+ seeds when keyed).
     uint32_t arena_pos = 0;
     for (uint32_t i = 0; i < n; ++i) {
         DrakenStringSlot* slot = &slots[i];
         if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) {
             str_init_null(slot);
+            if (keyhash) keyhash[i] = 0u;   // null row: seed unused
             continue;
         }
         const std::string& s = vals[i];
@@ -409,10 +426,12 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
         const uint32_t slen = static_cast<uint32_t>(s.size());
         if (slen > STR_INLINE_MAX) {
             std::memcpy(arena + arena_pos, sp, slen);
-            draken_build_string_slot(slot, sp, slen, arena_pos);
+            if (want_seed) draken::ops::draken_build_string_slot_seed(slot, sp, slen, arena_pos, &keyhash[i]);
+            else           draken_build_string_slot(slot, sp, slen, arena_pos);  // no XXH3
             arena_pos += slen;
         } else {
-            draken_build_string_slot(slot, sp, slen, arena_pos);  // inline; offset ignored
+            if (want_seed) draken::ops::draken_build_string_slot_seed(slot, sp, slen, arena_pos, &keyhash[i]);
+            else           draken_build_string_slot(slot, sp, slen, arena_pos);  // inline
         }
     }
 
@@ -421,6 +440,7 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
     out.length = n;
     out.arena = arena;
     out.arena_len = arena_pos;
+    out.keyhash = keyhash;
     return true;
 }
 
@@ -434,7 +454,7 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
 // accessed through the same uniform value[codes[i]] path.
 static inline bool build_direct_string_dict(const DecodedColumn& d,
                                             void* (*alloc)(size_t), void (*freefn)(void*),
-                                            ColumnOut& out) {
+                                            ColumnOut& out, bool want_seed = false) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const uint32_t dict_size = static_cast<uint32_t>(d.string_dict_lens.size());
     const bool nullable = !d.valid_bits.empty();
@@ -447,16 +467,26 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     uint8_t* arena = static_cast<uint8_t*>(alloc(arena_len ? arena_len : 1u));
     if (!arena) { freefn(slots); return false; }
     if (arena_len) std::memcpy(arena, d.string_dict_arena.data(), arena_len);
+    // E37: one seed per DISTINCT value (data_length entries) — only when the plan
+    // marks this column a downstream key. Non-key dict columns take the cheap
+    // builder (no XXH3). Dict already hashes per-distinct, so the cost is small,
+    // but the gate keeps the "no key → no hash" invariant uniform.
+    uint64_t* keyhash = nullptr;
+    if (want_seed) {
+        keyhash = static_cast<uint64_t*>(alloc((dict_size ? dict_size : 1u) * sizeof(uint64_t)));
+        if (!keyhash) { freefn(arena); freefn(slots); return false; }
+    }
     for (uint32_t k = 0; k < dict_size; ++k) {
         const uint32_t s_off = d.string_dict_offsets[k];
         const uint32_t slen = (k + 1u < dict_size)
             ? (d.string_dict_offsets[k + 1u] - s_off)
             : (static_cast<uint32_t>(arena_len) - s_off);
-        draken_build_string_slot(&slots[k], arena + s_off, slen, s_off);
+        if (want_seed) draken::ops::draken_build_string_slot_seed(&slots[k], arena + s_off, slen, s_off, &keyhash[k]);
+        else           draken_build_string_slot(&slots[k], arena + s_off, slen, s_off);
     }
 
     uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
-    if (!codes) { freefn(arena); freefn(slots); return false; }
+    if (!codes) { freefn(keyhash); freefn(arena); freefn(slots); return false; }
     const uint8_t cw = d.code_width;
     if (!d.dict_codes_array.empty()) {
         const uint8_t* ca = d.dict_codes_array.data();
@@ -480,7 +510,7 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     uint8_t* validity = nullptr;
     if (nullable) {
         validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
-        if (!validity) { freefn(codes); freefn(arena); freefn(slots); return false; }
+        if (!validity) { freefn(keyhash); freefn(codes); freefn(arena); freefn(slots); return false; }
         std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
     }
 
@@ -492,6 +522,7 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     out.validity = validity;
     out.length = n;
     out.dict_sorted = d.dict_ordered;
+    out.keyhash = keyhash;
     return true;
 }
 
@@ -1497,12 +1528,15 @@ class ParquetIOPipeline {
                     // buffer (+ validity), doing any compact→positional scatter
                     // itself; the consumer wraps it with zero copy.
                     bool ok;
+                    // E37: this column carries a hash seed only if the plan flagged
+                    // it a downstream key (parallel to the projected column order).
+                    const bool want_seed = (i < hash_key_columns_.size()) && (hash_key_columns_[i] != 0);
                     if (dk == DK_BOOL)
                         ok = build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_VARCHAR)
-                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed);
                     else if (dk == DK_VARCHAR_DICT)
-                        ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                        ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed);
                     else if (dk == DK_INT64_DICT)
                         ok = build_direct_int64_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_FLOAT64_DICT)
@@ -1659,6 +1693,14 @@ class ParquetIOPipeline {
     }
 
  public:
+    // E37: per-projected-column key flag (parallel to the scan's column order).
+    // 1 = build the hash seed for this string column (it is a downstream GROUP BY/
+    // JOIN/DISTINCT key); 0 (default when unset) = cheap slot build, NO XXH3. Set
+    // once by the planner via open_native_scan_plan. Empty → nothing keyed → the
+    // standalone-rugo / SELECT-*/ LIKE default of zero string hashing.
+    std::vector<uint8_t> hash_key_columns_;
+    void set_hash_key_columns(const std::vector<uint8_t>& v) { hash_key_columns_ = v; }
+
     // Standalone path (unchanged behaviour): self-constructs an exclusive pool.
     // Kept for the standalone rugo wheel and any caller that doesn't inject one —
     // rugo/ stays opteryx-free; nothing here depends on the execution engine.

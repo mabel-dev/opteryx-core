@@ -18,10 +18,15 @@
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/shared_ptr.h>   // S0: shared_ptr<VectorOwner> seam (CxxMorsel)
 
+#include <atomic>
+#include <chrono>
 #include <climits>
+// E37 TEMP diagnostic counter (declared early so own_string + hash_shaped_impl both see it).
+namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -377,8 +382,7 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
                         "vector_from_string_sequence: arena offset overflow");
                 const uint32_t off = static_cast<uint32_t>(sa->arena_used);
                 std::memcpy(arena + off, src, slen);
-                str_init_extern(&slots[i], src, slen,
-                                (uint32_t)XXH3_64bits(src, slen), off);
+                str_init_extern(&slots[i], src, slen, off);
                 sa->arena_used += slen;
             }
         }
@@ -478,8 +482,7 @@ static VectorOwner make_string_constant(nb::object value_obj, uint32_t length,
         } else {
             // Write bytes to arena at offset 0 (this is the only slot).
             std::memcpy(arena, src, slen);
-            str_init_extern(slot, src, slen,
-                            static_cast<uint32_t>(XXH3_64bits(src, slen)), 0u);
+            str_init_extern(slot, src, slen, 0u);
         }
     }
     // is_null: slot is already zeroed (null sentinel: length == 0, all bytes zero).
@@ -600,8 +603,7 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
         if (ulen <= STR_INLINE_MAX) {
             str_init_inline(&tmp_slot, ubytes, ulen);
         } else {
-            str_init_extern(&tmp_slot, ubytes, ulen,
-                            (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
+            str_init_extern(&tmp_slot, ubytes, ulen, 0u);
         }
 
         const uint64_t hseed = draken::ops::str_hash_seed(&tmp_slot, ubytes);
@@ -2523,7 +2525,8 @@ extern "C" PyObject* draken_vector_own_string(
     size_t            arena_len,
     uint8_t*          validity,
     uint32_t          length,
-    DrakenType        type)
+    DrakenType        type,
+    const uint64_t*   keyhash)   // E37: per-row hash seed (length entries) or nullptr; COPIED
 {
     // Step 1: take ownership of all three caller buffers immediately via RAII.
     // If any allocation fails below, destructors free them. If we succeed, we
@@ -2600,6 +2603,14 @@ extern "C" PyObject* draken_vector_own_string(
         DrakenVector v = draken_vector_from_dense(sa, length, type, raw_valid);
 
         VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+        // E37: attach a COPY of the carried per-row seed (dense: length entries).
+        if (keyhash != nullptr && length > 0u) {
+            uint64_t* kh = static_cast<uint64_t*>(
+                draken_malloc(static_cast<size_t>(length) * sizeof(uint64_t)));
+            if (!kh) throw std::bad_alloc();
+            std::memcpy(kh, keyhash, static_cast<size_t>(length) * sizeof(uint64_t));
+            owner.keyhash_buf = OwnedBuffer<uint64_t>(kh);
+        }
         nb::object obj = nb::cast(std::move(owner));
         PyObject* result = obj.ptr();
         Py_INCREF(result);
@@ -2695,8 +2706,7 @@ extern "C" void* draken_arrow_varlen_to_string_block(
         } else {
             const uint32_t off = static_cast<uint32_t>(sa->arena_used);
             std::memcpy(arena + off, src, slen);
-            str_init_extern(&slots[i], src, slen,
-                            static_cast<uint32_t>(XXH3_64bits(src, slen)), off);
+            str_init_extern(&slots[i], src, slen, off);
             sa->arena_used += slen;
         }
     }
@@ -2722,7 +2732,8 @@ extern "C" PyObject* draken_vector_own_string_dict(
     uint32_t          data_length,
     uint8_t*          validity,
     uint32_t          length,
-    DrakenType        type)
+    DrakenType        type,
+    const uint64_t*   keyhash)   // E37: per-DISTINCT hash seed (data_length entries) or nullptr; COPIED
 {
     // Take ownership of all four caller buffers immediately via RAII.
     OwnedBuffer<void>    slots_guard(static_cast<void*>(slots));
@@ -2803,6 +2814,15 @@ extern "C" PyObject* draken_vector_own_string_dict(
                                                  type, raw_valid);
 
         VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+        // E37: attach a COPY of the carried seed (dict: data_length distinct entries,
+        // addressed by codes exactly like the value slots).
+        if (keyhash != nullptr && data_length > 0u) {
+            uint64_t* kh = static_cast<uint64_t*>(
+                draken_malloc(static_cast<size_t>(data_length) * sizeof(uint64_t)));
+            if (!kh) throw std::bad_alloc();
+            std::memcpy(kh, keyhash, static_cast<size_t>(data_length) * sizeof(uint64_t));
+            owner.keyhash_buf = OwnedBuffer<uint64_t>(kh);
+        }
         nb::object obj = nb::cast(std::move(owner));
         PyObject* result = obj.ptr();
         Py_INCREF(result);
@@ -3647,8 +3667,7 @@ static VectorOwner make_string_from_float_vector(const VectorOwner& src, uint32_
                     "vector_cast_float64_to_string: arena offset overflow");
             const uint32_t off = static_cast<uint32_t>(sa->arena_used);
             std::memcpy(arena + off, bytes, len);
-            str_init_extern(&slots[i], bytes, len,
-                            static_cast<uint32_t>(XXH3_64bits(bytes, len)), off);
+            str_init_extern(&slots[i], bytes, len, off);
             sa->arena_used += len;
         }
     }
@@ -5147,8 +5166,7 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
                         "vector_from_bytes_sequence: arena offset overflow");
                 const uint32_t off = static_cast<uint32_t>(sa->arena_used);
                 std::memcpy(arena + off, src, slen);
-                str_init_extern(&slots[i], src, slen,
-                                (uint32_t)XXH3_64bits(src, slen), off);
+                str_init_extern(&slots[i], src, slen, off);
                 sa->arena_used += slen;
             }
         }
@@ -6298,6 +6316,13 @@ static VectorOwner hash_shaped_impl(const VectorOwner& v) {
     const uint32_t n = v.vec.length;
     if (v.vec.type != DRAKEN_NULL && v.vec.type != DRAKEN_VECTOR_FP16
             && v.vec.type != DRAKEN_DECIMAL128) {
+        // E37: reuse the scan-carried seed if present (string columns only; the
+        // producer sets keyhash_buf iff it equals str_hash_seed — presence ==
+        // validity). Byte-identical to draken_hash_shaped; recompute otherwise.
+        if (v.keyhash_buf) {
+            g_e37_carried_hits.fetch_add(1, std::memory_order_relaxed);
+            return vecresult_to_owner(draken_hash_shaped_carried(v.vec, v.keyhash_buf.get()));
+        }
         return vecresult_to_owner(draken_hash_shaped(v.vec));
     }
     // Dense fallback for NULL / FP16 / DECIMAL128: materialise n row hashes.
@@ -6385,7 +6410,12 @@ static CxxMorsel cxx_hash(const CxxMorsel& m, const int32_t* col_idxs, uint32_t 
             if (!tmp) throw std::bad_alloc();
             OwnedBuffer<uint64_t> tmp_owned(tmp);
             for (uint32_t c = 0u; c < n_cols; ++c) {
-                draken_hash(m.columns[col_idxs[c]].view, tmp, n);
+                const CxxColumn& kc = m.columns[col_idxs[c]];
+                // E37: reuse the scan-carried seed for this key column if present.
+                if (kc.own && kc.own->keyhash_buf)
+                    draken_hash_carried_dense(kc.view, kc.own->keyhash_buf.get(), tmp, n);
+                else
+                    draken_hash(kc.view, tmp, n);
                 simd_mix_hash(buf, tmp, static_cast<size_t>(n));
             }
         }
@@ -6405,8 +6435,34 @@ static CxxMorsel cxx_hash(const CxxMorsel& m, const int32_t* col_idxs, uint32_t 
     out.names.push_back(std::string("$keyhash"));
     return out;
 }
+// --- TEMP INSTRUMENTATION (OPTERYX_HASH_TIMING) — measure key-hash share. ---
+// Gated on the env var; zero cost when unset. Accumulates wall-ns / calls / rows
+// across all cxx_hash_c callers (GROUP BY, DISTINCT, native JOIN) and dumps at
+// exit. Remove once step-1 numbers are banked.
+static std::atomic<uint64_t> g_hash_ns{0}, g_hash_calls{0}, g_hash_rows{0};
+static const bool g_hash_timing = [](){
+    if (std::getenv("OPTERYX_HASH_TIMING") == nullptr) return false;
+    std::atexit([](){
+        fprintf(stderr, "[HASH_TIMING] cxx_hash_c: %.3f ms over %llu calls, %llu rows"
+                " | E37 carried-seed hits: %llu\n",
+                g_hash_ns.load() / 1e6,
+                (unsigned long long)g_hash_calls.load(),
+                (unsigned long long)g_hash_rows.load(),
+                (unsigned long long)g_e37_carried_hits.load());
+    });
+    return true;
+}();
+
 extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, uint32_t n_cols) {
-    return new CxxMorsel(cxx_hash(*m, col_idxs, n_cols));
+    if (!g_hash_timing) return new CxxMorsel(cxx_hash(*m, col_idxs, n_cols));
+    const auto t0 = std::chrono::steady_clock::now();
+    CxxMorsel* out = new CxxMorsel(cxx_hash(*m, col_idxs, n_cols));
+    const auto t1 = std::chrono::steady_clock::now();
+    g_hash_ns.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(),
+                        std::memory_order_relaxed);
+    g_hash_calls.fetch_add(1, std::memory_order_relaxed);
+    g_hash_rows.fetch_add(m->num_rows(), std::memory_order_relaxed);
+    return out;
 }
 
 // Row-routing scatter — partition a morsel into W disjoint sub-morsels by
@@ -7502,8 +7558,7 @@ NB_MODULE(draken_native, m) {
                     str_init_inline(&scalar_slot, ubytes, ulen);
                 } else {
                     // arena_offset=0: str_data(&scalar_slot, ubytes) returns ubytes.
-                    str_init_extern(&scalar_slot, ubytes, ulen,
-                                    (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
+                    str_init_extern(&scalar_slot, ubytes, ulen, 0u);
                 }
                 // `owned` (C++ storage, not Python memory) backs ubytes across
                 // the released-GIL window and lives to the end of this scope.
@@ -7820,7 +7875,7 @@ NB_MODULE(draken_native, m) {
                         if (ul <= STR_INLINE_MAX)
                             str_init_inline(&slot, u, ul);
                         else
-                            str_init_extern(&slot, u, ul, (uint32_t)XXH3_64bits(u, ul), 0u);
+                            str_init_extern(&slot, u, ul, 0u);
                         return slot;
                     };
                     std::string lo_owned = to_owned(lo, "lo");
@@ -7974,8 +8029,7 @@ NB_MODULE(draken_native, m) {
                         if (ulen <= STR_INLINE_MAX) {
                             str_init_inline(&slot, ubytes, ulen);
                         } else {
-                            str_init_extern(&slot, ubytes, ulen,
-                                            (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
+                            str_init_extern(&slot, ubytes, ulen, 0u);
                         }
                         uint64_t seed = draken::ops::str_hash_seed(&slot, ubytes);
                         uint64_t h;

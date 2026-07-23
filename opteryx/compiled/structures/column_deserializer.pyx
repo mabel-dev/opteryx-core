@@ -66,11 +66,13 @@ cdef extern from "core/draken_bridge.h":
     int draken_vector_mark_dict_sorted(PyObject* obj)
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
-        uint8_t* validity, uint32_t length, DrakenType vec_type)
+        uint8_t* validity, uint32_t length, DrakenType vec_type,
+        const uint64_t* keyhash)
     PyObject* draken_vector_own_string_dict(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint32_t* codes, uint32_t data_length,
-        uint8_t* validity, uint32_t length, DrakenType vec_type)
+        uint8_t* validity, uint32_t length, DrakenType vec_type,
+        const uint64_t* keyhash)
     PyObject* draken_vector_own_array(
         int32_t* parent_offsets, DrakenStringSlot* child_slots,
         uint8_t* child_arena, size_t child_arena_len,
@@ -666,7 +668,7 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
             memcpy(validity_buf, null_bitmap, null_bitmap_len)
         raw = draken_vector_own_string(
             <DrakenStringSlot*>slots_buf, NULL, 0,
-            validity_buf, num_rows, want_type)
+            validity_buf, num_rows, want_type, NULL)  # E37: deserialize path = future work
         if raw == NULL:
             raise MemoryError("draken_vector_own_string failed")
         return _wrap_raw_pyobj(raw)
@@ -730,7 +732,7 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
         <DrakenStringSlot*>slots_buf,
         arena_buf, <size_t>arena_len,
         codes_buf, dict_size,
-        validity_buf, num_rows, want_type)
+        validity_buf, num_rows, want_type, NULL)  # E37: deserialize path = future work
     if raw == NULL:
         raise MemoryError("draken_vector_own_string_dict failed")
     if is_sorted:
@@ -758,7 +760,7 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     # partially-null plain column silently lost its null rows.)
     if num_rows == 0:
         # Empty column — no slots needed.
-        raw = draken_vector_own_string(NULL, NULL, 0, NULL, 0, want_type)
+        raw = draken_vector_own_string(NULL, NULL, 0, NULL, 0, want_type, NULL)
         if raw == NULL:
             raise MemoryError("draken_vector_own_string failed (empty)")
         return _wrap_raw_pyobj(raw)
@@ -825,7 +827,7 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     raw = draken_vector_own_string(
         <DrakenStringSlot*>slots_buf,
         arena_buf, <size_t>arena_pos,
-        validity_buf, num_rows, want_type)
+        validity_buf, num_rows, want_type, NULL)  # E37: deserialize path = future work
     if raw == NULL:
         raise MemoryError("draken_vector_own_string failed")
     return _wrap_raw_pyobj(raw)

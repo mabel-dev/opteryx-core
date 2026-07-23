@@ -50,6 +50,33 @@ static inline uint64_t str_hash_seed(const DrakenStringSlot* s,
 }
 
 // ---------------------------------------------------------------------------
+// draken_build_string_slot_seed — E37 producer helper: build a slot AND emit its
+// hash SEED (== str_hash_seed) in one pass, WITHOUT a second hash of the bytes.
+//
+// For long strings XXH3_64bits is computed once and used for BOTH the slot's
+// hash32 (truncated) and the returned 64-bit seed — this is the whole point: a
+// producer that already builds the slot gets the seed for free, so the GROUP BY /
+// JOIN / DISTINCT probe never re-seeds from the arena. For short strings the seed
+// is read from the just-built slot (no arena access). The emitted seed is
+// byte-identical to str_hash_seed(slot, arena) by construction — the value the
+// keying hash consumes. `bytes[0..len)` must already be in the arena at
+// `arena_offset` for long slots (same contract as draken_build_string_slot).
+// See draken/docs/design/E37_carried_key_hash.md.
+static inline void draken_build_string_slot_seed(
+    DrakenStringSlot* slot, const uint8_t* bytes, uint32_t len,
+    uint32_t arena_offset, uint64_t* out_seed)
+{
+    if (len <= STR_INLINE_MAX) {
+        str_init_inline(slot, bytes, len);
+        *out_seed = str_hash_seed(slot, nullptr);   // inline path: no arena read
+    } else {
+        const uint64_t h = XXH3_64bits(bytes, len);  // computed for the SEED, not hash32
+        str_init_extern(slot, bytes, len, arena_offset);
+        *out_seed = h;                               // long seed: the full XXH3
+    }
+}
+
+// ---------------------------------------------------------------------------
 // hash_string — dispatch-table hash kernel for DRAKEN_VARCHAR.
 //
 // Fills out[0..n) with one uint64_t per logical row.

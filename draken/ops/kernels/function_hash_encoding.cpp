@@ -246,7 +246,6 @@ VecResult hash_kernel(const DrakenVector* v, const char* who) {
             uint8_t* dst = arena + arena_pos;
             std::memcpy(dst, src, len);
             str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }

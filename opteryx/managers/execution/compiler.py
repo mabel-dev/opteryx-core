@@ -273,6 +273,34 @@ class _Compiler:
     # stream layout (column indices, bind-time literal vectors). Only all-c-native
     # programs are admitted — anything else fails loud here, before execution.
 
+    def _hash_key_identities(self):
+        """E37: the set of column IDENTITIES consumed as a GROUP BY / JOIN / DISTINCT
+        key ANYWHERE in the plan. A scan column whose identity is in this set has its
+        hash seed carried (keyhash_buf) for hash-once-use-many reuse; every other
+        string column builds no sidecar (the pay-for-use default). Computed once per
+        compile over the whole plan graph, then cached.
+
+        A TRANSFORMED key (e.g. GROUP BY UPPER(url)) keys on the UPPER *output*
+        identity, not the scan column — so the scan column is correctly NOT marked;
+        carrying the seed for computed keys is the string-kernel step (E37 step 2).
+        A bare `SELECT DISTINCT` (empty `_distinct_on`, dedup over all columns) is
+        left unmarked here — correct but unoptimized, refined later."""
+        ids = getattr(self, "_hash_key_ids_cache", None)
+        if ids is not None:
+            return ids
+        ids = set()
+        for _, node in self.plan.nodes(True):
+            for ident in (getattr(node, "group_by_columns", None) or []):
+                ids.add(ident)
+            for ident in (getattr(node, "left_columns", None) or []):
+                ids.add(ident)
+            for ident in (getattr(node, "right_columns", None) or []):
+                ids.add(ident)
+            for ident in (getattr(node, "_distinct_on", None) or []):
+                ids.add(ident)
+        self._hash_key_ids_cache = ids
+        return ids
+
     def _rewrite_between(self, expr):
         """PLAN-TIME tree rewrite: BETWEEN(operand; lower, upper) becomes
         AND(operand >= lower, operand <= upper) (bounds' inclusivity respected).
@@ -1393,6 +1421,11 @@ class _Compiler:
                 self.scan_residual_reasons[scan.identity] = (
                     "non_admissible_kind:" + (pt.name if pt is not None else "NONE"))
                 return None
+        # E37: mark which read columns are consumed as a GROUP BY/JOIN/DISTINCT key
+        # downstream — only those carry the hash seed (keyhash_buf). Parallel to
+        # read_scs; all-zero when nothing keys (SELECT */LIKE) → no sidecar built.
+        _key_ids = self._hash_key_identities()
+        hash_key_columns = [1 if sc.identity in _key_ids else 0 for sc in read_scs]
         paths = manifest.get_file_paths()
         names = [sc.name for sc in read_scs]
         file_sizes = {}
@@ -1441,6 +1474,7 @@ class _Compiler:
             string_types=string_types,
             decimal_columns=decimal_columns,
             logical_coerce=logical_coerce,
+            hash_key_columns=hash_key_columns,
             # Gap #3 Phase 2b Step 2: the query's exec pool is SHARED with this scan's
             # decode work (one CPU budget, decode tagged high-priority). The reentrant-
             # pool deadlock this originally hit (an exec worker blocking in
@@ -1873,6 +1907,12 @@ class _Compiler:
         for identity in layout:
             ct = by_identity.get(identity) or cts.get(identity)
             pt = ct.physical if ct is not None else types_map.get(identity)
+            # When a build-payload column's type is unresolvable here (e.g. an
+            # aggregate output whose result type the binder never threaded into the
+            # compiler's type maps), the value defaults to VARCHAR. The native build
+            # sink treats these plan types as a fallback ONLY: it learns each payload
+            # column's real type from the first non-empty morsel (Join2BuildSink),
+            # so a wrong default here cannot mis-materialize a non-empty build side.
             types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
             logical.append(_logical_tuple(ct))
         return types, logical

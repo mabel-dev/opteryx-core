@@ -755,7 +755,8 @@ PyObject* wrap_column(ParsedColumn& pc) {
     }
     if (pc.is_string)
         return draken_vector_own_string(pc.slots, pc.arena, pc.arena_len,
-                                        pc.validity, pc.length, pc.type);
+                                        pc.validity, pc.length, pc.type,
+                                        /*keyhash=*/nullptr);   // E37: jsonl producer = task #5
     return draken_vector_own_raw(pc.data, pc.validity, pc.length, pc.type);
 }
 

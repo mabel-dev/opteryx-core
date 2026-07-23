@@ -162,6 +162,12 @@ struct NativeParquetScanSource : Source {
     // projected DATE/TIMESTAMP/TIME/int64-DECIMAL column is retagged natively,
     // byte-identically to the trampoline scan's `_coerce_vectors`.
     const std::vector<int>* logical_coerce;
+    // E37: per-projected-column flag (parallel to column_names) — 1 iff this column
+    // is consumed as a GROUP BY / JOIN / DISTINCT key downstream, so the scan should
+    // carry its hash SEED (VectorOwner::keyhash_buf) for hash-once reuse. Default
+    // null/empty → no column keyed → NO sidecar built (the pay-for-use gate; plain
+    // SELECT / LIKE / standalone rugo build nothing). See E37 §7.2.
+    const std::vector<uint8_t>* hash_key_columns;
 
     NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
                             const std::unordered_map<std::string, FileStats>* footer_map_,
@@ -172,11 +178,19 @@ struct NativeParquetScanSource : Source {
                             const std::vector<uint8_t>* decimal_columns_ = nullptr,
                             const std::vector<uint8_t>* varchar_columns_ = nullptr,
                             const std::vector<int>* string_types_ = nullptr,
-                            const std::vector<int>* logical_coerce_ = nullptr)
+                            const std::vector<int>* logical_coerce_ = nullptr,
+                            const std::vector<uint8_t>* hash_key_columns_ = nullptr)
         : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
           column_names(column_names_), in_flight_limit(in_flight_limit_),
           pool(pool_), decimal_columns(decimal_columns_), varchar_columns(varchar_columns_),
-          string_types(string_types_), logical_coerce(logical_coerce_) {}
+          string_types(string_types_), logical_coerce(logical_coerce_),
+          hash_key_columns(hash_key_columns_) {}
+
+    // E37: does projected column i want its hash seed carried? Default false.
+    bool wants_keyhash(size_t i) const {
+        return hash_key_columns != nullptr && i < hash_key_columns->size()
+            && (*hash_key_columns)[i] != 0;
+    }
 
     // Packed coercion plan for projected column i (0 = none).
     int coerce_for(size_t i) const {
@@ -412,11 +426,18 @@ struct NativeParquetScanSource : Source {
             void* arena = nullptr;
             void* codes = nullptr;
             rugo::morsel_take_string(result, i, &arena, &codes);
+            // E37: take the carried seed ONLY if this column is a downstream key
+            // (else leave it for ~MorselRef to free — no sidecar on non-key columns).
+            uint64_t* kh = nullptr;
+            if (wants_keyhash(i)) {
+                kh = static_cast<uint64_t*>(result.columns[i].keyhash);
+                result.columns[i].keyhash = nullptr;
+            }
             emit_dict_string_column(static_cast<DrakenStringSlot*>(slots), data_length,
                                     static_cast<uint8_t*>(arena), arena_len,
                                     static_cast<uint32_t*>(codes), length,
                                     validity, string_type_for(i), out,
-                                    result.columns[i].dict_sorted);
+                                    result.columns[i].dict_sorted, kh);
             return true;
         }
         if (dk == rugo::DK_VARCHAR) {
@@ -430,9 +451,16 @@ struct NativeParquetScanSource : Source {
             void* arena = nullptr;
             void* codes = nullptr;
             rugo::morsel_take_string(result, i, &arena, &codes);  // codes null for plain
+            // E37: take the carried seed ONLY if this column is a downstream key
+            // (else leave it for ~MorselRef to free — no sidecar on non-key columns).
+            uint64_t* kh = nullptr;
+            if (wants_keyhash(i)) {
+                kh = static_cast<uint64_t*>(result.columns[i].keyhash);
+                result.columns[i].keyhash = nullptr;
+            }
             emit_dense_string_column(static_cast<DrakenStringSlot*>(slots), length,
                                      static_cast<uint8_t*>(arena), arena_len,
-                                     validity, string_type_for(i), out);
+                                     validity, string_type_for(i), out, kh);
             return true;
         }
         // WP-11: a projected int64 (or widened-int32) column the plan flags as

@@ -99,7 +99,6 @@ VecResult trim_kernel(const DrakenVector* v, bool trim_left, bool trim_right, co
             uint8_t* dst = arena + arena_pos;
             std::memcpy(dst, sub, len);
             str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }

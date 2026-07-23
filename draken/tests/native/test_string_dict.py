@@ -430,7 +430,9 @@ class TestD2OnDictShape:
 
 
 # ---------------------------------------------------------------------------
-# 6. hash32 field: dict ingest reuses the XXH3 content hash (D.1 invariant)
+# 6. Slot-field parity: dense (D.1) and dict (D.3) ingest of the same value
+#    produce byte-identical slots. (E37: the hash32 field is now dead — always 0
+#    — so this checks length+prefix parity; the equal-0 hash32 still satisfies it.)
 # ---------------------------------------------------------------------------
 
 

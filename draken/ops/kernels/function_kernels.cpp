@@ -109,7 +109,6 @@ VecResult ascii_case_transform(const DrakenVector* v, bool to_upper, const char*
                     : ((c >= 'A' && c <= 'Z') ? c + 32 : c);
             }
             str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }
@@ -948,7 +947,6 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
                 uint8_t* dst = arena + arena_pos;
                 std::memcpy(dst, bytes, len);
                 str_init_extern(&slots[i], dst, len,
-                                static_cast<uint32_t>(XXH3_64bits(dst, len)),
                                 static_cast<uint32_t>(arena_pos));
                 arena_pos += len;
             }
@@ -1948,7 +1946,6 @@ VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t 
             uint8_t* dst = arena + arena_pos;
             std::memcpy(dst, sub, len);
             str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += len;
         }
@@ -2084,7 +2081,6 @@ VecResult fk_substring_dynamic_impl(FkSubstrDynMode mode, const DrakenVector* co
                 uint8_t* dst = arena + arena_pos;
                 std::memcpy(dst, src, len);
                 str_init_extern(&slots[i], dst, len,
-                                static_cast<uint32_t>(XXH3_64bits(dst, len)),
                                 static_cast<uint32_t>(arena_pos));
                 arena_pos += len;
             }

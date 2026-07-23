@@ -181,7 +181,8 @@ PyObject* draken_vector_own_string(
     size_t            arena_len,
     uint8_t*          validity,
     uint32_t          length,
-    DrakenType        type);   // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
+    DrakenType        type,             // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
+    const uint64_t*   keyhash = nullptr);  // E37: per-row hash seed (length entries) or NULL; COPIED (not owned)
 
 // draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
 //
@@ -217,7 +218,8 @@ PyObject* draken_vector_own_string_dict(
     uint32_t          data_length,
     uint8_t*          validity,
     uint32_t          length,
-    DrakenType        type);   // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
+    DrakenType        type,             // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
+    const uint64_t*   keyhash = nullptr);  // E37: per-DISTINCT hash seed (data_length entries) or NULL; COPIED
 
 // draken_vector_own_array — wrap hand-allocated buffers in a new DRAKEN_ARRAY[string] Vector.
 //

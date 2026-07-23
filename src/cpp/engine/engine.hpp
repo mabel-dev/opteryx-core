@@ -209,7 +209,7 @@ struct DeferredJoinProbeOperator : Operator {
         // pipeline finalized (Engine::run order), so ref->g is set.
         std::call_once(once, [this] {
             inner = std::make_unique<JoinProbeOperator>(
-                probe_key_idx, &ref->g->key_to_rows, &ref->g->payload,
+                probe_key_idx, &ref->g->index, &ref->g->payload,
                 probe_payload_idx);
         });
         return inner->make_state();
@@ -435,7 +435,8 @@ public:
                                 MemoryPool* pool = nullptr,
                                 const std::vector<int>* string_types = nullptr,
                                 const std::vector<uint8_t>* decimal_columns = nullptr,
-                                const std::vector<int>* logical_coerce = nullptr) {
+                                const std::vector<int>* logical_coerce = nullptr,
+                                const std::vector<uint8_t>* hash_key_columns = nullptr) {
         // docs/EXECUTION_TRACING_DESIGN.md: tag the rugo pipeline's trace spans
         // (TC_QUEUE_WAIT/TC_IO_REQUEST/TC_DECODE — currently node_id=0/untagged,
         // see io_pipeline.hpp's set_trace_node_id) with the SAME node_id this
@@ -446,7 +447,8 @@ public:
         // here rather than threaded through the Cython/Python construction path.
         uint32_t node_id = set_source_(p, std::make_unique<NativeParquetScanSource>(
             pipeline, footer_map, work_items, column_names, in_flight_limit,
-            pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce));
+            pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce,
+            hash_key_columns));
         if (pipeline != nullptr) pipeline->set_trace_node_id(node_id);
     }
     void set_buffer_source(size_t p, size_t buf) {

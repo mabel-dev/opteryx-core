@@ -203,7 +203,9 @@ static inline int sg_eq_slots(const DrakenStringSlot* a,
                               const uint8_t* arena_b) noexcept {
     if (a->raw.lo != b->raw.lo) return 0;
     if (str_is_inline(a)) return a->raw.hi == b->raw.hi;
-    if (a->ext.hash32 != b->ext.hash32) return 0;
+    // E37: hash32 fast-reject removed — this dedup only calls sg_eq_slots on
+    // candidates already sharing the same 64-bit str_hash_seed, so hash32 (its low
+    // 32 bits) always matches. length+first4 match then authoritative byte compare.
     return std::memcmp(arena_a + a->ext.arena_offset,
                        arena_b + b->ext.arena_offset,
                        a->ext.length) == 0;

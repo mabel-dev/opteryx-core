@@ -345,7 +345,6 @@ VecResult nc_blend_string(const DrakenVector* const* srcs, uint32_t nargs, uint3
             uint8_t* dst = arena + arena_pos;
             std::memcpy(dst, sv.data, sv.len);
             str_init_extern(&slots[row], dst, sv.len,
-                            static_cast<uint32_t>(XXH3_64bits(dst, sv.len)),
                             static_cast<uint32_t>(arena_pos));
             arena_pos += sv.len;
         }
