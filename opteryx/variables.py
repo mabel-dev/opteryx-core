@@ -150,6 +150,8 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # rather than faster). See HttpTuning in src/cpp/http_client.hpp.
     "disable_http_multiplexing": (
         BOOLEAN, config.DISABLE_HTTP_MULTIPLEXING, VariableOwner.USER, Visibility.RESTRICTED),
+    "http_pipewait": (
+        BOOLEAN, config.HTTP_PIPEWAIT, VariableOwner.USER, Visibility.RESTRICTED),
     "disable_http2": (
         BOOLEAN, config.DISABLE_HTTP2, VariableOwner.USER, Visibility.RESTRICTED),
     # Splits submission depth from thread count — `parquet_gcs_io_workers` alone

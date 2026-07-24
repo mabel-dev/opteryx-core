@@ -74,7 +74,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # on the (thread_local, process-lifetime) HttpClient itself.
         void set_http_tuning(long max_host_connections, int max_retries,
                               double min_bandwidth_bytes_per_s, long timeout_floor_ms,
-                              bint use_multiplexing, bint force_http11)
+                              bint use_multiplexing, bint use_pipewait, bint force_http11)
         void submit_row_group(
             const string& path, int rg_idx,
             const vector[string]& column_names,

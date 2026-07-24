@@ -70,6 +70,17 @@ bool http_use_multiplexing_env() {
     }();
     return v;
 }
+// CURLOPT_PIPEWAIT — SEPARATE from multiplexing above, and OFF by default so the
+// default path is byte-for-byte the historical behaviour (libcurl's own
+// CURLPIPE_MULTIPLEX default, no pipewait). Opt-in only: see HttpTuning for why
+// this is not free given get_many() builds a fresh CURLM per batch.
+bool http_use_pipewait_env() {
+    static bool v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_PIPEWAIT");
+        return e && (*e == '1' || *e == 't' || *e == 'T' || *e == 'y' || *e == 'Y');
+    }();
+    return v;
+}
 // Diagnostic only — pin to HTTP/1.1 to measure what h2 is contributing.
 bool http_force_http11_env() {
     static bool v = []() {
@@ -196,6 +207,7 @@ HttpTuning HttpClient::default_tuning() {
         c.min_bandwidth_bytes_per_s = http_min_bw_bytes_per_s_env();
         c.timeout_floor_ms          = http_timeout_floor_ms_env();
         c.use_multiplexing          = http_use_multiplexing_env();
+        c.use_pipewait              = http_use_pipewait_env();
         c.force_http11              = http_force_http11_env();
         return c;
     }();
@@ -558,7 +570,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
             // added below in this same loop, before any transfer has run, so
             // without this every one of them dials its own TCP+TLS connection.
             // See HttpTuning::use_multiplexing for measurements.
-            if (tuning.use_multiplexing)
+            if (tuning.use_pipewait)
                 curl_easy_setopt(easy, CURLOPT_PIPEWAIT,    1L);
             if (tuning.force_http11)
                 curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,

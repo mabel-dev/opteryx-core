@@ -68,6 +68,7 @@ cdef tuple _resolve_http_tuning(variables):
         _min_bw_mbps * 1.0e6 / 8.0,
         _resolve_var("http_request_timeout_floor_ms", variables, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS),
         not _resolve_var("disable_http_multiplexing", variables, config.DISABLE_HTTP_MULTIPLEXING),
+        _resolve_var("http_pipewait", variables, config.HTTP_PIPEWAIT),
         _resolve_var("disable_http2", variables, config.DISABLE_HTTP2),
     )
 

@@ -208,6 +208,17 @@ with throughput flat across range counts where a wide cap degraded. See
 HttpTuning::use_multiplexing in src/cpp/http_client.hpp for the full numbers.
 Set True only to A/B against the old behaviour."""
 
+HTTP_PIPEWAIT: bool = get_bool("OPTERYX_HTTP_PIPEWAIT", False)
+"""Enable CURLOPT_PIPEWAIT on get_many() handles.
+
+Default False = historical behaviour. INDEPENDENT of DISABLE_HTTP_MULTIPLEXING:
+libcurl already defaults CURLMOPT_PIPELINING to multiplex, so multiplexing was
+always on; PIPEWAIT additionally makes each batch WAIT for the first connection
+to negotiate h2 before the rest proceed. Because get_many() creates a fresh CURLM
+per batch with no CURLOPT_SHARE, connections are never reused across batches, so
+PIPEWAIT pays a serialised handshake on every row-group fetch instead of letting
+handshakes overlap. Opt-in until measured to be a net win."""
+
 DISABLE_HTTP2: bool = get_bool("OPTERYX_HTTP_DISABLE_HTTP2", False)
 
 PARQUET_IO_IN_FLIGHT_HEADROOM: int = int(get("PARQUET_IO_IN_FLIGHT_HEADROOM", 2))

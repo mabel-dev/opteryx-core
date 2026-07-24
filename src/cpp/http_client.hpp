@@ -65,14 +65,41 @@ struct HttpTuning {
     // in a way that simply forcing max_host_connections=1 is NOT — that would
     // serialise catastrophically there.
     //
-    // Measured on production GCS (2026-07-24, clickbench hits, 396 row groups,
-    // workers=16) by proxy, forcing one connection via max_host_connections=1:
+    // EVIDENCE, and what it does NOT show. Measured on production GCS
+    // (2026-07-24, clickbench hits, 396 row groups, workers=16) by PROXY —
+    // forcing a single connection via max_host_connections=1, NOT by testing
+    // PIPEWAIT itself:
     //   1 column  → no effect (nothing to multiplex)
     //   8 columns → 9.0% faster than the cap=3 default
     //   20 columns→ 11.5% faster; throughput FLAT across range counts (63.5 →
     //               63.1 MB/s) where cap=16 DEGRADED (53.8 → 52.1 MB/s)
-    // i.e. the cost tracks REQUEST COUNT, not bytes.
-    bool   use_multiplexing           = true;             // CURLOPT_PIPEWAIT
+    // i.e. the cost tracked REQUEST COUNT, not bytes. Ordering confound was
+    // controlled (ascending and reversed both reproduced within 0.25s).
+    //
+    // CAVEATS, both found AFTER the above:
+    //  1. REGIME-DEPENDENT. Re-measured ~1.5h later with the link topping out
+    //     near 51 MB/s instead of 63, the cap effect VANISHED entirely
+    //     (cap=1 30.28s vs cap=16 30.06s). Connection count appears to matter
+    //     only while there is bandwidth headroom.
+    //  2. PIPEWAIT IS NOT A FREE WAY TO GET THAT WIN. Capping connections costs
+    //     nothing extra; PIPEWAIT costs a serialised handshake per batch (see
+    //     use_pipewait below). The proxy measurement says nothing about whether
+    //     PIPEWAIT nets out positive — that is still unmeasured.
+    // NOTE these are two INDEPENDENT settings and conflating them (as an earlier
+    // revision did) leaves the pre-existing behaviour unreachable, so there is no
+    // control to measure against:
+    //   use_multiplexing = CURLMOPT_PIPELINING. libcurl >= 7.62 already defaults
+    //     this to CURLPIPE_MULTIPLEX, so `true` here == the historical default.
+    //   use_pipewait     = CURLOPT_PIPEWAIT. NOT the historical default, and not
+    //     free: get_many() builds a FRESH CURLM per batch with no CURLOPT_SHARE
+    //     (see the comment at the curl_multi_init call), so connections are never
+    //     reused ACROSS batches. PIPEWAIT therefore serialises
+    //     [TCP + TLS + h2 negotiate] ahead of the batch's transfers on EVERY
+    //     row-group fetch, where without it the handshakes overlap. Whether the
+    //     multiplexing win exceeds that per-batch latency is exactly what has to
+    //     be measured — hence default false, opt-in.
+    bool   use_multiplexing           = true;             // CURLMOPT_PIPELINING
+    bool   use_pipewait               = false;            // CURLOPT_PIPEWAIT
     // Diagnostic escape hatch: pin to HTTP/1.1. Only reason to set this is to
     // MEASURE h2's contribution (with multiplexing unavailable, a low
     // max_host_connections should become catastrophic rather than faster).

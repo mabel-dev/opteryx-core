@@ -314,11 +314,11 @@ cdef class CppIOPipeline:
         # in effect, unchanged from before this existed.
         if http_tuning is not None:
             (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
-             _timeout_floor_ms, _use_multiplexing, _force_http11) = http_tuning
+             _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11) = http_tuning
             self.pipeline.set_http_tuning(
                 <long>_max_host_connections, <int>_max_retries,
                 <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
-                <bint>_use_multiplexing, <bint>_force_http11,
+                <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
             )
 
     def __dealloc__(self):
