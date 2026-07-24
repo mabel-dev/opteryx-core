@@ -50,13 +50,14 @@ def _simple_collector(schema):
         names.append(column.name)
         types.append(type_label)
         nullables.append(column.nullable)
-        aliases.append(column.aliases)
+        # aliases is a LIST per column — an ARRAY column, not a VARCHAR one.
+        aliases.append(list(column.aliases or []))
 
     vectors = [
         vector_from_sequence(names, dtype=_draken_native.DrakenType.VARCHAR),
         vector_from_sequence(types, dtype=_draken_native.DrakenType.VARCHAR),
         vector_from_sequence(nullables, dtype=_draken_native.DrakenType.BOOL),
-        vector_from_sequence(aliases, dtype=_draken_native.DrakenType.VARCHAR),
+        vector_from_sequence(aliases, dtype=_draken_native.DrakenType.ARRAY),
     ]
 
     return Morsel.from_vectors(["name", "type", "nullable", "aliases"], vectors)
@@ -68,9 +69,6 @@ class ShowColumnsNode(BasePlanNode):
         self._full = parameters.get("full")
         self._extended = parameters.get("extended")
         self._schema = parameters.get("schema")
-        self._column_map = {
-            c.schema_column.identity: c.source_column for c in parameters["columns"]
-        }
         self.collector = None
         self.seen = False
 
@@ -81,10 +79,6 @@ class ShowColumnsNode(BasePlanNode):
     @property
     def config(self):  # pragma: no cover
         return ""
-
-    def rename_column(self, dic: dict, renames) -> dict:
-        dic["name"] = renames[dic["name"]]
-        return dic
 
     def execute(self, morsel):
         if self.seen:

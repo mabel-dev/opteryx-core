@@ -197,15 +197,34 @@ class TraceTimelines:
             nid = s["node_id"]
             if nid not in agg:
                 agg[nid] = {
-                    "role": role,
+                    "role": None,
                     "total_duration_ns": 0,
                     "total_rows_in": 0,
                     "total_rows_out": 0,
+                    "io_wait_ns": 0,
                     "call_count": 0,
                     "producing_calls": 0,
                 }
                 order.append(nid)
+            # Spans are recorded at trace_end, so a NESTED io_wait lands before
+            # the source pull enclosing it — taking the role from whichever span
+            # arrived first would label the scan "[io_wait]". Only a real
+            # pipeline stage names the node.
+            if role != "io_wait" and agg[nid]["role"] is None:
+                agg[nid]["role"] = role
             a = agg[nid]
+            # io_wait is a sub-span NESTED inside this same node's TC_SOURCE_PULL
+            # (see _EXEC_CATEGORIES), not a sibling stage — `agg` is keyed on
+            # node_id alone, so folding it into total_duration_ns/call_count the
+            # way a real role is folded would report a scan as having run for
+            # source_pull + the wait already contained within it. Recorded on its
+            # own axis instead: total_duration_ns stays the node's true wall
+            # time, and io_wait_ns says how much of that was spent blocked, so
+            # "this operator looks busy but was 89% waiting on the network" is
+            # answerable from one row without joining anything.
+            if role == "io_wait":
+                a["io_wait_ns"] += s["t_end_ns"] - s["t_start_ns"]
+                continue
             a["total_duration_ns"] += s["t_end_ns"] - s["t_start_ns"]
             a["total_rows_out"] += s["rows"]
             a["call_count"] += 1
@@ -219,10 +238,14 @@ class TraceTimelines:
             result.append(
                 {
                     "operator_id": str(nid),
-                    "operator_name": f"{name} [{a['role']}]",
+                    # io_wait only ever nests inside a source pull, so a node
+                    # carrying nothing but io_wait spans is a source whose
+                    # enclosing span was lost to arena truncation.
+                    "operator_name": f"{name} [{a['role'] or 'source'}]",
                     "total_duration_ns": a["total_duration_ns"],
                     "total_rows_in": a["total_rows_in"],
                     "total_rows_out": a["total_rows_out"],
+                    "io_wait_ns": a["io_wait_ns"],
                     "call_count": a["call_count"],
                     "producing_calls": a["producing_calls"],
                     "selectivity": None,

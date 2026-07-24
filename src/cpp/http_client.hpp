@@ -52,6 +52,32 @@ struct HttpTuning {
     int    max_retries                = 2;               // transient-failure retry budget
     double min_bandwidth_bytes_per_s  = 20.0e6 / 8.0;     // assumed floor stream bandwidth
     long   timeout_floor_ms           = 10000;            // minimum per-request timeout
+
+    // ── HTTP/2 multiplexing ────────────────────────────────────────────────
+    // get_many() adds every range's easy handle to one CURLM at once. WITHOUT
+    // CURLOPT_PIPEWAIT, libcurl opens a SEPARATE connection per handle rather
+    // than waiting to learn the first connection can multiplex — so an N-column
+    // row-group fetch dials up to min(max_host_connections, N) TCP+TLS
+    // connections against a server (GCS) that speaks HTTP/2 and would carry all
+    // N on one. PIPEWAIT is adaptive: if the server turns out NOT to negotiate
+    // h2, libcurl falls back to opening additional connections, so this is safe
+    // against HTTP/1.1 endpoints (MinIO / S3-compatible / dev/throttle_server.py)
+    // in a way that simply forcing max_host_connections=1 is NOT — that would
+    // serialise catastrophically there.
+    //
+    // Measured on production GCS (2026-07-24, clickbench hits, 396 row groups,
+    // workers=16) by proxy, forcing one connection via max_host_connections=1:
+    //   1 column  → no effect (nothing to multiplex)
+    //   8 columns → 9.0% faster than the cap=3 default
+    //   20 columns→ 11.5% faster; throughput FLAT across range counts (63.5 →
+    //               63.1 MB/s) where cap=16 DEGRADED (53.8 → 52.1 MB/s)
+    // i.e. the cost tracks REQUEST COUNT, not bytes.
+    bool   use_multiplexing           = true;             // CURLOPT_PIPEWAIT
+    // Diagnostic escape hatch: pin to HTTP/1.1. Only reason to set this is to
+    // MEASURE h2's contribution (with multiplexing unavailable, a low
+    // max_host_connections should become catastrophic rather than faster).
+    // Not a performance knob — leaving it true costs the multiplexing above.
+    bool   force_http11               = false;            // CURLOPT_HTTP_VERSION
 };
 
 class HttpClient {

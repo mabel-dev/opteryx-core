@@ -1560,12 +1560,11 @@ cdef inline int _dv_binop_kernel_c(
     if (vr.type == DRAKEN_DECIMAL or vr.type == DRAKEN_DECIMAL128
             or vr.type == DRAKEN_TIMESTAMP64):
         return 5
-    draken_frame_arena_adopt(arena, vr.data)
-    if vr.validity != NULL:
-        draken_frame_arena_adopt(arena, vr.validity)
-    dv_store[slot_idx] = draken_vector_from_dense(vr.data, vr.length, vr.type, vr.validity)
-    dv_stack[slot_idx] = &dv_store[slot_idx]
-    return 0
+    # Adopt at the result's OWN shape. A shape-preserving kernel (result_helpers.h's
+    # kernel_preserve_shape) returns data holding only data_length physical values
+    # with the input's selection carried through; re-declaring that dense at
+    # vr.length reads data[i] past a K-element buffer — wrong rows, then SIGBUS.
+    return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
 
 
 cdef inline int _dv_cast_kernel_c(
@@ -1588,12 +1587,11 @@ cdef inline int _dv_cast_kernel_c(
     if (vr.type == DRAKEN_VARCHAR or vr.type == DRAKEN_NVARCHAR
             or vr.type == DRAKEN_VARBINARY):
         return 5
-    draken_frame_arena_adopt(arena, vr.data)
-    if vr.validity != NULL:
-        draken_frame_arena_adopt(arena, vr.validity)
-    dv_store[slot_idx] = draken_vector_from_dense(vr.data, vr.length, vr.type, vr.validity)
-    dv_stack[slot_idx] = &dv_store[slot_idx]
-    return 0
+    # Adopt at the result's OWN shape — see the note in _dv_binop_kernel_c. Every
+    # cast kernel in cast_numeric.cpp / cast_temporal.cpp is compression-aware
+    # (casts data_length values, carries the input's selection), so forcing dense
+    # here mis-indexed every dict- or constant-shaped input.
+    return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
 
 
 cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena):

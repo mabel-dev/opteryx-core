@@ -1197,7 +1197,9 @@ class _Compiler:
         is the one that runs; there is no runtime fallback (an unsupported column
         kind reaching the native Source is a gate bug and fails the query loud).
 
-        Scope: local files; columns that are numeric (schema INT64/FLOAT32/FLOAT64 —
+        Scope: local files, plus remote files the connector's filesystem can rewrite
+        to a signed fetch URL (an unsignable remote path stays on the trampoline —
+        the C++ fetches carry no auth header); columns that are numeric (schema INT64/FLOAT32/FLOAT64 —
         parquet int32 widens to INT64 on decode) or string (VARCHAR/NVARCHAR/
         VARBINARY, decoded natively via the DK_VARCHAR / DK_VARCHAR_DICT /
         DK_POOL-string paths — WP-01); no scan-pushed LIMIT (R2, still open); and
@@ -1235,6 +1237,8 @@ class _Compiler:
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+        from opteryx.operators._operators import resolve_scan_filesystem
+        from opteryx.operators._operators import scan_footer_bytes_cache
         from opteryx.expression import get_all_nodes_of_type
         from opteryx.operators._operators import bytecode_is_all_c_native
         from opteryx.variables import resolve as _resolve_var
@@ -1436,12 +1440,19 @@ class _Compiler:
                 size = getattr(entry, "file_size_in_bytes", None)
                 if isinstance(size, int) and size > 0:
                     file_sizes.setdefault(entry.file_path, size)
-        if not native_scan_supported(paths, names, kinds, file_sizes or None):
-            # R7b: the footer gate (native_scan_supported) rejected the scan — a REMOTE
-            # (gs://, s3://, http(s)://) path, which this path does not support at all and
-            # rejects before any footer fetch; schema evolution; or a row group whose types
-            # are not all eligible. The remote case is by far the most common in a cloud
-            # deployment, so do not read this reason as implying a schema/type problem.
+        # Resolved once and shared by the gate and the plan below: the filesystem
+        # supplies the signed-URL rewrite that makes a remote (gs://) scan eligible,
+        # and the connector type picks the IO worker budget. Same helper the
+        # trampoline's `_ensure_scan_started` uses, so the two paths cannot disagree
+        # about which filesystem a scan has.
+        filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
+        if not native_scan_supported(paths, names, kinds, file_sizes or None,
+                                     filesystem=filesystem,
+                                     footer_bytes_cache=scan_footer_bytes_cache()):
+            # R7b: the footer gate (native_scan_supported) rejected the scan — schema
+            # evolution, a row group whose types are not all eligible, or a remote path
+            # the filesystem could not sign (an unsigned remote fetch has no auth header
+            # and would 401 at execution time). Signable remote paths ARE admitted.
             self.scan_residual_reasons[scan.identity] = "footer_gate"
             return None
         if predicate_input_names:
@@ -1464,12 +1475,14 @@ class _Compiler:
         splan = open_native_scan_plan(
             paths,
             names,
-            # Always the LOCAL worker budget: `native_scan_supported` above has already
-            # proven every path is local (`_is_local_path`, its first per-path check), so
-            # a remote connector can never reach here. This used to branch to a GCS budget
-            # on the connector type — unreachable, and it advertised a remote capability
-            # this path structurally does not have.
+            # Remote scans are admitted now that the gate accepts signable paths, so the
+            # worker budget branches on the connector type exactly as the trampoline path
+            # does — a GCS scan is latency-bound and wants the wider budget.
             decode_workers=_resolve_var(
+                "parquet_gcs_io_workers",
+                getattr(scan.properties, "variables", None),
+                config.PARQUET_GCS_IO_WORKERS,
+            ) if connector_type in ("GCS", "GS") else _resolve_var(
                 "parquet_local_io_workers",
                 getattr(scan.properties, "variables", None),
                 config.PARQUET_LOCAL_IO_WORKERS,
@@ -1498,6 +1511,10 @@ class _Compiler:
             # entangled with pre-existing uncommitted work, pending a git-diff carve.
             # See docs/DUCKDB_GAP3_DECODE_BUDGET_PLAN.md.
             pool=None,
+            # Signs gs:// paths into the fetch URLs the C++ pipeline resolves. The
+            # gate above already proved every path is local or signable.
+            filesystem=filesystem,
+            footer_bytes_cache=scan_footer_bytes_cache(),
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
 

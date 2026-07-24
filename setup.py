@@ -239,6 +239,25 @@ with open("README.md", "r", encoding="UTF8") as f:
     long_description = f.read()
 
 
+# Resolve libcurl - REQUIRED for http_client extension
+# Skip for sdist (source distribution packaging) and clean - no compilation needed
+# Skip when DRAKEN_BUILD=1 — draken-only builds don't need libcurl.
+#
+# Resolved BEFORE the extensions list (it used to sit after it) because extensions
+# INSIDE the list now need the curl flags too — opteryx.operators._operators builds
+# the HTTP-enabled copy of io_pipeline.hpp. Everything below is unchanged; only the
+# position moved.
+_DRAKEN_BUILD = bool(os.environ.get("DRAKEN_BUILD"))
+_build_commands = {"build", "build_ext", "install", "bdist_wheel", "bdist", "develop"}
+_skip_build = not any(
+    arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-")
+)
+_curl_include_dirs: list[str] = []
+_curl_link_args: list[str] = []
+if not _skip_build and not _DRAKEN_BUILD:
+    _curl_include_dirs, _curl_link_args = resolve_libcurl()
+
+
 # Define all extensions
 extensions = [
     *draken_rugo_extensions(
@@ -665,14 +684,37 @@ extensions = [
             # compiled copies per se).
             "src/cpp/ipc_deserialize.cpp",
             "src/cpp/memory_pool.cpp",
+            # NativeParquetScanSource submits work to a ParquetIOPipeline that
+            # pool_reader.so constructed. io_pipeline.hpp is header-only, so this
+            # extension gets its OWN inline copy of submit_row_group/decode_row_group
+            # — and RUGO_ENABLE_HTTP must therefore MATCH pool_reader's, for two
+            # independent reasons (see define_macros below).
+            "src/cpp/http_client.cpp",
         ],
         include_dirs=include_dirs
         + [
             "opteryx/operators/aggregate",
-        ],
+        ]
+        + _curl_include_dirs,
+        # RUGO_ENABLE_HTTP must match opteryx.connectors.parquet_io.pool_reader.
+        # This is the "differing feature macro" ABI hazard already called out in the
+        # sources comment above, and it bit for real:
+        #
+        #   1. io_pipeline.hpp declares DATA MEMBERS (http_tuning_, http_tuning_set_)
+        #      inside `#ifdef RUGO_ENABLE_HTTP`, so a mismatch changes the offset of
+        #      every member declared after them — one class, two layouts.
+        #   2. Without it, this .so's copy of decode_row_group() compiles the remote
+        #      branch out and calls reject_remote_path() instead, which throws from
+        #      OUTSIDE the try block — the work item dies, no result is ever queued,
+        #      and the Source reports "pipeline drained with result(s) missing".
+        #
+        # A remote scan reaching NativeParquetScanSource hit (2) and silently returned
+        # ZERO ROWS. Keep these two extensions' macro sets in lockstep.
+        define_macros=[("RUGO_ENABLE_HTTP", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA
+        + _curl_link_args
         + (["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]),
         depends=[
             "third_party/mabel/parvi/parvi.hpp",
@@ -742,19 +784,7 @@ extensions = [
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
 ]
 
-# Resolve libcurl - REQUIRED for http_client extension
-# Skip for sdist (source distribution packaging) and clean - no compilation needed
-# Skip when DRAKEN_BUILD=1 — draken-only builds don't need libcurl.
-_DRAKEN_BUILD = bool(os.environ.get("DRAKEN_BUILD"))
-_build_commands = {"build", "build_ext", "install", "bdist_wheel", "bdist", "develop"}
-_skip_build = not any(
-    arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-")
-)
-_curl_include_dirs: list[str] = []
-_curl_link_args: list[str] = []
 if not _skip_build and not _DRAKEN_BUILD:
-    _curl_include_dirs, _curl_link_args = resolve_libcurl()
-
     # HTTP client extension - MANDATORY (only add if not cleaning)
     extensions.append(
         Extension(

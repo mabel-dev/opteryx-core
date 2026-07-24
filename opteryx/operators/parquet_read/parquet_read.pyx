@@ -52,10 +52,14 @@ from opteryx.types.logical_type import LogicalCategory
 from opteryx.variables import resolve as _resolve_var
 
 cdef tuple _resolve_http_tuning(variables):
-    """Resolve the four SET-able http_* variables (default -> env -> SET, via
-    `resolve()`) into the 4-tuple CppIOPipeline.__cinit__ expects. Bandwidth is
+    """Resolve the SET-able http_* variables (default -> env -> SET, via
+    `resolve()`) into the 6-tuple CppIOPipeline.__cinit__ expects. Bandwidth is
     stored/SET in Mbps (the human-facing unit) and converted to bytes/s here,
-    matching HttpTuning's C++ field."""
+    matching HttpTuning's C++ field.
+
+    The two multiplexing flags are stored as `disable_*` (the state a caller
+    normally does NOT want, per variables.py's naming convention) and inverted
+    here into the positive sense HttpTuning uses."""
     cdef double _min_bw_mbps = _resolve_var(
         "http_min_bandwidth_mbps", variables, config.HTTP_MIN_BANDWIDTH_MBPS)
     return (
@@ -63,7 +67,17 @@ cdef tuple _resolve_http_tuning(variables):
         _resolve_var("http_max_retries", variables, config.HTTP_MAX_RETRIES),
         _min_bw_mbps * 1.0e6 / 8.0,
         _resolve_var("http_request_timeout_floor_ms", variables, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS),
+        not _resolve_var("disable_http_multiplexing", variables, config.DISABLE_HTTP_MULTIPLEXING),
+        _resolve_var("disable_http2", variables, config.DISABLE_HTTP2),
     )
+
+
+cdef int _resolve_in_flight_headroom(variables):
+    """Row groups submitted beyond the worker count (`in_flight_limit =
+    workers + headroom`). Separated from the worker count so submission depth
+    and download concurrency can be swept independently."""
+    return <int>_resolve_var(
+        "parquet_io_in_flight_headroom", variables, config.PARQUET_IO_IN_FLIGHT_HEADROOM)
 
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
@@ -164,6 +178,34 @@ cdef extern from "<mutex>" namespace "std" nogil:
 from opteryx import config
 
 _FOOTER_CACHE = ParquetFooterBytesCache()
+
+
+def scan_footer_bytes_cache():
+    """The process-wide footer-envelope byte cache this node reads through. Exposed
+    so the plan-time native-scan path shares ONE cache with the trampoline path
+    rather than warming a second copy of the same envelopes."""
+    return _FOOTER_CACHE
+
+
+def resolve_scan_filesystem(connector, blob_paths):
+    """Resolve (filesystem, connector_type) for a parquet scan's blobs.
+
+    Shared by the execution-time trampoline setup (`_ensure_scan_started`) and the
+    plan-time native-scan gate (the compiler), which must agree on BOTH values: the
+    filesystem supplies the signed-URL rewrite that decides whether a remote scan is
+    even eligible for the native Source, and the connector type picks the IO worker
+    budget. Two copies of this would drift into the two paths disagreeing about
+    whether a given scan can go native."""
+    filesystem = getattr(connector, "filesystem", None)
+    if filesystem is not None:
+        return filesystem, (
+            getattr(connector, "storage_type", None) or connector.__type__
+        )
+    from opteryx.connectors.io_systems import create_filesystem
+
+    first_path = blob_paths[0] if blob_paths else ""
+    protocol = first_path.split("://")[0] if "://" in first_path else ""
+    return create_filesystem(protocol), (protocol.upper() if protocol else "FILESYSTEM")
 
 
 cdef class ScanReadings:
@@ -1248,18 +1290,7 @@ cdef class ParquetReadNode(ReaderNode):
                     file_sizes.setdefault(file_entry.file_path, size)
         self._sp_file_sizes = file_sizes
 
-        filesystem = getattr(self.connector, "filesystem", None)
-        if filesystem is not None:
-            connector_type = (
-                getattr(self.connector, "storage_type", None) or self.connector.__type__
-            )
-        else:
-            from opteryx.connectors.io_systems import create_filesystem
-
-            first_path = blob_paths[0] if blob_paths else ""
-            protocol = first_path.split("://")[0] if "://" in first_path else ""
-            filesystem = create_filesystem(protocol)
-            connector_type = protocol.upper() if protocol else "FILESYSTEM"
+        filesystem, connector_type = resolve_scan_filesystem(self.connector, blob_paths)
         self._sp_filesystem = filesystem
         self._sp_connector_type = connector_type
 
@@ -1321,6 +1352,7 @@ cdef class ParquetReadNode(ReaderNode):
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
                 string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
                 http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
+                in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1359,6 +1391,7 @@ cdef class ParquetReadNode(ReaderNode):
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
             limit=self.limit if not has_predicates else None,
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
+            in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -1620,6 +1653,7 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
+            in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
         )
         self._lm_pass1_done = True
 
@@ -1704,6 +1738,7 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
+            in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
         )
         try:
             while True:

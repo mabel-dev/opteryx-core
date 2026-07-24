@@ -17,9 +17,9 @@ quota is reached; the scan loop checks `ctx.is_terminated()` between morsels
 and breaks promptly, dropping the scan iterator (which closes the underlying
 I/O).
 
-Special operators (Explain, SetVariable, ShowValue, ShowCreate, Insert,
-ViewManagement, TableManagement, RelationManagement) do not enter the push
-pipeline — they're invoked directly via their `__call__` interface.
+Special operators (Explain, SetVariable, ShowValue, ShowCreate, ShowColumns,
+Insert, ViewManagement, TableManagement, RelationManagement) do not enter the
+push pipeline — they're invoked directly via their `__call__` interface.
 """
 
 from typing import Any, Generator, Tuple
@@ -38,6 +38,7 @@ from draken.draken_native import DrakenType
 def _special_op_types():
     from opteryx.operators.explain import ExplainNode
     from opteryx.operators.set_variable import SetVariableNode
+    from opteryx.operators.show_columns import ShowColumnsNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
@@ -48,6 +49,7 @@ def _special_op_types():
     return (
         ExplainNode,
         SetVariableNode,
+        ShowColumnsNode,
         ShowCreateNode,
         ShowValueNode,
         TableManagementNode,
@@ -70,6 +72,7 @@ def execute(
 ) -> Tuple[Generator[Morsel, Any, Any], ResultType]:
     from opteryx.operators.explain import ExplainNode
     from opteryx.operators.set_variable import SetVariableNode
+    from opteryx.operators.show_columns import ShowColumnsNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
@@ -125,7 +128,10 @@ def execute(
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
-    if isinstance(head_node, (ShowValueNode, ShowCreateNode)):
+    # SHOW COLUMNS is answered entirely from the bound catalog schema
+    # (binder/view.py's visit_show_columns attaches it) — the Scan below it in the
+    # plan is never read. No pipeline, no native engine.
+    if isinstance(head_node, (ShowValueNode, ShowCreateNode, ShowColumnsNode)):
         return head_node(None), ResultType.TABULAR
 
     # serial_engine handles ONLY the special, non-pipeline operations above. A

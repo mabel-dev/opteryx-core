@@ -140,6 +140,23 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         FLOAT64, config.HTTP_MIN_BANDWIDTH_MBPS, VariableOwner.USER, Visibility.RESTRICTED),
     "http_request_timeout_floor_ms": (
         INT64, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS, VariableOwner.USER, Visibility.RESTRICTED),
+    # HTTP/2 multiplexing. Named for the state a caller does NOT want (per the
+    # convention at the top of this file), so the default-False state is the fast
+    # one. `disable_http_multiplexing` exists to A/B the CURLOPT_PIPEWAIT fix
+    # against the old connection-per-range behaviour WITHOUT a redeploy — the
+    # same reason parquet_gcs_io_workers is settable. `disable_http2` is a
+    # diagnostic, not a performance knob: it pins HTTP/1.1 so the contribution of
+    # h2 can be measured (a low connection cap should then become catastrophic
+    # rather than faster). See HttpTuning in src/cpp/http_client.hpp.
+    "disable_http_multiplexing": (
+        BOOLEAN, config.DISABLE_HTTP_MULTIPLEXING, VariableOwner.USER, Visibility.RESTRICTED),
+    "disable_http2": (
+        BOOLEAN, config.DISABLE_HTTP2, VariableOwner.USER, Visibility.RESTRICTED),
+    # Splits submission depth from thread count — `parquet_gcs_io_workers` alone
+    # moves both, so the sweep that found 16 optimal could not attribute the win
+    # to concurrency vs pipelining depth. Also drives IO pool size.
+    "parquet_io_in_flight_headroom": (
+        INT64, config.PARQUET_IO_IN_FLIGHT_HEADROOM, VariableOwner.USER, Visibility.RESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an

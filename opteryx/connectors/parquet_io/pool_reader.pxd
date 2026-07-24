@@ -73,7 +73,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # HttpTuning's comment in http_client.hpp for why this is never stored
         # on the (thread_local, process-lifetime) HttpClient itself.
         void set_http_tuning(long max_host_connections, int max_retries,
-                              double min_bandwidth_bytes_per_s, long timeout_floor_ms)
+                              double min_bandwidth_bytes_per_s, long timeout_floor_ms,
+                              bint use_multiplexing, bint force_http11)
         void submit_row_group(
             const string& path, int rg_idx,
             const vector[string]& column_names,
@@ -187,9 +188,13 @@ cpdef NativeScanPlan open_native_scan_plan(
     logical_coerce=*,
     hash_key_columns=*,
     pool=*,
+    filesystem=*,
+    footer_bytes_cache=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed
 # footers that every projected column, in every row group, decodes to a
 # DirectKind the Source supports (increment-1 scope: plain numerics only).
-cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=*)
+# `filesystem` supplies the signed-URL rewrite that makes a remote path eligible.
+cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=*,
+                                 filesystem=*, footer_bytes_cache=*)

@@ -198,6 +198,31 @@ client timeout."""
 HTTP_REQUEST_TIMEOUT_FLOOR_MS: int = int(get("OPTERYX_HTTP_TIMEOUT_FLOOR_MS", 10000))
 """Minimum per-request timeout (ms), regardless of how small the Range span is."""
 
+DISABLE_HTTP_MULTIPLEXING: bool = get_bool("OPTERYX_HTTP_DISABLE_MULTIPLEXING", False)
+"""Turn OFF HTTP/2 multiplexing (CURLOPT_PIPEWAIT) for get_many() batches.
+
+Default False — multiplexing ON. Without PIPEWAIT libcurl opens a connection per
+range instead of carrying them all on one h2 connection; measured on production
+GCS, forcing a single connection was 9.0% faster at 8 columns and 11.5% at 20,
+with throughput flat across range counts where a wide cap degraded. See
+HttpTuning::use_multiplexing in src/cpp/http_client.hpp for the full numbers.
+Set True only to A/B against the old behaviour."""
+
+DISABLE_HTTP2: bool = get_bool("OPTERYX_HTTP_DISABLE_HTTP2", False)
+
+PARQUET_IO_IN_FLIGHT_HEADROOM: int = int(get("PARQUET_IO_IN_FLIGHT_HEADROOM", 2))
+"""Row groups submitted BEYOND the decode-worker count (`in_flight_limit =
+workers + headroom`).
+
+Worker count currently governs two separate things — how many row groups download
+concurrently (threads) and how deep the submission window runs ahead of the
+consumer. The 128→16 worker sweep could not tell which of those produced the 33%
+win because they move together; this splits them. It also sizes the IO pool
+(`est_rg * (in_flight_limit + 1)`), so raising it costs memory linearly."""
+"""Pin HTTP requests to HTTP/1.1. Diagnostic ONLY — this exists to measure what
+HTTP/2 contributes (with multiplexing unavailable, a low connection cap should
+become catastrophic rather than faster). Leaving it True forfeits multiplexing."""
+
 _max_workers_raw = str(get("MAX_EXECUTION_WORKERS", "auto")).strip().lower()
 MAX_EXECUTION_WORKERS: int = (
     int(_max_workers_raw) if _max_workers_raw.lstrip("-").isdigit() else 0

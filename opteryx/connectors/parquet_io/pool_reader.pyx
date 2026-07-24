@@ -313,10 +313,12 @@ cdef class CppIOPipeline:
         # None, the pipeline leaves HttpClient::default_tuning() (env-derived)
         # in effect, unchanged from before this existed.
         if http_tuning is not None:
-            _max_host_connections, _max_retries, _min_bw_bytes_per_s, _timeout_floor_ms = http_tuning
+            (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
+             _timeout_floor_ms, _use_multiplexing, _force_http11) = http_tuning
             self.pipeline.set_http_tuning(
                 <long>_max_host_connections, <int>_max_retries,
                 <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
+                <bint>_use_multiplexing, <bint>_force_http11,
             )
 
     def __dealloc__(self):
@@ -1237,6 +1239,188 @@ def _flatten_dict_skip_predicates(predicates):
     return int_needles, str_preds
 
 
+cdef inline bint _is_remote_url(str url):
+    """True for a fetch URL the C++ HTTP client reads (as opposed to an ifstream
+    path). Complements `_is_local_path`, which classifies the ORIGINAL path; this
+    classifies the post-signing FETCH url, where a gs:// original has already
+    become https://."""
+    return (url.startswith("gs://") or url.startswith("http://")
+            or url.startswith("https://"))
+
+
+cdef tuple _sign_paths(object filesystem, object paths):
+    """Signed-URL rewrite (GCS): the C++ libcurl fetches carry no auth header, so a
+    gs:// path is rewritten to a signed HTTPS URL before it reaches the pipeline.
+
+    Returns (orig_to_cpp, cpp_to_orig). Both are EMPTY when the filesystem does not
+    sign (a local scan, or a connector with no rewrite hook), which is why every
+    caller reads through `orig_to_cpp.get(path, path)` — an unsigned path passes
+    through unchanged. The reverse map exists so C++ result paths translate back to
+    originals for telemetry; a caller whose native Source never reports paths back
+    (NativeScanPlan) can discard it."""
+    cdef dict orig_to_cpp = {}
+    cdef dict cpp_to_orig = {}
+    cdef str cpp_path
+    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
+    if sign_url:
+        for path in paths:
+            if path not in orig_to_cpp:
+                cpp_path = sign_url(path)
+                orig_to_cpp[path] = cpp_path
+                cpp_to_orig[cpp_path] = path
+    return orig_to_cpp, cpp_to_orig
+
+
+cdef tuple _acquire_remote_footers(
+    object paths,
+    dict orig_to_cpp,
+    object file_sizes,
+    ParquetFooterBytesCache footer_bytes_cache,
+    unordered_map[string, FileStats]* footer_map,
+    object prefetched_footers,
+):
+    """Acquire the Parquet footer for every REMOTE file in `paths`, in three steps
+    that share ONE eligibility pass so the caching rules can't drift apart (they used
+    to be two near-identical loops):
+
+      1. classify: for each remote-scheme, non-prefetched file, parse it straight
+         from the in-process parsed-struct cache or the in-process bytes cache, or
+         record it as still needing a footer;
+      2. probe the shared (cross-instance) footer cache with ONE batched mget and
+         parse any envelope another instance already fetched;
+      3. fetch the residual (probe misses) from origin in ONE concurrent batch
+         (`_fetch_footers_many`, which releases the GIL), parse it, and write those
+         envelopes back to the shared cache in ONE batched set.
+
+    Step 3 is the ONLY place a remote footer is read from origin, so it is the only
+    place that writes the shared cache. A caller's own per-path loop must never
+    origin-fetch a remote file — that would be the serial, GIL-held
+    `FetchParquetFooter` this batching exists to avoid.
+
+    POSTCONDITION, which is what callers rely on: every non-prefetched remote file in
+    `paths` has a PARSED footer in `_PARSED_FOOTER_CACHE`, keyed by its ORIGINAL path.
+    The original is the stable key — a signed URL carries an expiring signature, so
+    keying the persistent caches by the fetch URL would bust them on every query.
+
+    `footer_map`, when non-NULL, additionally receives each parsed footer keyed by
+    original path (the trampoline's `IpcRowGroupSource` convention). Pass NULL when
+    the caller keys its own map differently — `open_native_scan_plan` keys by FETCH
+    url, because the C++ Source uses `work_items[i].first` for BOTH the footer_map
+    lookup and the `submit_row_group` fetch — or needs no map at all
+    (`native_scan_supported` only reads types).
+
+    Returns (remote_files_seen, process_hits, tier_hits, tier_misses) for telemetry.
+    `remote_files_seen == 0` means the scan was all-local and the other counters carry
+    no information — the caller should report nothing rather than report zeros."""
+    cdef FileStats probe_fs
+    cdef FileStats parsed_fs
+    cdef const uint8_t* footer_buf_ptr
+    cdef size_t footer_buf_size
+    cdef Py_ssize_t bi
+    cdef str path, fetch_url
+    cdef bytes envelope
+
+    # Telemetry for the two in-process caches probed below. Counted together: both mean
+    # "no network round trip for this footer", which is the question an operator is asking
+    # when the remote tier looks idle. (They differ in that a bytes hit still pays a parse
+    # and a parsed hit doesn't — a cost split, not a cache-effectiveness one.)
+    cdef Py_ssize_t process_hits = 0
+    # Remote-scheme, non-prefetched files this scan looked at. Not reported — it only gates
+    # whether `process_hits` applies at all, separating "0 served in-process" (a cold
+    # process, worth reporting) from "nothing to serve" (an all-local scan, report nothing).
+    cdef Py_ssize_t remote_files_seen = 0
+
+    # (orig_path, fetch_url, size) for remote files that still need a footer fetched.
+    remote_candidates = []
+    footer_remote = remote_footer_cache()
+
+    # ── Step 1: classify ────────────────────────────────────────────────────────
+    for path in paths:
+        if prefetched_footers and path in prefetched_footers:
+            continue
+        fetch_url = orig_to_cpp.get(path, path)
+        if not _is_remote_url(fetch_url):
+            continue
+        remote_files_seen += 1
+        # Parsed-struct cache hit → nothing to parse. A local probe var is used (not
+        # &footer_map[key]) so a MISS does not default-construct an empty FileStats in
+        # the map, which a caller's pruning loop would read as "zero row groups" and
+        # silently skip the file's rows.
+        if _PARSED_FOOTER_CACHE.try_get(path, &probe_fs):
+            if footer_map != NULL:
+                footer_map[0][path.encode('utf-8')] = probe_fs
+            process_hits += 1
+            continue
+        if footer_bytes_cache is not None:
+            envelope = footer_bytes_cache.get(fetch_url)
+            if envelope is not None:
+                _parse_and_cache_footer(path, envelope, footer_map)
+                process_hits += 1
+                continue
+        remote_candidates.append((path, fetch_url,
+                                  file_sizes.get(path, -1) if file_sizes else -1))
+
+    if not remote_candidates:
+        return (remote_files_seen, process_hits, 0, 0)
+
+    # ── Step 2: one batched probe of the shared (cross-instance) cache ──────────
+    probe_hits = set()
+    if footer_remote is not None:
+        for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
+            if footer_bytes_cache is not None:
+                footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
+            _parse_and_cache_footer(path, envelope, footer_map)
+            probe_hits.add(path)
+
+    # ── Step 3: fetch the residual from origin in one concurrent batch ─────────
+    batch_orig = []
+    batch_urls = []
+    batch_sizes = []
+    for path, fetch_url, size in remote_candidates:
+        if path in probe_hits:
+            continue
+        batch_orig.append(path)
+        batch_urls.append(fetch_url)
+        batch_sizes.append(size)
+    if batch_urls:
+        envelopes = _fetch_footers_many(batch_urls, batch_sizes)
+        pending_remote = []
+        for bi in range(len(batch_orig)):
+            envelope = envelopes[bi]
+            if footer_bytes_cache is not None:
+                footer_bytes_cache.put(batch_urls[bi], envelope)
+            _parse_and_cache_footer(batch_orig[bi], envelope, footer_map)
+            # Write back only AFTER a successful parse, so a cross-instance reader never
+            # receives bytes that fail to decode here.
+            pending_remote.append((batch_orig[bi], envelope))
+        if footer_remote is not None and pending_remote:
+            footer_remote.put_many(pending_remote)
+
+    # Telemetry keyed off `remote_candidates`, NOT off the tier existing: a candidate is
+    # a footer this scan must fetch from origin unless the tier serves it, so with no
+    # tier every candidate genuinely IS a miss and is reported as one. Staying silent
+    # there would make a mis-set OPTERYX_FOOTER_CACHE_LOCATION look identical to a warm
+    # process that simply didn't need the tier — the two failure modes must be
+    # distinguishable from telemetry alone.
+    return (remote_files_seen, process_hits,
+            len(probe_hits), len(remote_candidates) - len(probe_hits))
+
+
+cdef void _parse_and_cache_footer(
+    str path,
+    bytes envelope,
+    unordered_map[string, FileStats]* footer_map,
+):
+    """Parse one footer envelope and land it in `_PARSED_FOOTER_CACHE` under the
+    stable ORIGINAL path, plus `footer_map` when the caller keeps one."""
+    cdef const uint8_t* buf_ptr = <const uint8_t*>envelope
+    cdef size_t buf_size = len(envelope)
+    cdef FileStats fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+    _PARSED_FOOTER_CACHE.put_fs(path, fs)
+    if footer_map != NULL:
+        footer_map[0][path.encode('utf-8')] = fs
+
+
 cpdef IpcRowGroupSource open_ipc_source(
     filesystem,
     paths,
@@ -1252,6 +1436,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     string_types=None,
     limit=None,
     http_tuning=None,
+    int in_flight_headroom=2,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -1282,22 +1467,13 @@ cpdef IpcRowGroupSource open_ipc_source(
     src.prefetched_footers = prefetched_footers
     src.footer_map = new unordered_map[string, FileStats]()
 
-    # Signed-URL rewrite (GCS): C++ libcurl fetches need no auth header. A reverse
-    # map translates C++ result paths back to originals for telemetry.
-    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
-    cdef dict orig_to_cpp = {}
-    cdef dict cpp_to_orig = {}
-    if sign_url:
-        for path in paths:
-            if path not in orig_to_cpp:
-                cpp_path = sign_url(path)
-                orig_to_cpp[path] = cpp_path
-                cpp_to_orig[cpp_path] = path
+    cdef dict orig_to_cpp
+    cdef dict cpp_to_orig
+    orig_to_cpp, cpp_to_orig = _sign_paths(filesystem, paths)
     src.orig_to_cpp = orig_to_cpp
     src.cpp_to_orig = cpp_to_orig
 
     cdef string path_bytes_cpp
-    cdef FileStats probe_fs
     cdef const uint8_t* footer_buf_ptr
     cdef size_t footer_buf_size
     cdef RowGroupStats* rgp
@@ -1309,111 +1485,24 @@ cpdef IpcRowGroupSource open_ipc_source(
 
     work_items = []
 
-    # ── Remote-file footer acquisition, in three steps that share ONE eligibility pass so
-    # the pruning rules can't drift apart (they used to be two near-identical loops):
-    #
-    #   1. classify: for each remote-scheme, non-prefetched file, either populate footer_map
-    #      straight from the in-process parsed-struct cache, skip it if the in-process bytes
-    #      cache already holds it, or record it as still needing a footer;
-    #   2. probe the shared (cross-instance) footer cache with ONE batched mget and seed the
-    #      bytes cache with any envelope another instance already fetched;
-    #   3. fetch the residual (probe misses) from origin in one concurrent batch, parse it,
-    #      and write those envelopes back to the shared cache in ONE batched set.
-    #
-    # Step 3 is the ONLY place a remote footer is read from origin, so it is the only place
-    # that writes the shared cache. The per-path loop further down never origin-fetches a
-    # remote file — it either finds a footer_map entry set here, or hits the bytes cache
-    # seeded in step 2 — which is why write-back lives only here and not there.
-    footer_remote = remote_footer_cache()
-
-    # (orig_path, fetch_url, size) for remote files that still need a footer fetched.
-    remote_candidates = []
-    # Telemetry for the two in-process caches probed below. Counted together: both mean
-    # "no network round trip for this footer", which is the question an operator is asking
-    # when the remote tier looks idle. (They differ in that a bytes hit still pays a parse
-    # and a parsed hit doesn't — a cost split, not a cache-effectiveness one.)
-    process_hits = 0
-    # Remote-scheme, non-prefetched files this scan looked at. Not reported — it only gates
-    # whether `process_hits` applies at all, separating "0 served in-process" (a cold
-    # process, worth reporting) from "nothing to serve" (an all-local scan, report nothing).
-    remote_files_seen = 0
-    for path in paths:
-        if prefetched_footers and path in prefetched_footers:
-            continue
-        fetch_url = orig_to_cpp.get(path, path)
-        if not (fetch_url.startswith("gs://")
-                or fetch_url.startswith("http://")
-                or fetch_url.startswith("https://")):
-            continue
-        remote_files_seen += 1
-        # Parsed-struct cache hit → populate footer_map and move on. A local probe var is
-        # used (not &footer_map[key]) so a MISS does not default-construct an empty
-        # FileStats in the map, which the pruning loop below would read as "zero row groups"
-        # and silently skip the file's rows.
-        if _PARSED_FOOTER_CACHE.try_get(path, &probe_fs):
-            src.footer_map[0][path.encode('utf-8')] = probe_fs
-            process_hits += 1
-            continue
-        if footer_bytes_cache is not None and footer_bytes_cache.get(fetch_url) is not None:
-            process_hits += 1
-            continue
-        remote_candidates.append((path, fetch_url,
-                                  file_sizes.get(path, -1) if file_sizes else -1))
-
+    # Remote-file footer acquisition — batched, shared-tier aware, and the ONLY place
+    # a remote footer is read from origin. The per-path loop below never origin-fetches
+    # a remote file: `_acquire_remote_footers` guarantees every non-prefetched remote
+    # file already has a parsed footer in `_PARSED_FOOTER_CACHE` (and, since a non-NULL
+    # footer_map is passed here, in `src.footer_map` too).
+    cdef Py_ssize_t remote_files_seen, process_hits, tier_hits, tier_misses
+    remote_files_seen, process_hits, tier_hits, tier_misses = _acquire_remote_footers(
+        paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+        src.footer_map, prefetched_footers,
+    )
     # Reported whenever this scan considered a remote file, including when the in-process
-    # caches served every one of them and the remote tier below was never reached — that
-    # is exactly the case where the remote counters go absent and need explaining.
+    # caches served every one of them and the remote tier was never reached — that is
+    # exactly the case where the remote counters go absent and need explaining.
     if remote_files_seen:
         src.footer_process_cache_hits = process_hits
-
-    # Step 2: one batched probe of the shared cache; seed the bytes cache with the hits so
-    # the fetch below skips them and the per-path loop parses them locally. footer_map is
-    # deliberately NOT touched here (the default-construct trap noted above); the bytes cache
-    # is the landing spot the existing fetch path already consults, so this needs one to seed.
-    probe_hits = set()
-    if remote_candidates:
-        if footer_remote is not None and footer_bytes_cache is not None:
-            for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
-                footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
-                probe_hits.add(path)
-        # Telemetry keyed off `remote_candidates`, NOT off the tier existing: a candidate is
-        # a footer this scan must fetch from origin unless the tier serves it, so with no
-        # tier (or no bytes cache to seed) every candidate genuinely IS a miss and is
-        # reported as one. Staying silent there would make a mis-set
-        # OPTERYX_FOOTER_CACHE_LOCATION look identical to a warm process that simply didn't
-        # need the tier — the two failure modes must be distinguishable from telemetry
-        # alone. The -1 sentinel now means only "this scan had no footer to fetch".
-        src.footer_cache_hits = len(probe_hits)
-        src.footer_cache_misses = len(remote_candidates) - len(probe_hits)
-
-    # Step 3: fetch the residual from origin in one concurrent batch, then write back once.
-    batch_orig = []
-    batch_urls = []
-    batch_sizes = []
-    for path, fetch_url, size in remote_candidates:
-        if path in probe_hits:
-            continue
-        batch_orig.append(path)
-        batch_urls.append(fetch_url)
-        batch_sizes.append(size)
-    if batch_urls:
-        envelopes = _fetch_footers_many(batch_urls, batch_sizes)
-        pending_remote = []
-        for bi in range(len(batch_orig)):
-            envelope = envelopes[bi]
-            if footer_bytes_cache is not None:
-                footer_bytes_cache.put(batch_urls[bi], envelope)
-            footer_buf_ptr = <const uint8_t*>envelope
-            footer_buf_size = len(envelope)
-            src.footer_map[0][batch_orig[bi].encode('utf-8')] = ReadParquetMetadataFromBuffer(
-                footer_buf_ptr, footer_buf_size
-            )
-            _PARSED_FOOTER_CACHE.put_fs(batch_orig[bi], src.footer_map[0][batch_orig[bi].encode('utf-8')])
-            # Write back only AFTER a successful parse, so a cross-instance reader never
-            # receives bytes that fail to decode here.
-            pending_remote.append((batch_orig[bi], envelope))
-        if footer_remote is not None and pending_remote:
-            footer_remote.put_many(pending_remote)
+    if tier_hits or tier_misses:
+        src.footer_cache_hits = tier_hits
+        src.footer_cache_misses = tier_misses
 
     # Sound only with zero predicates: a kept row group's footer num_rows IS its
     # exact row contribution when nothing filters it downstream. Running total is
@@ -1493,7 +1582,13 @@ cpdef IpcRowGroupSource open_ipc_source(
         if rg_bytes > max_rg_bytes:
             max_rg_bytes = rg_bytes
 
-    in_flight_limit = decode_workers + 2
+    # Submission window. `in_flight_headroom` is SET-able (default 2, the value
+    # this was hardcoded to) so submission depth can be varied independently of
+    # the worker/thread count — the two used to move together, which is why the
+    # worker sweep could not attribute its win to one or the other.
+    in_flight_limit = decode_workers + in_flight_headroom
+    if in_flight_limit < 1:
+        in_flight_limit = 1
     est_rg = max_rg_bytes * 2
     dyn_pool_size = est_rg * (in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
@@ -1531,6 +1626,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     null_fillers=None,
     string_types=None,
     http_tuning=None,
+    int in_flight_headroom=2,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -1594,7 +1690,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.n_items = len(wi)
     if src.n_items == 0:
         return src
-    src.in_flight_limit = decode_workers + 2
+    src.in_flight_limit = max(1, decode_workers + in_flight_headroom)
     src.pipeline = CppIOPipeline(
         decode_workers=decode_workers,
         queue_capacity=1024,
@@ -1617,8 +1713,10 @@ cdef class NativeScanPlan:
     directly and never calls back into this module — or any Python object —
     during its per-morsel pull loop.
 
-    First-landing scope (see `open_native_scan_plan`): local files only (no GCS
-    signed-URL rewrite, no prefetched-footer dicts, no pass-2 masks). The native
+    Scope (see `open_native_scan_plan`): local files, plus remote files whose paths
+    the caller's filesystem rewrites to signed fetch URLs; no prefetched-footer dicts,
+    no pass-2 masks. Remote row-group pruning is min/max-stats only — the C++ bloom
+    probe reads via ifstream and cannot open a URL. The native
     Source itself further requires every decoded column to land on a supported
     fixed-width direct kind (INT64/FLOAT32/FLOAT64, dense or dict — the types
     NumericFilterOperator already supports); it fails loud on anything else
@@ -1725,13 +1823,31 @@ cpdef NativeScanPlan open_native_scan_plan(
     logical_coerce=None,
     hash_key_columns=None,
     pool=None,
+    filesystem=None,
+    footer_bytes_cache=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
     reusing the same helpers, but returns raw C++ handles instead of a Cython
-    `IpcRowGroupSource` — local files only, no signed-URL rewrite, no
-    prefetched-footer dicts, no pass-2 masks (first landing; see
+    `IpcRowGroupSource` — no prefetched-footer dicts, no pass-2 masks (see
     `NativeScanPlan`'s docstring for the rest of the scope boundary).
+
+    ``filesystem`` supplies the signed-URL rewrite for remote (gs://) scans, the
+    same hook `open_ipc_source` uses; pass None for a purely local scan. KEYING,
+    which is the subtle part:
+
+    * ``footer_map`` and ``work_items`` are keyed by the SIGNED FETCH URL, because
+      the C++ Source uses `work_items[i].first` for BOTH the footer_map lookup and
+      the `submit_row_group` fetch (native_parquet_scan_source.hpp) — one string,
+      two jobs, so it has to be the one libcurl can resolve.
+    * ``_PARSED_FOOTER_CACHE`` and the shared cross-instance tier stay keyed by the
+      ORIGINAL path. A signed URL carries an expiring signature, so keying the
+      persistent caches by it would miss on every query.
+
+    Signing happens HERE, at plan time, rather than at first-morsel like the
+    trampoline's `_ensure_scan_started`. That lengthens the window between signing
+    and last use by the plan→execute gap; the signature lifetime must still cover
+    the query, exactly as it must on the trampoline path.
 
     ``pool`` (Gap #3 Phase 2b): the query's exec ``CppThreadPool``, if the caller
     has one available (see ``execute_native``/``compile_to_native``). When given,
@@ -1787,16 +1903,36 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef int64_t est_rg, dyn_pool_size
     cdef list work_items = []
     cdef uint64_t _footer_t0
+    cdef str fetch_url
+    cdef dict orig_to_cpp
+    # The reverse map is discarded: the native Source never reports a path back to
+    # Python (work_items[i].first is consumed entirely inside C++ — footer lookup and
+    # submit_row_group), so there is nothing to translate back for telemetry.
+    orig_to_cpp, _ = _sign_paths(filesystem, paths)
+
+    # Batched, shared-tier remote footer acquisition. footer_map is NULL here because
+    # this plan keys it by FETCH url while the helper keys by original path; the
+    # postcondition we use is the parsed cache, which the loop below reads by original
+    # path. Without this pre-pass the loop would fall into the serial, GIL-held
+    # `_read_footer_payload` once per remote file.
+    _footer_t0 = time.perf_counter_ns()
+    _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+                            NULL, None)
+    plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
     for path in paths:
-        path_bytes_cpp = path.encode('utf-8')
+        fetch_url = orig_to_cpp.get(path, path)
+        path_bytes_cpp = fetch_url.encode('utf-8')
         if plan.footer_map[0].count(path_bytes_cpp) == 0:
+            # Cache key is the ORIGINAL path (stable); map key is the FETCH url.
             if not _PARSED_FOOTER_CACHE.try_get(path, &plan.footer_map[0][path_bytes_cpp]):
                 # Not "compile" — a real network round-trip (cold cache), timed on its
-                # own so it cannot hide inside whatever span calls this function.
+                # own so it cannot hide inside whatever span calls this function. Only
+                # LOCAL files reach here: `_acquire_remote_footers` above has already
+                # parsed every remote footer into the cache.
                 _footer_t0 = time.perf_counter_ns()
                 envelope, _ = _read_footer_payload(
-                    path, file_sizes.get(path, -1) if file_sizes else -1, None
+                    fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None
                 )
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
@@ -1805,14 +1941,18 @@ cpdef NativeScanPlan open_native_scan_plan(
                 )
                 _PARSED_FOOTER_CACHE.put_fs(path, plan.footer_map[0][path_bytes_cpp])
                 plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
-        bloom_path = path if _is_local_path(path) else None
+        # None for remote — the C++ bloom probe opens the file via ifstream and
+        # cannot read a URL, so a remote scan prunes on min/max stats only.
+        bloom_path = fetch_url if _is_local_path(fetch_url) else None
         for rg_i in range(plan.footer_map[0][path_bytes_cpp].row_groups.size()):
             if predicates and not _rg_passes_predicates_native(
                 plan.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
             ):
                 plan.pruned_items += 1
                 continue
-            work_items.append((path, rg_i))
+            # Both work-item lists carry the FETCH url: the Python one is re-encoded
+            # below to index footer_map, the C++ one is what the Source fetches.
+            work_items.append((fetch_url, rg_i))
             plan.work_items.push_back(pair[string, int](path_bytes_cpp, <int>rg_i))
 
     plan.n_items = len(work_items)
@@ -1854,7 +1994,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     return plan
 
 
-cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=None):
+cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=None,
+                                 filesystem=None, footer_bytes_cache=None):
     """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
 
     Proves, from parsed footers (cache-warmed — not wasted work when the answer
@@ -1877,6 +2018,15 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     footer encodings list cannot distinguish a dictionary page from a plain
     fallback data page anyway (measured: every numeric chunk in the test corpus
     lists dict+plain).
+
+    REMOTE paths are admitted when ``filesystem`` can sign them. A path is eligible
+    if it is local (the C++ IO opens it via ifstream) OR it rewrites to a signed
+    fetch URL; an unsignable remote path is rejected, because the pipeline's libcurl
+    fetches carry no auth header and would 401 at execution time. This gate is the
+    FIRST thing to touch footers — it warms `_PARSED_FOOTER_CACHE` (keyed by original
+    path), which is why `open_native_scan_plan` afterwards does no network — so it
+    acquires remote footers through the batched, shared-tier `_acquire_remote_footers`
+    rather than the serial per-file path.
     """
     cdef FileStats fs
     cdef const FileStats* fsp = NULL   # borrowed (cache) on hit, &fs on cold miss
@@ -1917,6 +2067,8 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     cdef string s_decimal = b"decimal"
     cdef vector[string] wanted
     cdef list kinds = []
+    cdef dict orig_to_cpp
+    cdef str fetch_url
 
     if ncols == 0 or len(expected_kinds) != ncols:
         return False
@@ -1929,16 +2081,40 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
             return False
         kinds.append(kind)
 
+    # Transport eligibility, before any footer work: local, or remote-and-signable.
+    # An unsignable remote path fails the gate — the pipeline's libcurl fetches carry
+    # no auth header, so admitting it would 401 at execution time instead of here.
+    #
+    # Admitting remote here depends on a BUILD invariant, not just this code:
+    # `opteryx.operators._operators` must be compiled with RUGO_ENABLE_HTTP (setup.py),
+    # because it holds NativeParquetScanSource and its own inline copy of
+    # io_pipeline.hpp. Built without it, that copy's decode_row_group() calls
+    # reject_remote_path() from outside its try block, the work item dies unqueued, and
+    # a remote scan returns ZERO ROWS. If remote scans ever silently return nothing
+    # again, check that macro before anything in this file.
+    orig_to_cpp, _ = _sign_paths(filesystem, paths)
     for path in paths:
-        if not _is_local_path(path):
+        if not _is_local_path(path) and path not in orig_to_cpp:
             return False
+
+    # Batched, shared-tier acquisition for every remote footer, so the per-path loop
+    # below only ever hits the parsed cache for them. Skipping this would make this
+    # gate — the first toucher of remote footers — pay one serial, GIL-held
+    # round-trip per file.
+    _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+                            NULL, None)
+
+    for path in paths:
+        fetch_url = orig_to_cpp.get(path, path)
         # Borrow the parsed footer (no copy) on a hit; on a cold miss parse into
         # the local and point at it. The pointer is only read within this loop
         # iteration (never stashed, no put_fs on the hot path), so it stays valid.
+        # Cache key is the ORIGINAL path — a signed URL's signature expires, so it
+        # would never hit twice.
         fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
         if fsp == NULL:
             envelope, _ = _read_footer_payload(
-                path, file_sizes.get(path, -1) if file_sizes else -1, None
+                fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None
             )
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
@@ -2197,15 +2373,9 @@ def iter_pass2_row_groups_ipc(
         decode_workers = max(2, (os.cpu_count() or 4) - 2)
 
     # Planning-time URL signer: converts gs:// paths to signed HTTPS URLs.
-    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
-    cdef dict orig_to_cpp = {}
-    cdef dict cpp_to_orig = {}
-    if sign_url:
-        for path, _rg, _mask in work_items:
-            if path not in orig_to_cpp:
-                cpp_path = sign_url(path)
-                orig_to_cpp[path] = cpp_path
-                cpp_to_orig[cpp_path] = path
+    cdef dict orig_to_cpp
+    cdef dict cpp_to_orig
+    orig_to_cpp, cpp_to_orig = _sign_paths(filesystem, [w[0] for w in work_items])
 
     cdef CppIOPipeline pipeline = CppIOPipeline(
         decode_workers=decode_workers,

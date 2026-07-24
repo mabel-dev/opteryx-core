@@ -657,6 +657,23 @@ class Session(DataFrame):
         return self._telemetry.messages
 
     # ------------------------------------------------------------------
+    @property
+    def trace_armed(self) -> bool:
+        """Whether tracing was armed for the last statement executed on this
+        session — i.e. whether :meth:`trace` will return a bundle rather than
+        raise.
+
+        Arming is a per-statement fact read from the `trace` session variable
+        (see ``_inner_execute``), which is USER-owned and settable with `SET
+        trace TO ...`. ``OPTERYX_TRACE`` only supplies its default, so a caller
+        that wants to persist a trace must branch on this, not on the
+        environment: the two disagree whenever a query sets the variable, and a
+        caller keyed on the env var either calls :meth:`trace` on an unarmed
+        query (RuntimeError) or discards a bundle the engine already paid to
+        record.
+        """
+        return self._trace_armed
+
     def trace(self) -> Tuple[bytes, Dict[int, str], Dict[int, str], str, bool]:
         """Return this query's raw native execution trace: ``(blob,
         node_symbols, file_symbols, host_info, truncated)``.
@@ -681,11 +698,15 @@ class Session(DataFrame):
         calls ``opteryx.tracing.interpret_trace`` (or ``opteryx.tracing.parse_spans``
         for the unresolved fields).
 
-        Raises ``RuntimeError`` if tracing was not armed for this query
-        (``OPTERYX_TRACE`` unset when the query ran).
+        Raises ``RuntimeError`` if tracing was not armed for this query — check
+        :attr:`trace_armed` first rather than inferring arming from
+        ``OPTERYX_TRACE``, which is only the default for a per-query variable.
         """
         if not self._trace_armed:
-            raise RuntimeError("Execution tracing not enabled for this query (set OPTERYX_TRACE=1)")
+            raise RuntimeError(
+                "Execution tracing not enabled for this query "
+                "(SET trace TO true, or set OPTERYX_TRACE=1)"
+            )
         return (
             self._trace.blob,
             self._trace.node_symbols,

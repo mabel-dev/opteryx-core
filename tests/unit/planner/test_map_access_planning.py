@@ -40,7 +40,7 @@ def test_bracket_access_on_function_expression_uses_map_access():
 
 
 def test_bracket_access_on_identifier_uses_map_access():
-    expr = _first_projection_expression("SELECT missions[0] AS v FROM $astronauts")
+    expr = _first_projection_expression("SELECT missions[0] AS v FROM $planets")
 
     assert expr.node_type == NodeType.EXTRACTION_OPERATOR
     assert expr.value == "MapAccess"

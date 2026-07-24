@@ -57,6 +57,27 @@ int http_max_retries_env() {
     }();
     return v;
 }
+// HTTP/2 multiplexing (CURLOPT_PIPEWAIT) — see HttpTuning::use_multiplexing in
+// http_client.hpp for the mechanism and the production measurements. Defaults
+// ON: without it, get_many() opens a connection per range against a server that
+// would have multiplexed them all onto one. Env var is the DISABLE switch, so
+// the name matches the Opteryx variable (`disable_http_multiplexing`) and the
+// unset/default state is the fast one.
+bool http_use_multiplexing_env() {
+    static bool v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_DISABLE_MULTIPLEXING");
+        return !(e && (*e == '1' || *e == 't' || *e == 'T' || *e == 'y' || *e == 'Y'));
+    }();
+    return v;
+}
+// Diagnostic only — pin to HTTP/1.1 to measure what h2 is contributing.
+bool http_force_http11_env() {
+    static bool v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_DISABLE_HTTP2");
+        return e && (*e == '1' || *e == 't' || *e == 'T' || *e == 'y' || *e == 'Y');
+    }();
+    return v;
+}
 // get_many()'s per-host connection cap. HttpClient is thread_local (one per BS
 // worker thread, each with its own independent CURLM), so this bounds only
 // ONE thread's own batch — it does not by itself bound the cross-thread total
@@ -174,6 +195,8 @@ HttpTuning HttpClient::default_tuning() {
         c.max_retries               = http_max_retries_env();
         c.min_bandwidth_bytes_per_s = http_min_bw_bytes_per_s_env();
         c.timeout_floor_ms          = http_timeout_floor_ms_env();
+        c.use_multiplexing          = http_use_multiplexing_env();
+        c.force_http11              = http_force_http11_env();
         return c;
     }();
     return t;
@@ -490,6 +513,13 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         long host_cap = std::min(tuning.max_host_connections, (long)max_connections_);
         curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, host_cap);
         curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
+        // Enable h2 multiplexing on the multi handle. Default-on in libcurl
+        // since 7.62, set explicitly so behaviour does not depend on the linked
+        // libcurl's vintage. Paired with CURLOPT_PIPEWAIT per easy handle below
+        // — the multi option ALONE is not enough: without PIPEWAIT, handles
+        // added before any connection is established each get their own.
+        curl_multi_setopt(multi, CURLMOPT_PIPELINING,
+                          tuning.use_multiplexing ? (long)CURLPIPE_MULTIPLEX : (long)CURLPIPE_NOTHING);
 
         auto cleanup = [&]() {
             for (size_t j = 0; j < idxs.size(); ++j) {
@@ -523,6 +553,16 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
             curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
             curl_easy_setopt(easy, CURLOPT_WRITEDATA,       &ctx[i].buf);
             curl_easy_setopt(easy, CURLOPT_PRIVATE,         reinterpret_cast<void*>(i));
+            // THE multiplexing enabler: wait for the first connection to reveal
+            // whether it can multiplex before opening another. All N handles are
+            // added below in this same loop, before any transfer has run, so
+            // without this every one of them dials its own TCP+TLS connection.
+            // See HttpTuning::use_multiplexing for measurements.
+            if (tuning.use_multiplexing)
+                curl_easy_setopt(easy, CURLOPT_PIPEWAIT,    1L);
+            if (tuning.force_http11)
+                curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
+                                 (long)CURL_HTTP_VERSION_1_1);
             configure_ssl(easy);
             // No CURLOPT_SHARE: the local CURLM reuses connections within the
             // batch; CURLSH from multi+other-thread-get() could deadlock.

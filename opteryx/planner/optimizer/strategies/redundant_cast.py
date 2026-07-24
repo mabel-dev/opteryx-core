@@ -15,22 +15,39 @@ only to return a value of the requested type — so when the operand already car
 that type we decide, at plan time, to populate the column from the operand directly
 with no cast kernel.
 
-The rewrite is context-aware, because the cast column's *identity* matters in one place
-and not the other:
+The rewrite is context-aware, because the cast column's *identity* matters in some places
+and not others:
 
-* Projection context — the result (EXIT) schema references the cast column's identity
-  (e.g. `CAST(x AS INTEGER)`), so the identity must survive. We rewrite the CAST node into
-  a transparent `NESTED` wrapper around the operand, carrying the cast's schema_column.
-  `NESTED` lowers to just its operand at compile time (no instruction emitted), so the
-  evaluator aliases the cast column's identity straight onto the operand's buffer — no
-  per-row cast kernel, no copy.
+* Identity context — something downstream references the cast column's identity, so the
+  identity must survive. We rewrite the CAST node into a transparent `NESTED` wrapper around
+  the operand, carrying the cast's schema_column. `NESTED` lowers to just its operand at
+  compile time (no instruction emitted), so the evaluator aliases the cast column's identity
+  straight onto the operand's buffer — no per-row cast kernel.
+  This is the SELECT list: the result (EXIT) schema names `CAST(x AS INTEGER)`.
 
-* Predicate context — a CAST inside a Filter condition is consumed for its *value*; nothing
-  downstream references the cast's identity. We replace the CAST node with the bare operand
-  `x` (its own identity), so every predicate strategy that keys on a raw `IDENTIFIER` —
-  reader pushdown, parquet row-group pruning, LIKE/Eq/range rewrites — treats it as the raw
-  column it is, rather than the opaque result of a runtime calculation. Wrapping it in
-  `NESTED` here would hide `x`'s identity behind the cast's and forfeit all of that.
+* Value context — the node is consumed for its *value*; nothing downstream references the
+  cast's identity. We replace the CAST node with the bare operand `x` (its own identity).
+  Three places:
+
+  - Filter conditions, so every predicate strategy that keys on a raw `IDENTIFIER` (reader
+    pushdown, parquet row-group pruning, LIKE/Eq/range rewrites) treats it as the raw column
+    it is, rather than the opaque result of a runtime calculation. Wrapping it in `NESTED`
+    here would hide `x`'s identity behind the cast's and forfeit all of that.
+  - Aggregate operands, where the AGGREGATOR node carries its own schema_column and the
+    operand is read only to be folded. A bare operand also skips the compiler's
+    `_project_agg_operands` hoist entirely (it short-circuits on `IDENTIFIER`), so the
+    aggregate reads the scanned column directly instead of a projected copy of it.
+  - GROUP BY keys — value context here is forced, not chosen. The Project above the group
+    has had the same CAST folded to a `NESTED` reading the *operand*, so the group must emit
+    the operand for that read to resolve; a `NESTED` key would emit `x::DOUBLE` and strand
+    the projection looking for `x`. `GroupedAggregateHashedNode` re-derives
+    `group_by_columns` from the key nodes after optimization, so the key list follows the
+    substitution rather than being stranded on the cast's identity.
+
+Note that only a *top-level* node's identity is ever referenced, so a CAST nested inside a
+larger expression is always value context. The projection rule threads identity context all
+the way down rather than switching after the first level; that is conservative, not wrong —
+the surplus `NESTED` wrappers lower to nothing.
 
 Type equality is the unified `ColumnType` `==` (frozen dataclass): physical tag plus the
 logical descriptor (DECIMAL precision/scale, TIMESTAMP unit) and ARRAY element. Only a
@@ -47,39 +64,40 @@ from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, Logica
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
-def _eliminate_redundant_casts(node, telemetry, in_predicate=False):
+def _eliminate_redundant_casts(node, telemetry, value_context=False):
     """Depth-first rewrite of no-op CAST nodes anywhere in an expression tree.
 
-    ``in_predicate`` is threaded down unchanged: a CAST anywhere inside a Filter
-    condition is in predicate context, so it folds to the bare operand rather than
-    a NESTED wrapper (see module docstring).
+    ``value_context`` is threaded down unchanged: once we are inside a Filter
+    condition or an aggregate operand, every CAST below it is consumed for its
+    value, so it folds to the bare operand rather than a NESTED wrapper (see
+    module docstring).
     """
     if node is None:
         return node
 
     # Recurse into children first so nested casts collapse bottom-up.
     if node.left is not None:
-        node.left = _eliminate_redundant_casts(node.left, telemetry, in_predicate)
+        node.left = _eliminate_redundant_casts(node.left, telemetry, value_context)
     if node.right is not None:
-        node.right = _eliminate_redundant_casts(node.right, telemetry, in_predicate)
+        node.right = _eliminate_redundant_casts(node.right, telemetry, value_context)
     if node.centre is not None:
-        node.centre = _eliminate_redundant_casts(node.centre, telemetry, in_predicate)
+        node.centre = _eliminate_redundant_casts(node.centre, telemetry, value_context)
     if node.parameters:
         node.parameters = [
-            _eliminate_redundant_casts(p, telemetry, in_predicate) for p in node.parameters
+            _eliminate_redundant_casts(p, telemetry, value_context) for p in node.parameters
         ]
     if node.node_type == NodeType.CASE:
         if node.conditions:
             node.conditions = [
-                _eliminate_redundant_casts(c, telemetry, in_predicate) for c in node.conditions
+                _eliminate_redundant_casts(c, telemetry, value_context) for c in node.conditions
             ]
         if node.results:
             node.results = [
-                _eliminate_redundant_casts(r, telemetry, in_predicate) for r in node.results
+                _eliminate_redundant_casts(r, telemetry, value_context) for r in node.results
             ]
         if node.else_result is not None:
             node.else_result = _eliminate_redundant_casts(
-                node.else_result, telemetry, in_predicate
+                node.else_result, telemetry, value_context
             )
 
     if node.node_type != NodeType.CAST:
@@ -103,16 +121,17 @@ def _eliminate_redundant_casts(node, telemetry, in_predicate=False):
 
     telemetry.optimization_remove_redundant_cast += 1
 
-    # Predicate context: the cast's identity is never referenced downstream — the predicate
-    # consumes the value — so substitute the bare operand. Pushdown / row-group pruning /
-    # the IDENTIFIER-keyed predicate rewrites then see the raw column, not an opaque node.
-    if in_predicate:
+    # Value context: the cast's identity is never referenced downstream — the predicate or
+    # the aggregate consumes the value — so substitute the bare operand. Pushdown /
+    # row-group pruning / the IDENTIFIER-keyed predicate rewrites then see the raw column,
+    # not an opaque node.
+    if value_context:
         return operand
 
-    # Projection context: the EXIT schema references the cast column's identity, so a
-    # transparent NESTED wrapper carries the cast's schema_column (keeping its identity and
-    # name) while lowering to just its centre operand — the evaluator aliases the operand's
-    # buffer onto the cast column's identity, with no cast kernel and no copy.
+    # Identity context: the EXIT schema or the group's key list references the cast column's
+    # identity, so a transparent NESTED wrapper carries the cast's schema_column (keeping its
+    # identity and name) while lowering to just its centre operand — the evaluator aliases
+    # the operand's buffer onto the cast column's identity, with no cast kernel.
     nested = Node(node_type=NodeType.NESTED)
     nested.centre = operand
     nested.schema_column = node.schema_column
@@ -132,8 +151,44 @@ class RedundantCastEliminationStrategy(OptimizationStrategy):
 
         elif node.node_type == LogicalPlanStepType.Filter:
             node.condition = _eliminate_redundant_casts(
-                node.condition, self.telemetry, in_predicate=True
+                node.condition, self.telemetry, value_context=True
             )
+            context.optimized_plan[context.node_id] = node
+
+        elif node.node_type in (
+            LogicalPlanStepType.Aggregate,
+            LogicalPlanStepType.AggregateAndGroup,
+        ):
+            # `groups` and `projection` are None on an AggregateAndGroup that
+            # decorrelate_subquery promoted from a bare Aggregate, so each list is guarded
+            # rather than assumed — an unset list is nothing to rewrite, not an error.
+            # Aggregate operands are folded — nothing reads the operand's identity, so the
+            # bare column substitutes and the compiler's agg-operand hoist never fires.
+            if node.aggregates is not None:
+                node.aggregates = [
+                    _eliminate_redundant_casts(a, self.telemetry, value_context=True)
+                    for a in node.aggregates
+                ]
+            # GROUP BY keys are value context too, and must be: the Project above the group
+            # has had the same CAST folded to a NESTED wrapper reading the *operand*, so the
+            # group has to emit the operand for that read to resolve. Substituting the bare
+            # column keeps both sides naming `x`; GroupedAggregateHashedNode re-derives
+            # `group_by_columns` from these nodes after optimization, so the key list
+            # follows the substitution rather than being stranded on the cast's identity.
+            if node.node_type == LogicalPlanStepType.AggregateAndGroup:
+                if node.groups is not None:
+                    node.groups = [
+                        _eliminate_redundant_casts(g, self.telemetry, value_context=True)
+                        for g in node.groups
+                    ]
+                # `projection` is what a positional `GROUP BY 1` resolves against at
+                # physical-node construction — rewrite it the same way the explicit keys
+                # are, or the two spellings of the same GROUP BY would diverge.
+                if node.projection is not None:
+                    node.projection = [
+                        _eliminate_redundant_casts(c, self.telemetry, value_context=True)
+                        for c in node.projection
+                    ]
             context.optimized_plan[context.node_id] = node
 
         return context

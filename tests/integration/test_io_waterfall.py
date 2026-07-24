@@ -48,6 +48,23 @@ class TestIOWaterfallIntegration:
         with pytest.raises(RuntimeError):
             session.trace()
 
+    def test_trace_armed_reports_per_query_arming(self):
+        """`trace_armed` is the supported way to ask whether trace() will
+        return a bundle. A caller that persists traces (e.g. a worker writing
+        them alongside a query's results) must branch on this and not on
+        OPTERYX_TRACE, which is only the default for a per-query variable —
+        the two disagree in both directions, as these two runs show."""
+        disarmed = Session()
+        for _ in disarmed.execute_to_morsels("SET trace TO false; SELECT * FROM $planets;"):
+            pass
+        assert disarmed.trace_armed is False
+
+        armed = Session()
+        for _ in armed.execute_to_morsels("SET trace TO true; SELECT * FROM $planets;"):
+            pass
+        assert armed.trace_armed is True
+        armed.trace()  # must not raise when trace_armed is True
+
     def test_trace_not_in_telemetry(self):
         """Trace data must never appear in QueryTelemetry — it is a
         different concern (an event stream that only exists when tracing is

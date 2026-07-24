@@ -1720,12 +1720,15 @@ class ParquetIOPipeline {
     // (it's a plain C++ aggregate, not exposed to Python), so the binding calls
     // this instead of constructing an HttpTuning on the Cython side.
     void set_http_tuning(long max_host_connections, int max_retries,
-                          double min_bandwidth_bytes_per_s, long timeout_floor_ms) {
+                          double min_bandwidth_bytes_per_s, long timeout_floor_ms,
+                          bool use_multiplexing, bool force_http11) {
         HttpTuning t;
         t.max_host_connections = max_host_connections;
         t.max_retries = max_retries;
         t.min_bandwidth_bytes_per_s = min_bandwidth_bytes_per_s;
         t.timeout_floor_ms = timeout_floor_ms;
+        t.use_multiplexing = use_multiplexing;
+        t.force_http11 = force_http11;
         set_http_tuning(t);
     }
 #endif
