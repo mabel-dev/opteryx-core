@@ -32,5 +32,6 @@ def read(at_date=None, variables=None) -> Morsel:
 def schema():
     # fmt:off
     from opteryx.types.schema import mint_column_identity
-    return RelationSchema(name="$no_table", columns=[SchemaColumn(name="$column", column_type=_lt.INT64, identity=mint_column_identity("$no_table", "$column"))])
+    # EXACT: this relation exists to give `SELECT 1` a single row to project from.
+    return RelationSchema(name="$no_table", columns=[SchemaColumn(name="$column", column_type=_lt.INT64, identity=mint_column_identity("$no_table", "$column"))], row_count_metric=1)
     # fmt:on

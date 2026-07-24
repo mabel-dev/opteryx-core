@@ -124,5 +124,11 @@ def schema():
             fc(name="surface_pressure",    column_type=_lt.FLOAT32, aliases=["surfacePressure"]),
             fc(name="number_of_moons",     column_type=_lt.INT8,    aliases=["numberOfMoons"]),
           ],
+          # EXACT, not an estimate: read() returns a fixed 9-row literal. Declared so
+          # the optimizer does not fall back to _UNKNOWN_ROW_COUNT (1,000,000) — that
+          # fallback compounds through joins (a 2-way self cross join was estimated at
+          # 10^12 rows against an actual 81) and would make any row-count-based
+          # rejection or join ordering nonsense.
+          row_count_metric=9,
       )
       # fmt:on

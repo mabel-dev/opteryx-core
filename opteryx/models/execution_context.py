@@ -7,8 +7,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Iterable, List
 
-from opteryx.types.logical_type import ARRAY, VARIANT, VARCHAR
-from opteryx.variables import SystemVariables, SystemVariablesContainer, VariableOwner, Visibility
+from opteryx.variables import SystemVariables, SystemVariablesContainer, VariableOwner
 
 
 @dataclass
@@ -30,6 +29,14 @@ class ExecutionContext:
             Schema to be used in the execution, defaults to None.
         memberships: Iterable[str], optional
             Groups/roles the user belongs to.
+        entitlements: Iterable[str], optional
+            Platform-level capabilities granted to the caller (e.g. `data_admin`).
+            Distinct from `access_policies`, which are per-dataset pattern/role
+            grants: an entitlement is a property of the CALLER, not of a table.
+            Carried so the engine can report what the caller holds; it does NOT
+            by itself grant anything here — the submitting service still derives
+            row/visibility filters from these before handing over the query.
+            Defaults to empty: absent entitlements must never be assumed.
         variables: dict
             System variables available during execution.
         access_policies: Optional[List[dict]]
@@ -46,6 +53,7 @@ class ExecutionContext:
     user: str = None
     schema: str = None
     memberships: Iterable[str] = None
+    entitlements: Iterable[str] = None
     variables: SystemVariablesContainer = field(init=False)
     access_policies: List[dict] = field(default_factory=list)
     billing_account: str = None
@@ -56,15 +64,18 @@ class ExecutionContext:
         """
         # The initializer is a function rather than an empty constructor so we init here
         object.__setattr__(self, "variables", SystemVariables.snapshot(VariableOwner.USER))
-        self.variables._variables["user_memberships"] = (
-            ARRAY(VARIANT),
-            list(self.memberships or []),
-            VariableOwner.SERVER,
-            Visibility.UNRESTRICTED,
-        )
-        self.variables._variables["external_user"] = (
-            VARCHAR,
-            self.user or "",
-            VariableOwner.SERVER,
-            Visibility.RESTRICTED,
-        )
+        # Stamp this session's identity onto the INTERNAL identity variables. Only the
+        # VALUE is replaced — type/owner/visibility are preserved from the registration
+        # in opteryx/variables.py, which is the single declaration of what each variable
+        # IS. Re-stating that metadata here is how `external_user` came to be
+        # UNRESTRICTED in the table while still being hidden in practice: two
+        # declarations, silently disagreeing. They are all INTERNAL-owned, so a USER
+        # session cannot `SET` any of them (INTERNAL outranks USER) — in particular a
+        # caller cannot grant themselves entitlements.
+        for name, value in (
+            ("user_memberships", list(self.memberships or [])),
+            ("external_user", self.user or ""),
+            ("user_entitlements", list(self.entitlements or [])),
+        ):
+            var_type, _old_value, owner, visibility = self.variables._variables[name]
+            self.variables._variables[name] = (var_type, value, owner, visibility)

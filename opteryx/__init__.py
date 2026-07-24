@@ -83,6 +83,7 @@ def session(
     *,
     user: Optional[str] = None,
     memberships: Optional[Iterable[str]] = None,
+    entitlements: Optional[Iterable[str]] = None,
     schema: Optional[str] = None,
     access_policies: Optional[Iterable[str]] = None,
     billing_account: Optional[str] = None,
@@ -97,7 +98,7 @@ def session(
     should supply it; omitting it attributes usage to the house account.
 
     Example:
-        session = opteryx.session(user="alice", memberships=["opteryx"])
+        session = opteryx.session(user="alice", memberships=["finance"])
         session.execute("SELECT 1")
     """
     from opteryx.query_session import Session
@@ -105,6 +106,7 @@ def session(
     return Session(
         user=user,
         memberships=memberships,
+        entitlements=entitlements,
         schema=schema,
         access_policies=access_policies,
         billing_account=billing_account,

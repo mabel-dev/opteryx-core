@@ -24,9 +24,19 @@ from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.types.schema import RelationSchema
 
+# Datasets that exist ONLY to back a dedicated SQL surface and are therefore not
+# addressable by name in user SQL. `$variables` is reachable exclusively through
+# `SHOW VARIABLES` (see logical_planner.plan_show_variables), so that there is a
+# single surface for reading session variables rather than two that can drift.
+#
+# The flag in WELL_KNOWN_DATASETS below is `suggestable`, which only governs
+# "did you mean?" hints — it does NOT gate access (`$no_table` is suggestable=False
+# and freely queryable). Enforcement lives in binder.visit_scan.
+INTERNAL_ONLY_DATASETS = frozenset({"$variables"})
+
 WELL_KNOWN_DATASETS = {
     "$planets": ("opteryx.managers.virtual_datasets.planet_data", True),
-    "$variables": ("opteryx.managers.virtual_datasets.variables_data", True),
+    "$variables": ("opteryx.managers.virtual_datasets.variables_data", False),
     "$derived": ("opteryx.managers.virtual_datasets.derived_data", False),
     "$no_table": ("opteryx.managers.virtual_datasets.no_table_data", False),
     "$telemetry": ("opteryx.managers.virtual_datasets.telemetry", True),
@@ -51,7 +61,12 @@ def suggest(dataset):
     """Provide suggestions to the user if they gave a table that doesn't exist."""
     from opteryx.utils import suggest_alternative
 
-    known_datasets = (name for name, suggestable in WELL_KNOWN_DATASETS.items() if suggestable)
+    # The value is a (module_path, suggestable) 2-tuple — it MUST be destructured.
+    # Binding it whole to `suggestable` makes the filter always-true (a non-empty
+    # tuple is truthy), which silently suggested every internal dataset.
+    known_datasets = (
+        name for name, (_module_path, suggestable) in WELL_KNOWN_DATASETS.items() if suggestable
+    )
     suggestion = suggest_alternative(dataset, known_datasets)
     if suggestion is not None:
         return (

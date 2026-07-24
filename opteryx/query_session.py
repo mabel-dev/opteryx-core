@@ -38,10 +38,12 @@ from opteryx.exceptions import (
     InvalidCursorStateError,
     MissingSqlStatement,
     ProgrammingError,
+    ResultTooLargeError,
     SqlError,
     UnsupportedSyntaxError,
 )
 from opteryx.managers.billing import DEFAULT_BILLING_ACCOUNT, BillingEventType, write_billing_event
+from opteryx.variables import resolve as _resolve_var
 from opteryx.models import ExecutionContext, QueryTelemetry, TraceBundle
 from opteryx.models.dataframe import DataFrame
 from opteryx.types.logical_type import LogicalCategory
@@ -63,6 +65,7 @@ class Session(DataFrame):
         *,
         user: Optional[str] = None,
         memberships: Optional[Iterable[str]] = None,
+        entitlements: Optional[Iterable[str]] = None,
         schema: Optional[str] = None,
         access_policies: Optional[Iterable[dict]] = None,
         billing_account: Optional[str] = None,
@@ -78,6 +81,8 @@ class Session(DataFrame):
         # input validation consistent with the old Connection
         if memberships and not all(isinstance(v, str) for v in memberships):
             raise ProgrammingError("Invalid memberships provided to Session")
+        if entitlements and not all(isinstance(v, str) for v in entitlements):
+            raise ProgrammingError("Invalid entitlements provided to Session")
         if user and not isinstance(user, str):
             raise ProgrammingError("Invalid user provided to Session")
         if access_policies and not all(isinstance(v, dict) for v in access_policies):
@@ -85,7 +90,11 @@ class Session(DataFrame):
         if billing_account and not isinstance(billing_account, str):
             raise ProgrammingError("Invalid billing_account provided to Session")
         if memberships is None:
-            memberships = ["opteryx"]
+            # `public` — the group every caller is in by virtue of being a caller.
+            # NOT a product/tenant name: a caller who supplied no memberships holds
+            # only the universal one, and the default must not read as membership of
+            # anything more specific than that.
+            memberships = ["public"]
         if access_policies is None:
             access_policies = [{"pattern": "*", "role": "owner"}]
         if not billing_account:
@@ -98,6 +107,9 @@ class Session(DataFrame):
             access_policies=access_policies,
             schema=schema,
             memberships=memberships,
+            # NOT defaulted like `memberships` above: an unsupplied entitlement list
+            # means "holds none", never a house default.
+            entitlements=entitlements,
             billing_account=billing_account,
         )
 
@@ -547,11 +559,25 @@ class Session(DataFrame):
             self._emit_processed_bytes_billing(operation)
             return
 
+        # Runtime backstop for `sql_select_limit`. The plan-time guard only fires when
+        # every input has real statistics AND the estimate is high enough; this counts
+        # what is actually DELIVERED, so it also catches a result the estimate was too
+        # low to predict. One add and one compare PER MORSEL (not per row), at the
+        # boundary where morsels already cross into Python — no per-row cost.
+        row_budget = _resolve_var("sql_select_limit", self.context.variables, 0)
+        delivered_rows = 0
+
         def _yield_morsel(morsel: Morsel):
+            nonlocal delivered_rows
             if not getattr(self._schema, "columns", None):
                 self._schema = _schema_from_morsel(morsel)
                 self._description = self._schema_to_description(self._schema)
                 self._query_status = QueryStatus.SQL_SUCCESS
+            delivered_rows += morsel.num_rows
+            if row_budget and delivered_rows > row_budget:
+                # Raise rather than truncate: handing back the first N rows of a
+                # larger result is a wrong answer the caller cannot detect.
+                raise ResultTooLargeError(rows=delivered_rows, limit=row_budget)
             yield morsel
 
         def _flush_buffer(buffered):

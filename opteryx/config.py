@@ -7,50 +7,7 @@ import json
 import os as _os
 import typing
 from os import environ
-from typing import Optional, Union
-
-
-def memory_allocation_calculation(allocation: Union[float, int]) -> int:
-    """
-    Configure the memory allocation for the database based on the input.
-    If the allocation is between 0 and 1, it's treated as a percentage of the total system memory.
-    If the allocation is greater than 1, it's treated as an absolute value in megabytes.
-
-    Parameters:
-        allocation (float|int): Memory allocation value which could be a percentage or an absolute value.
-
-    Returns:
-        int: Memory size in bytes to be allocated.
-    """
-
-    # Use the compiled platform extension directly. Fail loudly if not present.
-    def _get_total_memory_bytes() -> int:
-        from opteryx.compiled import platform as _platform  # type: ignore
-
-        # Use physical RAM as the total memory reference
-        return int(_platform.physical_memory_total_bytes())
-
-    total_memory = _get_total_memory_bytes()
-    if 0 < allocation < 1:  # Treat as a percentage
-        return int(total_memory * allocation)
-    elif allocation >= 1:  # Treat as an absolute value in MB
-        return int(allocation * 1024 * 1024)
-    else:
-        raise ValueError("Invalid memory allocation value. Must be a positive number.")
-
-
-def system_gigabytes() -> int:
-    """
-    Get the total system memory in gigabytes.
-
-    This uses the compiled platform extension lazily to avoid paying the cost at module import time.
-
-    Returns:
-        int: Total system memory in gigabytes.
-    """
-    from opteryx.compiled import platform as _platform  # type: ignore
-
-    return int(_platform.physical_memory_total_bytes()) // (1024 * 1024 * 1024)
+from typing import Optional
 
 
 def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
@@ -207,17 +164,6 @@ KVSTORE_PREWARM_MEMORY_POOLS: bool = str(get("KVSTORE_PREWARM_MEMORY_POOLS", "1"
 )
 """Pre-create global memory:// pools from configured KV layers at startup."""
 
-# These values are computed lazily via __getattr__ to avoid importing
-# psutil (and making expensive system calls) during module import.
-# Annotate the names so type checkers know about them, but do not assign
-# values here — __getattr__ will compute and cache them on first access.
-MAX_LOCAL_BUFFER_CAPACITY: int
-"""Local buffer pool size in either bytes or fraction of system memory (lazy)."""
-
-CONCURRENT_READS:int = int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
-
-ENABLE_ZERO_COPY: bool = get_bool("ENABLE_ZERO_COPY", True)
-
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 
@@ -246,13 +192,7 @@ clamped, never silently overridden, not even to the physical core count; set 128
 you get 128 workers (oversubscription is warned once, not reduced). Worker count is
 degree-of-parallelism only — it never selects a code path (W=1 is one worker, not the
 serial engine). GROUP BY parallelises by ROW-ROUTING (disjoint key bins, no merge) —
-the only grouped strategy; the ungrouped/stateless paths engage above PARALLEL_MIN_ROWS."""
-
-PARALLEL_MIN_ROWS: int = int(get("PARALLEL_MIN_ROWS", 262_144))
-"""Row-floor for the parallel scheduler (M4). A pipeline whose scan yields fewer
-buffered rows than this runs through the operator's own (single-producer) path —
-below it the per-worker clone + thread setup dominate. Bench-tuned; set to 0 to
-force-engage parallel on any input (testing/benchmarking)."""
+the only grouped strategy."""
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
@@ -273,13 +213,6 @@ if environ.get("FEATURE_DRAKEN_DICT_EXPR_FASTPATH") is not None:
         stacklevel=2,
     )
 
-
-# Parquet pool reader (threaded IO worker + MemoryPool transport) configuration
-IO_POOL_SLOT_BYTES: int = int(get("IO_POOL_SLOT_BYTES", 32 * 1024 * 1024))
-"""Initial per-slot byte budget for the MemoryPool used by the pool reader."""
-
-IO_POOL_SLOT_COUNT: int = int(get("IO_POOL_SLOT_COUNT", 64))
-"""Initial slot count for the MemoryPool used by the pool reader."""
 
 MANIFEST_CACHE_PATH: str = get("OPTERYX_MANIFEST_CACHE_PATH", "")
 """Directory for the on-disk manifest cache. Empty disables the cache.

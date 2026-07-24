@@ -39,9 +39,7 @@ def _max_workers_for(sql, workers=4):
     # the real class before we shadow it with a tracking function below.
     from opteryx.managers.execution import execute  # noqa: F401
 
-    old_floor = config.PARALLEL_MIN_ROWS
     old_workers = config.MAX_EXECUTION_WORKERS
-    config.PARALLEL_MIN_ROWS = 0           # any data fans out
     config.MAX_EXECUTION_WORKERS = workers
     _tp.CppThreadPool = tracking_pool
     try:
@@ -51,7 +49,6 @@ def _max_workers_for(sql, workers=4):
         return max(seen) if seen else 0
     finally:
         _tp.CppThreadPool = real_pool
-        config.PARALLEL_MIN_ROWS = old_floor
         config.MAX_EXECUTION_WORKERS = old_workers
 
 

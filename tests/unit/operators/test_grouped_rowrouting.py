@@ -13,10 +13,10 @@ properties the design rests on:
   - string keys row-route correctly (there is no key-type gate);
   - W=1 runs the SAME row-routing path (one worker), not a serial divert.
 
-Row-routing is the only grouped strategy and engages on any input above the
-row-floor. The serial oracle is obtained by raising the floor above the fixture
-row count (the input is then buffered and keyed by a single engine); the routed
-run uses floor=0 so row-routing engages on the small fixtures.
+Row-routing is the only grouped strategy. The serial oracle is a W=1 run; the
+routed run uses W=N. (These tests previously also set a `PARALLEL_MIN_ROWS`
+row-floor — that config was removed as dead: nothing in the engine ever read it,
+so it never affected which path ran. Only the worker count ever did.)
 """
 import os
 import sys
@@ -25,10 +25,6 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx import config
-
-# Above any fixture's row count — forces the row-floor serial path (single engine).
-_SERIAL_FLOOR = 10_000_000
-
 
 def _collect(sql):
     out = []
@@ -47,25 +43,18 @@ def _sortkey(row):
     return tuple((x is None, x) for x in row)
 
 
-def _run(sql, *, workers, floor):
-    saved = (
-        config.MAX_EXECUTION_WORKERS,
-        config.PARALLEL_MIN_ROWS,
-    )
+def _run(sql, *, workers):
+    saved = config.MAX_EXECUTION_WORKERS
     try:
         config.MAX_EXECUTION_WORKERS = workers
-        config.PARALLEL_MIN_ROWS = floor
         return _collect(sql)
     finally:
-        (
-            config.MAX_EXECUTION_WORKERS,
-            config.PARALLEL_MIN_ROWS,
-        ) = saved
+        config.MAX_EXECUTION_WORKERS = saved
 
 
 def _assert_matches_serial(sql, workers=4):
-    serial = _run(sql, workers=1, floor=_SERIAL_FLOOR)
-    routed = _run(sql, workers=workers, floor=0)
+    serial = _run(sql, workers=1)
+    routed = _run(sql, workers=workers)
     assert sorted(routed, key=_sortkey) == sorted(serial, key=_sortkey), (
         f"row-routing != serial for: {sql}\n"
         f"serial={sorted(serial, key=_sortkey)}\nrouted={sorted(routed, key=_sortkey)}"
@@ -130,15 +119,9 @@ def test_skew_ndv_telemetry_emitted():
     # Row-routing measures bin balance (skew) and exact NDV and emits them as
     # telemetry, without acting on them. Assert the readings are present and
     # self-consistent.
-    saved = (
-        config.MAX_EXECUTION_WORKERS,
-        config.PARALLEL_MIN_ROWS,
-    )
+    saved = config.MAX_EXECUTION_WORKERS
     try:
         config.MAX_EXECUTION_WORKERS = 4
-        # floor=1 buffers a non-empty floor SAMPLE (the skew snapshot) while still
-        # engaging row-routing — floor=0 would route but leave the sample empty.
-        config.PARALLEL_MIN_ROWS = 1
         sess = __import__("opteryx").session()
         group_count = 0
         total_from_counts = 0
@@ -150,10 +133,7 @@ def test_skew_ndv_telemetry_emitted():
             total_from_counts += sum(m.column(names[1]).to_pylist())  # the COUNT(*) col
         rd = sess._telemetry._reading
     finally:
-        (
-            config.MAX_EXECUTION_WORKERS,
-            config.PARALLEL_MIN_ROWS,
-        ) = saved
+        config.MAX_EXECUTION_WORKERS = saved
 
     # The SOLE grouped path is the HASH_REPARTITION PipelineSink (route-raw + parallel
     # per-partition read-out); it emits the generic-pipeline + route-agg telemetry.
@@ -181,22 +161,15 @@ def test_w1_runs_rowrouting_path():
     sql = "SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity"
     _assert_matches_serial(sql, workers=1)
 
-    saved = (
-        config.MAX_EXECUTION_WORKERS,
-        config.PARALLEL_MIN_ROWS,
-    )
+    saved = config.MAX_EXECUTION_WORKERS
     try:
         config.MAX_EXECUTION_WORKERS = 1
-        config.PARALLEL_MIN_ROWS = 0
         sess = __import__("opteryx").session()
         for _ in sess.execute_to_morsels(sql):
             pass
         rd = sess._telemetry._reading
     finally:
-        (
-            config.MAX_EXECUTION_WORKERS,
-            config.PARALLEL_MIN_ROWS,
-        ) = saved
+        config.MAX_EXECUTION_WORKERS = saved
 
     assert rd.get("generic_pipeline_workers") == 1, (
         "W=1 must run the parallel grouped sink (1 worker), not serial"

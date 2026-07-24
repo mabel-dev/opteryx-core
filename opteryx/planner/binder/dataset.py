@@ -626,6 +626,18 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
     node.relation = node.relation.lower()
 
+    # Internal-only relations back a dedicated SQL surface and must not be
+    # addressable by name. `internal_relation` is set by the planner that owns the
+    # surface (e.g. plan_show_variables) and is never set from user SQL, so this
+    # rejects the typed form without blocking the sanctioned one. Checked before
+    # any connector/catalog work so a rejected scan costs nothing.
+    from opteryx.connectors.virtual_data_connector import INTERNAL_ONLY_DATASETS
+
+    if node.relation in INTERNAL_ONLY_DATASETS and not node.internal_relation:
+        raise UnsupportedSyntaxError(
+            f"'{node.relation}' cannot be queried directly; use `SHOW VARIABLES`."
+        )
+
     if node.alias in context.relations:
         raise AmbiguousDatasetError(dataset=node.alias)
 

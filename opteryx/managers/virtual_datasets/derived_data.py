@@ -16,4 +16,5 @@ __all__ = ("schema",)
 
 
 def schema():
-    return RelationSchema(name="$derived", columns=[])
+    # Scratch space for computed expressions — never scanned as a relation.
+    return RelationSchema(name="$derived", columns=[], row_count_metric=0)

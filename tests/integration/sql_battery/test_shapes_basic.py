@@ -61,7 +61,24 @@ STATEMENTS = [
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM testdata.astronauts", 357, 19, None),
         ("SELECT * FROM $no_table", 1, 1, None),
-        ("SELECT * FROM $variables", 39, 5, None),
+        # `SHOW VARIABLES` is the SINGLE surface for session variables. The
+        # `$variables` relation backing it is internal-only and must not be
+        # addressable by name, by any route.
+        # This battery runs without entitlements, so RESTRICTED variables are
+        # withheld — the full list is asserted in tests/unit/security/.
+        ("SHOW VARIABLES", 16, 5, None),
+        ("SELECT * FROM $variables", None, None, UnsupportedSyntaxError),
+        ("SELECT name FROM $variables", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM $VARIABLES", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM (SELECT * FROM $variables) AS x", None, None, UnsupportedSyntaxError),
+        ("SELECT v.name FROM $planets p CROSS JOIN $variables v", None, None, UnsupportedSyntaxError),
+        # Every other `SHOW <words>` form parses to the same ShowVariable node and is
+        # rejected rather than silently answered as if it were SHOW VARIABLES.
+        ("SHOW TIME ZONE", None, None, UnsupportedSyntaxError),
+        ("SHOW ALL", None, None, UnsupportedSyntaxError),
+        # The parser DISCARDS the LIKE pattern, so honouring it is impossible — this
+        # must fail rather than return the unfiltered list.
+        ("SHOW VARIABLES LIKE '%trace%'", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
         (b"SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),

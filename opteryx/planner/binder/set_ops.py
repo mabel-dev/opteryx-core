@@ -9,6 +9,7 @@ from opteryx.expression import ExpressionColumn, NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema
@@ -18,6 +19,113 @@ def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingC
     node.variables = context.execution_context.variables
     node.columns = []
     return node, context
+
+
+def _build_setop_on_condition(
+    left_relations: List[str],
+    right_relations: List[str],
+    col_names: List[str],
+) -> Node:
+    """AND-tree of equality conditions covering every (left_rel, right_rel, col)
+    triple, unbound (source/source_column only) — mirrors
+    plan_rewriter.strategies.intersect_to_inner_join._build_on_condition /
+    except_to_anti_join._build_on_condition exactly, so that delegating to
+    visit_join below resolves it exactly as it would a hand-written ON clause.
+
+    Not imported from plan_rewriter: binder and plan_rewriter are sibling
+    planning phases with no existing cross-import in either direction (plan_rewriter
+    runs BEFORE binding; reaching backward into it here would be a new, backwards
+    layering dependency for one small helper). The two plan_rewriter copies
+    already don't share this with each other either, so a third copy here follows
+    the codebase's existing convention for this specific helper, not a new one.
+    """
+    conditions = []
+    for left_rel in left_relations:
+        for right_rel in right_relations:
+            for col_name in col_names:
+                eq = Node(
+                    node_type=NodeType.COMPARISON_OPERATOR,
+                    value="Eq",
+                    do_not_create_column=True,
+                )
+                eq.left = LogicalColumn(
+                    node_type=NodeType.IDENTIFIER,
+                    source=left_rel,
+                    source_column=col_name,
+                )
+                eq.right = LogicalColumn(
+                    node_type=NodeType.IDENTIFIER,
+                    source=right_rel,
+                    source_column=col_name,
+                )
+                conditions.append(eq)
+
+    while len(conditions) > 1:
+        paired = []
+        for i in range(0, len(conditions), 2):
+            if i + 1 < len(conditions):
+                and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
+                and_node.left = conditions[i]
+                and_node.right = conditions[i + 1]
+                paired.append(and_node)
+            else:
+                paired.append(conditions[i])
+        conditions = paired
+
+    return conditions[0]
+
+
+def _rewrite_wildcard_setop_to_join(
+    self, node: Node, context: BindingContext, join_type: str
+) -> Tuple[Node, BindingContext]:
+    """Convert a wildcard (`SELECT * INTERSECT/EXCEPT SELECT *`) set-op node to a
+    `left semi` / `left anti` Join, at bind time, then delegate to visit_join.
+
+    plan_rewriter.strategies.intersect_to_inner_join / except_to_anti_join already
+    perform this exact rewrite, but only pre-bind, and explicitly skip wildcard
+    projections: column names aren't resolvable before the binder has fetched each
+    relation's schema (see those modules' docstrings — "The binder expands
+    wildcards and handles those nodes directly"). That claim was only half true:
+    visit_intersect/visit_except previously expanded the wildcard's `.columns`
+    but left `node.node_type` as Intersect/Except, which physical_planner has no
+    builder for — `SELECT * INTERSECT SELECT *` reached physical planning and
+    failed with `InvalidInternalStateError: Unexpected logical node encountered`.
+
+    Runs BEFORE this function pops `right_relation_names`' schemas (unlike the
+    ordinary wildcard-expansion path below) because visit_join's own
+    inner_binder(node.on, ...) call needs both sides' schemas present to resolve
+    the ON condition, exactly as it would for a hand-written ON clause.
+
+    Known gap: uses `node.left_relation_names`/`right_relation_names` directly,
+    not reduced via `_set_op_join_common.live_relations` the way the pre-bind
+    rewrite is (that reduction exists for CHAINED/nested set-ops, where a nested
+    set-op's own legs must not be double-counted). A single non-nested wildcard
+    set-op is unaffected; a chained wildcard case
+    (`SELECT * FROM a INTERSECT SELECT * FROM b INTERSECT SELECT * FROM c`) is not
+    verified against this path and may misbehave — flagged rather than solved
+    speculatively, matching how the parallel UNION-side gap was handled.
+    """
+    col_names = []
+    for schema_name in node.left_relation_names:
+        col_names.extend(schema_column.name for schema_column in context.schemas[schema_name].columns)
+
+    on_condition = _build_setop_on_condition(
+        node.left_relation_names,
+        node.right_relation_names,
+        col_names,
+    )
+
+    join_node = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join_node.type = join_type
+    join_node.on = on_condition
+    join_node.using = None
+    join_node.left_relation_names = node.left_relation_names
+    join_node.right_relation_names = node.right_relation_names
+    join_node.columns = []
+
+    from opteryx.planner.binder.join import visit_join
+
+    return visit_join(self, join_node, context)
 
 
 def _columns_for_side(
@@ -358,11 +466,22 @@ def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     coerced_types = _validate_set_operation_types(self, node, context, "INTERSECT")
     node.coerced_types = coerced_types
 
+    is_wildcard = len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD
+
+    # Delegate wildcard, non-ALL INTERSECT to the semi-join rewrite BEFORE popping
+    # right_relation_names' schemas below — visit_join needs both sides present to
+    # resolve the ON condition. INTERSECT ALL has no join-based rewrite (multiset
+    # semantics; matches plan_rewriter.strategies.intersect_to_inner_join's own
+    # exclusion) — it falls through unchanged and still fails loud at physical
+    # planning, exactly as before this fix, by design, not a regression.
+    if is_wildcard and node.modifier != "All":
+        return _rewrite_wildcard_setop_to_join(self, node, context, "left semi")
+
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
     context.relations = {n: "intersect" for n in node.left_relation_names}
 
-    if len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD:
+    if is_wildcard:
         columns = []
         for schema_name in node.left_relation_names:
             for schema_column in context.schemas[schema_name].columns:
@@ -386,11 +505,19 @@ def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     coerced_types = _validate_set_operation_types(self, node, context, "EXCEPT")
     node.coerced_types = coerced_types
 
+    is_wildcard = len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD
+
+    # See the matching comment in visit_intersect — same reasoning, "left anti"
+    # instead of "left semi". EXCEPT ALL falls through unchanged for the same
+    # multiset-semantics reason.
+    if is_wildcard and node.modifier != "All":
+        return _rewrite_wildcard_setop_to_join(self, node, context, "left anti")
+
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
     context.relations = {n: "except" for n in node.left_relation_names}
 
-    if len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD:
+    if is_wildcard:
         columns = []
         for schema_name in node.left_relation_names:
             for schema_column in context.schemas[schema_name].columns:

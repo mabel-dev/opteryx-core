@@ -115,7 +115,7 @@ def main():
             dot_thread.start()
             try:
                 start = time.monotonic_ns()
-                result = opteryx.query(statement, memberships=["opteryx"])
+                result = opteryx.query(statement)
                 result.materialize()
                 stop_event.set()
                 duration = time.monotonic_ns() - start

@@ -90,12 +90,19 @@ uint32_t draken_trace_next_corr_id(void);
 uint64_t draken_trace_now_ns(void);
 
 // One-line, semicolon-separated "key=value" environment identity for this
-// process: build arch (aarch64/x86_64/...) and hostname. Exists so a trace
-// captured on one host is self-describing when compared against a trace from
-// another — e.g. distinguishing a genuine decode-speed regression from an
-// ARM-vs-x86 SIMD dispatch difference, without the comparer having to know
-// or remember out-of-band which host produced which trace. Computed once
-// (lazily, on first call) and cached — cheap to call every query.
+// process: build arch (aarch64/x86_64/...) and host identity. Exists so a
+// trace captured on one host is self-describing when compared against a
+// trace from another — e.g. distinguishing a genuine decode-speed regression
+// from an ARM-vs-x86 SIMD dispatch difference, without the comparer having to
+// know or remember out-of-band which host produced which trace.
+//
+// The OS hostname (gethostname()) is not a usable instance identifier on
+// Cloud Run: its container sandbox always reports "localhost" there. So this
+// first tries the GCP metadata server's fixed link-local address for the
+// real per-instance ID, falling back to gethostname() when that's
+// unreachable (i.e. everywhere that isn't Cloud Run). Computed once (lazily,
+// on first call) and cached; the metadata attempt is bounded to a few hundred
+// ms so a non-GCP first call never stalls a query meaningfully.
 // Returns a static, non-owned, NUL-terminated string; never NULL.
 const char* draken_trace_host_info(void);
 

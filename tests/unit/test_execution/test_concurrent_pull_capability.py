@@ -90,7 +90,6 @@ def test_parallel_distinct_over_virtual_source_no_crash_matches_serial(monkeypat
     reference = _rows(sql)  # serial reference (default floor → serial dedup)
     assert reference, "expected non-empty reference"
 
-    monkeypatch.setattr(config, "PARALLEL_MIN_ROWS", 0)
     monkeypatch.setattr(config, "MAX_EXECUTION_WORKERS", 4)
     for _ in range(12):
         assert _rows(sql) == reference
@@ -99,7 +98,6 @@ def test_parallel_distinct_over_virtual_source_no_crash_matches_serial(monkeypat
 def test_parallel_distinct_multi_column_over_virtual_no_crash(monkeypatch):
     sql = "SELECT DISTINCT id, name FROM $planets"
     reference = _rows(sql)
-    monkeypatch.setattr(config, "PARALLEL_MIN_ROWS", 0)
     monkeypatch.setattr(config, "MAX_EXECUTION_WORKERS", 4)
     for _ in range(12):
         assert _rows(sql) == reference

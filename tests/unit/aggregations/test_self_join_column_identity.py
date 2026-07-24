@@ -75,15 +75,18 @@ def test_self_inner_join_reads_correct_leg():
 
 
 def test_two_tables_sharing_a_column_name():
-    # $planets and $variables both have a `name` column. v.name must return a
-    # variable name, not the planet name from the left leg.
+    # $planets and testdata.satellites both have a `name` column. s.name must return
+    # a satellite name, not the planet name from the left leg.
+    # (Previously joined $variables here; that relation is now internal-only,
+    # reachable only via SHOW VARIABLES.)
     rows = _rows(
-        "SELECT p.id AS k, v.name AS vn "
-        "FROM $planets p CROSS JOIN $variables v ORDER BY p.id LIMIT 3"
+        "SELECT p.id AS k, s.name AS sn "
+        "FROM $planets p CROSS JOIN testdata.satellites s ORDER BY p.id LIMIT 3"
     )
     planet_names = {"Mercury", "Venus", "Earth", "Mars", "Jupiter",
                     "Saturn", "Uranus", "Neptune", "Pluto"}
-    assert all(r["vn"] not in planet_names for r in rows), rows
+    assert rows, rows
+    assert all(r["sn"] not in planet_names for r in rows), rows
 
 
 def test_physical_self_cross_join():

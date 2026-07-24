@@ -111,8 +111,72 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 for col in node.schema.columns
                 if col.identity in context.collected_identities
             ]
+
+            # A Scan/Subquery leg of a UNION whose own Project was pruned away
+            # (bare `SELECT *`, no Project node at all) has a schema with its OWN,
+            # independently-minted column identities (mint_column_identity is
+            # random per relation, by design). `context.collected_identities` at
+            # this point may instead hold the SIBLING leg's identities: identity
+            # collection resets only at a Project node, and this leg has none.
+            # `node_columns` then comes back short even though the full width is
+            # needed — the previous behaviour silently pushed too few columns onto
+            # this leg while its sibling kept its correct width, and the physical
+            # compiler's positional UNION alignment then rejected the plan with
+            # "a UNION leg narrower than the union schema".
+            #
+            # The under-match is not always EMPTY: a `WHERE` clause on this same
+            # leg has its own Filter node, which (unlike Scan) already carries
+            # `.columns` at generic-collection time (line ~74 above) — one of
+            # THIS leg's own genuinely-correct identities (e.g. the predicate's
+            # `id`) gets folded into `collected_identities` in passing, so the
+            # identity intersection below can return a small NON-empty result
+            # that is still wrong (verified: 1-of-20 matched, silently, via the
+            # filter's `id` alone) — checking for emptiness alone misses this.
+            # The only inherently sound signal is width: a UNION requires equal
+            # arity across every leg by construction (see compiler.py — one
+            # width is chosen and applied positionally to all legs), so ANY
+            # match narrower than the union's own resolved width is a bug,
+            # never a legitimate result — there is no query for which a leg is
+            # SUPPOSED to contribute fewer columns than its siblings.
+            #
+            # UNION output is positional, not identity-matched — see compiler.py's
+            # UnionNode handling ("each leg's first N columns become the union's
+            # column_ids"). So an under-matched leg must supply its own first N
+            # schema columns, not an identity intersection against a possibly-
+            # foreign identity set. N is the width the UNION node itself was
+            # just pruned to (stashed below when node_type is Union).
+            #
+            # A Scan/Subquery reached via its OWN Project (which re-seeds
+            # collected_identities correctly before reaching its Scan) already
+            # matches the full width through the ordinary identity path above
+            # and is unaffected — this only fires on an actual shortfall.
+            #
+            # Known gap: does not re-derive N as each nested union's own width if
+            # a UNION leg itself contains a further UNION — context.bag holds one
+            # slot, last-write-wins. No known query pattern in the current test
+            # suite exercises that; flagged rather than solved speculatively.
+            if (
+                node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.Subquery)
+                and context.seen_unions > 0
+                and node.schema.columns
+            ):
+                width = context.bag.get("_union_leg_width", len(node.schema.columns))
+                if len(node_columns) < width:
+                    node_columns = [
+                        LogicalColumn(
+                            node_type=NodeType.IDENTIFIER,
+                            source_column=col.name,
+                            source=(col.origin[0] if col.origin else None),
+                            schema_column=col,
+                        )
+                        for col in node.schema.columns[:width]
+                    ]
+
             # Update the node with the pushed columns
             node.columns = node_columns
+
+            if node.node_type == LogicalPlanStepType.Union:
+                context.bag["_union_leg_width"] = len(node_columns)
 
         if node.node_type == LogicalPlanStepType.Join:
             node_columns = []

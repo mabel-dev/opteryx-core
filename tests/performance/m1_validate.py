@@ -188,7 +188,6 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
     path. Returns median wall/cpu/throughput plus the WP-INSTR readings and pruning
     facts from the LAST run (plan-time facts are run-invariant)."""
     config.MAX_EXECUTION_WORKERS = dop
-    config.PARALLEL_MIN_ROWS = 0  # force the parallel scheduler to engage so dop is real
     config.OPTERYX_INSTRUMENT_ENGINE = True
 
     orig = pool_reader.native_scan_supported
@@ -309,7 +308,6 @@ def _concurrency_sweep(sql: str, dataset_rows: int, qs, per_query_dop: int, repe
 
     config.OPTERYX_INSTRUMENT_ENGINE = False
     config.MAX_EXECUTION_WORKERS = per_query_dop
-    config.PARALLEL_MIN_ROWS = 0
     print(f"\n### CONCURRENCY  {sql}")
     print(f"    (per-query dop={per_query_dop}; aggregate over Q concurrent queries)")
     print(f"  {'path':<9}{'Q':>4}{'wall_ms':>10}{'agg_krows_s':>13}{'cores':>8}{'scale':>8}")

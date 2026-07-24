@@ -13,8 +13,15 @@
 #include "core/trace.hpp"
 #include "core/alloc.h"
 
+#include <cerrno>
 #include <cstring>
 #include <string>
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #if defined(__aarch64__) || defined(__arm64__)
@@ -26,6 +33,94 @@
 #else
 #define DRAKEN_TRACE_ARCH "unknown"
 #endif
+
+namespace {
+
+// GCP's metadata server: a fixed link-local address, reachable without a DNS
+// lookup on GCP and (deliberately) not routable off it — so a non-GCP host
+// fails the connect() fast instead of hanging on a DNS timeout. Bounded to
+// kMetadataTimeoutMs total so this can never meaningfully stall a query.
+constexpr const char* kMetadataAddr = "169.254.169.254";
+constexpr int kMetadataTimeoutMs = 300;
+
+// Returns the GCP compute instance ID, or "" if unreachable — not on GCP, no
+// route, or timed out. Any of those is a normal, expected outcome off Cloud
+// Run and must fall back silently, not fail loud: this is trace-bundle
+// labeling, not a correctness path.
+std::string fetch_gcp_instance_id() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return "";
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    inet_pton(AF_INET, kMetadataAddr, &addr.sin_addr);
+
+    int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return "";
+    }
+    if (rc < 0) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        timeval tv{kMetadataTimeoutMs / 1000, (kMetadataTimeoutMs % 1000) * 1000};
+        rc = select(fd + 1, nullptr, &wfds, nullptr, &tv);
+        if (rc <= 0) {
+            close(fd);
+            return "";
+        }
+        int err = 0;
+        socklen_t len = sizeof(err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+        if (err != 0) {
+            close(fd);
+            return "";
+        }
+    }
+    fcntl(fd, F_SETFL, flags);  // back to blocking for the request/response
+
+    timeval io_tv{kMetadataTimeoutMs / 1000, (kMetadataTimeoutMs % 1000) * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &io_tv, sizeof(io_tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &io_tv, sizeof(io_tv));
+
+    // HTTP/1.0 deliberately: the response is never chunked, so "everything
+    // after the blank line, until the socket closes" is the whole body.
+    static const char kRequest[] =
+        "GET /computeMetadata/v1/instance/id HTTP/1.0\r\n"
+        "Host: metadata.google.internal\r\n"
+        "Metadata-Flavor: Google\r\n\r\n";
+    if (send(fd, kRequest, sizeof(kRequest) - 1, 0) < 0) {
+        close(fd);
+        return "";
+    }
+
+    std::string response;
+    char buf[512];
+    ssize_t n;
+    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+        response.append(buf, static_cast<size_t>(n));
+        if (response.size() > 4096) break;  // instance ID is short; guard a misbehaving peer
+    }
+    close(fd);
+
+    if (response.find(" 200 ") == std::string::npos) return "";  // not a successful metadata response
+    if (response.find("Metadata-Flavor: Google") == std::string::npos) return "";  // not really the metadata server
+
+    size_t body_pos = response.find("\r\n\r\n");
+    if (body_pos == std::string::npos) return "";
+    std::string body = response.substr(body_pos + 4);
+    while (!body.empty() && (body.back() == '\n' || body.back() == '\r' || body.back() == ' ')) {
+        body.pop_back();
+    }
+    return body;
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -55,9 +150,13 @@ uint64_t draken_trace_now_ns(void) {
 
 const char* draken_trace_host_info(void) {
     static const std::string info = [] {
-        char host[256] = {0};
-        if (gethostname(host, sizeof(host) - 1) != 0) {
-            std::strcpy(host, "unknown");
+        std::string host = fetch_gcp_instance_id();
+        if (host.empty()) {
+            char buf[256] = {0};
+            if (gethostname(buf, sizeof(buf) - 1) != 0) {
+                std::strcpy(buf, "unknown");
+            }
+            host = buf;
         }
         return std::string("arch=") + DRAKEN_TRACE_ARCH + ";host=" + host;
     }();

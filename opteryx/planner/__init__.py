@@ -308,6 +308,18 @@ def query_planner(
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
+    # Refuse a query whose result is already known to blow the row limit, BEFORE any
+    # data is read — an accidental cross join should cost nothing, not an hour of IO.
+    # Only fires when every input has real row counts; see result_size_guard.
+    from opteryx.planner.result_size_guard import check_estimated_result_size
+    from opteryx.variables import resolve as _resolve_var
+
+    optimized_plan = check_estimated_result_size(
+        optimized_plan,
+        _resolve_var("sql_select_limit", execution_context.variables, 0),
+        telemetry=telemetry,
+    )
+
     # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()

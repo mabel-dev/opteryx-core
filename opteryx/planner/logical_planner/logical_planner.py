@@ -1391,7 +1391,13 @@ def plan_query(statement: dict) -> LogicalPlan:
             for nid in left_plan.nodes()
             if left_plan[nid].node_type in (LogicalPlanStepType.Project,)
         ]
-        columns = [LogicalPlanNode(NodeType.WILDCARD, value=(None,))]
+        # A BARE wildcard: `value` MUST be None. A non-None `value` marks a QUALIFIED
+        # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
+        # origin matches `value[0]` — `(None,)` matches no relation, so the EXIT bound
+        # to zero columns and the set operation failed with a misleading "UNION leg
+        # narrower than the union schema". Reached whenever the left leg has no
+        # Project node, i.e. a bare `SELECT *` leg.
+        columns = [LogicalPlanNode(NodeType.WILDCARD)]
         if _projection_nodes:
             columns = _projection_nodes[0].columns
         exit_node.columns = columns
@@ -1461,6 +1467,53 @@ def plan_show_columns(statement, **kwargs):
         plan.add_node(step_id, filter_node)
         plan.add_edge(previous_step_id, step_id)
         raise UnsupportedSyntaxError("Unable to filter colmns in SHOW COLUMNS")
+
+    return plan
+
+
+def plan_show_variables(statement, **kwargs):
+    """SHOW VARIABLES — planned as a scan of the `$variables` virtual dataset.
+
+    The parser folds every bare `SHOW <words>` form into a single `ShowVariable`
+    node carrying the trailing words: `SHOW VARIABLES` gives an empty list,
+    `SHOW TIME ZONE` gives ["TIME", "ZONE"]. Only the empty form is ours.
+
+    `SHOW VARIABLES LIKE '<pattern>'` parses to ["LIKE"] with the pattern
+    DISCARDED by the parser, so it cannot be honoured here — it is rejected
+    rather than silently answered with the unfiltered list, which would be a
+    wrong answer wearing the shape of a right one.
+    """
+    root_node = "ShowVariable"
+    plan = LogicalPlan()
+
+    words = [part["value"].upper() for part in statement[root_node]["variable"]]
+    if words == ["LIKE"]:
+        # The parser discards the pattern, so we cannot apply it.
+        raise UnsupportedSyntaxError(
+            "Opteryx does not support `SHOW VARIABLES LIKE`; use `SHOW VARIABLES`."
+        )
+    if words:
+        raise UnsupportedSyntaxError(
+            f"Opteryx does not support 'SHOW {' '.join(words)}'; use `SHOW VARIABLES`."
+        )
+
+    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step.relation = "$variables"
+    from_step.alias = "$variables"
+    # `$variables` is INTERNAL_ONLY_DATASETS — binder.visit_scan rejects it unless
+    # this flag marks the scan as planner-built rather than user-typed.
+    from_step.internal_relation = True
+    step_id = random_string()
+    plan.add_node(step_id, from_step)
+
+    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    # A BARE wildcard: `value` must be None. A non-None `value` marks a QUALIFIED
+    # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
+    # origin matches `value[0]` — so `(None,)` silently expands to nothing.
+    exit_node.columns = [LogicalPlanNode(NodeType.WILDCARD)]
+    previous_step_id, step_id = step_id, random_string()
+    plan.add_node(step_id, exit_node)
+    plan.add_edge(previous_step_id, step_id)
 
     return plan
 
@@ -2121,8 +2174,7 @@ QUERY_BUILDERS = {
     "ShowColumns": plan_show_columns,
     "ShowCreate": plan_show_create_query,
     # "ShowFunctions": show_functions_query,
-    # "ShowVariable": plan_show_variable,  # generic SHOW handler
-    # "ShowVariables": plan_show_variables,
+    "ShowVariable": plan_show_variables,  # generic SHOW handler; only SHOW VARIABLES is supported
     # "Use": plan_use
     "CreateView": plan_create_view,
     "AlterView": plan_alter_view,

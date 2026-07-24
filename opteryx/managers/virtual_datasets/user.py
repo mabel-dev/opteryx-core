@@ -33,9 +33,12 @@ def read(at_date=None, variables=None):
 
     username = _get_variable(variables, "external_user", "")
     memberships = _get_variable(variables, "user_memberships", [])
+    entitlements = _get_variable(variables, "user_entitlements", [])
 
     if callable(getattr(memberships, "to_pylist", None)):
         memberships = memberships.to_pylist()
+    if callable(getattr(entitlements, "to_pylist", None)):
+        entitlements = entitlements.to_pylist()
 
     attributes = []
     values = []
@@ -47,6 +50,12 @@ def read(at_date=None, variables=None):
     for m in memberships:
         attributes.append("membership")
         values.append(str(m))
+
+    # A caller holding no entitlements emits no rows — absence is the honest
+    # representation of "holds none"; it must never render as a blank grant.
+    for e in entitlements:
+        attributes.append("entitlement")
+        values.append(str(e))
 
     vectors = [
         vector_from_sequence(attributes, dtype=DrakenType.VARCHAR),
@@ -69,5 +78,10 @@ def schema():
             sc("value"),
             sc("type"),
         ],
+        # ESTIMATE, not a metric: the row count is one per username + membership +
+        # entitlement, so it varies per caller. Always small (single digits in
+        # practice) — the point is that it must not fall back to
+        # _UNKNOWN_ROW_COUNT (1,000,000), which is wrong by ~5 orders of magnitude.
+        row_count_estimate=8,
     )
     # fmt:on

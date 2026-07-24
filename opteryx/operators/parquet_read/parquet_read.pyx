@@ -46,6 +46,10 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
 from opteryx.types.logical_type import LogicalCategory
+# The single default -> env -> SET resolution point (opteryx/variables.py). Read
+# sites call this instead of `config.X` so what SHOW VARIABLES advertises and what
+# the engine uses cannot drift.
+from opteryx.variables import resolve as _resolve_var
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
@@ -1171,7 +1175,15 @@ cdef class ParquetReadNode(ReaderNode):
             and bool(_pass2_names)
             and (
                 _selectivity_estimate is None
-                or _selectivity_estimate <= config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY
+                # Resolved through the full default -> env -> SET chain, so
+                # `SET parquet_late_materialization_max_selectivity` takes effect for
+                # this query. Falls back to the config constant when this operator was
+                # built without a session (EXPLAIN-only, direct-construction tests).
+                or _selectivity_estimate <= _resolve_var(
+                    "parquet_late_materialization_max_selectivity",
+                    getattr(self.properties, "variables", None),
+                    config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+                )
             )
         )
         topn_active = topn_active and two_pass_eligible
@@ -1709,7 +1721,11 @@ cdef class ParquetReadNode(ReaderNode):
         cdef list pass2_work = []
         cdef dict p1_cache = {}
         cdef Py_ssize_t consecutive_full_pass = 0
-        cdef Py_ssize_t abandon_after = config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER
+        cdef Py_ssize_t abandon_after = _resolve_var(
+            "parquet_late_materialization_abandon_after",
+            getattr(self.properties, "variables", None),
+            config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER,
+        )
         cdef bint abandoned = False
         # This chunked path is a secondary safety net: the primary defense against
         # a non-selective predicate is the selectivity-gated two_pass_eligible

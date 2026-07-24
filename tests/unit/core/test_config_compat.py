@@ -47,16 +47,22 @@ def test_get_bool_mixed_case_and_whitespace(monkeypatch):
 
 
 def test_get_bool_default_true_flag_can_be_disabled(monkeypatch):
-    # ENABLE_ZERO_COPY defaults True: the old bool(str) idiom could never turn it off.
-    monkeypatch.setenv("ENABLE_ZERO_COPY", "false")
+    # A default-True flag must be switchable OFF by the environment — the old
+    # bool(str) idiom could never do this, since any non-empty string is truthy.
+    # Exercised against get_bool directly: this is a property of the parser, and
+    # there is no longer a default-True flag in config to borrow as a vehicle
+    # (ENABLE_ZERO_COPY, the previous one, was removed as dead).
     config = _reload_config()
-    assert config.ENABLE_ZERO_COPY is False
+    monkeypatch.setenv("A_DEFAULT_TRUE_FLAG", "false")
+    assert config.get_bool("A_DEFAULT_TRUE_FLAG", True) is False
+    monkeypatch.setenv("A_DEFAULT_TRUE_FLAG", "0")
+    assert config.get_bool("A_DEFAULT_TRUE_FLAG", True) is False
 
 
 def test_get_bool_default_true_flag_unset(monkeypatch):
-    monkeypatch.delenv("ENABLE_ZERO_COPY", raising=False)
     config = _reload_config()
-    assert config.ENABLE_ZERO_COPY is True
+    monkeypatch.delenv("A_DEFAULT_TRUE_FLAG", raising=False)
+    assert config.get_bool("A_DEFAULT_TRUE_FLAG", True) is True
 
 
 def test_get_bool_unrecognised_value_raises(monkeypatch):

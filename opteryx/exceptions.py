@@ -283,6 +283,34 @@ class UnsupportedSyntaxError(SqlError):
     """Exception raised for unsupported syntax."""
 
 
+class ResultTooLargeError(SqlError):
+    """Raised when a query's result exceeds `sql_select_limit`.
+
+    Deliberately an ERROR and not a truncation: silently returning the first N rows
+    of a larger result is a wrong answer wearing the shape of a right one, and the
+    caller has no way to tell. A caller who genuinely wants the first N says so with
+    a LIMIT — which is what the message tells them to do.
+
+    Raised from two places, because neither alone is sufficient:
+      - PLAN time, from the estimate, but ONLY when every input relation has real
+        row-count statistics (an estimate resting on a fabricated default could
+        reject a query that returns a handful of rows);
+      - RUN time, from the rows actually delivered, which catches the cases the
+        estimate was too low to predict.
+    """
+
+    def __init__(self, rows, limit: int, estimated: bool = False):
+        self.rows = rows
+        self.limit = limit
+        self.estimated = estimated
+        how = "is estimated to return" if estimated else "returned"
+        super().__init__(
+            f"Query {how} {rows:,} rows, which exceeds the {limit:,} row limit "
+            f"(`sql_select_limit`). Add a LIMIT clause to your query to bound the "
+            f"result, e.g. `... LIMIT 1000`."
+        )
+
+
 class IncorrectTypeError(SqlError):
     """Exception raised for incorrect types."""
 
