@@ -216,7 +216,7 @@ class ColumnType:
         except KeyError:
             raise NotImplementedError(
                 f"no dispatch category for physical type {self.physical!r} "
-                f"(NON_NATIVE / unsupported)"
+                f"(unsupported)"
             )
 
     def __str__(self) -> str:

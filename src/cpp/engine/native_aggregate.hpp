@@ -29,7 +29,7 @@
 #include <vector>
 
 #include "executor.hpp"
-#include "scan_filter_demo.hpp"  // NumericFilterOperator::is_valid / read_as_double (reused, not duplicated)
+#include "native_queue_sink.hpp"  // vec_row_is_valid / vec_read_as_double (reused, not duplicated)
 #include "native_decimal.hpp"    // DecimalExpr, DecimalValue, eval_decimal_expr_checked
 
 namespace opteryx::engine {
@@ -79,8 +79,8 @@ inline bool eval_expr_checked(const NativeExpr& e, const CxxMorsel& m, uint32_t 
             return true;
         case ExprKind::Column: {
             const DrakenVector& v = m.columns[e.col_idx].view;
-            if (!NumericFilterOperator::is_valid(v, row)) return false;
-            out = NumericFilterOperator::read_as_double(v, row);
+            if (!vec_row_is_valid(v, row)) return false;
+            out = vec_read_as_double(v, row);
             return true;
         }
         default: {

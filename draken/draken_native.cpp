@@ -1787,7 +1787,7 @@ static int draken_vector_compare_at(const DrakenVector& v,
             return (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
         }
         default:
-            // ARRAY / VECTOR_FP16 / NULL / NON_NATIVE — no natural sort order.
+            // ARRAY / VECTOR_FP16 / NULL — no natural sort order.
             throw std::invalid_argument(
                 "compare_at: ordering not supported for this vector type");
     }
@@ -5185,25 +5185,14 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
 // access so dense/dict/constant shapes all concatenate correctly.
 // ---------------------------------------------------------------------------
 
-static inline size_t concat_fixed_itemsize(DrakenType t) noexcept {
-    switch (t) {
-        case DRAKEN_INT8:
-        case DRAKEN_UINT8:                       return 1u;  // E33
-        case DRAKEN_INT16:
-        case DRAKEN_UINT16:                      return 2u;  // E33
-        case DRAKEN_INT32:
-        case DRAKEN_UINT32:                       // E33
-        case DRAKEN_FLOAT32:
-        case DRAKEN_DATE32:                     return 4u;
-        case DRAKEN_INT64:
-        case DRAKEN_UINT64:                       // E33
-        case DRAKEN_FLOAT64:
-        case DRAKEN_TIMESTAMP64:
-        case DRAKEN_DECIMAL:                    return 8u;
-        case DRAKEN_DECIMAL128:                 return 16u;  // int128 unscaled storage
-        case DRAKEN_INTERVAL:                   return sizeof(DrakenIntervalSlot);
-        default:                                return 0u;
-    }
+// Was its own hand-copied switch (independently missing TIME32/TIME64 relative
+// to the canonical table); now a thin alias so concat, join, and sort/group-by
+// row-gather can't drift apart from each other again. `lt` is the (already
+// uniformity-checked) logical descriptor: only VECTOR_FP16 reads it, for its
+// dimension × 2 stride.
+static inline size_t concat_fixed_itemsize(DrakenType t,
+                                           const LogicalType* lt) noexcept {
+    return draken_type_itemsize(t, lt);
 }
 
 static VectorOwner concat_fixed(const std::vector<const VectorOwner*>& parts,
@@ -5536,7 +5525,7 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
         return concat_bool(parts);
     if (type == DRAKEN_ARRAY)
         return concat_array(parts);
-    const size_t itemsize = concat_fixed_itemsize(type);
+    const size_t itemsize = concat_fixed_itemsize(type, lt);
     if (itemsize == 0u)
         throw std::invalid_argument("concat: unsupported type");
     return concat_fixed(parts, itemsize, type, lt);
@@ -6568,7 +6557,6 @@ NB_MODULE(draken_native, m) {
         .value("VARBINARY",    DRAKEN_VARBINARY)
         .value("VARIANT",      DRAKEN_VARIANT)
         .value("ARRAY",        DRAKEN_ARRAY)
-        .value("NON_NATIVE",   DRAKEN_NON_NATIVE)
         .value("NULL",         DRAKEN_NULL)
         .value("VECTOR_FP16",  DRAKEN_VECTOR_FP16)
         .value("DECIMAL128",   DRAKEN_DECIMAL128)

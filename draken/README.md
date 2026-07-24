@@ -103,7 +103,6 @@ the `.so` directly.
 | `VARBINARY`    | 64      | `bytes`                               | |
 | `VARIANT`      | 65      | `str` (JSON text)                     | Polymorphic JSON value |
 | `ARRAY`        | 80      | `list`                                | |
-| `NON_NATIVE`   | 100     | —                                     | Fallback/unoptimized; avoid in new code |
 | `NULL`         | 101     | `None`                                | Every row null; no data, no validity |
 | `VECTOR_FP16`  | 102     | `list[float]` (embeddings)            | |
 | `DECIMAL128`   | 103     | `decimal.Decimal`                     | int128 unscaled value; precision ≤ 38 |

@@ -33,6 +33,8 @@
 #include "pipeline_buffers.hpp"
 #include "core/string_slot.h"    // DrakenStringSlot, str_length, str_data
 #include "core/vector_owner.h"   // VectorOwner, OwnedBuffer
+#include "core/vector_alloc.h"   // draken_zero_sel — the DRAKEN_NULL gather arm
+#include "logical_type.h"        // LogicalType + draken_type_itemsize (owner only fwd-declares)
 
 namespace opteryx::engine {
 
@@ -45,9 +47,8 @@ struct SortKeySpec {
 // string_predicates.h): a string DrakenVector's `data` points at a
 // DrakenStringArena STRUCT — slots and arena live inside it. NOT a raw
 // DrakenStringSlot array with the arena on the owner; that convention exists in
-// some engine headers (native_hash_join payloads, scan_filter_demo compaction)
-// but mismatches everything the live scan actually produces — flagged, not
-// copied. Read and WRITE the canonical form here.
+// the GROUP BY key store, but mismatches everything the live scan actually
+// produces — flagged, not copied. Read and WRITE the canonical form here.
 inline const DrakenStringArena* string_arena_of(const DrakenVector& v) {
     return static_cast<const DrakenStringArena*>(v.data);
 }
@@ -56,6 +57,11 @@ inline bool sort_row_valid(const DrakenVector& v, uint32_t row) {
     return v.validity == nullptr || ((v.validity[row >> 3] >> (row & 7)) & 1u);
 }
 
+// ORDER BY / sort-KEY string-ness: the types with a defined byte collation.
+// NOT the storage predicate — VARIANT is stored identically (German string) but
+// has no defined ordering, so it must never reach the key comparator. Value-moving
+// paths (gather, join payload) use draken_type_is_string_storage instead; keeping
+// the two apart is what lets VARIANT be carried without becoming sortable.
 inline bool sort_type_is_string(DrakenType t) {
     return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY;
 }
@@ -235,21 +241,61 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
     std::stable_sort(perm.begin(), perm.end(), cmp);
 }
 
+// Zero-row typed column — the courtesy empty-result morsel (schema visibility when a
+// query legitimately returns no rows; the old ExitNode's `at_least_one` contract).
+// String-family columns get a canonical empty DrakenStringArena header (buffers.h:
+// a string vector's `data` points at the arena STRUCT, even when empty).
+inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
+    void* data;
+    if (draken_type_is_string_storage(t)) {
+        auto* sa = static_cast<DrakenStringArena*>(draken_malloc(sizeof(DrakenStringArena)));
+        sa->slots = nullptr; sa->arena = nullptr; sa->length = 0;
+        sa->arena_used = 0; sa->arena_cap = 0; sa->null_bitmap = nullptr;
+        sa->owns_buffers = 0; sa->type = t;
+        data = sa;
+    } else {
+        data = draken_malloc(1);
+    }
+    uint32_t* sel = static_cast<uint32_t*>(draken_malloc(sizeof(uint32_t)));
+    DrakenVector v;
+    v.data = data; v.selection = sel; v.data_length = 0; v.length = 0;
+    v.validity = nullptr; v.type = t; v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
+                                          OwnedBuffer<uint8_t>(nullptr), OwnedBuffer<void>(sel));
+    // TIMESTAMP64/DECIMAL/DECIMAL128 carry their descriptor out-of-band on the owner,
+    // never on DrakenVector itself (draken/logical_type.h) — a zero-row column is no
+    // exception; omitting it here left the courtesy empty-result morsel with a
+    // TIMESTAMP64/DECIMAL column draken treats as a hard error the moment it's
+    // re-encoded (e.g. a query with 0 rows still gets written out to Parquet).
+    c.own->logical_type = lt;
+    c.view = c.own->vec;
+    return c;
+}
+
 // ---- general row gather -----------------------------------------------------------
 // Copy `order[first..first+count)` (global row ids over `ms`, any order) into ONE
 // fresh dense morsel. `row_m`/`row_r` map a global row id to (morsel, local row).
 
-inline size_t gather_elem_size(DrakenType t) {
-    switch (t) {
-        case DRAKEN_INT8: case DRAKEN_UINT8:                          return 1;
-        case DRAKEN_INT16: case DRAKEN_UINT16:                        return 2;
-        case DRAKEN_INT32: case DRAKEN_UINT32: case DRAKEN_FLOAT32:
-        case DRAKEN_DATE32: case DRAKEN_TIME32:                       return 4;
-        case DRAKEN_INT64: case DRAKEN_UINT64: case DRAKEN_FLOAT64: case DRAKEN_DECIMAL:
-        case DRAKEN_TIMESTAMP64: case DRAKEN_TIME64:                  return 8;
-        case DRAKEN_DECIMAL128:                                       return 16;
-        default:                                                       return 0;
-    }
+// Sentinel `order` entry meaning "this output row is NULL in every column" — it
+// addresses no source row at all, so row_m/row_r are NOT consulted for it.
+//
+// Exists for LEFT OUTER / ASOF joins, whose unmatched probe rows must emit a fully
+// NULL build side. Every type arm below already has a null path (for a source row
+// whose validity bit is clear), so this rides that path instead of adding a second
+// one — which is precisely why it costs nothing per type and cannot reintroduce
+// per-type gaps. A caller with no unmatched rows never passes it.
+inline constexpr uint32_t kGatherNullRow = UINT32_MAX;
+
+// Callers reach this only for the plain fixed-width families — string
+// (sort_type_is_string) and BOOL are intercepted earlier in gather_rows with
+// their own row-store encodings, and ARRAY recurses on its child vector — so
+// this is a pure alias to the canonical table, kept in one place so it can't
+// drift from join_elem_size/concat_fixed_itemsize again. `lt` is the column's
+// logical descriptor: only VECTOR_FP16 reads it (its stride is dimension × 2),
+// every other type ignores it.
+inline size_t gather_elem_size(DrakenType t, const LogicalType* lt) {
+    return draken_type_itemsize(t, lt);
 }
 
 inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
@@ -287,13 +333,38 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
         };
 
-        if (sort_type_is_string(t)) {
+        if (t == DRAKEN_NULL) {
+            // Self-describing null (buffers.h): type==NULL ⟹ every row is null,
+            // no data buffer and no validity buffer. Which source rows were picked
+            // is irrelevant — the gather of n rows is just a length-n NULL vector.
+            // `selection` is the shared global zero vector (not owned); `data` is
+            // genuinely nullptr, which is why this cannot go through the width path
+            // below (0 there means "unsupported", not "no bytes by nature").
+            DrakenVector v;
+            v.data = nullptr;
+            v.selection = draken_zero_sel(n > 0 ? n : 1);
+            v.data_length = 0;
+            v.length = n;
+            v.validity = nullptr;
+            v.type = DRAKEN_NULL;
+            v.flags = 0;
+            CxxColumn c;
+            c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(nullptr),
+                                                  OwnedBuffer<uint8_t>(nullptr));
+            c.own->logical_type = src_lt;
+            c.view = c.own->vec;
+            out->columns.push_back(std::move(c));
+            continue;
+        }
+
+        if (draken_type_is_string_storage(t)) {
             // Two-pass string gather into ONE canonical consolidated block:
             // [DrakenStringArena header | slots[n] | arena bytes] — `data` points at
             // the header, exactly what draken's own kernels read (buffers.h contract).
             size_t total_arena = 0;
             for (uint32_t i = 0; i < n; ++i) {
                 uint32_t g = order[first + i];
+                if (g == kGatherNullRow) continue;   // NULL row: no arena bytes
                 const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
                 uint32_t r = row_r[g];
                 if (!sort_row_valid(v, r)) continue;
@@ -317,6 +388,11 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             size_t arena_pos = 0;
             for (uint32_t i = 0; i < n; ++i) {
                 uint32_t g = order[first + i];
+                if (g == kGatherNullRow) {
+                    std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
+                    mark_null(i);
+                    continue;
+                }
                 const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
                 uint32_t r = row_r[g];
                 if (!sort_row_valid(v, r)) {
@@ -359,6 +435,7 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             std::memset(data, 0, dbytes == 0 ? 1 : dbytes);
             for (uint32_t i = 0; i < n; ++i) {
                 uint32_t g = order[first + i];
+                if (g == kGatherNullRow) { mark_null(i); continue; }  // data bit stays 0
                 const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
                 uint32_t r = row_r[g];
                 if (!sort_row_valid(v, r)) { mark_null(i); continue; }
@@ -397,6 +474,11 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             offsets[0] = 0;
             for (uint32_t i = 0; i < n; ++i) {
                 uint32_t g = order[first + i];
+                if (g == kGatherNullRow) {   // empty element range + NULL parent
+                    offsets[i + 1] = offsets[i];
+                    mark_null(i);
+                    continue;
+                }
                 const CxxColumn& sc = ms[row_m[g]]->columns[ci];
                 const DrakenVector& v = sc.view;
                 uint32_t r = row_r[g];
@@ -472,17 +554,23 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             continue;
         }
 
-        size_t es = gather_elem_size(t);
+        size_t es = gather_elem_size(t, src_lt);
         if (es == 0) {
             err.code = 1;
-            err.msg = "gather_rows: unsupported column type (e.g. INTERVAL/VARIANT) "
-                      "— fail loud, never silent corruption";
+            err.msg = "gather_rows: unsupported column type (e.g. VARIANT, or a "
+                      "VECTOR with no dimension descriptor) — fail loud, never "
+                      "silent corruption";
             return nullptr;
         }
         uint8_t* data = static_cast<uint8_t*>(
             draken_malloc((n == 0 ? 1 : static_cast<size_t>(n)) * es));
         for (uint32_t i = 0; i < n; ++i) {
             uint32_t g = order[first + i];
+            if (g == kGatherNullRow) {
+                std::memset(data + static_cast<size_t>(i) * es, 0, es);
+                mark_null(i);
+                continue;
+            }
             const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
             uint32_t r = row_r[g];
             if (!sort_row_valid(v, r)) {

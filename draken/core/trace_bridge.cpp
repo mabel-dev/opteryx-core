@@ -13,16 +13,20 @@
 #include "core/trace.hpp"
 #include "core/alloc.h"
 
-#include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <random>
 #include <string>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <net/if_dl.h>
+#else
+#include <linux/if_packet.h>
+#endif
 
 #if defined(__aarch64__) || defined(__arm64__)
 #define DRAKEN_TRACE_ARCH "aarch64"
@@ -36,88 +40,59 @@
 
 namespace {
 
-// GCP's metadata server: a fixed link-local address, reachable without a DNS
-// lookup on GCP and (deliberately) not routable off it — so a non-GCP host
-// fails the connect() fast instead of hanging on a DNS timeout. Bounded to
-// kMetadataTimeoutMs total so this can never meaningfully stall a query.
-constexpr const char* kMetadataAddr = "169.254.169.254";
-constexpr int kMetadataTimeoutMs = 300;
+// Mirrors Python's uuid.getnode(): the 48-bit MAC address of a network
+// interface, formatted as hex. Local-only (getifaddrs is a syscall, not a
+// network round trip) so it's identical in cost everywhere — dev laptop,
+// Cloud Run, CI — unlike a hostname, which Cloud Run's gVisor sandbox always
+// reports as "localhost".
+uint64_t first_interface_mac() {
+    ifaddrs* ifap = nullptr;
+    if (getifaddrs(&ifap) != 0) return 0;
 
-// Returns the GCP compute instance ID, or "" if unreachable — not on GCP, no
-// route, or timed out. Any of those is a normal, expected outcome off Cloud
-// Run and must fall back silently, not fail loud: this is trace-bundle
-// labeling, not a correctness path.
-std::string fetch_gcp_instance_id() {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return "";
+    uint64_t node = 0;
+    for (ifaddrs* ifa = ifap; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr || (ifa->ifa_flags & IFF_LOOPBACK)) continue;
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(80);
-    inet_pton(AF_INET, kMetadataAddr, &addr.sin_addr);
-
-    int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
-        return "";
-    }
-    if (rc < 0) {
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(fd, &wfds);
-        timeval tv{kMetadataTimeoutMs / 1000, (kMetadataTimeoutMs % 1000) * 1000};
-        rc = select(fd + 1, nullptr, &wfds, nullptr, &tv);
-        if (rc <= 0) {
-            close(fd);
-            return "";
+        const unsigned char* mac = nullptr;
+#if defined(__APPLE__)
+        if (ifa->ifa_addr->sa_family != AF_LINK) continue;
+        auto* sdl = reinterpret_cast<sockaddr_dl*>(ifa->ifa_addr);
+        if (sdl->sdl_alen != 6) continue;
+        mac = reinterpret_cast<const unsigned char*>(LLADDR(sdl));
+#else
+        if (ifa->ifa_addr->sa_family != AF_PACKET) continue;
+        auto* sll = reinterpret_cast<sockaddr_ll*>(ifa->ifa_addr);
+        if (sll->sll_halen != 6) continue;
+        mac = sll->sll_addr;
+#endif
+        bool all_zero = true;
+        for (int i = 0; i < 6; ++i) {
+            if (mac[i] != 0) { all_zero = false; break; }
         }
-        int err = 0;
-        socklen_t len = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
-        if (err != 0) {
-            close(fd);
-            return "";
-        }
+        if (all_zero) continue;  // some virtual interfaces report a zero MAC
+
+        for (int i = 0; i < 6; ++i) node = (node << 8) | mac[i];
+        break;
     }
-    fcntl(fd, F_SETFL, flags);  // back to blocking for the request/response
+    freeifaddrs(ifap);
+    return node;
+}
 
-    timeval io_tv{kMetadataTimeoutMs / 1000, (kMetadataTimeoutMs % 1000) * 1000};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &io_tv, sizeof(io_tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &io_tv, sizeof(io_tv));
+// uuid.getnode()'s own fallback when no real MAC is found: a random 48-bit
+// number with the multicast bit set, per RFC 4122, so it can never collide
+// with (and be mistaken for) a real hardware address.
+uint64_t random_node_id() {
+    std::random_device rd;
+    std::uniform_int_distribution<uint64_t> dist(0, (1ULL << 48) - 1);
+    return dist(rd) | 0x010000000000ULL;
+}
 
-    // HTTP/1.0 deliberately: the response is never chunked, so "everything
-    // after the blank line, until the socket closes" is the whole body.
-    static const char kRequest[] =
-        "GET /computeMetadata/v1/instance/id HTTP/1.0\r\n"
-        "Host: metadata.google.internal\r\n"
-        "Metadata-Flavor: Google\r\n\r\n";
-    if (send(fd, kRequest, sizeof(kRequest) - 1, 0) < 0) {
-        close(fd);
-        return "";
-    }
-
-    std::string response;
-    char buf[512];
-    ssize_t n;
-    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
-        response.append(buf, static_cast<size_t>(n));
-        if (response.size() > 4096) break;  // instance ID is short; guard a misbehaving peer
-    }
-    close(fd);
-
-    if (response.find(" 200 ") == std::string::npos) return "";  // not a successful metadata response
-    if (response.find("Metadata-Flavor: Google") == std::string::npos) return "";  // not really the metadata server
-
-    size_t body_pos = response.find("\r\n\r\n");
-    if (body_pos == std::string::npos) return "";
-    std::string body = response.substr(body_pos + 4);
-    while (!body.empty() && (body.back() == '\n' || body.back() == '\r' || body.back() == ' ')) {
-        body.pop_back();
-    }
-    return body;
+std::string node_id_hex() {
+    uint64_t node = first_interface_mac();
+    if (node == 0) node = random_node_id();
+    char hex[16];
+    std::snprintf(hex, sizeof(hex), "%llx", static_cast<unsigned long long>(node));
+    return hex;
 }
 
 }  // namespace
@@ -149,17 +124,8 @@ uint64_t draken_trace_now_ns(void) {
 }
 
 const char* draken_trace_host_info(void) {
-    static const std::string info = [] {
-        std::string host = fetch_gcp_instance_id();
-        if (host.empty()) {
-            char buf[256] = {0};
-            if (gethostname(buf, sizeof(buf) - 1) != 0) {
-                std::strcpy(buf, "unknown");
-            }
-            host = buf;
-        }
-        return std::string("arch=") + DRAKEN_TRACE_ARCH + ";host=" + host;
-    }();
+    static const std::string info =
+        std::string("arch=") + DRAKEN_TRACE_ARCH + ";host=" + node_id_hex();
     return info.c_str();
 }
 

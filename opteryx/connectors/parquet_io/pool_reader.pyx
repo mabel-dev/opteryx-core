@@ -299,13 +299,25 @@ cdef class CppIOPipeline:
     # C attributes declared in pool_reader.pxd; only method bodies here.
 
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
-                  int64_t pool_size=256*1024*1024):
+                  int64_t pool_size=256*1024*1024,
+                  http_tuning=None):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
         self.pool = MemoryPool(pool_size, name="parquet-io", auto_resize=False)
         self.committed_bytes = 0
         # Workers serialize decoded columns directly into this pool's reserved
         # memory — no intermediate heap buffer, no consumer-side commit() copy.
         wire_pool_sink(self.pipeline, self.pool._pool)
+        # Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-
+        # derived timeout floor) — see HttpTuning's comment in http_client.hpp.
+        # http_tuning is None unless the caller resolved a SET override; when
+        # None, the pipeline leaves HttpClient::default_tuning() (env-derived)
+        # in effect, unchanged from before this existed.
+        if http_tuning is not None:
+            _max_host_connections, _max_retries, _min_bw_bytes_per_s, _timeout_floor_ms = http_tuning
+            self.pipeline.set_http_tuning(
+                <long>_max_host_connections, <int>_max_retries,
+                <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
+            )
 
     def __dealloc__(self):
         if self.pipeline:
@@ -1239,6 +1251,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     null_fillers=None,
     string_types=None,
     limit=None,
+    http_tuning=None,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -1490,6 +1503,7 @@ cpdef IpcRowGroupSource open_ipc_source(
         decode_workers=decode_workers,
         queue_capacity=1024,
         pool_size=dyn_pool_size,
+        http_tuning=http_tuning,
     )
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
@@ -1516,6 +1530,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     footer_bytes_cache=None,
     null_fillers=None,
     string_types=None,
+    http_tuning=None,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -1584,6 +1599,7 @@ cpdef IpcRowGroupSource open_pass2_source(
         decode_workers=decode_workers,
         queue_capacity=1024,
         pool_size=256*1024*1024,
+        http_tuning=http_tuning,
     )
     return src
 

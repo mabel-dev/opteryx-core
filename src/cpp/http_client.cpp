@@ -31,14 +31,18 @@
 namespace {
 
 // ── WP-5 retry / per-request-timeout configuration (env, read once) ──────────
-long http_timeout_floor_ms() {
+// These are the process-wide FALLBACK values only — HttpClient::default_tuning()
+// assembles them into an HttpTuning. A caller (Opteryx's query engine) that
+// wants a per-query SET override never touches these; it builds its own
+// HttpTuning and passes it explicitly to get()/get_many() (see http_client.hpp).
+long http_timeout_floor_ms_env() {
     static long v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_TIMEOUT_FLOOR_MS");
         return e ? std::atol(e) : 10000L;   // 10s floor
     }();
     return v;
 }
-double http_min_bw_bytes_per_s() {
+double http_min_bw_bytes_per_s_env() {
     static double v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_MIN_BW_MBPS");
         double mbps = e ? std::atof(e) : 20.0;   // assume ≥20 Mbps/stream
@@ -46,7 +50,7 @@ double http_min_bw_bytes_per_s() {
     }();
     return v;
 }
-int http_max_retries() {
+int http_max_retries_env() {
     static int v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_MAX_RETRIES");
         return e ? std::atoi(e) : 2;
@@ -68,13 +72,14 @@ int http_max_retries() {
 // across 7/7 runs. Default of 3 trades some throughput for a real safety
 // margin below the observed edge, given the ceiling isn't a clean, jitter-
 // free cutoff in practice; override for environments with a different (or
-// no) such ceiling.
-long http_max_host_connections(long fallback) {
+// no) such ceiling. Callers still clamp against max_connections_ (the CURLSH
+// pool cap) at the call site — this returns the raw configured value only.
+long http_max_host_connections_env() {
     static long v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_MAX_HOST_CONNECTIONS");
         return e ? std::atol(e) : 3L;
     }();
-    return std::min(v, fallback);
+    return v;
 }
 
 std::atomic<uint64_t> g_http_retries{0};
@@ -105,7 +110,8 @@ bool http_status_retryable(long code) {
 // Derive a per-request timeout from the Range header's byte span: a small chunk
 // that stalls should time out in ~floor seconds, not the 60s client default, so
 // it can be retried promptly. Returns the client default when no Range present.
-long request_timeout_ms(const std::map<std::string, std::string>& headers, long fallback_ms) {
+long request_timeout_ms(const std::map<std::string, std::string>& headers, long fallback_ms,
+                         const HttpTuning& tuning) {
     auto it = headers.find("Range");
     if (it == headers.end()) return fallback_ms;
     // "bytes=START-END"
@@ -116,9 +122,9 @@ long request_timeout_ms(const std::map<std::string, std::string>& headers, long 
     long start = std::atol(r.c_str() + eq + 1);
     long end   = std::atol(r.c_str() + dash + 1);
     long size  = (end >= start) ? (end - start + 1) : 0;
-    double bw  = http_min_bw_bytes_per_s();
+    double bw  = tuning.min_bandwidth_bytes_per_s;
     long derived = bw > 0 ? static_cast<long>(size * 1000.0 / bw) : fallback_ms;
-    long floor   = http_timeout_floor_ms();
+    long floor   = tuning.timeout_floor_ms;
     return std::max(floor, derived);
 }
 
@@ -159,6 +165,18 @@ void ensure_curl_global_init() {
 
 uint64_t HttpClient::total_retries() {
     return g_http_retries.load(std::memory_order_relaxed);
+}
+
+HttpTuning HttpClient::default_tuning() {
+    static HttpTuning t = []() {
+        HttpTuning c;
+        c.max_host_connections     = http_max_host_connections_env();
+        c.max_retries               = http_max_retries_env();
+        c.min_bandwidth_bytes_per_s = http_min_bw_bytes_per_s_env();
+        c.timeout_floor_ms          = http_timeout_floor_ms_env();
+        return c;
+    }();
+    return t;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,51 +335,65 @@ HttpClient::~HttpClient() {
 
 std::vector<uint8_t> HttpClient::get(
     const std::string& url,
-    const std::map<std::string, std::string>& headers)
+    const std::map<std::string, std::string>& headers,
+    const HttpTuning* tuning_ptr)
 {
-    CURL* easy = curl_easy_init();
-    if (!easy) throw std::runtime_error("curl_easy_init() failed");
+    HttpTuning tuning = tuning_ptr ? *tuning_ptr : default_tuning();
+    long per_request_timeout_ms = request_timeout_ms(headers, timeout_ms_, tuning);
 
-    ResponseBuffer buf;
+    for (int attempt = 0; ; ++attempt) {
+        CURL* easy = curl_easy_init();
+        if (!easy) throw std::runtime_error("curl_easy_init() failed");
 
-    curl_easy_setopt(easy, CURLOPT_URL,            url.c_str());
-    curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      timeout_ms_);
-    curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
-    curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
-    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
-    curl_easy_setopt(easy, CURLOPT_WRITEDATA,       &buf);
-    configure_ssl(easy);
-    configure_share(easy);
+        ResponseBuffer buf;
 
-    // Build custom header list
-    struct curl_slist* hlist = nullptr;
-    for (const auto& kv : headers) {
-        std::string line = kv.first + ": " + kv.second;
-        hlist = curl_slist_append(hlist, line.c_str());
-    }
-    if (hlist) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
+        curl_easy_setopt(easy, CURLOPT_URL,            url.c_str());
+        curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
+        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      per_request_timeout_ms);
+        curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
+        curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
+        curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
+        curl_easy_setopt(easy, CURLOPT_WRITEDATA,       &buf);
+        configure_ssl(easy);
+        configure_share(easy);
 
-    CURLcode res = curl_easy_perform(easy);
+        // Build custom header list
+        struct curl_slist* hlist = nullptr;
+        for (const auto& kv : headers) {
+            std::string line = kv.first + ": " + kv.second;
+            hlist = curl_slist_append(hlist, line.c_str());
+        }
+        if (hlist) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
 
-    curl_slist_free_all(hlist);
+        CURLcode res = curl_easy_perform(easy);
+        curl_slist_free_all(hlist);
 
-    if (res != CURLE_OK) {
+        bool curl_ok = (res == CURLE_OK);
+        long http_code = 0;
+        if (curl_ok) curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
+        long os_errno = 0;
+        curl_easy_getinfo(easy, CURLINFO_OS_ERRNO, &os_errno);
         curl_easy_cleanup(easy);
-        throw std::runtime_error(
-            std::string("CURL error: ") + curl_easy_strerror(res));
+
+        bool http_ok = curl_ok && http_code < 400;
+        if (http_ok) return std::move(buf.body);
+
+        bool retryable = curl_ok ? http_status_retryable(http_code)
+                                  : curl_result_retryable(res);
+        if (!retryable || attempt >= tuning.max_retries) {
+            if (!curl_ok)
+                throw HttpError(
+                    std::string("get: CURL error: ") + curl_easy_strerror(res) +
+                        " [os_errno=" + std::to_string(os_errno) + "] url=" + url,
+                    retryable, 0);
+            throw HttpError(
+                std::string("get: HTTP ") + std::to_string(http_code) + ": " + url,
+                retryable, http_code);
+        }
+
+        g_http_retries.fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
     }
-
-    long http_code = 0;
-    curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(easy);
-
-    if (http_code >= 400) {
-        throw std::runtime_error(
-            std::string("HTTP ") + std::to_string(http_code) + ": " + url);
-    }
-
-    return buf.body;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,10 +460,13 @@ std::map<std::string, std::string> HttpClient::head(
 // ---------------------------------------------------------------------------
 
 std::vector<std::vector<uint8_t>> HttpClient::get_many(
-    const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests)
+    const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
+    const HttpTuning* tuning_ptr)
 {
     const size_t n = requests.size();
     if (n == 0) return {};
+
+    HttpTuning tuning = tuning_ptr ? *tuning_ptr : default_tuning();
 
     // Per-request context: response buffer + last curl result/status.
     struct RequestCtx {
@@ -452,7 +487,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
         CURLM* multi = curl_multi_init();
         if (!multi) throw std::runtime_error("get_many: curl_multi_init() failed");
-        long host_cap = http_max_host_connections((long)max_connections_);
+        long host_cap = std::min(tuning.max_host_connections, (long)max_connections_);
         curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, host_cap);
         curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
 
@@ -482,7 +517,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
             curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
             // Per-request timeout derived from the Range size (WP-5): a stalled
             // small request times out near the floor, not the 60s client default.
-            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      request_timeout_ms(req_hdrs, timeout_ms_));
+            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      request_timeout_ms(req_hdrs, timeout_ms_, tuning));
             curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
             curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
             curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
@@ -538,7 +573,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
     std::vector<size_t> pending(n);
     for (size_t i = 0; i < n; ++i) pending[i] = i;
 
-    const int max_retries = http_max_retries();
+    const int max_retries = tuning.max_retries;
     for (int attempt = 0; ; ++attempt) {
         fetch(pending);
 

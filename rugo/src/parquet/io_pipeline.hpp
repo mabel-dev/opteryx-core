@@ -1056,13 +1056,15 @@ class ParquetIOPipeline {
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            bytes = tl_http_client().get(url, {{"Range", range_hdr}});
+            bytes = tl_http_client().get(url, {{"Range", range_hdr}},
+                                          http_tuning_set_ ? &http_tuning_ : nullptr);
 
         } else if (path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
             is_remote = true;
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            bytes = tl_http_client().get(path, {{"Range", range_hdr}});
+            bytes = tl_http_client().get(path, {{"Range", range_hdr}},
+                                          http_tuning_set_ ? &http_tuning_ : nullptr);
 
         } else
 #else
@@ -1344,7 +1346,8 @@ class ParquetIOPipeline {
                     reqs.emplace_back(url, std::map<std::string, std::string>{{"Range", range_hdr}});
                 }
                 auto t_fetch = std::chrono::steady_clock::now();
-                remote_buffers = tl_http_client().get_many(reqs);
+                remote_buffers = tl_http_client().get_many(
+                    reqs, http_tuning_set_ ? &http_tuning_ : nullptr);
                 uint64_t batch_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - t_fetch).count();
                 total_read_ns += batch_ns;
@@ -1700,6 +1703,32 @@ class ParquetIOPipeline {
     // standalone-rugo / SELECT-*/ LIKE default of zero string hashing.
     std::vector<uint8_t> hash_key_columns_;
     void set_hash_key_columns(const std::vector<uint8_t>& v) { hash_key_columns_ = v; }
+
+#ifdef RUGO_ENABLE_HTTP
+    // Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-derived
+    // timeout). Set once by the planner, BY VALUE, before any submit — mirrors
+    // decode_workers/hash_key_columns_. NOT stored on HttpClient itself: HttpClient
+    // is thread_local and outlives any one query (see tl_http_client() below), so
+    // read_range() passes &http_tuning_ into get()/get_many() on every call
+    // instead of mutating shared client state. http_tuning_set_ == false (the
+    // default when unset) means "use HttpClient::default_tuning()" — the
+    // env-derived process defaults, unchanged from before this existed.
+    HttpTuning http_tuning_;
+    bool http_tuning_set_ = false;
+    void set_http_tuning(const HttpTuning& t) { http_tuning_ = t; http_tuning_set_ = true; }
+    // Primitive-args overload: Cython declares HttpTuning-by-struct awkwardly
+    // (it's a plain C++ aggregate, not exposed to Python), so the binding calls
+    // this instead of constructing an HttpTuning on the Cython side.
+    void set_http_tuning(long max_host_connections, int max_retries,
+                          double min_bandwidth_bytes_per_s, long timeout_floor_ms) {
+        HttpTuning t;
+        t.max_host_connections = max_host_connections;
+        t.max_retries = max_retries;
+        t.min_bandwidth_bytes_per_s = min_bandwidth_bytes_per_s;
+        t.timeout_floor_ms = timeout_floor_ms;
+        set_http_tuning(t);
+    }
+#endif
 
     // Standalone path (unchanged behaviour): self-constructs an exclusive pool.
     // Kept for the standalone rugo wheel and any caller that doesn't inject one —

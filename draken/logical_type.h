@@ -27,6 +27,8 @@
 #include <deque>
 #include <mutex>
 
+#include "core/buffers.h"   // DrakenType, draken_type_fixed_itemsize
+
 // ---------------------------------------------------------------------------
 // Timestamp unit codes (ascending precision, matches Arrow/pandas convention).
 // ---------------------------------------------------------------------------
@@ -112,6 +114,37 @@ static inline const LogicalType* logical_type_intern(const LogicalType& lt) {
     }
     registry.push_back(lt);
     return &registry.back();
+}
+
+// ---------------------------------------------------------------------------
+// Physical width (bytes) of ONE element, for the row-store style copies that
+// materialize a column value-by-value (join build payload, sort/group-by row
+// gather, vector concat).
+//
+// This is the descriptor-aware layer over draken_type_fixed_itemsize (buffers.h).
+// Almost every fixed-width type's stride is decided by the physical tag alone and
+// comes straight from that canonical table. VECTOR_FP16 is the exception: its
+// `data` is a flat uint16 array strided by the embedding dimension, and the
+// dimension lives ONLY in the logical descriptor — the physical tag cannot answer
+// it. Callers hold the descriptor at every one of these sites, so this takes it
+// rather than each consumer growing its own FP16 special case.
+//
+// Returns 0 for "no flat per-element width", which every caller must treat as
+// unsupported-here: the bit-packed (BOOL), arena-backed (string family) and
+// child-vector (ARRAY) families all carry their own materialization and must be
+// intercepted BEFORE this is reached.
+//
+// A VECTOR_FP16 column with a missing or zero-dimension descriptor is broken, not
+// zero-width — dimension is mandatory for the parameterized physical types (see
+// the header comment above). It returns 0 so the caller fails loud rather than
+// materializing an uninterpretable column.
+// ---------------------------------------------------------------------------
+static inline size_t draken_type_itemsize(DrakenType t, const LogicalType* lt) {
+    if (t == DRAKEN_VECTOR_FP16) {
+        if (lt == nullptr || lt->dimension == 0u) return 0u;
+        return static_cast<size_t>(lt->dimension) * sizeof(uint16_t);
+    }
+    return draken_type_fixed_itemsize(t);
 }
 
 // ---------------------------------------------------------------------------

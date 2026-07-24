@@ -62,8 +62,12 @@ typedef enum {
     // Complex types: 80–99
     DRAKEN_ARRAY          = 80,
 
-    // Catch-all
-    DRAKEN_NON_NATIVE     = 100,  // Unoptimized or fallback-wrapped Arrow types
+    // 100: reserved — permanently retired (was DRAKEN_NON_NATIVE, "unoptimized or
+    //      fallback-wrapped Arrow types"). A migration artefact of the shim that
+    //      existed while the column types were being built out natively; by the time
+    //      PyArrow was banned from the engine (CLAUDE.md §4) nothing constructed one,
+    //      and it had zero producers when removed. Not renumbered — the tag value is
+    //      burned, per the ABI freeze.
 
     // D.11 — new types (added at the end; do NOT renumber anything above)
     DRAKEN_NULL           = 101,  // Self-describing null: type==NULL ⟹ every row null; no data, no validity.
@@ -225,13 +229,33 @@ static inline int draken_dict_sorted_dense(const DrakenVector* v) {
         && (v->flags & DRAKEN_DICT_CODES_DENSE);
 }
 
+// Is `t` stored as a DrakenStringArena (slots + byte arena)? This is a PHYSICAL
+// STORAGE question, not a semantic one — VARIANT holds JSON text in exactly the
+// same German-string layout as the VARCHAR family (see draken_vector_nbytes
+// below, which already groups all four), so anything that MOVES values (row
+// gather, join payload materialization, concat) must treat it as string-shaped.
+//
+// Deliberately NOT the same set as "may be an ORDER BY / GROUP BY key": VARIANT
+// has no defined collation, so key paths keep their own narrower predicate and
+// must not be switched to this one. Storage layout and key eligibility are
+// different questions that happened to share a predicate before.
+static inline int draken_type_is_string_storage(DrakenType t) {
+    return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR
+        || t == DRAKEN_VARBINARY || t == DRAKEN_VARIANT;
+}
+
 // Physical width (bytes) of one element of a fixed-width type's `data` array.
-// Returns 0 for the non-fixed families (bool is bit-packed; string/variant use a
-// string arena; array/fp16/null/non-native have no flat per-element width) — those
-// are handled out-of-band by draken_vector_nbytes below. Values mirror
-// concat_fixed_itemsize in draken_native.cpp; keep the two in step if a type's
-// physical width ever changes. INTERVAL is 16 (== sizeof(DrakenIntervalSlot),
-// pinned by a static_assert in interval_slot.h — not included here to keep this
+// This is the SOLE canonical source for this width — every consumer (join
+// build-side row-store, sort/group-by row-gather, vector concat) calls this
+// instead of hand-copying the switch; they had drifted out of sync with each
+// other and with this table before consolidation (each independently missing
+// a different subset of UINT8/16/32/64, TIME32/64, INTERVAL). Returns 0 for
+// the non-fixed families (bool is bit-packed; string/variant use a string
+// arena; array/fp16/null/non-native have no flat per-element width) — those
+// are handled out-of-band by draken_vector_nbytes below, and by each
+// consumer's own pre-dispatch for bool/string. INTERVAL is 16
+// (== sizeof(DrakenIntervalSlot), pinned by a static_assert in
+// interval_slot.h — expressed as a literal here, not a sizeof, to keep this
 // header C-compatible and dependency-light).
 static inline size_t draken_type_fixed_itemsize(DrakenType t) {
     switch (t) {
@@ -339,7 +363,6 @@ DRAKEN_STATIC_ASSERT(sizeof(DrakenType) == 4, "DrakenType underlying type must b
 DRAKEN_STATIC_ASSERT(DRAKEN_INT64  == 4,   "DrakenType tag renumbered: DRAKEN_INT64");
 DRAKEN_STATIC_ASSERT(DRAKEN_BOOL   == 50,  "DrakenType tag renumbered: DRAKEN_BOOL");
 DRAKEN_STATIC_ASSERT(DRAKEN_VARCHAR == 60, "DrakenType tag renumbered: DRAKEN_VARCHAR");
-DRAKEN_STATIC_ASSERT(DRAKEN_NON_NATIVE == 100, "DrakenType tag renumbered: DRAKEN_NON_NATIVE");
 DRAKEN_STATIC_ASSERT(DRAKEN_DECIMAL128 == 103, "DrakenType tag renumbered: DRAKEN_DECIMAL128");
 DRAKEN_STATIC_ASSERT(DRAKEN_UINT8  == 104, "DrakenType tag renumbered: DRAKEN_UINT8");
 DRAKEN_STATIC_ASSERT(DRAKEN_UINT64 == 107, "DrakenType tag renumbered: DRAKEN_UINT64");

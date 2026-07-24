@@ -94,6 +94,14 @@ TESTS = [
         ("apple", ["APple", "ApPle", "apPle", "APPle"], "APple"),
         ("banana", ["banana", "baNanA", "BANANA"], "banana"),
         ("orange", ["OrAnGe", "or_ange", "orange"], "OrAnGe"),
+        # rearranging parts - separators and camel case
+        ("DATE_FORMAT", ["FORMAT_DATE", "DATE_TRUNC", "CURRENT_DATE"], "FORMAT_DATE"),
+        ("DATE_FORMAT", ["formatdate", "datediff"], "formatdate"),
+        ("BigLittle", ["LittleBig", "BigBig"], "LittleBig"),
+        ("HTTPServer", ["ServerHTTP", "HTTPClient"], "ServerHTTP"),
+        ("snapple", ["apple", "crackle", "pop"], "apple"),
+        ("lengthArrayOf", ["array_of_length", "length_of_array"], "length_of_array"),
+        ("a_b_c_d_e_f", ["fedcba"], None),  # too many parts to rearrange
     ]
 # fmt:on
 

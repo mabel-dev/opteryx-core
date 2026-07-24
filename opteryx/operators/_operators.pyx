@@ -66,29 +66,6 @@ from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIO
 from rugo.parquet_reader cimport FileStats
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 
-# Slice 5a: the C++ morsel-driven engine demo (src/cpp/engine/) — proves the engine
-# processes REAL scan output through a real filter into the REAL output MorselQueue.
-cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil:
-    cdef struct DemoStats:
-        long long rows_in
-        long long rows_out
-    DemoStats run_filter_to_queue(
-        const cppvector[shared_ptr[CxxMorsel]]& morsels, size_t col_idx,
-        double threshold, int dop, MorselQueue* out_q, ErrCtx& err
-    )
-
-# Slice 5b: REAL scanned data through a REAL C++-native NULL-aware SUM/COUNT aggregate
-# Sink (extends slice 2's synthetic grouped-count pattern to genuine on-disk numeric
-# columns, correctly skipping NULLs).
-cdef extern from "engine/scan_aggregate_demo.hpp" namespace "opteryx::engine" nogil:
-    cdef struct AggDemoStats:
-        double sum
-        long long count
-    AggDemoStats run_sum_count(
-        const cppvector[shared_ptr[CxxMorsel]]& morsels, size_t col_idx,
-        int dop, ErrCtx& err
-    )
-
 # ScanPullFn: the streaming scan pull-on-demand callback. LIVE — ``_scan_pull_trampoline``
 # implements it and ``NativePlan.set_scan_source`` hands it to the engine. (The former
 # narrow ``native_engine_real_*`` wrappers and the ``run_real_*``/demo fused pipelines
@@ -99,19 +76,6 @@ ctypedef void (*ScanPullFn)(void* scan_ptr, shared_ptr[CxxMorsel]* out,
 
 cdef extern from "engine/streaming_scan_source.hpp" namespace "opteryx::engine" nogil:
     pass  # makes StreamingScanSource's header available; the engine drives it via ScanPullFn
-cdef extern from "engine/scan_filter_demo.hpp" namespace "opteryx::engine" nogil:
-    cdef enum class CompareOp "opteryx::engine::CompareOp":
-        Gt "opteryx::engine::CompareOp::Gt"
-        GtEq "opteryx::engine::CompareOp::GtEq"
-        Lt "opteryx::engine::CompareOp::Lt"
-        LtEq "opteryx::engine::CompareOp::LtEq"
-        Eq "opteryx::engine::CompareOp::Eq"
-        NotEq "opteryx::engine::CompareOp::NotEq"
-    cdef struct SimplePredicate:
-        size_t col_idx
-        CompareOp op
-        double threshold
-
 # ---- THE ENGINE: the pipeline-graph runner (engine.hpp). The plan compiler
 # (opteryx/managers/execution/compiler.py — planning, Python) builds the graph through
 # the NativePlan builder edge (see below); execution is ONE detached native driver
@@ -210,7 +174,6 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
         size_t new_buffer()
-        size_t new_join_ref()
         void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bint serialize_pull)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
@@ -223,7 +186,6 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[int]* logical_coerce,
                                     const cppvector[uint8_t]* hash_key_columns)
         void set_buffer_source(size_t p, size_t buf)
-        void add_filter(size_t p, cppvector[SimplePredicate] preds)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
                              cppvector[void*] lit_dv, ExprFilterFn fn,
                              cppvector[int] const_col_idx, cppvector[void*] const_scalar_dv)
@@ -237,16 +199,12 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
         void set_pipeline_dop(size_t p, int dop)
         void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
-        void add_join_probe(size_t p, size_t ref, size_t key_idx,
-                            cppvector[size_t] payload_idx)
         void set_queue_sink(size_t p, MorselQueue* q)
         void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
                               cppvector[AggSpec2] specs, size_t buf)
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf)
         void set_buffer_append_sink(size_t p, size_t buf)
-        void set_join_build_sink(size_t p, size_t key_idx, cppvector[size_t] payload_idx,
-                                 size_t ref)
         size_t new_join2_ref()
         void set_join2_build_sink(size_t p, cppvector[size_t] key_idx,
                                   cppvector[size_t] payload_idx, size_t ref,
@@ -2071,24 +2029,6 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
     return True
 
 
-cdef CompareOp _compare_op_from_str(object op) except *:
-    """Map an AST compare-op name ("Gt"/"GtEq"/"Lt"/"LtEq"/"Eq"/"NotEq") to the engine
-    ``CompareOp`` enum. Used by ``NativePlan.add_filter``'s SimplePredicate builder."""
-    if op == "Gt":
-        return CompareOp.Gt
-    elif op == "GtEq":
-        return CompareOp.GtEq
-    elif op == "Lt":
-        return CompareOp.Lt
-    elif op == "LtEq":
-        return CompareOp.LtEq
-    elif op == "Eq":
-        return CompareOp.Eq
-    elif op == "NotEq":
-        return CompareOp.NotEq
-    raise ValueError(f"native engine: unsupported compare op {op!r}")
-
-
 cdef class NativePlan:
     """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
     the Python references (scan plan nodes, compiled expression programs) whose
@@ -2168,9 +2108,6 @@ cdef class NativePlan:
     def new_buffer(self):
         return self._e.new_buffer()
 
-    def new_join_ref(self):
-        return self._e.new_join_ref()
-
     def set_scan_source(self, size_t p, scan, bint serialize_pull=False):
         """Source = the existing native scan, pulled via the GIL trampoline — the ONE
         tracked execution-path Python touch (see engine_cutover_decisions memory).
@@ -2218,17 +2155,6 @@ cdef class NativePlan:
     def set_buffer_source(self, size_t p, size_t buf):
         self._e.set_buffer_source(p, buf)
 
-    def add_filter(self, size_t p, list predicates):
-        """``predicates`` = [(col_idx:int, op:str, threshold:float), ...] ANDed."""
-        cdef cppvector[SimplePredicate] preds
-        cdef SimplePredicate sp
-        for col_idx, op, threshold in predicates:
-            sp.col_idx = <size_t>col_idx
-            sp.op = _compare_op_from_str(op)
-            sp.threshold = <double>threshold
-            preds.push_back(sp)
-        self._e.add_filter(p, preds)
-
     def add_select(self, size_t p, list indices, list names):
         cdef cppvector[size_t] idx
         cdef cppvector[string] nms
@@ -2237,12 +2163,6 @@ cdef class NativePlan:
         for n in names:
             nms.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
         self._e.add_select(p, idx, nms)
-
-    def add_join_probe(self, size_t p, size_t ref, size_t key_idx, list payload_idx):
-        cdef cppvector[size_t] pay
-        for i in payload_idx:
-            pay.push_back(<size_t>i)
-        self._e.add_join_probe(p, ref, key_idx, pay)
 
     def set_queue_sink(self, size_t p, PyMorselQueue q):
         self._e.set_queue_sink(p, q._q)
@@ -2268,12 +2188,6 @@ cdef class NativePlan:
     def set_buffer_append_sink(self, size_t p, size_t buf):
         """Stream this pipeline into a (possibly shared) buffer — UNION ALL legs."""
         self._e.set_buffer_append_sink(p, buf)
-
-    def set_join_build_sink(self, size_t p, size_t key_idx, list payload_idx, size_t ref):
-        cdef cppvector[size_t] pay
-        for i in payload_idx:
-            pay.push_back(<size_t>i)
-        self._e.set_join_build_sink(p, key_idx, pay, ref)
 
     def new_join2_ref(self):
         return self._e.new_join2_ref()

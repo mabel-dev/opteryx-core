@@ -51,6 +51,21 @@ from opteryx.types.logical_type import LogicalCategory
 # the engine uses cannot drift.
 from opteryx.variables import resolve as _resolve_var
 
+cdef tuple _resolve_http_tuning(variables):
+    """Resolve the four SET-able http_* variables (default -> env -> SET, via
+    `resolve()`) into the 4-tuple CppIOPipeline.__cinit__ expects. Bandwidth is
+    stored/SET in Mbps (the human-facing unit) and converted to bytes/s here,
+    matching HttpTuning's C++ field."""
+    cdef double _min_bw_mbps = _resolve_var(
+        "http_min_bandwidth_mbps", variables, config.HTTP_MIN_BANDWIDTH_MBPS)
+    return (
+        _resolve_var("http_max_connections_per_host", variables, config.HTTP_MAX_CONNECTIONS_PER_HOST),
+        _resolve_var("http_max_retries", variables, config.HTTP_MAX_RETRIES),
+        _min_bw_mbps * 1.0e6 / 8.0,
+        _resolve_var("http_request_timeout_floor_ms", variables, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS),
+    )
+
+
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
 import draken.draken_native as _draken_native_parquet
@@ -1291,7 +1306,13 @@ cdef class ParquetReadNode(ReaderNode):
                 filesystem,
                 blob_paths,
                 self._sp_pass1_column_names,
-                decode_workers=config.PARQUET_GCS_IO_WORKERS if connector_type in ("GCS", "GS") else config.PARQUET_LOCAL_IO_WORKERS,
+                decode_workers=_resolve_var(
+                    "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
+                    config.PARQUET_GCS_IO_WORKERS,
+                ) if connector_type in ("GCS", "GS") else _resolve_var(
+                    "parquet_local_io_workers", getattr(self.properties, "variables", None),
+                    config.PARQUET_LOCAL_IO_WORKERS,
+                ),
                 predicates=self._sp_predicate_stats,
                 file_sizes=file_sizes or None,
                 connector=connector_type,
@@ -1299,6 +1320,7 @@ cdef class ParquetReadNode(ReaderNode):
                 footer_bytes_cache=_FOOTER_CACHE,
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
                 string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
+                http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1321,7 +1343,13 @@ cdef class ParquetReadNode(ReaderNode):
             filesystem,
             blob_paths,
             column_names,
-            decode_workers=config.PARQUET_GCS_IO_WORKERS if connector_type in ("GCS", "GS") else config.PARQUET_LOCAL_IO_WORKERS,
+            decode_workers=_resolve_var(
+                    "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
+                    config.PARQUET_GCS_IO_WORKERS,
+                ) if connector_type in ("GCS", "GS") else _resolve_var(
+                    "parquet_local_io_workers", getattr(self.properties, "variables", None),
+                    config.PARQUET_LOCAL_IO_WORKERS,
+                ),
             predicates=self._sp_predicate_stats,
             file_sizes=file_sizes or None,
             connector=connector_type,
@@ -1330,6 +1358,7 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
             limit=self.limit if not has_predicates else None,
+            http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -1590,6 +1619,7 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
+            http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
         )
         self._lm_pass1_done = True
 
@@ -1673,6 +1703,7 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
+            http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
         )
         try:
             while True:

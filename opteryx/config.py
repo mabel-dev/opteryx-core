@@ -180,6 +180,24 @@ never reduced below the historic default. Override via the env var to tune per d
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 """Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
 
+# HTTP client tuning for remote (GCS/HTTP) Parquet range reads — mirrors the C++
+# defaults baked into src/cpp/http_client.cpp so the Python-side code default and
+# the native fallback (when no query resolves a SET override) never disagree.
+HTTP_MAX_CONNECTIONS_PER_HOST: int = int(get("OPTERYX_HTTP_MAX_HOST_CONNECTIONS", 3))
+"""Per-host concurrent-connection cap for get_many() batches. See http_client.cpp's
+http_max_host_connections_env() for the empirical justification of the default."""
+
+HTTP_MAX_RETRIES: int = int(get("OPTERYX_HTTP_MAX_RETRIES", 2))
+"""Retry budget for transient HTTP/transport failures (5xx, 429, connect/timeout/recv errors)."""
+
+HTTP_MIN_BANDWIDTH_MBPS: float = float(get("OPTERYX_HTTP_MIN_BW_MBPS", 20.0))
+"""Assumed floor stream bandwidth (Mbps), used to derive a per-request timeout from the
+Range span so a stalled small request times out promptly rather than waiting the full
+client timeout."""
+
+HTTP_REQUEST_TIMEOUT_FLOOR_MS: int = int(get("OPTERYX_HTTP_TIMEOUT_FLOOR_MS", 10000))
+"""Minimum per-request timeout (ms), regardless of how small the Range span is."""
+
 _max_workers_raw = str(get("MAX_EXECUTION_WORKERS", "auto")).strip().lower()
 MAX_EXECUTION_WORKERS: int = (
     int(_max_workers_raw) if _max_workers_raw.lstrip("-").isdigit() else 0

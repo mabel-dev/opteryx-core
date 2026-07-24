@@ -32,6 +32,37 @@ def is_windows() -> bool:
     return platform.system().lower() == "windows"
 
 
+# Rearranging is factorial in the number of parts; beyond this we only try the
+# name as written. 5 parts is 120 orderings, 6 would be 720.
+MAX_REARRANGE_PARTS: int = 5
+
+
+def _split_name(value: str) -> list:
+    """
+    Split a name into its parts, breaking on non-alphanumeric characters and on
+    camel case boundaries.
+
+    'DATE_FORMAT' -> ['DATE', 'FORMAT']
+    'BigLittle'   -> ['Big', 'Little']
+    'HTTPServer'  -> ['HTTP', 'Server']
+    """
+    parts = []
+    for token in ("".join(ch if ch.isalnum() else " " for ch in value)).split():
+        start = 0
+        for index in range(1, len(token)):
+            previous = token[index - 1]
+            current = token[index]
+            if not current.isupper():
+                continue
+            # 'gL' in 'BigLittle', or the 'PS' in 'HTTPServer' (upper run followed
+            # by a lower - the last upper starts the next word)
+            if not previous.isupper() or (index + 1 < len(token) and token[index + 1].islower()):
+                parts.append(token[start:index])
+                start = index
+        parts.append(token[start:])
+    return [part for part in parts if part]
+
+
 def suggest_alternative(value: str, candidates: Iterable[str]) -> Optional[str]:
     """
     Find closest match using a variation of Levenshtein Distance with additional
@@ -41,7 +72,8 @@ def suggest_alternative(value: str, candidates: Iterable[str]) -> Optional[str]:
     - Is limited to searching for distance less than three.
     - Is case insensitive and ignores non-alphanumeric characters.
     - Tries rearranging parts of the name if an exact or close match is not found
-      in its original form.
+      in its original form. Parts are identified by non-alphanumeric separators
+      ('DATE_FORMAT') and by camel case boundaries ('BigLittle').
 
     This function is designed for quickly identifying likely matches when a user
     is entering field or function names and may have minor typos, casing or
@@ -76,13 +108,16 @@ def suggest_alternative(value: str, candidates: Iterable[str]) -> Optional[str]:
     if result:
         return result
 
-    # If no match was found, and the name contains '_', try rearranging parts
-    if "_" in value:
-        parts = value.split("_")
-        combinations = permutations(parts)
-        for combination in combinations:
-            rearranged_name = "_".join(combination)
-            result = find_best_match(rearranged_name)
+    # If no match was found, try rearranging the parts of the name. Candidates are
+    # compared with their non-alphanumeric characters removed, so the parts are
+    # joined without a separator.
+    parts = _split_name(value)
+    if 1 < len(parts) <= MAX_REARRANGE_PARTS:
+        original = tuple(parts)
+        for combination in permutations(parts):
+            if combination == original:  # already tried, as `name`
+                continue
+            result = find_best_match("".join(combination))
             if result:
                 return result
 

@@ -27,7 +27,7 @@
 
 #include "operator.hpp"
 #include "native_group_sinks.hpp"   // shared engine helpers
-#include "native_hash_join.hpp"     // JoinPayloadColumn, join_elem_size
+#include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "native_sort.hpp"          // gather_rows, sort_row_valid, string helpers
 #include "morsels/cxx_hash.h"       // cxx_hash_c — draken owns the join-key hash
 #include "carchar_join_index.hpp"   // opteryx::carchar::CarcharJoinIndex
@@ -36,15 +36,22 @@ namespace opteryx::engine {
 
 enum class JoinMode : uint8_t { Inner = 0, LeftOuter = 1, Semi = 2, Anti = 3 };
 
-// compute_row_hashes (draken-owned key hash) is shared from native_hash_join.hpp.
-
+// The build side RETAINS its payload columns rather than copying their values into a
+// row-store. `morsels` holds one payload-column-only view per accepted build morsel
+// (a CxxColumn is a shared_ptr to its VectorOwner, so slicing to the payload columns
+// genuinely releases the rest of the morsel); `row_m`/`row_r` map a build row id to
+// (morsel, row within it) — exactly the shape gather_rows already consumes, and the
+// same thing SortSink does with its buffered input. That is what lets the emit path
+// be the engine's ONE row gather for both halves of the output row, instead of a
+// bespoke per-type materializer that has to be taught every new type.
 struct Join2BuildLocal : LocalSinkState {
-    std::vector<JoinPayloadColumn> payload;
-    std::vector<uint64_t> row_hashes;  // parallel to payload rows: the 64-bit key hash
+    std::vector<MorselPtr> morsels;    // payload-column views, in arrival order
+    std::vector<uint32_t> row_m;       // build row id -> index into `morsels`
+    std::vector<uint32_t> row_r;       // build row id -> row within that morsel
+    std::vector<uint64_t> row_hashes;  // parallel to build rows: the 64-bit key hash
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
     uint32_t next_row = 0;
     bool saw_null_key = false;
-    bool types_learned = false;        // corrected payload types from the first real morsel
 };
 struct Join2BuildGlobal : GlobalSinkState {
     std::mutex mtx;
@@ -52,8 +59,16 @@ struct Join2BuildGlobal : GlobalSinkState {
     // combine() under the mutex (single-threaded index construction, exactly as the
     // old unordered_map merge did); probed read-only/concurrently via const methods.
     opteryx::carchar::CarcharJoinIndex index;
-    std::vector<JoinPayloadColumn> payload;
-    std::vector<uint64_t> asof_keys;   // ASOF only: parallel to payload rows
+    std::vector<MorselPtr> morsels;    // every worker's retained views, concatenated
+    std::vector<uint32_t> row_m;       // global build row id -> index into `morsels`
+    std::vector<uint32_t> row_r;       // global build row id -> row within that morsel
+    // Zero-row, plan-typed payload columns. Used ONLY when no build morsel was ever
+    // retained (a build side that streamed zero rows): gather_rows takes its column
+    // count and types from ms.front(), so it needs a schema to emit a LEFT OUTER's
+    // all-NULL build half against. Never consulted when real morsels exist — those
+    // carry the authoritative (data-observed) types.
+    MorselPtr schema_morsel;
+    std::vector<uint64_t> asof_keys;   // ASOF only: parallel to build rows
     // ASOF only: draken hash → index into asof_sorted, materialized once at first
     // probe (ensure_sorted). CarcharJoinIndex stores each key's rows unsorted, so the
     // bisect needs this sorted view — keyed on the same 64-bit hash via a CarcharIndex.
@@ -79,29 +94,28 @@ struct Join2BuildSink : Sink {
           payload_types(std::move(types)), payload_logical(std::move(logical)),
           asof_idx(asof) {}
 
-    // Size+type one payload row-store from the plan-known types — called for BOTH
-    // the global and every worker-local state, so every one of them carries the
-    // full column count/type from the moment it exists, independent of whether any
-    // row ever actually reaches it (the empty-build-side case this whole scheme
-    // exists for).
-    void init_payload(std::vector<JoinPayloadColumn>& payload) const {
-        payload.resize(payload_col_idx.size());
-        for (size_t c = 0; c < payload_col_idx.size(); ++c) {
-            payload[c].type = payload_types[c];
-            payload[c].elem_size = join_elem_size(payload_types[c]);
-            payload[c].logical = payload_logical[c];
-        }
+    // Zero-row payload columns at the PLAN-known types. This is the fallback schema
+    // for a build side that streams zero rows (a filtered-to-empty subquery): with no
+    // retained morsel there is nothing for gather_rows to read a column count or type
+    // from, and a LEFT OUTER still has to emit an all-NULL build half. When any real
+    // morsel was retained this is never consulted — observed types beat plan types.
+    MorselPtr make_schema_morsel() const {
+        auto m = std::make_shared<CxxMorsel>();
+        m->columns.reserve(payload_col_idx.size());
+        for (size_t c = 0; c < payload_col_idx.size(); ++c)
+            m->columns.push_back(make_empty_col(payload_types[c], payload_logical[c]));
+        m->names.resize(payload_col_idx.size());
+        m->zero_col_rows = 0;
+        return m;
     }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         auto g = std::make_unique<Join2BuildGlobal>();
-        init_payload(g->payload);
+        g->schema_morsel = make_schema_morsel();
         return g;
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
-        auto l = std::make_unique<Join2BuildLocal>();
-        init_payload(l->payload);
-        return l;
+        return std::make_unique<Join2BuildLocal>();
     }
 
     SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState& ls,
@@ -109,26 +123,25 @@ struct Join2BuildSink : Sink {
         auto& l = static_cast<Join2BuildLocal&>(ls);
         uint32_t rows = in->num_rows();
         if (rows == 0) return SinkResult::CONTINUE;
-        // The plan-known payload types (init_payload) exist for the empty-build case,
-        // but the DATA is authoritative: learn each payload column's real type from the
-        // first non-empty morsel. This corrects a plan that couldn't resolve a build
-        // column's type and defaulted it (e.g. an aggregate output → VARCHAR), which
-        // would otherwise materialize the column through the wrong type arm.
-        if (!l.types_learned) {
-            for (size_t c = 0; c < l.payload.size(); ++c) {
-                DrakenType t = in->columns[payload_col_idx[c]].view.type;
-                l.payload[c].type = t;
-                l.payload[c].elem_size = join_elem_size(t);
-            }
-            l.types_learned = true;
-        }
-        for (size_t c = 0; c < l.payload.size(); ++c) {
-            if (l.payload[c].elem_size == 0) {
-                err.code = 1;
-                err.msg = "Join2BuildSink: unsupported payload column type";
-                return SinkResult::CONTINUE;
-            }
-        }
+        // Retain this morsel's PAYLOAD COLUMNS ONLY. A CxxColumn is a shared_ptr to
+        // its VectorOwner, so copying just the payload columns keeps those buffers
+        // alive and lets every other column of `in` be released when the build
+        // pipeline drops it. No values are copied and nothing is decompressed: a
+        // dict-encoded build column stays dict-encoded until the probe gathers it.
+        //
+        // There is no payload TYPE check here any more, and no type learning: the
+        // retained vectors ARE the types, and the emit path is the same gather every
+        // other operator uses. A payload column is only ever carried, never compared,
+        // so its type is not the join's business.
+        auto view = std::make_shared<CxxMorsel>();
+        view->columns.reserve(payload_col_idx.size());
+        for (size_t pc : payload_col_idx) view->columns.push_back(in->columns[pc]);
+        view->names.resize(payload_col_idx.size());
+        view->zero_col_rows = rows;
+        const uint32_t mi = static_cast<uint32_t>(l.morsels.size());
+        const uint32_t rows_before = l.next_row;
+        l.morsels.push_back(std::move(view));
+
         // Draken owns the key hash for the whole morsel; per-row nullness is read from
         // the key columns (not the hash) so NULL keys are excluded as before.
         std::vector<uint64_t> rowh;
@@ -147,18 +160,18 @@ struct Join2BuildSink : Sink {
             if (asof_idx >= 0
                     && !sort_row_valid(in->columns[static_cast<size_t>(asof_idx)].view, i))
                 continue;   // NULL asof value never satisfies the MATCH_CONDITION
-            for (size_t c = 0; c < payload_col_idx.size(); ++c) {
-                l.payload[c].append_row(in->columns[payload_col_idx[c]].view, i, err,
-                                        "Join2BuildSink: NULL payload value is not "
-                                        "supported");
-                if (err.code != 0) return SinkResult::CONTINUE;
-            }
+            // Record WHERE the row lives instead of copying its values out.
+            l.row_m.push_back(mi);
+            l.row_r.push_back(i);
             if (asof_idx >= 0)
                 l.asof_keys.push_back(
                     sort_num_key(in->columns[static_cast<size_t>(asof_idx)].view, i));
-            l.row_hashes.push_back(rowh[i]);   // parallel to the payload row just added
+            l.row_hashes.push_back(rowh[i]);   // parallel to the build row just added
             ++l.next_row;
         }
+        // Every row was NULL-keyed (or NULL-asof): nothing addresses this morsel, so
+        // don't pin its buffers for the lifetime of the build table.
+        if (l.next_row == rows_before) l.morsels.pop_back();
         return SinkResult::CONTINUE;
     }
 
@@ -167,48 +180,28 @@ struct Join2BuildSink : Sink {
         auto& l = static_cast<Join2BuildLocal&>(ls);
         std::lock_guard<std::mutex> lk(g.mtx);
         g.saw_null_key = g.saw_null_key || l.saw_null_key;
-        // Adopt the data-learned payload types (a worker that saw rows is authoritative;
-        // all workers see the same column types). The global keeps the plan types only
-        // when NO worker ever saw a row (the empty-build case init_payload exists for).
-        if (l.types_learned) {
-            for (size_t c = 0; c < g.payload.size(); ++c) {
-                g.payload[c].type = l.payload[c].type;
-                g.payload[c].elem_size = l.payload[c].elem_size;
-            }
-        }
-        // g.payload and l.payload are both pre-sized/typed from the same plan-known
-        // payload_types (make_global/make_local) — always the same shape, even when
-        // this worker's local never saw a row (its raw/arena vectors are then simply
-        // empty, so the appends below are no-ops).
-        uint32_t offset = g.total_rows;
-        for (size_t c = 0; c < g.payload.size(); ++c) {
-            JoinPayloadColumn& gcol = g.payload[c];
-            JoinPayloadColumn& lcol = l.payload[c];
-            if (join_type_is_string(gcol.type)) {
-                uint32_t arena_base = static_cast<uint32_t>(gcol.arena.size());
-                gcol.arena.insert(gcol.arena.end(), lcol.arena.begin(), lcol.arena.end());
-                size_t local_rows = lcol.elem_size ? lcol.raw.size() / lcol.elem_size : 0;
-                for (size_t r = 0; r < local_rows; ++r) {
-                    const auto* slot = reinterpret_cast<const DrakenStringSlot*>(
-                        lcol.raw.data() + r * lcol.elem_size);
-                    DrakenStringSlot rebased;
-                    if (str_is_inline(slot)) rebased = *slot;
-                    else str_clone_with_offset(&rebased, slot,
-                                               slot->ext.arena_offset + arena_base);
-                    const uint8_t* rb = reinterpret_cast<const uint8_t*>(&rebased);
-                    gcol.raw.insert(gcol.raw.end(), rb, rb + sizeof(DrakenStringSlot));
-                }
-            } else {
-                gcol.raw.insert(gcol.raw.end(), lcol.raw.begin(), lcol.raw.end());
-            }
-            merge_payload_validity(gcol, lcol, lcol.row_count(), offset);
+        // Concatenate this worker's retained views, then re-base its row addresses:
+        // a local morsel index becomes a global one by adding the number of morsels
+        // already present. No value copying and — the point of the whole exercise —
+        // no string-arena rebasing, because no arena was ever built: the slots still
+        // live in the source vectors, which we hold alive.
+        const uint32_t morsel_off = static_cast<uint32_t>(g.morsels.size());
+        const uint32_t row_off = g.total_rows;
+        g.morsels.insert(g.morsels.end(),
+                         std::make_move_iterator(l.morsels.begin()),
+                         std::make_move_iterator(l.morsels.end()));
+        g.row_m.reserve(g.row_m.size() + l.next_row);
+        g.row_r.reserve(g.row_r.size() + l.next_row);
+        for (uint32_t r = 0; r < l.next_row; ++r) {
+            g.row_m.push_back(morsel_off + l.row_m[r]);
+            g.row_r.push_back(l.row_r[r]);
         }
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
         // Insert this worker's rows into the global index at the global row offset.
-        // row_hashes[r] is the key hash of local payload row r → global row offset+r.
+        // row_hashes[r] is the key hash of local build row r → global row row_off+r.
         g.index.reserve(g.total_rows + l.next_row);
         for (uint32_t r = 0; r < l.next_row; ++r)
-            g.index.insert_row(l.row_hashes[r], static_cast<int64_t>(offset + r));
+            g.index.insert_row(l.row_hashes[r], static_cast<int64_t>(row_off + r));
         g.total_rows += l.next_row;
     }
 
@@ -254,128 +247,54 @@ struct Join2ProbeOperator : Operator {
                            ErrCtx& err) {
         const Join2BuildGlobal& g = *ref->g;
         uint32_t n = static_cast<uint32_t>(build_rows.size());
+        // The schema morsel always carries exactly one column per build payload
+        // column, whether or not any row was ever retained.
+        const size_t payload_col_count =
+            g.schema_morsel ? g.schema_morsel->columns.size() : 0;
         auto out = std::make_shared<CxxMorsel>();
         out->zero_col_rows = n;
-        out->columns.reserve(g.payload.size() + probe_payload_idx.size());
-        size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
+        out->columns.reserve(payload_col_count + probe_payload_idx.size());
 
-        for (const JoinPayloadColumn& col : g.payload) {
-            uint8_t* vbits = nullptr;
-            auto mark_null = [&](uint32_t i) {
-                if (vbits == nullptr) {
-                    vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
-                    std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
-                }
-                vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
-            };
-            // kNoBuildRow: LEFT OUTER's unmatched probe row (no build row at all).
-            // Otherwise NULL iff the build row's own payload value was NULL — the
-            // build side's own validity bitmap (lazily allocated, see
-            // JoinPayloadColumn::note_null), not the row-store row's absence.
-            auto row_is_null = [&](uint32_t build_row) {
-                return build_row == kNoBuildRow
-                    || (!col.validity.empty()
-                        && !((col.validity[build_row >> 3] >> (build_row & 7)) & 1u));
-            };
-            if (join_type_is_string(col.type)) {
-                const auto* src_slots =
-                    reinterpret_cast<const DrakenStringSlot*>(col.raw.data());
-                const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
-                size_t total_arena = 0;
-                for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) continue;
-                    const auto* slot = src_slots + static_cast<uint32_t>(build_rows[i]);
-                    if (!str_is_inline(slot)) total_arena += str_length(slot);
-                }
-                size_t slots_off = sizeof(DrakenStringArena);
-                size_t arena_off = slots_off
-                    + static_cast<size_t>(n == 0 ? 1 : n) * sizeof(DrakenStringSlot);
-                uint8_t* blk = static_cast<uint8_t*>(draken_malloc(arena_off + total_arena));
-                auto* sa = reinterpret_cast<DrakenStringArena*>(blk);
-                auto* dst = reinterpret_cast<DrakenStringSlot*>(blk + slots_off);
-                uint8_t* out_arena = total_arena > 0 ? blk + arena_off : nullptr;
-                sa->slots = dst; sa->arena = out_arena; sa->length = n;
-                sa->arena_used = total_arena; sa->arena_cap = total_arena;
-                sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
-                size_t arena_pos = 0;
-                for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) {
-                        std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
-                        mark_null(i);
-                        continue;
+        // Build payload: the engine's ONE row gather — the same call the probe half
+        // makes below. The build side is not materialized into a row-store; its
+        // columns were retained by the sink and are addressed by (morsel, row), which
+        // is exactly what gather_rows consumes. Consequence: the set of types a join
+        // can CARRY is now identical to the set gather_rows supports, for both halves.
+        if (payload_col_count > 0) {
+            // No retained morsel means the build side streamed zero rows; fall back to
+            // the plan-typed zero-row schema so an all-NULL LEFT OUTER half still has
+            // a column count and types to be built against.
+            const bool empty_build = g.morsels.empty();
+            std::vector<MorselPtr> schema_only;
+            if (empty_build) schema_only.push_back(g.schema_morsel);
+            const std::vector<MorselPtr>& bms = empty_build ? schema_only : g.morsels;
+            if (empty_build) {
+                // gather_rows recurses into an ARRAY column's child vector, which a
+                // zero-row schema column does not carry — fail loud rather than read
+                // an uninitialized child view.
+                for (const CxxColumn& c : bms.front()->columns) {
+                    if (c.view.type == DRAKEN_ARRAY) {
+                        err.code = 1;
+                        err.msg = "Join2Probe: ARRAY build payload with an empty build "
+                                  "side has no child vector to emit NULLs against — "
+                                  "fail loud, never silent corruption";
+                        return nullptr;
                     }
-                    const auto* slot = src_slots + static_cast<uint32_t>(build_rows[i]);
-                    if (str_is_inline(slot)) dst[i] = *slot;
-                    else {
-                        uint32_t slen = str_length(slot);
-                        std::memcpy(out_arena + arena_pos, str_data(slot, src_arena), slen);
-                        str_clone_with_offset(&dst[i], slot,
-                                              static_cast<uint32_t>(arena_pos));
-                        arena_pos += slen;
-                    }
-                }
-                uint32_t* sel = static_cast<uint32_t*>(
-                    draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-                for (uint32_t i = 0; i < n; ++i) sel[i] = i;
-                DrakenVector v;
-                v.data = sa; v.selection = sel; v.data_length = n; v.length = n;
-                v.validity = vbits; v.type = col.type;
-                v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-                CxxColumn c;
-                c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
-                                                      OwnedBuffer<uint8_t>(vbits),
-                                                      OwnedBuffer<void>(sel));
-                c.own->logical_type = col.logical;
-                c.view = c.own->vec;
-                out->columns.push_back(std::move(c));
-                continue;
-            }
-            void* data;
-            if (join_type_is_bool(col.type)) {
-                // Re-pack the row-store's unpacked bytes into the canonical bit
-                // layout. An unmatched row leaves its bit 0 and is marked NULL —
-                // the validity mask, not the bit, carries "no build row".
-                uint8_t* bits = join_alloc_bool_bits(n);
-                for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) {
-                        mark_null(i);
-                        continue;
-                    }
-                    if (col.raw[static_cast<uint32_t>(build_rows[i])])
-                        bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-                }
-                data = bits;
-            } else {
-                data = draken_malloc(
-                    static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
-                uint8_t* dst = static_cast<uint8_t*>(data);
-                for (uint32_t i = 0; i < n; ++i) {
-                    if (row_is_null(static_cast<uint32_t>(build_rows[i]))) {
-                        std::memset(dst + static_cast<size_t>(i) * col.elem_size, 0,
-                                    col.elem_size);
-                        mark_null(i);
-                        continue;
-                    }
-                    std::memcpy(dst + static_cast<size_t>(i) * col.elem_size,
-                                col.raw.data()
-                                    + static_cast<size_t>(static_cast<uint32_t>(build_rows[i])) * col.elem_size,
-                                col.elem_size);
                 }
             }
-            uint32_t* sel = static_cast<uint32_t*>(
-                draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-            for (uint32_t i = 0; i < n; ++i) sel[i] = i;
-            DrakenVector v;
-            v.data = data; v.selection = sel; v.data_length = n; v.length = n;
-            v.validity = vbits; v.type = col.type;
-            v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-            CxxColumn c;
-            c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                                  OwnedBuffer<uint8_t>(vbits),
-                                                  OwnedBuffer<void>(sel));
-            c.own->logical_type = col.logical;
-            c.view = c.own->vec;
-            out->columns.push_back(std::move(c));
+            std::vector<uint32_t> order(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                uint32_t br = static_cast<uint32_t>(build_rows[i]);
+                // LEFT OUTER / ASOF unmatched probe row: no build row exists, so hand
+                // gather_rows its null-row sentinel. A build row that EXISTS but holds
+                // a NULL value needs nothing here — the source vector's own validity
+                // already says so and the gather honours it.
+                order[i] = (br == kNoBuildRow) ? kGatherNullRow : br;
+            }
+            MorselPtr gathered = gather_rows(bms, order, 0, n, g.row_m, g.row_r,
+                                             bms.front()->names, err);
+            if (err.code != 0 || gathered == nullptr) return nullptr;
+            for (CxxColumn& c : gathered->columns) out->columns.push_back(std::move(c));
         }
 
         // Probe payload: the engine's one row gather (validity/strings/descriptors).

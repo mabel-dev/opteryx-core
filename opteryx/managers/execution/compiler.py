@@ -758,7 +758,7 @@ class _Compiler:
     # sort_key_type_supported() in src/cpp/engine/native_sort.hpp exactly
     # (native_group_sinks.hpp's key_append/key_append_phys reuse the same
     # header's gather_elem_size() for the identical purpose, over the same
-    # excluded set). ARRAY, INTERVAL, VARIANT, NON_NATIVE, NULL, VECTOR_FP16
+    # excluded set). ARRAY, INTERVAL, VARIANT, NULL, VECTOR_FP16
     # are excluded: unhashable/unorderable as a plain key, and today they only
     # fail loud deep in the native sink/sort with a generic RuntimeError.
     # Catching it HERE, at plan time, names the actual column and type.
@@ -1237,6 +1237,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.expression import get_all_nodes_of_type
         from opteryx.operators._operators import bytecode_is_all_c_native
+        from opteryx.variables import resolve as _resolve_var
 
         if not scan.columns and not getattr(scan, "predicates", None):
             # R1: zero-projection, no predicate — a bare COUNT(*) shape with
@@ -1468,7 +1469,11 @@ class _Compiler:
             # a remote connector can never reach here. This used to branch to a GCS budget
             # on the connector type — unreachable, and it advertised a remote capability
             # this path structurally does not have.
-            decode_workers=config.PARQUET_LOCAL_IO_WORKERS,
+            decode_workers=_resolve_var(
+                "parquet_local_io_workers",
+                getattr(scan.properties, "variables", None),
+                config.PARQUET_LOCAL_IO_WORKERS,
+            ),
             predicates=pruning or None,
             file_sizes=file_sizes or None,
             string_types=string_types,
@@ -2011,10 +2016,21 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     from opteryx.operators._operators import native_trace_host_info
     from opteryx.operators._operators import native_trace_set_enabled
     from opteryx.operators._operators import native_trace_start_query
+    from opteryx.variables import resolve as _resolve_var
 
     import time as _t
 
-    dop = resolve_worker_count(config.MAX_EXECUTION_WORKERS)
+    # Every physical node in `plan` shares the SAME QueryProperties instance (each
+    # was built via `creator(logical_node, query_properties, registry)` in
+    # create_physical_plan), so any one node's `.properties.variables` is this
+    # query's resolved session variables. `plan.nodes()` yields ids; take the first.
+    _first_nid = next(iter(plan.nodes()), None)
+    _query_variables = (
+        getattr(plan[_first_nid].properties, "variables", None) if _first_nid is not None else None
+    )
+    dop = resolve_worker_count(
+        _resolve_var("max_execution_workers", _query_variables, config.MAX_EXECUTION_WORKERS)
+    )
 
     # Gap #3 Phase 2b: the exec pool is now constructed BEFORE compilation (moved
     # up from after) so it can be handed to compile_to_native and shared with any

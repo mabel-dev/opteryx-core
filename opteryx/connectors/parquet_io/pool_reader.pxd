@@ -68,6 +68,12 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # E37: per-projected-column key flag; 1 = build the hash seed for this
         # string column. Set once at plan time; empty → no string hashing.
         void set_hash_key_columns(const vector[uint8_t]& v)
+        # Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-
+        # derived timeout floor). Set once at plan time, by value — see
+        # HttpTuning's comment in http_client.hpp for why this is never stored
+        # on the (thread_local, process-lifetime) HttpClient itself.
+        void set_http_tuning(long max_host_connections, int max_retries,
+                              double min_bandwidth_bytes_per_s, long timeout_floor_ms)
         void submit_row_group(
             const string& path, int rg_idx,
             const vector[string]& column_names,

@@ -97,12 +97,12 @@ uint64_t draken_trace_now_ns(void);
 // know or remember out-of-band which host produced which trace.
 //
 // The OS hostname (gethostname()) is not a usable instance identifier on
-// Cloud Run: its container sandbox always reports "localhost" there. So this
-// first tries the GCP metadata server's fixed link-local address for the
-// real per-instance ID, falling back to gethostname() when that's
-// unreachable (i.e. everywhere that isn't Cloud Run). Computed once (lazily,
-// on first call) and cached; the metadata attempt is bounded to a few hundred
-// ms so a non-GCP first call never stalls a query meaningfully.
+// Cloud Run: its container sandbox always reports "localhost" there. So
+// "host" here is a MAC-address-derived node ID instead — the same value (and
+// fallback-to-random-if-no-MAC behaviour) as Python's uuid.getnode(), just
+// computed locally in C++. A local interface lookup, not a network call:
+// identical cost everywhere. Computed once (lazily, on first call) and
+// cached.
 // Returns a static, non-owned, NUL-terminated string; never NULL.
 const char* draken_trace_host_info(void);
 

@@ -7,8 +7,9 @@
 
 Every tunable is registered here so `SHOW VARIABLES` can answer two questions:
 what exists, and what is settable. A knob that is NOT in this table is invisible
-to operators and users alike, which is how `OPTERYX_HTTP_MAX_HOST_CONNECTIONS`
-was able to sit unreachable in C++ for so long without anyone noticing.
+to operators and users alike — `http_max_connections_per_host` (formerly the
+env-only `OPTERYX_HTTP_MAX_HOST_CONNECTIONS`, sat unreachable in C++, and read
+by `get_many()` only, never `get()`) is the example that proved the point.
 
 Resolution is a three-layer chain, in increasing precedence:
 
@@ -114,6 +115,32 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         FLOAT64, config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
         VariableOwner.SERVER, Visibility.RESTRICTED),
 
+    # ── USER + RESTRICTED — deployment-shaped, but deliberately SETTABLE for tuning.
+    # This is the entire reason this three-layer chain (default -> env -> SET) exists:
+    # `parquet_gcs_io_workers` is the exact variable a real investigation swept from
+    # 8 to 128 by redeploying six times to find the optimum for one query shape (the
+    # answer differs by query — narrow vs wide projection). RESTRICTED so an ordinary
+    # caller cannot perturb deployment-wide-looking knobs on their own query, but a
+    # `platform_admin` caller CAN — this is the mechanism by which "what happens if
+    # we set this to N" gets answered without a redeploy. Do not move these to plain
+    # SERVER in a future tidy-up without re-reading this comment.
+    "parquet_gcs_io_workers": (INT64, config.PARQUET_GCS_IO_WORKERS, VariableOwner.USER, Visibility.RESTRICTED),
+    "parquet_local_io_workers": (INT64, config.PARQUET_LOCAL_IO_WORKERS, VariableOwner.USER, Visibility.RESTRICTED),
+    "max_execution_workers": (INT64, config.MAX_EXECUTION_WORKERS, VariableOwner.USER, Visibility.RESTRICTED),
+    # Same reasoning as the three above, for the HTTP client that services GCS
+    # range reads (src/cpp/http_client.cpp / rugo/src/parquet/io_pipeline.hpp).
+    # Named for what they DO, not for the env var they replace — the old env-only
+    # names (OPTERYX_HTTP_MIN_BW_MBPS etc.) were too terse to be self-explanatory
+    # on a `SHOW VARIABLES` a caller has never seen before.
+    "http_max_connections_per_host": (
+        INT64, config.HTTP_MAX_CONNECTIONS_PER_HOST, VariableOwner.USER, Visibility.RESTRICTED),
+    "http_max_retries": (
+        INT64, config.HTTP_MAX_RETRIES, VariableOwner.USER, Visibility.RESTRICTED),
+    "http_min_bandwidth_mbps": (
+        FLOAT64, config.HTTP_MIN_BANDWIDTH_MBPS, VariableOwner.USER, Visibility.RESTRICTED),
+    "http_request_timeout_floor_ms": (
+        INT64, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS, VariableOwner.USER, Visibility.RESTRICTED),
+
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an
     # interface contract. A client asks "what character set will I get back?", "when
@@ -154,10 +181,7 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # SERVER makes it honest: env-set at startup, discoverable, not settable.
     # RESTRICTED because it is documented **DANGEROUS** (most queries fail with it on).
     "disable_optimizer": (BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.SERVER, Visibility.RESTRICTED),
-    # Deployment shape: how many threads, where the caches live, which project.
-    "parquet_gcs_io_workers": (INT64, config.PARQUET_GCS_IO_WORKERS, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "parquet_local_io_workers": (INT64, config.PARQUET_LOCAL_IO_WORKERS, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "max_execution_workers": (INT64, config.MAX_EXECUTION_WORKERS, VariableOwner.SERVER, Visibility.RESTRICTED),
+    # Deployment shape: where the caches live, which project.
     "array_agg_max_values_per_group": (INT64, config.ARRAY_AGG_MAX_VALUES_PER_GROUP, VariableOwner.SERVER, Visibility.UNRESTRICTED),
     "max_consecutive_cache_failures": (INT64, config.MAX_CONSECUTIVE_CACHE_FAILURES, VariableOwner.SERVER, Visibility.RESTRICTED),
     "local_store_root": (VARCHAR, config.LOCAL_STORE_ROOT, VariableOwner.SERVER, Visibility.RESTRICTED),

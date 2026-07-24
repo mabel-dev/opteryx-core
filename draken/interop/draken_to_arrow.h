@@ -18,7 +18,7 @@
 //
 // Dict-encoded and constant vectors return false — caller falls back.
 // TIME32/TIME64 return false — units not recoverable at this level.
-// DECIMAL128, ARRAY, NON_NATIVE, FP16 return false.
+// DECIMAL128, ARRAY, FP16 return false.
 //
 // Non-identity permutations (data_length == length, DRAKEN_SEL_IDENTITY not set)
 // are gathered into a fresh buffer before export.
@@ -290,6 +290,6 @@ static bool draken_export_to_arrow(const DrakenVector* dv,
         return true;
     }
 
-    // TIME32, TIME64, DECIMAL128, ARRAY, NON_NATIVE, FP16 — not supported here.
+    // TIME32, TIME64, DECIMAL128, ARRAY, FP16 — not supported here.
     return false;
 }

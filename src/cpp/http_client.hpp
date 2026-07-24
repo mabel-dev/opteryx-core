@@ -38,6 +38,22 @@ struct HttpError : std::runtime_error {
         : std::runtime_error(what), retryable(retryable_), http_status(status) {}
 };
 
+// Per-call tuning for get()/get_many(). A null tuning pointer at the call site
+// means "use HttpClient::default_tuning()" (the process-wide env-derived
+// values, resolved once). A non-null pointer is a query-scoped override —
+// e.g. Opteryx's SET-able http_* variables, resolved fresh per query in
+// Python/Cython and passed down by value, NEVER stored on the (thread_local,
+// process-lifetime) HttpClient itself. Passing by value here is what makes a
+// per-query SET override safe despite HttpClient's thread_local lifetime: no
+// mutable client state is touched, so one query's override can never leak
+// into the next query serviced by the same worker thread.
+struct HttpTuning {
+    long   max_host_connections      = 3;               // get_many()'s per-host connection cap
+    int    max_retries                = 2;               // transient-failure retry budget
+    double min_bandwidth_bytes_per_s  = 20.0e6 / 8.0;     // assumed floor stream bandwidth
+    long   timeout_floor_ms           = 10000;            // minimum per-request timeout
+};
+
 class HttpClient {
 public:
     /**
@@ -60,16 +76,21 @@ public:
      * Perform HTTP GET request (thread-safe).
      *
      * Uses curl_easy_perform() — each call has its own CURL* easy handle.
-     * Sets CURLOPT_SHARE so the shared connection/DNS cache is used.
+     * Sets CURLOPT_SHARE so the shared connection/DNS cache is used. Retries
+     * transient failures (per `tuning.max_retries`) and derives the per-request
+     * timeout from the Range span (per `tuning.min_bandwidth_bytes_per_s` /
+     * `tuning.timeout_floor_ms`) — the same policy get_many() applies.
      *
      * @param url      URL to fetch
      * @param headers  Optional request headers (e.g. Range, Authorization)
+     * @param tuning   Optional per-call override; nullptr uses default_tuning()
      * @return Response body bytes
-     * @throws std::runtime_error on network error, timeout, or HTTP 4xx/5xx
+     * @throws HttpError on network error, timeout, or HTTP 4xx/5xx
      */
     std::vector<uint8_t> get(
         const std::string& url,
-        const std::map<std::string, std::string>& headers = {}
+        const std::map<std::string, std::string>& headers = {},
+        const HttpTuning* tuning = nullptr
     );
 
     /**
@@ -98,16 +119,23 @@ public:
      * so Python threads are not blocked while network I/O runs.
      *
      * @param requests  Vector of (url, headers) pairs
+     * @param tuning    Optional per-call override; nullptr uses default_tuning()
      * @return Vector of response bodies in the same order as requests
-     * @throws std::runtime_error on any network error, timeout, or HTTP 4xx/5xx
+     * @throws HttpError on any network error, timeout, or HTTP 4xx/5xx
      */
     std::vector<std::vector<uint8_t>> get_many(
-        const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests
+        const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
+        const HttpTuning* tuning = nullptr
     );
 
+    // Process-wide defaults, each resolved from its OPTERYX_HTTP_* env var
+    // exactly once (Meyer's singleton) and cached for the life of the process.
+    // This is what get()/get_many() fall back to when called with tuning=nullptr.
+    static HttpTuning default_tuning();
+
     // Process-cumulative count of individual range requests re-issued by
-    // get_many's transient-failure retry logic. For dev telemetry (surfaced in
-    // the IO pipeline diagnostics); not reset per query.
+    // get()/get_many()'s transient-failure retry logic. For dev telemetry
+    // (surfaced in the IO pipeline diagnostics); not reset per query.
     static uint64_t total_retries();
 
 private:

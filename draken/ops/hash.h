@@ -245,9 +245,10 @@ static inline void hash_decimal128(const DrakenVector& v, uint64_t* out, uint32_
 
 // ---------------------------------------------------------------------------
 // OpsTable: flat array[108] of TypeOps, indexed by DrakenType enum value.
-// The D.11 tail extends past DRAKEN_NON_NATIVE (100): NULL=101, VECTOR_FP16=102,
-// DECIMAL128=103, UINT8=104, UINT16=105, UINT32=106, UINT64=107. 108 entries cover
-// all tags. NULL / VECTOR_FP16 are handled at the nanobind boundary and keep zero
+// The D.11 tail runs NULL=101, VECTOR_FP16=102, DECIMAL128=103, UINT8=104,
+// UINT16=105, UINT32=106, UINT64=107, so 108 entries cover all tags. Index 100 is
+// a permanently-burned hole (the retired DRAKEN_NON_NATIVE; see core/buffers.h) and
+// stays zero-filled like any unregistered type. NULL / VECTOR_FP16 are handled at the nanobind boundary and keep zero
 // (null) slots here; DECIMAL128 fills only the gather slots (its arithmetic/hash/
 // reduction/compare are boundary-intercepted too). UINT8/16/32/64 are unregistered
 // (zero slots) pending Stage 2 kernel parity (E33) — dispatching an unregistered op

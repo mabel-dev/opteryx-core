@@ -49,9 +49,187 @@
 #include "morsels/cxx_hash.h"    // cxx_hash_c — draken owns the key hash (DISTINCT/GROUP BY)
 #include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
 #include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
-#include "native_hash_join.hpp"  // JoinPayloadColumn (per-group key store), compute_row_hashes
+#include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 
 namespace opteryx::engine {
+
+// ---- GROUP BY per-group key store ------------------------------------------
+// Row-store stride for one GROUP BY key value. BOOL and the string family are
+// resolved here (their stride differs from draken's raw vector width); everything
+// else delegates to draken_type_itemsize so this can't drift from
+// gather_elem_size/concat_fixed_itemsize. `lt` is the column's logical descriptor:
+// only VECTOR_FP16 reads it (stride = dimension × 2), every other type ignores it.
+//
+// A restricted type set is CORRECT here, unlike for a carried payload: a GROUP BY
+// key must hash and compare, so eligibility is checked separately by
+// sort_key_type_supported (see capture()). This machinery served the join's build
+// payload until the join stopped copying values (native_join2.hpp retains its
+// columns and emits via gather_rows) — GROUP BY is now its only consumer.
+inline size_t gb_key_elem_size(DrakenType t, const LogicalType* lt) {
+    if (t == DRAKEN_BOOL) return 1;
+    if (draken_type_is_string_storage(t)) return sizeof(DrakenStringSlot);
+    return draken_type_itemsize(t, lt);
+}
+
+// (join_key_type_supported / join_read_key removed — the key is now hashed by
+// draken via cxx_hash_c; nullness is read from the key column, and equality is
+// 64-bit hash identity. draken hashes any supported key type, so there is no
+// integer-only gate here anymore.)
+
+// Arena-backed storage, i.e. "this row-store slot is a DrakenStringSlot and its
+// long-form bytes need rebasing on every hop". A payload column is only being
+// CARRIED, never compared, so this is the storage predicate (VARIANT included) —
+// not sort_type_is_string, which answers the narrower "has a defined collation".
+inline bool gb_key_is_string(DrakenType t) {
+    return draken_type_is_string_storage(t);
+}
+
+inline bool gb_key_is_bool(DrakenType t) {
+    return t == DRAKEN_BOOL;
+}
+
+// Read the bit for physical element `phys` out of a bit-packed BOOL vector.
+inline uint8_t gb_read_bool_bit(const DrakenVector& v, uint32_t phys) {
+    const uint8_t* d = static_cast<const uint8_t*>(v.data);
+    return static_cast<uint8_t>((d[phys >> 3] >> (phys & 7)) & 1u);
+}
+
+// Allocate a zeroed bit-packed BOOL data buffer for `n` elements.
+inline uint8_t* gb_alloc_bool_bits(uint32_t n) {
+    size_t nbytes = (static_cast<size_t>(n) + 7u) / 8u;
+    if (nbytes == 0) nbytes = 1;
+    uint8_t* bits = static_cast<uint8_t*>(draken_malloc(nbytes));
+    std::memset(bits, 0, nbytes);
+    return bits;
+}
+
+// One materialized payload column: `raw` holds `elem_size` bytes per row,
+// densely packed in row-store order (NOT the original morsel's own row
+// order — rows are appended as build morsels stream in).
+//
+// `validity` mirrors the DrakenVector convention (1 bit/row, 1 = valid, bit
+// index == row-store row index) but is LAZY: as long as every row appended
+// so far is valid it stays empty ("empty = all valid"), matching a NULL
+// DrakenVector::validity. The first NULL payload value seen allocates it,
+// backfilling every prior row as valid — so the common NOT-NULL case pays
+// zero bitmap cost.
+struct GroupKeyColumn {
+    DrakenType type = DRAKEN_INT64;
+    size_t elem_size = 0;
+    const LogicalType* logical = nullptr;  // borrowed; carried to output columns
+    std::vector<uint8_t> raw;    // elem_size bytes/row (slots for strings)
+    std::vector<uint8_t> arena;  // strings only: consolidated long-string bytes
+    std::vector<uint8_t> validity;  // lazy — see comment above
+
+    size_t row_count() const { return elem_size ? raw.size() / elem_size : 0; }
+
+    // Record row-store row `row`'s null-ness. A no-op while every row so far
+    // has been valid (the lazy "empty = all valid" state).
+    void note_null(size_t row, bool is_null) {
+        if (validity.empty() && !is_null) return;
+        size_t nbytes = (row / 8) + 1;
+        if (validity.size() < nbytes) validity.resize(nbytes, 0xFF);
+        if (is_null) validity[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7)));
+        else validity[row >> 3] |= static_cast<uint8_t>(1u << (row & 7));
+    }
+
+    void append_row(const DrakenVector& v, uint32_t row, ErrCtx&, const char*) {
+        size_t out_row = row_count();
+        bool is_null = v.validity != nullptr
+            && !((v.validity[row >> 3] >> (row & 7)) & 1u);
+        uint32_t phys = v.selection[row];
+        if (gb_key_is_bool(type)) {
+            // Bit-packed on the way in, one unpacked 0/1 byte per row in the store.
+            raw.push_back(is_null ? 0 : gb_read_bool_bit(v, phys));
+            note_null(out_row, is_null);
+            return;
+        }
+        if (gb_key_is_string(type)) {
+            if (is_null) {
+                DrakenStringSlot zero;
+                std::memset(&zero, 0, sizeof(zero));
+                const uint8_t* rb = reinterpret_cast<const uint8_t*>(&zero);
+                raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
+                note_null(out_row, true);
+                return;
+            }
+            // CANONICAL layout (buffers.h): a string vector's `data` points at a
+            // DrakenStringArena STRUCT — slots and arena resolve through it.
+            const auto* sa = static_cast<const DrakenStringArena*>(v.data);
+            const DrakenStringSlot* slot = &sa->slots[phys];
+            DrakenStringSlot rebased;
+            if (str_is_inline(slot)) {
+                rebased = *slot;
+            } else {
+                uint32_t slen = str_length(slot);
+                size_t arena_pos = arena.size();
+                arena.resize(arena_pos + slen);
+                std::memcpy(arena.data() + arena_pos, str_data(slot, sa->arena), slen);
+                str_clone_with_offset(&rebased, slot, static_cast<uint32_t>(arena_pos));
+            }
+            const uint8_t* rb = reinterpret_cast<const uint8_t*>(&rebased);
+            raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
+            note_null(out_row, false);
+            return;
+        }
+        if (is_null) {
+            raw.resize(raw.size() + elem_size, 0);
+        } else {
+            const uint8_t* src = static_cast<const uint8_t*>(v.data) + static_cast<size_t>(phys) * elem_size;
+            raw.insert(raw.end(), src, src + elem_size);
+        }
+        note_null(out_row, is_null);
+    }
+
+    // Append row `r` of another GroupKeyColumn (same type) to this one, rebasing
+    // a long-string slot into this column's arena. Used to merge per-group key
+    // stores across worker partitions (GROUP BY).
+    void append_from(const GroupKeyColumn& src, size_t r) {
+        size_t out_row = row_count();
+        bool is_null = !src.validity.empty()
+            && !((src.validity[r >> 3] >> (r & 7)) & 1u);
+        if (gb_key_is_bool(type)) {
+            raw.push_back(is_null ? 0 : src.raw[r]);
+            note_null(out_row, is_null);
+            return;
+        }
+        if (gb_key_is_string(type)) {
+            if (is_null) {
+                DrakenStringSlot zero;
+                std::memset(&zero, 0, sizeof(zero));
+                const uint8_t* rb = reinterpret_cast<const uint8_t*>(&zero);
+                raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
+                note_null(out_row, true);
+                return;
+            }
+            const DrakenStringSlot* slot = reinterpret_cast<const DrakenStringSlot*>(
+                src.raw.data() + r * sizeof(DrakenStringSlot));
+            DrakenStringSlot rebased;
+            if (str_is_inline(slot)) {
+                rebased = *slot;
+            } else {
+                uint32_t slen = str_length(slot);
+                size_t arena_pos = arena.size();
+                arena.resize(arena_pos + slen);
+                std::memcpy(arena.data() + arena_pos,
+                            str_data(slot, src.arena.empty() ? nullptr : src.arena.data()),
+                            slen);
+                str_clone_with_offset(&rebased, slot, static_cast<uint32_t>(arena_pos));
+            }
+            const uint8_t* rb = reinterpret_cast<const uint8_t*>(&rebased);
+            raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
+            note_null(out_row, false);
+            return;
+        }
+        if (is_null) {
+            raw.resize(raw.size() + elem_size, 0);
+        } else {
+            raw.insert(raw.end(), src.raw.data() + r * elem_size,
+                       src.raw.data() + (r + 1) * elem_size);
+        }
+        note_null(out_row, is_null);
+    }
+};
 
 // ---- aggregate spec + accumulator --------------------------------------------------
 
@@ -340,7 +518,8 @@ inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
 // `valid_flags[i]==0` marks a NULL output row.
 
 inline CxxColumn emit_fixed_column(const int64_t* raws, const uint8_t* valid_flags,
-                                   uint32_t n, DrakenType t, const LogicalType* logical) {
+                                   uint32_t n, DrakenType t, const LogicalType* logical,
+                                   ErrCtx& err) {
     if (t == DRAKEN_BOOL) {
         // A BOOL DrakenVector's `data` is BIT-PACKED (consumer reads
         // data[phys>>3]>>(phys&7)&1) — NOT one byte per value. gather_elem_size
@@ -374,9 +553,27 @@ inline CxxColumn emit_fixed_column(const int64_t* raws, const uint8_t* valid_fla
         c.view = c.own->vec;
         return c;
     }
-    size_t es = gather_elem_size(t);
+    // Tag-only width (NOT the descriptor-aware draken_type_itemsize): every value
+    // here arrives in a widened int64 container, so this function's domain is the
+    // types whose width the physical tag alone decides AND which fit in 8 bytes.
+    // A parameterized-width type (VECTOR_FP16, dimension × 2) has no meaning in an
+    // int64 lane and must keep resolving to 0 here — resolving its real width would
+    // make the memcpy below read past the 8-byte container. DECIMAL128 likewise
+    // never reaches here; it has its own int128 lane (emit_i128_lane_column).
+    size_t es = draken_type_fixed_itemsize(t);
+    if (es == 0) {
+        // Previously this substituted a width of 1, allocating a 1-byte buffer and
+        // then memcpy'ing ZERO bytes per row — an unsupported type emitted a column
+        // of uninitialized garbage instead of an error. Unreachable today (every
+        // aggregate lane resolves to a tag-width type), which is exactly why it had
+        // to go: the next type added would have hit it silently.
+        err.code = 1;
+        err.msg = "native engine: aggregate result type has no fixed width — fail "
+                  "loud, never silent corruption";
+        return CxxColumn{};
+    }
     size_t alloc_n = (n == 0 ? 1 : n);
-    uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc_n * (es == 0 ? 1 : es)));
+    uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc_n * es));
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
     uint8_t* vbits = nullptr;
     for (uint32_t i = 0; i < n; ++i) {
@@ -681,7 +878,8 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
     switch (st) {
         case AAStore::Raw:
             child_col = emit_fixed_column(craw.data(), cvalid.data(), total,
-                                          meta.type, meta.logical);
+                                          meta.type, meta.logical, err);
+            if (err.code != 0) return CxxColumn{};
             break;
         case AAStore::I128: {
             // emit_i128_lane_column reads a per-row int64 "valid" lane, not the
@@ -727,25 +925,25 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
     };
     switch (kind) {
         case GBKind::Rows:
-            return emit_fixed_column(L.rows, nullptr, n, DRAKEN_INT64, nullptr);
+            return emit_fixed_column(L.rows, nullptr, n, DRAKEN_INT64, nullptr, err);
         case GBKind::Valid:
         case GBKind::CountDistinct:
             // COUNT(col) / COUNT(DISTINCT col) over zero valid rows is 0, not NULL.
-            return emit_fixed_column(L.valid, nullptr, n, DRAKEN_INT64, nullptr);
+            return emit_fixed_column(L.valid, nullptr, n, DRAKEN_INT64, nullptr, err);
         case GBKind::SumI: {
             // exact integer sums (overflow already failed loud at accumulate);
             // DECIMAL keeps its type + descriptor.
             DrakenType t = (meta.type == DRAKEN_DECIMAL) ? DRAKEN_DECIMAL : DRAKEN_INT64;
             return emit_fixed_column(L.i64, valid_ok(), n, t,
                                      (meta.type == DRAKEN_DECIMAL) ? meta.logical
-                                                                   : nullptr);
+                                                                   : nullptr, err);
         }
         case GBKind::SumF: {
             std::vector<int64_t> raws(n, 0);
             for (uint32_t i = 0; i < n; ++i)
                 std::memcpy(&raws[i], &L.f64[i], sizeof(double));
             return emit_fixed_column(raws.data(), valid_ok(), n, DRAKEN_FLOAT64,
-                                     nullptr);
+                                     nullptr, err);
         }
         case GBKind::SumD128:
         case GBKind::MinMaxD128:
@@ -777,10 +975,10 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
                 double a = num / static_cast<double>(L.valid[i]) / denom_scale;
                 std::memcpy(&raws[i], &a, sizeof(double));
             }
-            return emit_fixed_column(raws.data(), okp, n, DRAKEN_FLOAT64, nullptr);
+            return emit_fixed_column(raws.data(), okp, n, DRAKEN_FLOAT64, nullptr, err);
         }
         case GBKind::MinMaxNum:
-            return emit_fixed_column(L.i64, valid_ok(), n, meta.type, meta.logical);
+            return emit_fixed_column(L.i64, valid_ok(), n, meta.type, meta.logical, err);
         case GBKind::MinMaxStr:
             return emit_string_lane_column(meta, L.sval, L.valid, n);
         case GBKind::ArrayAgg:
@@ -1237,21 +1435,11 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
     }
 }
 
-// Key element size for the per-group key store (JoinPayloadColumn): BOOL is one
-// unpacked byte, strings a slot, DECIMAL128 16 raw bytes, everything else the
-// gather element width — covers every GROUP BY key type draken can hash.
-inline size_t gb_key_elem_size(DrakenType t) {
-    if (t == DRAKEN_BOOL) return 1;
-    if (sort_type_is_string(t)) return sizeof(DrakenStringSlot);
-    if (t == DRAKEN_DECIMAL128) return 16;
-    return gather_elem_size(t);
-}
-
-// Materialize rows [start, start+n) of a per-group key store (JoinPayloadColumn) as
+// Materialize rows [start, start+n) of a per-group key store (GroupKeyColumn) as
 // an output column — the group-key emit path, replacing emit_key_columns. Mirrors
 // the join's build_output per-column materialization over a contiguous range; a
 // group whose key value is NULL is emitted NULL via the validity bitmap.
-inline CxxColumn jpc_emit_range(const JoinPayloadColumn& col, size_t start,
+inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
                                 uint32_t n, ErrCtx& err) {
     (void)err;
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
@@ -1266,7 +1454,7 @@ inline CxxColumn jpc_emit_range(const JoinPayloadColumn& col, size_t start,
     auto row_is_null = [&](size_t g) {
         return !col.validity.empty() && !((col.validity[g >> 3] >> (g & 7)) & 1u);
     };
-    if (join_type_is_string(col.type)) {
+    if (gb_key_is_string(col.type)) {
         const auto* src_slots = reinterpret_cast<const DrakenStringSlot*>(col.raw.data());
         const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
         size_t total_arena = 0;
@@ -1317,8 +1505,8 @@ inline CxxColumn jpc_emit_range(const JoinPayloadColumn& col, size_t start,
         return c;
     }
     void* data;
-    if (join_type_is_bool(col.type)) {
-        uint8_t* bits = join_alloc_bool_bits(n);
+    if (gb_key_is_bool(col.type)) {
+        uint8_t* bits = gb_alloc_bool_bits(n);
         for (uint32_t i = 0; i < n; ++i) {
             size_t g = start + i;
             if (row_is_null(g)) { mark_null(i); continue; }
@@ -1356,13 +1544,13 @@ inline CxxColumn jpc_emit_range(const JoinPayloadColumn& col, size_t start,
 
 // Per-partition group table. The ad-hoc open-addressing GBPartition (table + stored
 // key bytes + inline lanes) is replaced by: a CarcharIndex (draken hash → dense group
-// id, hash identity), per-group key VALUES for emit (JoinPayloadColumn per key col),
+// id, hash identity), per-group key VALUES for emit (GroupKeyColumn per key col),
 // and the aggregate lanes indexed by group id. hashes[] keeps each group's key hash
 // so the parallel merge can re-insert it into the merged partition.
 struct GBPartition {
     opteryx::carchar::CarcharIndex index;
     std::vector<uint64_t> hashes;
-    std::vector<JoinPayloadColumn> keycols;
+    std::vector<GroupKeyColumn> keycols;
     std::vector<int64_t> grows;       // COUNT(*) rows lane (any Rows spec)
     std::vector<GBLanes> lanes;       // one per spec
     std::vector<GBCountDistinct> cd;  // one per spec (only CountDistinct fills it)
@@ -1418,7 +1606,7 @@ struct GroupBySink : Sink {
         P.keycols.resize(key_idx.size());
         for (size_t k = 0; k < key_idx.size(); ++k) {
             P.keycols[k].type = km[k].type;
-            P.keycols[k].elem_size = gb_key_elem_size(km[k].type);
+            P.keycols[k].elem_size = gb_key_elem_size(km[k].type, km[k].logical);
             P.keycols[k].logical = km[k].logical;
         }
     }
@@ -1434,16 +1622,30 @@ struct GroupBySink : Sink {
             }
             const CxxColumn& c = in->columns[key_idx[k]];
             DrakenType t = c.view.type;
-            if (gb_key_elem_size(t) == 0) {
+            const LogicalType* lt = c.own ? c.own->logical_type : nullptr;
+            // ELIGIBILITY, not storage: a GROUP BY key must be hashable/comparable,
+            // which is a semantic property (sort_key_type_supported — the same set
+            // the compiler's _KEY_COLUMN_TYPES mirrors at plan time). This used to
+            // test `elem_size == 0` and so rejected key types by the accident of
+            // their width being unknown; that conflation broke the moment a
+            // carry-only type (VARIANT) gained a known stride, since being
+            // MOVEABLE says nothing about being GROUPABLE.
+            if (!sort_key_type_supported(t)) {
                 err.code = 1;
                 err.msg = "native engine: unsupported GROUP BY key column type";
                 return false;
             }
+            if (gb_key_elem_size(t, lt) == 0) {
+                err.code = 1;
+                err.msg = "native engine: GROUP BY key column has no materializable "
+                          "width — fail loud, never silent corruption";
+                return false;
+            }
             l.key_meta[k].type = t;
-            l.key_meta[k].logical = c.own ? c.own->logical_type : nullptr;
+            l.key_meta[k].logical = lt;
             l.key_meta[k].captured = true;
         }
-        // Type every partition's per-group key store (JoinPayloadColumn per key col).
+        // Type every partition's per-group key store (GroupKeyColumn per key col).
         for (size_t p = 0; p < kGBParts; ++p) type_keycols(l.parts[p], l.key_meta);
         l.meta.resize(specs.size());
         l.kinds.resize(specs.size());
@@ -1966,7 +2168,7 @@ struct GroupBySink : Sink {
             auto m = std::make_shared<CxxMorsel>();
             m->zero_col_rows = n;
             // Group-key columns: materialize a contiguous [start, start+n) slice of
-            // each per-group key store (JoinPayloadColumn) into the output morsel.
+            // each per-group key store (GroupKeyColumn) into the output morsel.
             for (size_t k = 0; k < merged.keycols.size(); ++k) {
                 m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
                 if (err.code != 0) return;

@@ -6,7 +6,7 @@
 // compiler (opteryx/managers/execution/compiler.py — planning, Python) through the
 // builder methods below (the Cython edge). run() then executes the pipelines in
 // creation order at degree `dop` (run_pipeline, executor.hpp): breaker results hand
-// off natively (MorselBuffer for materialized morsels, JoinBuildRef for a hash-join
+// off natively (MorselBuffer for materialized morsels, Join2Ref for a hash-join
 // build table); the terminal pipeline streams into the production MorselQueue the
 // (Python) cursor drains. No Python runs inside run() — the one tracked exception
 // is StreamingScanSource's pull trampoline (see the engine_cutover_decisions memory:
@@ -30,51 +30,17 @@
 #include "morsel_queue.hpp"
 #include "native_expression.hpp"    // ExprFilterOperator, ExprMultiProjectOperator
 #include "native_group_sinks.hpp"   // UngroupedAggSink, GroupBySink, DistinctSink, AggSpec2
-#include "native_hash_join.hpp"     // HashJoinBuildSink/Global, JoinProbeOperator
+#include "native_key_hash.hpp"     // compute_row_hashes — the shared equi-key hash
 #include "native_join2.hpp"         // Join2BuildSink/Probe — multi-key, semi/anti/outer
 #include "native_parquet_scan_source.hpp"  // NativeParquetScanSource (zero-Python pull)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
-#include "scan_aggregate_demo.hpp"  // NULL-aware agg helpers (agg_is_valid et al.)
-#include "scan_filter_demo.hpp"     // NumericFilterOperator, SimplePredicate, QueueSink/Global
+#include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
 #include "streaming_scan_source.hpp"
 #include "trace.hpp"                 // TraceSpan/trace_begin/trace_drain — execution tracing
 
 namespace opteryx::engine {
-
-// Zero-row typed column — the courtesy empty-result morsel (schema visibility when a
-// query legitimately returns no rows; the old ExitNode's `at_least_one` contract).
-// String-family columns get a canonical empty DrakenStringArena header (buffers.h:
-// a string vector's `data` points at the arena STRUCT, even when empty).
-inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
-    void* data;
-    if (t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY
-            || t == DRAKEN_VARIANT) {
-        auto* sa = static_cast<DrakenStringArena*>(draken_malloc(sizeof(DrakenStringArena)));
-        sa->slots = nullptr; sa->arena = nullptr; sa->length = 0;
-        sa->arena_used = 0; sa->arena_cap = 0; sa->null_bitmap = nullptr;
-        sa->owns_buffers = 0; sa->type = t;
-        data = sa;
-    } else {
-        data = draken_malloc(1);
-    }
-    uint32_t* sel = static_cast<uint32_t*>(draken_malloc(sizeof(uint32_t)));
-    DrakenVector v;
-    v.data = data; v.selection = sel; v.data_length = 0; v.length = 0;
-    v.validity = nullptr; v.type = t; v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-    CxxColumn c;
-    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                          OwnedBuffer<uint8_t>(nullptr), OwnedBuffer<void>(sel));
-    // TIMESTAMP64/DECIMAL/DECIMAL128 carry their descriptor out-of-band on the owner,
-    // never on DrakenVector itself (draken/logical_type.h) — a zero-row column is no
-    // exception; omitting it here left the courtesy empty-result morsel with a
-    // TIMESTAMP64/DECIMAL column draken treats as a hard error the moment it's
-    // re-encoded (e.g. a query with 0 rows still gets written out to Parquet).
-    c.own->logical_type = lt;
-    c.view = c.own->vec;
-    return c;
-}
 
 // Intern one LogicalType* per column from parallel (kind, unit, precision, scale,
 // dimension) int arrays — the wire shape Python's compiler passes for every
@@ -183,51 +149,13 @@ struct ColumnSelectOperator : Operator {
     }
 };
 
-// ---- Join wiring: build table filled AFTER the build pipeline runs ----------------
-// The probe pipeline's operators are constructed at plan-build time, before the build
-// hash table exists. JoinBuildRef is the indirection: the Engine fills `g` the moment
-// the build pipeline's finalize completes (dependency order guarantees this precedes
-// any probe worker's make_state()).
-
-struct JoinBuildRef {
-    const HashJoinBuildGlobal* g = nullptr;
-};
-
-struct DeferredJoinProbeOperator : Operator {
-    size_t probe_key_idx;
-    std::vector<size_t> probe_payload_idx;
-    const JoinBuildRef* ref;
-    std::once_flag once;
-    std::unique_ptr<JoinProbeOperator> inner;
-
-    DeferredJoinProbeOperator(size_t key_idx, std::vector<size_t> payload_idx,
-                              const JoinBuildRef* r)
-        : probe_key_idx(key_idx), probe_payload_idx(std::move(payload_idx)), ref(r) {}
-
-    std::unique_ptr<OperatorState> make_state() override {
-        // First touch is at probe-pipeline worker start — strictly after the build
-        // pipeline finalized (Engine::run order), so ref->g is set.
-        std::call_once(once, [this] {
-            inner = std::make_unique<JoinProbeOperator>(
-                probe_key_idx, &ref->g->index, &ref->g->payload,
-                probe_payload_idx);
-        });
-        return inner->make_state();
-    }
-    OpResult execute(const MorselPtr& in, OperatorState& st, MorselPtr& out,
-                     ErrCtx& err) override {
-        return inner->execute(in, st, out, err);
-    }
-};
-
 // ---- The Engine: pipeline graph, built by the compiler, run natively --------------
 
 struct PipelineNode {
     std::unique_ptr<Source> source;
     std::vector<std::unique_ptr<Operator>> operators;
     std::unique_ptr<Sink> sink;
-    int fill_join_ref = -1;   // join_refs index to point at this sink's global post-run
-    int fill_join2_ref = -1;  // join2_refs index (generalized join)
+    int fill_join2_ref = -1;  // join2_refs index to point at this sink's global post-run
     int dop_override = 0;     // >0 forces this pipeline's degree (order-sensitive
                               // consumers of a sorted buffer run at 1); 0 = engine dop
     std::atomic<bool> halt{false};   // set by LimitOperator when its quota is filled
@@ -238,7 +166,6 @@ class Engine {
 public:
     std::vector<std::unique_ptr<PipelineNode>> pipelines;  // run in creation order
     std::vector<std::unique_ptr<MorselBuffer>> buffers;
-    std::vector<std::unique_ptr<JoinBuildRef>> join_refs;
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
     MorselQueue* out_q = nullptr;
     std::vector<std::string> final_names;   // terminal schema, for the empty-result morsel
@@ -349,10 +276,6 @@ public:
         buffers.push_back(std::make_unique<MorselBuffer>());
         return buffers.size() - 1;
     }
-    size_t new_join_ref() {
-        join_refs.push_back(std::make_unique<JoinBuildRef>());
-        return join_refs.size() - 1;
-    }
     size_t new_join2_ref() {
         join2_refs.push_back(std::make_unique<Join2Ref>());
         return join2_refs.size() - 1;
@@ -454,9 +377,6 @@ public:
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));
     }
-    void add_filter(size_t p, std::vector<SimplePredicate> preds) {
-        add_op_(p, std::make_unique<NumericFilterOperator>(std::move(preds)));
-    }
     void add_expr_filter(size_t p, void* instrs, int count, std::vector<int> col_idx,
                          std::vector<void*> lit_dv, ExprFilterFn fn,
                          std::vector<int> const_col_idx = {},
@@ -557,10 +477,6 @@ public:
         add_op_(p,
             std::make_unique<ColumnSelectOperator>(std::move(indices), std::move(names)));
     }
-    void add_join_probe(size_t p, size_t ref, size_t key_idx, std::vector<size_t> payload_idx) {
-        add_op_(p, std::make_unique<DeferredJoinProbeOperator>(
-            key_idx, std::move(payload_idx), join_refs[ref].get()));
-    }
     void set_queue_sink(size_t p, MorselQueue* q) {
         set_sink_(p, std::make_unique<QueueSink>(q));
         out_q = q;
@@ -580,11 +496,6 @@ public:
     }
     void set_buffer_append_sink(size_t p, size_t buf) {
         set_sink_(p, std::make_unique<BufferAppendSink>(buffers[buf].get()));
-    }
-    void set_join_build_sink(size_t p, size_t key_idx, std::vector<size_t> payload_idx,
-                             size_t ref) {
-        set_sink_(p, std::make_unique<HashJoinBuildSink>(key_idx, std::move(payload_idx)));
-        pipelines[p]->fill_join_ref = static_cast<int>(ref);
     }
     void set_final_schema(std::vector<std::string> names, std::vector<DrakenType> types,
                           std::vector<int> lt_kind, std::vector<int> lt_unit,
@@ -614,10 +525,6 @@ public:
                            ? pn->dop_override : dop;
             pn->result = run_pipeline(p, pdop, err, pool);
             if (err.code != 0) return;
-            if (pn->fill_join_ref >= 0) {
-                join_refs[static_cast<size_t>(pn->fill_join_ref)]->g =
-                    static_cast<const HashJoinBuildGlobal*>(pn->result.get());
-            }
             if (pn->fill_join2_ref >= 0) {
                 join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g =
                     static_cast<const Join2BuildGlobal*>(pn->result.get());

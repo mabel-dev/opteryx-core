@@ -216,6 +216,13 @@ sparingly; the §11 default is to not branch on shape at all.
 - Renumbering other enum values. ABI freeze stands.
 - Removing `DRAKEN_NON_NATIVE` or other catch-all tags. They aren't
   shape-as-type; they're explicit fallback markers. Leave them.
+  > **Superseded 2026-07-24 (for `DRAKEN_NON_NATIVE` only).** Out of scope *for
+  > this ticket* — not a standing prohibition. `DRAKEN_NON_NATIVE` was later
+  > removed on the architect's call: it was a migration artefact of the
+  > build-out shim, had zero producers anywhere in the tree, and the
+  > Arrow-wrapping it marked became impossible once PyArrow was banned from the
+  > engine (CLAUDE.md §4). Tag 100 is burned, not renumbered — the ABI freeze
+  > this ticket asserts still stands. Other catch-all tags are untouched.
 
 ## 6. STOP conditions
 
