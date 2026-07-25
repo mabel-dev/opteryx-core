@@ -57,7 +57,13 @@ class ColumnRange:
 
 @dataclass
 class ColumnStatistics:
-    """Statistics for a single column."""
+    """Statistics for a single column.
+
+    ``column_name`` is diagnostic only — it is NOT the key. Column names are
+    not unique across a plan (``it1.info``, ``mi.info`` and ``mi_idx.info`` are
+    three different columns all named ``info``), so ``RelationStatistics``
+    keys on the column *identity*. See that class for the contract.
+    """
 
     column_name: str
     data_type: str
@@ -77,10 +83,22 @@ class ColumnStatistics:
 
 @dataclass
 class RelationStatistics:
-    """Statistics for an entire relation/intermediate result."""
+    """Statistics for an entire relation/intermediate result.
+
+    ``columns`` is keyed by ``SchemaColumn.identity`` (opaque ``bytes``), NOT by
+    column name. This mirrors the invariant ``SchemaColumn.__post_init__``
+    already enforces: a name is not an identity, and keying on it "collapses
+    distinct columns that share a name — every self-join, and any join of
+    tables with a common column name — into one".
+
+    Keying on name silently merged unrelated columns here: a join of two
+    relations that both have an ``id`` dropped one side's stats outright, and
+    range constraints gathered from ``it1.info``, ``mi.info`` and
+    ``mi_idx.info`` were intersected as though they described one column.
+    """
 
     row_count: int
-    columns: dict[str, ColumnStatistics]
+    columns: dict[bytes, ColumnStatistics]
 
     def copy(self) -> "RelationStatistics":
         """Create a shallow copy with new column dict."""
@@ -88,21 +106,21 @@ class RelationStatistics:
             row_count=self.row_count, columns={k: v for k, v in self.columns.items()}
         )
 
-    def get_column(self, column_name: str) -> Optional[ColumnStatistics]:
-        """Retrieve statistics for a column."""
-        return self.columns.get(column_name)
+    def get_column(self, identity: bytes) -> Optional[ColumnStatistics]:
+        """Retrieve statistics for a column by its identity."""
+        return self.columns.get(identity)
 
     def with_row_count(self, new_count: int) -> "RelationStatistics":
         """Return a copy with updated row count."""
         return replace(self, row_count=new_count)
 
-    def update_column_range(self, column_name: str, new_range: ColumnRange) -> "RelationStatistics":
+    def update_column_range(self, identity: bytes, new_range: ColumnRange) -> "RelationStatistics":
         """Return a copy with an updated column range."""
         new_stats = self.copy()
-        col_stats = new_stats.columns.get(column_name)
+        col_stats = new_stats.columns.get(identity)
         if col_stats:
             new_col = replace(col_stats, value_range=new_range)
-            new_stats.columns[column_name] = new_col
+            new_stats.columns[identity] = new_col
         return new_stats
 
 

@@ -63,13 +63,13 @@ def _selectivity(node, stats: RelationStatistics) -> float:
 
     if nt == NodeType.UNARY_OPERATOR:
         op = node.value
-        col_name = _identifier_name(node.centre)
-        if col_name is None:
+        identity = _identifier_identity(node.centre)
+        if identity is None:
             return 1.0
         if op == "IsNull":
-            return _selectivity_is_null(col_name, stats)
+            return _selectivity_is_null(identity, stats)
         if op == "IsNotNull":
-            return 1.0 - _selectivity_is_null(col_name, stats)
+            return 1.0 - _selectivity_is_null(identity, stats)
         return 1.0
 
     if nt == NodeType.BETWEEN:
@@ -88,13 +88,13 @@ def _selectivity_comparison(node, stats: RelationStatistics) -> float:
     op = node.value
     left, right = node.left, node.right
 
-    col_name = _identifier_name(left)
+    identity = _identifier_identity(left)
     literal_node = right
-    if col_name is None:
-        col_name = _identifier_name(right)
+    if identity is None:
+        identity = _identifier_identity(right)
         literal_node = left
         op = _SWAPPED_OP.get(op, op)
-    if col_name is None:
+    if identity is None:
         return 1.0
     if literal_node is None or literal_node.node_type != NodeType.LITERAL:
         return 1.0
@@ -102,15 +102,15 @@ def _selectivity_comparison(node, stats: RelationStatistics) -> float:
     literal_value = _literal_scalar(literal_node)
 
     if op == "Eq":
-        return _selectivity_eq(col_name, literal_value, stats)
+        return _selectivity_eq(identity, literal_value, stats)
     if op == "NotEq":
-        return 1.0 - _selectivity_eq(col_name, literal_value, stats)
+        return 1.0 - _selectivity_eq(identity, literal_value, stats)
     if op in ("Lt", "LtEq", "Gt", "GtEq"):
-        return _selectivity_range(col_name, op, literal_value, stats)
+        return _selectivity_range(identity, op, literal_value, stats)
     if op == "InList":
-        return _selectivity_in(col_name, literal_value, stats)
+        return _selectivity_in(identity, literal_value, stats)
     if op == "NotInList":
-        return 1.0 - _selectivity_in(col_name, literal_value, stats)
+        return 1.0 - _selectivity_in(identity, literal_value, stats)
     if op in ("Like", "ILike", "RLike"):
         return _selectivity_like(literal_value)
     if op in ("NotLike", "NotILike", "NotRLike"):
@@ -130,8 +130,8 @@ def _selectivity_comparison(node, stats: RelationStatistics) -> float:
     return 1.0
 
 
-def _selectivity_eq(col_name: str, literal_value, stats: RelationStatistics) -> float:
-    col = stats.columns.get(col_name)
+def _selectivity_eq(identity: bytes, literal_value, stats: RelationStatistics) -> float:
+    col = stats.columns.get(identity)
     dgram = col.histogram if col is not None else None
     lit_f = _to_float(literal_value)
 
@@ -160,9 +160,9 @@ def _selectivity_eq(col_name: str, literal_value, stats: RelationStatistics) -> 
 
 
 def _selectivity_range(
-    col_name: str, op: str, literal_value, stats: RelationStatistics
+    identity: bytes, op: str, literal_value, stats: RelationStatistics
 ) -> float:
-    col = stats.columns.get(col_name)
+    col = stats.columns.get(identity)
     dgram = col.histogram if col is not None else None
     lit_f = _to_float(literal_value)
 
@@ -177,7 +177,7 @@ def _selectivity_range(
     return 0.25
 
 
-def _selectivity_in(col_name: str, literal_value, stats: RelationStatistics) -> float:
+def _selectivity_in(identity: bytes, literal_value, stats: RelationStatistics) -> float:
     if not isinstance(literal_value, (list, tuple, set, frozenset)):
         return 0.1
     values = list(literal_value)
@@ -185,7 +185,7 @@ def _selectivity_in(col_name: str, literal_value, stats: RelationStatistics) -> 
     if n == 0:
         return 0.0
 
-    col = stats.columns.get(col_name)
+    col = stats.columns.get(identity)
     dgram = col.histogram if col is not None else None
     if dgram is not None:
         total = float(dgram.count())
@@ -213,8 +213,8 @@ def _selectivity_in(col_name: str, literal_value, stats: RelationStatistics) -> 
 
 
 def _selectivity_between(node, stats: RelationStatistics) -> float:
-    col_name = _identifier_name(node.left)
-    if col_name is None:
+    identity = _identifier_identity(node.left)
+    if identity is None:
         return 1.0
     right = node.right
     centre = node.centre
@@ -226,7 +226,7 @@ def _selectivity_between(node, stats: RelationStatistics) -> float:
     a = _to_float(_literal_scalar(right))
     b = _to_float(_literal_scalar(centre))
 
-    col = stats.columns.get(col_name)
+    col = stats.columns.get(identity)
     dgram = col.histogram if col is not None else None
     if dgram is not None and a is not None and b is not None:
         total = float(dgram.count())
@@ -237,8 +237,8 @@ def _selectivity_between(node, stats: RelationStatistics) -> float:
     return 0.25
 
 
-def _selectivity_is_null(col_name: str, stats: RelationStatistics) -> float:
-    col = stats.columns.get(col_name)
+def _selectivity_is_null(identity: bytes, stats: RelationStatistics) -> float:
+    col = stats.columns.get(identity)
     nf = col.null_fraction if col is not None else None
     if nf is None:
         return 0.05
@@ -256,18 +256,19 @@ def _clamp01(value: float) -> float:
     return float(value)
 
 
-def _identifier_name(node) -> Optional[str]:
+def _identifier_identity(node) -> Optional[bytes]:
+    """Identity of an IDENTIFIER node — the key ``RelationStatistics.columns`` uses.
+
+    Names are not unique across a plan (``it1.info`` and ``mi.info`` are two
+    columns both named ``info``), so a name lookup could pull another
+    relation's histogram/NDV and silently mis-estimate. Returns None when no
+    identity is resolvable; callers then fall back to a constant.
+    """
     if node is None or getattr(node, "node_type", None) != NodeType.IDENTIFIER:
         return None
-    name = getattr(node, "source_column", None)
-    if name is None:
-        name = getattr(node, "value", None)
-    if isinstance(name, bytes):
-        try:
-            name = name.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    return name if isinstance(name, str) else None
+    schema_column = getattr(node, "schema_column", None)
+    identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+    return identity if isinstance(identity, bytes) else None
 
 
 def _literal_scalar(node):

@@ -327,15 +327,19 @@ class Manifest:
             or bool(f.null_value_counts)
             for f in self.files
         )
+        # Keyed by column identity to match RelationStatistics' contract — the
+        # predicate walker in cost_estimation.selectivity looks columns up by
+        # the bound identifier's identity, never by name.
         columns: dict = {}
         for col in self.schema.columns:
             col_name = getattr(col, "name", None)
-            if not col_name:
+            identity = getattr(col, "identity", None)
+            if not col_name or not isinstance(identity, bytes):
                 continue
             null_fraction = None
             if has_null_counts:
                 null_fraction = self.estimate_null_fraction(col_name)
-            columns[col_name] = ColumnStatistics(
+            columns[identity] = ColumnStatistics(
                 column_name=col_name,
                 data_type=str(getattr(col, "type", "")),
                 distinct_count=self.estimate_cardinality(col_name),

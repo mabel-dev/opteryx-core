@@ -37,14 +37,16 @@ from .optimization_strategy import (
 )
 
 
-def _phys_name(col):
-    """Physical column name for a join-key identifier, for stats.columns lookup."""
+def _phys_identity(col):
+    """Column identity for a join-key identifier, for stats.columns lookup.
+
+    Not the name: names are not unique across a plan, so a name lookup can
+    silently return an unrelated relation's range."""
+    if isinstance(col, bytes):
+        return col
     schema_column = getattr(col, "schema_column", None)
-    name = getattr(schema_column, "name", None) if schema_column is not None else None
-    if isinstance(name, str):
-        return name
-    value = getattr(col, "value", None)
-    return value if isinstance(value, str) else None
+    identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+    return identity if isinstance(identity, bytes) else None
 
 
 def _key_value_range(stats, col):
@@ -52,10 +54,10 @@ def _key_value_range(stats, col):
     no bound has been established (column absent / range empty)."""
     if stats is None:
         return None
-    name = _phys_name(col)
-    if name is None:
+    identity = _phys_identity(col)
+    if identity is None:
         return None
-    col_stats = stats.columns.get(name)
+    col_stats = stats.columns.get(identity)
     if col_stats is None:
         return None
     value_range = col_stats.value_range

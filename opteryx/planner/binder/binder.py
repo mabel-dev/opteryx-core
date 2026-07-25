@@ -778,12 +778,27 @@ def inner_binder(
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)
         else:
-            if node.value in ("InList", "NotInList") and isinstance(
-                getattr(node.right, "value", None), list
+            # VARCHAR/NVARCHAR/VARBINARY literals must be coerced to bytes at bind
+            # time, on EVERY comparison operator — not just InList/NotInList. The
+            # execution engine's canonical string representation is bytes (VARCHAR
+            # and VARBINARY are byte-identical past the type tag), and downstream
+            # optimizer passes (e.g. statistics_refresh's range-constraint merge)
+            # compare literal bounds from different operators against each other.
+            # Coercing only the InList side left scalar comparisons (Eq/Lt/Gt/...)
+            # holding `str` while InList held `bytes`, so a query mixing both against
+            # the same column crashed with `'>' not supported between bytes and str`.
+            if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
+                "Eq",
+                "NotEq",
+                "Lt",
+                "LtEq",
+                "Gt",
+                "GtEq",
+                "InList",
+                "NotInList",
             ):
                 from opteryx.types.logical_type import LogicalCategory as _OT
 
-                left_type = getattr(getattr(node.left, "schema_column", None), "category", None)
                 _COERCE = {
                     _OT.FLOAT: float,
                     _OT.INTEGER: int,
@@ -792,8 +807,23 @@ def inner_binder(
                     _OT.NVARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
                     _OT.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
                 }
-                coerce = _COERCE.get(left_type, lambda v: v)
-                node.right.value = [None if v is None else coerce(v) for v in node.right.value]
+
+                def _coerce_literal(literal_node, other_node):
+                    other_type = getattr(
+                        getattr(other_node, "schema_column", None), "category", None
+                    )
+                    coerce = _COERCE.get(other_type, lambda v: v)
+                    if isinstance(literal_node.value, list):
+                        literal_node.value = [
+                            None if v is None else coerce(v) for v in literal_node.value
+                        ]
+                    elif literal_node.value is not None:
+                        literal_node.value = coerce(literal_node.value)
+
+                if node.right is not None and node.right.node_type == NodeType.LITERAL:
+                    _coerce_literal(node.right, node.left)
+                elif node.left is not None and node.left.node_type == NodeType.LITERAL:
+                    _coerce_literal(node.left, node.right)
 
             # The type-mismatch check recurses the whole subtree for AND/OR/XOR
             # nodes, but inner_binder already visits every comparison leaf

@@ -73,6 +73,10 @@ def test_decide_swap_null_fraction_breaks_cardinality_tie():
 # --- end-to-end through visit ------------------------------------------------
 
 
+# RelationStatistics.columns is keyed by column identity, never by name.
+_K = b"tes_k_000000001"
+
+
 def _scan_with_stats(relation, row_count):
     n = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
     n.relation = relation
@@ -81,7 +85,7 @@ def _scan_with_stats(relation, row_count):
     n.statistics = RelationStatistics(
         row_count=row_count,
         columns={
-            "k": ColumnStatistics(column_name="k", data_type="INTEGER")
+            _K: ColumnStatistics(column_name="k", data_type="INTEGER")
         },
     )
     return n
@@ -95,10 +99,11 @@ def _inner_join_node(left_size, right_size):
     # the post-filter statistics, so a passing test proves statistics won.
     n.left_size = left_size
     n.right_size = right_size
-    n.left_columns = [SimpleNamespace(value="k")]
-    n.right_columns = [SimpleNamespace(value="k")]
-    n.left_column = SimpleNamespace(value="k")
-    n.right_column = SimpleNamespace(value="k")
+    # Join keys are raw column identities, matching how RelationStatistics is keyed.
+    n.left_columns = [_K]
+    n.right_columns = [_K]
+    n.left_column = _K
+    n.right_column = _K
     n.left_relation_names = ["big"]
     n.right_relation_names = ["small"]
     # left_readers/right_readers are attached by _build_join_plan, from the scans

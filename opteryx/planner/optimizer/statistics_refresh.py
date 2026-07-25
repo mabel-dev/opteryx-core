@@ -196,27 +196,31 @@ def _empty_stats(row_count: int = 0) -> RelationStatistics:
     return RelationStatistics(row_count=max(0, int(row_count)), columns={})
 
 
-def _column_name(col) -> Optional[str]:
-    """Best-effort column name extractor for join keys, group keys, etc.
+def _column_identity(col) -> Optional[bytes]:
+    """Column *identity* extractor for join keys, group keys, etc.
 
-    Join keys reach this as raw column *identities* — ``bytes`` (or ``str``)
-    rather than column Node objects (e.g. ``b'tes_c_c_r6Fy7PvB'``). A bytes
-    identity has no ``.value``/``.name`` attribute, so it must be decoded
-    directly; otherwise the key is dropped and ``_join_stats`` falls back to a
-    cross-product estimate.
+    ``RelationStatistics.columns`` is keyed by identity, so every lookup path
+    must resolve to one. Two shapes reach this:
+
+      * Join keys arrive as raw identities already — ``bytes`` such as
+        ``b'tes_c_c_r6Fy7PvB'`` — and are used verbatim.
+      * Group keys arrive as column Nodes carrying ``.schema_column.identity``.
+
+    Returns None when no identity can be resolved, in which case the caller
+    treats the statistic as unknown rather than guessing by name. A name is
+    never an acceptable substitute: see ``SchemaColumn.__post_init__``.
     """
     if col is None:
         return None
     if isinstance(col, bytes):
-        return col.decode("utf-8", "replace")
-    if isinstance(col, str):
         return col
-    name = getattr(col, "source_column", None) or getattr(col, "value", None)
-    if isinstance(name, bytes):
-        return name.decode("utf-8", "replace")
-    if isinstance(name, str):
-        return name
-    return getattr(col, "name", None)
+    schema_column = getattr(col, "schema_column", None)
+    if schema_column is not None:
+        identity = getattr(schema_column, "identity", None)
+        if isinstance(identity, bytes):
+            return identity
+    identity = getattr(col, "identity", None)
+    return identity if isinstance(identity, bytes) else None
 
 
 def _scan_stats(
@@ -251,7 +255,8 @@ def _scan_stats(
     if schema is not None:
         for col in schema.columns:
             col_name = getattr(col, "name", None)
-            if not col_name:
+            identity = getattr(col, "identity", None)
+            if not col_name or not isinstance(identity, bytes):
                 continue
             distinct_count = None
             value_range = ColumnRange()
@@ -271,7 +276,9 @@ def _scan_stats(
                         null_fraction = manifest.estimate_null_fraction(col_name)
                     except Exception:
                         null_fraction = None
-            columns[col_name] = ColumnStatistics(
+            # Keyed by identity; the manifest accessors above are name-based
+            # because manifest statistics are per-relation and unambiguous.
+            columns[identity] = ColumnStatistics(
                 column_name=col_name,
                 data_type=str(getattr(col, "type", "")),
                 distinct_count=distinct_count,
@@ -438,8 +445,8 @@ def _join_stats(
             columns=_cap_ndvs(left.columns, left.row_count),
         )
 
-    left_keys = _join_key_names(getattr(node, "left_columns", None))
-    right_keys = _join_key_names(getattr(node, "right_columns", None))
+    left_keys = _join_key_identities(getattr(node, "left_columns", None))
+    right_keys = _join_key_identities(getattr(node, "right_columns", None))
     left_key = left_keys[0] if left_keys else None
     right_key = right_keys[0] if right_keys else None
 
@@ -487,12 +494,12 @@ def _join_stats(
 
 
 def _intersect_join_keys(
-    merged: Dict[str, ColumnStatistics],
+    merged: Dict[bytes, ColumnStatistics],
     left: RelationStatistics,
     right: RelationStatistics,
-    left_keys: List[str],
-    right_keys: List[str],
-) -> Dict[str, ColumnStatistics]:
+    left_keys: List[bytes],
+    right_keys: List[bytes],
+) -> Dict[bytes, ColumnStatistics]:
     """Intersect ranges and reduce NDV for equi-join keys on both sides."""
     out = dict(merged)
     for lk, rk in zip(left_keys, right_keys):
@@ -520,24 +527,24 @@ def _aggregate_stats(
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
     groups = getattr(node, "groups", None) or []
-    group_names = [n for n in (_column_name(g) for g in groups) if n]
-    if not group_names:
+    group_keys = [k for k in (_column_identity(g) for g in groups) if k]
+    if not group_keys:
         return _empty_stats(row_count=1)
     ndvs = [
-        base.columns[name].distinct_count if name in base.columns else None
-        for name in group_names
+        base.columns[key].distinct_count if key in base.columns else None
+        for key in group_keys
     ]
     out_rows = estimate_group_by_cardinality(base.row_count, ndvs)
     # Output columns are the group keys; each row is now a unique combination,
     # so a single key's distinct_count is bounded above by the output row count.
     # Histograms drop because the group-by output's value distribution differs
     # from the input's (each group reduced to one row regardless of frequency).
-    out_cols: Dict[str, ColumnStatistics] = {}
-    for name in group_names:
-        col = base.columns.get(name)
+    out_cols: Dict[bytes, ColumnStatistics] = {}
+    for key in group_keys:
+        col = base.columns.get(key)
         if col is None:
             continue
-        out_cols[name] = replace(col, histogram=None)
+        out_cols[key] = replace(col, histogram=None)
     return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
 
 
@@ -584,7 +591,7 @@ def _union_stats(
     Distinct on top of this and the NDV cap will tighten.
     """
     rows = 0
-    columns: Dict[str, ColumnStatistics] = {}
+    columns: Dict[bytes, ColumnStatistics] = {}
     for cs, _ in child_stats:
         if cs is None:
             continue
@@ -680,13 +687,13 @@ def _merge_columns(left: RelationStatistics, right: RelationStatistics) -> dict:
     return merged
 
 
-def _cap_ndvs(columns: Dict[str, ColumnStatistics], row_count: int) -> Dict[str, ColumnStatistics]:
+def _cap_ndvs(columns: Dict[bytes, ColumnStatistics], row_count: int) -> Dict[bytes, ColumnStatistics]:
     """Return a new column dict where every distinct_count is capped at ``row_count``.
 
     A relation cannot contain more distinct values than rows. Called after any
     operator that reduces row count (Filter, Limit, Distinct, Group-by output).
     """
-    out: Dict[str, ColumnStatistics] = {}
+    out: Dict[bytes, ColumnStatistics] = {}
     for k, c in columns.items():
         if c.distinct_count is not None and c.distinct_count > row_count:
             out[k] = replace(c, distinct_count=max(1, int(row_count)))
@@ -695,7 +702,7 @@ def _cap_ndvs(columns: Dict[str, ColumnStatistics], row_count: int) -> Dict[str,
     return out
 
 
-def _drop_histograms(columns: Dict[str, ColumnStatistics]) -> Dict[str, ColumnStatistics]:
+def _drop_histograms(columns: Dict[bytes, ColumnStatistics]) -> Dict[bytes, ColumnStatistics]:
     """Return a copy with histograms removed.
 
     Called after any operator that distorts the underlying distribution
@@ -707,27 +714,32 @@ def _drop_histograms(columns: Dict[str, ColumnStatistics]) -> Dict[str, ColumnSt
 
 
 def _narrow_filter_columns(
-    columns: Dict[str, ColumnStatistics], condition
-) -> Dict[str, ColumnStatistics]:
+    columns: Dict[bytes, ColumnStatistics], condition
+) -> Dict[bytes, ColumnStatistics]:
     """Apply a filter predicate's range constraints to column ranges.
 
     Walks the predicate AST collecting per-column (lower, upper) constraints
     from comparisons / BETWEEN / IN / equality. AND combines constraints
     (intersect bounds); OR / NOT bail out for that branch (no narrowing) since
     safe range tightening would require disjunction logic we don't have.
+
+    Constraints are keyed by column identity, so the bounds intersected below
+    always come from the same column — the ``max``/``min`` are unguarded on
+    purpose, because a type error there now means a genuine defect upstream
+    rather than two unrelated columns having been merged.
     """
     if condition is None:
         return columns
-    constraints: Dict[str, Tuple[Optional[float], Optional[float], Optional[int]]] = {}
+    constraints: Dict[bytes, Tuple[Optional[float], Optional[float], Optional[int]]] = {}
     _collect_range_constraints(condition, constraints)
     if not constraints:
         return columns
 
-    out: Dict[str, ColumnStatistics] = dict(columns)
-    for col_name, (lower, upper, eq_card) in constraints.items():
-        if col_name not in out:
+    out: Dict[bytes, ColumnStatistics] = dict(columns)
+    for identity, (lower, upper, eq_card) in constraints.items():
+        if identity not in out:
             continue
-        col = out[col_name]
+        col = out[identity]
         # Intersect with current range.
         new_lower = col.value_range.lower_bound
         new_upper = col.value_range.upper_bound
@@ -739,12 +751,12 @@ def _narrow_filter_columns(
         new_ndv = col.distinct_count
         if eq_card is not None:
             new_ndv = eq_card if new_ndv is None else min(new_ndv, eq_card)
-        out[col_name] = replace(col, value_range=new_range, distinct_count=new_ndv)
+        out[identity] = replace(col, value_range=new_range, distinct_count=new_ndv)
     return out
 
 
 def _collect_range_constraints(
-    node, sink: Dict[str, Tuple[Optional[float], Optional[float], Optional[int]]]
+    node, sink: Dict[bytes, Tuple[Optional[float], Optional[float], Optional[int]]]
 ) -> None:
     """Walk an AND-conjunction of comparisons and accumulate per-column bounds.
 
@@ -765,8 +777,8 @@ def _collect_range_constraints(
         return  # Can't safely tighten bounds across disjunction / negation.
 
     if nt == NodeType.BETWEEN:
-        col_name = _identifier_name(node.left)
-        if col_name is None:
+        identity = _identifier_identity(node.left)
+        if identity is None:
             return
         # BETWEEN ranges live on .right (lower) / .right.right? — manifest does
         # ``a = node.right; b = ...``; we read whichever attributes carry the
@@ -776,32 +788,32 @@ def _collect_range_constraints(
         if a is None or b is None:
             return
         lo, hi = (a, b) if a <= b else (b, a)
-        _merge_constraint(sink, col_name, lower=lo, upper=hi)
+        _merge_constraint(sink, identity, lower=lo, upper=hi)
         return
 
     if nt == NodeType.COMPARISON_OPERATOR:
         op = getattr(node, "value", None)
-        col_name = _identifier_name(node.left)
+        identity = _identifier_identity(node.left)
         literal = node.right
-        if col_name is None:
-            col_name = _identifier_name(node.right)
+        if identity is None:
+            identity = _identifier_identity(node.right)
             literal = node.left
             op = _SWAPPED_COMPARISON.get(op, op)
-        if col_name is None:
+        if identity is None:
             return
         lit_value = _literal_value(literal)
         if lit_value is None:
             return
         if op == "Eq":
-            _merge_constraint(sink, col_name, lower=lit_value, upper=lit_value, eq_card=1)
+            _merge_constraint(sink, identity, lower=lit_value, upper=lit_value, eq_card=1)
         elif op == "Lt":
-            _merge_constraint(sink, col_name, upper=lit_value)
+            _merge_constraint(sink, identity, upper=lit_value)
         elif op == "LtEq":
-            _merge_constraint(sink, col_name, upper=lit_value)
+            _merge_constraint(sink, identity, upper=lit_value)
         elif op == "Gt":
-            _merge_constraint(sink, col_name, lower=lit_value)
+            _merge_constraint(sink, identity, lower=lit_value)
         elif op == "GtEq":
-            _merge_constraint(sink, col_name, lower=lit_value)
+            _merge_constraint(sink, identity, lower=lit_value)
         elif op == "InList":
             values = _in_list_values(literal)
             if values:
@@ -809,7 +821,7 @@ def _collect_range_constraints(
                     lo, hi = min(values), max(values)
                 except TypeError:
                     return
-                _merge_constraint(sink, col_name, lower=lo, upper=hi, eq_card=len(values))
+                _merge_constraint(sink, identity, lower=lo, upper=hi, eq_card=len(values))
         return
 
 
@@ -823,13 +835,20 @@ _SWAPPED_COMPARISON = {
 }
 
 
-def _identifier_name(node) -> Optional[str]:
+def _identifier_identity(node) -> Optional[bytes]:
+    """Identity of an IDENTIFIER node, for ``RelationStatistics.columns`` lookup.
+
+    Keyed on identity rather than ``source_column`` so that constraints from
+    ``it1.info``, ``mi.info`` and ``mi_idx.info`` stay three separate entries
+    instead of being merged into one bogus intersected range.
+    """
     from opteryx.expression import NodeType
 
     if node is None or getattr(node, "node_type", None) != NodeType.IDENTIFIER:
         return None
-    name = getattr(node, "source_column", None) or getattr(node, "value", None)
-    return name if isinstance(name, str) else None
+    schema_column = getattr(node, "schema_column", None)
+    identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+    return identity if isinstance(identity, bytes) else None
 
 
 def _literal_value(node):
@@ -863,30 +882,30 @@ def _in_list_values(node) -> List:
 
 
 def _merge_constraint(
-    sink: Dict[str, Tuple[Optional[float], Optional[float], Optional[int]]],
-    col_name: str,
+    sink: Dict[bytes, Tuple[Optional[float], Optional[float], Optional[int]]],
+    identity: bytes,
     lower=None,
     upper=None,
     eq_card: Optional[int] = None,
 ) -> None:
-    cur_lower, cur_upper, cur_eq = sink.get(col_name, (None, None, None))
+    cur_lower, cur_upper, cur_eq = sink.get(identity, (None, None, None))
     if lower is not None:
         cur_lower = lower if cur_lower is None else max(cur_lower, lower)
     if upper is not None:
         cur_upper = upper if cur_upper is None else min(cur_upper, upper)
     if eq_card is not None:
         cur_eq = eq_card if cur_eq is None else min(cur_eq, eq_card)
-    sink[col_name] = (cur_lower, cur_upper, cur_eq)
+    sink[identity] = (cur_lower, cur_upper, cur_eq)
 
 
-def _join_key_names(columns) -> List[str]:
+def _join_key_identities(columns) -> List[bytes]:
     if not columns:
         return []
-    out: List[str] = []
+    out: List[bytes] = []
     for col in columns:
-        name = _column_name(col)
-        if name:
-            out.append(name)
+        identity = _column_identity(col)
+        if identity:
+            out.append(identity)
     return out
 
 

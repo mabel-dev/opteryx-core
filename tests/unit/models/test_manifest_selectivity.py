@@ -24,7 +24,7 @@ from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema, SchemaColumn
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +32,22 @@ from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_ident
 # ---------------------------------------------------------------------------
 
 
+def _ident(name: str) -> bytes:
+    """Deterministic per-name identity for this fixture's single relation.
+
+    Selectivity estimation keys statistics on column *identity*, never on name
+    (names are not unique across a plan). In a real plan a bound identifier
+    node carries its schema column's identity; these fixtures reproduce that by
+    minting deterministically so ``_identifier`` and ``_schema`` agree.
+    ``mint_column_identity`` is random per call, so it cannot be used here.
+    """
+    return f"t_{name}".encode("utf-8")
+
+
 def _schema(*names: str) -> RelationSchema:
     return RelationSchema(
         name="t",
-        columns=[
-            SchemaColumn(name=n, column_type=INT64, identity=mint_column_identity("t", n))
-            for n in names
-        ],
+        columns=[SchemaColumn(name=n, column_type=INT64, identity=_ident(n)) for n in names],
     )
 
 
@@ -84,6 +93,9 @@ def _identifier(name: str) -> Node:
     n = Node(node_type=NodeType.IDENTIFIER)
     n.value = name
     n.source_column = name
+    # A bound identifier carries its schema column — that is where the identity
+    # used to look statistics up comes from.
+    n.schema_column = SchemaColumn(name=name, column_type=INT64, identity=_ident(name))
     return n
 
 

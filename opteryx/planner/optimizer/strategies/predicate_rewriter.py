@@ -478,21 +478,16 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
     for data in groups.values():
         if len(data["values"]) > 1:
             node = data["node"]
-            left_type = getattr(getattr(node.left, "schema_column", None), "category", None)
-            _COERCE = {
-                LogicalCategory.FLOAT: float,
-                LogicalCategory.INTEGER: int,
-                LogicalCategory.BOOLEAN: bool,
-                LogicalCategory.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                LogicalCategory.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
-            }
-            coerce = _COERCE.get(left_type, lambda v: v)
-            values = sorted(str(v) for v in set(data["values"]))
+            # Values arrive already typed/coerced by the binder (e.g. VARCHAR/
+            # VARBINARY literals are bytes, not str) — sort by string repr for a
+            # deterministic order across mixed literal types, but keep the actual
+            # typed values. A prior version stringified and re-coerced through
+            # str(v), which corrupted bytes literals into their Python repr
+            # (b'x' -> "b'x'") instead of round-tripping them.
+            values = sorted(set(data["values"]), key=str)
             node.value = "InList"
-            node.right.display_values = values
-            node.right.value = [
-                None if v is None else coerce(v) for v in values
-            ]
+            node.right.display_values = [str(v) for v in values]
+            node.right.value = values
             # Phase 2: build ARRAY ColumnType from old element type.
             _old_elem_ct_3 = node.right.type
             _arr_ct_3 = _lt.ARRAY(_old_elem_ct_3 if isinstance(_old_elem_ct_3, ColumnType) else _lt.VARIANT)

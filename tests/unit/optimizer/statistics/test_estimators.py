@@ -126,6 +126,12 @@ class TestColumnRange:
         assert result.upper_bound == 100
 
 
+# RelationStatistics.columns is keyed by opaque column identity (bytes), not by
+# name — names are not unique across a plan.
+_AGE = b"tes_age_00000001"
+_NAME = b"tes_nam_00000002"
+
+
 class TestColumnStatistics:
     """Tests for ColumnStatistics class."""
 
@@ -157,7 +163,7 @@ class TestRelationStatistics:
             column_name="name",
             data_type="string",
         )
-        stats = RelationStatistics(row_count=10000, columns={"age": col1, "name": col2})
+        stats = RelationStatistics(row_count=10000, columns={_AGE: col1, _NAME: col2})
 
         assert stats.row_count == 10000
         assert len(stats.columns) == 2
@@ -168,16 +174,16 @@ class TestRelationStatistics:
             column_name="age",
             data_type="int",
         )
-        stats = RelationStatistics(row_count=10000, columns={"age": col})
+        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
 
-        retrieved = stats.get_column("age")
+        retrieved = stats.get_column(_AGE)
         assert retrieved is not None
         assert retrieved.column_name == "age"
 
     def test_relation_statistics_get_nonexistent_column(self):
         """Test retrieving nonexistent column."""
         stats = RelationStatistics(row_count=10000, columns={})
-        retrieved = stats.get_column("age")
+        retrieved = stats.get_column(_AGE)
         assert retrieved is None
 
     def test_relation_statistics_copy(self):
@@ -186,7 +192,7 @@ class TestRelationStatistics:
             column_name="age",
             data_type="int",
         )
-        stats = RelationStatistics(row_count=10000, columns={"age": col})
+        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
         stats_copy = stats.copy()
 
         assert stats_copy.row_count == 10000
@@ -199,7 +205,7 @@ class TestRelationStatistics:
             column_name="age",
             data_type="int",
         )
-        stats = RelationStatistics(row_count=10000, columns={"age": col})
+        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
         new_stats = stats.with_row_count(5000)
 
         assert stats.row_count == 10000  # Original unchanged
@@ -212,13 +218,13 @@ class TestRelationStatistics:
             data_type="int",
             value_range=ColumnRange(lower_bound=0, upper_bound=120),
         )
-        stats = RelationStatistics(row_count=10000, columns={"age": col})
+        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
 
         new_range = ColumnRange(lower_bound=18, upper_bound=65)
-        new_stats = stats.update_column_range("age", new_range)
+        new_stats = stats.update_column_range(_AGE, new_range)
 
-        assert stats.columns["age"].value_range.lower_bound == 0  # Original unchanged
-        assert new_stats.columns["age"].value_range.lower_bound == 18
+        assert stats.columns[_AGE].value_range.lower_bound == 0  # Original unchanged
+        assert new_stats.columns[_AGE].value_range.lower_bound == 18
 
 
 class TestCardinalityFunctions:

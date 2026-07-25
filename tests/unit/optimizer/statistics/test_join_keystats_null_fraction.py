@@ -25,12 +25,19 @@ from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _join_stats
 
 
+# Join keys reach _join_stats as raw column *identities* (opaque bytes), which
+# is also how RelationStatistics.columns is keyed. Anything name-shaped here
+# would not resolve — and would silently re-create the dead-lookup bug where
+# every join-key NDV read returned None and the estimator fell back to tdom.
+_LK = b"tes_lk_00000001"
+_RK = b"tes_rk_00000002"
+
+
 def _join_node():
-    # _column_name reads `source_column` or `value`; a bare `value` is enough.
     return SimpleNamespace(
         type="inner",
-        left_columns=[SimpleNamespace(value="lk")],
-        right_columns=[SimpleNamespace(value="rk")],
+        left_columns=[_LK],
+        right_columns=[_RK],
     )
 
 
@@ -40,7 +47,7 @@ def _estimate(left_null_fraction):
     left = RelationStatistics(
         row_count=1000,
         columns={
-            "lk": ColumnStatistics(
+            _LK: ColumnStatistics(
                 column_name="lk", data_type="INTEGER", distinct_count=100, null_fraction=left_null_fraction
             )
         },
@@ -48,7 +55,7 @@ def _estimate(left_null_fraction):
     right = RelationStatistics(
         row_count=1000,
         columns={
-            "rk": ColumnStatistics(column_name="rk", data_type="INTEGER", distinct_count=100, null_fraction=0.0)
+            _RK: ColumnStatistics(column_name="rk", data_type="INTEGER", distinct_count=100, null_fraction=0.0)
         },
     )
     child_stats = [(left, "left"), (right, "right")]

@@ -73,20 +73,24 @@ def _contains_non_equi_comparator(condition) -> bool:
     return _col_value(condition) in _NON_EQUI_COMPARATORS
 
 
-def _join_key_name(col):
-    """Best-effort physical name of a join-key column, matching how
-    RelationStatistics.columns is keyed (see statistics_refresh._column_name).
-    Returns None when no name can be resolved (NDV/null then go unknown)."""
+def _join_key_identity(col):
+    """Identity of a join-key column, matching how RelationStatistics.columns
+    is keyed (see statistics_refresh._column_identity).
+
+    Join keys arrive as raw identity ``bytes``; nodes carry theirs on
+    ``.schema_column``. Returns None when none can be resolved (NDV/null then
+    go unknown). Never falls back to the column *name* — names are not unique
+    across a plan, so a name lookup can silently return another relation's
+    statistics."""
+    if isinstance(col, bytes):
+        return col
     schema_column = getattr(col, "schema_column", None)
     if schema_column is not None:
-        name = getattr(schema_column, "name", None)
-        if isinstance(name, str):
-            return name
-    name = getattr(col, "source_column", None) or getattr(col, "value", None)
-    if isinstance(name, str):
-        return name
-    name = getattr(col, "name", None)
-    return name if isinstance(name, str) else None
+        identity = getattr(schema_column, "identity", None)
+        if isinstance(identity, bytes):
+            return identity
+    identity = getattr(col, "identity", None)
+    return identity if isinstance(identity, bytes) else None
 
 
 def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_null):
@@ -241,8 +245,8 @@ class JoinOrderingStrategy(OptimizationStrategy):
             return None
         ndvs = []
         for col in key_columns or []:
-            name = _join_key_name(col)
-            col_stats = stats.get_column(name) if isinstance(name, str) else None
+            identity = _join_key_identity(col)
+            col_stats = stats.get_column(identity) if identity is not None else None
             if col_stats is not None and col_stats.distinct_count is not None:
                 ndvs.append(col_stats.distinct_count)
         return min(ndvs) if ndvs else None
@@ -254,8 +258,8 @@ class JoinOrderingStrategy(OptimizationStrategy):
             return None
         fractions = []
         for col in key_columns or []:
-            name = _join_key_name(col)
-            col_stats = stats.get_column(name) if isinstance(name, str) else None
+            identity = _join_key_identity(col)
+            col_stats = stats.get_column(identity) if identity is not None else None
             if col_stats is not None and col_stats.null_fraction is not None:
                 fractions.append(col_stats.null_fraction)
         return max(fractions) if fractions else None
