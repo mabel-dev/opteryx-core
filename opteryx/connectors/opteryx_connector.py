@@ -338,6 +338,7 @@ class OpteryxConnector(Eidetic, PredicatePushable):
     supports_predicate_pushdown = True  # Via FileSystemTable base
     supports_limit_pushdown = True  # Via FileSystemTable base
     supports_statistics = True  # Opteryx manifests provide stats
+    requires_execution_context = True  # information_schema row-level permission filtering
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -527,11 +528,28 @@ class OpteryxConnector(Eidetic, PredicatePushable):
             **kwargs: Additional parameters (telemetry, etc.)
 
         Returns:
-            OpteryxTable instance configured for the specific table
+            OpteryxTable instance configured for the specific table, or an
+            information_schema table reader when the relative identifier's
+            first segment is the reserved `information_schema` schema name.
         """
         # Parse catalog name and relative identifier
         workspace, relative_id = self._parse_identifier(name)
         catalog = self._get_catalog(workspace)
+
+        # Pop so it never reaches OpteryxTable below - only information_schema uses it.
+        execution_context = kwargs.pop("execution_context", None)
+
+        schema_segment, _, info_table_name = relative_id.partition(".")
+        if schema_segment == "information_schema" and info_table_name:
+            from opteryx.connectors.information_schema import build_information_schema_table
+
+            return build_information_schema_table(
+                info_table_name,
+                catalog=catalog,
+                workspace=workspace,
+                telemetry=kwargs.get("telemetry"),
+                execution_context=execution_context,
+            )
 
         # Merge stored kwargs with provided kwargs (provided takes precedence)
         merged_kwargs = {**self.kwargs, **kwargs}
@@ -562,6 +580,12 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
         workspace, relative_id = self._parse_identifier(name)
+
+        # information_schema is a reserved nested schema served by table_engine(),
+        # not a catalog-stored dataset or view - skip the catalog round trip.
+        if relative_id.partition(".")[0] == "information_schema":
+            return None, None
+
         catalog = self._get_catalog(workspace)
 
         kind, obj = catalog.get_relation(relative_id)

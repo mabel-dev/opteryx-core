@@ -124,7 +124,11 @@ def _create_window_node(logical_node, query_properties, registry):
     return registry.create(
         "Window",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("partition_by", "order_by", "window_functions")},
+        **{
+            k: v
+            for k, v in node_config.items()
+            if k in ("partition_by", "order_by", "window_functions", "top_k")
+        },
     )
 
 

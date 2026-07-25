@@ -31,6 +31,7 @@ from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
 from .statistics_only_response import StatisticsOnlyResponseStrategy
 from .timestamp_cast_sink import TimestampCastSinkStrategy
 from .topn_scan_pushdown import TopNScanPushdownStrategy
+from .window_topk_fusion import WindowTopKFusionStrategy
 
 __all__ = [
     "BooleanSimplificationStrategy",
@@ -66,4 +67,5 @@ __all__ = [
     "StatisticsOnlyResponseStrategy",
     "TimestampCastSinkStrategy",
     "TopNScanPushdownStrategy",
+    "WindowTopKFusionStrategy",
 ]

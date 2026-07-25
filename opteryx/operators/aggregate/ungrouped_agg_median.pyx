@@ -147,9 +147,9 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
     cdef void _raise_append_failure(self) except *:
         if self._state.overflowed:
             raise ValueError(
-                f"MEDIAN exceeded the per-group cap of "
-                f"{self._state.max_size} non-null values. "
-                "Use APPROX_PERCENTILE for larger inputs."
+                f"MEDIAN — too many values in one group (cap: "
+                f"{self._state.max_size}). Use APPROX_PERCENTILE(x, 0.5) for "
+                "approximate median over large sets of values."
             )
         raise MemoryError("MEDIAN buffer allocation failed")
 

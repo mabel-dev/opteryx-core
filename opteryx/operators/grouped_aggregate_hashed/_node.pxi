@@ -226,7 +226,7 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
         function = value.lower()
         if function == "count" and aggregator.duplicate_treatment == "Distinct":
             return "count_distinct"
-        if function in ("count", "sum", "min", "max", "avg", "median"):
+        if function in ("count", "sum", "min", "max", "avg", "median", "stddev"):
             return function
         if function in ("count_distinct", "approx_count_distinct", "approx_percentile",
                         "array_agg", "any_value"):

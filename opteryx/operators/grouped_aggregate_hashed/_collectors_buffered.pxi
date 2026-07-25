@@ -152,9 +152,10 @@ cdef class MedianFloat64Collector(BaseCollector):
             if self._capacity > 0:
                 cap = self._states[0][0].max_size
             raise ValueError(
-                f"MEDIAN exceeded the per-group cap of {cap} non-null values "
-                f"(first triggered by group {self._first_overflow_group}). "
-                "Use APPROX_PERCENTILE for larger inputs."
+                f"MEDIAN — too many values in one group (cap: {cap}; first "
+                f"triggered by group {self._first_overflow_group}). Use "
+                "APPROX_PERCENTILE(x, 0.5) for approximate median over large "
+                "sets of values."
             )
 
         if length <= 0:

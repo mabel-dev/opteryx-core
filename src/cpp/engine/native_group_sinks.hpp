@@ -1,13 +1,26 @@
 #pragma once
 // src/cpp/engine/native_group_sinks.hpp — the engine's general aggregation and
-// dedup breakers: UngroupedAggSink (COUNT(*)/COUNT/SUM/AVG/MIN/MAX, any mix),
-// GroupBySink (multi-key, string keys, NULL-key groups), DistinctSink.
+// dedup breakers: UngroupedAggSink (COUNT(*)/COUNT/SUM/AVG/MIN/MAX/STDDEV/
+// MEDIAN, any mix), GroupBySink (multi-key, string keys, NULL-key groups),
+// DistinctSink.
 //
 // Semantics (SQL, not demo shortcuts):
 //   - COUNT(*) counts rows; COUNT(col) counts non-NULL values.
 //   - SUM over integer-family/DECIMAL operands accumulates EXACT int64 (never a
 //     double round-trip); float operands accumulate double. SUM/AVG/MIN/MAX over
 //     zero valid values is NULL. AVG is FLOAT64.
+//   - STDDEV is POPULATION stddev (N denominator, not N-1/sample), always
+//     FLOAT64, accumulated as Σx/Σx²/count (no exactness requirement, unlike
+//     SUM/AVG — always double regardless of int or float operand). DECIMAL
+//     operands are rejected (CAST to DOUBLE first): reading the unscaled raw
+//     integer as a double would silently compute the wrong numbers' variance.
+//   - MEDIAN buffers every non-null value per group (MedianState, shared with
+//     the legacy Cython median accumulators — see _agg_kernels.hpp), capped
+//     at 1000/group (fails loud past the cap: use APPROX_PERCENTILE for
+//     larger inputs), and computes the exact median via std::nth_element at
+//     finalize (even counts interpolate). Always FLOAT64, numeric-only
+//     (unlike STDDEV/SUM/AVG — no BOOL/DATE32/TIMESTAMP64/TIME32/TIME64/
+//     DECIMAL, matching the legacy contract exactly, not silently widened).
 //   - MIN/MAX compare via the same normalized order keys the sort uses
 //     (native_sort.hpp): NULLs skipped, NaN highest, -0.0 == +0.0; the OUTPUT is
 //     the raw value at the operand's own type/width, logical descriptor carried.
@@ -50,6 +63,11 @@
 #include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
 #include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
+#include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — shared with the legacy
+                                 // Cython median accumulators (opteryx/operators/aggregate/,
+                                 // grouped_aggregate_hashed/), same struct, not duplicated
+#include "hllpp.h"               // HllppSketch — APPROX_COUNT_DISTINCT, global namespace
+#include "tdigest.h"             // td_histogram_t — APPROX_PERCENTILE, C API (third_party/tdigest-c)
 
 namespace opteryx::engine {
 
@@ -231,12 +249,45 @@ struct GroupKeyColumn {
     }
 };
 
+// RAII wrapper over td_histogram_t* (third_party/tdigest-c — a plain C API, no
+// C++ lifecycle of its own). Default-constructs a fresh digest so
+// std::vector<TDigestPtr>::resize(n) "just works" for per-group growth, same
+// as MedianState's resize contract.
+struct TDigestPtr {
+    td_histogram_t* h = nullptr;
+    TDigestPtr() : h(td_new(100.0)) {}
+    ~TDigestPtr() { if (h) td_free(h); }
+    TDigestPtr(const TDigestPtr&) = delete;
+    TDigestPtr& operator=(const TDigestPtr&) = delete;
+    TDigestPtr(TDigestPtr&& o) noexcept : h(o.h) { o.h = nullptr; }
+    TDigestPtr& operator=(TDigestPtr&& o) noexcept {
+        if (this != &o) { if (h) td_free(h); h = o.h; o.h = nullptr; }
+        return *this;
+    }
+};
+
 // ---- aggregate spec + accumulator --------------------------------------------------
 
 enum class AggFn : uint8_t {
     CountStar = 0, Count = 1, Sum = 2, Avg = 3, Min = 4, Max = 5,
     CountDistinct = 6,   // COUNT(DISTINCT col): dedup on serialized value bytes
     ArrayAgg = 7,        // ARRAY_AGG(col): one ARRAY per group; GROUP BY only
+    Stddev = 8,          // STDDEV(col): population stddev (N denominator), always DOUBLE
+    Median = 9,          // MEDIAN(col): exact median via MedianState (std::nth_element)
+    AnyValue = 10,       // ANY_VALUE(col): any real non-null value — implemented by
+                         // reusing the MIN machinery unchanged (always the minimum is
+                         // A valid ANY_VALUE answer per SQL's contract — "unspecified
+                         // which one" — see gb_kind_of / the two ternaries below).
+                         // tests/operators/test_grouped_any_value.py's own docstring
+                         // confirms callers must not depend on which value comes back.
+    ApproxCountDistinct = 11,  // APPROX_COUNT_DISTINCT(col): HyperLogLog++ sketch
+                               // (HllppSketch, src/cpp/hllpp.h) — same draken row
+                               // hash CountDistinct uses (compute_row_hashes), fed
+                               // into a sketch instead of an exact dedup set.
+    ApproxPercentile = 12,     // APPROX_PERCENTILE(col, p): t-digest sketch
+                               // (td_histogram_t, third_party/tdigest-c) — MEDIAN's
+                               // approximate sibling. `p` is AggSpec2::percentile,
+                               // a query-time constant, not a second operand column.
 };
 
 // AggSpec2.col_idx sentinels — named so a bare -1/-2 is never left for a future
@@ -265,14 +316,20 @@ struct AggSpec2 {
     // an OOM the query can't diagnose, and silently truncating would be a wrong
     // answer dressed as a right one.
     int64_t aa_max_per_group = 1000;
+    // APPROX_PERCENTILE's second argument — a query-time constant (0.0-1.0),
+    // validated at plan time (compiler.py). Ignored by every other fn.
+    double  percentile = 0.5;
 };
 
 struct AggCell {
     // Field order matters: the SUM/AVG/COUNT hot path touches ONLY the first
     // 40 bytes (one cache line); the MIN/MAX lanes sit after so aggregations
-    // without extremes never pull their lines.
+    // without extremes never pull their lines. fsumsq is STDDEV-only (second
+    // moment, Σx²) — placed next to fsum so STDDEV shares that same cache
+    // line; SUM/AVG/COUNT/MIN/MAX never touch it.
     __int128 isum = 0;   // EXACT integer-domain sum (int64 family AND DECIMAL128 raws)
     double   fsum = 0.0;
+    double   fsumsq = 0.0;                // STDDEV: Σx², always double (no exactness need)
     int64_t  valid = 0;                  // non-NULL operand rows
     int64_t  rows = 0;                   // ALL rows — COUNT(*)
     __int128 min128 = 0, max128 = 0;   // DECIMAL128 order extremes (raw == value order)
@@ -297,6 +354,54 @@ inline bool agg2_operand_supported(DrakenType t) {
         case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
         case DRAKEN_DECIMAL128:   // SUM/AVG/COUNT only — MIN/MAX guarded at capture
         case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:  // E33
+            return true;
+        default:
+            return false;
+    }
+}
+
+// MEDIAN is numeric-only — NOT the general agg2_operand_supported set. Matches
+// the legacy Cython median collectors exactly: no DECIMAL/DECIMAL128 (no
+// descale — same "never a mis-scaled answer" reasoning as STDDEV), no
+// BOOL/DATE32/TIMESTAMP64/TIME32/TIME64 either (unlike SUM/AVG/STDDEV, which
+// treat those as meaningful numeric domains — the legacy MEDIAN never did,
+// and this port preserves that existing contract rather than silently
+// widening it).
+// Single source of truth for the MEDIAN cap-overflow message — four call
+// sites (ungrouped accumulate/merge, grouped accumulate/merge) all fail loud
+// with the exact same text, never a silent approximate fallback (see
+// gro/g6's MEDIAN discussion — a query author who wants approximate opts in
+// by name via APPROX_PERCENTILE, the cap never silently decides for them).
+inline constexpr const char* kMedianCapExceededMsg =
+    "native engine: MEDIAN — too many values in one group (cap: 1000). Use "
+    "APPROX_PERCENTILE(x, 0.5) for approximate median over large sets of "
+    "values.";
+
+// HllppSketch::register_index/rho (hllpp.cpp) read the hash's raw top/bottom
+// bits directly — the standard HLL algorithm, correct ONLY if the hash has
+// genuine avalanche across all 64 bits. draken's row hash (cxx_hash_c, via
+// compute_row_hashes) is tuned for hash-table bucketing — collision-avoidance
+// for equality, which is all COUNT(DISTINCT)'s exact dedup set needs — not
+// full-bit avalanche. Confirmed empirically: APPROX_COUNT_DISTINCT fed raw
+// draken hashes directly was ~25% off on a 50K-row/39K-distinct set, while
+// COUNT(DISTINCT) on the identical hashes was exact. SplitMix64's finalizer
+// (well-known, cheap: a few multiply-xor-shift ops) re-mixes here, not in
+// draken, so every GROUP BY/JOIN/DISTINCT that relies on cxx_hash_c's actual
+// tuning is untouched — only this one consumer's stricter requirement changes.
+inline uint64_t hll_avalanche(uint64_t h) noexcept {
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    return h;
+}
+
+inline bool median_operand_supported(DrakenType t) {
+    switch (t) {
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+        case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
             return true;
         default:
             return false;
@@ -386,9 +491,27 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
     c.valid += 1;
 }
 
+// STDDEV accumulation: always double (mean/variance are inherently non-exact,
+// unlike SUM/AVG's int128-exact path), regardless of int or float operand.
+// No normalized order key / min-max lanes — STDDEV never needs them.
+inline void agg2_update_stddev(AggCell& c, const DrakenVector& v, uint32_t row,
+                               bool is_float) noexcept {
+    int64_t raw = agg2_read_raw(v, row, is_float);
+    double d;
+    if (is_float) {
+        std::memcpy(&d, &raw, sizeof(d));
+    } else {
+        d = static_cast<double>(raw);
+    }
+    c.fsum += d;
+    c.fsumsq += d * d;
+    c.valid += 1;
+}
+
 inline void agg2_merge(AggCell& into, const AggCell& from) {
     into.isum += from.isum;
     into.fsum += from.fsum;
+    into.fsumsq += from.fsumsq;
     if (from.valid > 0) {
         if (into.valid == 0 || from.min128 < into.min128) into.min128 = from.min128;
         if (into.valid == 0 || from.max128 > into.max128) into.max128 = from.max128;
@@ -630,6 +753,14 @@ enum class GBKind : uint8_t {
     MinMaxStr,
     CountDistinct,   // per-group dedup on serialized value bytes; count in valid
     ArrayAgg,        // per-group element list (capped); emits one ARRAY per group
+    Stddev,      // population stddev — always double, one kind for int AND float
+                 // operands (no exactness requirement, unlike Sum/Avg's I/F split)
+    Median,      // exact median — buffers per-group values (MedianState), sorts
+                 // and interpolates at finalize; always double, numeric-only
+    ApproxCountDistinct,  // HyperLogLog++ sketch per group; always INT64, never NULL
+                          // (matches CountDistinct: 0 for an empty group, not NULL)
+    ApproxPercentile,     // t-digest sketch per group; always DOUBLE, numeric-only
+                          // (same restriction as Median — see median_operand_supported)
 };
 
 // Which GBArrayAggState lane an ARRAY_AGG operand's values live in. One store per
@@ -699,9 +830,18 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
             return m.is_float ? GBKind::AvgF : GBKind::AvgI;
         case AggFn::Min:
         case AggFn::Max:
+        case AggFn::AnyValue:   // always the min-direction lane — see AggFn::AnyValue
             if (m.is_string) return GBKind::MinMaxStr;
             if (m.type == DRAKEN_DECIMAL128) return GBKind::MinMaxD128;
             return GBKind::MinMaxNum;
+        case AggFn::Stddev:
+            return GBKind::Stddev;
+        case AggFn::Median:
+            return GBKind::Median;
+        case AggFn::ApproxCountDistinct:
+            return GBKind::ApproxCountDistinct;
+        case AggFn::ApproxPercentile:
+            return GBKind::ApproxPercentile;
     }
     return GBKind::Rows;   // unreachable
 }
@@ -748,11 +888,16 @@ struct GBLaneView {
     const int64_t*     rows  = nullptr;
     const int64_t*     valid = nullptr;
     const int64_t*     i64   = nullptr;   // int sums / MIN-MAX raw containers
-    const double*      f64   = nullptr;   // float sums
+    const double*      f64   = nullptr;   // float sums / STDDEV Σx
+    const double*      f64sq = nullptr;   // STDDEV Σx²
     const __int128*    i128  = nullptr;   // DECIMAL128 sums / extremes
     const std::string* sval  = nullptr;   // string extremes
     GBArrayAggState*   aa    = nullptr;   // ARRAY_AGG element lists
     const AggSpec2*    aa_spec = nullptr; // ARRAY_AGG DISTINCT/ORDER BY/LIMIT modifiers
+    opteryx::ungrouped::MedianState* median = nullptr;   // MEDIAN per-group buffers
+    const HllppSketch* hll = nullptr;     // APPROX_COUNT_DISTINCT per-group sketches
+    TDigestPtr* td = nullptr;             // APPROX_PERCENTILE per-group sketches
+    const AggSpec2* pct_spec = nullptr;   // APPROX_PERCENTILE's percentile parameter
 };
 
 // Steal a freshly-built column's owner into a unique_ptr for VectorOwner::child_owner.
@@ -983,6 +1128,56 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             return emit_string_lane_column(meta, L.sval, L.valid, n);
         case GBKind::ArrayAgg:
             return emit_array_lane_column(meta, *L.aa_spec, L.aa, n, err);
+        case GBKind::Stddev: {
+            // Population variance: E[x^2] - E[x]^2, clamped to 0 (float rounding
+            // can push a near-zero true variance slightly negative, which would
+            // otherwise NaN the sqrt). Always DOUBLE, regardless of operand type.
+            std::vector<int64_t> raws(n, 0);
+            const uint8_t* okp = valid_ok();
+            for (uint32_t i = 0; i < n; ++i) {
+                if (okp[i] == 0) continue;
+                double cnt = static_cast<double>(L.valid[i]);
+                double mean = L.f64[i] / cnt;
+                double variance = (L.f64sq[i] / cnt) - (mean * mean);
+                if (variance < 0.0) variance = 0.0;
+                double sd = std::sqrt(variance);
+                std::memcpy(&raws[i], &sd, sizeof(double));
+            }
+            return emit_fixed_column(raws.data(), okp, n, DRAKEN_FLOAT64, nullptr, err);
+        }
+        case GBKind::Median: {
+            // Per-group state, not a fixed lane — null-ness is the state's own
+            // `size == 0` (zero non-null values seen), not a parallel valid[]
+            // array (Median never allocates one — see gb_lanes_resize).
+            std::vector<int64_t> raws(n, 0);
+            std::vector<uint8_t> okp(n, 0);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (L.median[i].size == 0) continue;
+                okp[i] = 1;
+                double med = L.median[i].finalize_median();
+                std::memcpy(&raws[i], &med, sizeof(double));
+            }
+            return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
+        }
+        case GBKind::ApproxCountDistinct: {
+            // Never NULL, matching exact CountDistinct: an empty group is 0.
+            std::vector<int64_t> raws(n);
+            for (uint32_t i = 0; i < n; ++i)
+                raws[i] = static_cast<int64_t>(L.hll[i].estimate());
+            return emit_fixed_column(raws.data(), nullptr, n, DRAKEN_INT64, nullptr, err);
+        }
+        case GBKind::ApproxPercentile: {
+            double q = L.pct_spec->percentile;
+            std::vector<int64_t> raws(n, 0);
+            std::vector<uint8_t> okp(n, 0);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (td_size(L.td[i].h) == 0) continue;
+                okp[i] = 1;
+                double val = td_quantile(L.td[i].h, q);
+                std::memcpy(&raws[i], &val, sizeof(double));
+            }
+            return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
+        }
     }
     return CxxColumn{};   // unreachable
 }
@@ -1074,6 +1269,9 @@ struct UCDPartition {
 struct UngroupedAggLocal : LocalSinkState {
     std::vector<AggCell> cells;
     std::vector<std::string> strs;   // string MIN/MAX extremes, parallel to cells
+    std::vector<opteryx::ungrouped::MedianState> medians;  // MEDIAN buffers, parallel to cells
+    std::vector<HllppSketch> hlls;  // APPROX_COUNT_DISTINCT sketches, parallel to cells
+    std::vector<TDigestPtr> tds;    // APPROX_PERCENTILE sketches, parallel to cells
     // COUNT(DISTINCT): per-spec, hash-partitioned CarcharSet dedup on draken value
     // hashes (partitioned for the parallel union at finalize).
     std::vector<std::array<UCDPartition, kGBParts>> dparts;
@@ -1084,6 +1282,9 @@ struct UngroupedAggGlobal : GlobalSinkState {
     std::mutex mtx;
     std::vector<AggCell> cells;
     std::vector<std::string> strs;
+    std::vector<opteryx::ungrouped::MedianState> medians;
+    std::vector<HllppSketch> hlls;
+    std::vector<TDigestPtr> tds;
     // per spec, per partition: queued worker tables (disjoint by hash — merged
     // AND counted in parallel at finalize, mirroring GroupBySink).
     std::vector<std::array<std::vector<UCDPartition>, kGBParts>> dpending;
@@ -1121,7 +1322,8 @@ struct UngroupedAggSink : Sink {
             const CxxColumn& c = in->columns[static_cast<size_t>(specs[s].col_idx)];
             DrakenType t = c.view.type;
             bool str_minmax = sort_type_is_string(t)
-                && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max);
+                && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
+                    || specs[s].fn == AggFn::AnyValue);
             // ARRAY_AGG is grouped-only (the binder rejects it without a GROUP BY,
             // and the compiler again at plan time). Reaching the ungrouped sink means
             // one of those gates broke — say so rather than read a lane that the
@@ -1133,10 +1335,30 @@ struct UngroupedAggSink : Sink {
                           "answer";
                 return false;
             }
+            // STDDEV never descales DECIMAL's fixed-point unscaled integer — reading
+            // it as a raw double would compute the variance of the WRONG numbers,
+            // a silent wrong answer, not an approximation. CAST to DOUBLE first.
+            if (specs[s].fn == AggFn::Stddev && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
+                err.code = 1;
+                err.msg = "native engine: STDDEV does not support DECIMAL operands — "
+                          "CAST to DOUBLE first, never a silently mis-scaled variance";
+                return false;
+            }
+            // MEDIAN is numeric-only (see median_operand_supported) — DECIMAL
+            // included, unlike STDDEV's DECIMAL-only rejection above.
+            if ((specs[s].fn == AggFn::Median || specs[s].fn == AggFn::ApproxPercentile)
+                    && !median_operand_supported(t)) {
+                err.code = 1;
+                err.msg = "native engine: MEDIAN/APPROX_PERCENTILE over this column "
+                          "type is not supported — only numeric inputs are accepted "
+                          "(CAST DECIMAL to DOUBLE first)";
+                return false;
+            }
             // COUNT only reads validity — any column type is countable.
             // COUNT(DISTINCT) reads serialized value bytes (key_append fails
             // loud on unsupported types at run time).
             if (specs[s].fn != AggFn::Count && specs[s].fn != AggFn::CountDistinct
+                    && specs[s].fn != AggFn::ApproxCountDistinct
                     && !str_minmax
                     && !agg2_operand_supported(t)) {
                 err.code = 1;
@@ -1163,6 +1385,9 @@ struct UngroupedAggSink : Sink {
             if (!capture_meta(l.meta, in, err)) return SinkResult::CONTINUE;
             l.cells.assign(specs.size(), AggCell{});
             l.strs.assign(specs.size(), std::string());
+            l.medians.resize(specs.size());   // MedianState: not copyable, resize (not assign)
+            l.hlls.resize(specs.size());
+            l.tds.resize(specs.size());
             l.dparts.resize(specs.size());
             l.init = true;
         }
@@ -1220,9 +1445,49 @@ struct UngroupedAggSink : Sink {
                         if (sort_row_valid(v, i)) agg2_update_str(c, l.strs[s], v, i, want_max);
                     }
                 }
+            } else if (specs[s].fn == AggFn::Stddev) {
+                bool is_f = l.meta[s].is_float;
+                for (uint32_t i = 0; i < v.length; ++i) {
+                    if (sort_row_valid(v, i)) agg2_update_stddev(c, v, i, is_f);
+                }
+            } else if (specs[s].fn == AggFn::Median) {
+                bool is_f = l.meta[s].is_float;
+                opteryx::ungrouped::MedianState& st = l.medians[s];
+                for (uint32_t i = 0; i < v.length; ++i) {
+                    if (!sort_row_valid(v, i)) continue;
+                    int64_t raw = agg2_read_raw(v, i, is_f);
+                    double d;
+                    if (is_f) std::memcpy(&d, &raw, sizeof(d));
+                    else d = static_cast<double>(raw);
+                    if (!st.append(d)) {
+                        err.code = 1;
+                        err.msg = kMedianCapExceededMsg;
+                        return SinkResult::CONTINUE;
+                    }
+                }
+            } else if (specs[s].fn == AggFn::ApproxCountDistinct) {
+                std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                std::vector<uint64_t> vh;
+                if (!compute_row_hashes(in, vcol, vh, err)) return SinkResult::CONTINUE;
+                HllppSketch& sk = l.hlls[s];
+                for (uint32_t i = 0; i < v.length; ++i) {
+                    if (sort_row_valid(v, i)) sk.add_hash(hll_avalanche(vh[i]));
+                }
+            } else if (specs[s].fn == AggFn::ApproxPercentile) {
+                bool is_f = l.meta[s].is_float;
+                td_histogram_t* h = l.tds[s].h;
+                for (uint32_t i = 0; i < v.length; ++i) {
+                    if (!sort_row_valid(v, i)) continue;
+                    int64_t raw = agg2_read_raw(v, i, is_f);
+                    double d;
+                    if (is_f) std::memcpy(&d, &raw, sizeof(d));
+                    else d = static_cast<double>(raw);
+                    td_add(h, d, 1);
+                }
             } else {
                 bool is_f = l.meta[s].is_float;
-                bool nm = specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max;
+                bool nm = specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
+                    || specs[s].fn == AggFn::AnyValue;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) agg2_update(c, v, i, is_f, nm);
                 }
@@ -1230,13 +1495,16 @@ struct UngroupedAggSink : Sink {
         }
         return SinkResult::CONTINUE;
     }
-    void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx&) override {
+    void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx& err) override {
         auto& g = static_cast<UngroupedAggGlobal&>(gs);
         auto& l = static_cast<UngroupedAggLocal&>(ls);
         std::lock_guard<std::mutex> lk(g.mtx);
         if (!g.init) {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
+            g.medians.resize(specs.size());
+            g.hlls.resize(specs.size());
+            g.tds.resize(specs.size());
             g.dpending.resize(specs.size());
             g.meta.resize(specs.size());
             g.init = true;
@@ -1247,6 +1515,28 @@ struct UngroupedAggSink : Sink {
                     agg2_merge_str(g.cells[s], l.cells[s], g.strs[s], l.strs[s],
                                    specs[s].fn == AggFn::Max);
                 agg2_merge(g.cells[s], l.cells[s]);
+                if (specs[s].fn == AggFn::Median) {
+                    opteryx::ungrouped::MedianState& src_st = l.medians[s];
+                    for (size_t k = 0; k < src_st.size; ++k) {
+                        if (!g.medians[s].append(src_st.buf[k])) {
+                            err.code = 1;
+                            err.msg = kMedianCapExceededMsg;
+                            return;
+                        }
+                    }
+                }
+                if (specs[s].fn == AggFn::ApproxCountDistinct) {
+                    if (!g.hlls[s].merge(l.hlls[s])) {
+                        err.code = 1;
+                        err.msg = "native engine: APPROX_COUNT_DISTINCT sketch merge "
+                                  "failed (precision mismatch) — unreachable, every "
+                                  "sketch shares one fixed precision";
+                        return;
+                    }
+                }
+                if (specs[s].fn == AggFn::ApproxPercentile) {
+                    td_merge(g.tds[s].h, l.tds[s].h);
+                }
                 if (specs[s].fn == AggFn::CountDistinct) {
                     for (size_t part = 0; part < kGBParts; ++part) {
                         if (l.dparts[s][part].size() > 0)
@@ -1264,6 +1554,9 @@ struct UngroupedAggSink : Sink {
             // zero morsels ever arrived: COUNT()=0, SUM/AVG/MIN/MAX=NULL
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
+            g.medians.resize(specs.size());
+            g.hlls.resize(specs.size());
+            g.tds.resize(specs.size());
             g.dpending.resize(specs.size());
             g.meta.resize(specs.size());
         }
@@ -1328,6 +1621,7 @@ struct UngroupedAggSink : Sink {
             if (kind == GBKind::CountDistinct)
                 valid1 = dcounts[s].load();
             double f641 = c.fsum;
+            double f64sq1 = c.fsumsq;
             __int128 i1281 = 0;
             switch (kind) {
                 case GBKind::SumI:
@@ -1341,7 +1635,8 @@ struct UngroupedAggSink : Sink {
                     i641 = static_cast<int64_t>(c.isum);
                     break;
                 case GBKind::MinMaxNum:
-                    i641 = (specs[s].fn == AggFn::Min) ? c.min_raw : c.max_raw;
+                    // Min and AnyValue both read the min lane — see AggFn::AnyValue.
+                    i641 = (specs[s].fn == AggFn::Max) ? c.max_raw : c.min_raw;
                     break;
                 case GBKind::AvgI:   // averages divide from the exact int128 sum
                 case GBKind::SumD128:
@@ -1349,14 +1644,18 @@ struct UngroupedAggSink : Sink {
                     i1281 = c.isum;
                     break;
                 case GBKind::MinMaxD128:
-                    i1281 = (specs[s].fn == AggFn::Min) ? c.min128 : c.max128;
+                    i1281 = (specs[s].fn == AggFn::Max) ? c.max128 : c.min128;
                     break;
                 default:
                     break;
             }
             GBLaneView lv;
             lv.rows = &rows1; lv.valid = &valid1; lv.i64 = &i641;
-            lv.f64 = &f641; lv.i128 = &i1281; lv.sval = &g.strs[s];
+            lv.f64 = &f641; lv.f64sq = &f64sq1; lv.i128 = &i1281; lv.sval = &g.strs[s];
+            lv.median = &g.medians[s];
+            lv.hll = &g.hlls[s];
+            lv.td = &g.tds[s];
+            lv.pct_spec = &specs[s];
             m->columns.push_back(emit_lane_column(g.meta[s], kind, lv, 1, err));
             if (err.code != 0) return;
             m->names.push_back(specs[s].name);
@@ -1394,11 +1693,15 @@ struct UngroupedAggSink : Sink {
 struct GBLanes {
     std::vector<int64_t>  valid;   // non-NULL operand rows (every kind but Rows)
     std::vector<int64_t>  i64;     // SumI/AvgI exact sums; MinMaxNum raw containers
-    std::vector<double>   f64;     // SumF/AvgF sums
+    std::vector<double>   f64;     // SumF/AvgF sums; Stddev Σx
+    std::vector<double>   f64sq;   // Stddev Σx²
     std::vector<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
     std::vector<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     std::vector<std::string> sval; // MinMaxStr extremes
     std::vector<GBArrayAggState> aa;  // ArrayAgg per-group element lists
+    std::vector<opteryx::ungrouped::MedianState> median;  // Median per-group buffers
+    std::vector<HllppSketch> hll;  // ApproxCountDistinct per-group sketches
+    std::vector<TDigestPtr> td;    // ApproxPercentile per-group sketches
 };
 
 inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
@@ -1414,6 +1717,9 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             return;
         case GBKind::SumF: case GBKind::AvgF:
             L.valid.resize(n); L.f64.resize(n);
+            return;
+        case GBKind::Stddev:
+            L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n);
             return;
         // AvgI sums exact int128 (overflow-proof); SUM's OUTPUT is INT64 so its
         // int64 lane + loud overflow trap loses nothing.
@@ -1431,6 +1737,23 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             // No `valid` lane: an ARRAY_AGG row is never NULL, and the element
             // count is the state's own nulls.size().
             L.aa.resize(n);
+            return;
+        case GBKind::Median:
+            // No `valid` lane: null-ness is the state's own size==0 (see
+            // emit_lane_column). resize() default-constructs new MedianStates
+            // (empty, size==0) — the correct initial state for a new group.
+            L.median.resize(n);
+            return;
+        case GBKind::ApproxCountDistinct:
+            // No `valid` lane: never NULL (see emit_lane_column). resize()
+            // default-constructs new HllppSketches (precision 14, matching the
+            // legacy collector's default — see AggFn::ApproxCountDistinct).
+            L.hll.resize(n);
+            return;
+        case GBKind::ApproxPercentile:
+            // No `valid` lane: null-ness is the digest's own td_size()==0 (see
+            // emit_lane_column). resize() default-constructs fresh TDigestPtrs.
+            L.td.resize(n);
             return;
     }
 }
@@ -1665,7 +1988,8 @@ struct GroupBySink : Sink {
             const CxxColumn& c = in->columns[static_cast<size_t>(specs[s].col_idx)];
             DrakenType t = c.view.type;
             bool str_minmax = sort_type_is_string(t)
-                && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max);
+                && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
+                    || specs[s].fn == AggFn::AnyValue);
             // ARRAY_AGG copies values instead of ordering/summing them, so it takes
             // the string family too — its own guard, not agg2's.
             if (specs[s].fn == AggFn::ArrayAgg) {
@@ -1677,6 +2001,7 @@ struct GroupBySink : Sink {
                 }
             } else if (specs[s].fn != AggFn::Count
                     && specs[s].fn != AggFn::CountDistinct
+                    && specs[s].fn != AggFn::ApproxCountDistinct
                     && !str_minmax
                     && !agg2_operand_supported(t)) {
                 // COUNT reads only validity; COUNT(DISTINCT) reads serialized value
@@ -1684,6 +2009,25 @@ struct GroupBySink : Sink {
                 err.code = 1;
                 err.msg = "native engine: unsupported aggregate operand type — fail "
                           "loud, never a silent wrong answer";
+                return false;
+            }
+            // STDDEV never descales DECIMAL's fixed-point unscaled integer — reading
+            // it as a raw double would compute the variance of the WRONG numbers,
+            // a silent wrong answer, not an approximation. CAST to DOUBLE first.
+            if (specs[s].fn == AggFn::Stddev && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
+                err.code = 1;
+                err.msg = "native engine: STDDEV does not support DECIMAL operands — "
+                          "CAST to DOUBLE first, never a silently mis-scaled variance";
+                return false;
+            }
+            // MEDIAN is numeric-only (see median_operand_supported) — DECIMAL
+            // included, unlike STDDEV's DECIMAL-only rejection above.
+            if ((specs[s].fn == AggFn::Median || specs[s].fn == AggFn::ApproxPercentile)
+                    && !median_operand_supported(t)) {
+                err.code = 1;
+                err.msg = "native engine: MEDIAN/APPROX_PERCENTILE over this column "
+                          "type is not supported — only numeric inputs are accepted "
+                          "(CAST DECIMAL to DOUBLE first)";
                 return false;
             }
             l.meta[s].type = t;
@@ -1841,6 +2185,38 @@ struct GroupBySink : Sink {
                         L.valid[e] += 1;
                     }
                     break;
+                case GBKind::Stddev:
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        uint32_t e = l.mk_ent[i];
+                        bool is_f = l.meta[s].is_float;
+                        int64_t raw = agg2_read_raw(v, i, is_f);
+                        double d;
+                        if (is_f) std::memcpy(&d, &raw, sizeof(d));
+                        else d = static_cast<double>(raw);
+                        L.f64[e] += d;
+                        L.f64sq[e] += d * d;
+                        L.valid[e] += 1;
+                    }
+                    break;
+                case GBKind::Median:
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        uint32_t e = l.mk_ent[i];
+                        bool is_f = l.meta[s].is_float;
+                        int64_t raw = agg2_read_raw(v, i, is_f);
+                        double d;
+                        if (is_f) std::memcpy(&d, &raw, sizeof(d));
+                        else d = static_cast<double>(raw);
+                        if (!L.median[e].append(d)) {
+                            err.code = 1;
+                            err.msg = kMedianCapExceededMsg;
+                            return SinkResult::CONTINUE;
+                        }
+                    }
+                    break;
                 case GBKind::SumD128:
                 case GBKind::AvgD128:
                     for (uint32_t i = 0; i < rows; ++i) {
@@ -1875,6 +2251,33 @@ struct GroupBySink : Sink {
                                 || (want_max ? r > L.i128[e] : r < L.i128[e]))
                             L.i128[e] = r;
                         L.valid[e] += 1;
+                    }
+                    break;
+                case GBKind::ApproxCountDistinct: {
+                    // Same draken row hash CountDistinct uses (compute_row_hashes),
+                    // fed into a HyperLogLog++ sketch instead of an exact dedup set.
+                    // NULLs excluded (sort_row_valid skip), matching CountDistinct.
+                    std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                    if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
+                        return SinkResult::CONTINUE;
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        L.hll[l.mk_ent[i]].add_hash(hll_avalanche(l.cd_vhash[i]));
+                    }
+                    break;
+                }
+                case GBKind::ApproxPercentile:
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        uint32_t e = l.mk_ent[i];
+                        bool is_f = l.meta[s].is_float;
+                        int64_t raw = agg2_read_raw(v, i, is_f);
+                        double d;
+                        if (is_f) std::memcpy(&d, &raw, sizeof(d));
+                        else d = static_cast<double>(raw);
+                        td_add(L.td[e].h, d, 1);
                     }
                     break;
                 case GBKind::CountDistinct: {
@@ -2056,6 +2459,33 @@ struct GroupBySink : Sink {
                             D.valid[m] += S.valid[e];
                         }
                         break;
+                    case GBKind::Stddev:
+                        for (uint32_t e = 0; e < sn; ++e) {
+                            uint32_t m = ge[e];
+                            D.f64[m] += S.f64[e];
+                            D.f64sq[m] += S.f64sq[e];
+                            D.valid[m] += S.valid[e];
+                        }
+                        break;
+                    case GBKind::Median: {
+                        // MedianState has no merge-by-move (unlike ArrayAgg's element
+                        // lists) — append each source value into the dest group's
+                        // state. Groups are cap-bounded (1000), so this is bounded
+                        // work, not a hot-path concern.
+                        GBLanes& SL = src.lanes[s];
+                        for (uint32_t e = 0; e < sn; ++e) {
+                            opteryx::ungrouped::MedianState& src_st = SL.median[e];
+                            opteryx::ungrouped::MedianState& dst_st = D.median[ge[e]];
+                            for (size_t k = 0; k < src_st.size; ++k) {
+                                if (!dst_st.append(src_st.buf[k])) {
+                                    err.code = 1;
+                                    err.msg = kMedianCapExceededMsg;
+                                    return;
+                                }
+                            }
+                        }
+                        break;
+                    }
                     case GBKind::SumD128:
                     case GBKind::AvgD128:
                         for (uint32_t e = 0; e < sn; ++e) {
@@ -2142,6 +2572,26 @@ struct GroupBySink : Sink {
                         }
                         break;
                     }
+                    case GBKind::ApproxCountDistinct:
+                        for (uint32_t e = 0; e < sn; ++e) {
+                            if (!D.hll[ge[e]].merge(S.hll[e])) {
+                                err.code = 1;
+                                err.msg = "native engine: APPROX_COUNT_DISTINCT sketch "
+                                          "merge failed (precision mismatch) — "
+                                          "unreachable, every sketch shares one fixed "
+                                          "precision";
+                                return;
+                            }
+                        }
+                        break;
+                    case GBKind::ApproxPercentile: {
+                        // td_merge's `from` isn't const in the vendored C API —
+                        // mutable alias, like Median's src-consuming merge.
+                        GBLanes& SL = src.lanes[s];
+                        for (uint32_t e = 0; e < sn; ++e)
+                            td_merge(D.td[ge[e]].h, SL.td[e].h);
+                        break;
+                    }
                     case GBKind::CountDistinct: {
                         // Re-key each distinct (group, value_hash) pair under the
                         // merged partition's renumbered group ids; the same pair may
@@ -2182,12 +2632,25 @@ struct GroupBySink : Sink {
                 } else if (kind == GBKind::ArrayAgg) {
                     lv.aa = const_cast<GBArrayAggState*>(L.aa.data()) + start;
                     lv.aa_spec = &specs[s];
+                } else if (kind == GBKind::Median) {
+                    // No `valid` lane (Median never allocates one — see
+                    // gb_lanes_resize); null-ness is each state's own size==0.
+                    lv.median = const_cast<opteryx::ungrouped::MedianState*>(
+                        L.median.data()) + start;
+                } else if (kind == GBKind::ApproxCountDistinct) {
+                    // No `valid` lane either — never NULL (see emit_lane_column).
+                    lv.hll = L.hll.data() + start;
+                } else if (kind == GBKind::ApproxPercentile) {
+                    // No `valid` lane: null-ness is each digest's own td_size()==0.
+                    lv.td = const_cast<TDigestPtr*>(L.td.data()) + start;
+                    lv.pct_spec = &specs[s];
                 } else {
                     lv.valid = L.valid.data() + start;
-                    if (!L.i64.empty())  lv.i64  = L.i64.data() + start;
-                    if (!L.f64.empty())  lv.f64  = L.f64.data() + start;
-                    if (!L.i128.empty()) lv.i128 = L.i128.data() + start;
-                    if (!L.sval.empty()) lv.sval = L.sval.data() + start;
+                    if (!L.i64.empty())   lv.i64   = L.i64.data() + start;
+                    if (!L.f64.empty())   lv.f64   = L.f64.data() + start;
+                    if (!L.f64sq.empty()) lv.f64sq = L.f64sq.data() + start;
+                    if (!L.i128.empty())  lv.i128  = L.i128.data() + start;
+                    if (!L.sval.empty())  lv.sval  = L.sval.data() + start;
                 }
                 m->columns.push_back(emit_lane_column(g.meta[s], kind, lv, n, err));
                 if (err.code != 0) return;
@@ -2356,6 +2819,222 @@ struct DistinctSink : Sink {
             if (err.code != 0) return;
             out->morsels.push_back(std::move(m));
         }
+    }
+};
+
+// ---- WindowTopKSink (ROW_NUMBER top-K per partition, no full sort) -----------------
+// `ROW_NUMBER() OVER (PARTITION BY p... ORDER BY o)` with a WindowTopKFusionStrategy-
+// fused `WHERE rn <= K`: streams instead of buffer-then-sort. sink() hashes each
+// morsel's partition columns (compute_row_hashes — the same 64-bit hash-only
+// identity contract GROUP BY/DISTINCT use) and maintains, per worker, a bounded
+// max-heap of the K best rows per partition hash — O(log K) per row instead of an
+// O(n log n) sort of every row. combine() merges each worker's per-partition heaps
+// into one global map (bounded: at most K survivors per partition per worker, so
+// the merge is cheap regardless of n). finalize() sorts each partition's <= K
+// survivors by the order key (cheap — K is small) to assign sequential
+// ROW_NUMBERs, and emits.
+//
+// Scope: the compiler only routes here when there is exactly one ROW_NUMBER
+// function (no RANK/DENSE_RANK — tie handling needs the full rank first, see
+// WindowSink) and exactly one ORDER BY column of a fixed-width numeric/temporal/
+// bool type (sort_num_key's supported set; VARCHAR/DECIMAL128 order keys use
+// WindowSink instead). Row order among order-key ties is NOT guaranteed to match
+// WindowSink's arrival-order tie-break — SQL doesn't guarantee one for ROW_NUMBER
+// either, so this is a legitimate (if different) answer, not a correctness gap.
+
+struct WindowTopKCandidate {
+    uint64_t key;         // sort_num_key(), direction-normalized so smaller = better
+    uint8_t valid;         // order-key validity; 0 = NULL
+    uint32_t morsel_idx;   // index into the owning state's retained-morsels vector
+    uint32_t row;
+};
+
+// NULLS FIRST under ASC / NULLS LAST under DESC (native_sort.hpp's documented
+// convention) — matches SortKeyCmp exactly. true if `a` ranks strictly earlier
+// (better) than `b` — a plain ascending "<" over the rank ordering, so feeding
+// this directly as push_heap/pop_heap's comparator gives front() == the WORST
+// kept candidate (the one nothing else ranks behind), which is what a bounded
+// top-K eviction needs: cheap access to "which one goes if a better one shows up".
+struct WindowTopKBetter {
+    bool ascending;
+    bool operator()(const WindowTopKCandidate& a, const WindowTopKCandidate& b) const {
+        if (a.valid != b.valid) return ascending ? (a.valid == 0) : (a.valid != 0);
+        if (!a.valid) return false;   // both NULL — tie, arbitrary/stable is fine
+        return a.key < b.key;         // smaller normalized key = ranks earlier/better
+    }
+};
+
+// Offer `c` into a bounded (<= k) heap of the current top-K: fills up to k, then
+// only replaces the current worst (heap.front(), under WindowTopKBetter) if `c`
+// ranks better than it.
+inline void window_topk_offer(std::vector<WindowTopKCandidate>& heap,
+                              const WindowTopKCandidate& c, size_t k,
+                              const WindowTopKBetter& better) {
+    if (heap.size() < k) {
+        heap.push_back(c);
+        std::push_heap(heap.begin(), heap.end(), better);
+    } else if (better(c, heap.front())) {   // c ranks better than the current worst -> c survives
+        std::pop_heap(heap.begin(), heap.end(), better);
+        heap.back() = c;
+        std::push_heap(heap.begin(), heap.end(), better);
+    }
+}
+
+using WindowTopKHeapMap = std::unordered_map<uint64_t, std::vector<WindowTopKCandidate>>;
+
+struct WindowTopKLocal : LocalSinkState {
+    std::vector<MorselPtr> morsels;
+    WindowTopKHeapMap heaps;
+};
+struct WindowTopKGlobal : GlobalSinkState {
+    std::mutex mtx;
+    std::vector<MorselPtr> morsels;
+    WindowTopKHeapMap heaps;
+};
+
+struct WindowTopKSink : Sink {
+    std::vector<size_t> part_idx;   // partition-key column indices (hashed, not sorted)
+    size_t order_idx;               // single ORDER BY column index
+    bool ascending;
+    size_t k;                       // WindowTopKFusionStrategy's fused K (>= 1)
+    std::string out_name;           // ROW_NUMBER output column name
+    MorselBuffer* out;
+    size_t chunk_rows;
+
+    WindowTopKSink(std::vector<size_t> p, size_t oi, bool asc, size_t kk,
+                   std::string name, MorselBuffer* b, size_t chunk = 131072)
+        : part_idx(std::move(p)), order_idx(oi), ascending(asc), k(kk),
+          out_name(std::move(name)), out(b), chunk_rows(chunk) {}
+
+    std::unique_ptr<GlobalSinkState> make_global() override {
+        return std::make_unique<WindowTopKGlobal>();
+    }
+    std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
+        return std::make_unique<WindowTopKLocal>();
+    }
+
+    SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState& ls,
+                    ErrCtx& err) override {
+        uint32_t rows = in->num_rows();
+        if (rows == 0) return SinkResult::CONTINUE;
+        auto& l = static_cast<WindowTopKLocal&>(ls);
+
+        std::vector<uint64_t> phashes;
+        if (!compute_row_hashes(in, part_idx, phashes, err)) return SinkResult::CONTINUE;
+
+        const DrakenVector& ov = in->columns[order_idx].view;
+        uint32_t mi = static_cast<uint32_t>(l.morsels.size());
+        l.morsels.push_back(in);
+
+        WindowTopKBetter better{ascending};
+        for (uint32_t r = 0; r < rows; ++r) {
+            bool ok = sort_row_valid(ov, r);
+            uint64_t raw = ok ? sort_num_key(ov, r) : 0;
+            WindowTopKCandidate c;
+            c.key = ok ? (ascending ? raw : ~raw) : 0;
+            c.valid = ok ? 1 : 0;
+            c.morsel_idx = mi;
+            c.row = r;
+            window_topk_offer(l.heaps[phashes[r]], c, k, better);
+        }
+        return SinkResult::CONTINUE;
+    }
+
+    void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx&) override {
+        auto& g = static_cast<WindowTopKGlobal&>(gs);
+        auto& l = static_cast<WindowTopKLocal&>(ls);
+        WindowTopKBetter better{ascending};
+        std::lock_guard<std::mutex> lk(g.mtx);
+        uint32_t base = static_cast<uint32_t>(g.morsels.size());
+        for (MorselPtr& m : l.morsels) g.morsels.push_back(std::move(m));
+        for (auto& [phash, local_heap] : l.heaps) {
+            std::vector<WindowTopKCandidate>& global_heap = g.heaps[phash];
+            for (WindowTopKCandidate c : local_heap) {
+                c.morsel_idx += base;
+                window_topk_offer(global_heap, c, k, better);
+            }
+        }
+    }
+
+    void finalize(GlobalSinkState& gs, ErrCtx& err) override {
+        auto& g = static_cast<WindowTopKGlobal&>(gs);
+        if (g.heaps.empty() || g.morsels.empty()) return;
+
+        WindowTopKBetter better{ascending};
+        std::vector<uint32_t> row_m, row_r;
+        std::vector<int64_t> rn;
+        for (auto& [phash, heap] : g.heaps) {
+            // Best-first: `a` sorts before `b` iff `a` ranks better than `b`.
+            std::sort(heap.begin(), heap.end(), better);
+            int64_t pos = 1;
+            for (const WindowTopKCandidate& c : heap) {
+                row_m.push_back(c.morsel_idx);
+                row_r.push_back(c.row);
+                rn.push_back(pos++);
+            }
+        }
+        size_t total = row_m.size();
+        if (total == 0) return;
+        std::vector<uint32_t> order(total);
+        for (size_t i = 0; i < total; ++i) order[i] = static_cast<uint32_t>(i);
+
+        // Same one-shot thread pool-let idiom as GroupBySink::finalize /
+        // WindowSink::finalize — total is bounded by (#partitions * k), typically
+        // small, so this is headroom for large-K/large-cardinality cases rather
+        // than the primary win (that's avoiding the O(n log n) sort above).
+        const std::vector<std::string>& names = g.morsels.front()->names;
+        size_t num_chunks = (total + chunk_rows - 1) / chunk_rows;
+        std::vector<MorselPtr> chunk_out(num_chunks);
+
+        unsigned hw = std::thread::hardware_concurrency();
+        unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
+        if (nt > 16) nt = 16;
+        if (nt > num_chunks) nt = static_cast<unsigned>(num_chunks);
+        if (total < 200000) nt = 1;
+        if (nt < 1) nt = 1;
+
+        std::vector<ErrCtx> errs(nt);
+        std::atomic<size_t> next_chunk{0};
+        auto worker = [&](unsigned tid) {
+            for (;;) {
+                size_t ci = next_chunk.fetch_add(1);
+                if (ci >= num_chunks) break;
+                size_t start = ci * chunk_rows;
+                size_t count = std::min(chunk_rows, total - start);
+                MorselPtr m = gather_rows(g.morsels, order, start, count, row_m, row_r,
+                                          names, errs[tid]);
+                if (errs[tid].code != 0) return;
+                uint32_t cn = static_cast<uint32_t>(count);
+                int64_t* data = static_cast<int64_t*>(
+                    draken_malloc((cn == 0 ? 1 : cn) * sizeof(int64_t)));
+                for (uint32_t j = 0; j < cn; ++j) data[j] = rn[start + j];
+                uint32_t* sel = static_cast<uint32_t*>(
+                    draken_malloc((cn == 0 ? 1 : cn) * sizeof(uint32_t)));
+                for (uint32_t j = 0; j < cn; ++j) sel[j] = j;
+                DrakenVector v;
+                v.data = data; v.selection = sel; v.data_length = cn; v.length = cn;
+                v.validity = nullptr; v.type = DRAKEN_INT64;
+                v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+                CxxColumn c;
+                c.own = std::make_shared<VectorOwner>(
+                    v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr),
+                    OwnedBuffer<void>(sel));
+                c.own->logical_type = nullptr;
+                c.view = c.own->vec;
+                m->columns.push_back(std::move(c));
+                m->names.push_back(out_name);
+                chunk_out[ci] = std::move(m);
+            }
+        };
+        std::vector<std::thread> threads;
+        threads.reserve(nt > 0 ? nt - 1 : 0);
+        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
+        worker(0);
+        for (std::thread& t : threads) t.join();
+        for (ErrCtx& e : errs) {
+            if (e.code != 0) { err = e; return; }
+        }
+        for (MorselPtr& m : chunk_out) out->morsels.push_back(std::move(m));
     }
 };
 

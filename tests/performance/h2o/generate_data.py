@@ -23,25 +23,23 @@ Idempotent — files that already exist are skipped.
 
 Dev dependencies
 ----------------
-    numpy    - generation (RNG + arrays)
-    pyarrow  - Parquet writer
+    numpy    - generation (fast RNG + array ops); explicitly permitted for
+               tests/dev use by `CLAUDE.md` §4. Not required by the writer —
+               only used to generate values quickly before they're handed
+               to Draken as plain Python lists.
 
-PyArrow is **banned in Opteryx production code** (`CLAUDE.md` §4) — the
-build-time `check_no_pyarrow()` in `setup.py` enforces this. It is
-permitted here because:
-  - this script is dev tooling under `tests/performance/`, never imported
-    by Opteryx,
-  - the runner (`run.py`) does not import PyArrow,
-  - we previously used DuckDB to write Parquet, but DuckDB emits the
-    legacy `converted_type='INT_32'` annotation on INT32 columns and
-    omits the modern `logical_type=StringType()` on UTF8 columns, which
-    Rugo's schema discovery does not accept (manifests as 0×0 reads).
-    PyArrow writes both legacy and modern metadata, producing files that
-    Rugo reads cleanly.
+Parquet is written via Rugo's own native writer (`rugo.parquet.write_parquet`)
+— no PyArrow. We previously used PyArrow because DuckDB's writer emitted the
+legacy `converted_type='INT_32'` annotation on INT32 columns and omitted the
+modern `logical_type=StringType()` on UTF8 columns, which Rugo's schema
+discovery didn't accept (manifests as 0×0 reads). Rugo's own writer emits
+metadata its own reader parses cleanly (see
+`tests/rugo/test_native_parquet_writer.py::test_rugo_can_parse_own_footer`),
+so that workaround is gone.
 
 Install into your dev venv:
 
-    pip install numpy pyarrow
+    pip install numpy
 
 Usage
 -----
@@ -70,10 +68,9 @@ SIZES = {
 
 # RNG seeds — deterministic so re-runs produce identical bytes.
 SEED_GROUPBY = 0xDB0001
-SEED_JOIN_X = 0xDB0002
-SEED_JOIN_SMALL = 0xDB0003
-SEED_JOIN_MEDIUM = 0xDB0004
-SEED_JOIN_BIG = 0xDB0005
+# join-datagen.R uses a single set.seed(108) for x + all three RHS tables,
+# since they share one key space — matched here with one seed for all four.
+SEED_JOIN = 0xDB0002
 
 
 def _require_deps():
@@ -81,47 +78,43 @@ def _require_deps():
         import numpy as np  # noqa: F401
     except ImportError:
         sys.exit("numpy is required. Install: pip install numpy")
-    try:
-        import pyarrow  # noqa: F401
-        import pyarrow.parquet  # noqa: F401
-    except ImportError:
-        sys.exit("pyarrow is required. Install: pip install pyarrow")
 
 
 def _write_parquet(table_name: str, columns: dict, out_path: Path) -> None:
-    """Write a dict of {colname: numpy array} to a Parquet file via PyArrow.
-
-    PyArrow emits both legacy (`converted_type`) and modern (`logical_type`)
-    Parquet metadata, which Rugo's schema discovery requires. SNAPPY
-    compression matches the existing `testdata/job/*.parquet` fixtures.
-    """
-    import numpy as np
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+    """Write a dict of {colname: numpy array} to a Parquet file via Rugo's
+    own native writer — no PyArrow (see module docstring)."""
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+    from rugo.parquet import write_parquet
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n = len(next(iter(columns.values())))
-    print(f"  [{table_name}] building arrow table ({n:,} rows)")
+    print(f"  [{table_name}] building morsel ({n:,} rows)")
 
-    arrays = []
     names = []
+    vectors = []
     for name, arr in columns.items():
-        names.append(name)
+        names.append(name.encode())
         k = arr.dtype.kind
         if k in ("U", "S", "O"):
-            arrays.append(pa.array(arr, type=pa.string()))
+            dtype = DrakenType.VARCHAR
         elif k == "f":
-            arrays.append(pa.array(arr, type=pa.float64()))
+            dtype = DrakenType.FLOAT64
         elif k in ("i", "u"):
             # Match groupby-datagen.R / join-datagen.R: ints fit in INT32.
-            pa_type = pa.int64() if arr.dtype.itemsize >= 8 else pa.int32()
-            arrays.append(pa.array(arr, type=pa_type))
+            dtype = DrakenType.INT64 if arr.dtype.itemsize >= 8 else DrakenType.INT32
         else:
-            arrays.append(pa.array(arr))
+            raise TypeError(f"{table_name}.{name}: unsupported numpy dtype {arr.dtype!r}")
+        # .tolist() coerces numpy scalars (np.int32, np.str_, ...) to native
+        # Python int/float/str — the type vector_from_sequence's nanobind
+        # constructors expect.
+        vectors.append(vector_from_sequence(arr.tolist(), dtype))
 
-    table = pa.Table.from_arrays(arrays, names=names)
+    morsel = Morsel.from_vectors(names, vectors)
     print(f"  [{table_name}] -> {out_path.relative_to(ROOT)}")
-    pq.write_table(table, out_path.as_posix(), compression="snappy")
+    data = write_parquet(morsel)
+    out_path.write_bytes(data)
 
 
 def _gen_groupby(N: int, K: int, seed: int) -> dict:
@@ -158,92 +151,127 @@ def _gen_groupby(N: int, K: int, seed: int) -> dict:
     return cols
 
 
-def _gen_join_x(N: int, K: int, seed: int) -> dict:
-    """Port of `_data/join-datagen.R` (LHS x table, no NAs).
+def _split_xlr(n: float, rng) -> dict:
+    """Port of upstream `split_xlr(n)`.
 
-    Distinct schema from groupby: ints first, strings later.
-        id1..id3 : int
-        id4..id6 : str
-        v1       : f64
+    A random permutation of 1..round(n*1.1), split into three disjoint
+    slices: `x` (90%, shared by LHS and RHS), `l` (10%, LHS-only — these
+    keys never appear in any RHS table, giving INNER vs LEFT joins a real
+    difference), `r` (10%, RHS-only — never appear in the LHS).
+    """
+    import numpy as np
+
+    total = int(round(n * 1.1))
+    n90 = int(round(n * 0.9))
+    n = int(round(n))
+    key = rng.permutation(total) + 1
+    return {"x": key[:n90], "l": key[n90:n], "r": key[n:total]}
+
+
+def _sample_all(x, size: int, rng):
+    """Port of upstream `sample_all(x, size)`.
+
+    Every value in `x` appears at least once; padded to `size` by sampling
+    `x` with replacement, then the whole thing is shuffled. When
+    `size == len(x)` this degenerates to an exact random permutation of
+    `x` (used for the RHS tables' designated join-key column, which must
+    be unique).
+    """
+    import numpy as np
+
+    pad_n = size - len(x)
+    if pad_n > 0:
+        x = np.concatenate([x, rng.choice(x, size=pad_n, replace=True)])
+    return rng.permutation(x)
+
+
+def _id_lookup(domain_size: int):
+    """`f"id{i}"` for i in 1..domain_size (upstream `sprintf("id%.0f", i)` — no
+    zero-padding, unlike the groupby id1/id2/id3 strings)."""
+    import numpy as np
+
+    return np.char.add("id", np.arange(1, domain_size + 1).astype(str))
+
+
+def _gen_join_tables(N: int, seed: int) -> dict:
+    """Port of `_data/join-datagen.R` end to end.
+
+    Generates LHS `x` and all three RHS tables (`small`, `medium`, `big`)
+    from one shared key space, matching upstream cardinalities exactly:
+        id1 domain = N/1e6   id2 domain = N/1e3   id3 domain = N
+    Each RHS table's *designated* join key (small.id1, medium.id2,
+    big.id3) is an exact unique permutation of its domain — a proper
+    foreign key — everything else is sampled with replacement, same as
+    upstream. id4/id5/id6 are string mirrors of id1/id2/id3 (not an
+    independent low-cardinality column), also matching upstream.
     """
     import numpy as np
 
     rng = np.random.default_rng(seed)
-    NK = N // K
+    key1 = _split_xlr(N / 1e6, rng)
+    key2 = _split_xlr(N / 1e3, rng)
+    key3 = _split_xlr(N, rng)
 
-    cols = {
-        "id1": (rng.integers(0, K, size=N) + 1).astype(np.int32),
-        "id2": (rng.integers(0, K, size=N) + 1).astype(np.int32),
-        "id3": (rng.integers(0, NK, size=N) + 1).astype(np.int32),
-        "id4": np.array([f"id{i:03d}" for i in range(1, K + 1)])[
-            rng.integers(0, K, size=N)
-        ],
-        "id5": np.array([f"id{i:03d}" for i in range(1, K + 1)])[
-            rng.integers(0, K, size=N)
-        ],
-        "id6": np.array([f"id{i:010d}" for i in range(1, NK + 1)])[
-            rng.integers(0, NK, size=N)
-        ],
+    lookup1 = _id_lookup(len(key1["x"]) + len(key1["l"]) + len(key1["r"]))
+    lookup2 = _id_lookup(len(key2["x"]) + len(key2["l"]) + len(key2["r"]))
+    lookup3 = _id_lookup(len(key3["x"]) + len(key3["l"]) + len(key3["r"]))
+
+    # LHS: x
+    lhs_keys1 = np.concatenate([key1["x"], key1["l"]])
+    lhs_keys2 = np.concatenate([key2["x"], key2["l"]])
+    lhs_keys3 = np.concatenate([key3["x"], key3["l"]])
+    id1 = _sample_all(lhs_keys1, N, rng).astype(np.int32)
+    id2 = _sample_all(lhs_keys2, N, rng).astype(np.int32)
+    id3 = _sample_all(lhs_keys3, N, rng).astype(np.int32)
+    x_cols = {
+        "id1": id1,
+        "id2": id2,
+        "id3": id3,
+        "id4": lookup1[id1 - 1],
+        "id5": lookup2[id2 - 1],
+        "id6": lookup3[id3 - 1],
         "v1":  np.round(rng.uniform(0.0, 100.0, size=N), 6),
     }
-    return cols
 
-
-def _gen_join_small(K: int, seed: int) -> dict:
-    """Small RHS: K rows (e.g. 100). Joined on id1 (int)."""
-    import numpy as np
-    rng = np.random.default_rng(seed)
-    return {
-        "id1": np.arange(1, K + 1, dtype=np.int32),
-        "id4": np.array([f"id{i:03d}" for i in range(1, K + 1)]),
-        "v2":  np.round(rng.uniform(0.0, 100.0, size=K), 6),
+    # RHS: small — n=N/1e6, designated key id1 (unique)
+    n_small = len(key1["x"]) + len(key1["r"])
+    rhs_keys1 = np.concatenate([key1["x"], key1["r"]])
+    s_id1 = _sample_all(rhs_keys1, n_small, rng).astype(np.int32)
+    small_cols = {
+        "id1": s_id1,
+        "id4": lookup1[s_id1 - 1],
+        "v2":  np.round(rng.uniform(0.0, 100.0, size=n_small), 6),
     }
 
-
-def _gen_join_medium(K: int, seed: int) -> dict:
-    """Medium RHS: K*K rows. Carries id1, id2, id4, id5 + v2."""
-    import numpy as np
-    rng = np.random.default_rng(seed)
-    n = K * K
-    cols = {
-        "id1": (rng.integers(0, K, size=n) + 1).astype(np.int32),
-        "id2": (rng.integers(0, K, size=n) + 1).astype(np.int32),
-        "id4": np.array([f"id{i:03d}" for i in range(1, K + 1)])[
-            rng.integers(0, K, size=n)
-        ],
-        "id5": np.array([f"id{i:03d}" for i in range(1, K + 1)])[
-            rng.integers(0, K, size=n)
-        ],
-        "v2":  np.round(rng.uniform(0.0, 100.0, size=n), 6),
+    # RHS: medium — n=N/1e3, designated key id2 (unique); id1 informational
+    n_medium = len(key2["x"]) + len(key2["r"])
+    rhs_keys2 = np.concatenate([key2["x"], key2["r"]])
+    m_id1 = _sample_all(rhs_keys1, n_medium, rng).astype(np.int32)
+    m_id2 = _sample_all(rhs_keys2, n_medium, rng).astype(np.int32)
+    medium_cols = {
+        "id1": m_id1,
+        "id2": m_id2,
+        "id4": lookup1[m_id1 - 1],
+        "id5": lookup2[m_id2 - 1],
+        "v2":  np.round(rng.uniform(0.0, 100.0, size=n_medium), 6),
     }
-    return cols
 
-
-def _gen_join_big(N: int, K: int, seed: int) -> dict:
-    """Big RHS: same row count as x. Joined on id3 (int, NK cardinality).
-
-    Carries every join column so j5 can project them all.
-    """
-    import numpy as np
-    rng = np.random.default_rng(seed)
-    NK = N // K
-
-    cols = {
-        "id1": (rng.integers(0, K, size=N) + 1).astype(np.int32),
-        "id2": (rng.integers(0, K, size=N) + 1).astype(np.int32),
-        "id3": (rng.integers(0, NK, size=N) + 1).astype(np.int32),
-        "id4": np.array([f"id{i:03d}" for i in range(1, K + 1)])[
-            rng.integers(0, K, size=N)
-        ],
-        "id5": np.array([f"id{i:03d}" for i in range(1, K + 1)])[
-            rng.integers(0, K, size=N)
-        ],
-        "id6": np.array([f"id{i:010d}" for i in range(1, NK + 1)])[
-            rng.integers(0, NK, size=N)
-        ],
+    # RHS: big — n=N, designated key id3 (unique); id1/id2 informational
+    rhs_keys3 = np.concatenate([key3["x"], key3["r"]])
+    b_id1 = _sample_all(rhs_keys1, N, rng).astype(np.int32)
+    b_id2 = _sample_all(rhs_keys2, N, rng).astype(np.int32)
+    b_id3 = _sample_all(rhs_keys3, N, rng).astype(np.int32)
+    big_cols = {
+        "id1": b_id1,
+        "id2": b_id2,
+        "id3": b_id3,
+        "id4": lookup1[b_id1 - 1],
+        "id5": lookup2[b_id2 - 1],
+        "id6": lookup3[b_id3 - 1],
         "v2":  np.round(rng.uniform(0.0, 100.0, size=N), 6),
     }
-    return cols
+
+    return {"x": x_cols, "small": small_cols, "medium": medium_cols, "big": big_cols}
 
 
 def generate(size: str, workload: str) -> None:
@@ -271,19 +299,17 @@ def generate(size: str, workload: str) -> None:
             _write_parquet("x_groupby", cols, path)
 
     if workload in ("join", "both"):
-        for table, gen in [
-            ("x",      lambda: _gen_join_x(N, K, SEED_JOIN_X)),
-            ("small",  lambda: _gen_join_small(K, SEED_JOIN_SMALL)),
-            ("medium", lambda: _gen_join_medium(K, SEED_JOIN_MEDIUM)),
-            ("big",    lambda: _gen_join_big(N, K, SEED_JOIN_BIG)),
-        ]:
-            path = base / table / f"{table}.parquet"
-            if path.exists():
-                print(f"  [{table}] already present, skipping")
-                continue
-            print(f"  [{table}] generating")
-            cols = gen()
-            _write_parquet(table, cols, path)
+        join_paths = {t: base / t / f"{t}.parquet" for t in ("x", "small", "medium", "big")}
+        missing = [t for t, p in join_paths.items() if not p.exists()]
+        if not missing:
+            print("  [x/small/medium/big] already present, skipping")
+        else:
+            # All four tables share one key space (see _gen_join_tables), so
+            # regenerating any of them regenerates all of them deterministically.
+            print(f"  [{', '.join(missing)}] generating (shared key space)")
+            tables = _gen_join_tables(N, SEED_JOIN)
+            for table in missing:
+                _write_parquet(table, tables[table], join_paths[table])
 
     print(f"[h2o] done. Run `make h2o` to execute the benchmark.")
 

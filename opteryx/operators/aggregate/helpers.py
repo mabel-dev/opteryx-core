@@ -20,6 +20,7 @@ AGGREGATORS: dict = {
     "MIN": "min",
     "ANY_VALUE": "any_value",
     "SUM": "sum",
+    "STDDEV": "stddev",
 }
 
 

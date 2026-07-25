@@ -125,6 +125,16 @@ cpdef tuple create_collectors(list aggregation_specs, list group_columns):
             c = ArrayAggCollector(spec.options)
         elif fn == "median":
             c = _DeferredMedianCollector()
+        elif fn == "stddev":
+            # This legacy Cython engine has no STDDEV collector — execution never
+            # reaches it: every data pipeline compiles to and runs on the native
+            # C++ engine (native_group_sinks.hpp's GBKind::Stddev), which
+            # implements STDDEV directly. GroupedAggregateHashedNode is still
+            # constructed as a spec carrier (compile_to_native reads
+            # node.aggregates off it) — reusing AvgCollector's shape here is a
+            # construction-time placeholder only, never actually accumulated
+            # into or finalized for a STDDEV query.
+            c = _DeferredAvgCollector()
         else:
             raise ValueError(f"unsupported aggregation function: {fn!r}")
 

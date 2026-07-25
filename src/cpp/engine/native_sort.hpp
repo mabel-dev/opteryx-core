@@ -23,10 +23,12 @@
 // from this list of morsels" utility — also used by LimitOperator's partial slice.
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "operator.hpp"
@@ -203,15 +205,11 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
     return true;
 }
 
-// Stable multi-key permutation over `perm` (pre-filled with row ids).
-// `take_first`: rows actually consumed downstream. SIZE_MAX (full sort) keeps
-// the stable order; a real limit uses partial_sort — O(n log k) instead of
-// O(n log n), the difference between compacting 65k TopN candidates to 10 and
-// fully sorting them. Ties at the boundary are unspecified either way (SQL's
-// ORDER BY..LIMIT contract; cross-worker compaction is already tie-unstable).
-inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
-                      size_t take_first = SIZE_MAX) {
-    auto cmp = [&](uint32_t a, uint32_t b) {
+// Multi-key row comparator over normalized SortKeyColumns — the single definition
+// shared by the serial and parallel sort paths below (no second copy to drift).
+struct SortKeyCmp {
+    const std::vector<SortKeyColumn>& keys;
+    bool operator()(uint32_t a, uint32_t b) const {
         for (const SortKeyColumn& c : keys) {
             int cmp;
             uint8_t va = c.valid[a], vb = c.valid[b];
@@ -231,14 +229,97 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
             if (cmp != 0) return c.asc ? (cmp < 0) : (cmp > 0);
         }
         return false;   // equal — stability preserves arrival order
-    };
+    }
+};
+
+// Full stable sort of `perm`, parallelized: each of `nt` threads stable_sorts its
+// own disjoint contiguous slice (no shared writes, safe without locks), then the
+// slices are merged pairwise in a binary tree via std::inplace_merge (stable).
+// The merge tree is single-threaded but only O(n log nt) element-moves total
+// (nt capped at 16 -> at most 4 rounds), trivial next to the O(n log n)
+// comparisons the chunk-sort phase would otherwise cost on one core.
+// One-shot pool-let, same idiom as GroupBySink::finalize / UngroupedAggGlobal's
+// COUNT(DISTINCT) merge (native_group_sinks.hpp) — thread only when it's worth it.
+inline void parallel_stable_sort_perm(const std::vector<SortKeyColumn>& keys,
+                                      std::vector<uint32_t>& perm) {
+    const size_t n = perm.size();
+    SortKeyCmp cmp{keys};
+
+    unsigned hw = std::thread::hardware_concurrency();
+    unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
+    if (nt > 16) nt = 16;
+    if (n < 200000) nt = 1;   // small: thread spawn/join overhead isn't worth it
+    if (nt < 1) nt = 1;
+
+    if (nt <= 1) {
+        std::stable_sort(perm.begin(), perm.end(), cmp);
+        return;
+    }
+
+    size_t chunk = (n + nt - 1) / nt;
+    std::vector<std::pair<size_t, size_t>> ranges;
+    for (size_t s = 0; s < n; s += chunk) ranges.emplace_back(s, std::min(s + chunk, n));
+
+    std::vector<std::thread> threads;
+    threads.reserve(ranges.size() - 1);
+    for (size_t r = 1; r < ranges.size(); ++r) {
+        threads.emplace_back([&perm, &cmp, &ranges, r]() {
+            std::stable_sort(perm.begin() + static_cast<ptrdiff_t>(ranges[r].first),
+                             perm.begin() + static_cast<ptrdiff_t>(ranges[r].second), cmp);
+        });
+    }
+    std::stable_sort(perm.begin() + static_cast<ptrdiff_t>(ranges[0].first),
+                     perm.begin() + static_cast<ptrdiff_t>(ranges[0].second), cmp);
+    for (std::thread& t : threads) t.join();
+
+    if (ranges.size() == 1) return;
+
+    // Bottom-up merge into an explicit scratch buffer, ping-ponging each round —
+    // deliberately NOT std::inplace_merge. inplace_merge's O(n) path depends on
+    // successfully allocating a same-sized internal temp buffer; when that fails
+    // (a real risk merging multi-million-element ranges) it silently falls back
+    // to an O(n log n) rotation-based algorithm — correct, but a catastrophic,
+    // easy-to-miss perf cliff at this scale. An explicit buffer makes every
+    // round's O(n) cost guaranteed rather than a library heuristic.
+    std::vector<uint32_t> scratch(n);
+    uint32_t* src = perm.data();
+    uint32_t* dst = scratch.data();
+    while (ranges.size() > 1) {
+        std::vector<std::pair<size_t, size_t>> next_ranges;
+        for (size_t i = 0; i + 1 < ranges.size(); i += 2) {
+            size_t a0 = ranges[i].first, a1 = ranges[i].second, a2 = ranges[i + 1].second;
+            std::merge(src + a0, src + a1, src + a1, src + a2, dst + a0, cmp);
+            next_ranges.emplace_back(a0, a2);
+        }
+        if (ranges.size() % 2 == 1) {
+            const auto& last = ranges.back();
+            std::copy(src + last.first, src + last.second, dst + last.first);
+            next_ranges.push_back(last);
+        }
+        std::swap(src, dst);
+        ranges = std::move(next_ranges);
+    }
+    if (src != perm.data()) std::copy(src, src + n, perm.data());
+}
+
+// Stable multi-key permutation over `perm` (pre-filled with row ids).
+// `take_first`: rows actually consumed downstream. SIZE_MAX (full sort) keeps
+// the stable order and takes the parallel path above; a real limit uses
+// partial_sort — O(n log k) instead of O(n log n), the difference between
+// compacting 65k TopN candidates to 10 and fully sorting them, so it stays
+// serial (k is small; threading isn't worth it). Ties at the boundary are
+// unspecified either way (SQL's ORDER BY..LIMIT contract; cross-worker
+// compaction is already tie-unstable).
+inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
+                      size_t take_first = SIZE_MAX) {
     if (take_first < perm.size()) {
+        SortKeyCmp cmp{keys};
         std::partial_sort(perm.begin(),
                           perm.begin() + static_cast<ptrdiff_t>(take_first),
                           perm.end(), cmp);
         return;
     }
-    std::stable_sort(perm.begin(), perm.end(), cmp);
+    parallel_stable_sort_perm(keys, perm);
 }
 
 // Zero-row typed column — the courtesy empty-result morsel (schema visibility when a
@@ -785,12 +866,13 @@ struct WindowSink : Sink {
     size_t n_part;                        // # partition keys at the front of sort_spec
     std::vector<WindowFnSpec> funcs;
     MorselBuffer* out;
+    int64_t top_k;                        // WindowTopKFusionStrategy hint; <0 = none
     size_t chunk_rows;
 
     WindowSink(std::vector<SortKeySpec> s, size_t np, std::vector<WindowFnSpec> f,
-               MorselBuffer* b, size_t chunk = 131072)
+               MorselBuffer* b, int64_t topk = -1, size_t chunk = 131072)
         : sort_spec(std::move(s)), n_part(np), funcs(std::move(f)), out(b),
-          chunk_rows(chunk) {}
+          top_k(topk), chunk_rows(chunk) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<WindowGlobal>();
@@ -849,34 +931,94 @@ struct WindowSink : Sink {
             }
         }
 
-        const std::vector<std::string>& names = src.front()->names;
-        for (size_t start = 0; start < n; start += chunk_rows) {
-            size_t count = std::min(chunk_rows, n - start);
-            MorselPtr m = gather_rows(src, perm, start, count, row_m, row_r, names, err);
-            if (err.code != 0) return;
-            uint32_t cn = static_cast<uint32_t>(count);
-            for (size_t f = 0; f < nf; ++f) {
-                int64_t* data = static_cast<int64_t*>(
-                    draken_malloc((cn == 0 ? 1 : cn) * sizeof(int64_t)));
-                for (uint32_t j = 0; j < cn; ++j) data[j] = ranks[f][start + j];
-                uint32_t* sel = static_cast<uint32_t*>(
-                    draken_malloc((cn == 0 ? 1 : cn) * sizeof(uint32_t)));
-                for (uint32_t j = 0; j < cn; ++j) sel[j] = j;
-                DrakenVector v;
-                v.data = data; v.selection = sel; v.data_length = cn; v.length = cn;
-                v.validity = nullptr; v.type = DRAKEN_INT64;
-                v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-                CxxColumn c;
-                c.own = std::make_shared<VectorOwner>(
-                    v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr),
-                    OwnedBuffer<void>(sel));
-                c.own->logical_type = nullptr;
-                c.view = c.own->vec;
-                m->columns.push_back(std::move(c));
-                m->names.push_back(funcs[f].name);
-            }
-            out->morsels.push_back(std::move(m));
+        // WindowTopKFusionStrategy's fused `WHERE <rank> <= K` filter (top_k >= 0):
+        // every row still got an exact rank above — RANK/DENSE_RANK ties can only be
+        // resolved once every row in the partition is known — but only the surviving
+        // prefix needs to be gathered and emitted. Compacts `perm`/`ranks` down to the
+        // kept rows once (O(n) pass, no per-element branch in the gather loop below),
+        // so a query keeping 200k of 10M ranked rows doesn't materialize, copy, then
+        // immediately filter back out the other 9.8M via a separate downstream Filter.
+        std::vector<uint32_t> kept_perm;
+        std::vector<std::vector<int64_t>> filtered_ranks;
+        const std::vector<uint32_t>* gather_order = &perm;
+        const std::vector<std::vector<int64_t>>* ranks_src = &ranks;
+        size_t total = n;
+        if (top_k >= 0 && nf > 0) {
+            std::vector<uint32_t> kept;
+            kept.reserve(n);
+            for (size_t i = 0; i < n; ++i) if (ranks[0][i] <= top_k) kept.push_back(static_cast<uint32_t>(i));
+            total = kept.size();
+            kept_perm.resize(total);
+            for (size_t j = 0; j < total; ++j) kept_perm[j] = perm[kept[j]];
+            filtered_ranks.assign(nf, std::vector<int64_t>(total));
+            for (size_t f = 0; f < nf; ++f)
+                for (size_t j = 0; j < total; ++j) filtered_ranks[f][j] = ranks[f][kept[j]];
+            gather_order = &kept_perm;
+            ranks_src = &filtered_ranks;
         }
+
+        // Chunked gather: each chunk builds one independent output morsel (its own
+        // gather_rows call + its own rank columns) — no cross-chunk state, so chunks
+        // are dispatched to a one-shot thread pool-let (same idiom as
+        // parallel_stable_sort_perm / GroupBySink::finalize above) and written into
+        // pre-sized slots so `out->morsels` still ends up in sorted-chunk order,
+        // which downstream relies on (WindowNode's pipeline runs at dop 1 to
+        // preserve it).
+        const std::vector<std::string>& names = src.front()->names;
+        size_t num_chunks = (total + chunk_rows - 1) / chunk_rows;
+        std::vector<MorselPtr> chunk_out(num_chunks);
+
+        unsigned hw = std::thread::hardware_concurrency();
+        unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
+        if (nt > 16) nt = 16;
+        if (nt > num_chunks) nt = static_cast<unsigned>(num_chunks);
+        if (total < 200000) nt = 1;
+        if (nt < 1) nt = 1;
+
+        std::vector<ErrCtx> errs(nt);
+        std::atomic<size_t> next_chunk{0};
+        auto worker = [&](unsigned tid) {
+            for (;;) {
+                size_t ci = next_chunk.fetch_add(1);
+                if (ci >= num_chunks) break;
+                size_t start = ci * chunk_rows;
+                size_t count = std::min(chunk_rows, total - start);
+                MorselPtr m = gather_rows(src, *gather_order, start, count, row_m, row_r,
+                                          names, errs[tid]);
+                if (errs[tid].code != 0) return;
+                uint32_t cn = static_cast<uint32_t>(count);
+                for (size_t f = 0; f < nf; ++f) {
+                    int64_t* data = static_cast<int64_t*>(
+                        draken_malloc((cn == 0 ? 1 : cn) * sizeof(int64_t)));
+                    for (uint32_t j = 0; j < cn; ++j) data[j] = (*ranks_src)[f][start + j];
+                    uint32_t* sel = static_cast<uint32_t*>(
+                        draken_malloc((cn == 0 ? 1 : cn) * sizeof(uint32_t)));
+                    for (uint32_t j = 0; j < cn; ++j) sel[j] = j;
+                    DrakenVector v;
+                    v.data = data; v.selection = sel; v.data_length = cn; v.length = cn;
+                    v.validity = nullptr; v.type = DRAKEN_INT64;
+                    v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+                    CxxColumn c;
+                    c.own = std::make_shared<VectorOwner>(
+                        v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr),
+                        OwnedBuffer<void>(sel));
+                    c.own->logical_type = nullptr;
+                    c.view = c.own->vec;
+                    m->columns.push_back(std::move(c));
+                    m->names.push_back(funcs[f].name);
+                }
+                chunk_out[ci] = std::move(m);
+            }
+        };
+        std::vector<std::thread> threads;
+        threads.reserve(nt > 0 ? nt - 1 : 0);
+        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
+        worker(0);
+        for (std::thread& t : threads) t.join();
+        for (ErrCtx& e : errs) {
+            if (e.code != 0) { err = e; return; }
+        }
+        for (MorselPtr& m : chunk_out) out->morsels.push_back(std::move(m));
     }
 };
 

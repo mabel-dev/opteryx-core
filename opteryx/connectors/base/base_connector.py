@@ -39,6 +39,7 @@ class BaseConnector:
     supports_limit_pushdown = False  # Limit pushdown to storage
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
+    requires_execution_context = False  # table_engine() needs the caller's ExecutionContext (e.g. for row-level permission filtering)
 
     @property
     def __mode__(self):  # pragma: no cover

@@ -742,7 +742,12 @@ class _Compiler:
     _AGG_NO_OPERAND = -1   # CountStar: no operand column
     _AGG_WHOLE_ROW = -2    # CountDistinct: dedup over every column (COUNT(DISTINCT *))
 
-    _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG"}
+    _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG", "STDDEV", "MEDIAN",
+                "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"}
+    # MEDIAN is numeric-only (native_group_sinks.hpp's median_operand_supported) —
+    # narrower than _AGG_OPERAND_TYPES (which also allows DECIMAL/BOOL/temporal for
+    # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median collectors exactly.
+    _MEDIAN_OPERAND_TYPES = _NUMERIC_TYPES
     _AGG_OPERAND_TYPES = _NUMERIC_TYPES + (
         DrakenType.DECIMAL, DrakenType.DECIMAL128, DrakenType.DATE32,
         DrakenType.TIMESTAMP64, DrakenType.TIME32, DrakenType.TIME64,
@@ -768,6 +773,18 @@ class _Compiler:
         DrakenType.BOOL,
         DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
     )
+    # WindowTopKSink's ORDER BY key: sort_num_key()'s fixed-width numeric path
+    # (native_group_sinks.hpp) — _KEY_COLUMN_TYPES minus the string family and
+    # DECIMAL128 (both need the row-comparator machinery WindowSink's full sort
+    # already has; WindowTopKSink deliberately doesn't reimplement it). A query
+    # outside this set still gets WindowTopKFusionStrategy's filter-fusion win via
+    # the ordinary WindowSink path — it just skips this sink specifically.
+    _TOPK_FAST_KEY_TYPES = tuple(
+        t for t in _KEY_COLUMN_TYPES
+        if t not in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
+                     DrakenType.DECIMAL128)
+    )
+    _RANK_ROW_NUMBER = 0  # row_number.pyx's _RANK_ROW_NUMBER kind code
 
     def _check_key_type(self, what, name, pt):
         if pt is not None and pt not in self._KEY_COLUMN_TYPES:
@@ -806,9 +823,16 @@ class _Compiler:
         computed = []
         for agg in getattr(node, "aggregates", None) or []:
             params = getattr(agg, "parameters", None) or []
-            if len(params) != 1:
+            if agg.value == "APPROX_PERCENTILE":
+                # 2 params: the column expression + a percentile literal —
+                # only params[0] is a projectable operand.
+                if len(params) != 2:
+                    continue
+                operand = params[0]
+            elif len(params) == 1:
+                operand = params[0]
+            else:
                 continue
-            operand = params[0]
             if operand.node_type in (NodeType.WILDCARD, NodeType.IDENTIFIER):
                 continue
             sc = getattr(operand, "schema_column", None)
@@ -834,7 +858,24 @@ class _Compiler:
             if func not in self._AGG_FNS:
                 _unsupported(f"the aggregate function {func}")
             params = getattr(agg, "parameters", None) or []
-            if len(params) != 1:
+            percentile = None
+            if func == "APPROX_PERCENTILE":
+                # APPROX_PERCENTILE(expr, percentile) — the only aggregate with a
+                # second, query-time-constant argument (not a second operand
+                # column, see CORR's still-deferred design question). Matches the
+                # legacy Cython _extract_percentile_option validation exactly.
+                if len(params) != 2:
+                    _unsupported("APPROX_PERCENTILE requires two arguments: the "
+                                 "column and the percentile")
+                pct_node = params[1]
+                if pct_node.node_type != NodeType.LITERAL:
+                    _unsupported("APPROX_PERCENTILE percentile argument must be a "
+                                 "literal")
+                percentile = float(pct_node.value)
+                if not (0.0 <= percentile <= 1.0):
+                    _unsupported("APPROX_PERCENTILE percentile must be between 0.0 "
+                                 "and 1.0")
+            elif len(params) != 1:
                 _unsupported(f"{func} with {len(params)} parameters")
             operand = params[0]
             distinct = getattr(agg, "duplicate_treatment", None) == "Distinct"
@@ -876,14 +917,47 @@ class _Compiler:
                 # sinks — silently lowering it as plain COUNT was a wrong answer.
                 specs.append((sc.identity, "CountDistinct" if distinct else "Count", idx))
                 continue
+            if func == "APPROX_COUNT_DISTINCT":
+                # Same as COUNT(DISTINCT col): hashes the operand (draken's own
+                # hash, any type), so it bypasses the numeric/string operand-type
+                # gate below entirely — not just the string subset ANY_VALUE/MIN/
+                # MAX get.
+                specs.append((sc.identity, "ApproxCountDistinct", idx))
+                continue
+            if func == "APPROX_PERCENTILE":
+                if pt not in self._MEDIAN_OPERAND_TYPES:
+                    # Numeric-only, same restriction as MEDIAN (its exact sibling)
+                    # — matches the legacy t-digest collector's contract.
+                    _unsupported(f"APPROX_PERCENTILE over a {pt} column — only "
+                                 "numeric inputs are accepted (CAST DECIMAL to "
+                                 "DOUBLE first)")
+                specs.append((sc.identity, "ApproxPercentile", idx,
+                             {"percentile": percentile}))
+                continue
             if pt not in self._AGG_OPERAND_TYPES:
-                # MIN/MAX over strings: the sinks keep a parallel byte-lexicographic
-                # extreme (agg2_update_str) — SUM/AVG over strings stays rejected.
-                _string_minmax = func in ("MIN", "MAX") and pt in (
+                # MIN/MAX/ANY_VALUE over strings: the sinks keep a parallel
+                # byte-lexicographic extreme (agg2_update_str) — ANY_VALUE reuses
+                # that same lane (see AggFn::AnyValue) — SUM/AVG over strings
+                # stays rejected.
+                _string_minmax = func in ("MIN", "MAX", "ANY_VALUE") and pt in (
                     DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY)
                 if not _string_minmax:
                     _unsupported(f"{func} over a {pt} column")
-            fn = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max"}[func]
+            if func == "STDDEV" and pt in (DrakenType.DECIMAL, DrakenType.DECIMAL128):
+                # The sink never descales DECIMAL's unscaled integer for STDDEV —
+                # reading it as a raw double would compute the wrong numbers'
+                # variance. CAST to DOUBLE first (same posture as the sink's own
+                # fail-loud guard — this is just the friendlier plan-time version).
+                _unsupported(f"STDDEV over a {pt} column — CAST to DOUBLE first")
+            if func == "MEDIAN" and pt not in self._MEDIAN_OPERAND_TYPES:
+                # MEDIAN is numeric-only — narrower than the generic operand-type
+                # gate above (which already let DECIMAL/BOOL/temporal through for
+                # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median
+                # collectors' restriction exactly (see median_operand_supported).
+                _unsupported(f"MEDIAN over a {pt} column — only numeric inputs are "
+                             "accepted (CAST DECIMAL to DOUBLE first)")
+            fn = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max",
+                  "STDDEV": "Stddev", "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
             specs.append((sc.identity, fn, idx))
         return specs
 
@@ -1093,9 +1167,37 @@ class _Compiler:
                 sort_spec.append((layout.index(identity), bool(asc)))
             fn_kinds = [int(k) for k, _out in funcs]
             fn_names = [out for _k, out in funcs]
+            top_k = int(getattr(node, "_top_k", -1))
+
+            # WindowTopKFusionStrategy's fused `rank <= K`, restricted to the shape
+            # WindowTopKSink actually implements: a single ROW_NUMBER (not RANK/
+            # DENSE_RANK — ties need every row's exact rank first, see WindowSink),
+            # a single ORDER BY column of a fixed-width key type. Anything else
+            # still gets the top_k win via WindowSink's post-rank filter, just not
+            # this sink's O(n log K)-instead-of-O(n log n) win.
+            use_topk_sink = (
+                top_k >= 1
+                and len(funcs) == 1
+                and fn_kinds[0] == self._RANK_ROW_NUMBER
+                and len(order_cols) == 1
+                and self._layout_type(None, order_cols[0]) in self._TOPK_FAST_KEY_TYPES
+            )
             buf = self.nplan.new_buffer()
+            if use_topk_sink:
+                part_idx = [idx for idx, _asc in sort_spec[: len(part_cols)]]
+                order_idx, order_asc0 = sort_spec[len(part_cols)]
+                self.nplan.set_window_topk_sink(
+                    p, part_idx, order_idx, bool(order_asc0), top_k, fn_names[0], buf)
+                p2 = self.nplan.new_pipeline()
+                self.nplan.set_buffer_source(p2, buf)
+                # No dop=1 pin: WindowTopKSink never produces a globally sorted
+                # stream the way WindowSink does (each partition is independently
+                # ranked), and ROW_NUMBER's OVER carries no outer ordering promise
+                # — nothing downstream relies on this pipeline's emit order.
+                return p2, list(layout) + list(fn_names)
+
             self.nplan.set_window_sink(p, sort_spec, len(part_cols),
-                                       fn_kinds, fn_names, buf)
+                                       fn_kinds, fn_names, top_k, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order

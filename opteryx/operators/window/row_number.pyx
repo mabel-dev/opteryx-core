@@ -62,6 +62,7 @@ cdef class WindowNode(BasePlanNode):
     cdef public list _order_ascending     # bool per order column
     cdef public list _functions           # list of (kind_code:int, output_identity:bytes)
     cdef public bint _blocking            # ORDER BY present -> buffer + sort
+    cdef public long long _top_k          # WindowTopKFusionStrategy hint; -1 = unset
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -81,6 +82,14 @@ cdef class WindowNode(BasePlanNode):
             self._functions.append((_KIND_CODES[kind], output_identity))
 
         self._blocking = len(self._order_columns) > 0
+
+        # Set only by WindowTopKFusionStrategy, and only when there is exactly one
+        # ranking output — a fused `WHERE <rank> <= K` filter. Keep only the rows
+        # whose rank is <= top_k before gathering/emitting (still computes an exact
+        # rank for every row first: RANK/DENSE_RANK ties can only be resolved once
+        # every row's rank is known).
+        top_k = parameters.get("top_k")
+        self._top_k = int(top_k) if top_k is not None else -1
 
         if not self._blocking:
             # Streaming path only handles a single ROW_NUMBER over a partition.

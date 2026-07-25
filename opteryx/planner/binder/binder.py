@@ -70,7 +70,10 @@ _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
 # float(value) (literal), and non-numeric inputs are rejected outright. Typing it as
 # DOUBLE (not input-passthrough) keeps the binder honest with the runtime, the same
 # way AVG is forced to DOUBLE below.
-_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "MEDIAN"})
+# STDDEV: population stddev, always DOUBLE regardless of input numeric type —
+# the native sink rejects DECIMAL input outright (native_group_sinks.hpp), so
+# there's no AVG-style decimal-passthrough case to handle.
+_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "MEDIAN", "STDDEV"})
 
 
 def _operand_column_type(operand):

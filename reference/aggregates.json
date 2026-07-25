@@ -185,6 +185,24 @@
             "strict_grouped": true
         }
     },
+    "STDDEV": {
+        "ast_symbol": "STDDEV",
+        "friendly_name": "Standard Deviation",
+        "kernel_name": "stddev",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the population standard deviation of the input values.",
+        "description": "Computes the population standard deviation of the input values.",
+        "documentation": "Population standard deviation (N denominator, not N-1/sample). Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
+        "sql_forms": [
+            "STDDEV(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
     "SUM": {
         "ast_symbol": "SUM",
         "friendly_name": "Sum",

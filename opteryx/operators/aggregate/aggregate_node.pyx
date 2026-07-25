@@ -378,10 +378,32 @@ def _build_engine_aggregate(aggregate):
             return [], None, _make_literal_state(aggregate)
         return [AnyValueAggregate(parameter_name, output_name)], None, None
 
-    if aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
-        raise NotImplementedError(
-            f"Approximate aggregate `{aggregate_type}` is no longer supported."
-        )
+    if aggregate_type == "APPROX_COUNT_DISTINCT":
+        # This legacy Cython engine has no HLL++ accumulator — execution never
+        # reaches it: every data pipeline compiles to and runs on the native
+        # C++ engine (native_group_sinks.hpp's GBKind::ApproxCountDistinct,
+        # HllppSketch). Physical-plan construction still builds this node as
+        # a spec carrier (compile_to_native reads node.aggregates off it), so
+        # this stub only needs to not raise — see the STDDEV stub below for
+        # the same reasoning in full.
+        return [], None, None
+
+    if aggregate_type == "APPROX_PERCENTILE":
+        # Same reasoning as APPROX_COUNT_DISTINCT above — no t-digest accumulator
+        # in this legacy engine, execution never reaches it (native engine:
+        # native_group_sinks.hpp's GBKind::ApproxPercentile, td_histogram_t).
+        return [], None, None
+
+    if aggregate_type == "STDDEV":
+        # This legacy Cython engine has no STDDEV accumulator — execution never
+        # reaches it: every data pipeline compiles to and runs on the native
+        # C++ engine (src/cpp/engine/native_group_sinks.hpp), which implements
+        # STDDEV directly (see UngroupedAggSink). Physical-plan construction
+        # still builds this node as a spec carrier (compile_to_native reads
+        # `node.aggregates` off it), so this stub only needs to not raise —
+        # returning zero engine aggregates is safe because this node's own
+        # execute()/finalize() are never invoked for a STDDEV query.
+        return [], None, None
 
     if aggregate_type == "MEDIAN":
         if parameter_name is None:

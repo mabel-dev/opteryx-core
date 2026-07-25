@@ -112,6 +112,11 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         Max "opteryx::engine::AggFn::Max"
         CountDistinct "opteryx::engine::AggFn::CountDistinct"
         ArrayAgg "opteryx::engine::AggFn::ArrayAgg"
+        Stddev "opteryx::engine::AggFn::Stddev"
+        Median "opteryx::engine::AggFn::Median"
+        AnyValue "opteryx::engine::AggFn::AnyValue"
+        ApproxCountDistinct "opteryx::engine::AggFn::ApproxCountDistinct"
+        ApproxPercentile "opteryx::engine::AggFn::ApproxPercentile"
     cdef cppclass AggSpec2:
         AggFn fn
         int col_idx
@@ -121,6 +126,7 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         bint aa_descending
         int64_t aa_limit
         int64_t aa_max_per_group
+        double percentile
 
 cdef extern from "core/alloc.h" nogil:
     void draken_free(void* ptr)
@@ -225,7 +231,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf)
         void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf)
         void set_window_sink(size_t p, cppvector[SortKeySpec] sort_spec, size_t n_part,
-                             cppvector[int] fn_kinds, cppvector[string] fn_names, size_t buf)
+                             cppvector[int] fn_kinds, cppvector[string] fn_names,
+                             long long top_k, size_t buf)
+        void set_window_topk_sink(size_t p, cppvector[size_t] part_idx, size_t order_idx,
+                                  bint ascending, size_t k, string out_name, size_t buf)
         void set_final_schema(cppvector[string] names, cppvector[DrakenType] types,
                               cppvector[int] lt_kind, cppvector[int] lt_unit,
                               cppvector[int] lt_precision, cppvector[int] lt_scale,
@@ -2373,10 +2382,12 @@ cdef class NativePlan:
         self._e.set_topn_sink(p, _sort_spec_from_list(spec), n, buf)
 
     def set_window_sink(self, size_t p, list sort_spec, size_t n_part,
-                        list fn_kinds, list fn_names, size_t buf):
+                        list fn_kinds, list fn_names, long long top_k, size_t buf):
         """``sort_spec`` = [(col_idx, ascending), ...] = partition keys (all asc) then
         order keys; ``n_part`` leading entries are the partition keys. ``fn_kinds`` =
-        int codes (0 ROW_NUMBER, 1 RANK, 2 DENSE_RANK); ``fn_names`` the output names."""
+        int codes (0 ROW_NUMBER, 1 RANK, 2 DENSE_RANK); ``fn_names`` the output names.
+        ``top_k`` = WindowTopKFusionStrategy's fused `rank <= K` hint, or -1 if none —
+        keep only rows whose rank is <= top_k, computed after ranking every row."""
         cdef cppvector[int] kinds
         cdef cppvector[string] names
         for k in fn_kinds:
@@ -2384,7 +2395,21 @@ cdef class NativePlan:
         for nm in fn_names:
             names.push_back(<string>(nm if isinstance(nm, bytes) else (<str>nm).encode("utf-8")))
         self._e.set_window_sink(p, _sort_spec_from_list(sort_spec), n_part,
-                                kinds, names, buf)
+                                kinds, names, top_k, buf)
+
+    def set_window_topk_sink(self, size_t p, list part_idx, size_t order_idx,
+                             bint ascending, size_t k, out_name, size_t buf):
+        """Streaming ROW_NUMBER top-K per partition (WindowTopKFusionStrategy) — no
+        full sort. ``part_idx`` = partition-key column indices (hashed); ``order_idx``/
+        ``ascending`` = the single ORDER BY column and its direction; ``k`` = the
+        fused `rank <= K`. The compiler only routes here when eligible — see
+        native_group_sinks.hpp's WindowTopKSink docstring for the exact scope."""
+        cdef cppvector[size_t] idx
+        for i in part_idx:
+            idx.push_back(<size_t>i)
+        cdef string nm = <string>(out_name if isinstance(out_name, bytes)
+                                  else (<str>out_name).encode("utf-8"))
+        self._e.set_window_topk_sink(p, idx, order_idx, ascending, k, nm, buf)
 
     def set_final_schema(self, list names, list types, list logical=None):
         """``names`` = final display names; ``types`` = DrakenType ints (physical);
@@ -2454,6 +2479,16 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.fn = AggFn.Max
         elif fn == "ArrayAgg":
             s.fn = AggFn.ArrayAgg
+        elif fn == "Stddev":
+            s.fn = AggFn.Stddev
+        elif fn == "Median":
+            s.fn = AggFn.Median
+        elif fn == "AnyValue":
+            s.fn = AggFn.AnyValue
+        elif fn == "ApproxCountDistinct":
+            s.fn = AggFn.ApproxCountDistinct
+        elif fn == "ApproxPercentile":
+            s.fn = AggFn.ApproxPercentile
         else:
             raise ValueError(f"native engine: unknown aggregate function {fn!r}")
         s.col_idx = <int>col_idx
@@ -2466,12 +2501,14 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_descending = False
             s.aa_limit = -1
             s.aa_max_per_group = 1000
+            s.percentile = 0.5
         else:
             s.aa_distinct = <bint>bool(opts.get("distinct", False))
             s.aa_ordered = <bint>bool(opts.get("ordered", False))
             s.aa_descending = <bint>bool(opts.get("descending", False))
             s.aa_limit = <int64_t>(-1 if opts.get("limit") is None else opts["limit"])
             s.aa_max_per_group = <int64_t>opts.get("max_per_group", 1000)
+            s.percentile = <double>opts.get("percentile", 0.5)
         out.push_back(s)
     return out
 

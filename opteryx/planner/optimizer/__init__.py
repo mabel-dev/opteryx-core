@@ -69,6 +69,7 @@ from opteryx.planner.optimizer.strategies import (
     StatisticsOnlyResponseStrategy,
     TimestampCastSinkStrategy,
     TopNScanPushdownStrategy,
+    WindowTopKFusionStrategy,
 )
 
 from .statistics_refresh import refresh_statistics
@@ -174,6 +175,11 @@ class OptimizerVisitor:
             # and after RedundantOperationsStrategy so Subquery boundary nodes
             # between two Projects are already gone.
             ProjectFusionStrategy(telemetry),
+            # After RedundantOperationsStrategy/ProjectFusionStrategy so the chain
+            # between a ranking Window and its `WHERE rank <= K` filter is already
+            # collapsed (no Subquery boundary, adjacent Projects fused) — fewer hops
+            # for the search to walk through.
+            WindowTopKFusionStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
             # Runs last: all other strategies have had their say.
             # Uses FileEntry.stats_by_name for range detection — projection-stable.

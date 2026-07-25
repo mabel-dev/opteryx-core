@@ -51,18 +51,23 @@ def _collect(workload: str, queries_dir: Path) -> list[Path]:
 
 
 def _drain(cur) -> tuple[int, int]:
-    """Drain a DuckDB cursor in chunks; return (row_count, col_count).
+    """Drain a DuckDB cursor in batches; return (row_count, col_count).
 
-    fetchall() materialises the full result set in Python memory and segfaults
-    on large join outputs.  fetchmany() keeps peak memory bounded.
+    Uses to_arrow_reader() — columnar, batch-level materialization with no
+    per-row Python object construction — NOT fetchmany(), which previously
+    measured here. fetchmany() pays a real but irrelevant ~10-13x per-row
+    Python-tuple-construction tax in DuckDB's DB-API layer (confirmed by
+    direct measurement: j1 4452ms via fetchmany() vs 362ms via
+    to_arrow_reader(), same rows, same query, same connection). The
+    Opteryx runner drains morsel batches (morsel.num_rows) with no per-row
+    Python objects either, so to_arrow_reader() is the apples-to-apples
+    match — both sides measure "produce all result batches", neither pays
+    full per-row marshalling cost.
     """
     ncols = len(cur.description) if cur.description else 0
     nrows = 0
-    while True:
-        batch = cur.fetchmany(65_536)
-        if not batch:
-            break
-        nrows += len(batch)
+    for batch in cur.to_arrow_reader(65_536):
+        nrows += batch.num_rows
     return nrows, ncols
 
 
@@ -134,6 +139,10 @@ def main() -> int:
         import duckdb  # noqa: F401
     except ImportError:
         sys.exit("duckdb is required: pip install duckdb")
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        sys.exit("pyarrow is required (for to_arrow_reader() batch draining): pip install pyarrow")
 
     workloads = ["groupby", "join"] if args.workload == "both" else [args.workload]
     output_path = args.output or str(HERE / f"results.{args.size}.json")

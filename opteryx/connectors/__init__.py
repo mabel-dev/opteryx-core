@@ -27,7 +27,11 @@ Core Connectors:
 
 Special Connectors:
 - VirtualDataConnector: In-memory datasets and computed tables
-- InformationSchemaConnector: System metadata tables
+
+System metadata (information_schema) is a reserved nested schema addressed
+as `<workspace>.information_schema.<table>` and served by OpteryxConnector
+itself (see opteryx/connectors/information_schema.py) - not a separate
+top-level connector prefix.
 
 Legacy Compatibility:
 The following names are supported for backward compatibility and map to FileSystemConnector:
@@ -95,9 +99,7 @@ class TableType(str, Enum):
 
 
 
-_storage_prefixes = {
-    "information_schema": "InformationSchema",
-}
+_storage_prefixes = {}
 
 # Cache for connector instances (keyed by prefix)
 _connector_cache = {}

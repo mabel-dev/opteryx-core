@@ -660,6 +660,8 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         engine_kwargs["variables"] = context.execution_context.variables
     if gateway.supports_diachronic:
         engine_kwargs["at_date"] = node.at_date
+    if getattr(gateway, "requires_execution_context", False):
+        engine_kwargs["execution_context"] = context.execution_context
 
     # Reuse the dataset resolved by the catalog resolution step, if present, so
     # table_engine doesn't re-read the catalog. Absent → normal binding path.
@@ -675,9 +677,14 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             _bind_time.monotonic_ns() - _bind_connector0
         )
 
-    # ensure this user can read the table
-    if not can_perform_action(context.execution_context, node.relation, action="READ"):
-        raise PermissionError(f"User does not have permission to read {node.relation}")
+    # ensure this user can read the table. Relations that govern their own
+    # per-row permissions (e.g. information_schema, which filters each row it
+    # emits by the caller's READ access to the underlying table) opt out of
+    # this relation-level gate rather than being blocked from the metadata
+    # view entirely.
+    if not getattr(node.connector, "self_governs_permissions", False):
+        if not can_perform_action(context.execution_context, node.relation, action="READ"):
+            raise PermissionError(f"User does not have permission to read {node.relation}")
 
     if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables

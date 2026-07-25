@@ -17,6 +17,7 @@ _GLOBAL_SUPPORTED = frozenset(
         "MAX",
         "AVG",
         "MEDIAN",
+        "STDDEV",
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
@@ -34,6 +35,7 @@ _STRICT_GROUPED_SUPPORTED = frozenset(
         "MAX",
         "AVG",
         "MEDIAN",
+        "STDDEV",
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
@@ -54,6 +56,7 @@ _FRIENDLY_NAMES = {
     "MEDIAN": "Median",
     "MIN": "Minimum",
     "SUM": "Sum",
+    "STDDEV": "Standard Deviation",
 }
 
 _CATEGORIES = {
@@ -68,6 +71,7 @@ _CATEGORIES = {
     "MEDIAN": "numeric",
     "MIN": "extrema",
     "SUM": "numeric",
+    "STDDEV": "numeric",
 }
 
 _SUMMARIES = {
@@ -82,6 +86,7 @@ _SUMMARIES = {
     "MEDIAN": "Computes the exact median (middle value) of the input values.",
     "MIN": "Returns the smallest non-null input value.",
     "SUM": "Sums the input values.",
+    "STDDEV": "Computes the population standard deviation of the input values.",
 }
 
 _DOCUMENTATION = {
@@ -96,6 +101,7 @@ _DOCUMENTATION = {
     "MEDIAN": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Per-group buffer is capped (default 1000) — exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
     "MIN": "Returns the smallest comparable non-null value encountered.",
     "SUM": "Nulls are ignored; non-null values are accumulated.",
+    "STDDEV": "Population standard deviation (N denominator, not N-1/sample). Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
 }
 
 _SQL_FORMS = {
@@ -115,6 +121,7 @@ _SQL_FORMS = {
     "MEDIAN": ["MEDIAN(expr)"],
     "MIN": ["MIN(expr)"],
     "SUM": ["SUM(expr)"],
+    "STDDEV": ["STDDEV(expr)"],
 }
 
 

@@ -42,19 +42,20 @@ form before execution.
 ## Setup (one-time)
 
 ```bash
-pip install numpy pyarrow         # dev deps; not Opteryx runtime deps
-python tests/performance/h2o/generate_data.py --size small
+pip install numpy                 # dev dep; not an Opteryx runtime dep
+PYTHONPATH=. python tests/performance/h2o/generate_data.py --size small
 ```
 
-`numpy` does the random generation; `pyarrow` writes Parquet. PyArrow is
-banned in Opteryx production code (`CLAUDE.md` §4), but is permitted here
-because this script is dev tooling never imported by Opteryx — only the
-runner is in the execution path, and `run.py` uses only Opteryx itself.
+`numpy` does the random generation (fast RNG over 1e7+ elements); explicitly
+permitted for `tests/`/`dev/` use by `CLAUDE.md` §4. Parquet is written by
+Rugo's own native writer (`rugo.parquet.write_parquet`) — no PyArrow.
 
-(We tried DuckDB first; it emits the legacy `INT_32` `converted_type` on
-INT32 columns and omits the modern `StringType()` `logical_type` on UTF8
-columns, which Rugo's schema discovery does not accept. PyArrow writes
-both metadata variants, producing files Rugo reads cleanly.)
+(We tried DuckDB's writer first; it emits the legacy `INT_32` `converted_type`
+on INT32 columns and omits the modern `StringType()` `logical_type` on UTF8
+columns, which Rugo's schema discovery does not accept. We then used PyArrow
+as a workaround — it writes both metadata variants — until Rugo got its own
+native writer, which emits metadata its own reader parses cleanly. That
+removed the need for PyArrow entirely.)
 
 The generator is idempotent: existing parquet files are skipped. Generation
 time scales with `N`: small ≈ 1 min, medium ≈ 10 min, large ≈ 1.5 hr on a
@@ -71,13 +72,21 @@ v1, v2   : INTEGER
 v3       : DOUBLE
 ```
 
-**Join tables** (note: distinct schema from groupby):
+**Join tables** (note: distinct schema from groupby). Cardinalities match
+upstream `join-datagen.R` exactly — id1/id2/id3 domains are N/1e6, N/1e3, N
+respectively (NOT the groupby table's flat K=100), and id4/id5/id6 are
+string mirrors of id1/id2/id3 (`f"id{value}"`), not an independent column:
 ```
 x       : id1..id3 INT,  id4..id6 VARCHAR,  v1 DOUBLE   (N rows)
-small   : id1 INT,        id4 VARCHAR,      v2 DOUBLE   (K rows)
-medium  : id1, id2 INT,   id4, id5 VARCHAR, v2 DOUBLE   (K*K rows)
+small   : id1 INT,        id4 VARCHAR,      v2 DOUBLE   (N/1e6 rows)
+medium  : id1, id2 INT,   id4, id5 VARCHAR, v2 DOUBLE   (N/1e3 rows)
 big     : id1..id3 INT,   id4..id6 VARCHAR, v2 DOUBLE   (N rows)
 ```
+Each RHS table's *designated* join key (small.id1, medium.id2, big.id3) is
+an exact unique permutation of its domain — a proper foreign key, matching
+upstream's `stopifnot(uniqueN(...) == n)`. ~10% of LHS keys and ~10% of RHS
+keys are deliberately private to their side (upstream `split_xlr`), so
+INNER (j2) and LEFT (j3) joins produce genuinely different row counts.
 
 ## Running
 

@@ -462,16 +462,26 @@ public:
         set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get()));
     }
     // Window ranking: sort_spec = [partition keys asc..., order keys...]; n_part =
-    // count of leading partition keys; fn_kinds[i] pairs with fn_names[i].
+    // count of leading partition keys; fn_kinds[i] pairs with fn_names[i]. top_k =
+    // WindowTopKFusionStrategy's fused `rank <= K` hint, or -1 if none.
     void set_window_sink(size_t p, std::vector<SortKeySpec> sort_spec, size_t n_part,
                          std::vector<int> fn_kinds, std::vector<std::string> fn_names,
-                         size_t buf) {
+                         int64_t top_k, size_t buf) {
         std::vector<WindowFnSpec> funcs;
         funcs.reserve(fn_kinds.size());
         for (size_t i = 0; i < fn_kinds.size(); ++i)
             funcs.push_back({static_cast<WinFn>(fn_kinds[i]), fn_names[i]});
         set_sink_(p, std::make_unique<WindowSink>(
-            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get()));
+            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(), top_k));
+    }
+    // Streaming ROW_NUMBER top-K per partition (WindowTopKFusionStrategy) — no full
+    // sort. See native_group_sinks.hpp's WindowTopKSink for the eligibility scope
+    // the compiler enforces before routing here instead of set_window_sink.
+    void set_window_topk_sink(size_t p, std::vector<size_t> part_idx, size_t order_idx,
+                              bool ascending, size_t k, std::string out_name, size_t buf) {
+        set_sink_(p, std::make_unique<WindowTopKSink>(
+            std::move(part_idx), order_idx, ascending, k, std::move(out_name),
+            buffers[buf].get()));
     }
     void add_select(size_t p, std::vector<size_t> indices, std::vector<std::string> names) {
         add_op_(p,
