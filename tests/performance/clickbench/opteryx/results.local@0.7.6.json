@@ -60,9 +60,9 @@ make clickbench (13.53 seconds) <- best ever on rugo parquet files [256K rg] (13
 (20.10 seconds) <- best on clickbench parquet files (13-JUL)
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch - (2016.9ms) (24-JUL)
-make medicare1 - (1727.4ms) (25-JUL)
-make job - (60948.0ms) (43 fails) (27-JUN)
-make h2o - (3786.4ms) (2 fails) (25-JUN)
-make jsonbench (31164.7ms) (24-JUL)
-make dash (356.3ms) (24-JUL)
+make tpch - (2007.6ms) (25-JUL)
+make medicare1 - (1695.1ms) (25-JUL)
+make job - (119924.5ms) (27-JUN)
+make h2o - (3575.9ms) (2 fails) (25-JUN)
+make jsonbench (30707.2ms) (25-JUL)
+make dash (354.8ms) (25-JUL)
