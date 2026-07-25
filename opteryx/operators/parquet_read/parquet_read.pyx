@@ -73,12 +73,23 @@ cdef tuple _resolve_http_tuning(variables):
     )
 
 
-cdef int _resolve_in_flight_headroom(variables):
-    """Row groups submitted beyond the worker count (`in_flight_limit =
-    workers + headroom`). Separated from the worker count so submission depth
-    and download concurrency can be swept independently."""
+cdef tuple _resolve_coalesce_tuning(variables):
+    """(waste_ratio, max_bytes) for remote range coalescing — see
+    ParquetIOPipeline::set_coalesce_tuning for what each bound is protecting."""
+    return (
+        _resolve_var("parquet_io_coalesce_waste_ratio", variables,
+                     config.PARQUET_IO_COALESCE_WASTE_RATIO),
+        _resolve_var("parquet_io_coalesce_max_bytes", variables,
+                     config.PARQUET_IO_COALESCE_MAX_BYTES),
+    )
+
+
+cdef int _resolve_in_flight_limit(variables):
+    """ABSOLUTE cap on submitted-but-unconsumed row groups; 0 = auto
+    (workers + 2). Absolute rather than a delta so "many threads, shallow
+    window" is expressible without a negative value."""
     return <int>_resolve_var(
-        "parquet_io_in_flight_headroom", variables, config.PARQUET_IO_IN_FLIGHT_HEADROOM)
+        "parquet_io_in_flight_limit", variables, config.PARQUET_IO_IN_FLIGHT_LIMIT)
 
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
@@ -1353,7 +1364,8 @@ cdef class ParquetReadNode(ReaderNode):
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
                 string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
                 http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-                in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
+                in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
+                coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1392,7 +1404,8 @@ cdef class ParquetReadNode(ReaderNode):
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
             limit=self.limit if not has_predicates else None,
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-            in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
+            in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
+            coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -1654,7 +1667,8 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-            in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
+            in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
+            coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
         )
         self._lm_pass1_done = True
 
@@ -1739,7 +1753,8 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-            in_flight_headroom=_resolve_in_flight_headroom(getattr(self.properties, "variables", None)),
+            in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
+            coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
         )
         try:
             while True:

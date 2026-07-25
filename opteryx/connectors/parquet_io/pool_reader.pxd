@@ -72,6 +72,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # derived timeout floor). Set once at plan time, by value — see
         # HttpTuning's comment in http_client.hpp for why this is never stored
         # on the (thread_local, process-lifetime) HttpClient itself.
+        void set_coalesce_tuning(double waste_ratio, int64_t max_bytes)
         void set_http_tuning(long max_host_connections, int max_retries,
                               double min_bandwidth_bytes_per_s, long timeout_floor_ms,
                               bint use_multiplexing, bint use_pipewait, bint force_http11)

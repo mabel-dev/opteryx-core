@@ -157,8 +157,19 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # Splits submission depth from thread count — `parquet_gcs_io_workers` alone
     # moves both, so the sweep that found 16 optimal could not attribute the win
     # to concurrency vs pipelining depth. Also drives IO pool size.
-    "parquet_io_in_flight_headroom": (
-        INT64, config.PARQUET_IO_IN_FLIGHT_HEADROOM, VariableOwner.USER, Visibility.RESTRICTED),
+    # ABSOLUTE (0 = auto = workers + 2), not a delta: expressing it as a delta
+    # made the key test case (many threads, SHALLOW window) require a negative
+    # value, which silently failed to apply on production.
+    # Remote range coalescing — see PARQUET_IO_COALESCE_WASTE_RATIO in config.py.
+    # SET-able because the right value is REGIME-dependent: a bandwidth-capped
+    # link wants ~0 (never buy bytes to save a cheap round-trip), a high-RTT link
+    # wants more (round-trips dominate, wasted bytes are cheap).
+    "parquet_io_coalesce_waste_ratio": (
+        FLOAT64, config.PARQUET_IO_COALESCE_WASTE_RATIO, VariableOwner.USER, Visibility.RESTRICTED),
+    "parquet_io_coalesce_max_bytes": (
+        INT64, config.PARQUET_IO_COALESCE_MAX_BYTES, VariableOwner.USER, Visibility.RESTRICTED),
+    "parquet_io_in_flight_limit": (
+        INT64, config.PARQUET_IO_IN_FLIGHT_LIMIT, VariableOwner.USER, Visibility.RESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an

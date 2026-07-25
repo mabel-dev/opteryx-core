@@ -177,8 +177,37 @@ near-linearly (measured ~8.4x at 16 workers on a string-heavy ClickBench scan), 
 machines use their cores; the floor of 8 means small instances (e.g. <=8 vCPU Cloud Run) are
 never reduced below the historic default. Override via the env var to tune per deployment."""
 
-PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
-"""Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
+PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 16))
+"""Worker threads for GCS/HTTP Parquet reads.
+
+This USED to default to 128, on the reasoning that "each range read pays network
+RTT, so high concurrency wins". That reasoning is WRONG for this workload and the
+default was measured to be the worst value in its own range.
+
+Production sweep (2026-07-24, `SELECT COUNT(WatchID) FROM benchmarks.clickbench.hits`
+— 99 files, 396 row groups, 792 MB, 3 runs/point, identical bytes throughout):
+
+    workers   median   avg dl/row group   throughput
+        128   18.66s          4507 ms      42.4 MB/s   <- the old default
+         64   16.33s          2188 ms      48.5 MB/s
+         32   16.29s          1178 ms      48.6 MB/s
+         20   14.67s           761 ms      54.0 MB/s
+         16   12.52s           631 ms      63.3 MB/s   <- optimum
+          8   13.20s           438 ms      60.0 MB/s
+
+An INTERIOR optimum: below it you are submission-limited against 396 row groups,
+above it the extra streams do not add bandwidth — they divide the SAME aggregate
+into thinner, more contended slices. Aggregate never exceeded ~64 MB/s at ANY
+setting, which looks like the instance's network ceiling rather than anything the
+engine controls; more concurrency cannot buy past it, so it only costs.
+
+Caveats before treating 16 as universal. It was measured on ONE query shape
+(single narrow int64 column, download-bound — decode stayed at 2-3ms/row group
+throughout, so decode parallelism never mattered), and in a window where ~63 MB/s
+was reachable; a later session saw the same config yield only ~51 MB/s, and
+run-to-run noise of +/-13% has been observed. Re-baseline IN-SESSION before
+trusting a small difference. Larger row groups, wider projections, or a bigger
+instance could all move the optimum — override via the env var per deployment."""
 
 # HTTP client tuning for remote (GCS/HTTP) Parquet range reads — mirrors the C++
 # defaults baked into src/cpp/http_client.cpp so the Python-side code default and
@@ -221,9 +250,45 @@ handshakes overlap. Opt-in until measured to be a net win."""
 
 DISABLE_HTTP2: bool = get_bool("OPTERYX_HTTP_DISABLE_HTTP2", False)
 
-PARQUET_IO_IN_FLIGHT_HEADROOM: int = int(get("PARQUET_IO_IN_FLIGHT_HEADROOM", 2))
-"""Row groups submitted BEYOND the decode-worker count (`in_flight_limit =
-workers + headroom`).
+PARQUET_IO_COALESCE_WASTE_RATIO: float = float(get("PARQUET_IO_COALESCE_WASTE_RATIO", 0.10))
+"""Merge a row group's adjacent column-chunk range GETs while the bytes THROWN
+AWAY stay within this fraction of the bytes actually needed.
+
+Parquet stores a row group's column chunks contiguously, so a wide projection is
+one unbroken extent that was previously issued as N separate range GETs — 105
+columns of ClickBench `hits` = 105 requests per row group, where merging all of
+them wastes 0.000%% of the bytes. 0.0 = merge only exactly-touching chunks
+(byte-neutral). Sparse projections self-limit: skipping a fat column you did not
+select blows the budget and splits the run."""
+
+PARQUET_IO_COALESCE_MAX_BYTES: int = int(get("PARQUET_IO_COALESCE_MAX_BYTES", 8 * 1024 * 1024))
+"""Ceiling on a single coalesced range GET; 0 = unbounded. Default 8 MB.
+
+Merging is not free past a point: one huge GET serialises what were concurrent
+transfers. Measured against GCS, 1x16MB took 1.05s where 8x2MB took 0.79s for
+identical bytes — so this bounds how far a run may merge.
+
+8 MB is the measured safe point. Local bench (8 files x 4 row groups x 100
+columns, 1.95 GB) against dev/throttle_server.py's PER-CONNECTION bandwidth
+cap — the regime most hostile to merging, since fewer connections means less
+aggregate throughput there:
+    no coalescing   7.76s   3200 requests
+    8 MB cap        7.35s    256 requests   <- fewer requests AND faster
+    4 MB cap        7.51s    512 requests
+    unbounded      16.49s     32 requests   <- collapses concurrency
+Bytes fetched were byte-identical across every row (1,947,017,170), because a
+row group's column chunks are contiguous — merging them wastes nothing.
+Unbounded wins on an UNCAPPED link (0.60s vs 0.90s) but is 2x worse here, so
+the default is bounded until production tells us which regime it is in."""
+
+PARQUET_IO_IN_FLIGHT_LIMIT: int = int(get("PARQUET_IO_IN_FLIGHT_LIMIT", 0))
+"""ABSOLUTE cap on row groups submitted but not yet consumed. 0 = auto
+(`workers + 2`, the historical formula).
+
+Deliberately absolute, not a delta: the whole point is to test "many threads,
+SHALLOW window", which as a delta requires a NEGATIVE headroom — and that was
+exactly the case that silently failed to apply (production cell: workers=128,
+headroom=-110 still reported peak concurrency 134, i.e. it fell back to +2).
 
 Worker count currently governs two separate things — how many row groups download
 concurrently (threads) and how deep the submission window runs ahead of the

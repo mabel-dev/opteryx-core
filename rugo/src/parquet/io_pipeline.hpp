@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <utility>
+#include <algorithm>
+#include <limits>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -1326,24 +1328,65 @@ class ParquetIOPipeline {
         if (remote)
             reject_remote_path(item.path);
 #endif
+        // remote_buffers is indexed by COALESCED GROUP; col_ptr/col_len map each
+        // column onto its slice within one of those group buffers.
         std::vector<std::vector<uint8_t>> remote_buffers;
+        std::vector<const uint8_t*>       col_ptr;
+        std::vector<size_t>               col_len;
 
         try {
 #ifdef RUGO_ENABLE_HTTP
             if (remote && !item.column_stats.empty()) {
                 const std::string url = fetch_url_for(item.path);
+                const size_t ncols = item.column_stats.size();
+
+                // Per-column byte extent. The start is extended backwards by
+                // bloom_prefix[i] (0 unless this column's adjacent bloom is being
+                // fetched for a decode-skip probe) so the bloom rides in front of
+                // the chunk within the same extent.
+                std::vector<int64_t> cstart(ncols), clen(ncols);
+                std::vector<size_t>  order(ncols);
+                for (size_t i = 0; i < ncols; ++i) {
+                    cstart[i] = base_offsets[i] - bloom_prefix[i];
+                    clen[i]   = bloom_prefix[i] + item.column_stats[i].total_compressed_size;
+                    order[i]  = i;
+                }
+                std::sort(order.begin(), order.end(),
+                          [&](size_t a, size_t b) { return cstart[a] < cstart[b]; });
+
+                // Coalesce runs of adjacent/near-adjacent extents into single
+                // range GETs — see set_coalesce_tuning() for the rationale and
+                // the measurements behind both bounds.
+                struct Group { int64_t start, end, useful; std::vector<size_t> cols; };
+                std::vector<Group> groups;
+                const int64_t max_bytes = coalesce_max_bytes_ > 0
+                    ? coalesce_max_bytes_ : std::numeric_limits<int64_t>::max();
+                for (size_t k = 0; k < ncols; ++k) {
+                    const size_t  i = order[k];
+                    const int64_t s = cstart[i], e = cstart[i] + clen[i];
+                    bool merged = false;
+                    if (!groups.empty()) {
+                        Group& g = groups.back();
+                        const int64_t ne      = std::max(g.end, e);
+                        const int64_t nspan   = ne - g.start;
+                        const int64_t nuseful = g.useful + clen[i];
+                        const int64_t nwaste  = nspan - nuseful;
+                        if (nspan <= max_bytes &&
+                            static_cast<double>(nwaste) <=
+                                coalesce_waste_ratio_ * static_cast<double>(nuseful)) {
+                            g.end = ne; g.useful = nuseful; g.cols.push_back(i);
+                            merged = true;
+                        }
+                    }
+                    if (!merged) groups.push_back(Group{s, e, clen[i], {i}});
+                }
+
                 std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
-                reqs.reserve(item.column_stats.size());
-                for (size_t i = 0; i < item.column_stats.size(); ++i) {
-                    int64_t chunk_size = item.column_stats[i].total_compressed_size;
-                    // Extend the start backwards by bloom_prefix[i] (0 unless this
-                    // column's adjacent bloom is being fetched for a decode-skip
-                    // probe). The chunk end is unchanged, so the bloom rides in
-                    // front of the chunk in the same range.
-                    int64_t fetch_start = base_offsets[i] - bloom_prefix[i];
-                    std::string range_hdr = "bytes=" + std::to_string(fetch_start) +
-                        "-" + std::to_string(base_offsets[i] + chunk_size - 1);
-                    reqs.emplace_back(url, std::map<std::string, std::string>{{"Range", range_hdr}});
+                reqs.reserve(groups.size());
+                for (const auto& g : groups) {
+                    reqs.emplace_back(url, std::map<std::string, std::string>{
+                        {"Range", "bytes=" + std::to_string(g.start) +
+                                  "-" + std::to_string(g.end - 1)}});
                 }
                 auto t_fetch = std::chrono::steady_clock::now();
                 remote_buffers = tl_http_client().get_many(
@@ -1353,6 +1396,24 @@ class ParquetIOPipeline {
                 total_read_ns += batch_ns;
                 // One fetch operation covering reqs.size() concurrent ranges.
                 record_http_fetch(batch_ns, reqs.size());
+
+                // Point each column at its slice of whichever group buffer it
+                // landed in. A short/missing buffer leaves the column's view null
+                // and is caught at the decode site — never silently decoded from
+                // the wrong offset.
+                col_ptr.assign(ncols, nullptr);
+                col_len.assign(ncols, 0);
+                for (size_t gi = 0; gi < groups.size() && gi < remote_buffers.size(); ++gi) {
+                    const Group& g = groups[gi];
+                    const std::vector<uint8_t>& buf = remote_buffers[gi];
+                    for (size_t i : g.cols) {
+                        const size_t off = static_cast<size_t>(cstart[i] - g.start);
+                        if (off + static_cast<size_t>(clen[i]) <= buf.size()) {
+                            col_ptr[i] = buf.data() + off;
+                            col_len[i] = static_cast<size_t>(clen[i]);
+                        }
+                    }
+                }
             }
 #endif
 
@@ -1424,7 +1485,14 @@ class ParquetIOPipeline {
                     // Batch-prefetched above: decode straight from the buffer.
                     // When bloom_prefix[i] > 0 the buffer carries the column's
                     // adjacent bloom filter in front of the chunk (bpre bytes).
-                    const std::vector<uint8_t>& raw = remote_buffers[i];
+                    if (i >= col_ptr.size() || col_ptr[i] == nullptr) {
+                        result.success = false;
+                        result.error = "coalesced range fetch did not cover column " +
+                                       std::to_string(i);
+                        break;
+                    }
+                    const uint8_t* raw_data = col_ptr[i];
+                    const size_t   raw_size = col_len[i];
                     const size_t bpre = static_cast<size_t>(bloom_prefix[i]);
                     result.bytes_fetched += chunk_size + static_cast<int64_t>(bpre);
                     // Bloom decode-skip: the adjacent bloom proves this row group
@@ -1432,7 +1500,7 @@ class ParquetIOPipeline {
                     // Skip decode of this and the remaining columns, exactly like
                     // the dictionary decode-skip (dict_all_filtered) below.
                     if (bpre > 0 && skip_ptr != nullptr &&
-                        bloom_needles_all_absent(raw.data(), bpre, skip.kind,
+                        bloom_needles_all_absent(raw_data, bpre, skip.kind,
                                                  skip.int_vals, skip.str_vals,
                                                  col_stats.physical_type)) {
                         result.empty_filtered = true;
@@ -1442,7 +1510,7 @@ class ParquetIOPipeline {
                     }
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw.data() + bpre, raw.size() - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr);
+                        raw_data + bpre, raw_size - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -1716,6 +1784,26 @@ class ParquetIOPipeline {
     HttpTuning http_tuning_;
     bool http_tuning_set_ = false;
     void set_http_tuning(const HttpTuning& t) { http_tuning_ = t; http_tuning_set_ = true; }
+
+    // ── Remote range coalescing (see the merge loop in decode_row_group) ─────
+    // Parquet stores a row group's column chunks CONTIGUOUSLY, so a wide
+    // projection is one unbroken extent that we nonetheless issue as N separate
+    // range GETs (measured: 105 columns of ClickBench hits = 105 requests per
+    // row group, and merging them all wastes 0.000% of the bytes).
+    //   waste_ratio: merge a run while bytes THROWN AWAY stay within this
+    //     fraction of bytes actually needed. 0.0 = merge only touching chunks
+    //     (byte-neutral). Sparse projections self-limit: skipping a fat column
+    //     you did not select blows the budget and splits the run.
+    //   max_bytes: ceiling on one merged request. A single huge GET serialises
+    //     what were concurrent transfers — measured 1x16MB (1.05s) SLOWER than
+    //     8x2MB (0.79s) for identical bytes — so unbounded merging is not free.
+    //     0 = unbounded.
+    double  coalesce_waste_ratio_ = 0.10;
+    int64_t coalesce_max_bytes_   = 0;
+    void set_coalesce_tuning(double waste_ratio, int64_t max_bytes) {
+        coalesce_waste_ratio_ = waste_ratio;
+        coalesce_max_bytes_   = max_bytes;
+    }
     // Primitive-args overload: Cython declares HttpTuning-by-struct awkwardly
     // (it's a plain C++ aggregate, not exposed to Python), so the binding calls
     // this instead of constructing an HttpTuning on the Cython side.

@@ -300,7 +300,7 @@ cdef class CppIOPipeline:
 
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
                   int64_t pool_size=256*1024*1024,
-                  http_tuning=None):
+                  http_tuning=None, coalesce_tuning=None):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
         self.pool = MemoryPool(pool_size, name="parquet-io", auto_resize=False)
         self.committed_bytes = 0
@@ -312,6 +312,11 @@ cdef class CppIOPipeline:
         # http_tuning is None unless the caller resolved a SET override; when
         # None, the pipeline leaves HttpClient::default_tuning() (env-derived)
         # in effect, unchanged from before this existed.
+        # Remote range coalescing (rugo-side, not HttpClient state) — None keeps
+        # ParquetIOPipeline's own defaults.
+        if coalesce_tuning is not None:
+            _waste_ratio, _max_bytes = coalesce_tuning
+            self.pipeline.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes)
         if http_tuning is not None:
             (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
              _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11) = http_tuning
@@ -1436,7 +1441,8 @@ cpdef IpcRowGroupSource open_ipc_source(
     string_types=None,
     limit=None,
     http_tuning=None,
-    int in_flight_headroom=2,
+    int in_flight_limit_override=0,
+    coalesce_tuning=None,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -1582,11 +1588,13 @@ cpdef IpcRowGroupSource open_ipc_source(
         if rg_bytes > max_rg_bytes:
             max_rg_bytes = rg_bytes
 
-    # Submission window. `in_flight_headroom` is SET-able (default 2, the value
+    # Submission window. ABSOLUTE and SET-able (0 = auto = workers + 2, the value
     # this was hardcoded to) so submission depth can be varied independently of
     # the worker/thread count — the two used to move together, which is why the
-    # worker sweep could not attribute its win to one or the other.
-    in_flight_limit = decode_workers + in_flight_headroom
+    # worker sweep could not attribute its win to one or the other. Absolute
+    # rather than a delta because the discriminating case (MANY threads, SHALLOW
+    # window) needs in_flight < workers, unexpressible as a positive delta.
+    in_flight_limit = in_flight_limit_override if in_flight_limit_override > 0 else decode_workers + 2
     if in_flight_limit < 1:
         in_flight_limit = 1
     est_rg = max_rg_bytes * 2
@@ -1599,6 +1607,7 @@ cpdef IpcRowGroupSource open_ipc_source(
         queue_capacity=1024,
         pool_size=dyn_pool_size,
         http_tuning=http_tuning,
+        coalesce_tuning=coalesce_tuning,
     )
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
@@ -1626,7 +1635,8 @@ cpdef IpcRowGroupSource open_pass2_source(
     null_fillers=None,
     string_types=None,
     http_tuning=None,
-    int in_flight_headroom=2,
+    int in_flight_limit_override=0,
+    coalesce_tuning=None,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -1690,12 +1700,13 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.n_items = len(wi)
     if src.n_items == 0:
         return src
-    src.in_flight_limit = max(1, decode_workers + in_flight_headroom)
+    src.in_flight_limit = max(1, in_flight_limit_override if in_flight_limit_override > 0 else decode_workers + 2)
     src.pipeline = CppIOPipeline(
         decode_workers=decode_workers,
         queue_capacity=1024,
         pool_size=256*1024*1024,
         http_tuning=http_tuning,
+        coalesce_tuning=coalesce_tuning,
     )
     return src
 
@@ -2294,6 +2305,7 @@ def iter_row_groups_ipc(
         decode_workers=decode_workers, predicates=predicates,
         file_sizes=file_sizes, connector=connector, query_id=query_id,
         prefetched_footers=prefetched_footers, footer_bytes_cache=footer_bytes_cache,
+        coalesce_tuning=kwargs.get("coalesce_tuning"),
     )
     cdef list names = src.column_names_bytes
     cdef list vectors
