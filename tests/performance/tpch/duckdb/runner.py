@@ -551,51 +551,25 @@ ORDER BY
         (
             "Q17",
             f"""
-WITH q17_part AS (
-    SELECT p_partkey
-    FROM read_parquet({T} || 'part/*.parquet') part
-    WHERE
-        p_brand = 'Brand#23'
-        AND p_container = 'MED BOX'
-),
-q17_avg AS (
-    SELECT
-        l_partkey AS t_partkey,
-        0.2 * AVG(l_quantity) AS t_avg_quantity
-    FROM read_parquet({T} || 'lineitem/*.parquet') lineitem
-    WHERE l_partkey IN (SELECT p_partkey FROM q17_part)
-    GROUP BY l_partkey
-),
-q17_price AS (
-    SELECT
-        l_quantity,
-        l_partkey,
-        l_extendedprice
-    FROM read_parquet({T} || 'lineitem/*.parquet') lineitem
-    WHERE l_partkey IN (SELECT p_partkey FROM q17_part)
-)
 SELECT
     CAST(SUM(l_extendedprice) / 7.0 AS DECIMAL(32,2)) AS avg_yearly
-FROM q17_avg, q17_price
+FROM
+    read_parquet({T} || 'lineitem/*.parquet') lineitem,
+    read_parquet({T} || 'part/*.parquet') part
 WHERE
-    t_partkey = l_partkey
-    AND l_quantity < t_avg_quantity
+    p_partkey = l_partkey
+    AND p_brand = 'Brand#23'
+    AND p_container = 'MED BOX'
+    AND l_quantity < (
+        SELECT 0.2 * AVG(l_quantity)
+        FROM read_parquet({T} || 'lineitem/*.parquet') lineitem2
+        WHERE lineitem2.l_partkey = part.p_partkey
+    )
 """,
         ),
         (
             "Q18",
             f"""
-WITH q18_tmp_cached AS (
-    SELECT
-        l_orderkey,
-        SUM(l_quantity) AS t_sum_quantity
-    FROM
-        read_parquet({T} || 'lineitem/*.parquet') lineitem
-    WHERE
-        l_orderkey IS NOT NULL
-    GROUP BY
-        l_orderkey
-)
 SELECT
     c_name,
     c_custkey,
@@ -606,15 +580,16 @@ SELECT
 FROM
     read_parquet({T} || 'customer/*.parquet') customer,
     read_parquet({T} || 'orders/*.parquet') orders,
-    q18_tmp_cached t,
-    read_parquet({T} || 'lineitem/*.parquet') l
+    read_parquet({T} || 'lineitem/*.parquet') lineitem
 WHERE
-    c_custkey = o_custkey
-    AND o_orderkey = t.l_orderkey
-    AND o_orderkey IS NOT NULL
-    AND t.t_sum_quantity > 300
-    AND o_orderkey = l.l_orderkey
-    AND l.l_orderkey IS NOT NULL
+    o_orderkey IN (
+        SELECT l_orderkey
+        FROM read_parquet({T} || 'lineitem/*.parquet') lineitem2
+        GROUP BY l_orderkey
+        HAVING SUM(l_quantity) > 300
+    )
+    AND c_custkey = o_custkey
+    AND o_orderkey = l_orderkey
 GROUP BY
     c_name,
     c_custkey,
@@ -670,101 +645,70 @@ WHERE
         (
             "Q20",
             f"""
-WITH tmp1 AS (
-    SELECT p_partkey
-    FROM read_parquet({T} || 'part/*.parquet') part
-    WHERE p_name LIKE 'forest%'
-),
-tmp2 AS (
-    SELECT s_name, s_address, s_suppkey
-    FROM
-        read_parquet({T} || 'supplier/*.parquet') supplier,
-        read_parquet({T} || 'nation/*.parquet') nation
-    WHERE
-        s_nationkey = n_nationkey
-        AND n_name = 'CANADA'
-),
-tmp3 AS (
-    SELECT
-        l_partkey,
-        0.5 * SUM(l_quantity) AS sum_quantity,
-        l_suppkey
-    FROM
-        read_parquet({T} || 'lineitem/*.parquet') lineitem,
-        tmp2
-    WHERE
-        l_shipdate >= DATE '1994-01-01'
-        AND l_shipdate <= DATE '1995-01-01'
-        AND l_suppkey = s_suppkey
-    GROUP BY l_partkey, l_suppkey
-),
-tmp4 AS (
-    SELECT ps_partkey, ps_suppkey, ps_availqty
-    FROM read_parquet({T} || 'partsupp/*.parquet') partsupp
-    WHERE ps_partkey IN (SELECT p_partkey FROM tmp1)
-),
-tmp5 AS (
-    SELECT ps_suppkey
-    FROM tmp4, tmp3
-    WHERE
-        ps_partkey = l_partkey
-        AND ps_suppkey = l_suppkey
-        AND ps_availqty > sum_quantity
-)
 SELECT
     s_name,
     s_address
 FROM
-    read_parquet({T} || 'supplier/*.parquet') supplier
+    read_parquet({T} || 'supplier/*.parquet') supplier,
+    read_parquet({T} || 'nation/*.parquet') nation
 WHERE
-    s_suppkey IN (SELECT ps_suppkey FROM tmp5)
+    s_suppkey IN (
+        SELECT ps_suppkey
+        FROM read_parquet({T} || 'partsupp/*.parquet') partsupp
+        WHERE
+            ps_partkey IN (
+                SELECT p_partkey
+                FROM read_parquet({T} || 'part/*.parquet') part
+                WHERE p_name LIKE 'forest%'
+            )
+            AND ps_availqty > (
+                SELECT 0.5 * SUM(l_quantity)
+                FROM read_parquet({T} || 'lineitem/*.parquet') lineitem
+                WHERE
+                    l_partkey = ps_partkey
+                    AND l_suppkey = ps_suppkey
+                    AND l_shipdate >= DATE '1994-01-01'
+                    AND l_shipdate < DATE '1995-01-01'
+            )
+    )
+    AND s_nationkey = n_nationkey
+    AND n_name = 'CANADA'
 ORDER BY s_name
 """,
         ),
         (
             "Q21",
             f"""
-WITH l3 AS (
-    SELECT
-        l_orderkey,
-        COUNT(DISTINCT l_suppkey) AS cntSupp
-    FROM
-        read_parquet({T} || 'lineitem/*.parquet') lineitem
-    WHERE
-        l_receiptdate > l_commitdate
-        AND l_orderkey IS NOT NULL
-    GROUP BY l_orderkey
-    HAVING COUNT(DISTINCT l_suppkey) = 1
-),
-location AS (
-    SELECT supplier.*
-    FROM
-        read_parquet({T} || 'supplier/*.parquet') supplier,
-        read_parquet({T} || 'nation/*.parquet') nation
-    WHERE
-        s_nationkey = n_nationkey
-        AND n_name = 'SAUDI ARABIA'
-)
 SELECT
     s_name,
     COUNT(*) AS numwait
-FROM (
-    SELECT li.l_suppkey, li.l_orderkey
-    FROM
-        read_parquet({T} || 'lineitem/*.parquet') li
-        JOIN read_parquet({T} || 'orders/*.parquet') o
-            ON li.l_orderkey = o.o_orderkey
-            AND o.o_orderstatus = 'F'
-        JOIN (
-            SELECT l_orderkey, COUNT(DISTINCT l_suppkey) AS cntSupp
-            FROM read_parquet({T} || 'lineitem/*.parquet') lineitem
-            GROUP BY l_orderkey
-        ) l2 ON li.l_orderkey = l2.l_orderkey
-            AND li.l_receiptdate > li.l_commitdate
-            AND l2.cntSupp > 1
-) l1
-JOIN l3 ON l1.l_orderkey = l3.l_orderkey
-JOIN location s ON l1.l_suppkey = s.s_suppkey
+FROM
+    read_parquet({T} || 'supplier/*.parquet') supplier,
+    read_parquet({T} || 'lineitem/*.parquet') l1,
+    read_parquet({T} || 'orders/*.parquet') orders,
+    read_parquet({T} || 'nation/*.parquet') nation
+WHERE
+    s_suppkey = l1.l_suppkey
+    AND o_orderkey = l1.l_orderkey
+    AND o_orderstatus = 'F'
+    AND l1.l_receiptdate > l1.l_commitdate
+    AND EXISTS (
+        SELECT *
+        FROM read_parquet({T} || 'lineitem/*.parquet') l2
+        WHERE
+            l2.l_orderkey = l1.l_orderkey
+            AND l2.l_suppkey <> l1.l_suppkey
+    )
+    AND NOT EXISTS (
+        SELECT *
+        FROM read_parquet({T} || 'lineitem/*.parquet') l3
+        WHERE
+            l3.l_orderkey = l1.l_orderkey
+            AND l3.l_suppkey <> l1.l_suppkey
+            AND l3.l_receiptdate > l3.l_commitdate
+    )
+    AND s_nationkey = n_nationkey
+    AND n_name = 'SAUDI ARABIA'
 GROUP BY
     s_name
 ORDER BY

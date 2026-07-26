@@ -1,39 +1,40 @@
-/*
-Opteryx syntax changes
-- temporary table definition changed to CTE
-*/
-
-with l3 as
-(select l_orderkey, count(distinct l_suppkey) as cntSupp
-from testdata.tpch.lineitem
-where l_receiptdate > l_commitdate and l_orderkey is not null
-group by l_orderkey
-having cntSupp = 1
-)
-
-, location as (
-select supplier.* from testdata.tpch.supplier, testdata.tpch.nation where
-s_nationkey = n_nationkey and n_name = 'SAUDI ARABIA'
-)
-select s_name, count(*) as numwait
+select
+    s_name,
+    count(*) as numwait
 from
-(
-select li.l_suppkey, li.l_orderkey
-from testdata.tpch.lineitem li join testdata.tpch.orders o on li.l_orderkey = o.o_orderkey and
-                      o.o_orderstatus = 'F'
-     join
-     (
-     select l_orderkey, count(distinct l_suppkey) as cntSupp
-     from testdata.tpch.lineitem
-     group by l_orderkey
-     ) l2 on li.l_orderkey = l2.l_orderkey and
-             li.l_receiptdate > li.l_commitdate and
-             l2.cntSupp > 1
-) l1 join l3 on l1.l_orderkey = l3.l_orderkey
- join location s on l1.l_suppkey = s.s_suppkey
+    testdata.tpch.supplier,
+    testdata.tpch.lineitem l1,
+    testdata.tpch.orders,
+    testdata.tpch.nation
+where
+    s_suppkey = l1.l_suppkey
+    and o_orderkey = l1.l_orderkey
+    and o_orderstatus = 'F'
+    and l1.l_receiptdate > l1.l_commitdate
+    and exists (
+        select
+            *
+        from
+            testdata.tpch.lineitem l2
+        where
+            l2.l_orderkey = l1.l_orderkey
+            and l2.l_suppkey <> l1.l_suppkey
+    )
+    and not exists (
+        select
+            *
+        from
+            testdata.tpch.lineitem l3
+        where
+            l3.l_orderkey = l1.l_orderkey
+            and l3.l_suppkey <> l1.l_suppkey
+            and l3.l_receiptdate > l3.l_commitdate
+    )
+    and s_nationkey = n_nationkey
+    and n_name = 'SAUDI ARABIA'
 group by
- s_name
+    s_name
 order by
- numwait desc,
- s_name
+    numwait desc,
+    s_name
 limit 100;
