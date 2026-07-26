@@ -168,6 +168,20 @@ class InSubqueryToJoinStrategy(PlanRewriteStrategy):
             subquery_wrapper.alias = subquery_alias
             subquery_wrapper.columns = projected_cols
 
+            # Give the subquery's own scans fresh aliases before merging them into the
+            # outer plan. A query can legally reuse an outer relation's name inside the
+            # subquery (canonical TPC-H Q18: `FROM ... lineitem WHERE o_orderkey IN
+            # (SELECT l_orderkey FROM lineitem GROUP BY ...)`) — without renaming, the
+            # merged plan holds two scans with the same alias and the binder raises
+            # AmbiguousDatasetError. Mirrors the identical fix in
+            # exists_subquery_to_join.py / the view/CTE expansion path. Only Scan
+            # aliases are remapped — projected_cols/subquery_col_name were already
+            # captured above and the ON condition below references subquery_alias (the
+            # wrapper's own alias), so this renaming doesn't affect either.
+            from opteryx.planner.relation_resolver import rename_relations
+
+            rename_relations(subquery_plan)
+
             # Merge the subquery plan nodes and edges into the main plan
             plan += subquery_plan
 

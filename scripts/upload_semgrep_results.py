@@ -11,7 +11,10 @@ workflow):
 The upload target is a fixed workspace/collection/dataset:
     opteryx / ops / sast_findings
 
-Depends on the `opteryx-upload` package (PyPI).
+Findings are flattened to NDJSON, converted to Parquet with `rugo`, and the
+Parquet file is what gets uploaded.
+
+Depends on the `rugo` and `opteryx-upload` packages (PyPI).
 """
 
 import json
@@ -24,6 +27,8 @@ from opteryx_upload import ConflictResolution
 from opteryx_upload import PATAuthenticator
 from opteryx_upload import Target
 from opteryx_upload import UploadClient
+from rugo.jsonl import read_jsonl
+from rugo.parquet import write_parquet
 
 UPLOAD_TARGET = Target(workspace="opteryx", collection="ops", dataset="sast_findings")
 
@@ -81,13 +86,19 @@ def main() -> int:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
 
+    parquet_path = "semgrep_findings.parquet"
+    with read_jsonl(ndjson_path) as reader:
+        for morsel in reader:
+            with open(parquet_path, "wb") as fh:
+                fh.write(write_parquet(morsel))
+
     authenticator = PATAuthenticator(
         client_id=os.environ["UPLOAD_CLIENT"],
         client_secret=os.environ["UPLOAD_TOKEN"],
     )
     client = UploadClient(token=authenticator)
     commit = client.upload_and_commit(
-        [ndjson_path],
+        [parquet_path],
         UPLOAD_TARGET,
         snapshot_message=f"semgrep scan {os.environ['GITHUB_REPOSITORY']}@{os.environ['GITHUB_SHA'][:12]}",
         conflict_resolution=ConflictResolution.APPEND,

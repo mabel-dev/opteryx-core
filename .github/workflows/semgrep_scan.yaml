@@ -18,8 +18,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Semgrep and upload client
-        run: python -m pip install --no-cache-dir semgrep opteryx-upload
+      - name: Install Semgrep, rugo, and upload client
+        run: python -m pip install --no-cache-dir semgrep rugo opteryx-upload
 
       - name: Run Semgrep
         run: semgrep scan --config=auto --json --output=semgrep-report.json
