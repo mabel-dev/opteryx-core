@@ -197,6 +197,21 @@ def decode_value(
     )
     cdef str candidate
 
+    # E33: an UNSIGNED column stores its magnitude in a signed int32/int64 slot, so
+    # a value at or above the signed midpoint has a NEGATIVE bit pattern. Decoding
+    # these statistics as signed inverts the column's min/max, and callers that
+    # prune row groups by comparing a predicate against them then discard groups
+    # that genuinely match — silently dropping rows (a `WHERE u32 > 0` over a
+    # column holding 3e9 returned nothing). Match the innermost "uint<width>" the
+    # same way decode_column.cpp's IntType detection does, so a LIST leaf
+    # ("array<uint32>") is caught too.
+    cdef Py_ssize_t _upos = logical_str.rfind("uint")
+    cdef bint is_unsigned_logical = (
+        _upos != -1
+        and _upos + 4 < len(logical_str)
+        and logical_str[_upos + 4].isdigit()
+    )
+
     if len(b) == 0:
         if type_str in ("byte_array", "fixed_len_byte_array"):
             if is_string_logical or prefer_text:
@@ -204,9 +219,9 @@ def decode_value(
         return b""
 
     if type_str == "int32":
-        return struct.unpack("<i", b)[0]
+        return struct.unpack("<I" if is_unsigned_logical else "<i", b)[0]
     elif type_str == "int64":
-        return struct.unpack("<q", b)[0]
+        return struct.unpack("<Q" if is_unsigned_logical else "<q", b)[0]
     elif type_str == "float32":
         return struct.unpack("<f", b)[0]
     elif type_str == "float64":

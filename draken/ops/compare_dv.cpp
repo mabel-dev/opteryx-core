@@ -15,7 +15,8 @@
 #include "ops/vec_result.h"
 #include "ops/int64_compare.h"
 #include "ops/float_ops.h"
-#include "ops/fixed_int_ops.h"   // i32_compare_vector (DATE32)
+#include "ops/fixed_int_ops.h"   // i8/i16/i32 + u8/u16/u32 compare_vector
+#include "ops/uint64_compare.h"  // u64_compare_vector (UINT64)
 #include "ops/string_compare.h"  // str_compare_vector (VARCHAR/NVARCHAR/VARBINARY)
 
 namespace {
@@ -161,6 +162,26 @@ extern "C" DrakenVector* draken_compare_dv(
                 break;
             case DRAKEN_INT32:
                 vr = draken::ops::i32_compare_vector(*left, *right, op_code);
+                break;
+            // Unsigned integers compare in their own domain — a value at or above
+            // the signed midpoint sits in a negative slot, so routing these through
+            // the signed kernels would invert the ordering. The kernels already
+            // exist (and are registered in hash.h's dispatch table); this switch
+            // simply never wired them in, so every unsigned comparison declined to
+            // the fallback and, on the relocated native ExprFilter, raised
+            // err_op=11 — which is what forced unsigned predicate inputs to fail
+            // the whole scan closed.
+            case DRAKEN_UINT8:
+                vr = draken::ops::u8_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_UINT16:
+                vr = draken::ops::u16_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_UINT32:
+                vr = draken::ops::u32_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_UINT64:
+                vr = draken::ops::u64_compare_vector(*left, *right, op_code);
                 break;
             case DRAKEN_FLOAT64:
                 vr = draken::ops::float_compare_vector<double>(*left, *right, op_code);

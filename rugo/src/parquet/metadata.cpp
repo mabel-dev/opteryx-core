@@ -38,52 +38,79 @@ static inline const char *ParquetTypeToString(int t) {
   }
 }
 
-static inline const char *LogicalTypeToString(int t) {
+// Legacy `converted_type` (parquet.thrift enum ConvertedType) -> the SAME logical
+// type vocabulary ParseLogicalType emits for the modern `logicalType` union.
+//
+// Both properties here are load-bearing and both were previously wrong:
+//
+//   1. The enum values must match the spec exactly:
+//        UTF8=0 MAP=1 MAP_KEY_VALUE=2 LIST=3 ENUM=4 DECIMAL=5 DATE=6
+//        TIME_MILLIS=7 TIME_MICROS=8 TIMESTAMP_MILLIS=9 TIMESTAMP_MICROS=10
+//        UINT_8=11 UINT_16=12 UINT_32=13 UINT_64=14
+//        INT_8=15 INT_16=16 INT_32=17 INT_64=18 JSON=19 BSON=20 INTERVAL=21
+//      MAP_KEY_VALUE=2 was missing, shifting every value above it by one: a DATE
+//      column came back "TIME_MILLIS", a DECIMAL came back "DATE", an INT_64 came
+//      back "JSON".
+//
+//   2. The strings must be the ones consumers actually match, which are the
+//      lowercase forms the modern path produces ("uint8", "date32[day]",
+//      "timestamp[ms]"). The old UPPER_SNAKE spellings matched nothing —
+//      decode_column.cpp's IntType detection, io_pipeline's admission gate and
+//      _rugo_schema's type maps are all lowercase — so a legacy-annotated
+//      unsigned column silently decoded as signed.
+//
+// Only reached for files carrying NO modern logicalType (pre-2.4 writers, some
+// Hive/Impala/Spark-legacy output); modern writers emit both and field 10 wins.
+//
+// DECIMAL needs the element's precision/scale to build "decimal(p,s)", and those
+// arrive in LATER thrift fields (7/8) than converted_type (6) — so this is called
+// after the field loop completes, not inline. See ParseSchemaElement.
+static inline std::string ConvertedTypeToString(int t, int32_t precision,
+                                                int32_t scale) {
   switch (t) {
   case 0:
     return "varchar"; // UTF8
   case 1:
-    return "MAP";
   case 2:
-    return "LIST";
+    return "map"; // MAP, MAP_KEY_VALUE
   case 3:
-    return "ENUM";
+    return "array"; // LIST
   case 4:
-    return "DECIMAL";
+    return "enum";
   case 5:
-    return "DATE";
+    return "decimal(" + std::to_string(precision) + "," + std::to_string(scale) + ")";
   case 6:
-    return "TIME_MILLIS";
+    return "date32[day]";
   case 7:
-    return "TIME_MICROS";
+    return "time[ms]";
   case 8:
-    return "TIMESTAMP_MILLIS";
+    return "time[us]";
   case 9:
-    return "TIMESTAMP_MICROS";
+    return "timestamp[ms]";
   case 10:
-    return "UINT_8";
+    return "timestamp[us]";
   case 11:
-    return "UINT_16";
+    return "uint8";
   case 12:
-    return "UINT_32";
+    return "uint16";
   case 13:
-    return "UINT_64";
+    return "uint32";
   case 14:
-    return "INT_8";
+    return "uint64";
   case 15:
-    return "INT_16";
+    return "int8";
   case 16:
-    return "INT_32";
+    return "int16";
   case 17:
-    return "INT_64";
+    return "int32";
   case 18:
-    return "JSON";
+    return "int64";
   case 19:
-    return "BSON";
+    return "json";
   case 20:
-    return "INTERVAL";
+    return "bson";
   case 21:
-    return "struct";
+    return "interval";
   default:
     return "";
   }
@@ -355,6 +382,9 @@ static SchemaElement ParseSchemaElement(TInput &in) {
   SchemaElement elem;
   int16_t last_id = 0;
   bool saw_physical_type = false;
+  // Legacy converted_type (field 6), resolved AFTER the loop: DECIMAL needs
+  // precision/scale, which arrive in later fields (7/8). -1 = absent.
+  int32_t converted_type = -1;
 
   while (true) {
     auto fh = ReadFieldHeader(in, last_id);
@@ -385,11 +415,8 @@ static SchemaElement ParseSchemaElement(TInput &in) {
       elem.num_children = ReadI32(in);
       break;
     }
-    case 6: { // converted_type (legacy logical type)
-      int32_t ct = ReadI32(in);
-      if (elem.logical_type.empty()) {
-        elem.logical_type = LogicalTypeToString(ct);
-      }
+    case 6: { // converted_type (legacy logical type) — resolved after the loop
+      converted_type = ReadI32(in);
       break;
     }
     case 7: { // scale (for DECIMAL)
@@ -418,6 +445,15 @@ static SchemaElement ParseSchemaElement(TInput &in) {
       SkipField(in, fh.type);
       break;
     }
+  }
+
+  // Legacy converted_type applies ONLY when no modern logicalType was present.
+  // Deferred to here so DECIMAL can read the precision/scale fields, which are
+  // parsed after converted_type. Field 10 (logicalType) always wins when set —
+  // same precedence as before, just resolved later.
+  if (elem.logical_type.empty() && converted_type >= 0) {
+    elem.logical_type =
+        ConvertedTypeToString(converted_type, elem.precision, elem.scale);
   }
 
   // Detect struct nodes: no physical type, has children, no logical_type
@@ -1117,13 +1153,36 @@ FileStats ReadParquetMetadata(const std::string &path) {
 
 // ------------------- AggregateColumnStats -------------------
 //
+// E33: does this logical type mark the column UNSIGNED? Matches the innermost
+// "uint<width>" so a LIST leaf ("array<uint32>") is caught too — same rule as
+// decode_column.cpp's IntType detection and rugo.parquet.decode_value.
+static inline bool StatsLogicalIsUnsigned(const std::string &lt) {
+  size_t pos = lt.rfind("uint");
+  return pos != std::string::npos && pos + 4 < lt.size() &&
+         lt[pos + 4] >= '0' && lt[pos + 4] <= '9';
+}
+
 // Compare two raw-bytes statistics values for a given physical type.
 // Returns <0 if a < b, 0 if equal, >0 if a > b.
 // Falls back to lexicographic for unrecognised types.
+//
+// An UNSIGNED column stores its magnitude in a signed int32/int64 slot, so any
+// value at or above the signed midpoint has a NEGATIVE bit pattern. Comparing
+// those as signed picks the WRONG winner when aggregating min-of-mins /
+// max-of-maxes across row groups, which hands callers an inverted range and lets
+// stats-based pruning discard files that genuinely match.
 static int CompareStatBytes(const std::string &a, const std::string &b,
-                             const std::string &physical_type) {
+                             const std::string &physical_type,
+                             const std::string &logical_type) {
+  const bool is_unsigned = StatsLogicalIsUnsigned(logical_type);
   if (physical_type == "int32") {
     if (a.size() < 4 || b.size() < 4) return 0;
+    if (is_unsigned) {
+      uint32_t ua = 0, ub = 0;
+      std::memcpy(&ua, a.data(), 4);
+      std::memcpy(&ub, b.data(), 4);
+      return (ua < ub) ? -1 : (ua > ub) ? 1 : 0;
+    }
     int32_t va = 0, vb = 0;
     std::memcpy(&va, a.data(), 4);
     std::memcpy(&vb, b.data(), 4);
@@ -1131,6 +1190,12 @@ static int CompareStatBytes(const std::string &a, const std::string &b,
   }
   if (physical_type == "int64") {
     if (a.size() < 8 || b.size() < 8) return 0;
+    if (is_unsigned) {
+      uint64_t ua = 0, ub = 0;
+      std::memcpy(&ua, a.data(), 8);
+      std::memcpy(&ub, b.data(), 8);
+      return (ua < ub) ? -1 : (ua > ub) ? 1 : 0;
+    }
     int64_t va = 0, vb = 0;
     std::memcpy(&va, a.data(), 8);
     std::memcpy(&vb, b.data(), 8);
@@ -1199,7 +1264,8 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
       // Aggregate min: keep the smallest value.
       if (col.has_min) {
         if (!agg.has_min ||
-            CompareStatBytes(col.min, agg.min_bytes, agg.physical_type) < 0) {
+            CompareStatBytes(col.min, agg.min_bytes, agg.physical_type,
+                             agg.logical_type) < 0) {
           agg.min_bytes = col.min;
           agg.has_min   = true;
         }
@@ -1208,7 +1274,8 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
       // Aggregate max: keep the largest value.
       if (col.has_max) {
         if (!agg.has_max ||
-            CompareStatBytes(col.max, agg.max_bytes, agg.physical_type) > 0) {
+            CompareStatBytes(col.max, agg.max_bytes, agg.physical_type,
+                             agg.logical_type) > 0) {
           agg.max_bytes = col.max;
           agg.has_max   = true;
         }

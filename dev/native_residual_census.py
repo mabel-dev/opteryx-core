@@ -135,12 +135,12 @@ HAND_SET: Dict[str, str] = {
     "non_admissible_kind": "SELECT data FROM '%s'" % _ARRAY,
     # R7b — the footer gate; still reachable via schema evolution (missing column).
     "footer_gate": "SELECT followers FROM '%s'" % _EVOLVING,
-    # R5b (A1) — an UNSIGNED integer column used as a c-native predicate input. The
-    # decode preserves the exact DK_UINT width, which the relocated ExprFilter's
-    # bytecode VM cannot read (err_op=11), so the scan fails closed to the trampoline.
-    # EventDate is parquet int32 / logical uint16.
-    "unsigned_predicate_input":
-        "SELECT EventDate FROM testdata.clickbench_tiny WHERE EventDate > 0",
+    # (R5b (A1) `unsigned_predicate_input` is RETIRED — no longer reachable, so it has
+    # no hand-set entry. An unsigned predicate input used to fail closed because the
+    # relocated ExprFilter's compare requires both operands to share a DrakenType and
+    # the literal was always INT64. The schema now declares the column's real width so
+    # the literal is coerced to match, and draken_compare_dv dispatches the unsigned
+    # compare kernels. See test_unsigned_predicate_input_now_native.)
 }
 
 

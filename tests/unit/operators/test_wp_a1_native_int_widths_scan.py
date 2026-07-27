@@ -146,63 +146,82 @@ def test_int_width_with_nulls(width, tmp_path, monkeypatch):
     _assert_parity(tmp_path, monkeypatch, cols, "v")
 
 
-# Signed narrow ints widen to INT64 on decode, so the relocated c-native ExprFilter's
-# bytecode VM reads them correctly → they go native as predicate inputs. UNSIGNED
-# columns decode to exact-width DK_UINT vectors the VM cannot read (err_op=11), so an
-# unsigned PREDICATE INPUT deliberately FAILS CLOSED to the trampoline (WP-11 pattern;
-# the uint compare kernel is out-of-scope follow-on). Either way the survivor set must
-# match byte-for-byte.
-def _is_unsigned(width):
-    return width.startswith("uint")
+# Every integer width — signed AND unsigned — now goes native as a predicate input.
+# Two things had to be true for that, and both now are:
+#   * the column's DECLARED type carries its real width (_rugo_schema
+#     ._integer_column_type), so `_coerce_literal_physical` re-materializes the
+#     comparison literal at that width and draken_compare_dv's identical-type guard
+#     is satisfied; and
+#   * draken_compare_dv dispatches the unsigned widths to u8/u16/u32/u64
+#     _compare_vector, which had existed (and been registered in hash.h) but were
+#     never wired into that switch.
+# Together these retired the A1 `unsigned_predicate_input` fail-closed entirely.
+# Either way the survivor set must match the forced-trampoline run byte-for-byte.
 
-
-# uint32/uint64 as a PUSHED-PREDICATE input trip a PRE-EXISTING, unrelated trampoline
-# latmat pass-1 bug (`set_pass1_predicate` on None — parquet_read.pyx, untouched by
-# A1) that crashes even a forced-trampoline run (int64 / uint8 / uint16 are fine). Since
-# the A1 fail-closed sends them to that trampoline, they cannot be drained end-to-end;
-# their fail-closed DECISION is asserted at the footer level in
-# test_wide_unsigned_predicate_input_fails_closed below. No real ClickBench column is
-# uint32/uint64, so the pre-existing bug does not touch the footer_gate census.
-_PRED_DRAINABLE = ["int8", "int16", "int32", "int64", "uint8", "uint16"]
+# uint32/uint64 used to be excluded here. A column holding any value >= 2**31 (resp.
+# 2**63) silently returned ZERO rows for a predicate on it — on the native AND the
+# trampoline path alike — because the statistics were decoded/compared as SIGNED: a
+# high value reads as negative, so the row group looked out of range and was pruned
+# away before any row was examined. Fixed in rugo.parquet.decode_value (per-row-group
+# pruning) and metadata.cpp's CompareStatBytes (min-of-mins across row groups/files).
+# The _WIDTHS entries below deliberately straddle those midpoints, so these cases now
+# pin the fix.
+_PRED_DRAINABLE = ["int8", "int16", "int32", "int64",
+                   "uint8", "uint16", "uint32", "uint64"]
 
 
 @pytest.mark.parametrize("width", _PRED_DRAINABLE)
 def test_int_width_predicate_input(width, tmp_path, monkeypatch):
     """The narrow/unsigned column is a c-native predicate INPUT and also projected.
-    Signed → native (widened to INT64, VM-readable). Unsigned → fail closed to the
-    trampoline. Survivor set identical to the forced-trampoline run regardless."""
+    Native for every width; survivor set identical to the forced-trampoline run."""
     typ, vals = _WIDTHS[width]
     cols = {"v": (typ, vals * 30), "n": (pa.int64(), list(range(len(vals) * 30)))}
-    native = not _is_unsigned(width)
-    _assert_parity(tmp_path, monkeypatch, cols, "v, n WHERE v > 0", expect_native=native)
-    _assert_parity(tmp_path, monkeypatch, cols, "v WHERE v = 1", expect_native=native)
+    _assert_parity(tmp_path, monkeypatch, cols, "v, n WHERE v > 0")
+    _assert_parity(tmp_path, monkeypatch, cols, "v WHERE v = 1")
 
 
 @pytest.mark.parametrize("width", _PRED_DRAINABLE)
 def test_int_width_role3_filter_only(width, tmp_path, monkeypatch):
     """Role-3: the narrow/unsigned column is read only as a predicate input (not
-    emitted). Same signed=native / unsigned=fail-closed split as predicate_input."""
+    emitted). Native for every width, same as predicate_input."""
     typ, vals = _WIDTHS[width]
     cols = {"v": (typ, vals * 30), "n": (pa.int64(), list(range(len(vals) * 30)))}
-    _assert_parity(tmp_path, monkeypatch, cols, "n WHERE v > 0",
-                   expect_native=not _is_unsigned(width))
+    _assert_parity(tmp_path, monkeypatch, cols, "n WHERE v > 0")
 
 
-@pytest.mark.parametrize("width", ["uint8", "uint16", "uint32", "uint64"])
-def test_wide_unsigned_predicate_input_fails_closed(width, tmp_path):
-    """The A1 fail-closed DECISION for an unsigned predicate input, asserted at the
-    footer level (`any_column_unsigned`) — the plan-time signal that keeps the scan on
-    the trampoline. Covers uint32/uint64, which cannot be drained end-to-end due to the
-    pre-existing latmat bug noted above."""
-    import glob
-    from opteryx.connectors.parquet_io.pool_reader import any_column_unsigned
-    typ, vals = _WIDTHS[width]
-    ds = _write(str(tmp_path / "a1u"), {"v": (typ, vals * 4),
-                                        "n": (pa.int64(), list(range(len(vals) * 4)))})
-    paths = glob.glob(os.path.join(ds, "*.parquet"))
-    # The unsigned column is flagged (→ fail closed); a plain int64 column is not.
-    assert any_column_unsigned(paths, ["v"], None) is True
-    assert any_column_unsigned(paths, ["n"], None) is False
+# (The former test_wide_unsigned_predicate_input_fails_closed asserted the A1
+# fail-closed DECISION via the `any_column_unsigned` footer probe. Both the probe and
+# the gate it fed are gone — unsigned predicate inputs are evaluated natively now — so
+# the assertion had nothing left to pin. The behaviour that replaced it is covered by
+# test_int_width_predicate_input / _role3_filter_only over every width above.)
+
+
+@pytest.mark.parametrize("dtype,lo,hi,mid", [
+    (pa.uint32(), [1, 2, 3], [3200000000, 4000000000, 4294967295], 4000000000),
+    (pa.uint64(), [1, 2, 3], [2**63, 2**63 + 7, 2**64 - 1], 2**63 + 7),
+])
+def test_unsigned_stats_aggregate_across_files(dtype, lo, hi, mid, tmp_path):
+    """min/max statistics must AGGREGATE in the unsigned domain across row groups and
+    files, not just decode correctly within one.
+
+    One file holds only values below the signed midpoint, another only values above
+    it. Comparing the raw stat bytes as signed picks the wrong min-of-mins /
+    max-of-maxes, which inverts the file's apparent range and prunes away files that
+    genuinely match — the row-group-level fix alone does not cover this path
+    (metadata.cpp's CompareStatBytes)."""
+    ds = str(tmp_path / "uagg")
+    os.makedirs(ds, exist_ok=True)
+    for name, vals in (("a", lo * 40), ("b", hi * 40)):
+        pq.write_table(
+            pa.table({"v": pa.array(vals, dtype),
+                      "n": pa.array(list(range(len(vals))), pa.int64())}),
+            os.path.join(ds, f"{name}.parquet"), row_group_size=30)
+
+    for lit, expected in ((0, 240), (lo[-1], 120), (mid, 40)):
+        session = opteryx.session()
+        rows = sum(m.num_rows for m in
+                   session.execute_to_morsels("SELECT n FROM '%s' WHERE v > %d" % (ds, lit)))
+        assert rows == expected, f"v > {lit}: got {rows}, expected {expected}"
 
 
 def test_mixed_widths_one_scan(tmp_path, monkeypatch):
@@ -249,15 +268,15 @@ def test_clickbench_annotated_int_columns_native(sql):
     "SELECT EventDate FROM %s WHERE EventDate > 0" % _TINY,        # uint16 pred input
     "SELECT UserID FROM %s WHERE EventDate > 0" % _TINY,          # uint16 role-3
 ])
-def test_clickbench_unsigned_predicate_input_fails_closed(sql):
-    """An UNSIGNED column used as a c-native predicate input deliberately stays on the
-    trampoline (the ExprFilter VM cannot read a UINT vector — err_op=11). This is the
-    documented A1 fail-closed case; the trampoline evaluates the predicate correctly."""
+def test_clickbench_unsigned_predicate_input_native(sql):
+    """An UNSIGNED column used as a c-native predicate input now goes NATIVE: the
+    literal is re-materialized at the column's declared width and draken_compare_dv
+    dispatches the unsigned compare kernel. This was the A1 fail-closed case."""
     session = opteryx.session()
     for morsel in session.execute_to_morsels(sql):
         _ = morsel.num_rows
     sources = list(session._telemetry.as_dict()["scan_sources"].values())
-    assert sources == ["StreamingScanSource"], sources
+    assert sources == ["NativeParquetScanSource"], sources
 
 
 if __name__ == "__main__":  # pragma: no cover

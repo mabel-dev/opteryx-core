@@ -278,6 +278,21 @@ cdef int _coerce_literal_physical(object col_type, object lit_value) except -99:
             return <int>DRAKEN_INT16 if -32768 <= lit_value <= 32767 else -1
         if pname == "INT32":
             return <int>DRAKEN_INT32 if -2147483648 <= lit_value <= 2147483647 else -1
+        # Unsigned columns need the same treatment: draken_compare_dv is
+        # identical-type only, so an INT64 literal against a UINT column declines
+        # to the fallback (and, on the relocated native ExprFilter, raised
+        # err_op=11 — which is why unsigned predicate inputs used to fail the scan
+        # closed). A negative literal can never equal an unsigned value and does
+        # not fit the type, so it stays untouched and takes the fallback, which
+        # compares correctly.
+        if pname == "UINT8":
+            return <int>DRAKEN_UINT8 if 0 <= lit_value <= 255 else -1
+        if pname == "UINT16":
+            return <int>DRAKEN_UINT16 if 0 <= lit_value <= 65535 else -1
+        if pname == "UINT32":
+            return <int>DRAKEN_UINT32 if 0 <= lit_value <= 4294967295 else -1
+        if pname == "UINT64":
+            return <int>DRAKEN_UINT64 if 0 <= lit_value <= 18446744073709551615 else -1
         if pname == "FLOAT64":
             # every |int| <= 2**53 is exactly representable in binary64
             return <int>DRAKEN_FLOAT64 if -9007199254740992 <= lit_value <= 9007199254740992 else -1

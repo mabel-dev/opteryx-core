@@ -152,15 +152,16 @@ def test_footer_gate_int_widths_now_native(sql):
     "SELECT EventDate FROM %s WHERE EventDate > 0" % _TINY,   # uint16 predicate input
     "SELECT UserID FROM %s WHERE EventDate > 0" % _TINY,      # uint16 role-3 filter
 ])
-def test_unsigned_predicate_input_fails_closed(sql):
-    """A1 documented fail-closed: an UNSIGNED integer column used as a c-native
-    predicate input stays on the trampoline (the relocated ExprFilter's bytecode VM
-    cannot read a UINT vector — err_op=11; the uint compare kernel is out-of-scope
-    follow-on). It is tagged `unsigned_predicate_input`, NOT admitted natively."""
+def test_unsigned_predicate_input_now_native(sql):
+    """Was the A1 `unsigned_predicate_input` fail-closed. An UNSIGNED integer column
+    used as a c-native predicate input is now admitted natively: the schema declares
+    the column's real width, so the comparison literal is re-materialized at that
+    width, and draken_compare_dv dispatches the u8/u16/u32/u64 compare kernels that
+    switch previously never wired in. The reason code no longer exists."""
     sources, reasons, err = census.scan_residuals(sql)
     assert err is None, f"query raised: {err}"
-    assert set(sources.values()) == {"StreamingScanSource"}, sources
-    assert set(reasons.values()) == {"unsigned_predicate_input"}, reasons
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
 
 
 # ---------------------------------------------------------------------------

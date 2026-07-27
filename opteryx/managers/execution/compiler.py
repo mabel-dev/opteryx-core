@@ -1433,7 +1433,6 @@ class _Compiler:
         # not re-added.
         read_scs = [col.schema_column for col in scan.columns]
         seen = {sc.identity for sc in read_scs}
-        predicate_input_names = []
         if predicates:
             for pred in predicates:
                 for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
@@ -1464,11 +1463,6 @@ class _Compiler:
                     # cross-domain temporal compare — see `_temporal_domain_mismatch` in
                     # connectors/parquet_io/predicates.py — so pruning stays sound and
                     # the residual filter produces the answer.)
-                    # A1: track predicate-input column names to fail closed below on an
-                    # UNSIGNED integer input (see the footer probe after paths). The
-                    # schema collapses every int width to canonical INT64, so the
-                    # unsigned tag is invisible here — it is checked against the footer.
-                    predicate_input_names.append(sc.name)
                     if sc.identity not in seen:
                         seen.add(sc.identity)
                         read_scs.append(sc)
@@ -1574,23 +1568,6 @@ class _Compiler:
             # and would 401 at execution time). Signable remote paths ARE admitted.
             self.scan_residual_reasons[scan.identity] = "footer_gate"
             return None
-        if predicate_input_names:
-            from opteryx.connectors.parquet_io.pool_reader import any_column_unsigned
-            if any_column_unsigned(paths, predicate_input_names, file_sizes or None):
-                # R5b (A1): an UNSIGNED integer column is a c-native predicate input.
-                # It decodes to an exact-width DK_UINT vector, and the relocated
-                # ExprFilter compares through draken_compare_dv, which requires both
-                # operands to share a DrakenType. `_coerce_literal_physical` re-
-                # materializes the literal at the column's width for the SIGNED
-                # widths only, so an unsigned column still meets an INT64 literal and
-                # raises err_op=11 at runtime. Fail closed so the predicate stays on
-                # the trampoline, which evaluates it correctly. Projected-only
-                # unsigned columns are unaffected (they decode natively); only
-                # unsigned PREDICATE INPUTS fall back. Mirrors the WP-11 BOOL
-                # predicate-input fail-closed. Extending the literal coercion to the
-                # unsigned widths would retire this gate.
-                self.scan_residual_reasons[scan.identity] = "unsigned_predicate_input"
-                return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
