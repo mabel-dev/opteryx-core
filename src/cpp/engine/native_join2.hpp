@@ -238,7 +238,7 @@ struct Join2ProbeOperator : Operator {
     std::vector<size_t> probe_payload_idx;
     const Join2Ref* ref;
     bool left_outer;
-    static constexpr size_t kBatch = 1024;
+    static constexpr size_t kBatch = 8192;
     static constexpr uint32_t kNoBuildRow = UINT32_MAX;
 
     Join2ProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
