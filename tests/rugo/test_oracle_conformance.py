@@ -36,6 +36,9 @@ sys.path.insert(0, str(REPO_ROOT))
 import pyarrow as pa  # test oracle only
 import pyarrow.parquet as pq  # test oracle only
 
+import draken  # noqa: F401 — must precede rugo native imports
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
 import rugo.parquet as rp
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,6 +307,87 @@ def test_read_v2_matches_pyarrow(case, shape):
     assert normalise(kind, got["c"]) == normalise(kind, values), (
         f"READ V2 mismatch {case_id}/{shape}: rugo={got['c']!r} expected={values!r}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-row-group: the rest of this suite's fixtures are 3-row / single-row-group
+# tables — rugo_reread_rewrite even asserts len(morsels) == 1. Row-group boundary
+# handling (row-group-relative validity-bit offsets, per-row-group stats, morsel
+# splitting on read) is untested by every case above. A contrived 50-row file
+# split across 5 row groups exercises that boundary explicitly, both directions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MRG_N = 50
+_MRG_IDS = list(range(_MRG_N))
+_MRG_VALS = [float(i) * 1.5 if i % 7 else None for i in range(_MRG_N)]
+_MRG_NAMES = [f"name_{i}" if i % 5 else None for i in range(_MRG_N)]
+
+
+def test_read_multi_rowgroup_matches_pyarrow():
+    """PyArrow writes 50 rows in 5 row groups (row_group_size=10) → rugo reads
+    → one morsel per row group, values match in order across the boundary."""
+    table = pa.table(
+        {
+            "id": pa.array(_MRG_IDS, type=pa.int64()),
+            "val": pa.array(_MRG_VALS, type=pa.float64()),
+            "name": pa.array(_MRG_NAMES, type=pa.string()),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf, compression=None, row_group_size=10)
+    data = buf.getvalue()
+
+    pf = pq.ParquetFile(io.BytesIO(data))
+    assert pf.num_row_groups == 5, "fixture setup: expected 5 row groups"
+
+    morsels = _morsels(data)
+    assert len(morsels) == 5, f"expected one rugo morsel per row group, got {len(morsels)}"
+    assert [m.num_rows for m in morsels] == [10, 10, 10, 10, 10]
+
+    ids, vals, names = [], [], []
+    for m in morsels:
+        ids.extend(m.column(b"id").to_pylist())
+        vals.extend(m.column(b"val").to_pylist())
+        names.extend(m.column(b"name").to_pylist())
+
+    assert ids == _MRG_IDS
+    assert vals == _MRG_VALS
+    assert names == _MRG_NAMES
+
+
+def test_write_multi_rowgroup_roundtrips_through_pyarrow():
+    """rugo writes 40 rows with max_rows_per_row_group=8 → 5 row groups →
+    PyArrow reads back, values match in order across the boundary.
+
+    40/8 (not 50/10): WriteParquet rounds max_rows_per_rg up to the nearest
+    multiple of 8 so validity bit-offsets stay byte-aligned (see the
+    max_rows_per_rg contract in rugo/src/parquet/_parquet_writer.hpp) — asking
+    for 10 would silently round up to 16 and only produce 4 groups, not 5.
+    """
+    n = 40
+    ids = list(range(n))
+    vals = [float(i) * 1.5 if i % 7 else None for i in range(n)]
+    names = [f"name_{i}" if i % 5 else None for i in range(n)]
+
+    morsel = Morsel.from_vectors(
+        ["id", "val", "name"],
+        [
+            vector_from_sequence(ids, dtype="INT64"),
+            vector_from_sequence(vals, dtype="DOUBLE"),
+            vector_from_sequence(names, dtype="VARCHAR"),
+        ],
+    )
+
+    data = rp.write_parquet(morsel, compression="none", bloom_filters=False, max_rows_per_row_group=8)
+
+    pf = pq.ParquetFile(io.BytesIO(data))
+    assert pf.num_row_groups == 5, f"expected 5 row groups, got {pf.num_row_groups}"
+    assert [pf.metadata.row_group(i).num_rows for i in range(5)] == [8, 8, 8, 8, 8]
+
+    got = pa_read(data)
+    assert got["id"] == ids
+    assert got["val"] == vals
+    assert got["name"] == names
 
 
 if __name__ == "__main__":
