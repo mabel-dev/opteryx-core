@@ -52,7 +52,8 @@ from opteryx.compiled.structures.column_stats cimport FileColumnStats, file_colu
 from draken.core.buffers cimport (
     DrakenType, DrakenVector,
     DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_DECIMAL128, DRAKEN_VARCHAR,
-    DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
+    DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64,
+    DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
 )
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from cpython.ref cimport PyObject
@@ -192,7 +193,8 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     morsel_take_string (arena is NULL for numeric dicts). The draken own_dict_*
     entry owns all three buffers; both takes null the MorselRef slots so the
     destructor frees nothing. dk: 8=int64, 9=float64, 10=float32,
-    15..18=uint8/16/32/64 (E33 — exact declared width, no widening)."""
+    15..18=uint8/16/32/64, 22..24=int8/16/32 (E33 — exact declared width, no
+    widening)."""
     cdef uint32_t dlen = result.columns[i].length
     cdef uint32_t data_length = result.columns[i].data_length
     cdef void* data_ptr
@@ -208,15 +210,21 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
         raw = draken_vector_own_dict_f64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
     elif dk == 10:
         raw = draken_vector_own_dict_f32(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
-    elif dk == 15 or dk == 16 or dk == 17 or dk == 18:
+    elif dk >= 15 and dk <= 18 or dk >= 22 and dk <= 24:
         if dk == 15:
             udtype = DRAKEN_UINT8
         elif dk == 16:
             udtype = DRAKEN_UINT16
         elif dk == 17:
             udtype = DRAKEN_UINT32
-        else:
+        elif dk == 18:
             udtype = DRAKEN_UINT64
+        elif dk == 22:
+            udtype = DRAKEN_INT8
+        elif dk == 23:
+            udtype = DRAKEN_INT16
+        else:
+            udtype = DRAKEN_INT32
         raw = draken_vector_own_dict(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval, udtype)
     else:
         raw = draken_vector_own_dict_i64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
@@ -248,7 +256,8 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
         return _wrap_string_direct(result, i, want_type)
     if dk == 7:
         return _wrap_string_dict_direct(result, i, want_type)
-    if dk == 8 or dk == 9 or dk == 10 or dk == 15 or dk == 16 or dk == 17 or dk == 18:
+    if (dk == 8 or dk == 9 or dk == 10 or dk >= 15 and dk <= 18
+            or dk >= 22 and dk <= 24):
         return _wrap_num_dict_direct(result, i, dk)
     if dk == 1:
         dtype = DRAKEN_INT64
@@ -266,8 +275,19 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
         dtype = DRAKEN_UINT32
     elif dk == 14:
         dtype = DRAKEN_UINT64
-    else:  # dk == 5
+    elif dk == 19:
+        dtype = DRAKEN_INT8
+    elif dk == 20:
+        dtype = DRAKEN_INT16
+    elif dk == 21:
+        dtype = DRAKEN_INT32
+    elif dk == 5:
         dtype = DRAKEN_DECIMAL128
+    else:
+        # An unrecognised kind used to fall into the DECIMAL128 branch, which
+        # silently mistyped the column and only surfaced much later as
+        # "DECIMAL vector is missing its logical-type descriptor".
+        raise ValueError(f"_wrap_direct: unhandled DirectKind {dk}")
     dptr = morsel_take_direct(result[0], i, &dval)
     vec = _vector_from_decoded(dptr, dval, dlen, dtype)
     if dk == 5 and dlen > 0:
@@ -2217,19 +2237,22 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
 
 cpdef bint any_column_unsigned(paths, column_names, file_sizes=None):
     """A1 — does ANY of ``column_names`` carry an UNSIGNED integer IntType annotation
-    in ANY row group of ANY file (footer logical_type "uint8"/"uint16"/"uint32"/
-    "uint64")?
+    in ANY row group of ANY file (footer logical_type "uint8".."uint64")?
 
-    Used to FAIL CLOSED when an unsigned column would be a c-native predicate INPUT:
-    the decode preserves the exact unsigned width (DK_UINT{8,16,32,64}) but the
-    relocated native ExprFilter's bytecode VM cannot read a UINT vector (it widens
-    every integer through the signed int-family reader), so a pushed comparison over
-    it raises err_op=11 at runtime. Rather than crash, such a scan stays on the
-    trampoline (which evaluates the predicate correctly), mirroring the WP-11 BOOL
-    predicate-input fail-closed. Signed narrow ints (int8/int16) widen to INT64 and
-    ARE readable, so they are NOT flagged here. The schema collapses every integer
-    width to canonical INT64, so unsignedness is only visible in the footer — hence
-    this probe rather than a schema-type check in the compiler.
+    Used to FAIL CLOSED when an unsigned column would be a c-native predicate
+    INPUT. The relocated native ExprFilter compares through draken_compare_dv,
+    which requires both operands to carry the SAME DrakenType.
+    `_coerce_literal_physical` re-materializes a comparison literal at the
+    column's physical type so that guard can fire — but it covers the SIGNED
+    widths only, so an unsigned column still meets an INT64 literal and raises
+    err_op=11 at runtime. Rather than crash, such a scan stays on the trampoline
+    (which evaluates the predicate correctly), mirroring the WP-11 BOOL
+    predicate-input fail-closed.
+
+    Signed narrow ints (int8/int16/int32) are NOT flagged: the schema declares
+    their true width (see _rugo_schema._integer_column_type), so the literal
+    coerces to match and the compare runs natively. Extending
+    `_coerce_literal_physical` to the unsigned widths would retire this probe.
     """
     cdef FileStats fs
     cdef const FileStats* fsp = NULL   # borrowed (cache) on hit, &fs on cold miss

@@ -344,7 +344,10 @@ cdef inline void _coerce_logical_types(
             if v is None:
                 continue
             v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
-            if v_nb.type == _draken_native_parquet.INT64:
+            # DATE is physical int32 and now decodes at that width (E33 exact-width
+            # integers), so accept INT32 as well as INT64.
+            if (v_nb.type == _draken_native_parquet.INT64
+                    or v_nb.type == _draken_native_parquet.INT32):
                 row_group[col_name] = _int64_to_date32(v_nb)
     if timestamp_col_set:
         for col_name in timestamp_col_set:
@@ -1433,13 +1436,18 @@ cdef class ParquetReadNode(ReaderNode):
                 if v_nb.type == _draken_native_parquet.ARRAY:
                     _array_child_to_timestamp(v_nb, op[1])
                 continue
+            # DATE is physical int32 and now decodes at that width (E33 exact-width
+            # integers), so kind==2 accepts INT32; DECIMAL/TIMESTAMP stay INT64-only.
+            if kind == 2:
+                if (v_nb.type == _draken_native_parquet.INT64
+                        or v_nb.type == _draken_native_parquet.INT32):
+                    vectors[i] = _int64_to_date32(v_nb)
+                continue
             if v_nb.type != _draken_native_parquet.INT64:
                 continue
             if kind == 1:
                 dec = op[1]
                 vectors[i] = _int64_to_decimal(v_nb, dec[0], dec[1])
-            elif kind == 2:
-                vectors[i] = _int64_to_date32(v_nb)
             else:  # kind == 3
                 vectors[i] = _int64_to_timestamp(v_nb, op[1])
 

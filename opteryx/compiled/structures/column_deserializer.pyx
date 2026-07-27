@@ -41,6 +41,7 @@ from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, Cpp
 from draken.core.buffers cimport DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_DECIMAL128
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from draken.vectors.vector cimport dict_int64_from_decoded as _dict_i64_from_decoded
 from draken.vectors.vector cimport dict_from_decoded as _dict_from_decoded
@@ -147,6 +148,15 @@ DEF TAG_UINT8_DICT  = 17
 DEF TAG_UINT16_DICT = 18
 DEF TAG_UINT32_DICT = 19
 DEF TAG_UINT64_DICT = 20
+# E33 — signed narrow, plain (exact declared width, never widened) and dict.
+# TAG_INT32_EXACT is distinct from TAG_INT32 (2), which is the legacy widening
+# tag still used for int32-backed DECIMAL.
+DEF TAG_INT8        = 21
+DEF TAG_INT16       = 22
+DEF TAG_INT32_EXACT = 23
+DEF TAG_INT8_DICT   = 24
+DEF TAG_INT16_DICT  = 25
+DEF TAG_INT32_DICT  = 26
 
 # ARRAY child element type tags — must match CHILD_* in ipc_serialize.hpp.
 DEF CHILD_INT64   = 1
@@ -493,18 +503,23 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
     return _vector_from_decoded(expanded, validity_buf, num_rows, DRAKEN_FLOAT64)
 
 
-# ─── E33: unsigned integer builders ───────────────────────────────────────────
-# Plain (13-16) and dict (17-20) tags are not routed through the C++ fast path
-# (ipc_deserialize.hpp only knows tags 1-5); they're new enough tags that adding
-# them there is deferred, mirroring how dict/string tags 6-10 already stay on
-# this Cython path. elem_bytes (1/2/4/8) always matches the declared UINT8/16/
-# 32/64 width exactly — these never widen, unlike the int32->int64 convention
-# the signed dict/plain builders above use.
+# ─── E33: exact-width integer builders ───────────────────────────────────────
+# Unsigned plain (13-16) / dict (17-20) and signed narrow plain (21-23) / dict
+# (24-26) tags are not routed through the C++ fast path (ipc_deserialize.hpp only
+# knows tags 1-5); they're new enough tags that adding them there is deferred,
+# mirroring how dict/string tags 6-10 already stay on this Cython path.
+# elem_bytes (1/2/4/8) always matches the declared width exactly — these never
+# widen, unlike the int32->int64 convention the legacy builders above use.
+#
+# Both builders are parameterized by (elem_bytes, dtype) and are signedness-
+# agnostic: the bytes on the wire are already the value at the declared width in
+# whichever domain the column is, so only the DrakenType tag differs.
 
-cdef object _build_numeric_plain_uint(const uint8_t* p, uint32_t num_rows,
+cdef object _build_numeric_plain_narrow(const uint8_t* p, uint32_t num_rows,
                                       const uint8_t* null_bitmap, uint32_t null_bitmap_len,
                                       int elem_bytes, DrakenType dtype):
-    """Deserialize a TAG_UINT8/16/32/64 plain column, scattering compact->positional
+    """Deserialize an exact-width plain column (uint8/16/32/64, int8/16/32),
+    scattering compact->positional
     exactly like _wrap_decoded_fixed does for the C++ fast-path tags."""
     cdef uint32_t data_len
     p = _read_u32(p, &data_len)
@@ -539,10 +554,11 @@ cdef object _build_numeric_plain_uint(const uint8_t* p, uint32_t num_rows,
     return _vector_from_decoded(pos_data, validity_buf, num_rows, dtype)
 
 
-cdef object _build_numeric_dict_uint(const uint8_t* p, uint32_t num_rows,
+cdef object _build_numeric_dict_narrow(const uint8_t* p, uint32_t num_rows,
                                      const uint8_t* null_bitmap, uint32_t null_bitmap_len,
                                      int elem_bytes, DrakenType dtype):
-    """Deserialize a TAG_UINT8/16/32/64 dict column, preserving dict encoding via
+    """Deserialize an exact-width dict column (uint8/16/32/64, int8/16/32),
+    preserving dict encoding via
     dict_from_decoded (generic analogue of _build_numeric_dict_int64)."""
     cdef uint32_t dict_size
     p = _read_u32(p, &dict_size)
@@ -1213,21 +1229,33 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool, DrakenType want
             elif tag == TAG_ARRAY:
                 result = _build_array_vector(p, num_rows, null_bitmap, null_bitmap_len)
             elif tag == TAG_UINT8:
-                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_UINT8)
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_UINT8)
             elif tag == TAG_UINT16:
-                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_UINT16)
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_UINT16)
             elif tag == TAG_UINT32:
-                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_UINT32)
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_UINT32)
             elif tag == TAG_UINT64:
-                result = _build_numeric_plain_uint(p, num_rows, null_bitmap, null_bitmap_len, 8, DRAKEN_UINT64)
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 8, DRAKEN_UINT64)
             elif tag == TAG_UINT8_DICT:
-                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_UINT8)
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_UINT8)
             elif tag == TAG_UINT16_DICT:
-                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_UINT16)
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_UINT16)
             elif tag == TAG_UINT32_DICT:
-                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_UINT32)
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_UINT32)
             elif tag == TAG_UINT64_DICT:
-                result = _build_numeric_dict_uint(p, num_rows, null_bitmap, null_bitmap_len, 8, DRAKEN_UINT64)
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 8, DRAKEN_UINT64)
+            elif tag == TAG_INT8:
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_INT8)
+            elif tag == TAG_INT16:
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_INT16)
+            elif tag == TAG_INT32_EXACT:
+                result = _build_numeric_plain_narrow(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_INT32)
+            elif tag == TAG_INT8_DICT:
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 1, DRAKEN_INT8)
+            elif tag == TAG_INT16_DICT:
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 2, DRAKEN_INT16)
+            elif tag == TAG_INT32_DICT:
+                result = _build_numeric_dict_narrow(p, num_rows, null_bitmap, null_bitmap_len, 4, DRAKEN_INT32)
             else:
                 raise ValueError(f"Unknown IPC type tag: {tag}")
     finally:

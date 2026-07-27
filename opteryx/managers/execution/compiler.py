@@ -107,6 +107,17 @@ def _unsupported(what: str):
     )
 
 
+# Physical types the native scan reads through its plain "int" kind: every integer
+# width and signedness, plus TIME32/TIME64 (parquet TIME binds to a TIME32/TIME64
+# schema type but decodes as a plain int stream — the binder models no TIME
+# coercion, so the trampoline emits it as an int too).
+_INT_KIND_TYPES = frozenset((
+    DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+    DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+    DrakenType.TIME32, DrakenType.TIME64,
+))
+
+
 def _physical_type(schema_column):
     ct = getattr(schema_column, "column_type", None)
     return ct.physical if ct is not None else None
@@ -1478,7 +1489,13 @@ class _Compiler:
             # it as INT64. Route it through the int path so the native scan emits the
             # identical INT64 column; the "int" footer gate admits the time[...]
             # logical annotation.
-            if pt == DrakenType.INT64 or pt == DrakenType.TIME32 or pt == DrakenType.TIME64:
+            if pt in _INT_KIND_TYPES:
+                # Every integer width, signed and unsigned. The schema declares the
+                # column's REAL width now (see _rugo_schema._integer_column_type),
+                # so this can no longer key on INT64 alone — a narrow column would
+                # otherwise fail the scan closed as non-admissible. The native
+                # Source decodes each width exactly (DK_INT8/16/32, DK_UINT8/16/32/64)
+                # and the "int" footer gate admits the whole int/uint logical family.
                 kinds.append("int")
                 string_types.append(0)
                 decimal_columns.append(0)
@@ -1561,13 +1578,17 @@ class _Compiler:
             from opteryx.connectors.parquet_io.pool_reader import any_column_unsigned
             if any_column_unsigned(paths, predicate_input_names, file_sizes or None):
                 # R5b (A1): an UNSIGNED integer column is a c-native predicate input.
-                # It decodes to an exact-width DK_UINT vector, but the relocated
-                # ExprFilter's bytecode VM cannot read a UINT vector (err_op=11 at
-                # runtime) — the uint comparison kernel is out-of-scope follow-on work
-                # (R4/R5). Fail closed so the predicate stays on the trampoline, which
-                # evaluates it correctly. Projected-only unsigned columns are
-                # unaffected (they decode natively); only unsigned PREDICATE INPUTS
-                # fall back. Mirrors the WP-11 BOOL predicate-input fail-closed.
+                # It decodes to an exact-width DK_UINT vector, and the relocated
+                # ExprFilter compares through draken_compare_dv, which requires both
+                # operands to share a DrakenType. `_coerce_literal_physical` re-
+                # materializes the literal at the column's width for the SIGNED
+                # widths only, so an unsigned column still meets an INT64 literal and
+                # raises err_op=11 at runtime. Fail closed so the predicate stays on
+                # the trampoline, which evaluates it correctly. Projected-only
+                # unsigned columns are unaffected (they decode natively); only
+                # unsigned PREDICATE INPUTS fall back. Mirrors the WP-11 BOOL
+                # predicate-input fail-closed. Extending the literal coercion to the
+                # unsigned widths would retire this gate.
                 self.scan_residual_reasons[scan.identity] = "unsigned_predicate_input"
                 return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`

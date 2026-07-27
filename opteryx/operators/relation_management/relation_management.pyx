@@ -58,13 +58,24 @@ class RelationManagementNode(BasePlanNode):
             return f"drop {', '.join(self.relation_names or [])}"
         return f"{self.action} {self.relation_name}"
 
+    @property
+    def _author(self):
+        """The session user this DDL is attributed to, or None when unauthenticated.
+
+        None is passed through rather than substituted, so a store that requires
+        attribution rejects the write instead of recording an invented identity.
+        """
+        from opteryx.variables import resolve
+
+        return resolve("external_user", self.properties.variables, None) or None
+
     def __call__(self, morsel=None, **kwargs) -> NonTabularResult:
         if self.action == "create_relation":
             if self.connector.relation_exists(self.relation_name):
                 if self.if_not_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
                 raise ValueError(f"relation already exists: {self.relation_name}")
-            self.connector.create_relation(self.relation_name, self.schema)
+            self.connector.create_relation(self.relation_name, self.schema, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_relation":
@@ -75,14 +86,16 @@ class RelationManagementNode(BasePlanNode):
                     if self.if_exists:
                         continue
                     raise DatasetNotFoundError(connector=connector, dataset=relation_name)
-                connector.drop_relation(relation_name, if_exists=self.if_exists)
+                connector.drop_relation(
+                    relation_name, if_exists=self.if_exists, author=self._author
+                )
                 dropped += 1
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "truncate_relation":
             if not self.connector.relation_exists(self.relation_name):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            self.connector.truncate_relation(self.relation_name)
+            self.connector.truncate_relation(self.relation_name, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:

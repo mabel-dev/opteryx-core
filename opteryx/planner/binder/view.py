@@ -93,8 +93,8 @@ def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
         # Get connector gateway (cached by prefix)
         connector = connector_factory(view_name, telemetry=context.telemetry)
 
-        # Ensure this user can drop the view
-        if not can_perform_action(context.execution_context, view_name, action="WRITE"):
+        # Ensure this user can drop the view - DROP is owner-only, a writer cannot
+        if not can_perform_action(context.execution_context, view_name, action="DROP"):
             raise PermissionError(f"User does not have permission to drop view {view_name}")
 
         if "variables" in dir(connector):

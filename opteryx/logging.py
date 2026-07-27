@@ -30,6 +30,3 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
         >>> logger.debug("Debug message")
     """
     return logging.getLogger(name or "opteryx")
-```
-
-Now I'll proceed with replacing all the imports. Let me use the edit_file tool to replace each import systematically:

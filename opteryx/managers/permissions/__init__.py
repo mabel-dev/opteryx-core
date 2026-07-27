@@ -14,6 +14,9 @@ ACTION_MAP = {
     "DELETE": {"writer", "owner"},
     "WRITE": {"writer", "owner"},
     "UPDATE": {"writer", "owner"},
+    # Dropping a relation destroys it and its history; a writer may change a
+    # relation's contents but only an owner may remove the relation itself.
+    "DROP": {"owner"},
 }
 
 

@@ -25,12 +25,17 @@ struct DictSkipPredicate {
 // members through the base transparently). If you add a scalar, add it HERE and
 // it is reset for free; do NOT add scalars directly to DecodedColumn.
 struct DecodedColumnMeta {
-  // E33: set from the column's Parquet IntType logical-type annotation
-  // (isSigned=false). int_bit_width is the DECLARED width (8/16/32/64) — note
-  // this is independent of `type`/physical width: a declared 8- or 16-bit
-  // unsigned column still arrives over the wire as physical "int32" (Parquet has
-  // no int8/int16 physical storage), so int_bit_width can be narrower than what
-  // `type` implies. 0 == not an integer column / no IntType annotation.
+  // E33: set from the column's Parquet IntType logical-type annotation.
+  // int_bit_width is the DECLARED width (8/16/32/64) and is_unsigned its
+  // signedness — note both are independent of `type`/physical width: a declared
+  // 8- or 16-bit column (signed OR unsigned) still arrives over the wire as
+  // physical "int32" (Parquet has no int8/int16 physical storage), so
+  // int_bit_width can be narrower than what `type` implies.
+  //
+  // 0 == not an integer column, or an integer carrying no IntType annotation.
+  // The latter is NOT the same as "unknown width": a bare physical int32 or
+  // int64 is exactly a 32- or 64-bit signed column (that is what PyArrow and
+  // parquet-mr emit), so consumers resolve absent-width from `type`.
   bool is_unsigned = false;
   int32_t int_bit_width = 0;
   // DECIMAL logical type. Set when the column carries a "decimal(P,S)" logical

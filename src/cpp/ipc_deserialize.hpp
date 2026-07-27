@@ -7,9 +7,12 @@
 // Vector.
 //
 // Scope: fixed-width tags 1..5 (int64, int32→int64 widening, float32,
-// float64, bool). Dict/string tags (6..10) are reported with
+// float64, bool) plus int128. Every other known tag — dict/string (6..10),
+// array (11), and the exact-width integer families (13..26) — is reported with
 // status=kStatusNotHandled so the Cython layer can fall back to its existing
-// implementation.
+// implementation. A tag missing from that list falls through to
+// kStatusUnknownTag, which is an ERROR, not a fallback: any tag added to
+// rugo/src/parquet/ipc_serialize.hpp must be registered here too.
 //
 // All operations are nogil-safe: no Python C API calls, no exceptions thrown
 // across the boundary. Errors are signalled via status fields. Allocations
@@ -52,6 +55,17 @@ enum IpcTag : uint8_t {
     kTagUInt16Dict  = 18,
     kTagUInt32Dict  = 19,
     kTagUInt64Dict  = 20,
+    // E33 — signed narrow integer (exact declared width, never widened). Like the
+    // unsigned family above, not handled by this fast C++ path — Cython's
+    // column_deserializer.pyx parses them. kTagInt32Exact is distinct from
+    // kTagInt32 (2), which is the legacy widening tag still used for int32-backed
+    // DECIMAL.
+    kTagInt8        = 21,
+    kTagInt16       = 22,
+    kTagInt32Exact  = 23,
+    kTagInt8Dict    = 24,
+    kTagInt16Dict   = 25,
+    kTagInt32Dict   = 26,
 };
 
 // IpcKind describes the Vector shape produced for the caller.

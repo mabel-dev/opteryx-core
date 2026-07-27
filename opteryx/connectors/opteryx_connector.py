@@ -32,10 +32,10 @@ def _warn_no_native_sketches() -> None:
             "(NDV / histogram) fall back to the slower Python path. Upgrade the "
             "opteryx_catalog package to enable native sketch reductions."
         )
-from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
+from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
-from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
+from opteryx.exceptions import DatasetNotFoundError, DatasetReadError, NotSupportedError
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
@@ -320,7 +320,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
         return self.schema, self.manifest
 
 
-class OpteryxConnector(Eidetic, PredicatePushable):
+class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     """
     Long-lived Opteryx catalog gateway supporting multiple catalogs.
 
@@ -600,6 +600,50 @@ class OpteryxConnector(Eidetic, PredicatePushable):
             return "dataset", obj
         return None, None
 
+    # Relation operations (Writable capability)
+    def create_relation(self, relation_name: str, schema, author: Optional[str] = None) -> None:
+        """Create a new dataset in the catalog."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        catalog.create_dataset(relative_id, schema, author=author)
+
+    def drop_relation(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop a dataset from the catalog.
+
+        This removes the dataset's catalog entry and snapshot history; the data
+        files it referenced are left in storage, and the catalog tombstones the
+        location so the expiration job can reclaim them.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        if not catalog.dataset_exists(relative_id):
+            if if_exists:
+                return
+            raise DatasetNotFoundError(dataset=relation_name, connector=self.__class__.__name__)
+
+        catalog.drop_dataset(relative_id, author=author)
+
+    def truncate_relation(self, relation_name: str, author: Optional[str] = None) -> None:
+        """Remove all rows from a dataset, retaining the dataset and its schema."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        catalog.load_dataset(relative_id).truncate(author=author)
+
+    def relation_exists(self, relation_name: str) -> bool:
+        """Check whether a dataset exists in the catalog."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        return catalog.dataset_exists(relative_id)
+
+    def insert(self, relation_name: str, file_entries) -> None:
+        raise NotSupportedError(
+            "INSERT into catalog-backed relations is not supported; "
+            "the catalog commit path takes morsels, not pre-written file entries."
+        )
+
     # View operations (Eidetic capability)
     def get_view(self, view_name: str):
         """Retrieve the definition of the specified view."""
@@ -675,7 +719,7 @@ class OpteryxConnector(Eidetic, PredicatePushable):
             identifier=identifier, sql=statement, update_if_exists=update_if_exists, author=owner
         )
 
-    def drop_view(self, view_name: str):
+    def drop_view(self, view_name: str, author: Optional[str] = None):
         """Drop the specified view."""
         # Parse view_name into workspace and relative identifier
         workspace, relative_id = self._parse_identifier(view_name)
@@ -687,7 +731,7 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         collection = ".".join(parts[:-1])
 
         identifier = (collection, name)
-        catalog.drop_view(identifier)
+        catalog.drop_view(identifier, author=author)
 
     def view_exists(self, view_name: str) -> bool:
         """Check if the specified view exists."""

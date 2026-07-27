@@ -338,3 +338,86 @@ def test_create_table_all_types(tmp_path):
     for col in dataset_info["schema"]["columns"]:
         assert col["name"] in expected_cols
         assert col["type"] == expected_cols[col["name"]]
+
+
+_OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
+_WRITER_POLICY = [{"pattern": "*", "role": "writer"}]
+
+
+def _seed_relations(tmp_path):
+    """Create a table and a view as an owner, returning an owner session."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(owner.execute_to_morsels("CREATE TABLE ws.t (id BIGINT)"))
+    list(owner.execute_to_morsels("CREATE VIEW ws.v AS SELECT * FROM ws.t"))
+    return owner
+
+
+def test_drop_table_requires_owner(tmp_path):
+    """A writer may not DROP TABLE - only an owner may."""
+    _seed_relations(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+
+    with pytest.raises(PermissionError, match="permission to drop table"):
+        list(writer.execute_to_morsels("DROP TABLE ws.t"))
+
+    assert (tmp_path / "ws" / "t" / "dataset.json").exists()
+
+
+def test_drop_view_requires_owner(tmp_path):
+    """A writer may not DROP VIEW - only an owner may."""
+    _seed_relations(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+
+    with pytest.raises(PermissionError, match="permission to drop view"):
+        list(writer.execute_to_morsels("DROP VIEW ws.v"))
+
+    assert (tmp_path / "ws" / "v" / "view.json").exists()
+
+
+def test_owner_can_drop_table_and_view(tmp_path):
+    """An owner may DROP both tables and views."""
+    owner = _seed_relations(tmp_path)
+
+    list(owner.execute_to_morsels("DROP VIEW ws.v"))
+    list(owner.execute_to_morsels("DROP TABLE ws.t"))
+
+    assert not (tmp_path / "ws" / "v" / "view.json").exists()
+    assert not (tmp_path / "ws" / "t").exists()
+
+
+def test_writer_retains_non_drop_ddl(tmp_path):
+    """Restricting DROP to owners does not restrict the WRITE tier."""
+    _seed_relations(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+
+    list(writer.execute_to_morsels("CREATE VIEW ws.v2 AS SELECT * FROM ws.t"))
+
+    assert (tmp_path / "ws" / "v2" / "view.json").exists()
+
+
+def test_view_owner_is_session_user(tmp_path):
+    """A created view records the session user, not a fixed literal."""
+    _setup_workspace(tmp_path)
+    owner_alice = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    list(owner_alice.execute_to_morsels("CREATE TABLE ws.t (id BIGINT)"))
+    list(owner_alice.execute_to_morsels("CREATE VIEW ws.va AS SELECT * FROM ws.t"))
+
+    owner_bob = opteryx.session(user="bob", access_policies=_OWNER_POLICY)
+    list(owner_bob.execute_to_morsels("CREATE VIEW ws.vb AS SELECT * FROM ws.t"))
+
+    with open(tmp_path / "ws" / "va" / "view.json") as f:
+        assert json.load(f)["owner"] == "alice"
+    with open(tmp_path / "ws" / "vb" / "view.json") as f:
+        assert json.load(f)["owner"] == "bob"
+
+
+def test_view_owner_none_when_unauthenticated(tmp_path):
+    """No session user means no attribution - not an invented one."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("CREATE TABLE ws.t (id BIGINT)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.v AS SELECT * FROM ws.t"))
+
+    with open(tmp_path / "ws" / "v" / "view.json") as f:
+        assert json.load(f)["owner"] is None

@@ -258,6 +258,8 @@ def _coerce_temporal_columns(morsel, unit_map: dict, date_set: set):
     changed = False
     for name in names:
         v_nb = morsel.column(name)._nb
+        # TIMESTAMP is physical int64; DATE is physical int32 and decodes at that
+        # width, so the date branch must accept INT32 as well as INT64.
         if v_nb.type == _draken_native.DrakenType.INT64:
             unit = unit_map.get(name)
             if unit is not None:
@@ -266,6 +268,9 @@ def _coerce_temporal_columns(morsel, unit_map: dict, date_set: set):
             elif name in date_set:
                 v_nb = _draken_native.vector_reinterpret_as_date32(v_nb)
                 changed = True
+        elif v_nb.type == _draken_native.DrakenType.INT32 and name in date_set:
+            v_nb = _draken_native.vector_reinterpret_as_date32(v_nb)
+            changed = True
         vectors.append(v_nb)
     if not changed:
         return morsel

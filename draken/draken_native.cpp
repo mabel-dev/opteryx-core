@@ -9642,27 +9642,35 @@ NB_MODULE(draken_native, m) {
         nb::arg("vec"),
         "Narrow a FLOAT64 vector to FLOAT32 (cast each value to float). Returns new Vector.");
 
-    // vector_reinterpret_as_date32 — reinterpret an INT64 vector's data as DATE32.
-    // INT64 values are cast to int32 (days-since-epoch). SHAPE-PRESERVING: only the
-    // data buffer (data_length values) is converted; dense stays dense, constant
-    // stays constant, and a Dict-shaped vector keeps its codes (copied) so a
-    // dict-encoded date column survives coercion compressed.
+    // vector_reinterpret_as_date32 — reinterpret an INT32/INT64 vector's data as
+    // DATE32. Parquet stores DATE as physical int32 days-since-epoch, so INT32 is
+    // the natural input and copies straight across; INT64 is accepted too (a date
+    // column that was widened somewhere upstream) and narrows to int32.
+    // SHAPE-PRESERVING: only the data buffer (data_length values) is converted;
+    // dense stays dense, constant stays constant, and a Dict-shaped vector keeps
+    // its codes (copied) so a dict-encoded date column survives coercion
+    // compressed.
     m.def("vector_reinterpret_as_date32",
         [](nb::object obj) -> VectorOwner {
             const DrakenVector* src = draken_vector_unwrap(obj.ptr());
             if (!src)
                 throw nb::python_error();
-            if (src->type != DRAKEN_INT64)
-                throw std::invalid_argument("vector_reinterpret_as_date32: requires INT64 vector");
+            if (src->type != DRAKEN_INT64 && src->type != DRAKEN_INT32)
+                throw std::invalid_argument(
+                    "vector_reinterpret_as_date32: requires INT32 or INT64 vector");
             const uint32_t n  = src->length;
             const uint32_t dl = src->data_length;
-            const int64_t* src_data = static_cast<const int64_t*>(src->data);
             // Convert only the data buffer (dl values), preserving shape.
             int32_t* dd = static_cast<int32_t*>(draken_malloc((dl > 0 ? dl : 1u) * sizeof(int32_t)));
             if (!dd) throw std::bad_alloc();
             OwnedBuffer<void> data_buf(dd);
-            for (uint32_t k = 0; k < dl; ++k)
-                dd[k] = static_cast<int32_t>(src_data[k]);
+            if (src->type == DRAKEN_INT32) {
+                std::memcpy(dd, src->data, static_cast<size_t>(dl) * sizeof(int32_t));
+            } else {
+                const int64_t* src_data = static_cast<const int64_t*>(src->data);
+                for (uint32_t k = 0; k < dl; ++k)
+                    dd[k] = static_cast<int32_t>(src_data[k]);
+            }
             // Validity is 1-bit-per-logical-row for every shape: copy n bits.
             OwnedBuffer<uint8_t> val_buf(nullptr);
             uint8_t* validity = nullptr;
@@ -9692,7 +9700,7 @@ NB_MODULE(draken_native, m) {
             return VectorOwner(v, std::move(data_buf), std::move(val_buf));
         },
         nb::arg("vec"),
-        "Reinterpret INT64 vector data as DATE32 (days-since-epoch, cast to int32). "
+        "Reinterpret INT32/INT64 vector data as DATE32 (days-since-epoch). "
         "Shape-preserving (dense/constant/dict). Returns new Vector.");
 
     // vector_reinterpret_as_decimal — reinterpret INT64 vector as DECIMAL with given precision/scale.

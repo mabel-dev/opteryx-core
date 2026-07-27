@@ -215,6 +215,12 @@ void deserialize_fixed_column(const uint8_t* data, int64_t length, DecodedFixedC
         case kTagUInt16Dict:
         case kTagUInt32Dict:
         case kTagUInt64Dict:
+        case kTagInt8:
+        case kTagInt16:
+        case kTagInt32Exact:
+        case kTagInt8Dict:
+        case kTagInt16Dict:
+        case kTagInt32Dict:
             out.status = kStatusNotHandled;
             return;
 

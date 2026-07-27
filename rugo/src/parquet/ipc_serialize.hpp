@@ -170,12 +170,14 @@ static void serialize_rle_int_as_int64(ByteSink& out,
     }
 }
 
-// E33: unsigned analogue of serialize_rle_int_as_int64. col.rle_int64_values
-// already holds the correct zero-extended magnitude (decode_column.cpp's
-// is_unsigned branch never sign-extends it), so this only narrows to elem_bytes
-// (1/2/4/8) instead of always expanding to a fixed 8-byte int64 slot.
-static void serialize_rle_int_as_uint(ByteSink& out, const DecodedColumn& col,
-                                      int elem_bytes, uint8_t tag) {
+// E33: exact-width analogue of serialize_rle_int_as_int64, for both signed and
+// unsigned narrow columns. col.rle_int64_values holds the correct value in either
+// domain (zero-extended for unsigned — decode_column.cpp's is_unsigned branch
+// never sign-extends it; sign-extended for signed), and its low elem_bytes are
+// that value at the declared width. So this only narrows to elem_bytes (1/2/4/8)
+// instead of always expanding to a fixed 8-byte int64 slot.
+static void serialize_rle_int_as_narrow(ByteSink& out, const DecodedColumn& col,
+                                        int elem_bytes, uint8_t tag) {
     write_u8(out, tag);
     write_u32(out, static_cast<uint32_t>(col.num_rows));
     write_null_bitmap(out, col);  // empty: rle path is non-nullable
@@ -377,21 +379,25 @@ static void serialize_int32(ByteSink& out, const DecodedColumn& col) {
     write_bytes(out, col.int32_values.data(), data_len);
 }
 
-// E33: unsigned dispatcher — mirrors serialize_int64/serialize_int32's RLE/dict/
-// plain branching, but always preserves the exact declared width (never widens,
-// unlike the int32->int64 convention those two use). Handles both physical
-// carriers: "int32" (UINT8/16/32 all arrive this way — Parquet has no int8/int16
-// physical storage) and "int64" (UINT64). The source values (int32_values /
-// dict_int32_values / rle_int64_values / int64_values / dict_int64_values)
-// already hold the correct zero-extended magnitude — decode_column.cpp's
-// is_unsigned branch never sign-extends them — so this only narrows to
-// elem_bytes, never re-derives a value.
-static void serialize_uint(ByteSink& out, const DecodedColumn& col,
-                           int elem_bytes, uint8_t plain_tag, uint8_t dict_tag) {
+// E33: exact-width integer dispatcher — mirrors serialize_int64/serialize_int32's
+// RLE/dict/plain branching, but always preserves the exact declared width (never
+// widens, unlike the int32->int64 convention those two use). Handles both
+// physical carriers: "int32" (UINT8/16/32 and INT8/16/32 all arrive this way —
+// Parquet has no int8/int16 physical storage) and "int64" (UINT64).
+//
+// Signedness-agnostic: keeping the low elem_bytes of the source value is correct
+// for both domains. Unsigned sources (int32_values / dict_int32_values /
+// rle_int64_values / int64_values / dict_int64_values) already hold the correct
+// zero-extended magnitude — decode_column.cpp's is_unsigned branch never
+// sign-extends them — and signed sources hold the sign-extended value, whose low
+// elem_bytes are exactly its two's-complement form at the declared width. Either
+// way this only narrows, never re-derives a value.
+static void serialize_narrow_int(ByteSink& out, const DecodedColumn& col,
+                                 int elem_bytes, uint8_t plain_tag, uint8_t dict_tag) {
     const bool src_is_32 = (col.type == "int32");
 
     if (!col.rle_int64_values.empty()) {
-        serialize_rle_int_as_uint(out, col, elem_bytes, plain_tag);
+        serialize_rle_int_as_narrow(out, col, elem_bytes, plain_tag);
         return;
     }
 
@@ -925,15 +931,33 @@ static void serialize_core(const DecodedColumn& col,
     } else if (col.is_unsigned && (t == "int64" || t == "int32")) {
         // E33: tags 13-16 plain (uint8/16/32/64), 17-20 dict.
         switch (col.int_bit_width) {
-            case 8:  serialize_uint(out, col, 1, 13, 17); break;
-            case 16: serialize_uint(out, col, 2, 14, 18); break;
-            case 32: serialize_uint(out, col, 4, 15, 19); break;
-            default: serialize_uint(out, col, 8, 16, 20); break;
+            case 8:  serialize_narrow_int(out, col, 1, 13, 17); break;
+            case 16: serialize_narrow_int(out, col, 2, 14, 18); break;
+            case 32: serialize_narrow_int(out, col, 4, 15, 19); break;
+            default: serialize_narrow_int(out, col, 8, 16, 20); break;
         }
     } else if (t == "int64") {
         serialize_int64(out, col);
+    } else if (t == "int32" && !col.is_decimal) {
+        // E33: signed narrow — tags 21-23 plain (int8/16/32), 24-26 dict. A bare
+        // physical int32 (no IntType annotation, width 0) IS a 32-bit signed
+        // column, so it serializes at its own width rather than widening to
+        // int64. This MUST stay in lockstep with direct_kind_for's int32 arm:
+        // whether a column takes the direct or the pool path depends on encoding,
+        // not type, so a disagreement here would make the same column arrive as
+        // INT32 or INT64 depending on how it happened to be stored.
+        //
+        // int32-backed DECIMAL is excluded: it is not an int32 column but a
+        // DECIMAL that happens to use int32 storage, and the consumer's
+        // schema-driven coercion reads it from an INT64 vector (the historic
+        // tpch Q01 decimal trap). It keeps the widening path below.
+        switch (col.int_bit_width) {
+            case 8:  serialize_narrow_int(out, col, 1, 21, 24); break;
+            case 16: serialize_narrow_int(out, col, 2, 22, 25); break;
+            default: serialize_narrow_int(out, col, 4, 23, 26); break;
+        }
     } else if (t == "int32") {
-        serialize_int32(out, col);
+        serialize_int32(out, col);   // int32-backed DECIMAL: widen, then coerce
     } else if (t == "float32") {
         serialize_float32(out, col);
     } else if (t == "float64") {

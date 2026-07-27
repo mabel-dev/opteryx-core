@@ -862,11 +862,11 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
 }
 
 static void
-CollectSchemaArtifacts(const SchemaElement &root,
+CollectSchemaArtifacts(const std::vector<SchemaElement> &top_level,
                        std::vector<SchemaField> &columns,
                        std::unordered_map<std::string, std::string> &map) {
-  for (const auto &child : root.children) {
-    EmitSchemaEntry(child, false, true, columns, map);
+  for (const auto &field : top_level) {
+    EmitSchemaEntry(field, false, true, columns, map);
   }
 }
 
@@ -882,7 +882,14 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
     switch (fh.id) {
     case 2: { // schema (list<SchemaElement>)
       ReadListHeader(in);
-      fs.schema = WalkSchema(in, 1);
+      // The first SchemaElement is always the file's message-level root — a
+      // Parquet-spec wrapper (pyarrow's "schema", arrow-rs's "arrow_schema",
+      // Hive's "hive_schema", ...) whose own name must never appear in a
+      // column's path, and nothing else about it is used. Parse it only to
+      // learn how many top-level columns follow, then store those columns
+      // themselves — not the wrapper — as fs.schema.
+      SchemaElement msg_root = ParseSchemaElement(in);
+      fs.schema = WalkSchema(in, msg_root.num_children);
       break;
     }
     case 3:
@@ -1037,11 +1044,7 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
   // over the schema — typically 105 nodes, not 23k row-group columns).
   std::unordered_map<std::string, std::string> logical_type_map;
   if (!fs.schema.empty()) {
-    for (const auto &root : fs.schema) {
-      if (root.children.empty()) continue;
-      CollectSchemaArtifacts(root, fs.schema_columns, logical_type_map);
-      break;
-    }
+    CollectSchemaArtifacts(fs.schema, fs.schema_columns, logical_type_map);
   }
 
   // Walk schema leaves once to collect per-leaf info in schema order.
@@ -1051,10 +1054,8 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
     leaf_infos.reserve(fs.schema_columns.size() > 0
                            ? fs.schema_columns.size()
                            : 64);
-    for (const auto &root : fs.schema) {
-      for (const auto &child : root.children) {
-        WalkLeaves(child, 0, 0, logical_type_map, leaf_infos);
-      }
+    for (const auto &field : fs.schema) {
+      WalkLeaves(field, 0, 0, logical_type_map, leaf_infos);
     }
     ApplyLeafInfosByIndex(fs, leaf_infos);
   }

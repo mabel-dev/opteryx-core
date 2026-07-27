@@ -742,13 +742,30 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
 
 cdef inline Vector _make_int_vector(parquet_reader.DecodedColumn& col,
                                     int32_t num_rows, bint from_int32):
-    """Build an int Vector from the flattened list, picking the UINT64 builder for
-    unsigned columns (so values > INT64_MAX survive) and the signed INT64 builder
-    otherwise. `_int64_list` has already reinterpreted unsigned bits to
-    non-negative Python ints, which the UINT64 builder requires."""
+    """Build an int Vector from the flattened list at the column's DECLARED width
+    and signedness, so a write/read round trip returns the type it started with.
+
+    Width comes from the IntType annotation (`int_bit_width`); an unannotated
+    column has no annotation to read, so its width is exactly what the physical
+    type says — int32 on the wire is a 32-bit column, int64 is a 64-bit one.
+    `_int64_list` has already reinterpreted unsigned bits to non-negative Python
+    ints, which the unsigned builders require."""
     cdef list vals = _int64_list(col, num_rows, from_int32)
+    cdef int32_t w = col.int_bit_width
     if col.is_unsigned:
+        if w == 8:
+            return Vector(_dn.vector_uint8_from_sequence(vals))
+        if w == 16:
+            return Vector(_dn.vector_uint16_from_sequence(vals))
+        if w == 32:
+            return Vector(_dn.vector_uint32_from_sequence(vals))
         return Vector(_dn.vector_uint64_from_sequence(vals))
+    if w == 8:
+        return Vector(_dn.vector_int8_from_sequence(vals))
+    if w == 16:
+        return Vector(_dn.vector_int16_from_sequence(vals))
+    if w == 32 or (w == 0 and from_int32):
+        return Vector(_dn.vector_int32_from_sequence(vals))
     return Vector(_dn.vector_from_sequence(vals))
 
 
@@ -910,9 +927,13 @@ cdef list _string_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
     # FLATTEN-TO-PYTHON BY DESIGN — standalone rugo reader endpoint; see
     # `_int64_list` and the module banner. Not the opteryx scan path.
     cdef list out = [None] * num_rows
-    cdef Py_ssize_t i, vi = 0
+    cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
     cdef bint has_v = col.valid_bits.size() > 0
     cdef uint8_t cw
+    cdef const uint8_t* arena
+    cdef uint32_t start
+    cdef int32_t ln
+    cdef bytes value
     if _decoded_has_dictionary(col):
         if not col.dict_codes_array.empty():
             cw = col.code_width if col.code_width in (1, 2, 4) else 1
@@ -926,6 +947,21 @@ cdef list _string_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
                     continue
                 out[i] = _dict_str_at(col, col.dict_indices[vi])
                 vi += 1
+        return out
+    if col.rle_run_lengths.size() > 0:
+        # Skip-dense RLE output (non-nullable dict byte_array column, mirrors
+        # `_int64_list`/`_float64_list`): each run's resolved string bytes live in
+        # rle_str_arena at [rle_str_offsets[r], +rle_str_lens[r]), repeated
+        # rle_run_lengths[r] times.
+        arena = col.rle_str_arena.data()
+        for r in range(col.rle_run_lengths.size()):
+            cnt = col.rle_run_lengths[r]
+            start = col.rle_str_offsets[r]
+            ln = col.rle_str_lens[r]
+            value = (<char*>(arena + start))[:ln]
+            for j in range(cnt):
+                out[off + j] = value
+            off += cnt
         return out
     for i in range(num_rows):
         if has_v and not _row_valid(col, i):

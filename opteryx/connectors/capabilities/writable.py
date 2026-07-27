@@ -18,35 +18,45 @@ class Writable:
     DROP / TRUNCATE.
     """
 
-    def create_relation(self, relation_name: str, schema: "RelationSchema") -> None:
+    def create_relation(
+        self, relation_name: str, schema: "RelationSchema", author: Optional[str] = None
+    ) -> None:
         """Create a new relation (table) with the given schema.
 
         Args:
             relation_name: Fully-qualified relation name (e.g., "schema.table")
             schema: RelationSchema defining the table structure
+            author: session user this creation is attributed to. A store with no
+                attribution concept ignores it; a store that requires one rejects
+                None rather than inventing an identity.
 
         Raises:
             ValueError: If relation already exists
         """
         raise NotImplementedError
 
-    def drop_relation(self, relation_name: str, if_exists: bool = False) -> None:
+    def drop_relation(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
         """Drop a relation.
 
         Args:
             relation_name: Fully-qualified relation name
             if_exists: If True, do not raise error if relation doesn't exist
+            author: session user the drop is attributed to. A catalog that
+                tombstones the dropped relation records this as the dropper.
 
         Raises:
             ValueError: If relation doesn't exist and if_exists is False
         """
         raise NotImplementedError
 
-    def truncate_relation(self, relation_name: str) -> None:
+    def truncate_relation(self, relation_name: str, author: Optional[str] = None) -> None:
         """Remove all rows from a relation.
 
         Args:
             relation_name: Fully-qualified relation name
+            author: session user this truncation is attributed to (see create_relation)
 
         Raises:
             ValueError: If relation doesn't exist

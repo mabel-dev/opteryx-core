@@ -88,6 +88,70 @@ JSONL_ARRAY_INNER_TYPE_ALIASES = {
 }
 
 
+# Parquet integer width/signedness → the exact ColumnType to declare.
+#
+# LogicalCategory stays a single INTEGER member (CLAUDE.md §14: the category is a
+# derived projection, not a place to encode width) — the width lives where it
+# belongs, in ColumnType.physical.
+#
+# Declaring the TRUE width matters because the scan produces vectors at that
+# width (E33 exact-width integers). If the schema said INT64 while the scan
+# handed back INT32, every consumer keyed on the declared type would be working
+# from a lie — most visibly `_coerce_literal_physical`, which re-materializes a
+# comparison literal at the column's physical type so draken_compare_dv's
+# identical-type guard can fire. Declaring INT64 there left narrow columns
+# unable to use the c-native compare at all.
+#
+# Keys are the rugo footer's logical-type strings (metadata.cpp emits lowercase
+# "int8".."uint64" from the modern IntType annotation) plus the underscored
+# legacy ConvertedType spellings.
+_INTEGER_LOGICAL_WIDTHS = {
+    "int8": "INT8",
+    "int16": "INT16",
+    "int32": "INT32",
+    "int64": "INT64",
+    "uint8": "UINT8",
+    "uint16": "UINT16",
+    "uint32": "UINT32",
+    "uint64": "UINT64",
+    "uint_8": "UINT8",
+    "uint_16": "UINT16",
+    "uint_32": "UINT32",
+    "uint_64": "UINT64",
+    "int_8": "INT8",
+    "int_16": "INT16",
+    "int_32": "INT32",
+    "int_64": "INT64",
+}
+
+# Fallback when a column carries no integer annotation: the physical type states
+# the width exactly. A bare parquet int32 IS a 32-bit signed column — that is what
+# PyArrow and parquet-mr emit for int32 — so it must not be widened here.
+_INTEGER_PHYSICAL_WIDTHS = {
+    "int8": "INT8",
+    "int16": "INT16",
+    "int32": "INT32",
+    "int64": "INT64",
+}
+
+
+def _integer_column_type(physical_type: Optional[str], logical_type: Optional[str]):
+    """The exact ColumnType for an integer column, honouring declared width and
+    signedness. Falls back to INT64 only when neither the annotation nor the
+    physical type identifies a width."""
+    from opteryx.types import logical_type as _lt
+
+    if logical_type:
+        name = _INTEGER_LOGICAL_WIDTHS.get(logical_type.lower())
+        if name is not None:
+            return getattr(_lt, name)
+    if physical_type:
+        name = _INTEGER_PHYSICAL_WIDTHS.get(physical_type.lower())
+        if name is not None:
+            return getattr(_lt, name)
+    return _lt.INT64
+
+
 def _normalize_sql_type_aliases(type_name: str) -> str:
     normalized = type_name.lower()
     for source, target in SQL_TYPE_ALIASES.items():
@@ -359,6 +423,11 @@ def rugo_to_relation_schema(
                 and _ct.element.category == LogicalCategory.TIMESTAMP
             ):
                 _ct = _lt.ARRAY(_lt.TIMESTAMP(_ts_unit))
+        elif sql_type == LogicalCategory.INTEGER:
+            # Declare the column's REAL width — _CATEGORY_TO_CANONICAL would hand
+            # back INT64 for every integer, contradicting the exact-width vector
+            # the scan produces. See _integer_column_type.
+            _ct = _integer_column_type(physical_type, logical_type)
         else:
             _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
         from opteryx.types.schema import mint_column_identity

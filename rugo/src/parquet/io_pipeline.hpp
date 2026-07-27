@@ -111,8 +111,19 @@ enum DirectKind {
     // Unsigned "compressed" (Dict-shaped) direct path, mirroring DK_INT64_DICT:
     // `data` is a draken_alloc'd dictionary of `data_length` unique values at the
     // exact declared element width (1/2/4/8 bytes); `codes` is the uint32_t[length]
-    // per-row selection. Consumer wraps via draken_vector_own_dict_u8/16/32/64.
-    DK_UINT8_DICT = 15, DK_UINT16_DICT = 16, DK_UINT32_DICT = 17, DK_UINT64_DICT = 18
+    // per-row selection. Consumer wraps via the generic type-parameterised
+    // draken_vector_own_dict with the matching DrakenType tag.
+    DK_UINT8_DICT = 15, DK_UINT16_DICT = 16, DK_UINT32_DICT = 17, DK_UINT64_DICT = 18,
+    // Signed narrow integer direct paths — the signed mirror of DK_UINT8/16/32.
+    // `data` is a positional array at the EXACT declared width (1/2/4 bytes,
+    // matching DRAKEN_INT8/16/32); these never widen. A parquet int8/int16 is
+    // physically int32 with an INTEGER(8|16, signed) annotation, and a BARE
+    // physical int32 IS a 32-bit signed column — so an un-annotated int32 lands
+    // on DK_INT32, not DK_INT64. Only physical int64 yields DK_INT64.
+    DK_INT8 = 19, DK_INT16 = 20, DK_INT32 = 21,
+    // Signed narrow "compressed" (Dict-shaped) direct path, mirroring
+    // DK_UINT*_DICT: dictionary at the exact declared width + uint32_t codes.
+    DK_INT8_DICT = 22, DK_INT16_DICT = 23, DK_INT32_DICT = 24
 };
 
 struct ColumnOut {
@@ -327,6 +338,15 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
                 default: return DK_UINT64_DICT;
             }
         }
+        // Signed: width comes from the IntType annotation; an un-annotated
+        // column (width 0) is exactly what its physical type says.
+        if (t == "int32") {
+            switch (d.int_bit_width) {
+                case 8:  return DK_INT8_DICT;
+                case 16: return DK_INT16_DICT;
+                default: return DK_INT32_DICT;
+            }
+        }
         return DK_INT64_DICT;
     }
     if (t == "float64" && d.float64_values.empty() && d.rle_float64_values.empty() &&
@@ -359,7 +379,14 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
                 default: return DK_UINT32;
             }
         }
-        return DK_INT64;
+        // Signed: int8/int16 carry an IntType annotation; a bare physical int32
+        // (width 0) is a 32-bit signed column, so it narrows to DK_INT32 rather
+        // than widening. int32_values already holds the exact bits either way.
+        switch (d.int_bit_width) {
+            case 8:  return DK_INT8;
+            case 16: return DK_INT16;
+            default: return DK_INT32;
+        }
     }
     if (t == "float32" && _fixed_eligible(d.float32_values.size(), n, nullable)) return DK_FLOAT32;
     if (t == "float64" && _fixed_eligible(d.float64_values.size(), n, nullable)) return DK_FLOAT64;
@@ -590,18 +617,21 @@ static inline bool build_direct_int64_dict(const DecodedColumn& d,
     return true;
 }
 
-// E33 — unsigned "compressed" (Dict-shaped) direct column: a draken_alloc'd
+// E33 — exact-width "compressed" (Dict-shaped) direct column: a draken_alloc'd
 // dictionary narrowed/reinterpreted to elem_bytes (1/2/4/8, matching the declared
-// DRAKEN_UINT8/16/32/64 width) + a uint32 per-row code selection. Mirrors
-// build_direct_int64_dict's code-source handling; unlike it, never widens — the
-// source dict payload (dict_int32_values / dict_int64_values) already holds the
-// correct unsigned magnitude bit-for-bit (E33's is_unsigned decode never sign-
-// extends it), so this only narrows/reinterprets. One function parameterized by
-// width rather than four near-duplicates, mirroring build_direct_int64_dict's
-// existing is32/dsz branch structure.
-static inline bool build_direct_uint_dict(const DecodedColumn& d, int elem_bytes,
-                                          void* (*alloc)(size_t), void (*freefn)(void*),
-                                          ColumnOut& out) {
+// DRAKEN_UINT8/16/32/64 or DRAKEN_INT8/16/32 width) + a uint32 per-row code
+// selection. Mirrors build_direct_int64_dict's code-source handling; unlike it,
+// never widens.
+//
+// Signedness-agnostic by construction: keeping the low elem_bytes of the source
+// dict payload yields the correct value at the declared width for both domains —
+// the unsigned magnitude (E33's is_unsigned decode never sign-extends) and the
+// two's-complement signed value alike. One function parameterized by width rather
+// than seven near-duplicates, mirroring build_direct_int64_dict's existing
+// is32/dsz branch structure.
+static inline bool build_direct_narrow_dict(const DecodedColumn& d, int elem_bytes,
+                                            void* (*alloc)(size_t), void (*freefn)(void*),
+                                            ColumnOut& out) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool is32 = !d.dict_int32_values.empty();
     const uint32_t dsz = is32
@@ -749,6 +779,22 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
             const uint64_t v = src_is_32
                 ? static_cast<uint64_t>(static_cast<uint32_t>(d.int32_values[i]))
                 : static_cast<uint64_t>(d.int64_values[i]);
+            std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+        }
+        csrc = narrowed.data();
+        elem = static_cast<uint32_t>(elem_bytes); compact_count = count;
+    } else if (dk == DK_INT8 || dk == DK_INT16 || dk == DK_INT32) {
+        // Signed mirror of the unsigned branch above: preserve the exact
+        // declared width instead of widening. The source is always physical
+        // int32 (parquet has no narrower integer storage) and int32_values holds
+        // the sign-extended value, so truncating to the low 1/2/4 bytes is
+        // value-preserving for anything that legitimately fits the declared
+        // width. Little-endian host assumed, as elsewhere in this decoder.
+        const int elem_bytes = (dk == DK_INT8) ? 1 : (dk == DK_INT16) ? 2 : 4;
+        const size_t count = d.int32_values.size();
+        narrowed.resize(count * static_cast<size_t>(elem_bytes));
+        for (size_t i = 0; i < count; ++i) {
+            const int32_t v = d.int32_values[i];
             std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
         }
         csrc = narrowed.data();
@@ -1572,12 +1618,12 @@ class ParquetIOPipeline {
                 const std::string& lt = col_stats.logical_type;
                 const bool safe_logical =
                     lt.empty() || lt == "int64" || lt == "int32" ||
-                    // A1: signed narrow ints (int8/int16) widen to DK_INT64 on decode
-                    // exactly like int32 — no consumer-side coercion — so they are
-                    // direct-eligible. Without this they fell to DK_POOL, which the
-                    // native scan Source cannot decode for a numeric column (only the
-                    // trampoline's pool deserializer could), so admitting them to the
-                    // native scan raised "unsupported column encoding".
+                    // A1: signed narrow ints (int8/int16) decode to their exact
+                    // declared width (DK_INT8/DK_INT16) — no consumer-side coercion —
+                    // so they are direct-eligible. Without this they fell to DK_POOL,
+                    // which the native scan Source cannot decode for a numeric column
+                    // (only the trampoline's pool deserializer could), so admitting
+                    // them to the native scan raised "unsupported column encoding".
                     lt == "int8" || lt == "int16" ||
                     lt == "float64" || lt == "float32" || lt == "boolean" ||
                     lt.rfind("date", 0) == 0 || lt.rfind("timestamp", 0) == 0 ||
@@ -1614,14 +1660,14 @@ class ParquetIOPipeline {
                         ok = build_direct_float_dict(decoded, false, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_FLOAT32_DICT)
                         ok = build_direct_float_dict(decoded, true, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
-                    else if (dk == DK_UINT8_DICT)
-                        ok = build_direct_uint_dict(decoded, 1, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
-                    else if (dk == DK_UINT16_DICT)
-                        ok = build_direct_uint_dict(decoded, 2, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
-                    else if (dk == DK_UINT32_DICT)
-                        ok = build_direct_uint_dict(decoded, 4, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_UINT8_DICT || dk == DK_INT8_DICT)
+                        ok = build_direct_narrow_dict(decoded, 1, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_UINT16_DICT || dk == DK_INT16_DICT)
+                        ok = build_direct_narrow_dict(decoded, 2, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_UINT32_DICT || dk == DK_INT32_DICT)
+                        ok = build_direct_narrow_dict(decoded, 4, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_UINT64_DICT)
-                        ok = build_direct_uint_dict(decoded, 8, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                        ok = build_direct_narrow_dict(decoded, 8, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else
                         ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     if (!ok) {

@@ -145,9 +145,13 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
     Supported column types: INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL,
     VARCHAR, NVARCHAR, VARBINARY, DATE32, TIMESTAMP64, TIME32/64, INTERVAL,
     DECIMAL, DECIMAL128, ARRAY, and all-null (NULL) columns. Any other physical
-    type raises ValueError (fail loud). Note: UINT types are stored as INT64
-    (parquet has no native unsigned type); UINT64 values exceeding INT64_MAX
-    will be truncated.
+    type raises ValueError (fail loud).
+
+    Integer widths are preserved. Parquet stores integers only as INT32 or
+    INT64, so narrower widths and unsignedness ride the smallest physical type
+    that holds them plus an INTEGER(bitWidth, isSigned) annotation:
+    int8/int16/uint8/uint16/uint32 on INT32, uint64 on INT64. INT32 and INT64
+    are written bare. ARRAY leaves still widen to INT64/UINT64.
     """
     return _encode(morsel, compression, False, bloom_filters, dictionary,
                    max_rows_per_row_group, max_page_bytes)[0]
@@ -342,74 +346,103 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             ci.i64 = i64_store.back().data()
 
         elif t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32:
-            # Narrow integers widen losslessly to INT64.
-            tmp64 = vector[int64_t]()
+            # Parquet's narrowest integer physical type is INT32, so int8/int16
+            # sign-extend into it and carry an INTEGER(8|16, isSigned=true)
+            # annotation to record the declared width. INT32 needs no annotation
+            # — the physical type already says exactly that.
+            tmp32 = vector[int32_t]()
             with nogil:
                 if dict_shape:
-                    tmp64.resize(dict_n)
+                    tmp32.resize(dict_n)
                     if t == DRAKEN_INT32:
                         for j in range(dict_n):
-                            tmp64[j] = (<const int32_t*>dv.data)[j]
+                            tmp32[j] = (<const int32_t*>dv.data)[j]
                     elif t == DRAKEN_INT16:
                         for j in range(dict_n):
-                            tmp64[j] = (<const int16_t*>dv.data)[j]
+                            tmp32[j] = (<const int16_t*>dv.data)[j]
                     else:
                         for j in range(dict_n):
-                            tmp64[j] = (<const int8_t*>dv.data)[j]
+                            tmp32[j] = (<const int8_t*>dv.data)[j]
                     did_preserve = True
                 else:
-                    tmp64.resize(nrows)
+                    tmp32.resize(nrows)
                     if t == DRAKEN_INT32:
                         for j in range(nrows):
-                            tmp64[j] = (<const int32_t*>dv.data)[sel[j]]
+                            tmp32[j] = (<const int32_t*>dv.data)[sel[j]]
                     elif t == DRAKEN_INT16:
                         for j in range(nrows):
-                            tmp64[j] = (<const int16_t*>dv.data)[sel[j]]
+                            tmp32[j] = (<const int16_t*>dv.data)[sel[j]]
                     else:
                         for j in range(nrows):
-                            tmp64[j] = (<const int8_t*>dv.data)[sel[j]]
+                            tmp32[j] = (<const int8_t*>dv.data)[sel[j]]
                     ci.dict_enabled = use_dict
-            i64_store.push_back(tmp64)
-            ci.type = PT_INT64
-            ci.i64 = i64_store.back().data()
+            i32_store.push_back(tmp32)
+            ci.type = PT_INT32
+            ci.i32 = i32_store.back().data()
+            if t == DRAKEN_INT8:
+                ci.int_bit_width = 8
+            elif t == DRAKEN_INT16:
+                ci.int_bit_width = 16
 
-        elif t == DRAKEN_UINT8 or t == DRAKEN_UINT16 or t == DRAKEN_UINT32 or t == DRAKEN_UINT64:
-            # Unsigned integers widen to physical INT64 and carry the unsigned
-            # annotation (INTEGER(64, isSigned=false)) so a UINT64 > INT64_MAX is
-            # reinterpreted (not truncated) by readers — the bit pattern of the
-            # int64 slot IS the uint64 magnitude. Mirrors the array-leaf path;
-            # `ci.is_unsigned`/`int_bit_width` are set after the value copy below.
+        elif t == DRAKEN_UINT8 or t == DRAKEN_UINT16 or t == DRAKEN_UINT32:
+            # uint8/16/32 all fit physical INT32 as a lossless bit reinterpret;
+            # the INTEGER(width, isSigned=false) annotation tells a reader to
+            # read the slot back as unsigned. A uint32 >= 2**31 therefore lands
+            # in a NEGATIVE int32 slot — correct on the wire, but it is why
+            # compute_stats and the sorted-dictionary comparator must order
+            # unsigned columns with an unsigned compare.
+            tmp32 = vector[int32_t]()
+            with nogil:
+                if dict_shape:
+                    tmp32.resize(dict_n)
+                    if t == DRAKEN_UINT32:
+                        for j in range(dict_n):
+                            tmp32[j] = <int32_t>(<const uint32_t*>dv.data)[j]
+                    elif t == DRAKEN_UINT16:
+                        for j in range(dict_n):
+                            tmp32[j] = <int32_t>(<const uint16_t*>dv.data)[j]
+                    else:
+                        for j in range(dict_n):
+                            tmp32[j] = <int32_t>(<const uint8_t*>dv.data)[j]
+                    did_preserve = True
+                else:
+                    tmp32.resize(nrows)
+                    if t == DRAKEN_UINT32:
+                        for j in range(nrows):
+                            tmp32[j] = <int32_t>(<const uint32_t*>dv.data)[sel[j]]
+                    elif t == DRAKEN_UINT16:
+                        for j in range(nrows):
+                            tmp32[j] = <int32_t>(<const uint16_t*>dv.data)[sel[j]]
+                    else:
+                        for j in range(nrows):
+                            tmp32[j] = <int32_t>(<const uint8_t*>dv.data)[sel[j]]
+                    ci.dict_enabled = use_dict
+            i32_store.push_back(tmp32)
+            ci.type = PT_INT32
+            ci.i32 = i32_store.back().data()
+            ci.is_unsigned = True
+            if t == DRAKEN_UINT8:
+                ci.int_bit_width = 8
+            elif t == DRAKEN_UINT16:
+                ci.int_bit_width = 16
+            else:
+                ci.int_bit_width = 32
+
+        elif t == DRAKEN_UINT64:
+            # uint64 needs the full INT64 slot; INTEGER(64, isSigned=false) makes
+            # a value > INT64_MAX reinterpreted rather than truncated — the bit
+            # pattern of the int64 slot IS the uint64 magnitude.
             tmp64 = vector[int64_t]()
             with nogil:
                 if dict_shape:
                     tmp64.resize(dict_n)
-                    if t == DRAKEN_UINT64:
-                        for j in range(dict_n):
-                            tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[j]
-                    elif t == DRAKEN_UINT32:
-                        for j in range(dict_n):
-                            tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[j]
-                    elif t == DRAKEN_UINT16:
-                        for j in range(dict_n):
-                            tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[j]
-                    else:
-                        for j in range(dict_n):
-                            tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[j]
+                    for j in range(dict_n):
+                        tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[j]
                     did_preserve = True
                 else:
                     tmp64.resize(nrows)
-                    if t == DRAKEN_UINT64:
-                        for j in range(nrows):
-                            tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[sel[j]]
-                    elif t == DRAKEN_UINT32:
-                        for j in range(nrows):
-                            tmp64[j] = <int64_t>(<const uint32_t*>dv.data)[sel[j]]
-                    elif t == DRAKEN_UINT16:
-                        for j in range(nrows):
-                            tmp64[j] = <int64_t>(<const uint16_t*>dv.data)[sel[j]]
-                    else:
-                        for j in range(nrows):
-                            tmp64[j] = <int64_t>(<const uint8_t*>dv.data)[sel[j]]
+                    for j in range(nrows):
+                        tmp64[j] = <int64_t>(<const uint64_t*>dv.data)[sel[j]]
                     ci.dict_enabled = use_dict
             i64_store.push_back(tmp64)
             ci.type = PT_INT64

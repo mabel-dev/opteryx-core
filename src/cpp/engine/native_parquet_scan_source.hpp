@@ -258,14 +258,17 @@ struct NativeParquetScanSource : Source {
             case rugo::DK_INT64: case rugo::DK_FLOAT32: case rugo::DK_FLOAT64:
             case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
             case rugo::DK_DECIMAL128: case rugo::DK_BOOL:
-            // A1 (E33): unsigned integer direct kinds — exact-width dense
-            // (DK_UINT8/16/32/64) and dict-shaped (DK_UINT*_DICT). Signed narrow
-            // ints already arrive as DK_INT64 (widened by decode's direct_kind_for),
-            // so only the unsigned family needs new tags here.
+            // A1 (E33): exact-width integer direct kinds — dense
+            // (DK_UINT8/16/32/64, DK_INT8/16/32) and dict-shaped (DK_*_DICT).
+            // Signed narrow ints no longer widen to DK_INT64, so the signed
+            // family needs the same tags as the unsigned one.
             case rugo::DK_UINT8:  case rugo::DK_UINT16:
             case rugo::DK_UINT32: case rugo::DK_UINT64:
             case rugo::DK_UINT8_DICT:  case rugo::DK_UINT16_DICT:
             case rugo::DK_UINT32_DICT: case rugo::DK_UINT64_DICT:
+            case rugo::DK_INT8:  case rugo::DK_INT16: case rugo::DK_INT32:
+            case rugo::DK_INT8_DICT:  case rugo::DK_INT16_DICT:
+            case rugo::DK_INT32_DICT:
                 return true;
             default:
                 return false;
@@ -278,12 +281,16 @@ struct NativeParquetScanSource : Source {
             case rugo::DK_FLOAT32:    case rugo::DK_FLOAT32_DICT: return DRAKEN_FLOAT32;
             case rugo::DK_DECIMAL128:                             return DRAKEN_DECIMAL128;
             case rugo::DK_BOOL:                                   return DRAKEN_BOOL;
-            // A1 (E33): preserve the exact declared unsigned width (dense + dict share
-            // the tag), byte-identical to the trampoline's _wrap_direct / _wrap_num_dict_direct.
+            // A1 (E33): preserve the exact declared width and signedness (dense + dict
+            // share the tag), byte-identical to the trampoline's _wrap_direct /
+            // _wrap_num_dict_direct.
             case rugo::DK_UINT8:      case rugo::DK_UINT8_DICT:   return DRAKEN_UINT8;
             case rugo::DK_UINT16:     case rugo::DK_UINT16_DICT:  return DRAKEN_UINT16;
             case rugo::DK_UINT32:     case rugo::DK_UINT32_DICT:  return DRAKEN_UINT32;
             case rugo::DK_UINT64:     case rugo::DK_UINT64_DICT:  return DRAKEN_UINT64;
+            case rugo::DK_INT8:       case rugo::DK_INT8_DICT:    return DRAKEN_INT8;
+            case rugo::DK_INT16:      case rugo::DK_INT16_DICT:   return DRAKEN_INT16;
+            case rugo::DK_INT32:      case rugo::DK_INT32_DICT:   return DRAKEN_INT32;
             default:                                              return DRAKEN_FLOAT64;
         }
     }
@@ -295,25 +302,33 @@ struct NativeParquetScanSource : Source {
             case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
             case rugo::DK_UINT8_DICT:  case rugo::DK_UINT16_DICT:
             case rugo::DK_UINT32_DICT: case rugo::DK_UINT64_DICT:
+            case rugo::DK_INT8_DICT:   case rugo::DK_INT16_DICT:
+            case rugo::DK_INT32_DICT:
                 return true;
             default:
                 return false;
         }
     }
 
-    // WP-11: build a projected DATE / TIMESTAMP column from an int64 (widened
-    // int32 for DATE) direct/dict column. Mirrors the trampoline scan's
-    // reinterpret_as_date32 / retag_int64_as_timestamp64 exactly:
-    //   - DATE32 narrows the int64 payload to int32 (per data_length, so
-    //     dict-shaped columns narrow the dictionary values and keep their codes)
-    //     and carries no logical type,
+    // WP-11: build a projected DATE / TIMESTAMP column from a direct/dict column.
+    // Mirrors the trampoline scan's reinterpret_as_date32 /
+    // retag_int64_as_timestamp64 exactly:
+    //   - DATE32 emits an int32 payload (per data_length, so dict-shaped columns
+    //     convert the dictionary values and keep their codes) and carries no
+    //     logical type,
     //   - TIMESTAMP64 keeps the int64 payload, only changes the tag, and attaches
     //     an interned LogicalType carrying the unit (mandatory: a
     //     DRAKEN_TIMESTAMP64 with a nullptr descriptor is a hard error in draken).
+    //
+    // The DATE carrier width is read from `dk`, never assumed: a DATE column is
+    // physical int32 and now decodes at that width (DK_INT32), though it can also
+    // arrive already widened (DK_INT64). Treating a 4-byte payload as int64 would
+    // read past the end of the buffer, so this must follow `dk`.
     bool build_temporal_column(rugo::MorselRef& result, size_t i, int dk, int packed,
                                CxxColumn& out) {
         const int kind = lc_kind(packed);
-        const bool is_dict = (dk == rugo::DK_INT64_DICT);
+        const bool is_dict = (dk == rugo::DK_INT64_DICT || dk == rugo::DK_INT32_DICT);
+        const bool src_is_32 = (dk == rugo::DK_INT32 || dk == rugo::DK_INT32_DICT);
         const uint32_t length = result.columns[i].length;
         const uint32_t data_length = is_dict ? result.columns[i].data_length : length;
         uint8_t* validity = nullptr;
@@ -329,7 +344,7 @@ struct NativeParquetScanSource : Source {
 
         void* payload = data;
         OwnedBuffer<void> data_buf;
-        if (is_date) {
+        if (is_date && !src_is_32) {
             // int64 → int32 over the physical values (data_length), preserving any
             // dict codes: byte-identical to draken's vector_reinterpret_as_date32.
             int32_t* nd = static_cast<int32_t*>(
@@ -341,6 +356,7 @@ struct NativeParquetScanSource : Source {
             payload = nd;
             data_buf = OwnedBuffer<void>(nd);
         } else {
+            // Already int32 (DATE at its physical width): retag only, no conversion.
             data_buf = OwnedBuffer<void>(data);
         }
         OwnedBuffer<uint8_t> val_buf(validity);
@@ -467,7 +483,10 @@ struct NativeParquetScanSource : Source {
         // DATE / TIMESTAMP / TIME is retagged natively (narrow + unit descriptor)
         // rather than emitted as plain INT64.
         const int packed = coerce_for(i);
-        if ((dk == rugo::DK_INT64 || dk == rugo::DK_INT64_DICT) && lc_kind(packed) != LC_NONE)
+        // DATE decodes at its physical int32 width (E33 exact-width integers) while
+        // TIMESTAMP stays int64, so both carriers reach the temporal builder.
+        if ((dk == rugo::DK_INT64 || dk == rugo::DK_INT64_DICT ||
+             dk == rugo::DK_INT32 || dk == rugo::DK_INT32_DICT) && lc_kind(packed) != LC_NONE)
             return build_temporal_column(result, i, dk, packed, out);
         if (!direct_kind_supported(dk)) return false;
         DrakenType dtype = draken_type_for(dk);

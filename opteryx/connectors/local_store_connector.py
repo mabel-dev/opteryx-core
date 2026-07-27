@@ -170,12 +170,18 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         entries, _native = read_manifest_file_entries(manifest_bytes)
         return entries
 
-    def create_relation(self, relation_name: str, schema: RelationSchema) -> None:
+    def create_relation(
+        self, relation_name: str, schema: RelationSchema, author: Optional[str] = None
+    ) -> None:
         """Create a new relation.
+
+        `author` is accepted for the Writable contract but not recorded - dataset.json
+        carries no attribution field, unlike view.json's `owner`.
 
         Args:
             relation_name: Fully-qualified relation name
             schema: RelationSchema for the table
+            author: session user, unused by this store
 
         Raises:
             ValueError: If relation already exists or name is invalid
@@ -204,12 +210,15 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             json.dump(descriptor.to_dict(), f)
         os.replace(tmp_path, dataset_path)
 
-    def drop_relation(self, relation_name: str, if_exists: bool = False) -> None:
+    def drop_relation(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
         """Drop a relation.
 
         Args:
             relation_name: Fully-qualified relation name
             if_exists: If True, don't raise error if relation doesn't exist
+            author: session user, unused by this store (see create_relation)
 
         Raises:
             ValueError: If relation doesn't exist and if_exists is False
@@ -224,11 +233,12 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         shutil.rmtree(relation_dir)
 
-    def truncate_relation(self, relation_name: str) -> None:
+    def truncate_relation(self, relation_name: str, author: Optional[str] = None) -> None:
         """Truncate a relation (remove all rows).
 
         Args:
             relation_name: Fully-qualified relation name
+            author: session user, unused by this store (see create_relation)
 
         Raises:
             ValueError: If relation doesn't exist
@@ -502,11 +512,12 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             json.dump(definition, f)
         os.replace(tmp_path, view_path)
 
-    def drop_view(self, view_name: str) -> None:
+    def drop_view(self, view_name: str, author: Optional[str] = None) -> None:
         """Drop the specified view.
 
         Args:
             view_name: Fully-qualified view name
+            author: session user, unused by this store (see create_relation)
 
         Raises:
             ValueError: If the view doesn't exist

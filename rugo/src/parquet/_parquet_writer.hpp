@@ -96,6 +96,10 @@ enum {
   CONV_UINT_16 = 12,
   CONV_UINT_32 = 13,
   CONV_UINT_64 = 14,
+  CONV_INT_8 = 15,
+  CONV_INT_16 = 16,
+  CONV_INT_32 = 17,
+  CONV_INT_64 = 18,
   CONV_INTERVAL = 21,
 };
 
@@ -170,15 +174,28 @@ struct ColumnInput {
   uint32_t dict_count = 0;         // number of dictionary entries
   bool dict_enabled = false;       // attempt AUTO-BUILD for plain buffers
 
-  // ---- unsigned integer logical annotation ----
-  // Parquet has no unsigned physical type: an unsigned column is stored as the
-  // signed physical type (INT32/INT64) plus an INTEGER(bitWidth, isSigned=false)
-  // LogicalType annotation. The stored bits are identical to the signed value
-  // (a lossless reinterpret), so nothing changes in the value encoders — only
-  // the schema gains the annotation, and a conformant reader (PyArrow/DuckDB/
-  // Polars/rugo) reads the bits back as unsigned. `int_bit_width` is 8/16/32/64;
-  // for a scalar column it annotates the column, for an ARRAY it annotates the
-  // leaf `element`. 0 => signed (no annotation).
+  // ---- integer width/signedness logical annotation ----
+  // Parquet's only integer physical types are INT32 and INT64. Every narrower
+  // width — and unsignedness at any width — is expressed as an INTEGER(bitWidth,
+  // isSigned) LogicalType annotation over the next physical type up that holds
+  // it: int8/int16/uint8/uint16/uint32 ride on INT32, uint64 on INT64. The
+  // stored bits are the plain signed reinterpret (lossless), so nothing changes
+  // in the value encoders — only the schema gains the annotation, and a
+  // conformant reader (PyArrow/DuckDB/Polars/rugo) recovers the declared type.
+  //
+  // `int_bit_width` is 8/16/32/64 and, with `is_unsigned`, selects the
+  // annotation; 0 means emit none. For a scalar column it annotates the column,
+  // for an ARRAY it annotates the leaf `element`.
+  //
+  // INT32 and INT64 are deliberately left un-annotated (int_bit_width == 0):
+  // the physical type alone already says exactly that, which is what PyArrow
+  // and parquet-mr emit. Readers must therefore treat a bare physical INT32 as
+  // a 32-bit signed column, not widen it.
+  //
+  // NOTE: when `is_unsigned`, values at or above the signed midpoint occupy
+  // NEGATIVE physical slots. Anything that ORDERS those slots (column
+  // statistics, sorted dictionaries) must compare them as unsigned or it will
+  // record a wrong min/max — see compute_stats and build_dict_column.
   bool is_unsigned = false;
   int int_bit_width = 0;
 
@@ -410,6 +427,12 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
   const uint32_t *codes = col.codes;
 
   switch (col.type) {
+  // Integer min/max are compared in the column's DECLARED domain, not the
+  // physical slot's. An unsigned column at or above the signed midpoint sits in
+  // a negative slot, so a signed compare would report a wrong min/max and a
+  // reader doing sound unsigned pruning could skip a row group that holds
+  // matching rows. Both branches emit the same PLAIN bytes either way — only
+  // WHICH value wins changes.
   case PT_INT32: {
     bool any = false;
     int32_t lo = 0, hi = 0;
@@ -418,7 +441,13 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
         continue;
       int32_t v = col.i32[codes ? codes[i] : i];
       if (!any) { lo = hi = v; any = true; }
-      else { if (v < lo) lo = v; if (v > hi) hi = v; }
+      else if (col.is_unsigned) {
+        if ((uint32_t)v < (uint32_t)lo) lo = v;
+        if ((uint32_t)v > (uint32_t)hi) hi = v;
+      } else {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
     }
     if (any) {
       st.has_minmax = true;
@@ -437,6 +466,9 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
       if (!any) {
         lo = hi = v;
         any = true;
+      } else if (col.is_unsigned) {
+        if ((uint64_t)v < (uint64_t)lo) lo = v;
+        if ((uint64_t)v > (uint64_t)hi) hi = v;
       } else {
         if (v < lo) lo = v;
         if (v > hi) hi = v;
@@ -1217,12 +1249,20 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
     std::vector<uint32_t> perm(D); // perm[new_code] = old_code
     for (uint32_t k = 0; k < D; k++)
       perm[k] = k;
+    // Order in the DECLARED domain: an unsigned value at or above the signed
+    // midpoint occupies a negative slot, so a signed compare would emit a
+    // dictionary that is not actually ordered while still advertising
+    // is_sorted=true — breaking the code-interval search that flag promises.
     if (col.type == PT_INT64)
-      std::sort(perm.begin(), perm.end(),
-                [&](uint32_t a, uint32_t b) { return col.i64[a] < col.i64[b]; });
+      std::sort(perm.begin(), perm.end(), [&](uint32_t a, uint32_t b) {
+        return col.is_unsigned ? (uint64_t)col.i64[a] < (uint64_t)col.i64[b]
+                               : col.i64[a] < col.i64[b];
+      });
     else if (col.type == PT_INT32)
-      std::sort(perm.begin(), perm.end(),
-                [&](uint32_t a, uint32_t b) { return col.i32[a] < col.i32[b]; });
+      std::sort(perm.begin(), perm.end(), [&](uint32_t a, uint32_t b) {
+        return col.is_unsigned ? (uint32_t)col.i32[a] < (uint32_t)col.i32[b]
+                               : col.i32[a] < col.i32[b];
+      });
     else // PT_BYTE_ARRAY
       std::sort(perm.begin(), perm.end(), [&](uint32_t a, uint32_t b) {
         return str_lt(col.strs[a], col.strs[b]);
@@ -1318,30 +1358,37 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
 
 // ---- schema serialization ----
 
-// Emit an INTEGER(bitWidth, isSigned=false) LogicalType annotation as the
-// current schema element's field 10 (logicalType). Matches PyArrow/parquet-mr
-// output for unsigned integer columns: the physical type stays signed INT32/
-// INT64 and a conformant reader reads the bits back as unsigned. Field 10 is
-// the last field in a SchemaElement, preserving ascending field-id order.
-inline void emit_uint_logical(TCompactWriter &w, int bit_width) {
+// Emit an INTEGER(bitWidth, isSigned) LogicalType annotation as the current
+// schema element's field 10 (logicalType). Matches PyArrow/parquet-mr output
+// for narrow and unsigned integer columns: the physical type stays INT32/INT64
+// and a conformant reader recovers the declared width and signedness. Field 10
+// is the last field in a SchemaElement, preserving ascending field-id order.
+inline void emit_int_logical(TCompactWriter &w, int bit_width, bool is_signed) {
   // Emits the legacy ConvertedType (field 6) AND the modern logicalType union
   // (field 10); the caller owns the enclosing SchemaElement struct's
   // structBegin/structEnd. Both are written because some readers (DuckDB) key
-  // unsigned detection on the legacy ConvertedType, matching parquet-mr/PyArrow
-  // output. Field ids stay ascending (6 before 10); caller has already written
-  // fields <= 4.
-  int conv = bit_width == 8 ? CONV_UINT_8
-           : bit_width == 16 ? CONV_UINT_16
-           : bit_width == 32 ? CONV_UINT_32
-           : CONV_UINT_64;
-  w.writeI32Field(6, conv);            // ConvertedType UINT_N
+  // width/signedness detection on the legacy ConvertedType, matching
+  // parquet-mr/PyArrow output. Field ids stay ascending (6 before 10); caller
+  // has already written fields <= 4.
+  int conv;
+  if (is_signed)
+    conv = bit_width == 8 ? CONV_INT_8
+         : bit_width == 16 ? CONV_INT_16
+         : bit_width == 32 ? CONV_INT_32
+         : CONV_INT_64;
+  else
+    conv = bit_width == 8 ? CONV_UINT_8
+         : bit_width == 16 ? CONV_UINT_16
+         : bit_width == 32 ? CONV_UINT_32
+         : CONV_UINT_64;
+  w.writeI32Field(6, conv);            // ConvertedType INT_N / UINT_N
   w.writeFieldHeader(CT_STRUCT, 10);   // logicalType
   w.structBegin();                     //   LogicalType union
   w.writeFieldHeader(CT_STRUCT, 10);   //   INTEGER member (union field id 10)
   w.structBegin();                     //     IntType { 1: i8 bitWidth; 2: bool isSigned }
   w.writeFieldHeader(CT_BYTE, 1);      //       bitWidth (i8)
   w.writeByte((uint8_t)bit_width);
-  w.writeBoolField(2, false);          //       isSigned = false
+  w.writeBoolField(2, is_signed);      //       isSigned
   w.structEnd();                       //     IntType
   w.structEnd();                       //   LogicalType union
 }
@@ -1397,8 +1444,8 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.writeStringField(4, "element");
       if (c.elem_type == PT_BYTE_ARRAY && c.elem_is_utf8)
         w.writeI32Field(6, CONV_UTF8);
-      if (c.is_unsigned && c.int_bit_width > 0)   // unsigned leaf annotation
-        emit_uint_logical(w, c.int_bit_width);
+      if (c.int_bit_width > 0)                    // narrow/unsigned leaf annotation
+        emit_int_logical(w, c.int_bit_width, !c.is_unsigned);
       w.structEnd();
       continue;
     }
@@ -1473,11 +1520,13 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.structEnd();
     } else if (c.type == PT_BYTE_ARRAY && c.is_utf8) {
       w.writeI32Field(6, CONV_UTF8);               // converted_type
-    } else if (c.is_unsigned && c.int_bit_width > 0) {
-      // Plain unsigned integer column: physical INT32/INT64 + INTEGER(width,
-      // isSigned=false) logicalType. Bits are the signed reinterpret; a
-      // conformant reader recovers the unsigned value.
-      emit_uint_logical(w, c.int_bit_width);
+    } else if (c.int_bit_width > 0) {
+      // Narrow and/or unsigned integer column: physical INT32/INT64 +
+      // INTEGER(width, isSigned) logicalType. Bits are the signed reinterpret;
+      // a conformant reader recovers the declared width and signedness. INT32
+      // and INT64 carry no annotation (int_bit_width == 0) — the physical type
+      // already states them exactly.
+      emit_int_logical(w, c.int_bit_width, !c.is_unsigned);
     }
     w.structEnd();
   }

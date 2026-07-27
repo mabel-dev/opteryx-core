@@ -67,6 +67,17 @@ class ViewManagementNode(BasePlanNode):
             return f"comment on {self.object_name}"
         return f"{self.action} {self.view_name}"
 
+    @property
+    def _author(self):
+        """The session user this DDL is attributed to, or None when unauthenticated.
+
+        None is passed through rather than substituted, so a store that requires
+        attribution rejects the write instead of recording an invented identity.
+        """
+        from opteryx.variables import resolve
+
+        return resolve("external_user", self.properties.variables, None) or None
+
     def __call__(self, morsel=None, **kwargs) -> NonTabularResult:
         # Perform the action and return a NonTabularResult object
 
@@ -86,9 +97,11 @@ class ViewManagementNode(BasePlanNode):
 
                 self.connector = connector_factory(self.view_name, telemetry=self.telemetry)
 
+            # The session user, not a fixed literal - attributing every view to
+            # "opteryx" made the stored owner useless for telling authors apart.
             update_if_exists = self.or_replace or self.action == "alter_view"
             self.connector.create_view(
-                self.view_name, view_sql, update_if_exists=update_if_exists, owner="opteryx"
+                self.view_name, view_sql, update_if_exists=update_if_exists, owner=self._author
             )
 
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -113,7 +126,7 @@ class ViewManagementNode(BasePlanNode):
                         continue
                     raise DatasetNotFoundError(connector=connector, dataset=vn)
 
-                connector.drop_view(vn)
+                connector.drop_view(vn, author=self._author)
                 dropped += 1
 
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)

@@ -36,6 +36,7 @@ def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
 
     node.connectors = {}
     for relation_name in node.relation_names:
@@ -44,6 +45,11 @@ def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node
             raise ReadOnlyConnectorError(
                 f"connector for {relation_name} does not support DROP TABLE"
             )
+
+        # Ensure this user can drop the table - DROP is owner-only, a writer cannot
+        if not can_perform_action(context.execution_context, relation_name, action="DROP"):
+            raise PermissionError(f"User does not have permission to drop table {relation_name}")
+
         node.connectors[relation_name] = connector
 
     node.columns = []

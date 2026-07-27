@@ -38,8 +38,12 @@ class Eidetic:
         # the view to the connector's metadata.
         raise NotImplementedError("create_view method must be implemented by subclasses.")
 
-    def drop_view(self, view_name):
-        """Drop the specified view."""
+    def drop_view(self, view_name, author: Optional[str] = None):
+        """Drop the specified view.
+
+        `author` is the session user the drop is attributed to; a catalog that
+        records or announces who dropped a view needs it.
+        """
         # Placeholder implementation; actual implementation would remove
         # the view from the connector's metadata.
         raise NotImplementedError("drop_view method must be implemented by subclasses.")

@@ -503,14 +503,24 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     result.max_rep_level = target_col->max_repetition_level;
     result.max_def_level = target_col->max_definition_level;
 
-    // E33: detect an unsigned IntType logical-type annotation ("uint8"/"uint16"/
-    // "uint32"/"uint64", built in metadata.cpp from isSigned=false). Declared width
-    // can be narrower than the physical wire width (Parquet has no int8/int16
-    // physical storage — UINT8/UINT16 still arrive as physical "int32").
+    // E33: detect an IntType logical-type annotation ("int8"/"int16"/"int32"/
+    // "int64" and the "uint*" forms, built in metadata.cpp from bitWidth +
+    // isSigned). Declared width can be narrower than the physical wire width
+    // (Parquet has no int8/int16 physical storage — INT8/UINT8/INT16/UINT16
+    // all arrive as physical "int32").
     // For a LIST column the leaf's logical type is carried on the container as
-    // "array<uint64>" (or "array<array<uint64>>" when nested), so match "uint"
-    // as the innermost element type rather than only as a leading prefix — the
-    // leaf element's signedness governs how its values decode.
+    // "array<uint64>" (or "array<array<uint64>>" when nested), so match the
+    // innermost element type rather than only a leading prefix — the leaf
+    // element's width and signedness govern how its values decode.
+    //
+    // "uint" must be tested FIRST and the signed search must reject a match
+    // preceded by 'u': "uint8" contains "int8" at offset 1, so a bare "int"
+    // search would silently mis-tag every unsigned column as signed.
+    //
+    // A physical int32 carrying NO annotation is a 32-bit signed column — the
+    // physical type already states that exactly, which is what PyArrow and
+    // parquet-mr emit for int32. int_bit_width stays 0 there and the consumer
+    // (direct_kind_for) treats absent-width as 32 for physical int32.
     {
       const std::string &lt = target_col->logical_type;
       size_t pos = lt.rfind("uint");
@@ -518,6 +528,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           lt[pos + 4] >= '0' && lt[pos + 4] <= '9') {
         result.is_unsigned = true;
         result.int_bit_width = std::atoi(lt.c_str() + pos + 4);
+      } else {
+        pos = lt.rfind("int");
+        if (pos != std::string::npos && pos + 3 < lt.size() &&
+            lt[pos + 3] >= '0' && lt[pos + 3] <= '9' &&
+            !(pos > 0 && lt[pos - 1] == 'u')) {
+          result.is_unsigned = false;
+          result.int_bit_width = std::atoi(lt.c_str() + pos + 3);
+        }
       }
     }
 
