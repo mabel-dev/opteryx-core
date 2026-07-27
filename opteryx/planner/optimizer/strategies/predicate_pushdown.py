@@ -63,7 +63,7 @@ def _emitted_identities(plan, nid, memo):
         sch = node.schema
         ids = frozenset(c.identity for c in sch.columns) if sch is not None else frozenset()
     elif nt == LogicalPlanStepType.Project:
-        cols = list(node.columns or []) + list(getattr(node, "order_by_columns", None) or [])
+        cols = list(node.columns or []) + list(getattr(node, "passthrough_columns", None) or [])
         ids = frozenset(c.schema_column.identity for c in cols if c.schema_column is not None)
     elif nt in (LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup):
         cols = list(node.aggregates or []) + list(node.groups or [])

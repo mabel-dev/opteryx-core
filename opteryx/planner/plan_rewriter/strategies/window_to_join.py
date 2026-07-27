@@ -99,7 +99,7 @@ def _rewrite_one_window(plan: LogicalPlan, win_nid: str) -> LogicalPlan:
     # never appear in the subquery's output schema.
     project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
     project_step.columns = list(inner_partition_by) + list(agg_nodes)
-    project_step.order_by_columns = []
+    project_step.passthrough_columns = []
     project_step.except_columns = None
     project_nid = random_string()
     inner_plan.add_node(project_nid, project_step)
@@ -156,7 +156,7 @@ def _rewrite_one_window(plan: LogicalPlan, win_nid: str) -> LogicalPlan:
     # plus the window aggregate result columns from the subquery.  The subquery's copy of
     # the partition column is never projected, so the parent sees each name exactly once.
     filter_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-    filter_step.order_by_columns = []
+    filter_step.passthrough_columns = []
     filter_step.except_columns = None
 
     outer_wildcard = Node(node_type=NodeType.WILDCARD)

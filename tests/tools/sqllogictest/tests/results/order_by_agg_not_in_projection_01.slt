@@ -1,0 +1,71 @@
+# ORDER BY over an aggregate absent from the SELECT list.
+#
+# `SELECT k FROM t GROUP BY k ORDER BY COUNT(*) DESC` — sorting by a metric you do
+# not display — is standard SQL and the direct sibling of the HAVING case in
+# having_not_in_projection_01.slt. Opteryx collected aggregates from the SELECT
+# list only, so the ORDER BY aggregate was never computed; the pass-through hoist
+# then carried a value nothing produced and the binder failed on the pruned
+# operand column (`ColumnNotFoundError: Unknown column 'id'`).
+#
+# These assert ORDER, so `rowsort` is deliberately NOT used — a fix that computed
+# the right aggregate but sorted on the wrong column would pass a sorted or
+# shape-only check. Expected output is confirmed against DuckDB reading
+# testdata/satellites/satellites.parquet.
+
+# aggregate in ORDER BY, not in SELECT
+query I
+SELECT planetId FROM testdata.satellites GROUP BY planetId ORDER BY MIN(id) DESC
+----
+9
+8
+7
+6
+5
+4
+3
+
+# ascending, different aggregate
+query I
+SELECT planetId FROM testdata.satellites GROUP BY planetId ORDER BY MAX(id) ASC
+----
+3
+4
+5
+6
+7
+8
+9
+
+# COUNT(*) (no operand column) with a tie-break on the group key
+query I
+SELECT planetId FROM testdata.satellites GROUP BY planetId ORDER BY COUNT(*) DESC, planetId ASC
+----
+5
+6
+7
+8
+9
+4
+3
+
+# HAVING and ORDER BY hoisting two DIFFERENT aggregates, neither projected
+query I
+SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100 ORDER BY MIN(id) DESC
+----
+9
+8
+7
+6
+
+# projected aggregate alongside a hoisted ORDER BY aggregate — output must carry
+# exactly the two SELECTed columns, ordered by the unselected MIN(id)
+query II
+SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId ORDER BY MIN(id) DESC
+----
+9 5
+8 14
+7 27
+6 61
+5 67
+4 2
+3 1

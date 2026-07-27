@@ -74,7 +74,7 @@ def _classify_projection(join_node: LogicalPlanNode, project_node: LogicalPlanNo
     columns = project_node.columns
     if not columns:
         return None
-    if project_node.except_columns or project_node.order_by_columns:
+    if project_node.except_columns or project_node.passthrough_columns:
         return None
 
     left_relations = set(join_node.left_relation_names or [])
@@ -209,7 +209,7 @@ class FullOuterToUnionStrategy(PlanRewriteStrategy):
 
             synthetic_project = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
             synthetic_project.columns = leg2_columns
-            synthetic_project.order_by_columns = []
+            synthetic_project.passthrough_columns = []
             synthetic_project.except_columns = None
 
             template = LogicalPlan()

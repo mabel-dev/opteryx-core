@@ -66,13 +66,13 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                         }
                     else:
                         provider_columns = {c.schema_column.identity for c in provider_node.columns}
-                    # A Project at runtime emits `columns ∪ order_by_columns` (see
+                    # A Project at runtime emits `columns ∪ passthrough_columns` (see
                     # projection.pyx). Both must be considered when deciding whether the
                     # upstream operator already produces the same set of columns.
                     my_columns = {
                         c.schema_column.identity
                         for c in list(node.columns)
-                        + list(getattr(node, "order_by_columns", None) or [])
+                        + list(getattr(node, "passthrough_columns", None) or [])
                     }
                     if provider_columns == my_columns:
                         # we need to ensure we keep some of the context if not the step

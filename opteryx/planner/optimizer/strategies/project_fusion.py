@@ -127,7 +127,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
     def _try_fuse(lower: LogicalPlanNode, upper: LogicalPlanNode):
         """Build a fused Project node, or return None if the pair can't be fused
         safely (see module docstring — no partial fusion)."""
-        lower_cols = list(lower.columns or []) + list(getattr(lower, "order_by_columns", None) or [])
+        lower_cols = list(lower.columns or []) + list(getattr(lower, "passthrough_columns", None) or [])
         lower_map = {}
         for col in lower_cols:
             if col.node_type == NodeType.WILDCARD:
@@ -138,7 +138,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
             lower_map[ident] = col
 
         upper_cols = list(upper.columns or [])
-        upper_order = list(getattr(upper, "order_by_columns", None) or [])
+        upper_order = list(getattr(upper, "passthrough_columns", None) or [])
         upper_exprs = upper_cols + upper_order
         if not upper_exprs:
             return None
@@ -179,7 +179,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
 
         fused = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
         fused.columns = [_substitute_column(c, inline_map) for c in upper_cols]
-        fused.order_by_columns = [_substitute_column(c, inline_map) for c in upper_order]
+        fused.passthrough_columns = [_substitute_column(c, inline_map) for c in upper_order]
         # Carry forward any hoisted columns `upper` already had (a prior fusion
         # earlier in the same chain) alongside the ones this fusion just hoisted.
         fused.hoisted_columns = list(getattr(upper, "hoisted_columns", None) or []) + hoisted

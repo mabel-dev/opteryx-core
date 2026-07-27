@@ -1,8 +1,8 @@
 """Tests for RedundantOperationsStrategy.
 
-In particular, covers the bug where a Project node's ``order_by_columns``
+In particular, covers the bug where a Project node's ``passthrough_columns``
 were ignored when checking whether the project was a no-op. ProjectionNode
-emits ``columns ∪ order_by_columns`` at runtime (see projection.pyx) so
+emits ``columns ∪ passthrough_columns`` at runtime (see projection.pyx) so
 both must be considered when deciding redundancy.
 """
 
@@ -48,11 +48,11 @@ def _scan(columns):
     return node
 
 
-def _project(columns, order_by_columns=None):
+def _project(columns, passthrough_columns=None):
     node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
     node.columns = list(columns)
-    if order_by_columns is not None:
-        node.order_by_columns = list(order_by_columns)
+    if passthrough_columns is not None:
+        node.passthrough_columns = list(passthrough_columns)
     node.alias = None
     return node
 
@@ -99,15 +99,15 @@ def _run_strategy(plan):
 # ---------------------------------------------------------------------------
 
 
-def test_project_with_order_by_columns_matching_provider_is_removed():
+def test_project_with_passthrough_columns_matching_provider_is_removed():
     """Test 2 — column-order independence (positive: should remove).
 
     Provider produces {a, b, c}; project has columns=[c],
-    order_by_columns=[a, b]. Sets are equal, so project is redundant.
+    passthrough_columns=[a, b]. Sets are equal, so project is redundant.
     """
     a, b, c = _column("a"), _column("b"), _column("c")
     scan = _scan([a, b, c])
-    project = _project(columns=[c], order_by_columns=[a, b])
+    project = _project(columns=[c], passthrough_columns=[a, b])
     exit_node = _exit()
     plan = _build_plan(scan, project, exit_node)
 
@@ -123,12 +123,12 @@ def test_project_with_subset_of_provider_columns_is_kept():
     """Test 3 — provider has more columns (negative: keep).
 
     Provider produces {a, b, c, d}; project has columns=[a],
-    order_by_columns=[b]. {a, b} ⊊ {a, b, c, d}, so the project still
+    passthrough_columns=[b]. {a, b} ⊊ {a, b, c, d}, so the project still
     narrows the relation and must be kept.
     """
     a, b, c, d = _column("a"), _column("b"), _column("c"), _column("d")
     scan = _scan([a, b, c, d])
-    project = _project(columns=[a], order_by_columns=[b])
+    project = _project(columns=[a], passthrough_columns=[b])
     exit_node = _exit()
     plan = _build_plan(scan, project, exit_node)
 
@@ -140,29 +140,29 @@ def test_project_with_subset_of_provider_columns_is_kept():
     )
 
 
-def test_project_without_order_by_columns_attribute_still_works():
-    """Test 5 — no ``order_by_columns`` attribute (positive: rule still works).
+def test_project_without_passthrough_columns_attribute_still_works():
+    """Test 5 — no ``passthrough_columns`` attribute (positive: rule still works).
 
     Some Project nodes (e.g. those built inside subqueries) don't set
-    ``order_by_columns``. ``LogicalPlanNode.__getattr__`` returns ``None``
+    ``passthrough_columns``. ``LogicalPlanNode.__getattr__`` returns ``None``
     for missing properties, and the fix's ``getattr(..., None) or []``
     handles that case.
     """
     a, b = _column("a"), _column("b")
     scan = _scan([a, b])
-    project = _project(columns=[a, b])  # no order_by_columns set at all
+    project = _project(columns=[a, b])  # no passthrough_columns set at all
     exit_node = _exit()
     plan = _build_plan(scan, project, exit_node)
 
-    # Sanity-check the precondition: order_by_columns is genuinely absent.
-    assert project.order_by_columns is None
+    # Sanity-check the precondition: passthrough_columns is genuinely absent.
+    assert project.passthrough_columns is None
 
     optimized = _run_strategy(plan)
 
     step_types = [n.node_type for _, n in optimized.nodes(True)]
     assert LogicalPlanStepType.Project not in step_types, (
         f"Project should still be removed when columns equal "
-        f"and order_by_columns is absent; got: {step_types}"
+        f"and passthrough_columns is absent; got: {step_types}"
     )
 
 
@@ -174,7 +174,7 @@ def test_project_with_only_columns_equal_to_provider_is_removed_regression():
     """
     a, b = _column("a"), _column("b")
     scan = _scan([a, b])
-    project = _project(columns=[a, b], order_by_columns=[])
+    project = _project(columns=[a, b], passthrough_columns=[])
     exit_node = _exit()
     plan = _build_plan(scan, project, exit_node)
 
@@ -202,7 +202,7 @@ def test_q25_shape_project_removed_end_to_end():
 
     types = _physical_node_types(sql)
     assert "ProjectionNode" not in types, (
-        "ProjectionNode should be removed when columns + order_by_columns "
+        "ProjectionNode should be removed when columns + passthrough_columns "
         f"matches the provider; got physical plan: {types}"
     )
 
@@ -211,7 +211,7 @@ def test_q25_shape_project_removed_end_to_end():
 
 
 def test_expression_in_order_by_keeps_project_or_passes_through():
-    """Test 4 — expression in order_by_columns.
+    """Test 4 — expression in passthrough_columns.
 
     SQL: ``SELECT a FROM t ORDER BY a + 1 LIMIT 1`` — the ``a + 1``
     expression is bound to a synthetic identity. Whether the Project
@@ -247,12 +247,12 @@ def test_redundant_project_removed_after_aggregate() -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    test_project_with_order_by_columns_matching_provider_is_removed()
-    print("✅ test_project_with_order_by_columns_matching_provider_is_removed")
+    test_project_with_passthrough_columns_matching_provider_is_removed()
+    print("✅ test_project_with_passthrough_columns_matching_provider_is_removed")
     test_project_with_subset_of_provider_columns_is_kept()
     print("✅ test_project_with_subset_of_provider_columns_is_kept")
-    test_project_without_order_by_columns_attribute_still_works()
-    print("✅ test_project_without_order_by_columns_attribute_still_works")
+    test_project_without_passthrough_columns_attribute_still_works()
+    print("✅ test_project_without_passthrough_columns_attribute_still_works")
     test_project_with_only_columns_equal_to_provider_is_removed_regression()
     print("✅ test_project_with_only_columns_equal_to_provider_is_removed_regression")
     test_q25_shape_project_removed_end_to_end()

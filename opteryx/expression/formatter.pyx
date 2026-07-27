@@ -242,9 +242,20 @@ def _format_expression_inner(root, qualify, cache):
             "IsNotEmpty": "%s IS NOT EMPTY",
             "BitwiseNot": "~%s",
         }
-        return _map.get(root.value, root.value + "(%s)").replace(
-            "%s", format_expression(root.centre, qualify_b, cache)
+        # Most unary operators carry their operand in `centre`, but EXISTS puts its
+        # subquery in `parameters`. Reading only `centre` rendered EVERY `EXISTS` as
+        # "Exists(null)", so two different EXISTS in one predicate produced the same
+        # text — and since the binder treats an expression's rendering as its
+        # identity, the second resolved to the first and both subqueries collapsed
+        # into one. `negated` is part of the meaning, so it is part of the rendering.
+        operand = root.centre
+        if operand is None:
+            parameters = root.parameters or []
+            operand = parameters[0] if parameters else None
+        rendered = _map.get(root.value, root.value + "(%s)").replace(
+            "%s", format_expression(operand, qualify_b, cache)
         )
+        return f"NOT {rendered}" if root.negated else rendered
     if node_type == NodeType.NOT:
         return f"NOT {format_expression(root.centre, qualify_b, cache)}"
     if node_type == NodeType.AND or node_type == NodeType.OR or node_type == NodeType.XOR:
@@ -271,6 +282,15 @@ def _format_expression_inner(root, qualify, cache):
         return " OR ".join(
             [format_expression(e, qualify_b, cache) for e in root.parameters]
         )
+    if node_type == NodeType.SUBQUERY:
+        # A subquery has no textual form here — `root.value` is a whole LogicalPlan,
+        # so the fallback `str(root.value)` renders it as "Graph - N nodes, M edges".
+        # Two DIFFERENT subqueries of the same size then render identically, and the
+        # binder uses this rendering as an expression's identity: the second
+        # subquery resolves to the first one's column and the two collapse into one.
+        # `uuid` is unique per node and preserved across plan copies, so it
+        # distinguishes them without depending on the plan's shape.
+        return f"SUBQUERY-{root.uuid}"
     if node_type == NodeType.BETWEEN:
         col = format_expression(root.left, qualify_b, cache)
         lower = format_expression(root.right, qualify_b, cache)

@@ -1,0 +1,78 @@
+# HAVING referencing expressions absent from the SELECT list.
+#
+# SQL-92 lets a HAVING clause reference any aggregate over the grouped relation,
+# and any group key, whether or not it is also selected — `GROUP BY k HAVING
+# SUM(x) > 1` with neither SUM(x) nor k projected is valid (and is what canonical
+# TPC-H Q18 does). Opteryx collected aggregates from the SELECT list only, so the
+# aggregate was never computed and its operand column was pruned from the schema,
+# surfacing as `ColumnNotFoundError: Unknown column 'x'`.
+#
+# These are RESULT checks, not shape checks — the earlier bug produced a hard
+# error, but the fix hoists columns through the Project, and a hoist that emitted
+# the wrong values (or leaked a hoisted column into the output row) would still
+# pass a shape check. Every expected value below is confirmed against DuckDB
+# reading testdata/satellites/satellites.parquet.
+
+# aggregate in HAVING, not in SELECT
+query I rowsort
+SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 5
+----
+5
+6
+7
+8
+
+# aggregate over a real column (not COUNT(*)) — the operand must survive schema pruning
+query I rowsort
+SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100
+----
+6
+7
+8
+9
+
+# two different aggregates in HAVING, neither projected
+query I rowsort
+SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MIN(id) > 10 AND MAX(id) < 150
+----
+6
+
+# group KEY referenced in HAVING but not projected — the key, not an aggregate,
+# is the hoisted column here
+query I rowsort
+SELECT COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING planetId > 4
+----
+14
+27
+5
+61
+67
+
+# HAVING aggregate differs from the projected aggregate; output must carry exactly
+# the two SELECTed columns, not the hoisted MAX(id)
+query II rowsort
+SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100
+----
+6 61
+7 27
+8 14
+9 5
+
+# HAVING and ORDER BY hoisting the SAME expression must not emit it twice
+query I
+SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100 ORDER BY MAX(id) DESC
+----
+9
+8
+7
+6
+
+# regression: HAVING referencing a SELECT alias resolves against the Project's own
+# output and must NOT be hoisted from below it
+query II rowsort
+SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY planetId HAVING c > 5
+----
+5 67
+6 61
+7 27
+8 14

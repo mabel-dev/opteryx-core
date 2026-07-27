@@ -556,7 +556,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _partition_by = [
                 logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
             ]
-            _order_by = [
+            # The WINDOW's own ORDER BY (inside OVER(...)), which is a different thing
+            # from the statement-level ORDER BY built below — named apart so the two
+            # cannot be confused or clobber one another.
+            _window_order_by = [
                 (
                     logical_planner_builders.build(item["expr"]),
                     True if item["options"]["asc"] is None else item["options"]["asc"],
@@ -564,7 +567,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 for item in _over.get("order_by", [])
             ]
             _win_alias = proj_col.alias or f"$win_{random_string(6)}"
-            _ranking_specs.append((proj_col.value, _partition_by, _order_by, _win_alias))
+            _ranking_specs.append((proj_col.value, _partition_by, _window_order_by, _win_alias))
             _ref = LogicalColumn(
                 node_type=NodeType.IDENTIFIER, source_column=_win_alias, alias=_win_alias
             )
@@ -605,6 +608,119 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     for _proj_col in _projection:
         _aggregates.extend(get_all_nodes_of_type(_proj_col, select_nodes=(NodeType.AGGREGATOR,)))
     _aggregates, _projection = decompose_aggregates(_aggregates, _projection)
+
+    # ORDER BY is BUILT here, ahead of the aggregate step below, for the same reason
+    # HAVING is (see the note on the next block): `GROUP BY k ORDER BY COUNT(*) DESC`
+    # sorts on an aggregate that is never selected, so that aggregate has to reach
+    # `_aggregates` before the aggregate step is constructed or nothing computes it.
+    # Only the BUILD moves up — the "which ORDER BY columns aren't in the projection"
+    # reconciliation still runs further down, next to the Project it feeds, and it
+    # already hoists an unselected aggregate as a pass-through column once the value
+    # actually exists.
+    _order_by = ast_branch.get("order_by")
+    _order_by_columns_not_in_projection: list = []
+    _order_by_columns: list = []
+    if _order_by and _order_by.get("kind") and _order_by["kind"].get("Expressions"):
+        _order_by = [
+            (
+                logical_planner_builders.build(item["expr"]),
+                True if item["options"]["asc"] is None else item["options"]["asc"],
+            )
+            for item in _order_by["kind"]["Expressions"]
+        ]
+        # Resolve positional ORDER BY (SQL-92): an integer literal refers to the
+        # 1-based position in the SELECT list. Replace it with the projection
+        # expression so downstream stages see a normal column reference.
+        # Any other literal (string, float, NULL, ...) is rejected.
+        rewritten = []
+        for expr, ascending in _order_by:
+            if expr.node_type == NodeType.LITERAL:
+                _expr_cat = expr.type.category if isinstance(expr.type, ColumnType) else expr.type
+                if _expr_cat != LogicalCategory.INTEGER:
+                    raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
+                position = int(expr.value)
+                if position < 1 or position > len(_projection):
+                    raise UnsupportedSyntaxError(
+                        f"ORDER BY position {position} is out of range — SELECT has {len(_projection)} column(s)."
+                    )
+                expr = _projection[position - 1]
+            rewritten.append((expr, ascending))
+        _order_by = rewritten
+        _order_by_columns = [exp[0] for exp in _order_by]
+
+    # An aggregate in ORDER BY that the SELECT list does not name is still an
+    # aggregate the aggregate step must produce (`GROUP BY k ORDER BY MIN(x)`).
+    # The pass-through hoist further down already carries the VALUE up to the Order
+    # node; without this it would carry a value nothing ever computed, and the
+    # binder would fail on the pruned operand column instead.
+    for _order_column in _order_by_columns:
+        for _aggregate in get_all_nodes_of_type(
+            _order_column, select_nodes=(NodeType.AGGREGATOR,)
+        ):
+            _aggregates.append(_aggregate)
+
+    # HAVING is BUILT here, not at its position in the plan further down, because a
+    # HAVING clause may reference aggregates and group keys that never appear in the
+    # SELECT list — `GROUP BY k HAVING SUM(x) > 1` with neither SUM(x) nor k selected
+    # is valid SQL-92 and is exactly what canonical TPC-H Q18 does. Two things follow:
+    #
+    #   1. those aggregates must join `_aggregates` so the aggregate step below
+    #      actually COMPUTES them (otherwise nothing produces the value, and the
+    #      binder prunes the operand column out of the schema entirely), and
+    #   2. the expressions must ride through the Project as pass-through columns,
+    #      because the HAVING Filter sits ABOVE the Project. The Exit node prunes back
+    #      to the SELECT list, so they never reach the output row.
+    #
+    # Collected AFTER decompose_aggregates: decomposition rewrites the projection list
+    # only, so a decomposed HAVING aggregate would leave the condition tree referencing
+    # an expression that nothing computes. Undecomposed aggregates over expressions are
+    # supported by the aggregate operator directly.
+    _having = logical_planner_builders.build(ast_branch["Select"].get("having"))
+    _having_passthrough: list = []
+    if _having:
+        _projection_aliases = {p.alias.lower() for p in _projection if p.alias}
+        _seen_expressions = {format_expression(p).lower() for p in _projection}
+        _seen_expressions.update(
+            p.qualified_name.lower() for p in _projection if p.qualified_name
+        )
+
+        _having_aggregates = get_all_nodes_of_type(
+            _having, select_nodes=(NodeType.AGGREGATOR,)
+        )
+
+        # Identifiers INSIDE an aggregate are pre-aggregation operands (SUM(x) consumes
+        # raw x) — hoisting them past the aggregate step is meaningless and they must be
+        # skipped. Only bare identifiers (group keys) are pass-through candidates.
+        _aggregate_operands = {
+            id(identifier)
+            for aggregate in _having_aggregates
+            for identifier in get_all_nodes_of_type(
+                aggregate, select_nodes=(NodeType.IDENTIFIER,)
+            )
+        }
+
+        for _aggregate in _having_aggregates:
+            # The binder dedups the aggregate list by schema_column.identity, so an
+            # aggregate already named in the SELECT is not computed twice.
+            _aggregates.append(_aggregate)
+            _key = format_expression(_aggregate).lower()
+            if _key not in _seen_expressions:
+                _seen_expressions.add(_key)
+                _having_passthrough.append(_aggregate)
+
+        for _identifier in get_all_nodes_of_type(_having, select_nodes=(NodeType.IDENTIFIER,)):
+            if id(_identifier) in _aggregate_operands:
+                continue
+            # A bare identifier naming a SELECT alias (`SUM(q) AS x ... HAVING x > 300`)
+            # resolves against the Project's own output — the Project creates it, so it
+            # must not be hoisted from below it.
+            if (_identifier.source_column or "").lower() in _projection_aliases:
+                continue
+            _key = format_expression(_identifier).lower()
+            if _key not in _seen_expressions:
+                _seen_expressions.add(_key)
+                _having_passthrough.append(_identifier)
+
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
 
     # Resolve positional and aliased GROUP BY into the actual projection
@@ -693,15 +809,19 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
         # Group ranking functions that share the same PARTITION BY + ORDER BY into a
         # single Window node (one sort serves all of them).
+        # `_window_order_by` here is the WINDOW's ORDER BY, deliberately NOT named
+        # `_order_by`: the statement-level ORDER BY is built above this point, and a
+        # loop variable of that name would silently overwrite it for everything
+        # downstream (it did — `RANK() OVER(ORDER BY id)` lost the statement's ORDER BY).
         _by_spec: dict = {}
-        for _kind, _partition_by, _order_by, _win_alias in _ranking_specs:
+        for _kind, _partition_by, _window_order_by, _win_alias in _ranking_specs:
             _pkey = tuple(format_expression(pb) for pb in _partition_by)
-            _okey = tuple((format_expression(c), bool(a)) for c, a in _order_by)
+            _okey = tuple((format_expression(c), bool(a)) for c, a in _window_order_by)
             _spec_key = (_pkey, _okey)
             if _spec_key not in _by_spec:
-                _by_spec[_spec_key] = (_partition_by, _order_by, [])
+                _by_spec[_spec_key] = (_partition_by, _window_order_by, [])
             _by_spec[_spec_key][2].append((_kind, _win_alias))
-        for _spec_key, (_partition_by, _order_by, _outs) in _by_spec.items():
+        for _spec_key, (_partition_by, _window_order_by, _outs) in _by_spec.items():
             _win_rel = f"$window-{random_string(6)}"
             _outputs = [
                 (
@@ -716,7 +836,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             ]
             _win_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
             _win_step.partition_by = _partition_by
-            _win_step.order_by = _order_by
+            _win_step.order_by = _window_order_by
             _win_step.outputs = _outputs
             _win_step.output_relation = _win_rel
             _win_step.columns = []
@@ -772,38 +892,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         inner_plan.add_node(step_id, aggregate_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
-
-    # pre-process part of the order by before the projection
-    _order_by = ast_branch.get("order_by")
-    _order_by_columns_not_in_projection = []
-    _order_by_columns = []
-    if _order_by and _order_by.get("kind") and _order_by["kind"].get("Expressions"):
-        _order_by = [
-            (
-                logical_planner_builders.build(item["expr"]),
-                True if item["options"]["asc"] is None else item["options"]["asc"],
-            )
-            for item in _order_by["kind"]["Expressions"]
-        ]
-        # Resolve positional ORDER BY (SQL-92): an integer literal refers to the
-        # 1-based position in the SELECT list. Replace it with the projection
-        # expression so downstream stages see a normal column reference.
-        # Any other literal (string, float, NULL, ...) is rejected.
-        rewritten = []
-        for expr, ascending in _order_by:
-            if expr.node_type == NodeType.LITERAL:
-                _expr_cat = expr.type.category if isinstance(expr.type, ColumnType) else expr.type
-                if _expr_cat != LogicalCategory.INTEGER:
-                    raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
-                position = int(expr.value)
-                if position < 1 or position > len(_projection):
-                    raise UnsupportedSyntaxError(
-                        f"ORDER BY position {position} is out of range — SELECT has {len(_projection)} column(s)."
-                    )
-                expr = _projection[position - 1]
-            rewritten.append((expr, ascending))
-        _order_by = rewritten
-        _order_by_columns = [exp[0] for exp in _order_by]
 
     # projection
     project_step = None
@@ -901,7 +989,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
         project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
         project_step.columns = _projection
-        project_step.order_by_columns = _order_by_columns_not_in_projection
+        project_step.passthrough_columns = _order_by_columns_not_in_projection
         project_step.except_columns = _projection[0].except_columns
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, project_step)
@@ -912,15 +1000,31 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if project_step and project_step.except_columns and _order_by_columns_not_in_projection:
         if any(
             col.source_column in {c.source_column for c in project_step.except_columns}
-            for col in project_step.order_by_columns
+            for col in project_step.passthrough_columns
         ):
             raise UnsupportedSyntaxError(
                 "Cannot ORDER BY columns excluded by the EXCEPT clause in the projection."
             )
-        project_step.order_by_columns = []
+        project_step.passthrough_columns = []
+
+    # HAVING expressions absent from the SELECT list ride through the Project so the
+    # Filter above it can read them. Appended AFTER the EXCEPT/ORDER BY reconciliation
+    # above — that block clears the ORDER BY pass-throughs, which must not take the
+    # HAVING ones with it (the query is unexecutable without them).
+    #
+    # Deduped against the ORDER BY pass-throughs already present: `HAVING SUM(x) > 1
+    # ORDER BY SUM(x)` hoists the same expression from both clauses, and emitting it
+    # twice trips the binder's duplicate-output check (AmbiguousIdentifierError).
+    if project_step is not None and _having_passthrough:
+        _existing = list(project_step.passthrough_columns or [])
+        _existing_keys = {format_expression(c).lower() for c in _existing}
+        for _column in _having_passthrough:
+            if format_expression(_column).lower() not in _existing_keys:
+                _existing_keys.add(format_expression(_column).lower())
+                _existing.append(_column)
+        project_step.passthrough_columns = _existing
 
     # having
-    _having = logical_planner_builders.build(ast_branch["Select"].get("having"))
     if _having:
         having_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
         having_step.condition = _having
@@ -936,7 +1040,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             distinct_step.on = logical_planner_builders.build(
                 ast_branch["Select"]["distinct"]["On"]
             )
-        elif project_step is not None and project_step.order_by_columns:
+        elif project_step is not None and project_step.passthrough_columns:
             # the ORDER BY value is ambiguous once rows collapse into a DISTINCT
             # group - the column must appear in the SELECT list so the ordering
             # value is well-defined per output row.

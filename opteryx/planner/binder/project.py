@@ -220,17 +220,23 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
     projected_column_count = len(columns)
 
-    for column in list(node.order_by_columns):
+    # Pass-through columns (ORDER BY / HAVING expressions not in the SELECT list) bind
+    # in the same scope as the projection so they resolve against the same schemas and
+    # survive the schema trim below; they are split back out after binding and emitted
+    # by the Project operator, then dropped at the Exit node.
+    for column in list(node.passthrough_columns):
         if column.node_type != NodeType.WILDCARD:
             columns.append(column)
             continue
-        raise UnsupportedSyntaxError("ORDER BY does not support wildcard projections.")
+        raise UnsupportedSyntaxError(
+            "ORDER BY and HAVING do not support wildcard projections."
+        )
 
     # Bind the local columns to physical columns
     node.columns, group_contexts = zip(*(inner_binder(col, context) for col in columns))
     bound_columns = list(node.columns)
     node.columns = list(bound_columns[:projected_column_count])
-    node.order_by_columns = list(bound_columns[projected_column_count:])
+    node.passthrough_columns = list(bound_columns[projected_column_count:])
     context.schemas = merge_schemas(*[ctx.schemas for ctx in group_contexts])
 
     # Check for duplicates.
@@ -245,7 +251,7 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
             name = name.lower()
         return (c.schema_column.identity, name)
 
-    top_level_columns = list(node.columns) + list(node.order_by_columns)
+    top_level_columns = list(node.columns) + list(node.passthrough_columns)
     all_top_level_identities = [c.schema_column.identity for c in top_level_columns]
     # O(1) membership + identity→first-node-column map so the schema trimming
     # below is O(n) rather than O(n²) in projection width (wide SELECTs of
@@ -309,6 +315,6 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     # update the columns attribute, preserving order
     bound_columns = {c.schema_column.identity: c for c in columns}
     node.columns = [bound_columns[c.schema_column.identity] for c in node.columns]
-    node.order_by_columns = [bound_columns[c.schema_column.identity] for c in node.order_by_columns]
+    node.passthrough_columns = [bound_columns[c.schema_column.identity] for c in node.passthrough_columns]
 
     return node, context

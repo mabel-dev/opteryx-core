@@ -9,10 +9,19 @@
 //                 preserved leg to the probe): every probe row emits; unmatched
 //                 rows carry NULL build payload.
 //   SEMI        — emit probe rows that have >=1 match (probe columns only).
-//   ANTI        — null-aware NOT IN: emit probe rows with NO match; a NULL probe
-//                 key never matches-out (NULL NOT IN <non-empty> is NULL → drop);
-//                 if the build side contained ANY NULL key, NOTHING passes; an
-//                 EMPTY build side passes every probe row (NOT IN () is TRUE).
+//   ANTI_NULL_AWARE — NOT IN: emit probe rows with NO match; a NULL probe key never
+//                 matches-out (NULL NOT IN <non-empty> is NULL → drop); if the build
+//                 side contained ANY NULL key, NOTHING passes; an EMPTY build side
+//                 passes every probe row (NOT IN () is TRUE).
+//   ANTI        — plain anti (NOT EXISTS / EXCEPT / a full outer's unmatched leg):
+//                 emit probe rows with NO match. NULLs are NOT special here — a NULL
+//                 key simply never equals anything, so a NULL on EITHER side is a
+//                 non-match and the probe row passes. This is NOT interchangeable
+//                 with ANTI_NULL_AWARE: `NOT EXISTS (SELECT 1 FROM T WHERE T.k = x)`
+//                 is TRUE when T.k is NULL (NULL = x is UNKNOWN → no match), whereas
+//                 `x NOT IN (…, NULL)` is UNKNOWN → drop. Collapsing the two made
+//                 NOT EXISTS return NOTHING whenever the inner key held a single
+//                 NULL.
 //
 // Anything outside a mode's contract sets ErrCtx — loud, never silently wrong.
 
@@ -26,6 +35,7 @@
 #include <vector>
 
 #include "operator.hpp"
+#include "native_expression.hpp"    // ExprProgram/ExprEvalFn — SEMI/ANTI residual
 #include "native_group_sinks.hpp"   // shared engine helpers
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "native_sort.hpp"          // gather_rows, sort_row_valid, string helpers
@@ -34,7 +44,9 @@
 
 namespace opteryx::engine {
 
-enum class JoinMode : uint8_t { Inner = 0, LeftOuter = 1, Semi = 2, Anti = 3 };
+enum class JoinMode : uint8_t {
+    Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4
+};
 
 // The build side RETAINS its payload columns rather than copying their values into a
 // row-store. `morsels` holds one payload-column-only view per accepted build morsel
@@ -493,16 +505,89 @@ struct AsofProbeOperator : Join2ProbeOperator {
 
 struct SemiAntiProbeState : OperatorState {};   // whole-morsel filter; no resume state
 
-struct SemiAntiProbeOperator : Operator {
-    std::vector<size_t> probe_key_idx;
-    const Join2Ref* ref;
-    bool anti;   // false = SEMI, true = null-aware ANTI (NOT IN semantics)
+// Derives from Join2ProbeOperator purely to reuse `build_output` — the (build
+// payload | probe payload) pair gather — for the residual path below. The emit is
+// this class's own: probe rows only, never a joined row.
+struct SemiAntiProbeOperator : Join2ProbeOperator {
+    bool anti;         // false = SEMI, true = ANTI (either flavour)
+    bool null_aware;   // ANTI only: true = NOT IN's UNKNOWN rules, false = plain anti
 
-    SemiAntiProbeOperator(std::vector<size_t> keys, const Join2Ref* r, bool anti_)
-        : probe_key_idx(std::move(keys)), ref(r), anti(anti_) {}
+    // Optional CORRELATED NON-EQUALITY residual — canonical TPC-H Q21's
+    // `EXISTS (... WHERE l2.l_orderkey = l1.l_orderkey AND l2.l_suppkey <> l1.l_suppkey)`.
+    // The equality becomes the join key as usual; this is everything else, and it
+    // references BOTH sides. It must gate the EXISTENCE test, not filter the output:
+    // this operator emits probe rows already collapsed to "has >=1 match", so a
+    // post-join filter (what nested_loop does) would ask the question in the wrong
+    // order. A probe row matches only if at least one KEY-matching build row also
+    // satisfies this predicate.
+    // Evaluated over the pair morsel in bounded batches: one vectorized call per
+    // batch, never per pair (§3 — batch-oriented, not row-oriented).
+    ExprProgram residual;
+    ExprEvalFn residual_fn = nullptr;   // null = no residual; the cheap path below
+
+    SemiAntiProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
+                          const Join2Ref* r, bool anti_, bool null_aware_,
+                          ExprProgram res, ExprEvalFn res_fn)
+        : Join2ProbeOperator(std::move(keys), std::move(payload), r, /*outer=*/false),
+          anti(anti_), null_aware(null_aware_),
+          residual(std::move(res)), residual_fn(res_fn) {}
 
     std::unique_ptr<OperatorState> make_state() override {
         return std::make_unique<SemiAntiProbeState>();
+    }
+
+    // Evaluate the residual over one batch of candidate (build_row, probe_row) pairs
+    // and mark every probe row that has >=1 satisfying build row. Clears the batch.
+    // Returns false with `err` set on failure.
+    bool resolve_pairs(const MorselPtr& in, std::vector<int64_t>& build_rows,
+                       std::vector<int64_t>& probe_rows, std::vector<uint8_t>& found,
+                       ErrCtx& err) {
+        if (build_rows.empty()) return true;
+        MorselPtr pairs = build_output(in, build_rows, probe_rows, err);
+        if (err.code != 0 || pairs == nullptr) return false;
+
+        DrakenVector v;
+        void* data = nullptr;
+        uint8_t* validity = nullptr;
+        void* sel = nullptr;
+        int err_op = 0;
+        const char* kernel_msg = nullptr;
+        VecResult* child = nullptr;
+        int rc = residual_fn(residual.instrs, residual.count, pairs.get(),
+                             residual.col_idx.data(), residual.lit_dv.data(),
+                             &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
+        if (rc != 0) {
+            err.code = 1;
+            err.msg = format_kernel_error(
+                "SemiAntiProbe: correlated residual evaluation failed", err_op, kernel_msg);
+            return false;
+        }
+        // Take ownership of the span's buffers so they are released on every path out.
+        VectorOwner owner(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity),
+                          OwnedBuffer<void>(sel));
+        if (child != nullptr) { delete child; }   // a BOOL residual has no ARRAY child
+        if (v.type != DRAKEN_BOOL) {
+            err.code = 1;
+            err.msg = "SemiAntiProbe: correlated residual did not evaluate to BOOL — "
+                      "fail loud rather than guess at the existence test";
+            return false;
+        }
+        // BOOL data is BIT-PACKED and read through the uniform selection path
+        // (data[selection[i]]); validity is 1 bit per LOGICAL row (CLAUDE.md §11).
+        const uint8_t* bits = static_cast<const uint8_t*>(v.data);
+        const uint32_t* codes = v.selection;   // never NULL (draken invariant)
+        uint32_t np = static_cast<uint32_t>(build_rows.size());
+        for (uint32_t k = 0; k < np; ++k) {
+            // A NULL residual is UNKNOWN, and UNKNOWN is not TRUE — the pair does
+            // not satisfy EXISTS.
+            if (!sort_row_valid(v, k)) continue;
+            uint32_t phys = codes[k];
+            if ((bits[phys >> 3] >> (phys & 7)) & 1u)
+                found[static_cast<size_t>(probe_rows[k])] = 1;
+        }
+        build_rows.clear();
+        probe_rows.clear();
+        return true;
     }
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
@@ -511,12 +596,47 @@ struct SemiAntiProbeOperator : Operator {
         uint32_t n = in->num_rows();
         if (n == 0) return OpResult::NEED_INPUT;
 
-        if (anti && g.saw_null_key) return OpResult::NEED_INPUT;   // x NOT IN {…,NULL} → never true
+        // NOT IN only: a NULL anywhere in the build makes every comparison UNKNOWN.
+        // Plain ANTI (NOT EXISTS) must NOT do this — a NULL build key is just a row
+        // that matches nothing.
+        if (anti && null_aware && g.saw_null_key) return OpResult::NEED_INPUT;
         bool build_empty = (g.total_rows == 0 && !g.saw_null_key);
 
         std::vector<uint64_t> rowh;
         if (!build_empty && !compute_row_hashes(in, probe_key_idx, rowh, err))
             return OpResult::NEED_INPUT;
+
+        // With a residual, existence has to be decided per candidate pair, so the
+        // key-matching pairs are materialized and the predicate evaluated over them
+        // in batches. Without one, existence stays the cheap hash-identity count and
+        // NO pairs are built — the common case pays nothing for this.
+        std::vector<uint8_t> matched;
+        if (residual_fn != nullptr) {
+            matched.assign(n, 0);
+            if (!build_empty) {
+                std::vector<int64_t> build_rows, probe_rows;
+                build_rows.reserve(kBatch);
+                probe_rows.reserve(kBatch);
+                for (uint32_t i = 0; i < n; ++i) {
+                    bool any_null = false;
+                    for (size_t k : probe_key_idx) {
+                        if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                    }
+                    if (any_null) continue;   // NULL key never equi-matches
+                    g.index.append_probe_matches(rowh[i], static_cast<int64_t>(i),
+                                                 build_rows, probe_rows);
+                    // Bound the pair batch: fan-out is probe_rows x rows-per-key, which
+                    // is unbounded in general. Flushing after a COMPLETE probe row keeps
+                    // every row's pairs contiguous (a single high-fan-out row may push
+                    // past kBatch — correct, just a larger batch).
+                    if (build_rows.size() >= kBatch
+                        && !resolve_pairs(in, build_rows, probe_rows, matched, err))
+                        return OpResult::NEED_INPUT;
+                }
+                if (!resolve_pairs(in, build_rows, probe_rows, matched, err))
+                    return OpResult::NEED_INPUT;
+            }
+        }
 
         std::vector<uint32_t> survivors;
         survivors.reserve(n);
@@ -526,13 +646,18 @@ struct SemiAntiProbeOperator : Operator {
                 if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
             }
             if (any_null) {
-                // NULL key: never equi-matches (SEMI drops); NULL NOT IN <non-empty>
-                // is NULL (ANTI drops) — but NOT IN an EMPTY set is TRUE.
-                if (anti && build_empty) survivors.push_back(i);
+                // NULL probe key never equi-matches, so SEMI drops it.
+                // Plain ANTI: no match → NOT EXISTS is TRUE → the row passes.
+                // NULL-aware ANTI: NULL NOT IN <non-empty> is UNKNOWN → drop; but
+                // NOT IN an EMPTY set is TRUE.
+                if (anti && (!null_aware || build_empty)) survivors.push_back(i);
                 continue;
             }
-            // Existence by 64-bit hash identity (const, thread-safe probe).
-            bool found = !build_empty && g.index.row_count_for(rowh[i]) > 0;
+            // Existence: per-pair residual verdict when there is one, else 64-bit
+            // hash identity (const, thread-safe probe).
+            bool found = residual_fn != nullptr
+                             ? (matched[i] != 0)
+                             : (!build_empty && g.index.row_count_for(rowh[i]) > 0);
             if (found != anti) survivors.push_back(i);
         }
         if (survivors.empty()) return OpResult::NEED_INPUT;
@@ -551,14 +676,19 @@ struct DeferredJoin2Probe : Operator {
     JoinMode mode;
     int asof_probe_idx = -1;   // >= 0: ASOF probe (asof column index + op below)
     int asof_op = 0;
+    // SEMI/ANTI only: correlated non-equality residual (see SemiAntiProbeOperator).
+    ExprProgram residual;
+    ExprEvalFn residual_fn = nullptr;
     std::once_flag once;
     std::unique_ptr<Operator> inner;
 
     DeferredJoin2Probe(std::vector<size_t> keys, std::vector<size_t> payload,
                        const Join2Ref* r, JoinMode m,
-                       int asof_idx = -1, int asof_op_code = 0)
+                       int asof_idx = -1, int asof_op_code = 0,
+                       ExprProgram res = ExprProgram(), ExprEvalFn res_fn = nullptr)
         : key_idx(std::move(keys)), payload_idx(std::move(payload)), ref(r), mode(m),
-          asof_probe_idx(asof_idx), asof_op(asof_op_code) {}
+          asof_probe_idx(asof_idx), asof_op(asof_op_code),
+          residual(std::move(res)), residual_fn(res_fn) {}
 
     std::unique_ptr<OperatorState> make_state() override {
         std::call_once(once, [this] {
@@ -566,9 +696,11 @@ struct DeferredJoin2Probe : Operator {
                 inner = std::make_unique<AsofProbeOperator>(
                     key_idx, payload_idx, ref,
                     static_cast<size_t>(asof_probe_idx), asof_op);
-            } else if (mode == JoinMode::Semi || mode == JoinMode::Anti) {
+            } else if (mode == JoinMode::Semi || mode == JoinMode::Anti
+                       || mode == JoinMode::AntiNullAware) {
                 inner = std::make_unique<SemiAntiProbeOperator>(
-                    key_idx, ref, mode == JoinMode::Anti);
+                    key_idx, payload_idx, ref, mode != JoinMode::Semi,
+                    mode == JoinMode::AntiNullAware, residual, residual_fn);
             } else {
                 inner = std::make_unique<Join2ProbeOperator>(
                     key_idx, payload_idx, ref, mode == JoinMode::LeftOuter);

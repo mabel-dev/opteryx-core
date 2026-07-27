@@ -1028,9 +1028,11 @@ def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None):
     Scalar subquery used as an expression value, e.g.:
         WHERE col = (SELECT MAX(x) FROM T WHERE T.k = outer.k)
 
-    The inner plan is embedded as a NodeType.SUBQUERY expression node.
-    Correlation detection and decorrelation are handled by DecorrelateSubqueryStrategy
-    in the Plan Rewriter.
+    The inner plan is embedded as a NodeType.SUBQUERY expression node. It stays
+    a subquery through the plan rewriter and is bound in place (binder's
+    bind_correlated_subquery); DecorrelateSubqueryStrategy in the OPTIMIZER then
+    removes it, using the binder's resolution of each name to tell a correlated
+    reference from a local one.
     """
     from opteryx.planner.logical_planner.logical_planner import plan_query
 

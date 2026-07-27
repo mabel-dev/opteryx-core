@@ -262,6 +262,54 @@ def locate_identifier_in_loaded_schemas(
     return column, found_source_relation
 
 
+def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
+    """
+    Bind the plan of a subquery that appears inside an expression.
+
+    `node.value` is a whole LogicalPlan. It is bound with a child scope
+    (`open_correlated_scope`) so that:
+
+      * names the subquery's own FROM provides resolve locally, and
+      * names it does NOT provide resolve against the enclosing query and are
+        tagged `is_outer_reference` — i.e. the correlation is identified by
+        real name resolution rather than inferred from qualifiers.
+
+    The subquery is left in place as a SUBQUERY node carrying a bound plan;
+    removing it is decorrelation's job, which now runs post-bind with the
+    orientation already settled.
+
+    The returned context is the CALLER's, unchanged — a subquery's scope must
+    not leak outwards.
+    """
+    from opteryx.planner.binder.common import BinderVisitor
+
+    subplan = node.value
+    exit_points = subplan.get_exit_points()
+    if len(exit_points) != 1:
+        raise InvalidInternalStateError(
+            f"subquery plan has {len(exit_points)} heads - this is an error"
+        )
+
+    bound_subplan, _ = BinderVisitor().traverse(
+        subplan, exit_points[0], context=context.open_correlated_scope()
+    )
+    node.value = bound_subplan
+
+    # A scalar subquery IS a value, so it has a type: that of the single column its
+    # plan emits. Publishing it lets the ENCLOSING expression bind normally —
+    # without it, `x < (SELECT AVG(y)) * 2` binds the Multiply while its operand is
+    # still typeless, leaving the arithmetic with no result type and the engine
+    # unable to select a kernel. Decorrelation later swaps this node for a
+    # reference to the very same column, so the types agree by construction.
+    top = bound_subplan[bound_subplan.get_exit_points()[0]]
+    columns = list(top.columns or [])
+    if len(columns) == 1 and columns[0].schema_column is not None:
+        node.schema_column = columns[0].schema_column
+        node.type = columns[0].schema_column.column_type
+
+    return node, context
+
+
 def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     """
     Locate which schema the identifier is defined in. We return a populated node
@@ -294,23 +342,27 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         )
         return new_node
 
-    # get the list of candidate schemas
-    if node.source:
+    def _candidates(schemas):
+        """Schemas in `schemas` that could provide this identifier."""
+        if not node.source:
+            return schemas
         # A reference like `partsupp.ps_suppkey` from `FROM testdata.tpch.partsupp`
         # carries `node.source = "partsupp"` while the schema is keyed by the
         # full path `testdata.tpch.partsupp`. Match the bare qualifier against
         # both the exact key and the trailing dotted segment.
         suffix = f".{node.source}"
-        candidate_schemas = {
+        return {
             name: schema
-            for name, schema in context.schemas.items()
+            for name, schema in schemas.items()
             if name.startswith("$shared") or name == node.source or name.endswith(suffix)
         }
-    else:
-        candidate_schemas = context.schemas
 
-    # if there are no candidates, we probably don't know the relation
-    if not candidate_schemas:
+    # get the list of candidate schemas
+    candidate_schemas = _candidates(context.schemas)
+
+    # if there are no candidates, we probably don't know the relation — unless an
+    # enclosing scope does (a qualified correlated reference, `WHERE l.k = o.k`).
+    if not candidate_schemas and not _candidates(context.outer_schemas):
         if node.source in context.relations:
             raise UnexpectedDatasetReferenceError(
                 dataset=node.source,
@@ -323,6 +375,20 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     column, found_source_relation = locate_identifier_in_loaded_schemas(
         node.source_column, candidate_schemas
     )
+
+    # Not in the local scope — fall outwards to the enclosing query. SQL binds a
+    # name to the innermost scope that provides it, so this runs ONLY after the
+    # local lookup failed, and can never redirect a name the local scope owns.
+    # A hit here is by definition a CORRELATED reference: it is what makes the
+    # subquery depend on the outer row, and tagging it is what lets decorrelation
+    # orient the predicate without guessing from syntax.
+    if not column and context.outer_schemas:
+        column, found_source_relation = locate_identifier_in_loaded_schemas(
+            node.source_column, _candidates(context.outer_schemas)
+        )
+        if column:
+            node.is_outer_reference = True
+            node.outer_relation = found_source_relation
 
     # if we didn't find the column, suggest alternatives
     if not column:
@@ -441,6 +507,17 @@ def inner_binder(
     # If the node is of type IDENTIFIER, it's just a simple look up to bind the node.
     if node_type in (NodeType.IDENTIFIER, NodeType.EVALUATED):
         return locate_identifier(node, context)
+
+    # A subquery embedded in an EXPRESSION (`col < (SELECT ...)`, as opposed to one
+    # in the FROM clause). Bind its inner plan in a child scope that can see this
+    # scope as the enclosing one, so correlated references resolve outwards and get
+    # tagged. Binding it here is what lets decorrelation run AFTER name resolution
+    # instead of guessing orientation from query text.
+    #
+    # The subquery's own schema stays inside its scope: it must NOT leak into this
+    # one, or its columns would become resolvable in the outer query.
+    if node_type == NodeType.SUBQUERY:
+        return bind_correlated_subquery(node, context)
 
     # Early exit for nodes representing calculated columns.
     # If the node represents a calculated column, if we're seeing it again it's because it

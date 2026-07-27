@@ -545,3 +545,105 @@ SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity <
 
 statement error io failed
 SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity < s.gravity
+
+# --- scalar subqueries in expressions -------------------------------------
+# Decorrelated post-bind (DecorrelateSubqueryStrategy). Uncorrelated forms
+# become a cross join against a one-row aggregate; correlated equi forms become
+# an inner join against a grouped aggregate.
+
+query shape 1 1
+SELECT name FROM $planets WHERE gravity = (SELECT MAX(gravity) FROM $planets)
+
+query shape 5 1
+SELECT name FROM $planets WHERE gravity > (SELECT AVG(gravity) FROM $planets)
+
+# the subquery inside arithmetic — the enclosing expression has to be typed
+query shape 8 1
+SELECT name FROM $planets WHERE gravity < (SELECT AVG(gravity) FROM $planets) * 2
+
+# two subqueries in one predicate — each is removed in its own pass
+query shape 7 1
+SELECT name FROM $planets WHERE gravity > (SELECT MIN(gravity) FROM $planets) AND gravity < (SELECT MAX(gravity) FROM $planets)
+
+# only equalities can become join keys; a non-equi correlation must say so
+statement error UnsupportedSyntaxError
+SELECT p.name FROM $planets p WHERE p.numberOfMoons < (SELECT AVG(p2.numberOfMoons) FROM $planets p2 WHERE p2.orbitalPeriod > p.orbitalPeriod)
+
+# an uncorrelated subquery that could return many rows must not silently multiply
+statement error UnsupportedSyntaxError
+SELECT name FROM $planets WHERE gravity = (SELECT gravity FROM $planets)
+
+# --- EXISTS / NOT EXISTS ---------------------------------------------------
+# Decorrelated post-bind alongside scalar subqueries (DecorrelateSubqueryStrategy).
+# EXISTS becomes a SEMI join, NOT EXISTS an ANTI join; a correlated non-equality
+# rides on the join and is evaluated per candidate pair inside the existence test.
+
+query shape 7 1
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE s.planetId = p.id)
+
+query shape 2 1
+SELECT name FROM $planets p WHERE NOT EXISTS (SELECT 1 FROM testdata.satellites s WHERE s.planetId = p.id)
+
+# SELECT * carries no Project for the rewrite to overwrite
+query shape 7 1
+SELECT name FROM $planets p WHERE EXISTS (SELECT * FROM testdata.satellites s WHERE s.planetId = p.id)
+
+# EXISTS ANDed with an ordinary predicate — the predicate survives above the join
+query shape 5 1
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE s.planetId = p.id) AND p.gravity > 5
+
+# two existence tests in one predicate — each becomes its own join
+query shape 3 1
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE s.planetId = p.id) AND NOT EXISTS (SELECT 1 FROM testdata.satellites s2 WHERE s2.planetId = p.id AND s2.radius > 1000)
+
+# correlated NON-equality: cannot be a join key, evaluated per pair in the probe
+query shape 7 1
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE s.planetId = p.id AND s.radius <> p.gravity)
+
+# uncorrelated EXISTS is not supported (pre-existing gap, not a regression)
+statement error UnsupportedSyntaxError
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE s.radius > 100)
+
+# --- IN / NOT IN subqueries ------------------------------------------------
+# Decorrelated post-bind alongside scalar and EXISTS. IN is EXISTS plus one key:
+# the membership test pairs the outer expression with the subquery's single
+# output column. NOT IN keeps its NULL-AWARE anti join — a NULL in the subquery
+# makes NOT IN yield nothing, which a plain anti join would get wrong.
+
+query shape 9 1
+SELECT name FROM testdata.satellites WHERE id IN (SELECT id FROM $planets)
+
+query shape 168 1
+SELECT name FROM testdata.satellites WHERE id NOT IN (SELECT id FROM $planets)
+
+# DISTINCT sits above the projection — the output column is not the exit node
+query shape 7 1
+SELECT name FROM $planets WHERE id IN (SELECT DISTINCT planetId FROM testdata.satellites)
+
+# correlated IN — the pre-bind rewrite this replaced had no correlation support
+query shape 7 1
+SELECT name FROM $planets p WHERE p.id IN (SELECT s.planetId FROM testdata.satellites s WHERE s.radius > p.gravity)
+
+query shape 5 1
+SELECT name FROM $planets WHERE id IN (SELECT planetId FROM testdata.satellites) AND gravity > 5
+
+# HAVING also sits above the projection (canonical TPC-H Q18 shape)
+query shape 4 1
+SELECT name FROM $planets WHERE id IN (SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 5)
+
+# --- null-safe equality correlation ----------------------------------------
+# BI tools (Tableau) emit IS NOT DISTINCT FROM as `(a = b) OR (a IS NULL AND
+# b IS NULL)`, wrapped in parentheses at every level. Every correlated EXISTS in
+# the medicare1 benchmark uses this shape; without matching it the correlation is
+# invisible and the query is rejected.
+
+query shape 7 1
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE ((s.planetId = p.id) OR (s.planetId IS NULL AND p.id IS NULL)))
+
+query shape 2 1
+SELECT name FROM $planets p WHERE NOT EXISTS (SELECT 1 FROM testdata.satellites s WHERE ((s.planetId = p.id) OR (s.planetId IS NULL AND p.id IS NULL)))
+
+# a lookalike OR over DIFFERENT columns is not a null-safe equality and must not
+# be mistaken for one
+statement error UnsupportedSyntaxError
+SELECT name FROM $planets p WHERE EXISTS (SELECT 1 FROM testdata.satellites s WHERE ((s.planetId = p.id) OR (s.radius IS NULL AND p.id IS NULL)))

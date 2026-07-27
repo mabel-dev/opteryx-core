@@ -33,12 +33,18 @@ cdef class FilterJoinNode(JoinNode):
     cdef public object using
     cdef public list left_columns
     cdef public list right_columns
+    # Correlated NON-equality predicate lifted out of an EXISTS subquery
+    # (decorrelate_subquery, the post-bind optimizer strategy; TPC-H Q21). None for the ordinary shape. The compiler
+    # feeds it to the native probe, where it gates the existence test per candidate
+    # pair — it is NOT a post-join filter.
+    cdef public object residual
 
     def __init__(self, properties=None, **parameters):
         self.join_type = parameters["type"]
         JoinNode.__init__(self, properties=properties, **parameters)
         self.on = parameters.get("on")
         self.using = parameters.get("using")
+        self.residual = parameters.get("residual")
 
         self.left_columns = parameters.get("left_columns")
         self.left_readers = parameters.get("left_readers")

@@ -822,10 +822,14 @@ SELECT p.id FROM $planets p CROSS JOIN (SELECT 1 AS one) AS t
 query error io failed
 SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 1
 
-statement error io failed
+# A HAVING clause may reference aggregates absent from the SELECT list (SQL-92).
+# Both of these were recorded as expected-errors while that was unsupported; the
+# aggregate/pass-through hoist fixed it, and both row counts are confirmed against
+# DuckDB reading the same parquet.
+query shape 1 1
 SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) = 1
 
-statement error io failed
+query shape 4 1
 SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100
 
 query error io failed

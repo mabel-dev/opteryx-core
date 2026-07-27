@@ -191,7 +191,7 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
                 LogicalColumn(node_type=NodeType.IDENTIFIER, source=None, source_column=c)
                 for c in col_names
             ]
-            project.order_by_columns = []
+            project.passthrough_columns = []
             plan.insert_node_after(random_string(), project, nid)
 
         return plan

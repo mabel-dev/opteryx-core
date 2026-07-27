@@ -17,6 +17,18 @@ class LogicalColumn:
             The originating logical source for the column.
         alias: Optional[str]
             A temporary name assigned in the SQL query for the column, defaults to None.
+        is_outer_reference: bool
+            True when this reference resolved to an ENCLOSING query's scope rather
+            than the local one — i.e. it is what makes a subquery correlated. Set by
+            the binder (which is the only thing that knows), and read by
+            decorrelation to orient the correlation predicate.
+        outer_relation:
+            The schema this reference resolved against when `is_outer_reference`.
+
+    NOTE: `__getattr__` returns None for anything unset, so an ad-hoc attribute
+    assigned from outside LOOKS like it works — but `copy()` rebuilds from the
+    explicit field list below and silently drops it. Anything that must survive a
+    plan copy has to be a real field here.
     """
 
     def __init__(
@@ -28,6 +40,8 @@ class LogicalColumn:
         alias: Optional[str] = None,
         schema_column=None,
         query_column: Optional[str] = None,
+        is_outer_reference: bool = False,
+        outer_relation=None,
     ):
         self.node_type = node_type
         self.source_column = source_column
@@ -36,6 +50,8 @@ class LogicalColumn:
         self.alias = alias
         self.schema_column = schema_column
         self.query_column = query_column
+        self.is_outer_reference = is_outer_reference
+        self.outer_relation = outer_relation
 
     @property
     def qualified_name(self) -> str:
@@ -78,6 +94,8 @@ class LogicalColumn:
                 None if self.schema_column is None else self.schema_column.to_schema_column()
             ),
             query_column=self.query_column,
+            is_outer_reference=self.is_outer_reference,
+            outer_relation=self.outer_relation,
         )
 
     def __repr__(self) -> str:

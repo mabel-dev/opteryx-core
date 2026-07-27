@@ -994,7 +994,7 @@ class _Compiler:
             proj_exprs = (
                 list(node.parameters.get("hoisted_columns") or [])
                 + list(node.parameters.get("projection") or [])
-                + list(node.parameters.get("order_by_columns") or [])
+                + list(node.parameters.get("passthrough_columns") or [])
             )
             eval_nodes = [col for col in proj_exprs
                           if col.node_type != NodeType.IDENTIFIER]
@@ -1726,8 +1726,12 @@ class _Compiler:
         join_type = getattr(node, "join_type", None)
         if join_type == "asof":
             return self._compile_asof_join(node, in_edges)
+        # "left anti null-aware" (NOT IN) and "left anti" (NOT EXISTS / EXCEPT / a full
+        # outer's unmatched leg) are DIFFERENT modes — they disagree on NULLs. Mapping
+        # both to the null-aware mode made NOT EXISTS emit nothing at all whenever the
+        # inner key held a single NULL. See native_join2.hpp's JoinMode comment.
         modes = {"inner": 0, "left outer": 1, "left semi": 2,
-                 "left anti null-aware": 3, "left anti": 3,
+                 "left anti null-aware": 3, "left anti": 4,
                  "cross": 0, "nested_loop": 0}
         if join_type not in modes:
             _unsupported(f"a {join_type} join")
@@ -1763,6 +1767,14 @@ class _Compiler:
         # combined layout below (fails loud if not c-native).
         residual = getattr(node, "on", None) if join_type == "nested_loop" else None
 
+        # A SEMI/ANTI node may carry a CORRELATED NON-EQUALITY residual, split off the
+        # EXISTS subquery by decorrelate_subquery, post-bind (TPC-H Q21). Unlike nested_loop's,
+        # this one CANNOT be a post-join filter: SEMI/ANTI emit probe rows already
+        # collapsed to existence, so the predicate has to gate the existence test
+        # inside the probe. It therefore needs the build payload the plain SEMI/ANTI
+        # path deliberately drops.
+        filter_residual = getattr(node, "residual", None) if mode in (2, 3, 4) else None
+
         # INNER / CROSS: build = left leg (CROSS builds right for the scalar side).
         # LEFT OUTER / SEMI / ANTI: the LEFT leg is the preserved/filtered side —
         # it must be the PROBE; the RIGHT leg builds the table.
@@ -1785,9 +1797,11 @@ class _Compiler:
                 _unsupported("a build-side join key the stream does not carry")
             build_key_idx.append(blayout.index(identity))
         ref = self.nplan.new_join2_ref()
-        # SEMI/ANTI emit probe rows only — no build payload needed.
-        build_payload = [] if mode in (2, 3) else list(range(len(blayout)))
-        if mode in (2, 3):
+        # SEMI/ANTI emit probe rows only — no build payload needed, UNLESS a
+        # correlated residual has to read build-side columns to decide existence.
+        semi_no_payload = mode in (2, 3, 4) and filter_residual is None
+        build_payload = [] if semi_no_payload else list(range(len(blayout)))
+        if semi_no_payload:
             build_types, build_logical = [], []
         else:
             build_types, build_logical = self._payload_types(build_id, blayout)
@@ -1803,9 +1817,22 @@ class _Compiler:
                 _unsupported("a probe-side join key the stream does not carry")
             probe_key_idx.append(playout.index(identity))
         probe_payload = list(range(len(playout)))
+        if filter_residual is not None:
+            # The residual reads one column from each side, so the probe needs the
+            # FULL probe payload as well as the build payload retained above. It is
+            # lowered against the pair layout the probe materializes internally —
+            # build payload first, then probe payload — the same order
+            # Join2ProbeOperator::build_output emits.
+            pair_layout = list(blayout) + list(playout)
+            bc = self._lower_expression(
+                filter_residual, "a correlated EXISTS residual condition"
+            )
+            self.nplan.add_join2_probe_residual(pp, ref, probe_key_idx, probe_payload,
+                                                mode, bc, pair_layout)
+            return pp, list(playout)          # existence filter — probe stream unchanged
         self.nplan.add_join2_probe(pp, ref, probe_key_idx,
-                                   [] if mode in (2, 3) else probe_payload, mode)
-        if mode in (2, 3):
+                                   [] if mode in (2, 3, 4) else probe_payload, mode)
+        if mode in (2, 3, 4):
             return pp, list(playout)          # existence filter — probe stream unchanged
         # Join2ProbeOperator emits build payload columns first, then probe payload.
         out_layout = list(blayout) + list(playout)

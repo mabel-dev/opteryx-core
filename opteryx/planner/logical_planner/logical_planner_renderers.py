@@ -64,8 +64,8 @@ def render_distinct(node: LogicalPlanNode) -> str:
 def render_project(node: LogicalPlanNode) -> str:
     cols = ", ".join(format_expression(col) for col in node.columns)
     order_by = (
-        f" + ({', '.join(format_expression(col) for col in node.order_by_columns)})"
-        if node.order_by_columns
+        f" + ({', '.join(format_expression(col) for col in node.passthrough_columns)})"
+        if node.passthrough_columns
         else ""
     )
     except_cols = (

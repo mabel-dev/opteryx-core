@@ -129,7 +129,7 @@ SELECT DISTINCT CONCAT(server, '-', CAST(times_found AS VARCHAR)) FROM (SELECT *
 statement error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
 SELECT DISTINCT server FROM testdata.split WHERE server IN (SELECT server FROM testdata.split WHERE times_found = 0)
 
-statement error sql failed UnsupportedSyntaxError: Correlated scalar subqueries are not supported\. Rewrite using EXISTS, IN, or an explicit JOIN\.
+statement error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
 SELECT DISTINCT server FROM testdata.split WHERE risk_score = (SELECT MAX(risk_score) FROM testdata.split)
 
 query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.

@@ -169,6 +169,32 @@ STATEMENTS = [
         ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId", 7, 2, None),
         ("SELECT planetId, COUNT(*), MAX(id) FROM testdata.satellites GROUP BY planetId", 7, 3, None),
 
+        # HAVING — a HAVING clause may reference aggregates and group keys that never
+        # appear in the SELECT list (SQL-92). These shapes silently failed with
+        # ColumnNotFoundError until the aggregate/pass-through hoist landed; every row
+        # count below is confirmed against DuckDB reading the same parquet file.
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 5", 4, 1, None),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100", 4, 1, None),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MIN(id) > 10 AND MAX(id) < 150", 1, 1, None),
+        # group KEY referenced in HAVING but not projected
+        ("SELECT COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING planetId > 4", 5, 1, None),
+        # HAVING aggregate differs from the projected aggregate
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100", 4, 2, None),
+        # HAVING + ORDER BY, both hoisting; the shared-expression case must not
+        # double-emit the column (AmbiguousIdentifierError)
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING SUM(id) > 500 ORDER BY planetId", 5, 1, None),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100 ORDER BY MAX(id) DESC", 4, 1, None),
+        # regression: HAVING referencing a SELECT alias still resolves at the Project
+        ("SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY planetId HAVING c > 5", 4, 2, None),
+
+        # ORDER BY over an aggregate absent from the SELECT list — same class as the
+        # HAVING cases above ("sort by a metric you don't display"). Shape only asserts
+        # the hoisted aggregate does not leak into the output row; the ORDER itself is
+        # asserted against DuckDB in results/order_by_agg_not_in_projection_01.slt.
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId ORDER BY COUNT(*) DESC", 7, 1, None),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId ORDER BY MIN(id) DESC", 7, 1, None),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100 ORDER BY MIN(id) DESC", 4, 1, None),
+
         # WHERE clause variations
         ("SELECT * FROM $planets WHERE id = 1", 1, 20, None),
         ("SELECT * FROM $planets WHERE ~id = -2", 1, 20, None),

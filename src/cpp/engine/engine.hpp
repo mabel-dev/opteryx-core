@@ -307,6 +307,24 @@ public:
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             static_cast<JoinMode>(mode)));
     }
+    // SEMI/ANTI with a correlated NON-equality residual (TPC-H Q21's
+    // `l2.l_suppkey <> l1.l_suppkey`). The residual is evaluated per candidate
+    // (build,probe) pair INSIDE the existence test — see SemiAntiProbeOperator — so
+    // it needs the build payload the plain SEMI/ANTI path never retains. Column
+    // indices are resolved against the pair layout: build payload, then probe payload.
+    void add_join2_probe_residual(size_t p, size_t ref, std::vector<size_t> key_idx,
+                                  std::vector<size_t> payload_idx, int mode,
+                                  void* instrs, int count, std::vector<int> col_idx,
+                                  std::vector<void*> lit_dv, ExprEvalFn fn) {
+        ExprProgram prog;
+        prog.instrs = instrs;
+        prog.count = count;
+        prog.col_idx = std::move(col_idx);
+        prog.lit_dv = std::move(lit_dv);
+        add_op_(p, std::make_unique<DeferredJoin2Probe>(
+            std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
+            static_cast<JoinMode>(mode), -1, 0, std::move(prog), fn));
+    }
     // ASOF: build side = Join2BuildSink capturing the asof column's order key;
     // probe side = nearest-match per MATCH_CONDITION op (0 GtEq / 1 Gt / 2 LtEq / 3 Lt).
     void set_asof_build_sink(size_t p, std::vector<size_t> key_idx,

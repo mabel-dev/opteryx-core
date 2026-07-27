@@ -41,6 +41,7 @@ from opteryx.planner.optimizer.strategies import (
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
     CrossJoinChainReorderStrategy,
+    DecorrelateSubqueryStrategy,
     CrossJoinFilterPushdownStrategy,
     DisjunctionSimplificationStrategy,
     DistinctPushdownStrategy,
@@ -125,6 +126,10 @@ class OptimizerVisitor:
         """
         self.telemetry = telemetry
         self.strategies = [
+            # Removes scalar subqueries by turning them into joins. Must run
+            # before any strategy that reasons about joins or pushes predicates,
+            # since it introduces a join and moves a predicate across it.
+            DecorrelateSubqueryStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
             # Drops no-op LIMITs before StatisticsOnlyResponseStrategy runs, so
             # e.g. `SELECT COUNT(*) FROM t LIMIT n` is answered from the

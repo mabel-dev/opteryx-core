@@ -6,20 +6,11 @@
 # Rewrite strategies are applied in declaration order.
 # Strategies that must see the output of a prior strategy go after it.
 
-from opteryx.planner.plan_rewriter.strategies.decorrelate_subquery import (
-    DecorrelateSubqueryStrategy,
-)
 from opteryx.planner.plan_rewriter.strategies.except_to_anti_join import (
     ExceptToAntiJoinStrategy,
 )
-from opteryx.planner.plan_rewriter.strategies.exists_subquery_to_join import (
-    ExistsSubqueryToJoinStrategy,
-)
 from opteryx.planner.plan_rewriter.strategies.full_outer_to_union import (
     FullOuterToUnionStrategy,
-)
-from opteryx.planner.plan_rewriter.strategies.in_subquery_to_join import (
-    InSubqueryToJoinStrategy,
 )
 from opteryx.planner.plan_rewriter.strategies.intersect_except_all_to_window_join import (
     IntersectExceptAllToWindowJoinStrategy,
@@ -32,10 +23,7 @@ from opteryx.planner.plan_rewriter.strategies.window_to_join import WindowToJoin
 STRATEGIES: list = [
     WindowToJoinStrategy,          # runs first — aggregate Window nodes must be eliminated before join planning
     ExceptToAntiJoinStrategy,
-    ExistsSubqueryToJoinStrategy,
     FullOuterToUnionStrategy,
     IntersectToSemiJoinStrategy,
     IntersectExceptAllToWindowJoinStrategy,  # INTERSECT/EXCEPT ALL -> ROW_NUMBER + semi/anti join
-    InSubqueryToJoinStrategy,
-    DecorrelateSubqueryStrategy,  # runs after EXISTS/IN — handles scalar correlated subqueries
 ]

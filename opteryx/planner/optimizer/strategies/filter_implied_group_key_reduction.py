@@ -180,7 +180,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
 
         project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
         project_node.columns = project_columns
-        project_node.order_by_columns = []
+        project_node.passthrough_columns = []
 
         context.optimized_plan.insert_node_after(
             random_string(), project_node, context.node_id

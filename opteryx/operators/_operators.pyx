@@ -218,6 +218,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                   cppvector[int] lt_kind, cppvector[int] lt_unit,
                                   cppvector[int] lt_precision, cppvector[int] lt_scale,
                                   cppvector[int] lt_dimension)
+        void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
+                                      cppvector[size_t] payload_idx, int mode,
+                                      void* instrs, int count, cppvector[int] col_idx,
+                                      cppvector[void*] lit_dv, ExprEvalFn fn)
         void add_join2_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                              cppvector[size_t] payload_idx, int mode)
         void set_asof_build_sink(size_t p, cppvector[size_t] key_idx,
@@ -2231,7 +2235,9 @@ cdef class NativePlan:
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                         int mode):
-        """mode: 0=inner, 1=left outer (probe side preserved), 2=semi, 3=anti."""
+        """mode: 0=inner, 1=left outer (probe side preserved), 2=semi,
+        3=null-aware anti (NOT IN), 4=plain anti (NOT EXISTS / EXCEPT).
+        3 and 4 differ on NULL handling — see native_join2.hpp's JoinMode."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         for i in key_idx:
@@ -2239,6 +2245,27 @@ cdef class NativePlan:
         for i in payload_idx:
             pay.push_back(<size_t>i)
         self._e.add_join2_probe(p, ref, keys, pay, mode)
+
+    def add_join2_probe_residual(self, size_t p, size_t ref, list key_idx,
+                                 list payload_idx, int mode, CompiledBytecode bc,
+                                 list layout):
+        """SEMI/ANTI (mode 2/3/4) whose EXISTENCE test is gated by a correlated
+        non-equality residual — TPC-H Q21's `l2.l_suppkey <> l1.l_suppkey`. ``bc`` is
+        resolved against ``layout``, the PAIR layout (build payload then probe
+        payload), because the predicate reads a column from each side."""
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+        self.held.append(bc)
+        self._e.add_join2_probe_residual(p, ref, keys, pay, mode,
+                                         <void*>bc.instrs, <int>bc.count,
+                                         col_idx, lit_dv, _expr_eval_tramp)
 
     def set_asof_build_sink(self, size_t p, list key_idx, list payload_idx,
                             size_t asof_idx, size_t ref, list payload_types,

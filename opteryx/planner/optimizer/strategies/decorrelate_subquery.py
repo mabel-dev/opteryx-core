@@ -1,0 +1,1059 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+"""
+Decorrelate scalar subqueries (post-bind).
+
+    WHERE outer.c < (SELECT AGG(x) FROM T WHERE T.k = outer.k)
+->  INNER JOIN (SELECT k, AGG(x) FROM T GROUP BY k) ON outer.k = T.k
+    WHERE outer.c < AGG(x)
+
+This runs on the BOUND plan, which is what makes it correct rather than
+heuristic. The binder resolves every name in the subquery against the
+subquery's own scope first and the enclosing query second, tagging the latter
+`is_outer_reference` (see binder.bind_correlated_subquery). So a correlation
+predicate is identified by a fact — "exactly one side resolved to the outer
+scope" — instead of by guessing from whether the query author happened to
+write a table qualifier.
+
+That is the whole reason this lives here and not in the plan rewriter. The
+pre-bind rewriter had to infer orientation from syntax, which is undecidable
+for canonical TPC-H Q17/Q20 (`WHERE l_partkey = p_partkey` — both sides bare,
+no lexical signal at all).
+
+Because the subquery's plan is already bound, its output columns carry real
+schema columns and identities, so the decorrelated relation can simply be
+joined to: no schema has to be synthesized and no re-binding is needed.
+
+An UNCORRELATED scalar subquery is the same rewrite with no keys: it is one value
+attached to every outer row, i.e. a cross join. It must provably yield one row
+(an ungrouped aggregate), or cross-joining it would multiply the outer rows
+instead of raising SQL's "more than one row returned by a subquery".
+
+NOT handled here (each raises, never silently wrong):
+  - subqueries with no aggregate (use EXISTS/IN)
+  - an uncorrelated subquery that could return several rows
+  - correlations that are not equalities
+
+EXISTS is the same rewrite with a different join:
+
+    WHERE EXISTS (SELECT 1 FROM T WHERE T.k = outer.k)
+->  LEFT SEMI JOIN T ON outer.k = T.k        (NOT EXISTS -> LEFT ANTI JOIN)
+
+It is a boolean test rather than a value, so nothing is substituted into the
+predicate — the existence test IS the join, and the EXISTS node is removed. A
+correlated NON-equality (`AND T.a <> outer.a`, canonical TPC-H Q21) cannot be a
+join key and cannot be a post-join filter either, because SEMI/ANTI have already
+collapsed the row to existence by then; it rides on the join as `residual` and is
+evaluated per candidate pair inside the probe (SemiAntiProbeOperator).
+
+`IN` is EXISTS with one more key — the membership test pairs the outer expression
+with the subquery's single output column:
+
+    WHERE x IN (SELECT y FROM T)
+->  LEFT SEMI JOIN T ON x = T.y     (NOT IN -> LEFT ANTI NULL-AWARE JOIN)
+
+`NOT IN` is null-aware and `NOT EXISTS` is not: `x NOT IN (SELECT y ...)` yields
+nothing when any y is NULL, because `x <> NULL` is unknown rather than true. That
+lives in the join TYPE, so it must not be "simplified" to a plain anti join.
+
+Because a correlation simply contributes further keys, correlated `IN (SELECT ...)`
+works here; the pre-bind rewrite it replaced had no correlation support at all.
+
+Scope note: this owns EVERY subquery form that appears in a predicate — scalar,
+EXISTS, IN. The plan rewriter is now purely syntactic (set operations, window
+rewrites) and no longer touches subqueries.
+
+Known gaps (raise, never silently wrong):
+  - UNCORRELATED `EXISTS`. Unlike the scalar case it cannot become a cross join —
+    the answer is "any row at all", a zero-key semi/anti join, and the engine's
+    join compiler admits zero-key only for CROSS and nested_loop.
+  - An EXPRESSION on the left of `IN` (`x + 0 IN (...)`): join conditions are
+    restricted to column comparisons.
+Both predate this strategy.
+"""
+
+from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
+from opteryx.expression import NodeType
+from opteryx.models import LogicalColumn, Node
+from opteryx.planner.binder.join_helpers import extract_join_fields
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.optimizer.strategies.optimization_strategy import (
+    OptimizationStrategy,
+    OptimizerContext,
+)
+from opteryx.utils import random_string
+
+
+def _is_exists(node) -> bool:
+    """EXISTS / NOT EXISTS — `negated` distinguishes them."""
+    return (
+        node is not None
+        and node.node_type == NodeType.UNARY_OPERATOR
+        and node.value == "Exists"
+    )
+
+
+def _is_in_subquery(node) -> bool:
+    """`x IN (SELECT ...)` / `NOT IN`."""
+    return (
+        node is not None
+        and node.node_type == NodeType.COMPARISON_OPERATOR
+        and node.value == "InSubQuery"
+    )
+
+
+def _find_exists(condition):
+    """Locate the first EXISTS node, as (node, replace_fn)."""
+    return _find(condition, _is_exists)
+
+
+def _find_in(condition):
+    """Locate the first IN-subquery node, as (node, replace_fn)."""
+    return _find(condition, _is_in_subquery)
+
+
+def _find_subquery(condition):
+    """
+    Locate the first SCALAR subquery node, as (node, replace_fn).
+
+    EXISTS and IN also wrap a SUBQUERY node, but those are not scalar — they are
+    a boolean test, not a value. Descending into them would treat the same node
+    as both, so they are skipped here and matched by `_find_exists` instead.
+    """
+    return _find(condition, lambda n: n.node_type == NodeType.SUBQUERY)
+
+
+def _find(condition, predicate):
+    """
+    First node satisfying `predicate`, with a callable that replaces it in place.
+
+    Returns (node, replace_fn) or (None, None). `replace_fn(new)` returns the new
+    root of the expression, which matters when the match IS the root.
+    """
+    if condition is None:
+        return None, None
+
+    if predicate(condition):
+        return condition, lambda new: new
+
+    # An EXISTS/IN node owns the subquery beneath it; never look inside one while
+    # searching for something else.
+    if _is_exists(condition) or _is_in_subquery(condition):
+        return None, None
+
+    for attr in ("left", "right", "centre"):
+        child = getattr(condition, attr, None)
+        if child is None:
+            continue
+        found, replace_child = _find(child, predicate)
+        if found is not None:
+
+            def _replace(new, _c=condition, _a=attr, _rc=replace_child):
+                setattr(_c, _a, _rc(new))
+                return _c
+
+            return found, _replace
+
+    for index, param in enumerate(getattr(condition, "parameters", None) or []):
+        found, replace_param = _find(param, predicate)
+        if found is not None:
+
+            def _replace(new, _c=condition, _i=index, _rc=replace_param):
+                _c.parameters[_i] = _rc(new)
+                return _c
+
+            return found, _replace
+
+    return None, None
+
+
+def _is_outer(node) -> bool:
+    return bool(node is not None and node.is_outer_reference)
+
+
+def _unwrap(node):
+    """
+    Strip NESTED wrappers.
+
+    Parentheses survive into the expression tree as NESTED nodes, so a predicate
+    the user bracketed looks structurally different from the identical unbracketed
+    one. Every structural match here has to see through them — BI tools bracket
+    heavily, and medicare1's correlations arrive as `((a = b) OR (a IS NULL AND
+    b IS NULL))`, NESTED at all three levels.
+    """
+    while node is not None and node.node_type == NodeType.NESTED:
+        node = node.centre
+    return node
+
+
+def _column_identity(node):
+    schema_column = getattr(node, "schema_column", None)
+    return getattr(schema_column, "identity", None)
+
+
+def _match_null_safe_eq(condition):
+    """
+    Recognise a null-safe equality spelled as an OR, and return its `Eq` part.
+
+        (a = b) OR (a IS NULL AND b IS NULL)
+
+    This is how Tableau (and several BI tools) emit `IS NOT DISTINCT FROM`, and it
+    is the shape every correlated EXISTS in the medicare1 benchmark uses. Without
+    this it reads as a bare OR, no correlation is found, and the query is rejected.
+
+    Only matched when both branches name the SAME pair of columns, so an unrelated
+    disjunction is never mistaken for one.
+
+    NOTE: the returned key is a plain equality, so two NULL keys do NOT match — the
+    `IS NULL AND IS NULL` branch is not reproduced by the join. See the module
+    docstring; this mirrors what the pre-bind rewrite did.
+    """
+    condition = _unwrap(condition)
+    if condition is None or condition.node_type != NodeType.OR:
+        return None
+
+    equality, null_test = _unwrap(condition.left), _unwrap(condition.right)
+    if equality is None or null_test is None:
+        return None
+    if equality.node_type != NodeType.COMPARISON_OPERATOR or equality.value != "Eq":
+        equality, null_test = null_test, equality
+    if equality.node_type != NodeType.COMPARISON_OPERATOR or equality.value != "Eq":
+        return None
+    if null_test.node_type != NodeType.AND:
+        return None
+
+    def _is_null_check(node):
+        return (
+            node is not None
+            and node.node_type == NodeType.UNARY_OPERATOR
+            and node.value == "IsNull"
+        )
+
+    left_null, right_null = _unwrap(null_test.left), _unwrap(null_test.right)
+    if not (_is_null_check(left_null) and _is_null_check(right_null)):
+        return None
+
+    def _operand(node):
+        operand = node.centre
+        if operand is None:
+            parameters = node.parameters or []
+            operand = parameters[0] if parameters else None
+        return _unwrap(operand)
+
+    equality_columns = {_column_identity(equality.left), _column_identity(equality.right)}
+    null_columns = {_column_identity(_operand(left_null)), _column_identity(_operand(right_null))}
+    if None in equality_columns or equality_columns != null_columns:
+        return None
+
+    return equality
+
+
+def _split_correlations(condition):
+    """
+    Split a conjunction into (correlations, remaining).
+
+    A correlation is an equality with exactly one side resolved to the enclosing
+    scope. Everything else stays inside the subquery.
+    """
+    condition = _unwrap(condition)
+    if condition is None:
+        return [], None
+
+    null_safe = _match_null_safe_eq(condition)
+    if null_safe is not None and _is_outer(null_safe.left) != _is_outer(null_safe.right):
+        return [null_safe], None
+
+    if condition.node_type == NodeType.AND:
+        left_corr, left_rest = _split_correlations(_unwrap(condition.left))
+        right_corr, right_rest = _split_correlations(_unwrap(condition.right))
+        if left_rest is None:
+            remaining = right_rest
+        elif right_rest is None:
+            remaining = left_rest
+        else:
+            remaining = Node(node_type=NodeType.AND, do_not_create_column=True)
+            remaining.left = left_rest
+            remaining.right = right_rest
+        return left_corr + right_corr, remaining
+
+    if (
+        condition.node_type == NodeType.COMPARISON_OPERATOR
+        and condition.value == "Eq"
+        and _is_outer(condition.left) != _is_outer(condition.right)
+    ):
+        return [condition], None
+
+    return [], condition
+
+
+def _find_outer_reference(node):
+    """The first still-correlated column reference under `node`, or None."""
+    if node is None:
+        return None
+    if _is_outer(node):
+        return node
+    for attr in ("left", "right", "centre"):
+        found = _find_outer_reference(getattr(node, attr, None))
+        if found is not None:
+            return found
+    for param in getattr(node, "parameters", None) or []:
+        found = _find_outer_reference(param)
+        if found is not None:
+            return found
+    return None
+
+
+def _reject_residual_correlation(plan: LogicalPlan) -> None:
+    """
+    Fail loudly if the subquery still depends on the outer row after the equi
+    correlations have been lifted out.
+
+    Only equalities can become join keys. A correlation like
+    `WHERE t.a > outer.b` stays inside the subquery, where `outer.b` is out of
+    scope the moment the subquery becomes the join's right-hand relation. Left
+    alone that surfaces much later as an opaque "expression references column X
+    which the stream does not carry", so it is caught here with a description of
+    the actual limitation.
+    """
+    for _nid, node in plan.nodes(True):
+        for candidate in (node.condition, *(node.columns or [])):
+            found = _find_outer_reference(candidate)
+            if found is not None:
+                raise UnsupportedSyntaxError(
+                    "A correlated scalar subquery can only be decorrelated on equality "
+                    f"correlations; `{found.source_column}` correlates to the outer query "
+                    "through a non-equality predicate, which is not supported."
+                )
+
+
+def _aggregate_node(plan: LogicalPlan):
+    for nid, node in plan.nodes(True):
+        if node.node_type in (
+            LogicalPlanStepType.Aggregate,
+            LogicalPlanStepType.AggregateAndGroup,
+        ):
+            return nid, node
+    return None, None
+
+
+def _expose_key(plan: LogicalPlan, key_column) -> None:
+    """
+    Group the subquery's aggregate by `key_column` and project it, so the
+    decorrelated relation emits one row per correlation key and the join can
+    match on it.
+    """
+    _, aggregate = _aggregate_node(plan)
+    if aggregate is None:
+        raise UnsupportedSyntaxError(
+            "Correlated scalar subquery could not be decorrelated: it has no aggregate. "
+            "Rewrite using EXISTS or IN."
+        )
+
+    if aggregate.node_type == LogicalPlanStepType.Aggregate:
+        # An ungrouped Aggregate becomes grouped. AggregateAndGroup additionally
+        # requires `projection` (its output column list, aggregates + keys) — a
+        # plain Aggregate carries no such attribute, so it has to be built here or
+        # the physical node fails with KeyError('projection').
+        aggregate.node_type = LogicalPlanStepType.AggregateAndGroup
+        aggregate.groups = [key_column]
+        aggregate.projection = list(aggregate.aggregates or []) + [key_column]
+    else:
+        aggregate.groups = list(aggregate.groups or []) + [key_column]
+        aggregate.projection = list(aggregate.projection or []) + [key_column]
+
+    aggregate.columns = list(aggregate.columns or []) + [key_column]
+
+    # The key has to survive every projection above the aggregate or it is not
+    # visible to the join.
+    for _nid, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Project:
+            node.columns = list(node.columns or []) + [key_column]
+
+
+def _projecting_node(plan: LogicalPlan):
+    """
+    The node in `plan` that defines its output columns.
+
+    Not necessarily the exit: DISTINCT, HAVING, LIMIT and ORDER BY all sit above the
+    projection and pass it through. Returns None if nothing projects.
+    """
+    projecting = (
+        LogicalPlanStepType.Project,
+        LogicalPlanStepType.Aggregate,
+        LogicalPlanStepType.AggregateAndGroup,
+        LogicalPlanStepType.Union,
+    )
+    frontier = [plan.get_exit_points()[0]]
+    seen: set = set()
+    while frontier:
+        nid = frontier.pop(0)
+        if nid in seen:
+            continue
+        seen.add(nid)
+        candidate = plan[nid]
+        if candidate is not None and candidate.node_type in projecting:
+            return candidate
+        frontier.extend(child for child, _t, _r in plan.ingoing_edges(nid))
+    return None
+
+
+def _output_column(plan: LogicalPlan):
+    """
+    The schema column a scalar subquery evaluates to.
+
+    This is the column its TOP node emits, which is not necessarily the aggregate:
+    `SELECT 0.2 * AVG(x)` projects an arithmetic expression over the aggregate, and
+    substituting the bare AVG for it would silently drop the `0.2 *` and answer a
+    different question. Canonical TPC-H Q17 and Q20 are both this shape.
+
+    Must be read BEFORE the correlation key is appended to the projection.
+    """
+    # The exit is not always the node that DEFINES the output. `SELECT DISTINCT x`
+    # exits through a Distinct, and `GROUP BY ... HAVING ...` exits through the
+    # HAVING Filter (canonical TPC-H Q18). Those are row filters/reshapers that pass
+    # their input's columns through.
+    #
+    # Crucially, `node.columns` does NOT mean the same thing on every node: on a
+    # Project it is the OUTPUT list, but on a Filter it is the columns the predicate
+    # READS. Trusting it anywhere would pick Q18's `l_quantity` (from
+    # `HAVING SUM(l_quantity) > 300`) as the subquery's output instead of
+    # `l_orderkey`. So only nodes that genuinely define a projection are consulted.
+    node = _projecting_node(plan)
+
+    if node is not None and node.node_type in (
+        LogicalPlanStepType.Aggregate,
+        LogicalPlanStepType.AggregateAndGroup,
+    ):
+        columns = list(node.projection or node.aggregates or [])
+    else:
+        columns = list(node.columns or []) if node is not None else []
+    if not columns:
+        _, aggregate = _aggregate_node(plan)
+        if aggregate is None or not aggregate.aggregates:
+            raise UnsupportedSyntaxError(
+                "Correlated scalar subquery could not be decorrelated: it produces no column."
+            )
+        return aggregate.aggregates[0].schema_column
+    if len(columns) != 1:
+        raise UnsupportedSyntaxError(
+            f"A scalar subquery must return exactly one column, this one returns {len(columns)}."
+        )
+    return columns[0].schema_column
+
+
+def _collect_relations(plan: LogicalPlan, root_nid: str):
+    """
+    Walk a subtree and gather (relation names, {name: schema}) for the relations
+    it exposes.
+
+    A Join created after binding still has to look like a bound Join: downstream
+    strategies read `schemas` / `left_relation_names` / `right_relation_names`
+    off it. The binder builds those from its BindingContext, which does not exist
+    here, so they are reconstructed from the already-bound nodes underneath.
+    """
+    relations: set = set()
+    schemas: dict = {}
+    stack = [root_nid]
+    seen: set = set()
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        node = plan[nid]
+        schema = node.schema
+        if schema is not None:
+            name = node.alias or node.relation or schema.name
+            schemas[name] = schema
+            relations.add(name)
+        for child, _target, _relation in plan.ingoing_edges(nid):
+            stack.append(child)
+    return relations, schemas
+
+
+def _reference_to(column) -> LogicalColumn:
+    """
+    A bound IDENTIFIER referring to an already-bound schema column.
+
+    `source` matters: predicate pushdown attributes a join condition to a leg by
+    the column's relation, and a reference without one is treated as belonging to
+    neither — the ON condition is then pulled apart and the join is left with
+    `on = None`.
+    """
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column=column.name,
+        source=(column.origin[0] if column.origin else None),
+        schema_column=column,
+    )
+
+
+def _local_copy(column) -> LogicalColumn:
+    """
+    Copy a column reference, clearing the correlated marker.
+
+    Once the subquery boundary is gone the reference is an ordinary column of one
+    of the join's legs, so leaving it flagged would make a later pass treat it as
+    still pointing out of scope.
+    """
+    local = column.copy()
+    local.is_outer_reference = False
+    local.outer_relation = None
+    return local
+
+
+def _has_work(condition) -> bool:
+    return any(
+        finder(condition)[0] is not None
+        for finder in (_find_subquery, _find_exists, _find_in)
+    )
+
+
+class DecorrelateSubqueryStrategy(OptimizationStrategy):
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        return any(
+            node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
+            for _, node in plan.nodes(True)
+        )
+
+    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+        if not context.optimized_plan:
+            context.optimized_plan = context.pre_optimized_tree.copy()
+
+        if node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition):
+            context.collected_decorrelations.append(context.node_id)
+
+        return context
+
+    # Each pass removes at least one subquery, so this only bounds a rewrite that
+    # fails to make progress. Far above any real query's nesting depth.
+    MAX_ROUNDS = 100
+
+    def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
+        # Graph inserts are deferred to complete(): mutating during traversal
+        # corrupts the walk.
+        #
+        # Re-scan rather than trusting what visit() collected. A subquery's own plan
+        # can contain further subqueries (canonical TPC-H Q20 nests IN inside IN
+        # inside a scalar subquery); grafting it in brings those Filter nodes into
+        # this plan AFTER the traversal that collected candidates, so they would
+        # otherwise never be rewritten and a SUBQUERY node would reach the engine.
+        for _round in range(self.MAX_ROUNDS):
+            targets = [
+                nid
+                for nid, node in plan.nodes(True)
+                if node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
+            ]
+            if not targets:
+                break
+            plan = self._rewrite_filters(plan, targets)
+        else:
+            raise InvalidInternalStateError(
+                f"subquery decorrelation did not converge after {self.MAX_ROUNDS} rounds"
+            )
+        context.collected_decorrelations = []
+        return plan
+
+    def _rewrite_filters(self, plan: LogicalPlan, filter_nids) -> LogicalPlan:
+        for filter_nid in filter_nids:
+            # One predicate can hold several subqueries (`EXISTS (...) AND
+            # x < (SELECT ...)`). Each pass removes exactly one, so keep going
+            # until none remain — otherwise a SUBQUERY node survives into the
+            # compiled expression and the engine fails on an unknown node type.
+            #
+            # EXISTS is drained first: it can delete the Filter outright (when the
+            # existence test was the whole predicate), and a scalar pass would then
+            # be looking at a node that is no longer in the plan.
+            for finder, rewrite in (
+                (_find_exists, _decorrelate_exists),
+                (_find_in, _decorrelate_in),
+                (_find_subquery, _decorrelate),
+            ):
+                while filter_nid in plan and finder(plan[filter_nid].condition)[0] is not None:
+                    plan = rewrite(plan, filter_nid, self.telemetry)
+        return plan
+
+
+def _lift_correlations(inner_plan: LogicalPlan):
+    """
+    Pull correlated equalities out of a subquery's own filters.
+
+    Returns (key_pairs, residual) where key_pairs is [(inner_col, outer_col)] and
+    residual is the conjunction of correlated NON-equality predicates that remain
+    (or None). Uncorrelated predicates stay inside the subquery untouched.
+
+    Orientation comes from the binder's resolution, not from the query text — see
+    the module docstring.
+    """
+    correlations: list = []
+    for inner_nid, inner_node in list(inner_plan.nodes(True)):
+        if inner_node.node_type != LogicalPlanStepType.Filter:
+            continue
+        found, remaining = _split_correlations(inner_node.condition)
+        if not found:
+            continue
+        correlations.extend(found)
+        if remaining is None:
+            inner_plan.remove_node(inner_nid, heal=True)
+        else:
+            inner_node.condition = remaining
+            inner_node.columns = [
+                column
+                for column in (inner_node.columns or [])
+                if not column.is_outer_reference
+            ]
+
+    key_pairs = []
+    for correlation in correlations:
+        if _is_outer(correlation.left):
+            key_pairs.append((correlation.right, correlation.left))
+        else:
+            key_pairs.append((correlation.left, correlation.right))
+
+    # Whatever still points outwards is a correlated non-equality.
+    residual = None
+    for inner_nid, inner_node in list(inner_plan.nodes(True)):
+        if inner_node.node_type != LogicalPlanStepType.Filter:
+            continue
+        if _find_outer_reference(inner_node.condition) is None:
+            continue
+        residual = inner_node.condition if residual is None else residual
+        inner_plan.remove_node(inner_nid, heal=True)
+
+    return key_pairs, residual
+
+
+def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
+    """
+    Turn `x IN (subquery)` into a SEMI join and `x NOT IN` into a NULL-AWARE ANTI join.
+
+    IN is EXISTS with one extra key: the membership test itself pairs the outer
+    expression with the subquery's single output column. Any genuine correlation
+    inside the subquery simply contributes further keys — which is why moving this
+    here gains correlated `IN`, something the pre-bind rewrite never supported.
+
+    NOT IN is null-aware and EXISTS is not: `x NOT IN (SELECT y ...)` yields nothing
+    at all when any y is NULL, because `x <> NULL` is unknown rather than true. That
+    is carried by the join TYPE (`left anti null-aware`), so it must not be
+    "simplified" to a plain anti join.
+    """
+    filter_node = plan[filter_nid]
+    in_node, _replace = _find_in(filter_node.condition)
+    if in_node is None:
+        return plan
+
+    negated = bool(in_node.negated)
+    inner_plan = in_node.right.value
+
+    # The subquery's single output column is one side of the membership test. This
+    # is also the "exactly one column" rule for an IN subquery.
+    membership_column = _output_column(inner_plan)
+    # A computed output (`SELECT CASE ... END`) is minted into `$derived` and has no
+    # origin, and a key reference with no source is attributed to neither leg — the
+    # join then comes out with empty key lists and is rejected. Name the relation.
+    if not membership_column.origin:
+        membership_column.origin = [f"$in-{random_string(6)}"]
+
+    key_pairs, residual = _lift_correlations(inner_plan)
+    key_pairs = [(_reference_to(membership_column), in_node.left)] + key_pairs
+
+    return _build_filter_join(
+        plan,
+        filter_nid,
+        inner_plan,
+        remove=in_node,
+        join_type="left anti null-aware" if negated else "left semi",
+        key_pairs=key_pairs,
+        residual=residual,
+        telemetry=telemetry,
+        counter="optimization_decorrelate_in_subquery",
+        replace_projection=False,
+    )
+
+
+def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
+    """
+    Turn `EXISTS (subquery)` into a SEMI join and `NOT EXISTS` into an ANTI join.
+
+    EXISTS is a boolean test, not a value: nothing from the subquery is read, so
+    unlike the scalar case there is no output column to substitute and no
+    aggregate to group. The existence test becomes the join itself, and the
+    EXISTS node is simply removed from the predicate.
+    """
+    filter_node = plan[filter_nid]
+    exists_node, _replace = _find_exists(filter_node.condition)
+    if exists_node is None:
+        return plan
+
+    negated = bool(exists_node.negated)
+    subquery = exists_node.parameters[0]
+    inner_plan = subquery.value
+
+    key_pairs, residual = _lift_correlations(inner_plan)
+
+    if not key_pairs:
+        raise UnsupportedSyntaxError(
+            "EXISTS requires a correlated equality predicate linking the subquery to the "
+            "outer query (e.g. EXISTS (SELECT 1 FROM T WHERE T.k = outer.k)). "
+            "Uncorrelated EXISTS is not supported."
+        )
+
+    return _build_filter_join(
+        plan,
+        filter_nid,
+        inner_plan,
+        remove=exists_node,
+        join_type="left anti" if negated else "left semi",
+        key_pairs=key_pairs,
+        residual=residual,
+        telemetry=telemetry,
+        counter="optimization_decorrelate_exists_subquery",
+        replace_projection=True,
+    )
+
+
+def _build_filter_join(
+    plan: LogicalPlan,
+    filter_nid: str,
+    inner_plan: LogicalPlan,
+    remove,
+    join_type: str,
+    key_pairs,
+    residual,
+    telemetry,
+    counter: str,
+    replace_projection: bool,
+) -> LogicalPlan:
+    """
+    Replace a filtering subquery (EXISTS / IN) with a SEMI or ANTI join.
+
+    Shared by both because they differ only in where the keys come from and which
+    join type carries the semantics.
+    """
+    filter_node = plan[filter_nid]
+
+    # The subquery must emit the join keys, and anything the residual reads (it is
+    # evaluated per candidate pair). Target the node that defines the projection,
+    # which is not always the exit — see _output_column.
+    projection_node = _projecting_node(inner_plan)
+    if projection_node is not None and projection_node.node_type == LogicalPlanStepType.Project:
+        wanted = [_local_copy(inner_key) for inner_key, _ in key_pairs]
+        seen = {column.schema_column.identity for column in wanted}
+        for column in _inner_columns_of(residual):
+            if column.schema_column is not None and column.schema_column.identity not in seen:
+                seen.add(column.schema_column.identity)
+                wanted.append(_local_copy(column))
+        if replace_projection:
+            # EXISTS projects `SELECT 1`; the literal is useless to match on, so the
+            # projection is replaced outright by the keys.
+            projection_node.columns = wanted
+        else:
+            # IN already projects the membership column, and its projection may be
+            # feeding something above it (a HAVING filter reads columns the Project
+            # passes through — canonical TPC-H Q18). Only ADD what is missing.
+            existing = {
+                column.schema_column.identity
+                for column in (projection_node.columns or [])
+                if column.schema_column is not None
+            }
+            projection_node.columns = list(projection_node.columns or []) + [
+                column
+                for column in wanted
+                if column.schema_column is not None
+                and column.schema_column.identity not in existing
+            ]
+
+    # --- graft the subquery in as the join's right-hand relation --------------
+    outer_relations: set = set()
+    outer_schemas: dict = {}
+    for provider, _target, _relation in plan.ingoing_edges(filter_nid):
+        found_relations, found_schemas = _collect_relations(plan, provider)
+        outer_relations |= found_relations
+        outer_schemas.update(found_schemas)
+
+    inner_exit = inner_plan.get_exit_points()[0]
+    plan += inner_plan
+    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
+    # Any relation named by a key that this leg supplies must be known as one of
+    # its names, or the key resolves to neither side (see the `$in-` stamp above).
+    for inner_key, _outer_key in key_pairs:
+        origin = getattr(inner_key.schema_column, "origin", None)
+        if origin:
+            inner_relations.update(origin)
+
+    on_condition = None
+    for inner_key, outer_key in key_pairs:
+        equals = Node(
+            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        )
+        equals.left = _local_copy(outer_key)
+        equals.right = _local_copy(inner_key)
+        if on_condition is None:
+            on_condition = equals
+        else:
+            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction.left = on_condition
+            conjunction.right = equals
+            on_condition = conjunction
+
+    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join.type = join_type
+    join.on = on_condition
+    join.using = None
+    # Every column the join reads, keys AND residual. The residual is evaluated
+    # inside the existence test but lives on the node rather than in `on`, so
+    # omitting its columns here hides them from projection pushdown, which then
+    # prunes them off BOTH legs and the engine cannot evaluate the residual.
+    join.columns = [
+        column
+        for pair in key_pairs
+        for column in (_local_copy(pair[1]), _local_copy(pair[0]))
+    ] + [_local_copy(column) for column in _all_columns_of(residual)]
+    join.left_relation_names = sorted(outer_relations)
+    join.right_relation_names = sorted(inner_relations)
+    join.all_relations = outer_relations | inner_relations
+    join.schemas = {**outer_schemas, **inner_schemas}
+    join.left_columns, join.right_columns = extract_join_fields(
+        on_condition, join.left_relation_names, join.right_relation_names
+    )
+    # A correlated NON-equality cannot be a join key, and it cannot be a post-join
+    # filter either: SEMI/ANTI emit rows already collapsed to existence, so the
+    # inner side is gone by then. It rides on the join and is evaluated per
+    # candidate (build, probe) pair inside the existence test — see
+    # SemiAntiProbeOperator in native_join2.hpp.
+    join.residual = _clear_outer_markers(residual) if residual is not None else None
+
+    # The existence test IS the join now, so drop it from the predicate.
+    _, remaining = _split_out(filter_node.condition, remove)
+
+    if remaining is None:
+        # Nothing left to filter: the Filter node BECOMES the join, in place.
+        # Deleting it and healing instead leaves other passes holding a node id
+        # that no longer resolves (redundant_operators then reads None.alias).
+        plan[filter_nid] = join
+        plan.add_edge(inner_exit, filter_nid)
+    else:
+        filter_node.condition = remaining
+        filter_node.columns = [
+            column
+            for column in (filter_node.columns or [])
+            if column.node_type == NodeType.IDENTIFIER
+        ]
+        join_nid = random_string()
+        plan.insert_node_before(join_nid, join, filter_nid)
+        plan.add_edge(inner_exit, join_nid)
+
+    setattr(telemetry, counter, getattr(telemetry, counter, 0) + 1)
+    return plan
+
+
+def _all_columns_of(node):
+    """Every identifier under `node`, from either side of the correlation."""
+    if node is None:
+        return []
+    if node.node_type == NodeType.IDENTIFIER:
+        return [node]
+    found: list = []
+    for attr in ("left", "right", "centre"):
+        found.extend(_all_columns_of(getattr(node, attr, None)))
+    for param in getattr(node, "parameters", None) or []:
+        found.extend(_all_columns_of(param))
+    return found
+
+
+def _inner_columns_of(node):
+    """Every non-correlated identifier under `node`."""
+    if node is None:
+        return []
+    if node.node_type == NodeType.IDENTIFIER:
+        return [] if _is_outer(node) else [node]
+    found: list = []
+    for attr in ("left", "right", "centre"):
+        found.extend(_inner_columns_of(getattr(node, attr, None)))
+    for param in getattr(node, "parameters", None) or []:
+        found.extend(_inner_columns_of(param))
+    return found
+
+
+def _clear_outer_markers(node):
+    """
+    Strip the correlated marker from a residual before it rides on the join.
+
+    Both legs are ordinary inputs of the join by then, so a reference left flagged
+    would read as still pointing out of scope.
+    """
+    if node is None:
+        return None
+    if node.node_type == NodeType.IDENTIFIER:
+        return _local_copy(node) if _is_outer(node) else node
+    for attr in ("left", "right", "centre"):
+        child = getattr(node, attr, None)
+        if child is not None:
+            setattr(node, attr, _clear_outer_markers(child))
+    parameters = getattr(node, "parameters", None)
+    if parameters:
+        node.parameters = [_clear_outer_markers(p) for p in parameters]
+    return node
+
+
+def _split_out(condition, target):
+    """
+    Remove `target` from a conjunction.
+
+    Returns (found, remaining); remaining is None when `target` was the whole
+    predicate.
+    """
+    if condition is None:
+        return False, None
+    if condition is target:
+        return True, None
+    if condition.node_type == NodeType.AND:
+        found_left, left = _split_out(condition.left, target)
+        found_right, right = _split_out(condition.right, target)
+        if not (found_left or found_right):
+            return False, condition
+        if left is None:
+            return True, right
+        if right is None:
+            return True, left
+        condition.left, condition.right = left, right
+        return True, condition
+    return False, condition
+
+
+def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
+    filter_node = plan[filter_nid]
+    subquery, replace_subquery = _find_subquery(filter_node.condition)
+    if subquery is None:
+        return plan
+
+    inner_plan = subquery.value
+
+    # --- pull the correlation out of the subquery -----------------------------
+    key_pairs, residual = _lift_correlations(inner_plan)
+
+    # A scalar subquery yields a VALUE, so a correlated non-equality has nowhere to
+    # go: unlike SEMI/ANTI there is no per-pair existence test to fold it into.
+    # Reject it here, while the cause is still legible.
+    if residual is not None:
+        found = _find_outer_reference(residual)
+        raise UnsupportedSyntaxError(
+            "A correlated scalar subquery can only be decorrelated on equality "
+            f"correlations; `{found.source_column if found else '?'}` correlates to the "
+            "outer query through a non-equality predicate, which is not supported."
+        )
+
+    if not key_pairs:
+        # Uncorrelated: the subquery does not depend on the outer row, so it is a
+        # single value joined to every row — a cross join against a one-row relation.
+        #
+        # "One row" has to be established, not assumed: an ungrouped aggregate always
+        # yields exactly one row, but a GROUP BY (or no aggregate at all) can yield
+        # many, and cross-joining that would silently MULTIPLY the outer rows rather
+        # than raise the "more than one row returned by a subquery" that SQL requires.
+        _, aggregate = _aggregate_node(inner_plan)
+        if aggregate is None or aggregate.node_type != LogicalPlanStepType.Aggregate:
+            raise UnsupportedSyntaxError(
+                "An uncorrelated scalar subquery must return exactly one row; only an "
+                "ungrouped aggregate is supported here."
+            )
+
+    # Read the subquery's value column before the key widens the projection.
+    value_column = _output_column(inner_plan)
+
+    # Once decorrelated the subquery IS a relation, so its output column needs to
+    # name one. An aggregate's output column has no origin (it is minted into the
+    # `$derived` pseudo-schema), and a reference with no source belongs to neither
+    # leg as far as the join operator is concerned — `HashedInnerJoinNode.supports`
+    # rejects the join outright. This bites specifically when the value column
+    # reaches the ON condition, which happens once cross-join-filter pushdown folds
+    # `CROSS JOIN + WHERE x = <value>` into an equi-join.
+    scalar_alias = f"$scalar-{random_string(6)}"
+    if not value_column.origin:
+        value_column.origin = [scalar_alias]
+
+    for inner_key, _outer_key in key_pairs:
+        _expose_key(inner_plan, inner_key)
+
+    # --- the subquery's value becomes an ordinary column ----------------------
+    filter_node.condition = replace_subquery(_reference_to(value_column))
+    filter_node.columns = [
+        column for column in (filter_node.columns or []) if column.node_type == NodeType.IDENTIFIER
+    ] + [_reference_to(value_column)]
+
+    # --- graft the subquery in as a joined relation ---------------------------
+    # Capture the outer leg BEFORE rewiring: insert_node_before moves every
+    # provider of the filter onto the join, so this is the join's left input.
+    outer_relations: set = set()
+    outer_schemas: dict = {}
+    for provider, _target, _relation in plan.ingoing_edges(filter_nid):
+        found_relations, found_schemas = _collect_relations(plan, provider)
+        outer_relations |= found_relations
+        outer_schemas.update(found_schemas)
+
+    inner_exit = inner_plan.get_exit_points()[0]
+    plan += inner_plan
+    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
+    # The alias stamped onto the value column above has to be a known name of this
+    # leg, or a reference carrying it still resolves to neither side.
+    inner_relations.add(scalar_alias)
+
+    on_condition = None
+    for inner_key, outer_key in key_pairs:
+        equals = Node(
+            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        )
+        equals.left = _local_copy(outer_key)
+        equals.right = _local_copy(inner_key)
+        if on_condition is None:
+            on_condition = equals
+        else:
+            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction.left = on_condition
+            conjunction.right = equals
+            on_condition = conjunction
+
+    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    # No correlation means no key to join on: the subquery is one value attached
+    # to every outer row, which is exactly a cross join.
+    join.type = "inner" if key_pairs else "cross join"
+    join.on = on_condition
+    join.using = None
+    # The join's referenced columns. This must be populated: projection pushdown
+    # only harvests a node's identities when `node.columns` is truthy, so leaving
+    # it empty hides the join keys from that pass, which then prunes the key out
+    # of the subquery's projection and leaves the build side unable to supply it.
+    # A cross join has no keys, so the subquery's VALUE column takes that role —
+    # it is the only thing the outer query needs from that leg.
+    join.columns = [
+        column
+        for pair in key_pairs
+        for column in (_local_copy(pair[1]), _local_copy(pair[0]))
+    ] or [_reference_to(value_column)]
+    join.left_relation_names = sorted(outer_relations)
+    join.right_relation_names = sorted(inner_relations)
+    join.all_relations = outer_relations | inner_relations
+    join.schemas = {**outer_schemas, **inner_schemas}
+
+    # The binder derives a join's key lists from its ON condition, but it ran
+    # before this join existed and nothing recomputes them later — so they are
+    # derived here, with the same helper, or the engine rejects the join for
+    # having unaligned keys.
+    if key_pairs:
+        join.left_columns, join.right_columns = extract_join_fields(
+            on_condition, join.left_relation_names, join.right_relation_names
+        )
+    else:
+        join.left_columns, join.right_columns = [], []
+
+    join_nid = random_string()
+    plan.insert_node_before(join_nid, join, filter_nid)
+    plan.add_edge(inner_exit, join_nid)
+
+    telemetry.optimization_decorrelate_scalar_subquery = (
+        getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1
+    )
+    return plan

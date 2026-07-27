@@ -60,6 +60,9 @@ class OptimizerContext:
         self.collected_predicates: list = []
         """We collect predicates we should be able to push to reads and joins"""
 
+        self.collected_decorrelations: list = []
+        """Filter nodes holding a scalar subquery, decorrelated in complete()"""
+
         self.collected_identities: set = set()
         """We collect column identities so we can push column selection as close to the read as possible, including off to remote systems"""
 

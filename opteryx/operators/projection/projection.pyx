@@ -39,20 +39,26 @@ cdef class ProjectionNode(BasePlanNode):
         """
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
-        # Both `projection` and `order_by_columns` may arrive as None (not just
+        # `passthrough_columns` are columns this Project must COMPUTE AND EMIT for a
+        # consumer above it (ORDER BY, HAVING) that are not part of the query's output
+        # row. They ride in the morsel alongside `projection` and are dropped at the
+        # Exit node, which prunes to the SELECT list. Contrast `hoisted_columns` below,
+        # which are computed but never emitted.
+        #
+        # Both `projection` and `passthrough_columns` may arrive as None (not just
         # absent): the optimizer treats a node's column lists as "iterable or None"
         # (projection_pushdown.py), and the physical planner forwards a None
-        # `order_by_columns` verbatim. This fires e.g. on COUNT(*) over a subquery,
-        # where pushdown leaves the inner Project with no ORDER BY columns. Normalise
-        # both to empty lists — None means "no columns here", never a passthrough.
+        # `passthrough_columns` verbatim. This fires e.g. on COUNT(*) over a subquery,
+        # where pushdown leaves the inner Project with no pass-through columns.
+        # Normalise both to empty lists — None means "no columns here".
         proj = parameters["projection"] or []
-        order_by = parameters.get("order_by_columns") or []
+        passthrough = parameters.get("passthrough_columns") or []
         # Columns a fused Project must compute for internal use (a lower-Project
         # expression referenced 2+ times by this node's own columns) but never
         # exposes in its output row — see project_fusion.py. Ordered first so a
         # later program can load an earlier one's output by identity.
         hoisted = parameters.get("hoisted_columns") or []
-        projection = proj + order_by
+        projection = proj + passthrough
 
         self.projection = []
         for column in projection:
