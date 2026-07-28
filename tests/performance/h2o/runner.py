@@ -150,6 +150,26 @@ def main() -> int:
 
     workloads = ["groupby", "join"] if args.workload == "both" else [args.workload]
 
+    warm_table = (
+        f"testdata.h2o.{args.size}.x_groupby"
+        if "groupby" in workloads
+        else f"testdata.h2o.{args.size}.x"
+    )
+    print("Warming up (cold start)...")
+    start = time.monotonic()
+    warm_session = None
+    try:
+        warm_session = opteryx.session()
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {warm_table};"):
+            pass
+        cold_time_ms = (time.monotonic() - start) * 1000.0
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    except Exception as e:
+        print(f"Cold start failed: {e}\n")
+    finally:
+        if warm_session is not None:
+            warm_session.close()
+
     duckdb_min, duckdb_machine = load_duckdb_baseline(
         str(HERE / "duckdb" / f"results.{args.size}.json")
     )

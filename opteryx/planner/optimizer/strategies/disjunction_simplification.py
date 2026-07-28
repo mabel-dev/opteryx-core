@@ -82,6 +82,29 @@ def _build_or(predicates: List[Node]) -> Optional[Node]:
     return result
 
 
+def _predicate_key(pred: Node) -> str:
+    """Canonical dedup/factoring key for one AND-conjunct leaf.
+
+    format_expression() renders by NAME, not by bound identity — so two
+    predicates on DIFFERENT columns that merely share a name (e.g. two
+    self-join aliases: n1.n_name vs n2.n_name) render IDENTICALLY. Keying
+    purely on that text made cross-clause dedup/absorption/factoring below
+    collapse `(n1.n_name=A AND n2.n_name=B) OR (n1.n_name=B AND n2.n_name=A)`
+    into a single branch — both branches render to the same *set* of strings
+    even though they bind to opposite columns — silently dropping the second
+    branch and changing the query's result. Appending each referenced column's
+    schema_column.identity disambiguates them: two predicates only share a key
+    now if they are actually the same predicate on the same bound column, not
+    merely same-looking text.
+    """
+    identities = sorted(
+        str(node.schema_column.identity)
+        for node in get_all_nodes_of_type(pred, (NodeType.IDENTIFIER,))
+        if node.schema_column is not None
+    )
+    return format_expression(pred) + "‖" + ",".join(identities)
+
+
 def _simplify_disjunction(condition: Node) -> Optional[Node]:
     """
     Apply DNF simplification to an OR-rooted condition. Returns a new condition
@@ -97,7 +120,7 @@ def _simplify_disjunction(condition: Node) -> Optional[Node]:
     for branch in branches:
         clause: Dict[str, Node] = {}
         for pred in _split_and(branch):
-            clause[format_expression(pred)] = pred
+            clause[_predicate_key(pred)] = pred
         if clause:
             branch_clauses.append(clause)
 

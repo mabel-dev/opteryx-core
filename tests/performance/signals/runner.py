@@ -125,6 +125,21 @@ def main() -> int:
         print(f"[!] no queries matched in {args.queries_dir}")
         return 1
 
+    print("Warming up (cold start)...")
+    start = time.monotonic()
+    warm_session = None
+    try:
+        warm_session = opteryx.session()
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM '{args.dataset}';"):
+            pass
+        cold_time_ms = (time.monotonic() - start) * 1000.0
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    except Exception as e:
+        print(f"Cold start failed: {e}\n")
+    finally:
+        if warm_session is not None:
+            warm_session.close()
+
     print_banner(
         title="Signals benchmark",
         opteryx_version=opteryx.__version__,

@@ -326,11 +326,16 @@ if __name__ == "__main__":  # pragma: no cover
     if args.profile:
         import collections
 
-        # A query's accurate per-operator SELF time only accrues with tracing on
-        # (it lets push() subtract downstream_time out of the inclusive
-        # execution_time). The only sanctioned path that flips tracing on every
-        # node is EXPLAIN ANALYZE, so we drive each query that way in a SEPARATE
-        # pass — the benchmark numbers above stay tracing-free and honest.
+        from opteryx.utils import mermaid as _mermaid
+
+        # Real per-operator self-time only exists once the query has actually run:
+        # the physical-plan Python objects never execute on the native engine (the
+        # C++ engine does), so their own execution_time/sensors() counters stay
+        # zero — mermaid._collect_node_stats() is what overlays the native engine's
+        # per-identity readings (telemetry._reading["native_op_stats"]) back onto
+        # the plan nodes; it's the same lookup EXPLAIN ANALYZE (TEXT format) uses
+        # for its own self-time column. We drive each query via EXPLAIN ANALYZE in
+        # a SEPARATE pass — the benchmark numbers above stay tracing-free and honest.
         print(f"\n{'=' * 80}")
         print("PER-OPERATOR PROFILE (tracing pass — EXPLAIN ANALYZE self-time)")
         print(f"{'=' * 80}\n")
@@ -350,12 +355,16 @@ if __name__ == "__main__":  # pragma: no cover
                 for _ in session.execute_to_morsels(f"EXPLAIN ANALYZE {statement}"):
                     pass
 
+                node_stats_by_nid, _, _ = _mermaid._collect_node_stats(session._plan)
                 op_self = collections.defaultdict(int)
                 for nid in session._plan.nodes():
                     node = session._plan[nid]
                     if node is None or node.name in ("Explain", "Exit"):
                         continue
-                    op_self[node.name] += node.sensors().get("self_time", 0)
+                    stat = node_stats_by_nid.get(nid)
+                    if stat is None:
+                        continue
+                    op_self[node.name] += stat.get("self_time", 0)
 
                 for name, t in op_self.items():
                     suite_self[name] += t

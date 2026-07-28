@@ -127,6 +127,22 @@ def main() -> int:
     baseline_path = _resolve_baseline_path(args.duckdb_baseline)
     duckdb_min, duckdb_machine = _load_clickbench_baseline(baseline_path)
 
+    # Cold start
+    print("Warming up (cold start)...")
+    start = time.monotonic_ns()
+    warm_session = None
+    try:
+        warm_session = opteryx.session()
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET.value};"):
+            pass
+        cold_time_ms = (time.monotonic_ns() - start) / 1e6
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    except Exception as e:
+        print(f"Cold start failed: {e}\n")
+    finally:
+        if warm_session is not None:
+            warm_session.close()
+
     print_banner(
         title="CLICKBENCH BENCHMARK",
         opteryx_version=opteryx.__version__,

@@ -6,6 +6,7 @@ from .decorrelate_subquery import DecorrelateSubqueryStrategy
 from .cross_join_chain_reorder import CrossJoinChainReorderStrategy
 from .cross_join_filter_pushdown import CrossJoinFilterPushdownStrategy
 from .disjunction_simplification import DisjunctionSimplificationStrategy
+from .disjunctive_domain_pushdown import DisjunctiveDomainPushdownStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
 from .hash_map_variant import HashMapVariantStrategy
 from .join_elimination import JoinEliminationStrategy
@@ -43,6 +44,7 @@ __all__ = [
     "CrossJoinChainReorderStrategy",
     "CrossJoinFilterPushdownStrategy",
     "DisjunctionSimplificationStrategy",
+    "DisjunctiveDomainPushdownStrategy",
     "DistinctPushdownStrategy",
     "HashMapVariantStrategy",
     "JoinEliminationStrategy",

@@ -11,8 +11,12 @@ helpers. We capture its inputs at runtime by intercepting the call inside the
 strategy, then assert on the resulting graph. End-to-end driving keeps the
 test honest — hand-built mock plans drift from binder output.
 
-Adapter requires manifests on scan nodes; ``$planets`` is a virtual dataset
-without a manifest, so tests use real parquet datasets in ``testdata/``.
+Adapter requires manifests on Scan nodes, so tests use real parquet datasets
+in ``testdata/``. ``READ_JSONL(...)`` relations are ``FunctionDataset`` nodes,
+not ``Scan`` nodes, so the adapter never finds a manifest for them — that's
+the one reachable "no stats" case (every virtual dataset like ``$planets``
+now carries an explicit ``row_count_metric``/``row_count_estimate``, so none
+of them exercise this branch any more).
 """
 
 import os
@@ -120,10 +124,13 @@ def test_vertex_row_count_uses_manifest():
 
 
 def test_no_manifest_returns_none():
-    """Virtual datasets like $planets have no manifest; adapter bails."""
+    """READ_JSONL relations are FunctionDataset nodes, not Scan nodes; the
+    adapter can't find a manifest for them, so it bails."""
     sql = """
     SELECT a.id AS ai, b.id AS bi, c.id AS ci
-    FROM $planets a, $planets b, $planets c
+    FROM READ_JSONL('testdata/jsonl_perf/data.jsonl') AS a,
+         READ_JSONL('testdata/jsonl_perf/data.jsonl') AS b,
+         READ_JSONL('testdata/jsonl_perf/data.jsonl') AS c
     WHERE a.id = b.id AND b.id = c.id LIMIT 1
     """
     graphs = _capture_graphs(sql)

@@ -51,11 +51,13 @@ from draken.core.buffers cimport (
     DRAKEN_DECIMAL128,
     DRAKEN_ARRAY,
     DRAKEN_NULL,
+    DRAKEN_VECTOR_FP16,
     DrakenStringArena,
     DrakenStringSlot,
     str_data,
     str_length,
 )
+from draken.core.fp16 cimport draken_fp16_to_fp32
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
 
@@ -259,7 +261,9 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef int dec_w
     cdef long mul
     cdef int64_t months, us, days, millis
-    cdef object unit, scale_obj, prec_obj
+    cdef object unit, scale_obj, prec_obj, dim_obj
+    cdef uint32_t dim
+    cdef const uint16_t* fp16_data
     # ARRAY locals
     cdef Vector child
     cdef const DrakenVector* cdv
@@ -975,12 +979,69 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 str_store.push_back(elem_s); ci.strs = str_store.back().data()
                 ci.num_elements = str_store.back().size()
 
+        elif t == DRAKEN_VECTOR_FP16:
+            # No native Parquet vector type: emit as LIST<DOUBLE>, the same
+            # shape as the ARRAY-of-FLOAT64 branch above. VECTOR_FP16 storage
+            # is dense fixed-width (every non-null row has exactly `dimension`
+            # values, never a per-element null), so this is simpler than the
+            # general ARRAY case: no child vector, no variable row length.
+            # The VECTOR_FP16 tag itself does not survive — a rugo re-read of
+            # this column comes back as an ordinary ARRAY<FLOAT64>. Parquet
+            # has no vector type to preserve it as; accepted as a deliberate,
+            # one-way conversion rather than rejecting the column outright.
+            dim_obj = v._nb.logical_type_dimension
+            if dim_obj is None:
+                raise ValueError(
+                    "write_parquet: VECTOR_FP16 column %r missing logical-type "
+                    "descriptor (dimension)" % (names[i],))
+            dim = <uint32_t><int>dim_obj
+            fp16_data = <const uint16_t*>dv.data
+
+            rep_v = vector[uint8_t]()
+            def_v = vector[uint8_t]()
+            elem_f64 = vector[double]()
+            row_lvl_off = vector[uint32_t]()
+            row_elem_off = vector[uint32_t]()
+
+            with nogil:
+                for j in range(nrows):
+                    row_lvl_off.push_back(<uint32_t>rep_v.size())
+                    row_elem_off.push_back(<uint32_t>elem_f64.size())
+                    p = sel[j]
+                    if dv.validity != NULL and not ((dv.validity[p >> 3] >> (p & 7)) & 1):
+                        rep_v.push_back(0); def_v.push_back(0)   # null vector -> null list
+                        continue
+                    for k in range(dim):
+                        rlev = 0 if k == 0 else 1  # ternary-in-push_back miscompiles
+                        rep_v.push_back(rlev)
+                        def_v.push_back(3)                       # present element
+                        elem_f64.push_back(
+                            <double>draken_fp16_to_fp32(fp16_data[<size_t>p * dim + <size_t>k]))
+                row_lvl_off.push_back(<uint32_t>rep_v.size())
+                row_elem_off.push_back(<uint32_t>elem_f64.size())
+
+            level_store.push_back(rep_v)
+            ci.rep_levels = level_store.back().data()
+            level_store.push_back(def_v)
+            ci.def_levels = level_store.back().data()
+            ci.num_levels = def_v.size()
+            row_offset_store.push_back(row_lvl_off)
+            ci.row_level_offsets = row_offset_store.back().data()
+            row_offset_store.push_back(row_elem_off)
+            ci.row_element_offsets = row_offset_store.back().data()
+            ci.is_array = True
+            ci.type = PT_BYTE_ARRAY  # placeholder; element type drives output
+            ci.elem_type = PT_DOUBLE
+            f64_store.push_back(elem_f64)
+            ci.f64 = f64_store.back().data()
+            ci.num_elements = f64_store.back().size()
+
         else:
             raise ValueError(
                 "write_parquet: unsupported column type %d for column %r "
                 "(supports INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL, VARCHAR/NVARCHAR/"
                 "VARBINARY/VARIANT, DATE32, TIME32/64, TIMESTAMP64, INTERVAL, "
-                "DECIMAL/DECIMAL128, ARRAY of those, NULL; FP16 not yet)"
+                "DECIMAL/DECIMAL128, ARRAY of those, NULL, VECTOR_FP16)"
                 % (<int>t, names[i])
             )
 

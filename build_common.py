@@ -879,6 +879,10 @@ def draken_rugo_extensions(parquet_created_by):
                     "third_party/zstd/compress",
                     "third_party/lz4",              # lz4.h
                     "third_party/miniz",            # miniz_tinfl.h / miniz.h
+                    # parquet_writer.pxi's VECTOR_FP16 branch -> core/fp16.h -> <fp16/fp16.h>.
+                    # draken_native and _kernel_registry already carry this; every extension
+                    # that touches core/fp16.h needs the same include.
+                    "third_party/usearch/fp16/include",
                 ]
             ),
             depends=[

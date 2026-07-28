@@ -13,7 +13,7 @@ from libcpp.vector cimport vector
 
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 
-from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY
+from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY, DRAKEN_VECTOR_FP16
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
 
@@ -25,6 +25,7 @@ cdef extern from "_text_render.hpp" namespace "rugo_text":
     vector[string] jsonl_write(const DrakenVector** dvs, const DrakenVector** childs,
                                const int* units, const int* scales,
                                const int* cunits, const int* cscales,
+                               const int* dims,
                                const string* prefixes, size_t ncols, size_t nrows) nogil
 
 
@@ -49,12 +50,13 @@ def write_jsonl(Morsel morsel not None):
     cdef int* scales = <int*>malloc(ncols * sizeof(int))
     cdef int* cunits = <int*>malloc(ncols * sizeof(int))
     cdef int* cscales = <int*>malloc(ncols * sizeof(int))
+    cdef int* dims = <int*>malloc(ncols * sizeof(int))
     cdef vector[string] prefixes   # pre-escaped  "name":
 
     cdef Vector v, cv
     cdef const DrakenVector* dv
     cdef Py_ssize_t c, i
-    cdef object nm, u, sc
+    cdef object nm, u, sc, dm
     cdef string namebuf
     cdef bytes nb_name
     cdef vector[string] chunks
@@ -69,13 +71,20 @@ def write_jsonl(Morsel morsel not None):
             dv = v.unified()
             dvs[c] = dv
             child_dvs[c] = NULL
-            units[c] = 0; scales[c] = 0; cunits[c] = 0; cscales[c] = 0
+            units[c] = 0; scales[c] = 0; cunits[c] = 0; cscales[c] = 0; dims[c] = 0
             u = v._nb.logical_type_unit
             if u is not None:
                 units[c] = _unit_code(u)
             sc = v._nb.logical_type_scale
             if sc is not None:
                 scales[c] = <int>sc
+            if dv.type == DRAKEN_VECTOR_FP16:
+                dm = v._nb.logical_type_dimension
+                if dm is None:
+                    raise ValueError(
+                        "write_jsonl: VECTOR_FP16 column %r missing logical-type "
+                        "descriptor (dimension)" % (names[c],))
+                dims[c] = <int>dm
             if dv.type == DRAKEN_ARRAY and v._nb.array_child_type is not None:
                 cv = Vector(v._nb.array_child)
                 child_vecs.append(cv)
@@ -94,7 +103,7 @@ def write_jsonl(Morsel morsel not None):
             prefixes.push_back(namebuf)
 
         with nogil:
-            chunks = jsonl_write(dvs, child_dvs, units, scales, cunits, cscales,
+            chunks = jsonl_write(dvs, child_dvs, units, scales, cunits, cscales, dims,
                                  prefixes.data(), <size_t>ncols, <size_t>nrows)
         for k in range(chunks.size()):
             total += chunks[k].size()
@@ -109,4 +118,4 @@ def write_jsonl(Morsel morsel not None):
         return result
     finally:
         free(dvs); free(child_dvs)
-        free(units); free(scales); free(cunits); free(cscales)
+        free(units); free(scales); free(cunits); free(cscales); free(dims)

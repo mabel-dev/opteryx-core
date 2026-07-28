@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 from typing import List
+from typing import Optional
 from typing import Tuple
 
 from opteryx.planner.cost_estimation.join_cardinality import KeyStats
@@ -31,6 +32,13 @@ class JoinEdge:
     equi_keys: Tuple[Tuple[KeyStats, KeyStats], ...] = ()
     extra_selectivity: float = 1.0
     payload: Any = None
+    # Equivalence-class id for this edge's join key (see
+    # plan_adapter._group_equivalence_classes). Two edges sharing a class_id
+    # restate the same transitive key identity — e.g. JOB's
+    # `t.id=mi.movie_id AND t.id=mk.movie_id AND mk.movie_id=mi.movie_id`
+    # triangle. ``None`` means "no known class" — never deduped against
+    # another edge, matching the historical (pre-dedup) behaviour.
+    class_id: Optional[int] = None
 
 
 def _bits(mask: int):

@@ -11,6 +11,7 @@
 #include "interop/value_format.hpp"  // moved into draken; resolved via -I draken
 
 #include "core/alloc.h"          // draken_free
+#include "core/fp16.h"           // draken_fp16_to_fp32 — VECTOR_FP16 renders as an array of floats
 #include "ops/vec_result.h"      // VecResult
 #include "ops/kernels/cast_kernels.h"
 
@@ -30,6 +31,7 @@ struct Col {
   const DrakenVector *child; // ARRAY element vector
   DrakenVector sv;           // string source (cast result OR original string col)
   int unit, scale, cunit, cscale;
+  int dim;                   // VECTOR_FP16 only: values per row
   char delim;
   EmitFn emit;               // resolved once per column
   void *free_data;           // cast result block to draken_free (else null)
@@ -119,6 +121,23 @@ static void ej_array(std::string &o, Col &c, size_t i) {
   for (int32_t k = s; k < e; k++) { if (k > s) o.push_back(','); render_json_scalar(o, c.child, (size_t)k, c.cunit, c.cscale); }
   o.push_back(']');
 }
+// VECTOR_FP16 has no wire representation in CSV/JSONL any more than Parquet
+// does — rendered as an array of floats (fp16->fp32, same conversion as the
+// Parquet writer's VECTOR_FP16 branch), matching ej_array/ec_array's style.
+// Storage is dense fixed-width (dv->data + p*dim, exactly `dim` values, no
+// per-element nulls), so there is no offsets buffer to read, unlike ARRAY.
+static void ej_fp16(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
+  uint32_t p = c.dv->selection[i];
+  const uint16_t *base = (const uint16_t *)c.dv->data + (size_t)p * (size_t)c.dim;
+  o.push_back('[');
+  for (int k = 0; k < c.dim; k++) {
+    if (k) o.push_back(',');
+    double v = (double)draken_fp16_to_fp32(base[k]);
+    if (double_is_nan_or_inf(v)) o.append("null"); else fmt_double(o, v);
+  }
+  o.push_back(']');
+}
 static void ej_null(std::string &o, Col &c, size_t i) { (void)c; (void)i; o.append("null"); }
 
 // ---- CSV cell emitters (null -> empty field) ----
@@ -155,6 +174,10 @@ static void ec_timestamp(std::string &o, Col &c, size_t i) {
 static void ec_array(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   c.scratch.clear(); ej_array(c.scratch, c, i); csv_field(o, c.scratch.data(), c.scratch.size(), c.delim);
+}
+static void ec_fp16(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) return;
+  c.scratch.clear(); ej_fp16(c.scratch, c, i); csv_field(o, c.scratch.data(), c.scratch.size(), c.delim);
 }
 static void ec_null(std::string &o, Col &c, size_t i) { (void)o; (void)c; (void)i; }
 
@@ -193,10 +216,10 @@ static inline void vr_to_dv(const VecResult &vr, DrakenVector &dv) {
 // Resolve one column: choose the cell emitter, and (for int/bool/date/ts) run
 // the batch cast kernel to produce the string source.
 static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *child,
-                        int unit, int scale, int cunit, int cscale, char delim,
+                        int unit, int scale, int cunit, int cscale, int dim, char delim,
                         bool csv) {
   c.dv = dv; c.child = child; c.unit = unit; c.scale = scale;
-  c.cunit = cunit; c.cscale = cscale; c.delim = delim;
+  c.cunit = cunit; c.cscale = cscale; c.dim = dim; c.delim = delim;
   c.free_data = nullptr; c.free_sel = nullptr;
   VecResult vr;
   bool quoted = false;
@@ -228,6 +251,8 @@ static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *chil
     c.sv = *dv; c.emit = csv ? ec_string : ej_string; return;
   case DRAKEN_ARRAY:
     c.emit = csv ? ec_array : ej_array; return;
+  case DRAKEN_VECTOR_FP16:
+    c.emit = csv ? ec_fp16 : ej_fp16; return;
   default:
     c.emit = csv ? ec_null : ej_null; return;
   }
@@ -290,11 +315,12 @@ static inline BS::thread_pool<> &jsonl_render_pool() {
 inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const DrakenVector **childs,
                                             const int *units, const int *scales,
                                             const int *cunits, const int *cscales,
+                                            const int *dims,
                                             const std::string *prefixes, size_t ncols, size_t nrows) {
   std::vector<Col> cols(ncols);
   size_t prefsum = 0;
   for (size_t c = 0; c < ncols; c++) {
-    resolve_col(cols[c], dvs[c], childs[c], units[c], scales[c], cunits[c], cscales[c], 0, false);
+    resolve_col(cols[c], dvs[c], childs[c], units[c], scales[c], cunits[c], cscales[c], dims[c], 0, false);
     prefsum += prefixes[c].size();
   }
   size_t est = prefsum + ncols + 2 + ncols * 8; // reserve heuristic (per row)
@@ -333,12 +359,13 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
 inline std::string csv_write(const DrakenVector **dvs, const DrakenVector **childs,
                              const int *units, const int *scales,
                              const int *cunits, const int *cscales,
+                             const int *dims,
                              const std::string *names, size_t ncols, size_t nrows,
                              char delim, bool header) {
   std::vector<Col> cols(ncols);
   size_t namesum = 0;
   for (size_t c = 0; c < ncols; c++) {
-    resolve_col(cols[c], dvs[c], childs[c], units[c], scales[c], cunits[c], cscales[c], delim, true);
+    resolve_col(cols[c], dvs[c], childs[c], units[c], scales[c], cunits[c], cscales[c], dims[c], delim, true);
     namesum += names[c].size();
   }
   std::string out;

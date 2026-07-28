@@ -84,7 +84,11 @@ def render_project(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.Union)
 def render_union(node: LogicalPlanNode) -> str:
     modifier = f" {node.modifier.upper()}" if node.modifier else ""
-    columns = " [" + ", ".join(c.current_name for c in node.columns) + "]" if node.columns else ""
+    columns = (
+        " [" + ", ".join(format_expression(c) for c in node.columns) + "]"
+        if node.columns
+        else ""
+    )
     return f"UNION{modifier}{columns}"
 
 

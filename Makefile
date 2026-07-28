@@ -160,8 +160,12 @@ q:
 	@VALIDATE_OPTIMIZER_PLANS=1 $(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
 
 rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — gates the rugo wheel
-	$(call print_blue,"Running rugo release floor: oracle conformance...")
+	$(call print_blue,"Running rugo release floor: parquet oracle conformance...")
 	@$(PYTEST) tests/rugo/test_oracle_conformance.py -q
+	$(call print_blue,"Running rugo release floor: csv oracle conformance...")
+	@$(PYTEST) tests/rugo/test_csv_oracle_conformance.py -q
+	$(call print_blue,"Running rugo release floor: jsonl oracle conformance...")
+	@$(PYTEST) tests/rugo/test_jsonl_oracle_conformance.py -q
 	$(call print_blue,"Running rugo release floor: notebook actions...")
 	@$(PYTEST) tests/rugo/test_notebook_actions.py -q
 	$(call print_blue,"Running rugo release floor: cli...")

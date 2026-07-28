@@ -407,6 +407,44 @@ class Features:
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
     enable_dpccp_join_planning = get_bool("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", True)
 
+    # One kill-switch per optimizer strategy (opteryx/planner/optimizer/__init__.py's
+    # OptimizerVisitor.strategies), for A/B testing a strategy against the rest of the
+    # pipeline. All default False (every strategy enabled) — this changes no behaviour
+    # until a specific one is set. See OptimizerVisitor._STRATEGY_DISABLE_FLAGS for the
+    # strategy-class -> flag mapping this wires into.
+    disable_boolean_simplification = get_bool("FEATURE_DISABLE_BOOLEAN_SIMPLIFICATION", False)
+    disable_cast_simplification = get_bool("FEATURE_DISABLE_CAST_SIMPLIFICATION", False)
+    disable_constant_folding = get_bool("FEATURE_DISABLE_CONSTANT_FOLDING", False)
+    disable_correlated_filters = get_bool("FEATURE_DISABLE_CORRELATED_FILTERS", False)
+    disable_decorrelate_subquery = get_bool("FEATURE_DISABLE_DECORRELATE_SUBQUERY", False)
+    disable_cross_join_filter_pushdown = get_bool("FEATURE_DISABLE_CROSS_JOIN_FILTER_PUSHDOWN", False)
+    disable_disjunction_simplification = get_bool("FEATURE_DISABLE_DISJUNCTION_SIMPLIFICATION", False)
+    disable_disjunctive_domain_pushdown = get_bool("FEATURE_DISABLE_DISJUNCTIVE_DOMAIN_PUSHDOWN", False)
+    disable_distinct_pushdown = get_bool("FEATURE_DISABLE_DISTINCT_PUSHDOWN", False)
+    disable_filter_implied_group_key_reduction = get_bool("FEATURE_DISABLE_FILTER_IMPLIED_GROUP_KEY_REDUCTION", False)
+    disable_function_rewrite = get_bool("FEATURE_DISABLE_FUNCTION_REWRITE", False)
+    disable_group_key_reduction = get_bool("FEATURE_DISABLE_GROUP_KEY_REDUCTION", False)
+    disable_hash_map_variant = get_bool("FEATURE_DISABLE_HASH_MAP_VARIANT", False)
+    disable_join_elimination = get_bool("FEATURE_DISABLE_JOIN_ELIMINATION", False)
+    disable_join_ordering = get_bool("FEATURE_DISABLE_JOIN_ORDERING", False)
+    disable_join_planning = get_bool("FEATURE_DISABLE_JOIN_PLANNING", False)
+    disable_join_rewrite = get_bool("FEATURE_DISABLE_JOIN_REWRITE", False)
+    disable_limit_elimination = get_bool("FEATURE_DISABLE_LIMIT_ELIMINATION", False)
+    disable_limit_files_pruning = get_bool("FEATURE_DISABLE_LIMIT_FILES_PRUNING", False)
+    disable_limit_pushdown = get_bool("FEATURE_DISABLE_LIMIT_PUSHDOWN", False)
+    disable_operator_fusion = get_bool("FEATURE_DISABLE_OPERATOR_FUSION", False)
+    disable_predicate_compaction = get_bool("FEATURE_DISABLE_PREDICATE_COMPACTION", False)
+    disable_predicate_rewrite = get_bool("FEATURE_DISABLE_PREDICATE_REWRITE", False)
+    disable_project_fusion = get_bool("FEATURE_DISABLE_PROJECT_FUSION", False)
+    disable_projection_pushdown = get_bool("FEATURE_DISABLE_PROJECTION_PUSHDOWN", False)
+    disable_redundant_cast_elimination = get_bool("FEATURE_DISABLE_REDUNDANT_CAST_ELIMINATION", False)
+    disable_redundant_operations = get_bool("FEATURE_DISABLE_REDUNDANT_OPERATIONS", False)
+    disable_split_conjunctive_predicates = get_bool("FEATURE_DISABLE_SPLIT_CONJUNCTIVE_PREDICATES", False)
+    disable_statistics_only_response = get_bool("FEATURE_DISABLE_STATISTICS_ONLY_RESPONSE", False)
+    disable_timestamp_cast_sink = get_bool("FEATURE_DISABLE_TIMESTAMP_CAST_SINK", False)
+    disable_topn_scan_pushdown = get_bool("FEATURE_DISABLE_TOPN_SCAN_PUSHDOWN", False)
+    disable_window_topk_fusion = get_bool("FEATURE_DISABLE_WINDOW_TOPK_FUSION", False)
+
 
 features = Features()
 

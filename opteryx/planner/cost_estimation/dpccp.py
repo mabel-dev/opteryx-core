@@ -65,9 +65,23 @@ def _combine(
     right: JoinTree,
     edges: Tuple[JoinEdge, ...],
 ) -> JoinTreeNode:
+    # Closing a cycle in the join graph (a vertex joined to the already-built
+    # subtree via more than one equality) hands us >1 edge here for what may
+    # be a single transitive key identity — e.g. JOB's
+    # `t.id=mi.movie_id AND t.id=mk.movie_id AND mk.movie_id=mi.movie_id`
+    # triangle. Multiplying each edge's selectivity independently squares the
+    # divisor for one real join condition, undercounting the output by a
+    # factor of the tdom. Edges sharing a class_id contribute selectivity
+    # once; edges with class_id=None (identity unknown) are never deduped.
     equi_keys = []
     extra_sel = 1.0
+    seen_classes = set()
     for e in edges:
+        if e.class_id is not None:
+            if e.class_id in seen_classes:
+                extra_sel *= e.extra_selectivity
+                continue
+            seen_classes.add(e.class_id)
         equi_keys.extend(e.equi_keys)
         extra_sel *= e.extra_selectivity
     # Skip the public wrapper's validation — inputs originate inside the

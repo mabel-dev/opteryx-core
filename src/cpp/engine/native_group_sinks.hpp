@@ -52,6 +52,7 @@
 
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
+#include "groupby_tel.hpp"       // diagnostic hash/probe/apply phase timing (GroupBySink::sink)
 #include "native_sort.hpp"       // sort_num_key, sort_row_valid, sort_type_is_string,
                                  // string_arena_of, gather_elem_size, gather_rows,
                                  // make canonical string blocks
@@ -2071,17 +2072,21 @@ struct GroupBySink : Sink {
         }
         uint32_t rows = in->num_rows();
         size_t nspecs = specs.size();
+        groupby_tel::calls.fetch_add(1, std::memory_order_relaxed);
 
         // Pass A: draken owns the key hash for the whole morsel (cxx_hash_c is
         // shape-preserving for a single key — it hashes each distinct value once).
+        GROUPBY_TEL_START(_gbA_t0);
         if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
             return SinkResult::CONTINUE;
+        GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbA_t0);
 
         // Pass B: find-or-insert each row's group into its partition (partition =
         // hash >> kGBPartShift; group id from CarcharIndex, equality by 64-bit hash
         // identity). A NEW group appends its key VALUES (this representative row) to
         // the partition's per-column key store — NULL keys collapse to one group via
         // the NULL_HASH sentinel, exactly as SQL GROUP BY requires.
+        GROUPBY_TEL_START(_gbB_t0);
         l.mk_ent.resize(rows);
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
@@ -2112,7 +2117,10 @@ struct GroupBySink : Sink {
             for (size_t s = 0; s < nspecs; ++s)
                 gb_lanes_resize(P.lanes[s], l.kinds[s], n);
         }
+        GROUPBY_TEL_ACCUM(groupby_tel::probe_ns, _gbB_t0);
+
         // Pass C: columnar updates — kind dispatched ONCE per spec, tight row loops.
+        GROUPBY_TEL_START(_gbC_t0);
         if (l.has_rows) {
             for (uint32_t i = 0; i < rows; ++i)
                 l.parts[l.mk_hash[i] >> kGBPartShift].grows[l.mk_ent[i]] += 1;

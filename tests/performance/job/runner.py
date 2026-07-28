@@ -175,6 +175,21 @@ def main() -> int:
         if not queries:
             sys.exit(f"--filter {args.filter!r} matched zero queries")
 
+    print("Warming up (cold start)...")
+    start = time.monotonic()
+    warm_session = None
+    try:
+        warm_session = opteryx.session()
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET_PREFIX}title;"):
+            pass
+        cold_time_ms = (time.monotonic() - start) * 1000.0
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    except Exception as e:
+        print(f"Cold start failed: {e}\n")
+    finally:
+        if warm_session is not None:
+            warm_session.close()
+
     duckdb_min, duckdb_machine = load_duckdb_baseline(
         str(HERE / "duckdb" / "results.json")
     )

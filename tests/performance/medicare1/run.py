@@ -208,6 +208,21 @@ def main() -> int:
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
     results_path = args.results_dir / f"{git_sha()}-{ts}.csv"
 
+    print("Warming up (cold start)...")
+    start = time.monotonic()
+    warm_session = None
+    try:
+        warm_session = opteryx.session()
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET_PREFIX}{TABLES[0]};"):
+            pass
+        cold_time_ms = (time.monotonic() - start) * 1000.0
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    except Exception as e:
+        print(f"Cold start failed: {e}\n")
+    finally:
+        if warm_session is not None:
+            warm_session.close()
+
     # Load DuckDB baseline for comparison
     duckdb_baseline_path = HERE / "duckdb" / "results.json"
     duckdb_results, duckdb_machine = load_duckdb_baseline(str(duckdb_baseline_path))

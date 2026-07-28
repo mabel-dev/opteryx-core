@@ -273,7 +273,16 @@ def _format_expression_inner(root, qualify, cache):
     if node_type == NodeType.IDENTIFIER:
         if qualify_b and root.source:
             return root.qualified_name
-        return root.current_name
+        if root.current_name is not None:
+            return root.current_name
+        # Post-bind synthetic identifiers (e.g. a Projection passing through an
+        # aggregate-output column built directly against a schema_column, never
+        # parsed from SQL text) carry no current_name. schema_column.name is the
+        # established fallback for "the user-facing name" elsewhere in the planner
+        # (group_key_reduction.py, filter_implied_group_key_reduction.py).
+        if root.schema_column is not None:
+            return root.schema_column.name
+        return "null"
     if node_type == NodeType.DNF:
         return " AND ".join(
             [format_expression(e, qualify_b, cache) for e in root.parameters]

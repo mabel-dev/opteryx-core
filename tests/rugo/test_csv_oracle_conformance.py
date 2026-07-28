@@ -20,13 +20,13 @@ There is no bool/date/decimal inference to test; CSV doesn't carry a schema.
 Shapes: DENSE (all valid), SPARSE (one null), ALLNULL (every value null), and
 EMPTY (zero rows), matching the Parquet oracle's convention.
 
-A CSV-specific wrinkle gets its own dedicated section below: an unquoted
-empty field is NULL, a quoted empty field ("") is an empty string. rugo's
-reader honours that distinction (see `is_null = raw_len == 0 && !was_quoted`
-in csv_column_builder.cpp) and PyArrow's writer emits it correctly, so the
-READ-direction matrix exercises "" as a first-class value. rugo's WRITER
-currently does NOT emit that distinguishing quote -- see
-test_write_empty_string_collapses_to_null_KNOWN_GAP below.
+A CSV-specific wrinkle: an unquoted empty field is NULL, a quoted empty
+field ("") is an empty string. Both rugo's reader (see
+`is_null = raw_len == 0 && !was_quoted` in csv_column_builder.cpp) and
+rugo's writer (see `csv_field` in draken/interop/value_format.hpp, which
+quotes zero-length fields) honour that distinction, matching PyArrow, so
+"" is exercised as a first-class value in both the READ- and
+WRITE-direction matrices.
 """
 
 import io
@@ -80,15 +80,18 @@ def pa_read_csv_typed(data: bytes, pa_type) -> list:
     # single-column round-trip loses rows on the oracle's read side, not
     # rugo's write side — this is a PyArrow parsing default, not a rugo gap.
     # strings_can_be_null=True: PyArrow's default (False) never nulls a string
-    # column on an empty field — reasonable in general (it can't tell apart an
-    # unquoted-empty NULL from a quoted-empty "" once both are set to null),
-    # but WRITE_CASES never feeds "" through this path (see module docstring /
-    # the KNOWN_GAP test below), so an empty field here is unambiguously NULL.
+    # column on an empty field. quoted_strings_can_be_null=False: PyArrow's
+    # default (True) nulls a quoted empty field too, collapsing "" into NULL;
+    # setting it False makes PyArrow distinguish a quoted empty field ("")
+    # from an unquoted empty field (NULL) — matching rugo's writer, which
+    # quotes "" but never emits anything for NULL.
     table = pcsv.read_csv(
         io.BytesIO(data),
         parse_options=pcsv.ParseOptions(ignore_empty_lines=False),
         convert_options=pcsv.ConvertOptions(
-            column_types={"v": pa_type}, strings_can_be_null=True
+            column_types={"v": pa_type},
+            strings_can_be_null=True,
+            quoted_strings_can_be_null=False,
         ),
     )
     return table.to_pydict()["v"]
@@ -106,12 +109,10 @@ READ_CASES = [
     ("string", pa.string(), "VARCHAR", ["", "abc", "a longer utf-8 ☃ string, with a comma"]),
 ]
 
-# Write-direction case list mirrors READ_CASES but keeps "" out of the string
-# values — see test_write_empty_string_collapses_to_null_KNOWN_GAP for why.
 WRITE_CASES = [
     ("int64", pa.int64(), "INT64", [-(2**63), 0, 2**63 - 1]),
     ("float64", pa.float64(), "DOUBLE", [-1.5, 0.0, 2.5]),
-    ("string", pa.string(), "VARCHAR", ["plain", "has,comma", "a longer utf-8 ☃ string"]),
+    ("string", pa.string(), "VARCHAR", ["", "abc", "a longer utf-8 ☃ string, with a comma"]),
 ]
 
 SHAPES = ["dense", "sparse", "allnull", "empty"]
@@ -167,27 +168,24 @@ def test_write_roundtrips_through_pyarrow(case, shape):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KNOWN GAP: rugo's CSV writer does not distinguish "" from NULL.
-#
-# The reader tells them apart correctly (see is_null = raw_len==0 && !was_quoted
-# in csv_column_builder.cpp, and test_read_matches_pyarrow[string-*] above,
-# which round-trips PyArrow-quoted "" through rugo's reader intact). The
-# writer, however, does not emit the distinguishing quote for an empty
-# string, so both "" and NULL currently serialize to the same unquoted empty
-# field and both come back as NULL on re-read. This is a real, reader/writer
-# asymmetry — pinned down here rather than silently avoided so it stays
-# visible. Flagged to the architect; not fixed as part of this test-only change.
+# Regression: rugo's CSV writer must distinguish "" from NULL, round-tripping
+# through both rugo's own reader and PyArrow's. See `csv_field` in
+# draken/interop/value_format.hpp (quotes zero-length fields) and
+# `is_null = raw_len == 0 && !was_quoted` in csv_column_builder.cpp.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_write_empty_string_collapses_to_null_KNOWN_GAP():
+def test_write_empty_string_distinguished_from_null():
     data = rugo_write_csv(["", "abc", None], "VARCHAR")
-    got = rugo_read_csv(data)
-    assert got == [None, "abc", None], (
-        f"expected current (gap) behaviour [None, 'abc', None], got {got!r} — "
-        "if this now reads ['', 'abc', None], the writer has started quoting "
-        "empty strings: update this test (and READ_CASES/WRITE_CASES) to drop "
-        "the KNOWN_GAP label and merge '' back into the shared case list."
+
+    got_rugo = rugo_read_csv(data)
+    assert got_rugo == ["", "abc", None], (
+        f"rugo round-trip: expected ['', 'abc', None], got {got_rugo!r}"
+    )
+
+    got_pa = pa_read_csv_typed(data, pa.string())
+    assert got_pa == ["", "abc", None], (
+        f"PyArrow round-trip: expected ['', 'abc', None], got {got_pa!r}"
     )
 
 

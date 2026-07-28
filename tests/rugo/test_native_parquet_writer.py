@@ -586,19 +586,6 @@ def test_rugo_can_parse_own_footer():
     assert names == ["i", "s"]
 
 
-def test_unsupported_type_fails_loud():
-    """An FP16 embedding column is not yet supported — must raise, not skip."""
-    import draken.draken_native as dn
-    from draken.vectors.vector import Vector
-    from draken.morsels.morsel import Morsel
-
-    morsel = Morsel.from_vectors(
-        ["e"], [Vector(dn.vector_fp16_from_sequence([[1.0, 2.0], [3.0, 4.0]], 2))]
-    )
-    with pytest.raises(ValueError, match="unsupported column type"):
-        write_parquet(morsel)
-
-
 def test_two_string_array_columns_keep_values():
     """Regression: two list<string> columns in one morsel. The first column's
     string-element bytes used to be zeroed because the ARRAY child Vector was a

@@ -152,25 +152,16 @@ def _classify_predicate(
     return left_leaf, right_leaf, pred.value == "Eq"
 
 
-def _build_equiv_tdoms(
+def _group_equivalence_classes(
     cross_equi: List[Tuple[int, int, Node]],
-    per_leaf_scans: List[Dict[str, Any]],
-    vertices: List[JoinVertex],
-) -> Dict[Tuple[int, str], int]:
-    """Compute tdom for each join column using equivalence sets (Ebergen 2022 §3.2).
+) -> List[List[Tuple[int, str]]]:
+    """Partition (leaf_idx, col_name) key references into equivalence classes.
 
-    Columns that are transitively joined by equality form one equivalence set.
-    tdom for the set = max(known NDVs in set) if any NDV is available,
-                       min(row_count of leaves in set) otherwise.
-
-    The fallback (min row_count) assumes the smallest table is the PK/dimension
-    side, so its cardinality upper-bounds the number of distinct join-key values.
-    This is strictly better than a magic constant because it uses actual table
-    sizes from the manifest.
-
-    Returns a dict mapping (leaf_idx, col_name) → tdom for every column seen in
-    a join predicate. Columns not present in the returned dict had no join
-    predicate and are unaffected.
+    Columns transitively joined by equality (e.g. JOB's
+    `t.id=mi.movie_id AND t.id=mk.movie_id AND mk.movie_id=mi.movie_id`) form
+    one class — the three predicates all restate a single key identity.
+    Returned in a deterministic order (by each class's smallest member) so
+    class ids are stable across calls for the same input.
     """
     parent: Dict[Tuple[int, str], Tuple[int, str]] = {}
 
@@ -202,8 +193,30 @@ def _build_equiv_tdoms(
     for key in parent:
         sets[find(key)].append(key)
 
+    return [sorted(members) for members in sorted(sets.values(), key=lambda m: min(m))]
+
+
+def _build_equiv_tdoms(
+    equivalence_classes: List[List[Tuple[int, str]]],
+    per_leaf_scans: List[Dict[str, Any]],
+    vertices: List[JoinVertex],
+) -> Dict[Tuple[int, str], int]:
+    """Compute tdom for each join column using equivalence sets (Ebergen 2022 §3.2).
+
+    tdom for a set = max(known NDVs in set) if any NDV is available,
+                     min(row_count of leaves in set) otherwise.
+
+    The fallback (min row_count) assumes the smallest table is the PK/dimension
+    side, so its cardinality upper-bounds the number of distinct join-key values.
+    This is strictly better than a magic constant because it uses actual table
+    sizes from the manifest.
+
+    Returns a dict mapping (leaf_idx, col_name) → tdom for every column seen in
+    a join predicate. Columns not present in the returned dict had no join
+    predicate and are unaffected.
+    """
     result: Dict[Tuple[int, str], int] = {}
-    for members in sets.values():
+    for members in equivalence_classes:
         known_ndvs: List[int] = []
         leaf_set: set = set()
         for leaf_idx, col_name in members:
@@ -282,7 +295,16 @@ def build_join_graph(
     # absent from scan statistics (common with Parquet files) the tdom falls
     # back to min(row_count of leaves in the set), which is far better than the
     # flat 0.1 constant used by _key_selectivity. See Ebergen (2022) §3.2.
-    equiv_tdoms = _build_equiv_tdoms(cross_equi, per_leaf_scans, vertices)
+    equivalence_classes = _group_equivalence_classes(cross_equi)
+    equiv_tdoms = _build_equiv_tdoms(equivalence_classes, per_leaf_scans, vertices)
+    # Reverse lookup so edges can be tagged with the class they belong to —
+    # DPccp/_combine uses this to dedupe redundant transitive-equality edges
+    # when a chain of joins closes a cycle (see dpccp._combine).
+    class_id_of: Dict[Tuple[int, str], int] = {
+        member: class_idx
+        for class_idx, members in enumerate(equivalence_classes)
+        for member in members
+    }
 
     def _key_stats_with_tdom(scan_node, col_name: Optional[str], leaf_idx: int) -> KeyStats:
         ks = _key_stats(scan_node, col_name)
@@ -312,12 +334,14 @@ def build_join_graph(
             _key_stats_with_tdom(left_scan, left_col, left_leaf),
             _key_stats_with_tdom(right_scan, right_col, right_leaf),
         ),)
+        class_id = class_id_of.get((left_leaf, left_col)) if left_col is not None else None
         edges.append(
             JoinEdge(
                 left=left_leaf,
                 right=right_leaf,
                 equi_keys=equi,
                 extra_selectivity=1.0,
+                class_id=class_id,
                 payload=pred,
             )
         )

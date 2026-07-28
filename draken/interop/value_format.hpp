@@ -253,9 +253,11 @@ inline void fmt_decimal_ptr128(std::string &out, const void *p, int s) {
 // ---- escaping ----
 
 // Append a CSV field, quoting per RFC 4180 if it contains the delimiter, a
-// quote, CR or LF. Quotes are doubled.
+// quote, CR or LF. A zero-length field is also quoted, so an empty string
+// ("") is distinguishable from a NULL cell (which never calls this
+// function at all). Quotes are doubled.
 inline void csv_field(std::string &out, const char *s, size_t n, char delim) {
-  bool quote = false;
+  bool quote = n == 0;
   for (size_t i = 0; i < n; i++) {
     char c = s[i];
     if (c == delim || c == '"' || c == '\n' || c == '\r') { quote = true; break; }

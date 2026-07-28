@@ -29,6 +29,7 @@ Example Usage:
 This module aims to enhance query performance through systematic and incremental optimization steps.
 """
 
+from opteryx import config
 from opteryx.config import DISABLE_OPTIMIZER
 from opteryx.config import VALIDATE_OPTIMIZER_PLANS
 from opteryx.exceptions import InvalidInternalStateError
@@ -44,6 +45,7 @@ from opteryx.planner.optimizer.strategies import (
     DecorrelateSubqueryStrategy,
     CrossJoinFilterPushdownStrategy,
     DisjunctionSimplificationStrategy,
+    DisjunctiveDomainPushdownStrategy,
     DistinctPushdownStrategy,
     FilterImpliedGroupKeyReductionStrategy,
     FunctionRewriteStrategy,
@@ -77,6 +79,51 @@ from .statistics_refresh import refresh_statistics
 from .strategies.optimization_strategy import OptimizerContext
 
 __all__ = ["do_optimizer"]
+
+
+# Strategy class name -> opteryx.config.Features flag name. One entry per strategy
+# in OptimizerVisitor.strategies, checked centrally in optimize() so every strategy
+# gets an A/B kill-switch without each one hand-rolling its own flag check. A few
+# strategies (PredicateOrdering/PredicatePushdown/ManifestPruning) ALSO check their
+# own flag inline in should_i_run from before this table existed — listing them here
+# too is harmless (same flag, checked twice) and keeps this the complete registry.
+_STRATEGY_DISABLE_FLAGS = {
+    "BooleanSimplificationStrategy": "disable_boolean_simplification",
+    "CastSimplificationStrategy": "disable_cast_simplification",
+    "ConstantFoldingStrategy": "disable_constant_folding",
+    "CorrelatedFiltersStrategy": "disable_correlated_filters",
+    "DecorrelateSubqueryStrategy": "disable_decorrelate_subquery",
+    "CrossJoinFilterPushdownStrategy": "disable_cross_join_filter_pushdown",
+    "DisjunctionSimplificationStrategy": "disable_disjunction_simplification",
+    "DisjunctiveDomainPushdownStrategy": "disable_disjunctive_domain_pushdown",
+    "DistinctPushdownStrategy": "disable_distinct_pushdown",
+    "FilterImpliedGroupKeyReductionStrategy": "disable_filter_implied_group_key_reduction",
+    "FunctionRewriteStrategy": "disable_function_rewrite",
+    "GroupKeyReductionStrategy": "disable_group_key_reduction",
+    "HashMapVariantStrategy": "disable_hash_map_variant",
+    "JoinEliminationStrategy": "disable_join_elimination",
+    "JoinOrderingStrategy": "disable_join_ordering",
+    "JoinPlanningStrategy": "disable_join_planning",
+    "JoinRewriteStrategy": "disable_join_rewrite",
+    "LimitEliminationStrategy": "disable_limit_elimination",
+    "LimitFilesPruningStrategy": "disable_limit_files_pruning",
+    "LimitPushdownStrategy": "disable_limit_pushdown",
+    "ManifestPruningStrategy": "disable_manifest_pruning",
+    "OperatorFusionStrategy": "disable_operator_fusion",
+    "PredicateCompactionStrategy": "disable_predicate_compaction",
+    "PredicateOrderingStrategy": "disable_predicate_ordering",
+    "PredicatePushdownStrategy": "disable_predicate_pushdown",
+    "PredicateRewriteStrategy": "disable_predicate_rewrite",
+    "ProjectFusionStrategy": "disable_project_fusion",
+    "ProjectionPushdownStrategy": "disable_projection_pushdown",
+    "RedundantCastEliminationStrategy": "disable_redundant_cast_elimination",
+    "RedundantOperationsStrategy": "disable_redundant_operations",
+    "SplitConjunctivePredicatesStrategy": "disable_split_conjunctive_predicates",
+    "StatisticsOnlyResponseStrategy": "disable_statistics_only_response",
+    "TimestampCastSinkStrategy": "disable_timestamp_cast_sink",
+    "TopNScanPushdownStrategy": "disable_topn_scan_pushdown",
+    "WindowTopKFusionStrategy": "disable_window_topk_fusion",
+}
 
 
 def _validate_strategy_order(strategies) -> None:
@@ -140,6 +187,12 @@ class OptimizerVisitor:
             RedundantCastEliminationStrategy(telemetry),  # CAST(x AS T) where x is T -> x
             CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             DisjunctionSimplificationStrategy(telemetry),
+            # Derives implied-but-weaker per-column domain predicates (IN-list or
+            # range) from an OR-of-AND filter that DisjunctionSimplification couldn't
+            # factor (its branches share no identical predicate — e.g. TPC-H Q7's
+            # bilateral trade filter). ANDs them onto the untouched OR so the split
+            # below turns them into their own pushable Filter steps.
+            DisjunctiveDomainPushdownStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
             FunctionRewriteStrategy(telemetry),
@@ -241,6 +294,9 @@ class OptimizerVisitor:
         # as stale until refresh_statistics has populated per-node estimates.
         current_plan.statistics_are_stale = True
         for strategy in self.strategies:
+            flag_name = _STRATEGY_DISABLE_FLAGS.get(type(strategy).__name__)
+            if flag_name is not None and getattr(config.features, flag_name):
+                continue
             if strategy.should_i_run(current_plan):
                 if (
                     strategy.optimization_technique == "cost"

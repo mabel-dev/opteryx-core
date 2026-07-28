@@ -12,7 +12,7 @@ from libcpp.vector cimport vector
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
-from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY
+from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY, DRAKEN_VECTOR_FP16
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
 
@@ -20,6 +20,7 @@ cdef extern from "_text_render.hpp" namespace "rugo_text":
     string csv_write(const DrakenVector** dvs, const DrakenVector** childs,
                      const int* units, const int* scales,
                      const int* cunits, const int* cscales,
+                     const int* dims,
                      const string* names, size_t ncols, size_t nrows,
                      char delim, bint header)
 
@@ -36,7 +37,9 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
 
     delimiter: single-character field separator (default ',').
     header: write a header row of column names (default True).
-    Nulls are empty fields; ARRAY columns render as a JSON array (quoted).
+    Nulls are empty fields; ARRAY and VECTOR_FP16 columns render as a JSON
+    array (quoted) -- VECTOR_FP16 has no wire type here any more than in
+    Parquet, so it renders as an array of floats.
     """
     if len(delimiter) != 1:
         raise ValueError("write_csv: delimiter must be a single character")
@@ -54,11 +57,12 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
     cdef int* scales = <int*>malloc(ncols * sizeof(int))
     cdef int* cunits = <int*>malloc(ncols * sizeof(int))
     cdef int* cscales = <int*>malloc(ncols * sizeof(int))
+    cdef int* dims = <int*>malloc(ncols * sizeof(int))
 
     cdef Vector v, cv
     cdef const DrakenVector* dv
     cdef Py_ssize_t c
-    cdef object nm, u, sc
+    cdef object nm, u, sc, dm
     cdef string out
     cdef bytes nb_name
     cdef vector[string] cnames
@@ -70,13 +74,20 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
             dv = v.unified()
             dvs[c] = dv
             child_dvs[c] = NULL
-            units[c] = 0; scales[c] = 0; cunits[c] = 0; cscales[c] = 0
+            units[c] = 0; scales[c] = 0; cunits[c] = 0; cscales[c] = 0; dims[c] = 0
             u = v._nb.logical_type_unit
             if u is not None:
                 units[c] = _csv_unit_code(u)
             sc = v._nb.logical_type_scale
             if sc is not None:
                 scales[c] = <int>sc
+            if dv.type == DRAKEN_VECTOR_FP16:
+                dm = v._nb.logical_type_dimension
+                if dm is None:
+                    raise ValueError(
+                        "write_csv: VECTOR_FP16 column %r missing logical-type "
+                        "descriptor (dimension)" % (names[c],))
+                dims[c] = <int>dm
             if dv.type == DRAKEN_ARRAY and v._nb.array_child_type is not None:
                 cv = Vector(v._nb.array_child)
                 child_vecs.append(cv)
@@ -91,9 +102,9 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
             nb_name = nm if isinstance(nm, bytes) else str(nm).encode("utf-8")
             cnames.push_back(string(<const char*>nb_name, len(nb_name)))
 
-        out = csv_write(dvs, child_dvs, units, scales, cunits, cscales,
+        out = csv_write(dvs, child_dvs, units, scales, cunits, cscales, dims,
                         cnames.data(), <size_t>ncols, <size_t>nrows, delim, header)
         return PyBytes_FromStringAndSize(out.data(), out.size())
     finally:
         free(dvs); free(child_dvs)
-        free(units); free(scales); free(cunits); free(cscales)
+        free(units); free(scales); free(cunits); free(cscales); free(dims)
