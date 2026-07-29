@@ -838,6 +838,9 @@ def _format_stats(stats: dict) -> str:
         ("Peak Queued", str(stats.get("max_concurrent_queued", 0)), "row groups"),
         ("Peak Downloading", str(stats["max_concurrent_downloads"]), "row groups"),
         ("Peak Decoding", str(stats.get("max_concurrent_decodes", 0)), "row groups"),
+        ("Queue Stalls", str(stats.get("queue_stall_events", 0)), "consumer found nothing claimable"),
+        ("Avg Stall", format_time(stats.get("avg_queue_stall_ms", 0)), ""),
+        ("Max Stall", format_time(stats.get("max_queue_stall_ms", 0)), ""),
     ]
 
     for label, value, unit in stats_items:

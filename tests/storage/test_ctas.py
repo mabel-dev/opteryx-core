@@ -139,6 +139,127 @@ def test_ctas_unresolved_type_rejected(tmp_path):
         list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT NULL AS x"))
 
 
+_OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
+_WRITER_POLICY = [{"pattern": "*", "role": "writer"}]
+
+
+def test_ctas_or_replace_creates_when_missing(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(
+        session.execute_to_morsels(
+            "CREATE OR REPLACE TABLE ws.dst AS SELECT 1 AS a, 'hello' AS b"
+        )
+    )
+    rows = _morsels_to_rows(session.execute_to_morsels("SELECT * FROM ws.dst"))
+    assert len(rows) == 1
+    assert rows[0]["a"] == 1
+
+
+def test_ctas_or_replace_succeeds_when_exists(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a, 'old' AS b"))
+    list(
+        session.execute_to_morsels(
+            "CREATE OR REPLACE TABLE ws.dst AS SELECT 2 AS a, 'new' AS b"
+        )
+    )
+    rows = _morsels_to_rows(session.execute_to_morsels("SELECT * FROM ws.dst"))
+    assert len(rows) == 1
+    assert rows[0]["a"] == 2
+    assert rows[0]["b"] == "new"
+
+
+def test_ctas_or_replace_schema_change_allowed_local_store(tmp_path):
+    """LocalStoreConnector has no field-id lineage to preserve, so REPLACE may
+    change the column set - unlike the catalog connector (see relation.py)."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+    list(
+        session.execute_to_morsels(
+            "CREATE OR REPLACE TABLE ws.dst AS SELECT 'x' AS c, 'y' AS d"
+        )
+    )
+    rows = _morsels_to_rows(session.execute_to_morsels("SELECT * FROM ws.dst"))
+    assert rows == [{"c": "x", "d": "y"}]
+
+
+def test_ctas_or_replace_atomic_on_failure(tmp_path):
+    """A REPLACE that fails partway must leave the existing relation untouched."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a, 'old' AS b"))
+
+    from opteryx.connectors import connector_factory
+
+    conn = connector_factory("ws.dst", telemetry=None)
+
+    def _boom():
+        raise RuntimeError("forced replace failure")
+
+    conn._pre_commit_recheck_hook = _boom
+    try:
+        with pytest.raises(RuntimeError, match="forced replace failure"):
+            list(
+                session.execute_to_morsels(
+                    "CREATE OR REPLACE TABLE ws.dst AS SELECT 2 AS a, 'new' AS b"
+                )
+            )
+    finally:
+        conn._pre_commit_recheck_hook = None
+
+    rows = _morsels_to_rows(session.execute_to_morsels("SELECT * FROM ws.dst"))
+    assert rows == [{"a": 1, "b": "old"}]
+
+
+def test_ctas_without_or_replace_existing_still_rejected(tmp_path):
+    """Plain CTAS (no OR REPLACE) into an existing relation is unchanged."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+    with pytest.raises(ValueError, match="already exists"):
+        list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 2 AS a"))
+
+
+def test_create_requires_writer_or_owner(tmp_path):
+    _setup_workspace(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+    with pytest.raises(PermissionError, match="permission to create table"):
+        list(reader.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+
+
+def test_create_allowed_for_writer(tmp_path):
+    _setup_workspace(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+    list(writer.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+    assert (tmp_path / "ws" / "dst" / "dataset.json").exists()
+
+
+def test_replace_existing_requires_owner(tmp_path):
+    """A writer may not REPLACE an existing relation - same tier as DROP."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(owner.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+    with pytest.raises(PermissionError, match="permission to replace table"):
+        list(writer.execute_to_morsels("CREATE OR REPLACE TABLE ws.dst AS SELECT 2 AS a"))
+
+    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.dst"))
+    assert rows == [{"a": 1}]
+
+
+def test_replace_existing_allowed_for_owner(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(owner.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+    list(owner.execute_to_morsels("CREATE OR REPLACE TABLE ws.dst AS SELECT 2 AS a"))
+    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.dst"))
+    assert rows == [{"a": 2}]
+
+
 def test_ctas_partial_failure_leaves_empty_relation(tmp_path):
     _setup_workspace(tmp_path)
 

@@ -2050,12 +2050,26 @@ class ParquetIOPipeline {
                 continue;  // our decode likely enqueued a result — re-check
             }
             // Nothing ready and nothing to help with: sleep until a pool worker
-            // produces a result, a new item is published, or we shut down.
+            // produces a result, a new item is published, or we shut down. This
+            // is the genuine stall case — distinct from TC_QUEUE_WAIT (an item
+            // sitting claimable in pending_items_) and from inline_decodes_
+            // (the consumer found work and helped instead of blocking) — so it
+            // gets its own span, recorded around the actual wait.
+            const bool _tr_stall_on = draken_trace_enabled();
+            const uint64_t _tr_stall_start = _tr_stall_on ? draken_trace_now_ns() : 0;
             queue_cv_.wait(lk, [this]() {
                 return !result_queue_.empty()
                     || shutdown_.load(std::memory_order_relaxed)
                     || !pending_items_.empty();
             });
+            if (_tr_stall_on) {
+                const auto _tr_idx = BS::this_thread::get_index();
+                const uint16_t _tr_worker =
+                    _tr_idx.has_value() ? static_cast<uint16_t>(*_tr_idx) : 0xFFFFu;
+                draken_trace_record(DRAKEN_TC_QUEUE_STALL, trace_node_id_,
+                    0, 0, _tr_worker, _tr_stall_start, draken_trace_now_ns(),
+                    0, 0, 0, 0);
+            }
         }
     }
 

@@ -24,6 +24,7 @@ and complex types lose precision in BRIN bounds and cannot be answered.
 """
 
 from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, INT64 as _CT_INT64
@@ -325,6 +326,52 @@ def extract_alias_by_identity(logical_plan) -> dict:
         elif getattr(column, "source_column", None):
             mapping[identity] = column.source_column
     return mapping
+
+
+def _replace_nested_aggregators(node, agg_identity_to_literal: dict):
+    """Recursively replace AGGREGATOR nodes within an expression tree with their
+    literal replacement, in place.
+
+    The aggregate is not always the column itself — it can be embedded inside a
+    wrapping expression (e.g. HUMANIZE(COUNT(*)), COUNT(*) + 1). A caller that only
+    matches the top-level column's own identity/alias leaves a nested AGGREGATOR
+    dangling, still referencing an identity no node in the rewritten plan carries.
+    """
+    if node is None:
+        return node
+
+    if node.node_type == NodeType.AGGREGATOR:
+        agg_id = getattr(getattr(node, "schema_column", None), "identity", None)
+        return agg_identity_to_literal.get(agg_id, node)
+
+    if node.parameters:
+        if isinstance(node.parameters, tuple):
+            node.parameters = list(node.parameters)
+        node.parameters = [
+            _replace_nested_aggregators(p, agg_identity_to_literal) for p in node.parameters
+        ]
+
+    # NodeType.CASE uses conditions/results/else_result instead of parameters
+    if node.node_type == NodeType.CASE:
+        if node.conditions:
+            node.conditions = [
+                _replace_nested_aggregators(c, agg_identity_to_literal) for c in node.conditions
+            ]
+        if node.results:
+            node.results = [
+                _replace_nested_aggregators(r, agg_identity_to_literal) for r in node.results
+            ]
+        if node.else_result is not None:
+            node.else_result = _replace_nested_aggregators(node.else_result, agg_identity_to_literal)
+
+    if node.right is not None:
+        node.right = _replace_nested_aggregators(node.right, agg_identity_to_literal)
+    if node.centre is not None:
+        node.centre = _replace_nested_aggregators(node.centre, agg_identity_to_literal)
+    if node.left is not None:
+        node.left = _replace_nested_aggregators(node.left, agg_identity_to_literal)
+
+    return node
 
 
 def get_count_from_manifest(manifest) -> int:
@@ -634,7 +681,20 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                     new_cols.append(replacement)
                     changed = True
                 else:
-                    new_cols.append(c)
+                    # The aggregate may be embedded inside a wrapping expression
+                    # (e.g. HUMANIZE(COUNT(*))) rather than being the column
+                    # itself. Walk the tree and splice the literal in wherever a
+                    # nested AGGREGATOR still references a replaced identity.
+                    nested_aggs = get_all_nodes_of_type(c, (NodeType.AGGREGATOR,))
+                    if any(
+                        getattr(getattr(a, "schema_column", None), "identity", None)
+                        in agg_identity_to_literal
+                        for a in nested_aggs
+                    ):
+                        new_cols.append(_replace_nested_aggregators(c, agg_identity_to_literal))
+                        changed = True
+                    else:
+                        new_cols.append(c)
 
             if changed:
                 n.columns = new_cols
@@ -706,9 +766,16 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # instead)
         scan_node.manifest = None
 
-        # Update exit node columns so aliasing is preserved
-        if exit_node is not None:
-            exit_node.columns = literals
+        # NOTE: exit_node.columns is deliberately NOT overwritten here. The
+        # substitution loop above already rewrote it correctly, in place, for
+        # both cases: a plain `SELECT COUNT(*)` Exit column IS the aggregate
+        # (matched and replaced by identity), while a wrapping expression like
+        # `SELECT HUMANIZE(COUNT(*))` has its Exit column reference the
+        # HUMANIZE result identity — which must NOT be replaced with the raw
+        # count literal. Blindly overwriting exit_node.columns with `literals`
+        # here (as this used to do) discarded that distinction and pointed the
+        # Exit at the wrong (bare aggregate) identity whenever the aggregate
+        # was embedded in a larger expression.
 
         # Update telemetry safely
         if self.telemetry is not None:

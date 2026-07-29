@@ -121,6 +121,10 @@ def cmd_stats(trace_file: str) -> None:
     print(f"  Peak Downloading:        {stats['max_concurrent_downloads']}")
     print(f"  Peak Decoding:           {stats.get('max_concurrent_decodes', 0)}")
     print()
+    print(f"  Queue Stalls:            {stats.get('queue_stall_events', 0)}")
+    print(f"  Avg Stall:               {_format_ms(stats.get('avg_queue_stall_ms', 0))}")
+    print(f"  Max Stall:               {_format_ms(stats.get('max_queue_stall_ms', 0))}")
+    print()
 
 
 def _format_bytes(b: int) -> str:

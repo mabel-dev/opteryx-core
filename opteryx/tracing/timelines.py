@@ -31,6 +31,7 @@ from opteryx.tracing.spans import TC_DECODE
 from opteryx.tracing.spans import TC_IO_REQUEST
 from opteryx.tracing.spans import TC_IO_WAIT
 from opteryx.tracing.spans import TC_OP_EXEC
+from opteryx.tracing.spans import TC_QUEUE_STALL
 from opteryx.tracing.spans import TC_QUEUE_WAIT
 from opteryx.tracing.spans import TC_SINK
 from opteryx.tracing.spans import TC_SOURCE_PULL
@@ -279,6 +280,11 @@ class TraceTimelines:
         queue_spans = [s for s in self.spans if s["category"] == TC_QUEUE_WAIT]
         io_spans = [s for s in self.spans if s["category"] == TC_IO_REQUEST]
         decode_spans = [s for s in self.spans if s["category"] == TC_DECODE]
+        # TC_QUEUE_STALL: the consumer found rugo's pending_items_ AND
+        # result_queue_ both empty and genuinely blocked — distinct from
+        # queue_spans above (an item sitting claimable, not yet picked up).
+        # See DrakenTraceCategory in draken/core/trace_bridge_c.h.
+        stall_spans = [s for s in self.spans if s["category"] == TC_QUEUE_STALL]
 
         if not self.spans:
             return {
@@ -299,6 +305,10 @@ class TraceTimelines:
                 "max_concurrent_decodes": 0,
                 "avg_download_time_ms": 0,
                 "avg_decode_time_ms": 0,
+                "queue_stall_events": 0,
+                "queue_stall_total_ms": 0,
+                "avg_queue_stall_ms": 0,
+                "max_queue_stall_ms": 0,
             }
 
         def phase_duration_ms(spans):
@@ -312,6 +322,11 @@ class TraceTimelines:
             if not spans:
                 return 0
             return sum(s["t_end_ns"] - s["t_start_ns"] for s in spans) / len(spans) / 1e6
+
+        def max_duration_ms(spans):
+            if not spans:
+                return 0
+            return max(s["t_end_ns"] - s["t_start_ns"] for s in spans) / 1e6
 
         t_min = min(s["t_start_ns"] for s in self.spans)
         t_max = max(s["t_end_ns"] for s in self.spans)
@@ -343,4 +358,14 @@ class TraceTimelines:
             "max_concurrent_decodes": self._max_concurrent(decode_spans),
             "avg_download_time_ms": avg_duration_ms(io_spans),
             "avg_decode_time_ms": avg_duration_ms(decode_spans),
+            # A stall is the consumer thread finding NOTHING claimable/ready and
+            # genuinely blocking — zero events is the healthy case (the queue
+            # never ran dry). Non-zero and growing means the decode/download
+            # side can't keep the consumer fed.
+            "queue_stall_events": len(stall_spans),
+            "queue_stall_total_ms": sum(
+                s["t_end_ns"] - s["t_start_ns"] for s in stall_spans
+            ) / 1e6,
+            "avg_queue_stall_ms": avg_duration_ms(stall_spans),
+            "max_queue_stall_ms": max_duration_ms(stall_spans),
         }

@@ -45,6 +45,12 @@ typedef enum {
     DRAKEN_TC_BUFFER_RESIDENT = 8,
     DRAKEN_TC_DECODE          = 9,
     DRAKEN_TC_DECODE_PHASE    = 10,
+    // A consumer (rugo::ParquetIOPipeline::wait_and_get_result) found BOTH
+    // result_queue_ and pending_items_ empty and had to block on queue_cv_ —
+    // i.e. a genuine stall, as opposed to TC_QUEUE_WAIT (an item sitting in
+    // pending_items_ before a worker claims it) or an inline-decode help
+    // (which never blocks). [t_start_ns, t_end_ns) is the blocked interval.
+    DRAKEN_TC_QUEUE_STALL     = 11,
 } DrakenTraceCategory;
 
 // One cache line. Layout MUST match draken_trace::TraceSpan (draken/core/

@@ -1824,16 +1824,19 @@ def plan_drop(statement, **kwargs):
 def _plan_ctas(relation_name, if_not_exists, query_ast, or_replace=False):
     """Plan CREATE TABLE ... AS SELECT.
 
-    Builds: SELECT subtree (Exit-stripped) → InsertNode(create_target=True).
-    Target schema is derived at bind time from the SELECT's exit columns.
+    Builds: SELECT subtree (Exit-headed, kept - not stripped) → InsertNode
+    (create_target=True). Mirrors plan_insert's SELECT-source branch: keeping
+    the Exit node is what makes serial_engine.py route this onto execute_native
+    (the native engine) instead of the legacy push-pipeline, which cannot drive
+    an InsertNode sink attached anywhere else. Target schema is derived at bind
+    time from the SELECT's exit columns.
     """
     plan = LogicalPlan()
 
     source_plan = plan_query(query_ast)
     exit_node_id = source_plan.get_exit_points()[0]
-    source_plan.remove_node(exit_node_id, heal=True)
     plan += source_plan
-    source_tail_id = source_plan.get_exit_points()[0]
+    source_tail_id = exit_node_id
 
     insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
     insert_step.relation_name = relation_name
