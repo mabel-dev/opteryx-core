@@ -1821,7 +1821,7 @@ def plan_drop(statement, **kwargs):
         raise UnsupportedSyntaxError(f"DROP {object_type} is not supported")
 
 
-def _plan_ctas(relation_name, if_not_exists, query_ast):
+def _plan_ctas(relation_name, if_not_exists, query_ast, or_replace=False):
     """Plan CREATE TABLE ... AS SELECT.
 
     Builds: SELECT subtree (Exit-stripped) → InsertNode(create_target=True).
@@ -1842,6 +1842,7 @@ def _plan_ctas(relation_name, if_not_exists, query_ast):
     insert_step.explicit_columns = None
     insert_step.create_target = True
     insert_step.if_not_exists = if_not_exists
+    insert_step.or_replace = or_replace
 
     insert_id = random_string()
     plan.add_node(insert_id, insert_step)
@@ -1876,14 +1877,13 @@ def plan_create_table(statement, **kwargs):
     # Extract IF NOT EXISTS flag
     create_table_node.if_not_exists = statement[root_node].get("if_not_exists", False)
 
-    # Check for unsupported options
-    for option in ["or_replace", "external", "temporary", "transient", "volatile", "iceberg"]:
-        if statement[root_node].get(option):
-            raise UnsupportedSyntaxError(f"CREATE TABLE option not supported: {option}")
-
     # CTAS path
     query_ast = statement[root_node].get("query")
     if query_ast is not None:
+        # Check for unsupported options (or_replace is handled below, CTAS-only)
+        for option in ["external", "temporary", "transient", "volatile", "iceberg"]:
+            if statement[root_node].get(option):
+                raise UnsupportedSyntaxError(f"CREATE TABLE option not supported: {option}")
         column_defs = statement[root_node].get("columns", [])
         if column_defs:
             raise UnsupportedSyntaxError("CREATE TABLE AS SELECT cannot specify column definitions")
@@ -1891,7 +1891,13 @@ def plan_create_table(statement, **kwargs):
             relation_name=create_table_node.relation_name,
             if_not_exists=create_table_node.if_not_exists,
             query_ast=query_ast,
+            or_replace=statement[root_node].get("or_replace", False),
         )
+
+    # Check for unsupported options (plain CREATE TABLE form — or_replace not supported here)
+    for option in ["or_replace", "external", "temporary", "transient", "volatile", "iceberg"]:
+        if statement[root_node].get(option):
+            raise UnsupportedSyntaxError(f"CREATE TABLE option not supported: {option}")
 
     # Parse columns
     columns = []

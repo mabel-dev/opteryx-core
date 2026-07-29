@@ -14,8 +14,12 @@ ACTION_MAP = {
     "DELETE": {"writer", "owner"},
     "WRITE": {"writer", "owner"},
     "UPDATE": {"writer", "owner"},
+    # Creating a brand-new relation risks nothing existing; a writer may do it.
+    "CREATE": {"writer", "owner"},
     # Dropping a relation destroys it and its history; a writer may change a
     # relation's contents but only an owner may remove the relation itself.
+    # CREATE OR REPLACE on an existing relation reuses this tier: it has the
+    # same blast radius as DROP (the old relation's data/history is gone).
     "DROP": {"owner"},
 }
 

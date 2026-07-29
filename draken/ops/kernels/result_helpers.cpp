@@ -73,6 +73,7 @@ extern "C" VecResult vecresult_from_string_block(
     sa->arena_cap    = arena_len;
     sa->null_bitmap  = has_validity ? (block + L.validity_start) : nullptr;
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type         = type;
 
     VecResult r;
@@ -164,6 +165,7 @@ extern "C" VecResult vecresult_from_string_buffers(
     sa->arena_cap    = arena_len;
     sa->null_bitmap  = dvalid;   // embedded; freed with the block
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type         = type;
 
     VecResult r;

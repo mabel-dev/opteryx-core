@@ -74,6 +74,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
     supports_predicate_pushdown = False
     supports_limit_pushdown = False
+    # No Iceberg-style field-id lineage to preserve, unlike the catalog
+    # connector - REPLACE can freely change schema here.
+    supports_schema_evolution_on_replace = True
 
     def __init__(self, store_root: Optional[str] = None, **kwargs):
         """Initialize LocalStoreConnector.
@@ -301,12 +304,34 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             telemetry=telemetry,
         )
 
-    def insert(self, relation_name: str, file_entries: List[FileEntry]) -> None:
+    def write_morsel(self, relation_name: str, morsel) -> FileEntry:
+        """Write a morsel as a parquet file into the relation's directory.
+
+        Creates the directory if needed - this runs before create_relation/
+        replace_relation (deferred to EOS for atomicity), so the relation's
+        catalog entry (dataset.json) does not exist yet when the first morsel
+        arrives. An empty directory with no dataset.json is invisible to
+        relation_exists() and everything else, so this doesn't compromise
+        atomicity - only a dataset.json write makes a relation "exist".
+        """
+        from opteryx.connectors.parquet_io.parquet_writer import write_morsel as _write_morsel
+
+        relation_dir = self._relation_dir(relation_name)
+        os.makedirs(relation_dir, exist_ok=True)
+        return _write_morsel(morsel, relation_dir)
+
+    def insert(
+        self,
+        relation_name: str,
+        file_entries: List[FileEntry],
+        author: Optional[str] = None,
+    ) -> None:
         """Commit pre-written data files into a new snapshot.
 
         Args:
             relation_name: Fully-qualified relation name
             file_entries: List of FileEntry objects to append to the relation
+            author: session user, unused by this store (see create_relation)
 
         Raises:
             ValueError: If relation doesn't exist
@@ -325,7 +350,52 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         new_files = current_files + file_entries
         self._commit(relation_name, new_files)
 
-    def _commit(self, relation_name: str, new_files: List[FileEntry]) -> None:
+    def replace_relation(
+        self,
+        relation_name: str,
+        schema: RelationSchema,
+        file_entries: List[FileEntry],
+        author: Optional[str] = None,
+    ) -> None:
+        """Atomically replace a relation's entire contents with the given files,
+        as a single new snapshot (CREATE OR REPLACE ... AS SELECT).
+
+        Unlike the catalog connector, schema CAN change here - there's no
+        Iceberg-style field-id lineage to preserve, so this is the path that
+        exercises or_replace's schema-changing case in tests.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            schema: RelationSchema the new data conforms to (may differ from current)
+            file_entries: List of FileEntry objects that become the relation's entire contents
+            author: session user, unused by this store (see create_relation)
+
+        Raises:
+            ValueError: If relation doesn't exist
+            ConcurrentModificationError: If relation was modified concurrently
+        """
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+
+        if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
+            raise ValueError(f"relation does not exist: {relation_name}")
+
+        self._commit(relation_name, file_entries, schema=schema)
+
+    def relation_column_names(self, relation_name: str) -> List[str]:
+        """Return the relation's current column names only (not full type fidelity)."""
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+        return [c.name for c in descriptor.schema.columns]
+
+    def _commit(
+        self,
+        relation_name: str,
+        new_files: List[FileEntry],
+        schema: Optional[RelationSchema] = None,
+    ) -> None:
         """Optimistic concurrency control commit protocol.
 
         Atomically updates the relation's current snapshot, guarding against concurrent
@@ -334,6 +404,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         Args:
             relation_name: Fully-qualified relation name
             new_files: Complete list of files for the new snapshot
+            schema: Schema for the new snapshot; defaults to the relation's current
+                schema (pass explicitly only when the schema is changing, e.g. REPLACE)
 
         Raises:
             ConcurrentModificationError: If relation was modified concurrently
@@ -343,6 +415,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         # Step 1: Read base descriptor and capture current snapshot
         base_descriptor = self._read_dataset_json(relation_dir)
         base_snapshot = base_descriptor.current_snapshot
+        new_schema = schema if schema is not None else base_descriptor.schema
 
         # Step 2: Build the manifest Parquet (the file list + stats) and its
         # tiny commit-log pointer. created_at is shared between both filenames
@@ -350,7 +423,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         created_at = _now_utc_iso()
         ts = _ts_for_filename(created_at)
 
-        manifest_bytes = write_manifest_parquet(new_files, base_descriptor.schema)
+        manifest_bytes = write_manifest_parquet(new_files, new_schema)
 
         manifest_name = f"manifest-{ts}.parquet"
         counter = 1
@@ -411,7 +484,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         new_descriptor = DatasetDescriptor(
             format_version=base_descriptor.format_version,
             relation_name=base_descriptor.relation_name,
-            schema=base_descriptor.schema,
+            schema=new_schema,
             current_snapshot=snapshot_name,
             created_at=base_descriptor.created_at,
         )

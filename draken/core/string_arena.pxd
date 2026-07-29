@@ -28,5 +28,6 @@ cdef inline DrakenStringArena* alloc_string_arena(DrakenType dtype, size_t lengt
     arena.arena_cap = arena_cap
     arena.null_bitmap = NULL
     arena.owns_buffers = 1
+    arena.payloads_elided = 0
     arena.type = DRAKEN_VARCHAR
     return arena

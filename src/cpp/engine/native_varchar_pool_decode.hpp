@@ -73,7 +73,8 @@ inline const uint8_t* varchar_pool_read_u32(const uint8_t* p, uint32_t* out) {
 // variant) are retained by the VectorOwner.
 inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint32_t nslots,
                                          const uint8_t* src_arena, size_t arena_len,
-                                         DrakenType type, DrakenStringArena** out_sa) {
+                                         DrakenType type, DrakenStringArena** out_sa,
+                                         bool payloads_elided = false) {
     constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
     const size_t struct_end =
         (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
@@ -97,6 +98,10 @@ inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint
     sa->length = nslots;
     sa->arena_used = arena_len;
     sa->arena_cap = arena_len;
+    // Carry the decoder's state across the block copy. Losing it here is how a
+    // downstream gather ends up believing payloads exist while the slots carry
+    // the trap offset.
+    sa->payloads_elided = payloads_elided ? 1u : 0u;
     sa->null_bitmap = nullptr;   // validity tracked separately via VectorOwner
     sa->owns_buffers = 0;
     sa->type = type;
@@ -108,9 +113,11 @@ inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint
 inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t length,
                                      uint8_t* src_arena, size_t arena_len,
                                      uint8_t* validity, DrakenType type, CxxColumn& out,
-                                     uint64_t* keyhash = nullptr) {
+                                     uint64_t* keyhash = nullptr,
+                                     bool payloads_elided = false) {
     DrakenStringArena* sa = nullptr;
-    uint8_t* block = consolidate_string_block(src_slots, length, src_arena, arena_len, type, &sa);
+    uint8_t* block = consolidate_string_block(src_slots, length, src_arena, arena_len, type, &sa,
+                                              payloads_elided);
     draken_free(src_slots);
     draken_free(src_arena);
     DrakenVector v = draken_vector_from_dense(sa, length, type, validity);

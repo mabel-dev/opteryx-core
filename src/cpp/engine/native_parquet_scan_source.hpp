@@ -476,7 +476,8 @@ struct NativeParquetScanSource : Source {
             }
             emit_dense_string_column(static_cast<DrakenStringSlot*>(slots), length,
                                      static_cast<uint8_t*>(arena), arena_len,
-                                     validity, string_type_for(i), out, kh);
+                                     validity, string_type_for(i), out, kh,
+                                     result.columns[i].payloads_elided);
             return true;
         }
         // WP-11: a projected int64 (or widened-int32) column the plan flags as

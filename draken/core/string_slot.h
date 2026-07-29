@@ -66,6 +66,13 @@ typedef union {
 // Accessors
 // ---------------------------------------------------------------------------
 
+// Arena offset stamped on a long slot whose payload bytes were deliberately NOT
+// materialized (see DrakenStringArena.payloads_elided in buffers.h). The arena is
+// NULL in that case, so any str_data() on such a slot lands ~4GB out and faults
+// immediately instead of silently returning adjacent memory. This is a TRAP value,
+// never a signal — the signal is payloads_elided.
+#define STR_ELIDED_PAYLOAD_OFFSET 0xFFFFFFFFu
+
 static inline uint32_t str_length(const DrakenStringSlot* s) { return s->inl.length; }
 static inline int      str_is_inline(const DrakenStringSlot* s) { return s->inl.length <= STR_INLINE_MAX; }
 

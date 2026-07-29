@@ -921,11 +921,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         self, node: LogicalPlanNode, context: OptimizerContext
     ) -> OptimizerContext:
         # Two-pass: classify pushable predicates as selective (comparison-style) vs.
-        # metadata-only (UNARY_OPERATOR), then commit. Metadata-only predicates ride
-        # along on a scan only when at least one selective predicate is also being
-        # pushed — otherwise a non-selective unary predicate (e.g. `col <> ''`) would
-        # be the sole driver of two-pass / late-materialization, which is a net loss
-        # when the predicate doesn't narrow the mask enough to pay back the overhead.
+        # metadata-only (UNARY_OPERATOR), then commit both unconditionally. Whether a
+        # non-selective unary predicate (e.g. `col <> ''`) is worth two-pass /
+        # late-materialization is no longer this strategy's call to make — the scan
+        # operator computes its own per-predicate selectivity estimate and gates
+        # two_pass_eligible on it directly (parquet_read.pyx), regardless of whether
+        # the predicate is unary or comparison. Requiring a selective companion here
+        # was a coarser stand-in for that check before it existed; it now just forces
+        # a lone unary predicate into a redundant standalone Filter node after the scan.
         remaining_predicates = []
         selective_to_push = []  # (predicate, condition_to_push)
         metadata_to_push = []   # (predicate, condition_to_push)
@@ -1000,24 +1003,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             else:
                 not_pushable.append(predicate)
 
-        # Commit selective predicates unconditionally.
-        for _predicate, condition in selective_to_push:
+        # Commit both selective and metadata-only predicates unconditionally — the
+        # scan's own selectivity estimate decides whether two-pass pays off, not this
+        # strategy (see comment above).
+        for _predicate, condition in selective_to_push + metadata_to_push:
             if not node.predicates:
                 node.predicates = []
             node.predicates.append(condition)
-
-        # Metadata predicates only push when a selective companion is also pushing.
-        if selective_to_push:
-            for _predicate, condition in metadata_to_push:
-                if not node.predicates:
-                    node.predicates = []
-                node.predicates.append(condition)
-        else:
-            for predicate, _condition in metadata_to_push:
-                self.telemetry.optimization_predicate_pushdown_metadata_orphaned += 1
-                context.optimized_plan.insert_node_after(
-                    predicate.nid, predicate, context.node_id
-                )
 
         for predicate in not_pushable:
             self.telemetry.optimization_predicate_pushdown += 1

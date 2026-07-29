@@ -140,6 +140,10 @@ struct ColumnOut {
     // double-freeing. Any not taken (decode error / abandonment) are freed here.
     void*    arena = nullptr;        // long-string byte arena
     size_t   arena_len = 0;          // valid bytes in arena
+    // 1 = long-form payload bytes were deliberately never materialized (the
+    // planner proved every read of this column is length-answerable). Explicit
+    // state — never inferred from arena/arena_len. See draken/core/buffers.h.
+    bool     payloads_elided = false;
     void*    codes = nullptr;        // DK_VARCHAR_DICT: uint32 code per row
     uint32_t data_length = 0;        // DK_VARCHAR_DICT: number of unique-value slots
     bool     dict_sorted = false;    // dict shapes: `data` is ascending (is_sorted)
@@ -222,6 +226,10 @@ static inline bool pass1_build_dv_view(ColumnOut& co, uint32_t nrows,
         sa.arena_cap   = co.arena_len;
         sa.null_bitmap = co.validity;
         sa.owns_buffers = 0;
+        // Carry the decoder's state: if the payloads were never materialized the
+        // predicate reads lengths only, and anything that would move bytes (the
+        // gather that compacts survivors) must see it too.
+        sa.payloads_elided = co.payloads_elided ? 1u : 0u;
         sa.type        = DRAKEN_VARCHAR;
         v.data        = &sa;
         v.selection   = draken_identity_sel(nrows);   // dense
@@ -404,9 +412,15 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
 // slot per row; strings > STR_INLINE_MAX live in the arena (hash from the bytes),
 // inline strings live in the slot; null rows get an init-null slot. string_values
 // has one entry per row. Allocates via `alloc`; frees what it took on failure.
+// `length_only`: the planner proved every read of this column is
+// length-answerable, so long-form payload bytes are never read. Each value's
+// true length (and its free 4-byte prefix) is still recorded; only the payload
+// copy is skipped, and the slot carries STR_ELIDED_PAYLOAD_OFFSET so any misuse
+// faults. The STATE is carried explicitly on the arena via out.payloads_elided.
 static inline bool build_direct_string_plain(const DecodedColumn& d,
                                              void* (*alloc)(size_t), void (*freefn)(void*),
-                                             ColumnOut& out, bool want_seed = false) {
+                                             ColumnOut& out, bool want_seed = false,
+                                             bool length_only = false) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
@@ -414,10 +428,12 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
 
     // Pass 1: arena bytes (long, non-null strings only).
     size_t total_arena = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) continue;
-        const size_t slen = (i < vals.size()) ? vals[i].size() : 0u;
-        if (slen > STR_INLINE_MAX) total_arena += slen;
+    if (!length_only) {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) continue;
+            const size_t slen = (i < vals.size()) ? vals[i].size() : 0u;
+            if (slen > STR_INLINE_MAX) total_arena += slen;
+        }
     }
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
@@ -453,7 +469,12 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
         const std::string& s = vals[i];
         const uint8_t* sp = reinterpret_cast<const uint8_t*>(s.data());
         const uint32_t slen = static_cast<uint32_t>(s.size());
-        if (slen > STR_INLINE_MAX) {
+        if (slen > STR_INLINE_MAX && length_only) {
+            if (want_seed) draken::ops::draken_build_string_slot_seed(
+                               slot, sp, slen, STR_ELIDED_PAYLOAD_OFFSET, &keyhash[i]);
+            else           draken_build_string_slot(
+                               slot, sp, slen, STR_ELIDED_PAYLOAD_OFFSET);
+        } else if (slen > STR_INLINE_MAX) {
             std::memcpy(arena + arena_pos, sp, slen);
             if (want_seed) draken::ops::draken_build_string_slot_seed(slot, sp, slen, arena_pos, &keyhash[i]);
             else           draken_build_string_slot(slot, sp, slen, arena_pos);  // no XXH3
@@ -469,6 +490,7 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
     out.length = n;
     out.arena = arena;
     out.arena_len = arena_pos;
+    out.payloads_elided = length_only;
     out.keyhash = keyhash;
     return true;
 }
@@ -1648,10 +1670,20 @@ class ParquetIOPipeline {
                     // E37: this column carries a hash seed only if the plan flagged
                     // it a downstream key (parallel to the projected column order).
                     const bool want_seed = (i < hash_key_columns_.size()) && (hash_key_columns_[i] != 0);
+                    // Every read of this column is length-answerable (proved by
+                    // LengthOnlyColumnStrategy) -> its long-value payloads need not
+                    // be materialized. Movers that copy payloads without reading them
+                    // (string_gather.h materialize/slice/take/compress, concat_string,
+                    // consolidate_string_block) determine "no payload" PER SLOT via
+                    // STR_ELIDED_PAYLOAD_OFFSET on the slot itself, never by trusting
+                    // DrakenStringArena.payloads_elided (that struct byte is not
+                    // self-zeroing across every arena constructor in the tree, so an
+                    // uninitialised one could misread as elided — see buffers.h).
+                    const bool length_only = (i < length_only_columns_.size()) && (length_only_columns_[i] != 0);
                     if (dk == DK_BOOL)
                         ok = build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_VARCHAR)
-                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed);
+                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed, length_only);
                     else if (dk == DK_VARCHAR_DICT)
                         ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed);
                     else if (dk == DK_INT64_DICT)
@@ -1817,6 +1849,12 @@ class ParquetIOPipeline {
     // standalone-rugo / SELECT-*/ LIKE default of zero string hashing.
     std::vector<uint8_t> hash_key_columns_;
     void set_hash_key_columns(const std::vector<uint8_t>& v) { hash_key_columns_ = v; }
+    // Parallel to the projected column order. 1 = the optimizer proved every read
+    // of this column is length-answerable (IsEmpty/IsNotEmpty/LENGTH), so its
+    // long-value payload is never read and need not be materialized. All-zero
+    // (the default) leaves decoding byte-for-byte unchanged.
+    std::vector<uint8_t> length_only_columns_;
+    void set_length_only_columns(const std::vector<uint8_t>& v) { length_only_columns_ = v; }
 
 #ifdef RUGO_ENABLE_HTTP
     // Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-derived

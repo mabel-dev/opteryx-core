@@ -41,11 +41,11 @@ class InsertNode(BasePlanNode):
         self.target_column_names = parameters.get("target_column_names")
 
         self.create_target = parameters.get("create_target", False)
+        self.is_replace = parameters.get("is_replace", False)
         self.is_noop = parameters.get("is_noop", False)
 
         self._file_entries = []
         self._total_rows = 0
-        self._created = False
         self.result: Optional[NonTabularResult] = None
 
     @property
@@ -56,9 +56,18 @@ class InsertNode(BasePlanNode):
     def config(self):
         return f"insert into {self.relation_name}"
 
-    def _push_impl(self, morsel):
-        from opteryx.connectors.parquet_io.parquet_writer import write_morsel
+    @property
+    def _author(self):
+        """The session user this write is attributed to, or None when unauthenticated.
 
+        None is passed through rather than substituted, so a store that requires
+        attribution rejects the write instead of recording an invented identity.
+        """
+        from opteryx.variables import resolve
+
+        return resolve("external_user", self.properties.variables, None) or None
+
+    def _push_impl(self, morsel):
         if self.is_noop:
             if morsel is _EOS_SENTINEL:
                 self.result = NonTabularResult(
@@ -67,12 +76,26 @@ class InsertNode(BasePlanNode):
                 )
             return
 
-        if self.create_target and not self._created:
-            self.connector.create_relation(self.relation_name, self.target_schema)
-            self._created = True
-
         if morsel is _EOS_SENTINEL:
-            self.connector.insert(self.relation_name, self._file_entries)
+            # All files are durably written before any catalog mutation - a
+            # mid-query failure above this point leaves the target relation
+            # completely untouched, whether this is a fresh create or a replace.
+            if self.is_replace:
+                self.connector.replace_relation(
+                    self.relation_name, self.target_schema, self._file_entries,
+                    author=self._author,
+                )
+            elif self.create_target:
+                self.connector.create_relation(
+                    self.relation_name, self.target_schema, author=self._author
+                )
+                self.connector.insert(
+                    self.relation_name, self._file_entries, author=self._author
+                )
+            else:
+                self.connector.insert(
+                    self.relation_name, self._file_entries, author=self._author
+                )
             self.result = NonTabularResult(
                 record_count=self._total_rows,
                 status=QueryStatus.SQL_SUCCESS,
@@ -82,8 +105,7 @@ class InsertNode(BasePlanNode):
         if self.column_mapping is not None and self.target_column_names is not None:
             morsel = self._align_morsel(morsel)
 
-        relation_dir = self.connector._relation_dir(self.relation_name)
-        file_entry = write_morsel(morsel, relation_dir)
+        file_entry = self.connector.write_morsel(self.relation_name, morsel)
         self._file_entries.append(file_entry)
         self._total_rows += len(morsel)
 

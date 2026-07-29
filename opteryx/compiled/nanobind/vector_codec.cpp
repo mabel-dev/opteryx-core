@@ -127,6 +127,7 @@ static nb::object codec_apply(
     out_sa->arena_cap    = total_extern;
     out_sa->null_bitmap  = nullptr;
     out_sa->owns_buffers = 0;
+    out_sa->payloads_elided = 0;
     out_sa->type         = DRAKEN_VARCHAR;
 
     // Validity: copy from input (null rows are left as null slots = zero).

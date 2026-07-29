@@ -37,6 +37,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint32_t data_length # DK_VARCHAR_DICT: unique-value slot count
         bint dict_sorted     # dict shapes: `data` is ascending (is_sorted)
         void* keyhash        # E37: per-data-element hash seed (uint64), or NULL
+        bint payloads_elided # 1 = long-form payload bytes never materialized
 
     cdef cppclass MorselRef:
         string path
@@ -68,6 +69,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # E37: per-projected-column key flag; 1 = build the hash seed for this
         # string column. Set once at plan time; empty → no string hashing.
         void set_hash_key_columns(const vector[uint8_t]& v)
+        void set_length_only_columns(const vector[uint8_t]& v)
         # Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-
         # derived timeout floor). Set once at plan time, by value — see
         # HttpTuning's comment in http_client.hpp for why this is never stored
@@ -161,6 +163,10 @@ cdef class NativeScanPlan:
     # downstream, so the native Source carries its hash seed (keyhash_buf). All-zero
     # (the default) → no sidecar built — the pay-for-use gate.
     cdef vector[uint8_t] hash_key_columns
+    # Parallel to column_names. 1 = every read of this column is length-answerable
+    # (LengthOnlyColumnStrategy proved it), so the decoder records lengths but
+    # skips copying long-value payloads. All-zero (the default) → decode unchanged.
+    cdef vector[uint8_t] length_only_columns
     cdef int in_flight_limit
     cdef int n_items
     # WP-02: row groups excluded by pushed-predicate min/max + bloom pruning at
@@ -188,6 +194,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     decimal_columns=*,
     logical_coerce=*,
     hash_key_columns=*,
+    length_only_columns=*,
     pool=*,
     filesystem=*,
     footer_bytes_cache=*,

@@ -56,20 +56,28 @@ int list_directory(const char* path, file_info_t** files, size_t* count) {
         // Build full path for stat
         char full_path[PATH_MAX];
         snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-        
-        // Get file info
+
+        // lstat, NOT stat: a symlink must be classified as itself, never as
+        // whatever it points at. stat() follows the link and reports the
+        // TARGET's type — a symlink to a directory would report is_directory,
+        // and a symlink whose target no longer exists would silently vanish
+        // from the listing instead of being reported. Neither is acceptable:
+        // symlinks are not traversed by this codebase (see list_files_with_info).
         struct stat st;
-        if (stat(full_path, &st) != 0) {
+        if (lstat(full_path, &st) != 0) {
             continue; // Skip files we can't stat
         }
-        
+        if (S_ISLNK(st.st_mode)) {
+            continue; // symlinks are invisible to directory listing, not followed
+        }
+
         // Fill file info
         (*files)[num_files].name = strdup(entry->d_name);
         (*files)[num_files].is_directory = S_ISDIR(st.st_mode);
         (*files)[num_files].is_regular_file = S_ISREG(st.st_mode);
         (*files)[num_files].size = (int64_t)st.st_size;
         (*files)[num_files].mtime = (int64_t)st.st_mtime;
-        
+
         num_files++;
     }
     
@@ -101,10 +109,13 @@ int walk_directory(const char* base_path, file_callback_t callback, void* user_d
             continue;
         
         snprintf(path, sizeof(path), "%s/%s", base_path, entry->d_name);
-        
+
+        // lstat, NOT stat: never resolve through a symlink to classify it —
+        // see the comment in list_directory above.
         struct stat st;
-        if (stat(path, &st) != 0) continue;
-        
+        if (lstat(path, &st) != 0) continue;
+        if (S_ISLNK(st.st_mode)) continue; // symlinks are not walked, period
+
         // Call callback for this entry
         int result = callback(path, &st, user_data);
         if (result != 0) {
@@ -164,6 +175,10 @@ static bool matches_extension(const char* name, const std::vector<std::string>& 
     return false;
 }
 
+// A symlink is classified as neither a directory nor a file — this walker does
+// not traverse or read through symlinks, ever. DT_LNK is handled explicitly
+// (not folded into the DT_UNKNOWN fallback) so that intent reads directly off
+// this function rather than being an emergent side effect of lstat() below.
 static int classify_entry(const std::string& path, const struct dirent* entry, bool* is_directory,
                           bool* is_file) {
     *is_directory = false;
@@ -179,13 +194,19 @@ static int classify_entry(const std::string& path, const struct dirent* entry, b
         *is_file = true;
         return 0;
     }
-    if (dtype != DT_LNK && dtype != DT_UNKNOWN) {
+    if (dtype == DT_LNK) {
+        return 0; // symlink: not a directory, not a file — not followed
+    }
+    if (dtype != DT_UNKNOWN) {
         return 0;
     }
 #endif
 
+    // dtype was DT_UNKNOWN (filesystem doesn't populate d_type) — classify via
+    // lstat, NOT stat, so an unresolved d_type never silently resolves through
+    // a symlink to its target's type.
     struct stat st;
-    if (stat(path.c_str(), &st) != 0) {
+    if (lstat(path.c_str(), &st) != 0) {
         return -errno;
     }
 
@@ -194,6 +215,7 @@ static int classify_entry(const std::string& path, const struct dirent* entry, b
     } else if (S_ISREG(st.st_mode)) {
         *is_file = true;
     }
+    // S_ISLNK falls through with both flags false — symlinks are not followed.
 
     return 0;
 }
@@ -407,33 +429,51 @@ int list_files_with_info(const char* base_path, const char** extensions, size_t 
             
             bool is_directory = false;
             bool is_file = false;
-            
-            // Try to use d_type first if available
+            bool is_symlink = false;
+
+            // Try to use d_type first if available. DT_LNK is checked
+            // explicitly and short-circuits the whole classification — a
+            // symlink is never a directory to recurse into or a file to read,
+            // regardless of what it points at. This is the fix for a real bug:
+            // previously DT_LNK fell through to the stat() fallback below,
+            // which resolves through the link to the TARGET's type — a
+            // symlinked directory (including one pointing at an ancestor of
+            // itself) was pushed onto the walk stack and recursed into
+            // indefinitely, silently multiplying every file under it.
 #ifdef _DIRENT_HAVE_D_TYPE
-            if (entry_copy->d_type != DT_UNKNOWN) {
-                if (entry_copy->d_type == DT_DIR) {
-                    is_directory = true;
-                } else if (entry_copy->d_type == DT_REG) {
-                    is_file = true;
-                }
+            if (entry_copy->d_type == DT_DIR) {
+                is_directory = true;
+            } else if (entry_copy->d_type == DT_REG) {
+                is_file = true;
+            } else if (entry_copy->d_type == DT_LNK) {
+                is_symlink = true;
             }
 #endif
-            
-            // If d_type not available or is DT_UNKNOWN/DT_LNK, use stat
-            if (!is_directory && !is_file) {
+
+            // d_type unavailable (DT_UNKNOWN) — classify via lstat, NOT stat,
+            // so an unresolved d_type never silently resolves through a
+            // symlink to its target's type.
+            if (!is_directory && !is_file && !is_symlink) {
                 struct stat st;
-                if (stat(full_path.c_str(), &st) != 0) {
+                if (lstat(full_path.c_str(), &st) != 0) {
                     free(entry_copy);
                     continue;
                 }
-                
+
                 if (S_ISDIR(st.st_mode)) {
                     is_directory = true;
                 } else if (S_ISREG(st.st_mode)) {
                     is_file = true;
+                } else if (S_ISLNK(st.st_mode)) {
+                    is_symlink = true;
                 }
             }
-            
+
+            if (is_symlink) {
+                free(entry_copy);
+                continue; // not traversed, not reported — symlinks are not followed
+            }
+
             if (is_directory) {
                 stack.emplace_back(std::move(full_path));
             } else if (is_file) {

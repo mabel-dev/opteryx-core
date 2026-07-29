@@ -35,7 +35,7 @@ def _warn_no_native_sketches() -> None:
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
-from opteryx.exceptions import DatasetNotFoundError, DatasetReadError, NotSupportedError
+from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
@@ -601,6 +601,56 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         return None, None
 
     # Relation operations (Writable capability)
+    def _dataset_location(self, relation_name: str) -> str:
+        """Resolve the GCS location data files for this relation live under.
+
+        Called from `write_morsel`, which runs before the relation is
+        necessarily registered in the catalog (CREATE OR REPLACE writes files
+        before creating/replacing the catalog entry at EOS - see insert.pyx).
+        For an existing relation this reads its real registered location; for
+        one that doesn't exist yet, it mirrors the exact formula
+        `catalog.create_dataset` will use for that identifier, since no
+        location has been assigned yet.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        if catalog.dataset_exists(relative_id):
+            return catalog.load_dataset(relative_id).metadata.location
+        collection, dataset_name = relative_id.split(".")
+        return f"gs://{catalog.gcs_bucket}/{catalog.workspace}/{collection}/{dataset_name}"
+
+    def write_morsel(self, relation_name: str, morsel) -> FileEntry:
+        """Write a morsel as a parquet file via the catalog's own GCS-aware
+        FileIO. Opteryx has no GCS write path of its own; this reuses the
+        exact write primitive `opteryx_catalog`'s `SimpleDataset.append`/
+        `overwrite` use internally (`catalog.io.new_output(...)` +
+        `rugo.parquet.write_parquet`), so a CTAS/REPLACE writing many morsels
+        lands them the same way the catalog would land a single one.
+        """
+        from rugo.parquet import write_parquet
+
+        from opteryx.utils import random_string
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        location = self._dataset_location(relation_name)
+
+        file_name = f"data-{random_string(32)}.parquet"
+        data_path = f"{location}/data/{file_name}"
+
+        pdata = write_parquet(morsel, compression="zstd", bloom_filters=True)
+
+        out = catalog.io.new_output(data_path).create()
+        out.write(pdata)
+        out.close()
+
+        return FileEntry(
+            file_path=data_path,
+            file_format="PARQUET",
+            record_count=len(morsel),
+            file_size_in_bytes=len(pdata),
+        )
+
     def create_relation(self, relation_name: str, schema, author: Optional[str] = None) -> None:
         """Create a new dataset in the catalog."""
         workspace, relative_id = self._parse_identifier(relation_name)
@@ -638,11 +688,33 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
         return catalog.dataset_exists(relative_id)
 
-    def insert(self, relation_name: str, file_entries) -> None:
-        raise NotSupportedError(
-            "INSERT into catalog-backed relations is not supported; "
-            "the catalog commit path takes morsels, not pre-written file entries."
-        )
+    def insert(
+        self, relation_name: str, file_entries, author: Optional[str] = None
+    ) -> None:
+        """Commit pre-written parquet files into the catalog as a new snapshot,
+        appended to whatever the dataset already contains."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        file_paths = [fe.file_path for fe in file_entries]
+        catalog.load_dataset(relative_id).add_files(file_paths, author=author)
+
+    def replace_relation(
+        self, relation_name: str, schema, file_entries, author: Optional[str] = None
+    ) -> None:
+        """Atomically replace a dataset's entire contents with the given files,
+        as a single new snapshot (CREATE OR REPLACE ... AS SELECT). Schema is
+        unchanged - this does not evolve the dataset's schema."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        file_paths = [fe.file_path for fe in file_entries]
+        catalog.load_dataset(relative_id).truncate_and_add_files(file_paths, author=author)
+
+    def relation_column_names(self, relation_name: str):
+        """Return the dataset's current column names only (not full type fidelity)."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        schema = catalog.load_dataset(relative_id).schema()
+        return [c.name for c in schema.columns]
 
     # View operations (Eidetic capability)
     def get_view(self, view_name: str):

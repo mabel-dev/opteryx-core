@@ -120,6 +120,20 @@ typedef struct {
 // Lifetime: slots and arena are both owned by this struct when owns_buffers
 // is non-zero. arena_used tracks bytes consumed during construction; arena_cap
 // is the allocation size. Slots whose length <= 12 do not reference the arena.
+//
+// `payloads_elided` states — explicitly — whether the long-form payload BYTES
+// exist. Do NOT infer this from `arena`/`arena_cap`: a NULL arena answers "no
+// arena was allocated", which is a different question. Those two only ever
+// agreed by coincidence of construction order, and the coincidence is exactly
+// what this field exists to stop anyone relying on. A producer that records
+// each value's LENGTH but deliberately skips copying its bytes (a column the
+// planner proved is read only through length-answerable operations) sets this
+// to 1; every ordinary producer leaves it 0.
+//
+// Polarity is deliberate: 0 == "payloads are present", so a construction site
+// that forgets this field degrades to correct-but-unoptimised, never to
+// silently dropping real data. It is NOT self-zeroing — sites that allocate
+// without memset MUST set it (see the static_assert below pinning the layout).
 typedef struct {
     DrakenStringSlot* slots;       // [length] slot array
     uint8_t*      arena;       // long-form byte arena (may be NULL when all rows inline)
@@ -128,6 +142,7 @@ typedef struct {
     size_t        arena_cap;   // arena allocation size
     uint8_t*      null_bitmap; // optional, 1 bit per row
     uint8_t       owns_buffers;// free slots/arena/null_bitmap on free?
+    uint8_t       payloads_elided; // 1 = long-form payload bytes were never materialized
     DrakenType    type;        // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
 } DrakenStringArena;
 
@@ -359,6 +374,15 @@ DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, flags)       == 36, "DrakenVector.fl
 
 // Pin the DrakenType underlying integer width and representative tag values.
 // A renumber silently breaks the runtime dispatch key for every cimport site.
+// DrakenStringArena: payloads_elided occupies what was tail padding after
+// owns_buffers, so adding it did NOT grow the struct. Pinned so a future field
+// has to be a deliberate decision (and so this one cannot silently drift into
+// the DrakenType slot on a platform that packs differently).
+DRAKEN_STATIC_ASSERT(sizeof(DrakenStringArena) == 56, "DrakenStringArena size drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, owns_buffers)    == 48, "DrakenStringArena.owns_buffers offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, payloads_elided) == 49, "DrakenStringArena.payloads_elided must land in the padding after owns_buffers");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, type)            == 52, "DrakenStringArena.type offset drift");
+
 DRAKEN_STATIC_ASSERT(sizeof(DrakenType) == 4, "DrakenType underlying type must be 4 bytes");
 DRAKEN_STATIC_ASSERT(DRAKEN_INT64  == 4,   "DrakenType tag renumbered: DRAKEN_INT64");
 DRAKEN_STATIC_ASSERT(DRAKEN_BOOL   == 50,  "DrakenType tag renumbered: DRAKEN_BOOL");

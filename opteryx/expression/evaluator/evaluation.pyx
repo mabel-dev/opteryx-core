@@ -2399,6 +2399,7 @@ cdef int _dv_copy_result_string(
     sa_out.arena_cap = total_arena
     sa_out.null_bitmap = NULL
     sa_out.owns_buffers = 0     # the ONE block is owned by the caller's VectorOwner
+    sa_out.payloads_elided = 0
     sa_out.type = src.type
     cdef size_t arena_pos = 0
     for i in range(n):
@@ -2480,6 +2481,7 @@ cdef int _dv_copy_result_string_preserve(
     sa_out.arena_cap = total_arena
     sa_out.null_bitmap = NULL
     sa_out.owns_buffers = 0     # the ONE block is owned by the caller's VectorOwner
+    sa_out.payloads_elided = 0
     sa_out.type = src.type
     cdef size_t arena_pos = 0
     for j in range(k):

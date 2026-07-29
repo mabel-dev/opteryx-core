@@ -27,6 +27,7 @@ from .group_key_reduction import GroupKeyReductionStrategy
 from .predicate_rewriter import PredicateRewriteStrategy
 from .project_fusion import ProjectFusionStrategy
 from .projection_pushdown import ProjectionPushdownStrategy
+from .length_only_columns import LengthOnlyColumnStrategy
 from .redundant_cast import RedundantCastEliminationStrategy
 from .redundant_operators import RedundantOperationsStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
@@ -65,6 +66,7 @@ __all__ = [
     "PredicateRewriteStrategy",
     "ProjectFusionStrategy",
     "ProjectionPushdownStrategy",
+    "LengthOnlyColumnStrategy",
     "RedundantCastEliminationStrategy",
     "RedundantOperationsStrategy",
     "SplitConjunctivePredicatesStrategy",

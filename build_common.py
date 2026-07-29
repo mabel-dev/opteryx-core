@@ -588,12 +588,16 @@ def draken_rugo_extensions(parquet_created_by):
         ),
         make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
         make_draken_extension("morsels.morsel", "morsels/_morsel_shim.pyx"),
-        # Permutation-based Morsel sort (LSD radix + vergesort pre-pass). A pure
-        # Draken data-structure primitive: takes a Morsel, returns a sort
-        # permutation. Both wheels build it — opteryx's SortNode carries it to the
-        # engine, and it is available to the standalone rugo wheel with no opteryx
-        # dependency. SQL ORDER BY semantics stay in opteryx's SortNode; only the
-        # primitive lives here. Depends on the vendored draken/core/vergesort.h.
+        # The ONE sort implementation (vergesort prepass -> comparison-sort
+        # fallback over the AoS short-circuit comparator, or plain SortKeyCmp for
+        # 5+ key columns) lives in draken/morsels/sort.hpp — pure C++, no
+        # opteryx/Python dependency. This extension is a thin Cython marshaling
+        # shim over it (Morsel <-> shared_ptr<CxxMorsel>, nothing sort-related).
+        # Both wheels build it: opteryx's SortSink/TopNSink/WindowSink call the
+        # same header through src/cpp/engine/native_sort.hpp's re-export shim,
+        # and the standalone rugo wheel calls this module directly (no opteryx
+        # dependency). SQL ORDER BY semantics stay in opteryx's planner; only the
+        # sort primitive lives here.
         make_draken_extension(
             "morsels.sort",
             "morsels/sort.pyx",
@@ -602,6 +606,8 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/vector_alloc.h",
                 "draken/core/string_slot.h",
                 "draken/core/vergesort.h",
+                "draken/morsels/cxx_morsel.h",
+                "draken/morsels/sort.hpp",
             ],
         ),
     ]

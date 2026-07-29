@@ -167,7 +167,8 @@ static inline VecResult sg_finalize(const StrBlock& sb,
                                     uint32_t         data_length,
                                     uint32_t         length,
                                     size_t           arena_used,
-                                    uint8_t          flags) {
+                                    uint8_t          flags,
+                                    uint8_t          payloads_elided = 0) {
     sb.sa->slots        = sb.slots;
     sb.sa->arena        = sb.arena_bytes;
     sb.sa->length       = data_length;
@@ -175,6 +176,7 @@ static inline VecResult sg_finalize(const StrBlock& sb,
     sb.sa->arena_cap    = arena_used;
     sb.sa->null_bitmap  = validity;  // for consistency; C++ ops use v.validity
     sb.sa->owns_buffers = 0;
+    sb.sa->payloads_elided = payloads_elided;
     sb.sa->type         = DRAKEN_VARCHAR;
 
     VecResult r;
@@ -211,6 +213,7 @@ static inline int sg_eq_slots(const DrakenStringSlot* a,
                        a->ext.length) == 0;
 }
 
+
 // ---------------------------------------------------------------------------
 // MATERIALIZE — expand any shape → owned dense string vector.
 //
@@ -225,13 +228,24 @@ static inline VecResult str_materialize(const DrakenVector& v) {
     const uint8_t*           src_v   = v.validity;
 
     // Phase 1: assign new arena offsets per unique source slot (indexed by code).
-    // data_length == number of unique slots in the source.
+    // data_length == number of unique slots in the source. A slot's OWN offset
+    // says whether its payload exists (STR_ELIDED_PAYLOAD_OFFSET = it does not),
+    // checked per-slot — never inferred from a vector-level flag, so a producer
+    // that forgets to set one can never misread a real payload as absent, or an
+    // elided one as present (see DrakenStringArena.payloads_elided in buffers.h
+    // for why the struct flag alone is not trustworthy).
     std::vector<uint32_t> new_off(v.data_length, 0u);
     size_t total_arena = 0u;
+    bool any_elided = false;
     for (uint32_t k = 0; k < v.data_length; ++k) {
         if (!str_is_inline(&src_s[k])) {
-            new_off[k] = static_cast<uint32_t>(total_arena);
-            total_arena += src_s[k].ext.length;
+            if (src_s[k].ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                new_off[k] = STR_ELIDED_PAYLOAD_OFFSET;
+                any_elided = true;
+            } else {
+                new_off[k] = static_cast<uint32_t>(total_arena);
+                total_arena += src_s[k].ext.length;
+            }
         }
     }
     if (total_arena > static_cast<size_t>(UINT32_MAX))
@@ -241,9 +255,10 @@ static inline VecResult str_materialize(const DrakenVector& v) {
     StrBlock sb = sg_alloc_str_block(n, total_arena);
     SgOwned<void> bg(sb.block);  // frees block if validity alloc throws
 
-    // Phase 3: copy arena bytes for each unique long slot.
+    // Phase 3: copy arena bytes for each unique long slot with a real payload.
     for (uint32_t k = 0; k < v.data_length; ++k) {
-        if (!str_is_inline(&src_s[k]) && sb.arena_bytes != nullptr) {
+        if (!str_is_inline(&src_s[k]) && new_off[k] != STR_ELIDED_PAYLOAD_OFFSET &&
+            sb.arena_bytes != nullptr) {
             std::memcpy(sb.arena_bytes + new_off[k],
                         src_a + src_s[k].ext.arena_offset,
                         src_s[k].ext.length);
@@ -270,7 +285,8 @@ static inline VecResult str_materialize(const DrakenVector& v) {
     bg.release();
     return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n, total_arena,
                        static_cast<uint8_t>(DRAKEN_SEL_IDENTITY |
-                                            DRAKEN_SEL_PERMUTATION));
+                                            DRAKEN_SEL_PERMUTATION),
+                       any_elided ? 1u : 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +312,8 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
         size_t total_arena = 0u;
         for (uint32_t i = 0; i < n; ++i) {
             const DrakenStringSlot* s = &src_s[start + i];
-            if (!str_is_inline(s) && sg_val_row(src_v, start + i))
+            if (!str_is_inline(s) && sg_val_row(src_v, start + i) &&
+                s->ext.arena_offset != STR_ELIDED_PAYLOAD_OFFSET)
                 total_arena += s->ext.length;
         }
         if (total_arena > static_cast<size_t>(UINT32_MAX))
@@ -320,6 +337,9 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
                 const DrakenStringSlot* src = &src_s[src_log];
                 if (str_is_inline(src)) {
                     sb.slots[i] = *src;
+                } else if (src->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                    // No payload to move; keep the slot's length and the trap offset.
+                    str_clone_with_offset(&sb.slots[i], src, STR_ELIDED_PAYLOAD_OFFSET);
                 } else {
                     std::memcpy(sb.arena_bytes + arena_pos,
                                 src_a + src->ext.arena_offset,
@@ -387,7 +407,8 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
 
         bg.release();
         cg.release();
-        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u);
+        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u,
+                           0u);
     }
 
     // ── Compact path (k > n): build exactly n output slots ────────────────
@@ -404,8 +425,12 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
         if (!sg_val_row(src_v, src_log)) continue;
         const uint32_t code = v.selection[src_log];
         if (!str_is_inline(&src_s[code]) && new_off.find(code) == new_off.end()) {
-            new_off[code] = static_cast<uint32_t>(total_arena);
-            total_arena  += src_s[code].ext.length;
+            if (src_s[code].ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                new_off[code] = STR_ELIDED_PAYLOAD_OFFSET;
+            } else {
+                new_off[code] = static_cast<uint32_t>(total_arena);
+                total_arena  += src_s[code].ext.length;
+            }
             seen_codes.push_back(code);
         }
     }
@@ -417,9 +442,10 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
 
     if (sb.arena_bytes != nullptr) {
         for (uint32_t code : seen_codes)
-            std::memcpy(sb.arena_bytes + new_off[code],
-                        src_a + src_s[code].ext.arena_offset,
-                        src_s[code].ext.length);
+            if (new_off[code] != STR_ELIDED_PAYLOAD_OFFSET)
+                std::memcpy(sb.arena_bytes + new_off[code],
+                            src_a + src_s[code].ext.arena_offset,
+                            src_s[code].ext.length);
     }
 
     uint8_t* out_v = nullptr;
@@ -514,7 +540,8 @@ static inline VecResult str_take(const DrakenVector& v,
 
         bg.release();
         cg.release();
-        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u);
+        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u,
+                           0u);
     }
 
     // ── Compact path (k > n) ────────────────────────────────────────────
@@ -530,8 +557,12 @@ static inline VecResult str_take(const DrakenVector& v,
         if (!sg_val_row(src_v, src_log)) continue;
         const uint32_t code = v.selection[src_log];
         if (!str_is_inline(&src_s[code]) && new_off.find(code) == new_off.end()) {
-            new_off[code] = static_cast<uint32_t>(total_arena);
-            total_arena  += src_s[code].ext.length;
+            if (src_s[code].ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                new_off[code] = STR_ELIDED_PAYLOAD_OFFSET;
+            } else {
+                new_off[code] = static_cast<uint32_t>(total_arena);
+                total_arena  += src_s[code].ext.length;
+            }
             seen_codes.push_back(code);
         }
     }
@@ -543,9 +574,10 @@ static inline VecResult str_take(const DrakenVector& v,
 
     if (sb.arena_bytes != nullptr) {
         for (uint32_t code : seen_codes)
-            std::memcpy(sb.arena_bytes + new_off[code],
-                        src_a + src_s[code].ext.arena_offset,
-                        src_s[code].ext.length);
+            if (new_off[code] != STR_ELIDED_PAYLOAD_OFFSET)
+                std::memcpy(sb.arena_bytes + new_off[code],
+                            src_a + src_s[code].ext.arena_offset,
+                            src_s[code].ext.length);
     }
 
     uint8_t* out_v = nullptr;
@@ -661,8 +693,12 @@ static inline VecResult str_compress(const DrakenVector& v) {
     for (uint32_t k = 0; k < dict_size; ++k) {
         const DrakenStringSlot* slot = &src_s[unique_src_codes[k]];
         if (!str_is_inline(slot)) {
-            new_off[k]   = static_cast<uint32_t>(total_arena);
-            total_arena += slot->ext.length;
+            if (slot->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                new_off[k] = STR_ELIDED_PAYLOAD_OFFSET;
+            } else {
+                new_off[k]   = static_cast<uint32_t>(total_arena);
+                total_arena += slot->ext.length;
+            }
         }
     }
     if (total_arena > static_cast<size_t>(UINT32_MAX))
@@ -686,7 +722,7 @@ static inline VecResult str_compress(const DrakenVector& v) {
             sb.slots[k].ext.prefix       = src->ext.prefix;
             sb.slots[k].ext.hash32       = src->ext.hash32;
             sb.slots[k].ext.arena_offset = new_off[k];
-            if (sb.arena_bytes != nullptr)
+            if (new_off[k] != STR_ELIDED_PAYLOAD_OFFSET && sb.arena_bytes != nullptr)
                 std::memcpy(sb.arena_bytes + new_off[k],
                             src_a + src->ext.arena_offset,
                             src->ext.length);

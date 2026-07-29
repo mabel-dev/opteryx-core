@@ -606,6 +606,10 @@ cdef class ParquetReadNode(ReaderNode):
     cdef public object _topn_sort_name
     cdef public bint _topn_descending
     cdef public object _topn_limit
+    # Column identities proven to be read only through length-answerable
+    # operations (set by LengthOnlyColumnStrategy via node properties). The
+    # decoder skips long-value byte copies for these.
+    cdef public object _length_only_columns
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
@@ -644,6 +648,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._topn_sort_name = parameters.get("topn_sort_name")
         self._topn_descending = bool(parameters.get("topn_descending", False))
         self._topn_limit = parameters.get("topn_limit")
+        self._length_only_columns = parameters.get("length_only_columns")
         self._scan_mtx = new cpp_mutex()
 
     def __dealloc__(self):

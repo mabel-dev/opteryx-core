@@ -355,6 +355,7 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
     sa->arena_cap   = total_extern;
     sa->null_bitmap = nullptr;  // set below after bitmap is initialised
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type        = DRAKEN_VARCHAR;
 
     // All-valid starting state; null rows clear their bit in pass 2.
@@ -472,6 +473,7 @@ static VectorOwner make_string_constant(nb::object value_obj, uint32_t length,
     sa->arena_cap    = arena_ext;
     sa->null_bitmap  = nullptr;        // validity is on the DrakenVector, not the arena
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type         = type;
 
     if (!is_null) {
@@ -723,6 +725,7 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
     sa->arena_cap    = total_extern;
     sa->null_bitmap  = validity;
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type         = DRAKEN_VARCHAR;
 
     // --- Build DrakenVector and VectorOwner ---------------------------------
@@ -2526,7 +2529,8 @@ extern "C" PyObject* draken_vector_own_string(
     uint8_t*          validity,
     uint32_t          length,
     DrakenType        type,
-    const uint64_t*   keyhash)   // E37: per-row hash seed (length entries) or nullptr; COPIED
+    const uint64_t*   keyhash,   // E37: per-row hash seed (length entries) or nullptr; COPIED
+    bool              payloads_elided)
 {
     // Step 1: take ownership of all three caller buffers immediately via RAII.
     // If any allocation fails below, destructors free them. If we succeed, we
@@ -2597,6 +2601,7 @@ extern "C" PyObject* draken_vector_own_string(
         sa->arena_cap   = arena_len;
         sa->null_bitmap = nullptr;  // validity is tracked separately via VectorOwner
         sa->owns_buffers = 0;
+        sa->payloads_elided = payloads_elided ? 1u : 0u;
         sa->type        = type;
 
         // Step 6: construct DrakenVector (dense; flags set by draken_vector_from_dense).
@@ -2691,6 +2696,7 @@ extern "C" void* draken_arrow_varlen_to_string_block(
     sa->slots = slots; sa->arena = arena; sa->length = length;
     sa->arena_used = 0u; sa->arena_cap = total_extern;
     sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = type;
+    sa->payloads_elided = 0;
 
     for (uint32_t i = 0u; i < length; ++i) {
         const bool valid = (nulls == nullptr) ||
@@ -2807,6 +2813,7 @@ extern "C" PyObject* draken_vector_own_string_dict(
         sa->arena_cap    = arena_len;
         sa->null_bitmap  = nullptr;  // validity tracked separately via VectorOwner
         sa->owns_buffers = 0;
+        sa->payloads_elided = 0;
         sa->type         = type;
 
         // Build the unified vector: selection = caller codes, value array = sa.
@@ -2928,6 +2935,7 @@ extern "C" PyObject* draken_vector_own_array(
         sa->arena_cap   = child_arena_len;
         sa->null_bitmap = raw_cval;  // NULL = all child elements valid
         sa->owns_buffers = 0;
+        sa->payloads_elided = 0;
         sa->type        = child_type;
 
         // Step 6: build child VectorOwner (dense; validity carried on the vector
@@ -3642,6 +3650,7 @@ static VectorOwner make_string_from_float_vector(const VectorOwner& src, uint32_
     sa->arena_cap = total_extern;
     sa->null_bitmap = nullptr;
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type = DRAKEN_VARCHAR;
 
     if (has_nulls) {
@@ -5144,6 +5153,7 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
     sa->arena_cap   = total_extern;
     sa->null_bitmap = nullptr;
     sa->owns_buffers = 0;
+    sa->payloads_elided = 0;
     sa->type        = DRAKEN_VARBINARY;
 
     if (has_nulls) {
@@ -5305,6 +5315,12 @@ static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
     uint64_t total = 0u;
     size_t   total_extern = 0u;
     bool     any_null = false;
+    // A slot's OWN offset says whether its payload exists
+    // (STR_ELIDED_PAYLOAD_OFFSET = it does not) — checked per-slot, never
+    // inferred from a vector-level flag (DrakenStringArena.payloads_elided is
+    // not self-zeroing across every arena constructor in the tree, so it is not
+    // a trustworthy gate here; see buffers.h).
+    bool     any_elided = false;
     for (const VectorOwner* p : parts) {
         const DrakenVector& v = p->vec;
         total += v.length;
@@ -5314,7 +5330,10 @@ static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
         for (uint32_t i = 0u; i < v.length; ++i) {
             if (!row_is_valid(v, i)) continue;
             const DrakenStringSlot* s = &sa->slots[v.selection[i]];
-            if (!str_is_inline(s)) total_extern += s->ext.length;
+            if (!str_is_inline(s)) {
+                if (s->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) any_elided = true;
+                else total_extern += s->ext.length;
+            }
         }
     }
     if (total > static_cast<uint64_t>(UINT32_MAX))
@@ -5352,6 +5371,7 @@ static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
     sa_out->slots = slots; sa_out->arena = arena;
     sa_out->length = n; sa_out->arena_used = 0u; sa_out->arena_cap = total_extern;
     sa_out->null_bitmap = nullptr; sa_out->owns_buffers = 0;
+    sa_out->payloads_elided = any_elided ? 1u : 0u;
     sa_out->type = type;
     if (any_null) { std::memset(bitmap, 0xFF, validity_bytes); sa_out->null_bitmap = bitmap; }
 
@@ -5369,6 +5389,12 @@ static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
             const DrakenStringSlot* src = &sa_in->slots[v.selection[i]];
             if (str_is_inline(src)) {
                 slots[out] = *src;
+            } else if (src->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                // No payload to move; carry the length/prefix and the trap offset.
+                slots[out].ext.length       = src->ext.length;
+                slots[out].ext.prefix       = src->ext.prefix;
+                slots[out].ext.hash32       = src->ext.hash32;
+                slots[out].ext.arena_offset = STR_ELIDED_PAYLOAD_OFFSET;
             } else {
                 const uint32_t slen = src->ext.length;
                 const uint32_t off  = static_cast<uint32_t>(sa_out->arena_used);

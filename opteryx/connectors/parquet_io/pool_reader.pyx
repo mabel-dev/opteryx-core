@@ -80,7 +80,7 @@ cdef extern from "core/draken_bridge.h":
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType vec_type,
-        const uint64_t* keyhash)
+        const uint64_t* keyhash, bint payloads_elided)
     PyObject* draken_vector_own_string_dict(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint32_t* codes, uint32_t data_length,
@@ -145,7 +145,8 @@ cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType w
     # E37: keyhash is COPIED by own_string (not taken) — MorselRef dtor frees it.
     raw = draken_vector_own_string(
         <DrakenStringSlot*>slots_ptr, <uint8_t*>arena_ptr, arena_len,
-        dval, dlen, want_type, <const uint64_t*>result.columns[i].keyhash)
+        dval, dlen, want_type, <const uint64_t*>result.columns[i].keyhash,
+        result.columns[i].payloads_elided)
     if raw == NULL:
         raise MemoryError("draken_vector_own_string failed")
     vec = Vector.__new__(Vector)
@@ -1853,6 +1854,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     decimal_columns=None,
     logical_coerce=None,
     hash_key_columns=None,
+    length_only_columns=None,
     pool=None,
     filesystem=None,
     footer_bytes_cache=None,
@@ -1909,6 +1911,15 @@ cpdef NativeScanPlan open_native_scan_plan(
     else:
         for _sti in range(len(column_names)):
             plan.hash_key_columns.push_back(0)
+    # Per-column length-only flag (1 = nothing in the plan reads this column's
+    # bytes, only its length). Default all-zero → decode is byte-for-byte
+    # unchanged for every caller that does not opt in.
+    if length_only_columns is not None:
+        for _sti in range(len(column_names)):
+            plan.length_only_columns.push_back(<uint8_t>length_only_columns[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.length_only_columns.push_back(0)
     # WP-11: parallel decimal-routing flags + packed logical-coercion plan. Both
     # default to all-zero (no coercion) so pre-WP-11 callers are unchanged.
     if decimal_columns is not None:
@@ -2017,6 +2028,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     # E37: hand the per-column key flags to the decoder so non-key string columns
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
     plan.pipeline_ptr.set_hash_key_columns(plan.hash_key_columns)
+    plan.pipeline_ptr.set_length_only_columns(plan.length_only_columns)
     # A pool sink must be wired regardless — the decode worker's pool-path
     # (dk=0) branch expects one to exist even though this plan's Source never
     # routes a column there deliberately (it fails loud on dk=0 instead).

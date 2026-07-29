@@ -55,6 +55,7 @@ from opteryx.planner.optimizer.strategies import (
     JoinOrderingStrategy,
     JoinPlanningStrategy,
     JoinRewriteStrategy,
+    LengthOnlyColumnStrategy,
     LimitEliminationStrategy,
     LimitFilesPruningStrategy,
     LimitPushdownStrategy,
@@ -242,6 +243,10 @@ class OptimizerVisitor:
             # Runs last: all other strategies have had their say.
             # Uses FileEntry.stats_by_name for range detection — projection-stable.
             HashMapVariantStrategy(telemetry),
+            # Runs dead last: it enumerates every reference to a column, so
+            # every strategy that can add, remove or rewrite one must already
+            # have run. Annotates scans only — it rewrites nothing.
+            LengthOnlyColumnStrategy(telemetry),
         ]
         _validate_strategy_order(self.strategies)
 

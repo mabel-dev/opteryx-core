@@ -1085,8 +1085,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                             &batch_remaining, &batch_cv]() {
               if (!any_error.load(std::memory_order_relaxed)) {
 
-              // Per-task decompression buffer (each task owns this — no sharing)
-              std::vector<uint8_t> decomp_buf;
+              // Decompression scratch buffer: thread_local so it is allocated
+              // once per worker thread and reused across every page task that
+              // thread runs — mirrors compression.cpp's get_thread_dctx()
+              // (persistent-per-thread ZSTD_DCtx). DecompressInto's
+              // out_buf.resize() only grows the backing allocation when a
+              // page needs more capacity than any this thread has already
+              // handled. Confirmed via dev/decomp_buffer_ab (matched A/B
+              // against the real DecompressInto + the real page-decode pool):
+              // consistent win at every page size tested, no regression.
+              static thread_local std::vector<uint8_t> decomp_buf;
               const uint8_t* dp;
               size_t         ds;
 

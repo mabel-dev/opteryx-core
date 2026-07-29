@@ -1544,6 +1544,14 @@ class _Compiler:
         # read_scs; all-zero when nothing keys (SELECT */LIKE) → no sidecar built.
         _key_ids = self._hash_key_identities()
         hash_key_columns = [1 if sc.identity in _key_ids else 0 for sc in read_scs]
+        # Columns the optimizer proved are read ONLY through length-answerable
+        # operations (LengthOnlyColumnStrategy) — the decoder records each value's
+        # length but skips copying long-value payloads, which nothing reads.
+        # Parallel to read_scs; all-zero when nothing qualifies. This is the
+        # identity -> positional translation point (identities do not cross the
+        # native boundary), mirroring hash_key_columns above.
+        _length_only_ids = getattr(scan, "_length_only_columns", None) or frozenset()
+        length_only_columns = [1 if sc.identity in _length_only_ids else 0 for sc in read_scs]
         paths = manifest.get_file_paths()
         names = [sc.name for sc in read_scs]
         file_sizes = {}
@@ -1593,6 +1601,7 @@ class _Compiler:
             decimal_columns=decimal_columns,
             logical_coerce=logical_coerce,
             hash_key_columns=hash_key_columns,
+            length_only_columns=length_only_columns,
             # Gap #3 Phase 2b Step 2: the query's exec pool is SHARED with this scan's
             # decode work (one CPU budget, decode tagged high-priority). The reentrant-
             # pool deadlock this originally hit (an exec worker blocking in

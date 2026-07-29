@@ -268,6 +268,7 @@ DrakenVector* make_string_vec(const char* const* uniques, uint32_t k,
     }
     sa->slots = slots; sa->arena = arena; sa->length = k;
     sa->arena_used = arena_len; sa->arena_cap = arena_len; sa->owns_buffers = 0; sa->type = type;
+    sa->payloads_elided = 0;
 
     auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
     auto* sel = static_cast<uint32_t*>(malloc((length ? length : 1) * sizeof(uint32_t)));

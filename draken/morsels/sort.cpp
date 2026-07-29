@@ -10,6 +10,7 @@
             "draken/core/vector_alloc.h",
             "draken/core/vergesort.h",
             "draken/morsels/cxx_morsel.h",
+            "draken/morsels/sort.hpp",
             "src/cpp/simd_hash.h"
         ],
         "extra_compile_args": [
@@ -1214,21 +1215,19 @@ static int __Pyx_init_co_variables(void) {
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <stdlib.h>
-#include "core/buffers.h"
-#include "core/string_slot.h"
-#include "core/vector_alloc.h"
 #include "ios"
 #include "new"
 #include "stdexcept"
 #include "typeinfo"
 #include <vector>
 #include <memory>
-#include <stdio.h>
-#include "simd_hash.h"
-#include "core/bitmap_ops.h"
 #include <string_view>
 #include <string>
+#include <stdio.h>
+#include <stdlib.h>
+#include "core/buffers.h"
+#include "core/string_slot.h"
+#include "core/vector_alloc.h"
 #include "morsels/cxx_morsel.h"
 
     extern "C" const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle);
@@ -1247,39 +1246,9 @@ static int __Pyx_init_co_variables(void) {
     extern "C" CxxMorsel* cxx_morsel_new_eos();
     extern "C" PyObject* cxx_morsel_to_handle(const CxxMorsel*);
     
-
-    #include <algorithm>
-    #include <cstdint>
-    #include <cstring>
-    #include "core/string_slot.h"
-
-    static void _sort_strings(
-        uint32_t* perm,
-        uint32_t n,
-        const char* data,
-        const int32_t* offsets,
-        bool ascending
-    ) {
-        // STABLE string sort — std::stable_sort, NOT std::sort.
-        //   Multi-column LSD: morsel_sort runs columns least-significant first;
-        //   each pass MUST preserve the order the prior (less-significant) passes
-        //   established for equal keys. std::sort is unstable, so a string pass
-        //   destroyed the prior passes' order — multi-key ORDER BY with a string
-        //   key was producing wrong results (the secondary key was ignored
-        //   within equal-string groups). stable_sort preserves `perm`'s incoming
-        //   order on equal strings → correct LSD.
-        std::stable_sort(perm, perm + n,
-            [data, offsets, ascending](uint32_t a, uint32_t b) {
-                int32_t sa = offsets[a], la = offsets[a + 1] - sa;
-                int32_t sb = offsets[b], lb = offsets[b + 1] - sb;
-                int32_t cm = (la < lb) ? la : lb;
-                int r = cm ? std::memcmp(data + sa, data + sb, (size_t)cm) : 0;
-                if (r == 0) r = la - lb;
-                return ascending ? (r < 0) : (r > 0);
-            });
-    }
-    
-#include "vergesort.h"
+#include "simd_hash.h"
+#include "core/bitmap_ops.h"
+#include "morsels/sort.hpp"
 #include "pythread.h"
 #ifdef _OPENMP
 #include <omp.h>
@@ -2067,6 +2036,70 @@ static struct __pyx_vtabstruct__memoryviewslice *__pyx_vtabptr__memoryviewslice;
 #define __Pyx_CLEAR(r)    do { PyObject* tmp = ((PyObject*)(r)); r = NULL; __Pyx_DECREF(tmp);} while(0)
 #define __Pyx_XCLEAR(r)   do { if((r) != NULL) {PyObject* tmp = ((PyObject*)(r)); r = NULL; __Pyx_DECREF(tmp);}} while(0)
 
+/* PyErrExceptionMatches.proto (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+#define __Pyx_PyErr_ExceptionMatches(err) __Pyx_PyErr_ExceptionMatchesInState(__pyx_tstate, err)
+static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err);
+#else
+#define __Pyx_PyErr_ExceptionMatches(err)  PyErr_ExceptionMatches(err)
+#endif
+
+/* PyThreadStateGet.proto (used by PyErrFetchRestore) */
+#if CYTHON_FAST_THREAD_STATE
+#define __Pyx_PyThreadState_declare  PyThreadState *__pyx_tstate;
+#define __Pyx_PyThreadState_assign  __pyx_tstate = __Pyx_PyThreadState_Current;
+#if PY_VERSION_HEX >= 0x030C00A6
+#define __Pyx_PyErr_Occurred()  (__pyx_tstate->current_exception != NULL)
+#define __Pyx_PyErr_CurrentExceptionType()  (__pyx_tstate->current_exception ? (PyObject*) Py_TYPE(__pyx_tstate->current_exception) : (PyObject*) NULL)
+#else
+#define __Pyx_PyErr_Occurred()  (__pyx_tstate->curexc_type != NULL)
+#define __Pyx_PyErr_CurrentExceptionType()  (__pyx_tstate->curexc_type)
+#endif
+#else
+#define __Pyx_PyThreadState_declare
+#define __Pyx_PyThreadState_assign
+#define __Pyx_PyErr_Occurred()  (PyErr_Occurred() != NULL)
+#define __Pyx_PyErr_CurrentExceptionType()  PyErr_Occurred()
+#endif
+
+/* PyErrFetchRestore.proto (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+#define __Pyx_PyErr_Clear() __Pyx_ErrRestore(NULL, NULL, NULL)
+#define __Pyx_ErrRestoreWithState(type, value, tb)  __Pyx_ErrRestoreInState(PyThreadState_GET(), type, value, tb)
+#define __Pyx_ErrFetchWithState(type, value, tb)    __Pyx_ErrFetchInState(PyThreadState_GET(), type, value, tb)
+#define __Pyx_ErrRestore(type, value, tb)  __Pyx_ErrRestoreInState(__pyx_tstate, type, value, tb)
+#define __Pyx_ErrFetch(type, value, tb)    __Pyx_ErrFetchInState(__pyx_tstate, type, value, tb)
+static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb);
+static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb);
+#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A6
+#define __Pyx_PyErr_SetNone(exc) (Py_INCREF(exc), __Pyx_ErrRestore((exc), NULL, NULL))
+#else
+#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
+#endif
+#else
+#define __Pyx_PyErr_Clear() PyErr_Clear()
+#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
+#define __Pyx_ErrRestoreWithState(type, value, tb)  PyErr_Restore(type, value, tb)
+#define __Pyx_ErrFetchWithState(type, value, tb)  PyErr_Fetch(type, value, tb)
+#define __Pyx_ErrRestoreInState(tstate, type, value, tb)  PyErr_Restore(type, value, tb)
+#define __Pyx_ErrFetchInState(tstate, type, value, tb)  PyErr_Fetch(type, value, tb)
+#define __Pyx_ErrRestore(type, value, tb)  PyErr_Restore(type, value, tb)
+#define __Pyx_ErrFetch(type, value, tb)  PyErr_Fetch(type, value, tb)
+#endif
+
+/* PyObjectGetAttrStr.proto (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_USE_TYPE_SLOTS
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name);
+#else
+#define __Pyx_PyObject_GetAttrStr(o,n) PyObject_GetAttr(o,n)
+#endif
+
+/* PyObjectGetAttrStrNoError.proto (used by GetBuiltinName) */
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name);
+
+/* GetBuiltinName.proto */
+static PyObject *__Pyx_GetBuiltinName(PyObject *name);
+
 /* TupleAndListFromArray.proto (used by fastcall) */
 #if CYTHON_COMPILING_IN_CPYTHON
 static CYTHON_INLINE PyObject* __Pyx_PyList_FromArray(PyObject *const *src, Py_ssize_t n);
@@ -2151,13 +2184,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_FastCallDict(PyObject *func, PyObj
 
 /* PyObjectCallOneArg.proto (used by CallUnboundCMethod0) */
 static CYTHON_INLINE PyObject* __Pyx_PyObject_CallOneArg(PyObject *func, PyObject *arg);
-
-/* PyObjectGetAttrStr.proto (used by UnpackUnboundCMethod) */
-#if CYTHON_USE_TYPE_SLOTS
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name);
-#else
-#define __Pyx_PyObject_GetAttrStr(o,n) PyObject_GetAttr(o,n)
-#endif
 
 /* UnpackUnboundCMethod.proto (used by CallUnboundCMethod0) */
 typedef struct {
@@ -2274,63 +2300,6 @@ static int __Pyx__ArgTypeTest(PyObject *obj, PyTypeObject *type, const char *nam
 #define __Pyx_ArgTypeTest(obj, type, none_allowed, name, exact)\
     ((likely(__Pyx_IS_TYPE(obj, type) | (none_allowed && (obj == Py_None)))) ? 1 :\
         __Pyx__ArgTypeTest(obj, type, name, exact))
-
-/* PyErrExceptionMatches.proto (used by PyObjectGetAttrStrNoError) */
-#if CYTHON_FAST_THREAD_STATE
-#define __Pyx_PyErr_ExceptionMatches(err) __Pyx_PyErr_ExceptionMatchesInState(__pyx_tstate, err)
-static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err);
-#else
-#define __Pyx_PyErr_ExceptionMatches(err)  PyErr_ExceptionMatches(err)
-#endif
-
-/* PyThreadStateGet.proto (used by PyErrFetchRestore) */
-#if CYTHON_FAST_THREAD_STATE
-#define __Pyx_PyThreadState_declare  PyThreadState *__pyx_tstate;
-#define __Pyx_PyThreadState_assign  __pyx_tstate = __Pyx_PyThreadState_Current;
-#if PY_VERSION_HEX >= 0x030C00A6
-#define __Pyx_PyErr_Occurred()  (__pyx_tstate->current_exception != NULL)
-#define __Pyx_PyErr_CurrentExceptionType()  (__pyx_tstate->current_exception ? (PyObject*) Py_TYPE(__pyx_tstate->current_exception) : (PyObject*) NULL)
-#else
-#define __Pyx_PyErr_Occurred()  (__pyx_tstate->curexc_type != NULL)
-#define __Pyx_PyErr_CurrentExceptionType()  (__pyx_tstate->curexc_type)
-#endif
-#else
-#define __Pyx_PyThreadState_declare
-#define __Pyx_PyThreadState_assign
-#define __Pyx_PyErr_Occurred()  (PyErr_Occurred() != NULL)
-#define __Pyx_PyErr_CurrentExceptionType()  PyErr_Occurred()
-#endif
-
-/* PyErrFetchRestore.proto (used by PyObjectGetAttrStrNoError) */
-#if CYTHON_FAST_THREAD_STATE
-#define __Pyx_PyErr_Clear() __Pyx_ErrRestore(NULL, NULL, NULL)
-#define __Pyx_ErrRestoreWithState(type, value, tb)  __Pyx_ErrRestoreInState(PyThreadState_GET(), type, value, tb)
-#define __Pyx_ErrFetchWithState(type, value, tb)    __Pyx_ErrFetchInState(PyThreadState_GET(), type, value, tb)
-#define __Pyx_ErrRestore(type, value, tb)  __Pyx_ErrRestoreInState(__pyx_tstate, type, value, tb)
-#define __Pyx_ErrFetch(type, value, tb)    __Pyx_ErrFetchInState(__pyx_tstate, type, value, tb)
-static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb);
-static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb);
-#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A6
-#define __Pyx_PyErr_SetNone(exc) (Py_INCREF(exc), __Pyx_ErrRestore((exc), NULL, NULL))
-#else
-#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
-#endif
-#else
-#define __Pyx_PyErr_Clear() PyErr_Clear()
-#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
-#define __Pyx_ErrRestoreWithState(type, value, tb)  PyErr_Restore(type, value, tb)
-#define __Pyx_ErrFetchWithState(type, value, tb)  PyErr_Fetch(type, value, tb)
-#define __Pyx_ErrRestoreInState(tstate, type, value, tb)  PyErr_Restore(type, value, tb)
-#define __Pyx_ErrFetchInState(tstate, type, value, tb)  PyErr_Fetch(type, value, tb)
-#define __Pyx_ErrRestore(type, value, tb)  PyErr_Restore(type, value, tb)
-#define __Pyx_ErrFetch(type, value, tb)  PyErr_Fetch(type, value, tb)
-#endif
-
-/* PyObjectGetAttrStrNoError.proto (used by GetBuiltinName) */
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name);
-
-/* GetBuiltinName.proto */
-static PyObject *__Pyx_GetBuiltinName(PyObject *name);
 
 /* PyValueError_Check.proto */
 #define __Pyx_PyExc_ValueError_Check(obj)  __Pyx_TypeCheck(obj, PyExc_ValueError)
@@ -2678,6 +2647,73 @@ static void __Pyx_RaiseUnboundLocalError(const char *varname);
 /* DivInt[long].proto */
 static CYTHON_INLINE long __Pyx_div_long(long, long, int b_is_constant);
 
+/* IterFinish.proto */
+static CYTHON_INLINE int __Pyx_IterFinish(void);
+
+/* UnpackItemEndCheck.proto */
+static int __Pyx_IternextUnpackEndCheck(PyObject *retval, Py_ssize_t expected);
+
+/* PyObjectCall2Args.proto (used by CallUnboundCMethod1) */
+static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2);
+
+/* CallUnboundCMethod1.proto */
+CYTHON_UNUSED
+static PyObject* __Pyx__CallUnboundCMethod1(__Pyx_CachedCFunction* cfunc, PyObject* self, PyObject* arg);
+#if CYTHON_COMPILING_IN_CPYTHON
+static CYTHON_INLINE PyObject* __Pyx_CallUnboundCMethod1(__Pyx_CachedCFunction* cfunc, PyObject* self, PyObject* arg);
+#else
+#define __Pyx_CallUnboundCMethod1(cfunc, self, arg)  __Pyx__CallUnboundCMethod1(cfunc, self, arg)
+#endif
+
+/* MoveIfSupported.proto */
+#if CYTHON_USE_CPP_STD_MOVE
+  #include <utility>
+  #define __PYX_STD_MOVE_IF_SUPPORTED(x) std::move(x)
+#else
+  #define __PYX_STD_MOVE_IF_SUPPORTED(x) x
+#endif
+
+/* decode_c_string_utf16.proto (used by decode_c_string) */
+static CYTHON_INLINE PyObject *__Pyx_PyUnicode_DecodeUTF16(const char *s, Py_ssize_t size, const char *errors) {
+    int byteorder = 0;
+    return PyUnicode_DecodeUTF16(s, size, errors, &byteorder);
+}
+static CYTHON_INLINE PyObject *__Pyx_PyUnicode_DecodeUTF16LE(const char *s, Py_ssize_t size, const char *errors) {
+    int byteorder = -1;
+    return PyUnicode_DecodeUTF16(s, size, errors, &byteorder);
+}
+static CYTHON_INLINE PyObject *__Pyx_PyUnicode_DecodeUTF16BE(const char *s, Py_ssize_t size, const char *errors) {
+    int byteorder = 1;
+    return PyUnicode_DecodeUTF16(s, size, errors, &byteorder);
+}
+
+/* decode_c_string.proto */
+static CYTHON_INLINE PyObject* __Pyx_decode_c_string(
+         const char* cstring, Py_ssize_t start, Py_ssize_t stop,
+         const char* encoding, const char* errors,
+         PyObject* (*decode_func)(const char *s, Py_ssize_t size, const char *errors));
+
+/* ListAppend.proto */
+#if CYTHON_USE_PYLIST_INTERNALS && CYTHON_ASSUME_SAFE_MACROS
+static CYTHON_INLINE int __Pyx_PyList_Append(PyObject* list, PyObject* x) {
+    PyListObject* L = (PyListObject*) list;
+    Py_ssize_t len = Py_SIZE(list);
+    if (likely(L->allocated > len) & likely(len > (L->allocated >> 1))) {
+        Py_INCREF(x);
+        #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030d0000
+        L->ob_item[len] = x;
+        #else
+        PyList_SET_ITEM(list, len, x);
+        #endif
+        __Pyx_SET_SIZE(list, len + 1);
+        return 0;
+    }
+    return PyList_Append(list, x);
+}
+#else
+#define __Pyx_PyList_Append(L,x) PyList_Append(L,x)
+#endif
+
 /* AllocateExtensionType.proto */
 static PyObject *__Pyx_AllocateExtensionType(PyTypeObject *t, int is_final);
 
@@ -2774,6 +2810,9 @@ enum __Pyx_ImportType_CheckSize_3_2_9 {
 };
 static PyTypeObject *__Pyx_ImportType_3_2_9(PyObject* module, const char *module_name, const char *class_name, size_t size, size_t alignment, enum __Pyx_ImportType_CheckSize_3_2_9 check_size);
 #endif
+
+/* FunctionImport.proto */
+static int __Pyx_ImportFunction_3_2_9(PyObject *module, const char *funcname, void (**f)(void), const char *sig);
 
 /* ImportFrom.proto */
 static PyObject* __Pyx_ImportFrom(PyObject* module, PyObject* name);
@@ -2986,6 +3025,48 @@ static CYTHON_INLINE int __pyx_memoryview_slice_memviewslice(
         int have_start, int have_stop, int have_step,
         int is_slice);
 
+/* CppExceptionConversion.proto */
+#ifndef __Pyx_CppExn2PyErr
+#include <new>
+#include <typeinfo>
+#include <stdexcept>
+#include <ios>
+static void __Pyx_CppExn2PyErr() {
+  try {
+    if (PyErr_Occurred())
+      ; // let the latest Python exn pass through and ignore the current one
+    else
+      throw;
+  } catch (const std::bad_alloc& exn) {
+    PyErr_SetString(PyExc_MemoryError, exn.what());
+  } catch (const std::bad_cast& exn) {
+    PyErr_SetString(PyExc_TypeError, exn.what());
+  } catch (const std::bad_typeid& exn) {
+    PyErr_SetString(PyExc_TypeError, exn.what());
+  } catch (const std::domain_error& exn) {
+    PyErr_SetString(PyExc_ValueError, exn.what());
+  } catch (const std::invalid_argument& exn) {
+    PyErr_SetString(PyExc_ValueError, exn.what());
+  } catch (const std::ios_base::failure& exn) {
+    PyErr_SetString(PyExc_IOError, exn.what());
+  } catch (const std::out_of_range& exn) {
+    PyErr_SetString(PyExc_IndexError, exn.what());
+  } catch (const std::overflow_error& exn) {
+    PyErr_SetString(PyExc_OverflowError, exn.what());
+  } catch (const std::range_error& exn) {
+    PyErr_SetString(PyExc_ArithmeticError, exn.what());
+  } catch (const std::underflow_error& exn) {
+    PyErr_SetString(PyExc_ArithmeticError, exn.what());
+  } catch (const std::exception& exn) {
+    PyErr_SetString(PyExc_RuntimeError, exn.what());
+  }
+  catch (...)
+  {
+    PyErr_SetString(PyExc_RuntimeError, "Unknown exception");
+  }
+}
+#endif
+
 /* IsLittleEndian.proto (used by BufferFormatCheck) */
 static CYTHON_INLINE int __Pyx_Is_Little_Endian(void);
 
@@ -3010,9 +3091,6 @@ static int __Pyx_ValidateAndInit_memviewslice(
                 PyObject *original_obj);
 
 /* ObjectToMemviewSlice.proto */
-static CYTHON_INLINE __Pyx_memviewslice __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(PyObject *, int writable_flag);
-
-/* ObjectToMemviewSlice.proto */
 static CYTHON_INLINE __Pyx_memviewslice __Pyx_PyObject_to_MemoryviewSlice_dc_int(PyObject *, int writable_flag);
 
 /* MemviewSliceCopy.proto */
@@ -3021,6 +3099,9 @@ __pyx_memoryview_copy_new_contig(const __Pyx_memviewslice *from_mvs,
                                  const char *mode, int ndim,
                                  size_t sizeof_dtype, int contig_flag,
                                  int dtype_is_object);
+
+/* CIntFromPy.proto */
+static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *);
 
 /* PyObjectVectorCallKwBuilder.proto (used by CIntToPy) */
 CYTHON_UNUSED static int __Pyx_VectorcallBuilder_AddArg_Check(PyObject *key, PyObject *value, PyObject *builder, PyObject **args, int n);
@@ -3041,19 +3122,7 @@ static int __Pyx_VectorcallBuilder_AddArgStr(const char *key, PyObject *value, P
 #endif
 
 /* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint64_t(uint64_t value);
-
-/* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value);
-
-/* CIntFromPy.proto */
-static CYTHON_INLINE int __Pyx_PyLong_As_int(PyObject *);
-
-/* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_unsigned_int(unsigned int value);
-
-/* PyObjectCall2Args.proto (used by PyObjectCallMethod1) */
-static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2);
+static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value);
 
 /* PyObjectCallMethod1.proto (used by UpdateUnpickledDict) */
 static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg);
@@ -3065,10 +3134,13 @@ static int __Pyx_UpdateUnpickledDict(PyObject *obj, PyObject *state, Py_ssize_t 
 static CYTHON_INLINE int __Pyx_CheckUnpickleChecksum(long checksum, long checksum1, long checksum2, long checksum3, const char *members);
 
 /* CIntFromPy.proto */
+static CYTHON_INLINE int __Pyx_PyLong_As_int(PyObject *);
+
+/* CIntFromPy.proto */
 static CYTHON_INLINE long __Pyx_PyLong_As_long(PyObject *);
 
 /* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value);
+static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value);
 
 /* CIntFromPy.proto */
 static CYTHON_INLINE char __Pyx_PyLong_As_char(PyObject *);
@@ -3165,23 +3237,21 @@ static PyObject *__pyx_memoryviewslice_convert_item_to_object(struct __pyx_memor
 static PyObject *__pyx_memoryviewslice_assign_item_from_object(struct __pyx_memoryviewslice_obj *__pyx_v_self, char *__pyx_v_itemp, PyObject *__pyx_v_value); /* proto*/
 static PyObject *__pyx_memoryviewslice__get_base(struct __pyx_memoryviewslice_obj *__pyx_v_self); /* proto*/
 
-/* Module declarations from "cpython.mem" */
-
 /* Module declarations from "libc.stddef" */
 
 /* Module declarations from "libc.stdint" */
 
 /* Module declarations from "libc.string" */
 
-/* Module declarations from "libc.stdlib" */
-
-/* Module declarations from "draken.core.buffers" */
-
 /* Module declarations from "libcpp.vector" */
 
 /* Module declarations from "libcpp" */
 
 /* Module declarations from "libcpp.memory" */
+
+/* Module declarations from "libcpp.string_view" */
+
+/* Module declarations from "libcpp.string" */
 
 /* Module declarations from "libc.stdio" */
 
@@ -3193,19 +3263,20 @@ static PyObject *__pyx_memoryviewslice__get_base(struct __pyx_memoryviewslice_ob
 
 /* Module declarations from "cpython.object" */
 
-/* Module declarations from "draken.vectors.vector" */
+/* Module declarations from "libc.stdlib" */
 
-/* Module declarations from "libcpp.string_view" */
-
-/* Module declarations from "libcpp.string" */
+/* Module declarations from "draken.core.buffers" */
 
 /* Module declarations from "draken.morsels.cxx_morsel" */
 
+/* Module declarations from "draken.vectors.vector" */
+
 /* Module declarations from "draken.morsels.morsel" */
+static std::shared_ptr<CxxMorsel>  (*__pyx_f_6draken_7morsels_6morsel_morsel_to_cxx)(struct __pyx_obj_6draken_7morsels_6morsel_Morsel *); /*proto*/
+static struct __pyx_obj_6draken_7morsels_6morsel_Morsel *(*__pyx_f_6draken_7morsels_6morsel_cxx_to_morsel)(std::shared_ptr<CxxMorsel> ); /*proto*/
 
 /* Module declarations from "draken.morsels.sort" */
-static uint64_t __pyx_v_6draken_7morsels_4sort__asc_xor;
-static uint64_t __pyx_v_6draken_7morsels_4sort__desc_xor;
+static size_t __pyx_v_6draken_7morsels_4sort_SIZE_MAX_C;
 static PyObject *__pyx_collections_abc_Sequence = 0;
 static PyObject *generic = 0;
 static PyObject *strided = 0;
@@ -3214,7 +3285,7 @@ static PyObject *contiguous = 0;
 static PyObject *indirect_contiguous = 0;
 static int __pyx_memoryview_thread_locks_used;
 static PyThread_type_lock __pyx_memoryview_thread_locks[8];
-static void __pyx_f_6draken_7morsels_4sort__radix_sort(uint32_t *, uint32_t *, uint64_t const *, Py_ssize_t, int); /*proto*/
+static std::vector<SortKeySpec>  __pyx_f_6draken_7morsels_4sort__resolve_spec(PyObject *, PyObject *, PyObject *); /*proto*/
 static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6draken_7morsels_6morsel_Morsel *, PyObject *, PyObject *, int __pyx_skip_dispatch); /*proto*/
 static int __pyx_array_allocate_buffer(struct __pyx_array_obj *); /*proto*/
 static struct __pyx_array_obj *__pyx_array_new(PyObject *, Py_ssize_t, char *, char const *, char *); /*proto*/
@@ -3250,7 +3321,6 @@ static void __pyx_memoryview_slice_assign_scalar(__Pyx_memviewslice *, int, size
 static void __pyx_memoryview__slice_assign_scalar(char *, Py_ssize_t *, Py_ssize_t *, int, size_t, void *); /*proto*/
 static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *, PyObject *); /*proto*/
 /* #### Code section: typeinfo ### */
-static const __Pyx_TypeInfo __Pyx_TypeInfo_nn_int64_t = { "int64_t", NULL, sizeof(int64_t), { 0 }, 0, __PYX_IS_UNSIGNED(int64_t) ? 'U' : 'I', __PYX_IS_UNSIGNED(int64_t), 0 };
 static const __Pyx_TypeInfo __Pyx_TypeInfo_int = { "int", NULL, sizeof(int), { 0 }, 0, __PYX_IS_UNSIGNED(int) ? 'U' : 'I', __PYX_IS_UNSIGNED(int), 0 };
 /* #### Code section: before_global_var ### */
 #define __Pyx_MODULE_NAME "draken.morsels.sort"
@@ -3259,6 +3329,7 @@ int __pyx_module_is_main_draken__morsels__sort = 0;
 
 /* Implementation of "draken.morsels.sort" */
 /* #### Code section: global_var ### */
+static PyObject *__pyx_builtin_zip;
 static PyObject *__pyx_builtin___import__;
 static PyObject *__pyx_builtin_enumerate;
 static PyObject *__pyx_builtin_Ellipsis;
@@ -3267,7 +3338,7 @@ static PyObject *__pyx_builtin_id;
 static const char __pyx_k_c[] = "c";
 static const char __pyx_k_name[] = "name";
 static const char __pyx_k_fortran[] = "fortran";
-static const char __pyx_k_draken_morsels_sort_Permutation[] = "draken.morsels.sort\n\nPermutation-based sort for Draken Morsels.\n\n    perm = morsel_sort(morsel, column_names, ascending)\n\nReturns a uint32 array where perm[i] is the original row index for sorted\nposition i.  Multi-column sort uses LSD (Least Significant Digit) stable\nradix sort, processing columns from least-significant to most-significant.\n\nString columns are materialized into a contiguous byte buffer (resolving the\nunified selection through the arena slots) and sorted by full-content memcmp\nvia std::sort.\n\nA sorted-dictionary fast-path applies when a string dictionary carries the\nDRAKEN_DICT_KEYS_SORTED flag: its codes are assigned in the same unsigned-byte\norder this routine sorts by, so sorting by CODE (an integer radix pass on the\nselection) is byte-for-byte equivalent to the materialize + string-compare\npath, and skips the O(total_bytes) copy entirely.\n\nNumeric, temporal, boolean and dictionary-encoded numeric columns are sorted\nvia vec.compress(), which returns a sortable signed int64 per logical row for\nevery encoding shape; the keys are sign-flipped and fed to the radix pass.\n\nNulls are represented as INT64_MIN by compress_into, which maps to the\nsmallest unsigned key after the sign-bit flip, giving NULLS FIRST for ASC.\n";
+static const char __pyx_k_draken_morsels_sort_Python_calla[] = "draken.morsels.sort\n\nPython-callable entrypoint over the ONE sort implementation \342\200\224 draken/morsels/sort.hpp:\na vergesort run-detection prepass, falling back to a comparison sort (parallel\nstd::stable_sort over the AoS short-circuit comparator, or plain per-column\nSortKeyCmp for 5+ key columns). No sort logic lives in this file. It exists only\nto marshal a Python Morsel list into that pure-C++ core and back \342\200\224 the same\ncore src/cpp/engine/native_sort.hpp re-exports for opteryx's SortSink/TopNSink,\nand directly usable here with no opteryx/query-engine dependency at all (rugo's\nuse case).\n\n    morsels_out = sort_morsels(morsels_in, column_names, ascending, limit=None)\n    perm        = morsel_sort(morsel, column_names, ascending)   # single-morsel,\n                                                                  # permutation only\n";
 /* #### Code section: decls ### */
 static int __pyx_array___pyx_pf_15View_dot_MemoryView_5array___cinit__(struct __pyx_array_obj *__pyx_v_self, PyObject *__pyx_v_shape, Py_ssize_t __pyx_v_itemsize, PyObject *__pyx_v_format, PyObject *__pyx_v_mode, int __pyx_v_allocate_buffer); /* proto */
 static int __pyx_array___pyx_pf_15View_dot_MemoryView_5array_2__getbuffer__(struct __pyx_array_obj *__pyx_v_self, Py_buffer *__pyx_v_info, int __pyx_v_flags); /* proto */
@@ -3310,9 +3381,8 @@ static void __pyx_memoryviewslice___pyx_pf_15View_dot_MemoryView_16_memoryviewsl
 static PyObject *__pyx_pf___pyx_memoryviewslice___reduce_cython__(CYTHON_UNUSED struct __pyx_memoryviewslice_obj *__pyx_v_self); /* proto */
 static PyObject *__pyx_pf___pyx_memoryviewslice_2__setstate_cython__(CYTHON_UNUSED struct __pyx_memoryviewslice_obj *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
 static PyObject *__pyx_pf_15View_dot_MemoryView___pyx_unpickle_Enum(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v___pyx_type, long __pyx_v___pyx_checksum, PyObject *__pyx_v___pyx_state); /* proto */
-static PyObject *__pyx_pf_6draken_7morsels_4sort_vergesort_stats(CYTHON_UNUSED PyObject *__pyx_self); /* proto */
-static PyObject *__pyx_pf_6draken_7morsels_4sort_2vergesort_reset(CYTHON_UNUSED PyObject *__pyx_self); /* proto */
-static PyObject *__pyx_pf_6draken_7morsels_4sort_4morsel_sort(CYTHON_UNUSED PyObject *__pyx_self, struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_morsel, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending); /* proto */
+static PyObject *__pyx_pf_6draken_7morsels_4sort_sort_morsels(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_morsels, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending, PyObject *__pyx_v_limit, size_t __pyx_v_chunk_rows); /* proto */
+static PyObject *__pyx_pf_6draken_7morsels_4sort_2morsel_sort(CYTHON_UNUSED PyObject *__pyx_self, struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_morsel, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending); /* proto */
 static PyObject *__pyx_tp_new_array(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
 static PyObject *__pyx_tp_new_Enum(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
 static PyObject *__pyx_tp_new_memoryview(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
@@ -3351,10 +3421,11 @@ typedef struct {
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_items;
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_pop;
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_values;
+  __Pyx_CachedCFunction __pyx_umethod_PyList_Type__index;
   PyObject *__pyx_slice[1];
   PyObject *__pyx_tuple[1];
-  PyObject *__pyx_codeobj_tab[3];
-  PyObject *__pyx_string_tab[129];
+  PyObject *__pyx_codeobj_tab[2];
+  PyObject *__pyx_string_tab[140];
   PyObject *__pyx_number_tab[4];
 /* #### Code section: module_state_contents ### */
 /* CommonTypesMetaclass.module_state_decls */
@@ -3435,96 +3506,107 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #define __pyx_kp_u_itemsize_0_for_cython_array __pyx_string_tab[36]
 #define __pyx_kp_u_no_default___reduce___due_to_non __pyx_string_tab[37]
 #define __pyx_kp_u_object __pyx_string_tab[38]
-#define __pyx_kp_u_strided_and_direct __pyx_string_tab[39]
-#define __pyx_kp_u_strided_and_direct_or_indirect __pyx_string_tab[40]
-#define __pyx_kp_u_strided_and_indirect __pyx_string_tab[41]
-#define __pyx_kp_u_unable_to_allocate_array_data __pyx_string_tab[42]
-#define __pyx_kp_u_unable_to_allocate_shape_and_str __pyx_string_tab[43]
-#define __pyx_n_u_ASCII __pyx_string_tab[44]
-#define __pyx_n_u_Ellipsis __pyx_string_tab[45]
-#define __pyx_n_u_Pyx_PyDict_NextRef __pyx_string_tab[46]
-#define __pyx_n_u_Sequence __pyx_string_tab[47]
-#define __pyx_n_u_View_MemoryView __pyx_string_tab[48]
-#define __pyx_n_u_abc __pyx_string_tab[49]
-#define __pyx_n_u_allocate_buffer __pyx_string_tab[50]
-#define __pyx_n_u_annotate __pyx_string_tab[51]
-#define __pyx_n_u_array __pyx_string_tab[52]
-#define __pyx_n_u_ascending __pyx_string_tab[53]
-#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[54]
-#define __pyx_n_u_base __pyx_string_tab[55]
-#define __pyx_n_u_c __pyx_string_tab[56]
-#define __pyx_n_u_class __pyx_string_tab[57]
-#define __pyx_n_u_class_getitem __pyx_string_tab[58]
-#define __pyx_n_u_cline_in_traceback __pyx_string_tab[59]
-#define __pyx_n_u_column_names __pyx_string_tab[60]
-#define __pyx_n_u_compress __pyx_string_tab[61]
-#define __pyx_n_u_count __pyx_string_tab[62]
-#define __pyx_n_u_dict __pyx_string_tab[63]
-#define __pyx_n_u_draken_morsels_sort __pyx_string_tab[64]
-#define __pyx_n_u_dtype_is_object __pyx_string_tab[65]
-#define __pyx_n_u_encode __pyx_string_tab[66]
-#define __pyx_n_u_enumerate __pyx_string_tab[67]
-#define __pyx_n_u_error __pyx_string_tab[68]
-#define __pyx_n_u_flags __pyx_string_tab[69]
-#define __pyx_n_u_format __pyx_string_tab[70]
-#define __pyx_n_u_fortran __pyx_string_tab[71]
-#define __pyx_n_u_func __pyx_string_tab[72]
-#define __pyx_n_u_getstate __pyx_string_tab[73]
-#define __pyx_n_u_hits __pyx_string_tab[74]
-#define __pyx_n_u_i __pyx_string_tab[75]
-#define __pyx_n_u_id __pyx_string_tab[76]
-#define __pyx_n_u_import __pyx_string_tab[77]
-#define __pyx_n_u_index __pyx_string_tab[78]
-#define __pyx_n_u_is_coroutine __pyx_string_tab[79]
-#define __pyx_n_u_items __pyx_string_tab[80]
-#define __pyx_n_u_itemsize __pyx_string_tab[81]
-#define __pyx_n_u_main __pyx_string_tab[82]
-#define __pyx_n_u_memview __pyx_string_tab[83]
-#define __pyx_n_u_misses __pyx_string_tab[84]
-#define __pyx_n_u_mode __pyx_string_tab[85]
-#define __pyx_n_u_module __pyx_string_tab[86]
-#define __pyx_n_u_morsel __pyx_string_tab[87]
-#define __pyx_n_u_morsel_sort __pyx_string_tab[88]
-#define __pyx_n_u_name __pyx_string_tab[89]
-#define __pyx_n_u_name_2 __pyx_string_tab[90]
-#define __pyx_n_u_ndim __pyx_string_tab[91]
-#define __pyx_n_u_new __pyx_string_tab[92]
-#define __pyx_n_u_num_rows __pyx_string_tab[93]
-#define __pyx_n_u_obj __pyx_string_tab[94]
-#define __pyx_n_u_pack __pyx_string_tab[95]
-#define __pyx_n_u_pop __pyx_string_tab[96]
-#define __pyx_n_u_pyx_checksum __pyx_string_tab[97]
-#define __pyx_n_u_pyx_state __pyx_string_tab[98]
-#define __pyx_n_u_pyx_type __pyx_string_tab[99]
-#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[100]
-#define __pyx_n_u_pyx_vtable __pyx_string_tab[101]
-#define __pyx_n_u_qualname __pyx_string_tab[102]
-#define __pyx_n_u_reduce __pyx_string_tab[103]
-#define __pyx_n_u_reduce_cython __pyx_string_tab[104]
-#define __pyx_n_u_reduce_ex __pyx_string_tab[105]
-#define __pyx_n_u_register __pyx_string_tab[106]
-#define __pyx_n_u_set_name __pyx_string_tab[107]
-#define __pyx_n_u_setdefault __pyx_string_tab[108]
-#define __pyx_n_u_setstate __pyx_string_tab[109]
-#define __pyx_n_u_setstate_cython __pyx_string_tab[110]
-#define __pyx_n_u_shape __pyx_string_tab[111]
-#define __pyx_n_u_size __pyx_string_tab[112]
-#define __pyx_n_u_start __pyx_string_tab[113]
-#define __pyx_n_u_step __pyx_string_tab[114]
-#define __pyx_n_u_stop __pyx_string_tab[115]
-#define __pyx_n_u_struct __pyx_string_tab[116]
-#define __pyx_n_u_test __pyx_string_tab[117]
-#define __pyx_n_u_unpack __pyx_string_tab[118]
-#define __pyx_n_u_update __pyx_string_tab[119]
-#define __pyx_n_u_values __pyx_string_tab[120]
-#define __pyx_n_u_vergesort_reset __pyx_string_tab[121]
-#define __pyx_n_u_vergesort_stats __pyx_string_tab[122]
-#define __pyx_n_u_x __pyx_string_tab[123]
-#define __pyx_kp_b__6 __pyx_string_tab[124]
-#define __pyx_kp_b_iso88591__8 __pyx_string_tab[125]
-#define __pyx_kp_b_iso88591_q_q_3awc __pyx_string_tab[126]
-#define __pyx_kp_b_iso88591_s_Cq_j_t1_j_a_r_A_uAQ_l_ar_1_Qb __pyx_string_tab[127]
-#define __pyx_n_b_O __pyx_string_tab[128]
+#define __pyx_kp_u_sort_failed __pyx_string_tab[39]
+#define __pyx_kp_u_strided_and_direct __pyx_string_tab[40]
+#define __pyx_kp_u_strided_and_direct_or_indirect __pyx_string_tab[41]
+#define __pyx_kp_u_strided_and_indirect __pyx_string_tab[42]
+#define __pyx_kp_u_unable_to_allocate_array_data __pyx_string_tab[43]
+#define __pyx_kp_u_unable_to_allocate_shape_and_str __pyx_string_tab[44]
+#define __pyx_kp_u_unknown_sort_column __pyx_string_tab[45]
+#define __pyx_n_u_ASCII __pyx_string_tab[46]
+#define __pyx_n_u_Ellipsis __pyx_string_tab[47]
+#define __pyx_n_u_Pyx_PyDict_NextRef __pyx_string_tab[48]
+#define __pyx_n_u_Sequence __pyx_string_tab[49]
+#define __pyx_n_u_View_MemoryView __pyx_string_tab[50]
+#define __pyx_n_u_abc __pyx_string_tab[51]
+#define __pyx_n_u_allocate_buffer __pyx_string_tab[52]
+#define __pyx_n_u_annotate __pyx_string_tab[53]
+#define __pyx_n_u_array __pyx_string_tab[54]
+#define __pyx_n_u_ascending __pyx_string_tab[55]
+#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[56]
+#define __pyx_n_u_base __pyx_string_tab[57]
+#define __pyx_n_u_c __pyx_string_tab[58]
+#define __pyx_n_u_chunk_rows __pyx_string_tab[59]
+#define __pyx_n_u_class __pyx_string_tab[60]
+#define __pyx_n_u_class_getitem __pyx_string_tab[61]
+#define __pyx_n_u_cline_in_traceback __pyx_string_tab[62]
+#define __pyx_n_u_column_names __pyx_string_tab[63]
+#define __pyx_n_u_count __pyx_string_tab[64]
+#define __pyx_n_u_cxx_in __pyx_string_tab[65]
+#define __pyx_n_u_cxx_out __pyx_string_tab[66]
+#define __pyx_n_u_dict __pyx_string_tab[67]
+#define __pyx_n_u_draken_morsels_sort __pyx_string_tab[68]
+#define __pyx_n_u_dtype_is_object __pyx_string_tab[69]
+#define __pyx_n_u_encode __pyx_string_tab[70]
+#define __pyx_n_u_enumerate __pyx_string_tab[71]
+#define __pyx_n_u_err __pyx_string_tab[72]
+#define __pyx_n_u_error __pyx_string_tab[73]
+#define __pyx_n_u_first __pyx_string_tab[74]
+#define __pyx_n_u_flags __pyx_string_tab[75]
+#define __pyx_n_u_format __pyx_string_tab[76]
+#define __pyx_n_u_fortran __pyx_string_tab[77]
+#define __pyx_n_u_func __pyx_string_tab[78]
+#define __pyx_n_u_getstate __pyx_string_tab[79]
+#define __pyx_n_u_i __pyx_string_tab[80]
+#define __pyx_n_u_id __pyx_string_tab[81]
+#define __pyx_n_u_import __pyx_string_tab[82]
+#define __pyx_n_u_index __pyx_string_tab[83]
+#define __pyx_n_u_is_coroutine __pyx_string_tab[84]
+#define __pyx_n_u_items __pyx_string_tab[85]
+#define __pyx_n_u_itemsize __pyx_string_tab[86]
+#define __pyx_n_u_limit __pyx_string_tab[87]
+#define __pyx_n_u_m __pyx_string_tab[88]
+#define __pyx_n_u_main __pyx_string_tab[89]
+#define __pyx_n_u_memview __pyx_string_tab[90]
+#define __pyx_n_u_mode __pyx_string_tab[91]
+#define __pyx_n_u_module __pyx_string_tab[92]
+#define __pyx_n_u_morsel __pyx_string_tab[93]
+#define __pyx_n_u_morsel_sort __pyx_string_tab[94]
+#define __pyx_n_u_morsels __pyx_string_tab[95]
+#define __pyx_n_u_name __pyx_string_tab[96]
+#define __pyx_n_u_name_2 __pyx_string_tab[97]
+#define __pyx_n_u_ndim __pyx_string_tab[98]
+#define __pyx_n_u_new __pyx_string_tab[99]
+#define __pyx_n_u_num_rows __pyx_string_tab[100]
+#define __pyx_n_u_obj __pyx_string_tab[101]
+#define __pyx_n_u_ok __pyx_string_tab[102]
+#define __pyx_n_u_pack __pyx_string_tab[103]
+#define __pyx_n_u_pop __pyx_string_tab[104]
+#define __pyx_n_u_pyx_checksum __pyx_string_tab[105]
+#define __pyx_n_u_pyx_state __pyx_string_tab[106]
+#define __pyx_n_u_pyx_type __pyx_string_tab[107]
+#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[108]
+#define __pyx_n_u_pyx_vtable __pyx_string_tab[109]
+#define __pyx_n_u_qualname __pyx_string_tab[110]
+#define __pyx_n_u_reduce __pyx_string_tab[111]
+#define __pyx_n_u_reduce_cython __pyx_string_tab[112]
+#define __pyx_n_u_reduce_ex __pyx_string_tab[113]
+#define __pyx_n_u_register __pyx_string_tab[114]
+#define __pyx_n_u_result __pyx_string_tab[115]
+#define __pyx_n_u_set_name __pyx_string_tab[116]
+#define __pyx_n_u_setdefault __pyx_string_tab[117]
+#define __pyx_n_u_setstate __pyx_string_tab[118]
+#define __pyx_n_u_setstate_cython __pyx_string_tab[119]
+#define __pyx_n_u_shape __pyx_string_tab[120]
+#define __pyx_n_u_size __pyx_string_tab[121]
+#define __pyx_n_u_sort_morsels __pyx_string_tab[122]
+#define __pyx_n_u_spec __pyx_string_tab[123]
+#define __pyx_n_u_start __pyx_string_tab[124]
+#define __pyx_n_u_step __pyx_string_tab[125]
+#define __pyx_n_u_stop __pyx_string_tab[126]
+#define __pyx_n_u_struct __pyx_string_tab[127]
+#define __pyx_n_u_take_first __pyx_string_tab[128]
+#define __pyx_n_u_test __pyx_string_tab[129]
+#define __pyx_n_u_unpack __pyx_string_tab[130]
+#define __pyx_n_u_update __pyx_string_tab[131]
+#define __pyx_n_u_values __pyx_string_tab[132]
+#define __pyx_n_u_x __pyx_string_tab[133]
+#define __pyx_n_u_zip __pyx_string_tab[134]
+#define __pyx_kp_b__6 __pyx_string_tab[135]
+#define __pyx_kp_b_iso88591_B_t1_q_q_M_NRS_Q_j_aq_6_Jha_1HF __pyx_string_tab[136]
+#define __pyx_kp_b_iso88591_M_ST_A_1_HF_r_A_uAQ_q__AXV3fA_1 __pyx_string_tab[137]
+#define __pyx_kp_b_std_shared_ptr_CxxMorsel_struct __pyx_string_tab[138]
+#define __pyx_n_b_O __pyx_string_tab[139]
 #define __pyx_int_0 __pyx_number_tab[0]
 #define __pyx_int_neg_1 __pyx_number_tab[1]
 #define __pyx_int_1 __pyx_number_tab[2]
@@ -3556,8 +3638,8 @@ static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
   Py_CLEAR(clear_module_state->__pyx_type___pyx_memoryviewslice);
   for (int i=0; i<1; ++i) { Py_CLEAR(clear_module_state->__pyx_slice[i]); }
   for (int i=0; i<1; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
-  for (int i=0; i<3; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<129; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<2; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
+  for (int i=0; i<140; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<4; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_clear_contents ### */
 /* CommonTypesMetaclass.module_state_clear */
@@ -3594,8 +3676,8 @@ static CYTHON_SMALL_CODE int __pyx_m_traverse(PyObject *m, visitproc visit, void
   Py_VISIT(traverse_module_state->__pyx_type___pyx_memoryviewslice);
   for (int i=0; i<1; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_slice[i]); }
   for (int i=0; i<1; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
-  for (int i=0; i<3; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<129; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<2; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
+  for (int i=0; i<140; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<4; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_traverse_contents ### */
 /* CommonTypesMetaclass.module_state_traverse */
@@ -16097,7 +16179,7 @@ static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *__
   return __pyx_r;
 }
 
-/* "draken/core/buffers.pxd":167
+/* "draken/core/buffers.pxd":170
  * # the frozen ABI surface here so the listed consumers continue to bind it via
  * # `cimport draken.core.buffers`. Inline so it links into each extension.
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):             # <<<<<<<<<<<<<<
@@ -16113,7 +16195,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
 
-  /* "draken/core/buffers.pxd":168
+  /* "draken/core/buffers.pxd":171
  * # `cimport draken.core.buffers`. Inline so it links into each extension.
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))             # <<<<<<<<<<<<<<
@@ -16122,7 +16204,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf = ((DrakenVarBuffer *)malloc((sizeof(DrakenVarBuffer))));
 
-  /* "draken/core/buffers.pxd":169
+  /* "draken/core/buffers.pxd":172
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
  *     if buf == NULL:             # <<<<<<<<<<<<<<
@@ -16132,16 +16214,16 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_t_1 = (__pyx_v_buf == NULL);
   if (unlikely(__pyx_t_1)) {
 
-    /* "draken/core/buffers.pxd":170
+    /* "draken/core/buffers.pxd":173
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
  *     if buf == NULL:
  *         raise MemoryError()             # <<<<<<<<<<<<<<
  * 
  *     # allocate offsets: length + 1
 */
-    PyErr_NoMemory(); __PYX_ERR(2, 170, __pyx_L1_error)
+    PyErr_NoMemory(); __PYX_ERR(2, 173, __pyx_L1_error)
 
-    /* "draken/core/buffers.pxd":169
+    /* "draken/core/buffers.pxd":172
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
  *     if buf == NULL:             # <<<<<<<<<<<<<<
@@ -16150,7 +16232,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   }
 
-  /* "draken/core/buffers.pxd":173
+  /* "draken/core/buffers.pxd":176
  * 
  *     # allocate offsets: length + 1
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))             # <<<<<<<<<<<<<<
@@ -16159,7 +16241,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->offsets = ((uint32_t *)malloc(((__pyx_v_length + 1) * (sizeof(uint32_t)))));
 
-  /* "draken/core/buffers.pxd":174
+  /* "draken/core/buffers.pxd":177
  *     # allocate offsets: length + 1
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
  *     if buf.offsets == NULL:             # <<<<<<<<<<<<<<
@@ -16169,7 +16251,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_t_1 = (__pyx_v_buf->offsets == NULL);
   if (unlikely(__pyx_t_1)) {
 
-    /* "draken/core/buffers.pxd":175
+    /* "draken/core/buffers.pxd":178
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
  *     if buf.offsets == NULL:
  *         free(buf)             # <<<<<<<<<<<<<<
@@ -16178,16 +16260,16 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
     free(__pyx_v_buf);
 
-    /* "draken/core/buffers.pxd":176
+    /* "draken/core/buffers.pxd":179
  *     if buf.offsets == NULL:
  *         free(buf)
  *         raise MemoryError()             # <<<<<<<<<<<<<<
  * 
  *     # allocate data buffer
 */
-    PyErr_NoMemory(); __PYX_ERR(2, 176, __pyx_L1_error)
+    PyErr_NoMemory(); __PYX_ERR(2, 179, __pyx_L1_error)
 
-    /* "draken/core/buffers.pxd":174
+    /* "draken/core/buffers.pxd":177
  *     # allocate offsets: length + 1
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
  *     if buf.offsets == NULL:             # <<<<<<<<<<<<<<
@@ -16196,7 +16278,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   }
 
-  /* "draken/core/buffers.pxd":179
+  /* "draken/core/buffers.pxd":182
  * 
  *     # allocate data buffer
  *     if bytes_cap > 0:             # <<<<<<<<<<<<<<
@@ -16206,7 +16288,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_t_1 = (__pyx_v_bytes_cap > 0);
   if (__pyx_t_1) {
 
-    /* "draken/core/buffers.pxd":180
+    /* "draken/core/buffers.pxd":183
  *     # allocate data buffer
  *     if bytes_cap > 0:
  *         buf.data = <uint8_t*> malloc(bytes_cap)             # <<<<<<<<<<<<<<
@@ -16215,7 +16297,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
     __pyx_v_buf->data = ((uint8_t *)malloc(__pyx_v_bytes_cap));
 
-    /* "draken/core/buffers.pxd":181
+    /* "draken/core/buffers.pxd":184
  *     if bytes_cap > 0:
  *         buf.data = <uint8_t*> malloc(bytes_cap)
  *         if buf.data == NULL:             # <<<<<<<<<<<<<<
@@ -16225,7 +16307,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
     __pyx_t_1 = (__pyx_v_buf->data == NULL);
     if (unlikely(__pyx_t_1)) {
 
-      /* "draken/core/buffers.pxd":182
+      /* "draken/core/buffers.pxd":185
  *         buf.data = <uint8_t*> malloc(bytes_cap)
  *         if buf.data == NULL:
  *             free(buf.offsets)             # <<<<<<<<<<<<<<
@@ -16234,7 +16316,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
       free(__pyx_v_buf->offsets);
 
-      /* "draken/core/buffers.pxd":183
+      /* "draken/core/buffers.pxd":186
  *         if buf.data == NULL:
  *             free(buf.offsets)
  *             free(buf)             # <<<<<<<<<<<<<<
@@ -16243,16 +16325,16 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
       free(__pyx_v_buf);
 
-      /* "draken/core/buffers.pxd":184
+      /* "draken/core/buffers.pxd":187
  *             free(buf.offsets)
  *             free(buf)
  *             raise MemoryError()             # <<<<<<<<<<<<<<
  *     else:
  *         buf.data = NULL
 */
-      PyErr_NoMemory(); __PYX_ERR(2, 184, __pyx_L1_error)
+      PyErr_NoMemory(); __PYX_ERR(2, 187, __pyx_L1_error)
 
-      /* "draken/core/buffers.pxd":181
+      /* "draken/core/buffers.pxd":184
  *     if bytes_cap > 0:
  *         buf.data = <uint8_t*> malloc(bytes_cap)
  *         if buf.data == NULL:             # <<<<<<<<<<<<<<
@@ -16261,7 +16343,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
     }
 
-    /* "draken/core/buffers.pxd":179
+    /* "draken/core/buffers.pxd":182
  * 
  *     # allocate data buffer
  *     if bytes_cap > 0:             # <<<<<<<<<<<<<<
@@ -16271,7 +16353,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
     goto __pyx_L5;
   }
 
-  /* "draken/core/buffers.pxd":186
+  /* "draken/core/buffers.pxd":189
  *             raise MemoryError()
  *     else:
  *         buf.data = NULL             # <<<<<<<<<<<<<<
@@ -16283,7 +16365,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   }
   __pyx_L5:;
 
-  /* "draken/core/buffers.pxd":188
+  /* "draken/core/buffers.pxd":191
  *         buf.data = NULL
  * 
  *     buf.null_bitmap = NULL             # <<<<<<<<<<<<<<
@@ -16292,7 +16374,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->null_bitmap = NULL;
 
-  /* "draken/core/buffers.pxd":189
+  /* "draken/core/buffers.pxd":192
  * 
  *     buf.null_bitmap = NULL
  *     buf.length = length             # <<<<<<<<<<<<<<
@@ -16301,7 +16383,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->length = __pyx_v_length;
 
-  /* "draken/core/buffers.pxd":190
+  /* "draken/core/buffers.pxd":193
  *     buf.null_bitmap = NULL
  *     buf.length = length
  *     buf.type = dtype             # <<<<<<<<<<<<<<
@@ -16309,7 +16391,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->type = __pyx_v_dtype;
 
-  /* "draken/core/buffers.pxd":191
+  /* "draken/core/buffers.pxd":194
  *     buf.length = length
  *     buf.type = dtype
  *     return buf             # <<<<<<<<<<<<<<
@@ -16317,7 +16399,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_r = __pyx_v_buf;
   goto __pyx_L0;
 
-  /* "draken/core/buffers.pxd":167
+  /* "draken/core/buffers.pxd":170
  * # the frozen ABI surface here so the listed consumers continue to bind it via
  * # `cimport draken.core.buffers`. Inline so it links into each extension.
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):             # <<<<<<<<<<<<<<
@@ -16367,462 +16449,24 @@ static CYTHON_INLINE uint64_t __pyx_f_6draken_7vectors_6vector_mix_hash(uint64_t
   return __pyx_r;
 }
 
-/* "draken/morsels/sort.pyx":120
+/* "draken/morsels/sort.pyx":77
  * 
  * 
- * def vergesort_stats():             # <<<<<<<<<<<<<<
- *     """Return (hits, misses) counters. hits = sorted by vergesort, misses = fell through to radix."""
- *     cdef uint64_t hits, misses
+ * cdef vector[SortKeySpec] _resolve_spec(list names, list column_names, list ascending) except *:             # <<<<<<<<<<<<<<
+ *     """Resolve ORDER BY column names to positional indices against `names`
+ *     (a Morsel's _col_names) and pack into the C++ spec vector. Pure lookup
 */
 
-/* Python wrapper */
-static PyObject *__pyx_pw_6draken_7morsels_4sort_1vergesort_stats(PyObject *__pyx_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-PyDoc_STRVAR(__pyx_doc_6draken_7morsels_4sort_vergesort_stats, "Return (hits, misses) counters. hits = sorted by vergesort, misses = fell through to radix.");
-static PyMethodDef __pyx_mdef_6draken_7morsels_4sort_1vergesort_stats = {"vergesort_stats", (PyCFunction)__pyx_pw_6draken_7morsels_4sort_1vergesort_stats, METH_NOARGS, __pyx_doc_6draken_7morsels_4sort_vergesort_stats};
-static PyObject *__pyx_pw_6draken_7morsels_4sort_1vergesort_stats(PyObject *__pyx_self, CYTHON_UNUSED PyObject *unused) {
-  CYTHON_UNUSED PyObject *const *__pyx_kwvalues;
-  PyObject *__pyx_r = 0;
-  __Pyx_RefNannyDeclarations
-  __Pyx_RefNannySetupContext("vergesort_stats (wrapper)", 0);
-  __pyx_kwvalues = __Pyx_KwValues_VARARGS(__pyx_args, __pyx_nargs);
-  __pyx_r = __pyx_pf_6draken_7morsels_4sort_vergesort_stats(__pyx_self);
-
-  /* function exit code */
-  __Pyx_RefNannyFinishContext();
-  return __pyx_r;
-}
-
-static PyObject *__pyx_pf_6draken_7morsels_4sort_vergesort_stats(CYTHON_UNUSED PyObject *__pyx_self) {
-  uint64_t __pyx_v_hits;
-  uint64_t __pyx_v_misses;
-  PyObject *__pyx_r = NULL;
-  __Pyx_RefNannyDeclarations
-  PyObject *__pyx_t_1 = NULL;
-  PyObject *__pyx_t_2 = NULL;
-  PyObject *__pyx_t_3 = NULL;
-  size_t __pyx_t_4;
-  PyObject *__pyx_t_5 = NULL;
-  int __pyx_lineno = 0;
-  const char *__pyx_filename = NULL;
-  int __pyx_clineno = 0;
-  __Pyx_RefNannySetupContext("vergesort_stats", 0);
-
-  /* "draken/morsels/sort.pyx":123
- *     """Return (hits, misses) counters. hits = sorted by vergesort, misses = fell through to radix."""
- *     cdef uint64_t hits, misses
- *     vergesort_get_stats(&hits, &misses)             # <<<<<<<<<<<<<<
- *     return int(hits), int(misses)
- * 
-*/
-  vergesort_get_stats((&__pyx_v_hits), (&__pyx_v_misses));
-
-  /* "draken/morsels/sort.pyx":124
- *     cdef uint64_t hits, misses
- *     vergesort_get_stats(&hits, &misses)
- *     return int(hits), int(misses)             # <<<<<<<<<<<<<<
- * 
- * 
-*/
-  __Pyx_XDECREF(__pyx_r);
-  __pyx_t_2 = NULL;
-  __pyx_t_3 = __Pyx_PyLong_From_uint64_t(__pyx_v_hits); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 124, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = 1;
-  {
-    PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_t_3};
-    __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(&PyLong_Type), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 124, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_1);
-  }
-  __pyx_t_2 = NULL;
-  __pyx_t_5 = __Pyx_PyLong_From_uint64_t(__pyx_v_misses); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 124, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_4 = 1;
-  {
-    PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_t_5};
-    __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)(&PyLong_Type), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 124, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_3);
-  }
-  __pyx_t_5 = PyTuple_New(2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 124, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_5);
-  __Pyx_GIVEREF(__pyx_t_1);
-  if (__Pyx_PyTuple_SET_ITEM(__pyx_t_5, 0, __pyx_t_1) != (0)) __PYX_ERR(0, 124, __pyx_L1_error);
-  __Pyx_GIVEREF(__pyx_t_3);
-  if (__Pyx_PyTuple_SET_ITEM(__pyx_t_5, 1, __pyx_t_3) != (0)) __PYX_ERR(0, 124, __pyx_L1_error);
-  __pyx_t_1 = 0;
-  __pyx_t_3 = 0;
-  __pyx_r = __pyx_t_5;
-  __pyx_t_5 = 0;
-  goto __pyx_L0;
-
-  /* "draken/morsels/sort.pyx":120
- * 
- * 
- * def vergesort_stats():             # <<<<<<<<<<<<<<
- *     """Return (hits, misses) counters. hits = sorted by vergesort, misses = fell through to radix."""
- *     cdef uint64_t hits, misses
-*/
-
-  /* function exit code */
-  __pyx_L1_error:;
-  __Pyx_XDECREF(__pyx_t_1);
-  __Pyx_XDECREF(__pyx_t_2);
-  __Pyx_XDECREF(__pyx_t_3);
-  __Pyx_XDECREF(__pyx_t_5);
-  __Pyx_AddTraceback("draken.morsels.sort.vergesort_stats", __pyx_clineno, __pyx_lineno, __pyx_filename);
-  __pyx_r = NULL;
-  __pyx_L0:;
-  __Pyx_XGIVEREF(__pyx_r);
-  __Pyx_RefNannyFinishContext();
-  return __pyx_r;
-}
-
-/* "draken/morsels/sort.pyx":127
- * 
- * 
- * def vergesort_reset():             # <<<<<<<<<<<<<<
- *     """Reset hit/miss counters to zero."""
- *     vergesort_reset_stats()
-*/
-
-/* Python wrapper */
-static PyObject *__pyx_pw_6draken_7morsels_4sort_3vergesort_reset(PyObject *__pyx_self, CYTHON_UNUSED PyObject *unused); /*proto*/
-PyDoc_STRVAR(__pyx_doc_6draken_7morsels_4sort_2vergesort_reset, "Reset hit/miss counters to zero.");
-static PyMethodDef __pyx_mdef_6draken_7morsels_4sort_3vergesort_reset = {"vergesort_reset", (PyCFunction)__pyx_pw_6draken_7morsels_4sort_3vergesort_reset, METH_NOARGS, __pyx_doc_6draken_7morsels_4sort_2vergesort_reset};
-static PyObject *__pyx_pw_6draken_7morsels_4sort_3vergesort_reset(PyObject *__pyx_self, CYTHON_UNUSED PyObject *unused) {
-  CYTHON_UNUSED PyObject *const *__pyx_kwvalues;
-  PyObject *__pyx_r = 0;
-  __Pyx_RefNannyDeclarations
-  __Pyx_RefNannySetupContext("vergesort_reset (wrapper)", 0);
-  __pyx_kwvalues = __Pyx_KwValues_VARARGS(__pyx_args, __pyx_nargs);
-  __pyx_r = __pyx_pf_6draken_7morsels_4sort_2vergesort_reset(__pyx_self);
-
-  /* function exit code */
-  __Pyx_RefNannyFinishContext();
-  return __pyx_r;
-}
-
-static PyObject *__pyx_pf_6draken_7morsels_4sort_2vergesort_reset(CYTHON_UNUSED PyObject *__pyx_self) {
-  PyObject *__pyx_r = NULL;
-  __Pyx_RefNannyDeclarations
-  __Pyx_RefNannySetupContext("vergesort_reset", 0);
-
-  /* "draken/morsels/sort.pyx":129
- * def vergesort_reset():
- *     """Reset hit/miss counters to zero."""
- *     vergesort_reset_stats()             # <<<<<<<<<<<<<<
- * 
- * 
-*/
-  vergesort_reset_stats();
-
-  /* "draken/morsels/sort.pyx":127
- * 
- * 
- * def vergesort_reset():             # <<<<<<<<<<<<<<
- *     """Reset hit/miss counters to zero."""
- *     vergesort_reset_stats()
-*/
-
-  /* function exit code */
-  __pyx_r = Py_None; __Pyx_INCREF(Py_None);
-  __Pyx_XGIVEREF(__pyx_r);
-  __Pyx_RefNannyFinishContext();
-  return __pyx_r;
-}
-
-/* "draken/morsels/sort.pyx":134
- * #  LSD radix sort
- * 
- * cdef void _radix_sort(             # <<<<<<<<<<<<<<
- *     uint32_t* perm,
- *     uint32_t* tmp,
-*/
-
-static void __pyx_f_6draken_7morsels_4sort__radix_sort(uint32_t *__pyx_v_perm, uint32_t *__pyx_v_tmp, uint64_t const *__pyx_v_keys, Py_ssize_t __pyx_v_n, int __pyx_v_n_passes) {
-  uint64_t __pyx_v_count[256];
-  Py_ssize_t __pyx_v_i;
-  int __pyx_v_b;
-  int __pyx_v_bv;
-  uint8_t __pyx_v_byte_val;
-  uint64_t __pyx_v_total;
-  uint64_t __pyx_v_old;
-  uint32_t *__pyx_v_src;
-  uint32_t *__pyx_v_dst;
-  uint32_t *__pyx_v_sw;
-  int __pyx_t_1;
-  int __pyx_t_2;
-  int __pyx_t_3;
-  Py_ssize_t __pyx_t_4;
-  Py_ssize_t __pyx_t_5;
-  Py_ssize_t __pyx_t_6;
-  uint64_t __pyx_t_7;
-  int __pyx_t_8;
-  uint8_t __pyx_t_9;
-  int __pyx_t_10;
-
-  /* "draken/morsels/sort.pyx":154
- *     cdef uint8_t byte_val
- *     cdef uint64_t total, old
- *     cdef uint32_t* src = perm             # <<<<<<<<<<<<<<
- *     cdef uint32_t* dst = tmp
- *     cdef uint32_t* sw
-*/
-  __pyx_v_src = __pyx_v_perm;
-
-  /* "draken/morsels/sort.pyx":155
- *     cdef uint64_t total, old
- *     cdef uint32_t* src = perm
- *     cdef uint32_t* dst = tmp             # <<<<<<<<<<<<<<
- *     cdef uint32_t* sw
- * 
-*/
-  __pyx_v_dst = __pyx_v_tmp;
-
-  /* "draken/morsels/sort.pyx":158
- *     cdef uint32_t* sw
- * 
- *     for b in range(n_passes):             # <<<<<<<<<<<<<<
- *         memset(count, 0, 256 * sizeof(uint64_t))
- * 
-*/
-  __pyx_t_1 = __pyx_v_n_passes;
-  __pyx_t_2 = __pyx_t_1;
-  for (__pyx_t_3 = 0; __pyx_t_3 < __pyx_t_2; __pyx_t_3+=1) {
-    __pyx_v_b = __pyx_t_3;
-
-    /* "draken/morsels/sort.pyx":159
- * 
- *     for b in range(n_passes):
- *         memset(count, 0, 256 * sizeof(uint64_t))             # <<<<<<<<<<<<<<
- * 
- *         for i in range(n):
-*/
-    (void)(memset(__pyx_v_count, 0, (0x100 * (sizeof(uint64_t)))));
-
-    /* "draken/morsels/sort.pyx":161
- *         memset(count, 0, 256 * sizeof(uint64_t))
- * 
- *         for i in range(n):             # <<<<<<<<<<<<<<
- *             count[(keys[src[i]] >> (b * 8)) & 0xFF] += 1
- * 
-*/
-    __pyx_t_4 = __pyx_v_n;
-    __pyx_t_5 = __pyx_t_4;
-    for (__pyx_t_6 = 0; __pyx_t_6 < __pyx_t_5; __pyx_t_6+=1) {
-      __pyx_v_i = __pyx_t_6;
-
-      /* "draken/morsels/sort.pyx":162
- * 
- *         for i in range(n):
- *             count[(keys[src[i]] >> (b * 8)) & 0xFF] += 1             # <<<<<<<<<<<<<<
- * 
- *         total = 0
-*/
-      __pyx_t_7 = (((__pyx_v_keys[(__pyx_v_src[__pyx_v_i])]) >> (__pyx_v_b * 8)) & 0xFF);
-      (__pyx_v_count[__pyx_t_7]) = ((__pyx_v_count[__pyx_t_7]) + 1);
-    }
-
-    /* "draken/morsels/sort.pyx":164
- *             count[(keys[src[i]] >> (b * 8)) & 0xFF] += 1
- * 
- *         total = 0             # <<<<<<<<<<<<<<
- *         for bv in range(256):
- *             old = count[bv]
-*/
-    __pyx_v_total = 0;
-
-    /* "draken/morsels/sort.pyx":165
- * 
- *         total = 0
- *         for bv in range(256):             # <<<<<<<<<<<<<<
- *             old = count[bv]
- *             count[bv] = total
-*/
-    for (__pyx_t_8 = 0; __pyx_t_8 < 0x100; __pyx_t_8+=1) {
-      __pyx_v_bv = __pyx_t_8;
-
-      /* "draken/morsels/sort.pyx":166
- *         total = 0
- *         for bv in range(256):
- *             old = count[bv]             # <<<<<<<<<<<<<<
- *             count[bv] = total
- *             total += old
-*/
-      __pyx_v_old = (__pyx_v_count[__pyx_v_bv]);
-
-      /* "draken/morsels/sort.pyx":167
- *         for bv in range(256):
- *             old = count[bv]
- *             count[bv] = total             # <<<<<<<<<<<<<<
- *             total += old
- * 
-*/
-      (__pyx_v_count[__pyx_v_bv]) = __pyx_v_total;
-
-      /* "draken/morsels/sort.pyx":168
- *             old = count[bv]
- *             count[bv] = total
- *             total += old             # <<<<<<<<<<<<<<
- * 
- *         for i in range(n):
-*/
-      __pyx_v_total = (__pyx_v_total + __pyx_v_old);
-    }
-
-    /* "draken/morsels/sort.pyx":170
- *             total += old
- * 
- *         for i in range(n):             # <<<<<<<<<<<<<<
- *             byte_val = <uint8_t>((keys[src[i]] >> (b * 8)) & 0xFF)
- *             dst[count[byte_val]] = src[i]
-*/
-    __pyx_t_4 = __pyx_v_n;
-    __pyx_t_5 = __pyx_t_4;
-    for (__pyx_t_6 = 0; __pyx_t_6 < __pyx_t_5; __pyx_t_6+=1) {
-      __pyx_v_i = __pyx_t_6;
-
-      /* "draken/morsels/sort.pyx":171
- * 
- *         for i in range(n):
- *             byte_val = <uint8_t>((keys[src[i]] >> (b * 8)) & 0xFF)             # <<<<<<<<<<<<<<
- *             dst[count[byte_val]] = src[i]
- *             count[byte_val] += 1
-*/
-      __pyx_v_byte_val = ((uint8_t)(((__pyx_v_keys[(__pyx_v_src[__pyx_v_i])]) >> (__pyx_v_b * 8)) & 0xFF));
-
-      /* "draken/morsels/sort.pyx":172
- *         for i in range(n):
- *             byte_val = <uint8_t>((keys[src[i]] >> (b * 8)) & 0xFF)
- *             dst[count[byte_val]] = src[i]             # <<<<<<<<<<<<<<
- *             count[byte_val] += 1
- * 
-*/
-      (__pyx_v_dst[(__pyx_v_count[__pyx_v_byte_val])]) = (__pyx_v_src[__pyx_v_i]);
-
-      /* "draken/morsels/sort.pyx":173
- *             byte_val = <uint8_t>((keys[src[i]] >> (b * 8)) & 0xFF)
- *             dst[count[byte_val]] = src[i]
- *             count[byte_val] += 1             # <<<<<<<<<<<<<<
- * 
- *         sw = src
-*/
-      __pyx_t_9 = __pyx_v_byte_val;
-      (__pyx_v_count[__pyx_t_9]) = ((__pyx_v_count[__pyx_t_9]) + 1);
-    }
-
-    /* "draken/morsels/sort.pyx":175
- *             count[byte_val] += 1
- * 
- *         sw = src             # <<<<<<<<<<<<<<
- *         src = dst
- *         dst = sw
-*/
-    __pyx_v_sw = __pyx_v_src;
-
-    /* "draken/morsels/sort.pyx":176
- * 
- *         sw = src
- *         src = dst             # <<<<<<<<<<<<<<
- *         dst = sw
- * 
-*/
-    __pyx_v_src = __pyx_v_dst;
-
-    /* "draken/morsels/sort.pyx":177
- *         sw = src
- *         src = dst
- *         dst = sw             # <<<<<<<<<<<<<<
- * 
- *     # If an odd number of passes ran, the result ended up in tmp; copy back.
-*/
-    __pyx_v_dst = __pyx_v_sw;
-  }
-
-  /* "draken/morsels/sort.pyx":180
- * 
- *     # If an odd number of passes ran, the result ended up in tmp; copy back.
- *     if src != perm:             # <<<<<<<<<<<<<<
- *         memcpy(perm, src, <size_t>n * sizeof(uint32_t))
- * 
-*/
-  __pyx_t_10 = (__pyx_v_src != __pyx_v_perm);
-  if (__pyx_t_10) {
-
-    /* "draken/morsels/sort.pyx":181
- *     # If an odd number of passes ran, the result ended up in tmp; copy back.
- *     if src != perm:
- *         memcpy(perm, src, <size_t>n * sizeof(uint32_t))             # <<<<<<<<<<<<<<
- * 
- * 
-*/
-    (void)(memcpy(__pyx_v_perm, __pyx_v_src, (((size_t)__pyx_v_n) * (sizeof(uint32_t)))));
-
-    /* "draken/morsels/sort.pyx":180
- * 
- *     # If an odd number of passes ran, the result ended up in tmp; copy back.
- *     if src != perm:             # <<<<<<<<<<<<<<
- *         memcpy(perm, src, <size_t>n * sizeof(uint32_t))
- * 
-*/
-  }
-
-  /* "draken/morsels/sort.pyx":134
- * #  LSD radix sort
- * 
- * cdef void _radix_sort(             # <<<<<<<<<<<<<<
- *     uint32_t* perm,
- *     uint32_t* tmp,
-*/
-
-  /* function exit code */
-}
-
-/* "draken/morsels/sort.pyx":199
- * #  Public API
- * 
- * cpdef morsel_sort(Morsel morsel, list column_names, list ascending):             # <<<<<<<<<<<<<<
- *     """
- *     Compute a sort permutation for a Draken Morsel.
-*/
-
-static PyObject *__pyx_pw_6draken_7morsels_4sort_5morsel_sort(PyObject *__pyx_self, 
-#if CYTHON_METH_FASTCALL
-PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
-#else
-PyObject *__pyx_args, PyObject *__pyx_kwds
-#endif
-); /*proto*/
-static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_morsel, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending, CYTHON_UNUSED int __pyx_skip_dispatch) {
-  Py_ssize_t __pyx_v_n;
-  uint32_t *__pyx_v_perm_buf;
-  uint32_t *__pyx_v_tmp_buf;
-  uint64_t *__pyx_v_keys;
-  Py_ssize_t __pyx_v_i;
-  __Pyx_memviewslice __pyx_v_signed_mv = { 0, 0, { 0 }, { 0 }, { 0 } };
-  struct __pyx_obj_6draken_7vectors_6vector_Vector *__pyx_v_sv = 0;
-  uint64_t __pyx_v_key_xor;
-  int __pyx_v_asc;
-  __Pyx_memviewslice __pyx_v_rv = { 0, 0, { 0 }, { 0 }, { 0 } };
-  DrakenVector *__pyx_v_sort_uv;
-  DrakenStringArena *__pyx_v_sort_arena;
-  uint32_t *__pyx_v_sort_sel;
-  int64_t __pyx_v_sort_total_bytes;
-  Py_ssize_t __pyx_v_sort_di;
-  int32_t *__pyx_v_sort_offsets;
-  uint8_t *__pyx_v_sort_buf;
-  int64_t __pyx_v_sort_fill;
-  int64_t __pyx_v_sort_slen;
-  Py_ssize_t __pyx_v_col_idx;
-  PyObject *__pyx_v_col_name = NULL;
-  PyObject *__pyx_v_vec = NULL;
-  PyObject *__pyx_v_result = NULL;
-  PyObject *__pyx_r = NULL;
+static std::vector<SortKeySpec>  __pyx_f_6draken_7morsels_4sort__resolve_spec(PyObject *__pyx_v_names, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending) {
+  std::vector<SortKeySpec>  __pyx_v_spec;
+  SortKeySpec __pyx_v_item;
+  PyObject *__pyx_v_key_bytes = 0;
+  PyObject *__pyx_v_names_bytes = 0;
+  PyObject *__pyx_v_name = NULL;
+  PyObject *__pyx_v_asc = NULL;
+  Py_ssize_t __pyx_v_idx;
+  PyObject *__pyx_7genexpr__pyx_v_n = NULL;
+  std::vector<SortKeySpec>  __pyx_r;
   __Pyx_RefNannyDeclarations
   Py_ssize_t __pyx_t_1;
   Py_ssize_t __pyx_t_2;
@@ -16832,50 +16476,44 @@ static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6dr
   size_t __pyx_t_6;
   int __pyx_t_7;
   PyObject *__pyx_t_8 = NULL;
-  Py_ssize_t __pyx_t_9;
-  uint64_t __pyx_t_10;
-  Py_ssize_t __pyx_t_11;
-  Py_ssize_t __pyx_t_12;
-  __Pyx_memviewslice __pyx_t_13 = { 0, 0, { 0 }, { 0 }, { 0 } };
-  Py_ssize_t __pyx_t_14;
+  PyObject *__pyx_t_9 = NULL;
+  PyObject *__pyx_t_10 = NULL;
+  PyObject *(*__pyx_t_11)(PyObject *);
+  PyObject *(*__pyx_t_12)(PyObject *);
+  PyObject *__pyx_t_13 = NULL;
+  PyObject *__pyx_t_14 = NULL;
   PyObject *__pyx_t_15 = NULL;
-  __Pyx_memviewslice __pyx_t_16 = { 0, 0, { 0 }, { 0 }, { 0 } };
-  int __pyx_t_17;
-  int __pyx_t_18;
-  char const *__pyx_t_19;
-  PyObject *__pyx_t_20 = NULL;
-  PyObject *__pyx_t_21 = NULL;
-  PyObject *__pyx_t_22 = NULL;
-  PyObject *__pyx_t_23 = NULL;
-  PyObject *__pyx_t_24 = NULL;
-  PyObject *__pyx_t_25 = NULL;
+  int __pyx_t_16;
+  PyObject *__pyx_t_17 = NULL;
+  PyObject *__pyx_t_18 = NULL;
+  PyObject *__pyx_t_19 = NULL;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
-  __Pyx_RefNannySetupContext("morsel_sort", 0);
+  __Pyx_RefNannySetupContext("_resolve_spec", 0);
 
-  /* "draken/morsels/sort.pyx":218
- *         position i.  Apply with ``morsel.take(perm)``.
- *     """
+  /* "draken/morsels/sort.pyx":81
+ *     (a Morsel's _col_names) and pack into the C++ spec vector. Pure lookup
+ *     no sort logic  done once per call under the GIL, never per row."""
  *     if len(column_names) != len(ascending):             # <<<<<<<<<<<<<<
  *         raise ValueError("column_names and ascending must have the same length")
  *     if not column_names:
 */
   if (unlikely(__pyx_v_column_names == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "object of type 'NoneType' has no len()");
-    __PYX_ERR(0, 218, __pyx_L1_error)
+    __PYX_ERR(0, 81, __pyx_L1_error)
   }
-  __pyx_t_1 = __Pyx_PyList_GET_SIZE(__pyx_v_column_names); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 218, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyList_GET_SIZE(__pyx_v_column_names); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 81, __pyx_L1_error)
   if (unlikely(__pyx_v_ascending == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "object of type 'NoneType' has no len()");
-    __PYX_ERR(0, 218, __pyx_L1_error)
+    __PYX_ERR(0, 81, __pyx_L1_error)
   }
-  __pyx_t_2 = __Pyx_PyList_GET_SIZE(__pyx_v_ascending); if (unlikely(__pyx_t_2 == ((Py_ssize_t)-1))) __PYX_ERR(0, 218, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyList_GET_SIZE(__pyx_v_ascending); if (unlikely(__pyx_t_2 == ((Py_ssize_t)-1))) __PYX_ERR(0, 81, __pyx_L1_error)
   __pyx_t_3 = (__pyx_t_1 != __pyx_t_2);
   if (unlikely(__pyx_t_3)) {
 
-    /* "draken/morsels/sort.pyx":219
- *     """
+    /* "draken/morsels/sort.pyx":82
+ *     no sort logic  done once per call under the GIL, never per row."""
  *     if len(column_names) != len(ascending):
  *         raise ValueError("column_names and ascending must have the same length")             # <<<<<<<<<<<<<<
  *     if not column_names:
@@ -16887,23 +16525,23 @@ static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6dr
       PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_mstate_global->__pyx_kp_u_column_names_and_ascending_must};
       __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 219, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 82, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     __Pyx_Raise(__pyx_t_4, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __PYX_ERR(0, 219, __pyx_L1_error)
+    __PYX_ERR(0, 82, __pyx_L1_error)
 
-    /* "draken/morsels/sort.pyx":218
- *         position i.  Apply with ``morsel.take(perm)``.
- *     """
+    /* "draken/morsels/sort.pyx":81
+ *     (a Morsel's _col_names) and pack into the C++ spec vector. Pure lookup
+ *     no sort logic  done once per call under the GIL, never per row."""
  *     if len(column_names) != len(ascending):             # <<<<<<<<<<<<<<
  *         raise ValueError("column_names and ascending must have the same length")
  *     if not column_names:
 */
   }
 
-  /* "draken/morsels/sort.pyx":220
+  /* "draken/morsels/sort.pyx":83
  *     if len(column_names) != len(ascending):
  *         raise ValueError("column_names and ascending must have the same length")
  *     if not column_names:             # <<<<<<<<<<<<<<
@@ -16914,19 +16552,19 @@ static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6dr
   else
   {
     Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_column_names);
-    if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 220, __pyx_L1_error)
+    if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 83, __pyx_L1_error)
     __pyx_t_3 = (__pyx_temp != 0);
   }
 
   __pyx_t_7 = (!__pyx_t_3);
   if (unlikely(__pyx_t_7)) {
 
-    /* "draken/morsels/sort.pyx":221
+    /* "draken/morsels/sort.pyx":84
  *         raise ValueError("column_names and ascending must have the same length")
  *     if not column_names:
  *         raise ValueError("at least one sort column is required")             # <<<<<<<<<<<<<<
  * 
- *     cdef Py_ssize_t n = morsel.num_rows
+ *     cdef vector[SortKeySpec] spec
 */
     __pyx_t_5 = NULL;
     __pyx_t_6 = 1;
@@ -16934,14 +16572,14 @@ static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6dr
       PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_mstate_global->__pyx_kp_u_at_least_one_sort_column_is_requ};
       __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 221, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 84, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     __Pyx_Raise(__pyx_t_4, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __PYX_ERR(0, 221, __pyx_L1_error)
+    __PYX_ERR(0, 84, __pyx_L1_error)
 
-    /* "draken/morsels/sort.pyx":220
+    /* "draken/morsels/sort.pyx":83
  *     if len(column_names) != len(ascending):
  *         raise ValueError("column_names and ascending must have the same length")
  *     if not column_names:             # <<<<<<<<<<<<<<
@@ -16950,1109 +16588,386 @@ static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6dr
 */
   }
 
-  /* "draken/morsels/sort.pyx":223
- *         raise ValueError("at least one sort column is required")
+  /* "draken/morsels/sort.pyx":89
+ *     cdef SortKeySpec item
+ *     cdef bytes key_bytes
+ *     cdef list names_bytes = [n if isinstance(n, bytes) else n.encode() for n in names]             # <<<<<<<<<<<<<<
  * 
- *     cdef Py_ssize_t n = morsel.num_rows             # <<<<<<<<<<<<<<
- *     if n == 0:
- *         return array("i")
+ *     for name, asc in zip(column_names, ascending):
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 223, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_2 = __Pyx_PyIndex_AsSsize_t(__pyx_t_4); if (unlikely((__pyx_t_2 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 223, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __pyx_v_n = __pyx_t_2;
-
-  /* "draken/morsels/sort.pyx":224
- * 
- *     cdef Py_ssize_t n = morsel.num_rows
- *     if n == 0:             # <<<<<<<<<<<<<<
- *         return array("i")
- * 
-*/
-  __pyx_t_7 = (__pyx_v_n == 0);
-  if (__pyx_t_7) {
-
-    /* "draken/morsels/sort.pyx":225
- *     cdef Py_ssize_t n = morsel.num_rows
- *     if n == 0:
- *         return array("i")             # <<<<<<<<<<<<<<
- * 
- *     # Allocate all three C buffers once; reuse keys across every column.
-*/
-    __Pyx_XDECREF(__pyx_r);
-    __pyx_t_5 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_array); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 225, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_8);
-    __pyx_t_6 = 1;
-    #if CYTHON_UNPACK_METHODS
-    if (unlikely(PyMethod_Check(__pyx_t_8))) {
-      __pyx_t_5 = PyMethod_GET_SELF(__pyx_t_8);
-      assert(__pyx_t_5);
-      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_8);
-      __Pyx_INCREF(__pyx_t_5);
-      __Pyx_INCREF(__pyx__function);
-      __Pyx_DECREF_SET(__pyx_t_8, __pyx__function);
-      __pyx_t_6 = 0;
+  { /* enter inner scope */
+    __pyx_t_4 = PyList_New(0); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 89, __pyx_L7_error)
+    __Pyx_GOTREF(__pyx_t_4);
+    if (unlikely(__pyx_v_names == Py_None)) {
+      PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
+      __PYX_ERR(0, 89, __pyx_L7_error)
     }
-    #endif
-    {
-      PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_mstate_global->__pyx_n_u_i};
-      __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_8, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 225, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_4);
-    }
-    __pyx_r = __pyx_t_4;
-    __pyx_t_4 = 0;
-    goto __pyx_L0;
-
-    /* "draken/morsels/sort.pyx":224
- * 
- *     cdef Py_ssize_t n = morsel.num_rows
- *     if n == 0:             # <<<<<<<<<<<<<<
- *         return array("i")
- * 
-*/
-  }
-
-  /* "draken/morsels/sort.pyx":229
- *     # Allocate all three C buffers once; reuse keys across every column.
- *     # perm and tmp swap roles each radix pass; keys is overwritten per column.
- *     cdef uint32_t* perm_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))             # <<<<<<<<<<<<<<
- *     cdef uint32_t* tmp_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
- *     cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
-*/
-  __pyx_v_perm_buf = ((uint32_t *)PyMem_Malloc((__pyx_v_n * (sizeof(uint32_t)))));
-
-  /* "draken/morsels/sort.pyx":230
- *     # perm and tmp swap roles each radix pass; keys is overwritten per column.
- *     cdef uint32_t* perm_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
- *     cdef uint32_t* tmp_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))             # <<<<<<<<<<<<<<
- *     cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
- *     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:
-*/
-  __pyx_v_tmp_buf = ((uint32_t *)PyMem_Malloc((__pyx_v_n * (sizeof(uint32_t)))));
-
-  /* "draken/morsels/sort.pyx":231
- *     cdef uint32_t* perm_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
- *     cdef uint32_t* tmp_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
- *     cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))             # <<<<<<<<<<<<<<
- *     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:
- *         PyMem_Free(perm_buf)
-*/
-  __pyx_v_keys = ((uint64_t *)PyMem_Malloc((__pyx_v_n * (sizeof(uint64_t)))));
-
-  /* "draken/morsels/sort.pyx":232
- *     cdef uint32_t* tmp_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
- *     cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
- *     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:             # <<<<<<<<<<<<<<
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)
-*/
-  __pyx_t_3 = (__pyx_v_perm_buf == NULL);
-  if (!__pyx_t_3) {
-  } else {
-    __pyx_t_7 = __pyx_t_3;
-    goto __pyx_L7_bool_binop_done;
-  }
-  __pyx_t_3 = (__pyx_v_tmp_buf == NULL);
-  if (!__pyx_t_3) {
-  } else {
-    __pyx_t_7 = __pyx_t_3;
-    goto __pyx_L7_bool_binop_done;
-  }
-  __pyx_t_3 = (__pyx_v_keys == NULL);
-  __pyx_t_7 = __pyx_t_3;
-  __pyx_L7_bool_binop_done:;
-  if (unlikely(__pyx_t_7)) {
-
-    /* "draken/morsels/sort.pyx":233
- *     cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
- *     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:
- *         PyMem_Free(perm_buf)             # <<<<<<<<<<<<<<
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)
-*/
-    PyMem_Free(__pyx_v_perm_buf);
-
-    /* "draken/morsels/sort.pyx":234
- *     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)             # <<<<<<<<<<<<<<
- *         PyMem_Free(keys)
- *         raise MemoryError()
-*/
-    PyMem_Free(__pyx_v_tmp_buf);
-
-    /* "draken/morsels/sort.pyx":235
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)             # <<<<<<<<<<<<<<
- *         raise MemoryError()
- * 
-*/
-    PyMem_Free(__pyx_v_keys);
-
-    /* "draken/morsels/sort.pyx":236
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)
- *         raise MemoryError()             # <<<<<<<<<<<<<<
- * 
- *     cdef Py_ssize_t i
-*/
-    PyErr_NoMemory(); __PYX_ERR(0, 236, __pyx_L1_error)
-
-    /* "draken/morsels/sort.pyx":232
- *     cdef uint32_t* tmp_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
- *     cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
- *     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:             # <<<<<<<<<<<<<<
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)
-*/
-  }
-
-  /* "draken/morsels/sort.pyx":239
- * 
- *     cdef Py_ssize_t i
- *     for i in range(n):             # <<<<<<<<<<<<<<
- *         perm_buf[i] = <uint32_t>i
- * 
-*/
-  __pyx_t_2 = __pyx_v_n;
-  __pyx_t_1 = __pyx_t_2;
-  for (__pyx_t_9 = 0; __pyx_t_9 < __pyx_t_1; __pyx_t_9+=1) {
-    __pyx_v_i = __pyx_t_9;
-
-    /* "draken/morsels/sort.pyx":240
- *     cdef Py_ssize_t i
- *     for i in range(n):
- *         perm_buf[i] = <uint32_t>i             # <<<<<<<<<<<<<<
- * 
- *     cdef int64_t[::1] signed_mv
-*/
-    (__pyx_v_perm_buf[__pyx_v_i]) = ((uint32_t)__pyx_v_i);
-  }
-
-  /* "draken/morsels/sort.pyx":258
- *     cdef int64_t sort_slen
- * 
- *     try:             # <<<<<<<<<<<<<<
- *         # LSD: iterate columns from least-significant to most-significant.
- *         for col_idx in range(len(column_names) - 1, -1, -1):
-*/
-  /*try:*/ {
-
-    /* "draken/morsels/sort.pyx":260
- *     try:
- *         # LSD: iterate columns from least-significant to most-significant.
- *         for col_idx in range(len(column_names) - 1, -1, -1):             # <<<<<<<<<<<<<<
- *             col_name = column_names[col_idx]
- *             asc = bool(ascending[col_idx])
-*/
-    if (unlikely(__pyx_v_column_names == Py_None)) {
-      PyErr_SetString(PyExc_TypeError, "object of type 'NoneType' has no len()");
-      __PYX_ERR(0, 260, __pyx_L13_error)
-    }
-    __pyx_t_2 = __Pyx_PyList_GET_SIZE(__pyx_v_column_names); if (unlikely(__pyx_t_2 == ((Py_ssize_t)-1))) __PYX_ERR(0, 260, __pyx_L13_error)
-    for (__pyx_t_1 = (__pyx_t_2 - 1); __pyx_t_1 > -1L; __pyx_t_1-=1) {
-      __pyx_v_col_idx = __pyx_t_1;
-
-      /* "draken/morsels/sort.pyx":261
- *         # LSD: iterate columns from least-significant to most-significant.
- *         for col_idx in range(len(column_names) - 1, -1, -1):
- *             col_name = column_names[col_idx]             # <<<<<<<<<<<<<<
- *             asc = bool(ascending[col_idx])
- *             key_xor = _asc_xor if asc else _desc_xor
-*/
-      if (unlikely(__pyx_v_column_names == Py_None)) {
-        PyErr_SetString(PyExc_TypeError, "'NoneType' object is not subscriptable");
-        __PYX_ERR(0, 261, __pyx_L13_error)
+    __pyx_t_5 = __pyx_v_names; __Pyx_INCREF(__pyx_t_5);
+    __pyx_t_2 = 0;
+    for (;;) {
+      {
+        Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_5);
+        #if !CYTHON_ASSUME_SAFE_SIZE
+        if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 89, __pyx_L7_error)
+        #endif
+        if (__pyx_t_2 >= __pyx_temp) break;
       }
-      __pyx_t_4 = __Pyx_PyList_GET_ITEM(__pyx_v_column_names, __pyx_v_col_idx);
-      __Pyx_INCREF(__pyx_t_4);
-      __Pyx_XDECREF_SET(__pyx_v_col_name, __pyx_t_4);
-      __pyx_t_4 = 0;
-
-      /* "draken/morsels/sort.pyx":262
- *         for col_idx in range(len(column_names) - 1, -1, -1):
- *             col_name = column_names[col_idx]
- *             asc = bool(ascending[col_idx])             # <<<<<<<<<<<<<<
- *             key_xor = _asc_xor if asc else _desc_xor
- * 
-*/
-      if (unlikely(__pyx_v_ascending == Py_None)) {
-        PyErr_SetString(PyExc_TypeError, "'NoneType' object is not subscriptable");
-        __PYX_ERR(0, 262, __pyx_L13_error)
-      }
-      __pyx_t_7 = __Pyx_PyObject_IsTrue(__Pyx_PyList_GET_ITEM(__pyx_v_ascending, __pyx_v_col_idx)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 262, __pyx_L13_error)
-      __pyx_v_asc = (!(!__pyx_t_7));
-
-      /* "draken/morsels/sort.pyx":263
- *             col_name = column_names[col_idx]
- *             asc = bool(ascending[col_idx])
- *             key_xor = _asc_xor if asc else _desc_xor             # <<<<<<<<<<<<<<
- * 
- *             vec = morsel._cxx_column(col_name)
-*/
-      if (__pyx_v_asc) {
-        __pyx_t_10 = __pyx_v_6draken_7morsels_4sort__asc_xor;
-      } else {
-        __pyx_t_10 = __pyx_v_6draken_7morsels_4sort__desc_xor;
-      }
-      __pyx_v_key_xor = __pyx_t_10;
-
-      /* "draken/morsels/sort.pyx":265
- *             key_xor = _asc_xor if asc else _desc_xor
- * 
- *             vec = morsel._cxx_column(col_name)             # <<<<<<<<<<<<<<
- * 
- *             if (<Vector>vec).unified().type == DRAKEN_VARCHAR or (<Vector>vec).unified().type == DRAKEN_NVARCHAR:
-*/
-      __pyx_t_4 = ((struct __pyx_vtabstruct_6draken_7morsels_6morsel_Morsel *)__pyx_v_morsel->__pyx_vtab)->_cxx_column(__pyx_v_morsel, __pyx_v_col_name, 0, NULL); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 265, __pyx_L13_error)
-      __Pyx_GOTREF(__pyx_t_4);
-      __Pyx_XDECREF_SET(__pyx_v_vec, __pyx_t_4);
-      __pyx_t_4 = 0;
-
-      /* "draken/morsels/sort.pyx":267
- *             vec = morsel._cxx_column(col_name)
- * 
- *             if (<Vector>vec).unified().type == DRAKEN_VARCHAR or (<Vector>vec).unified().type == DRAKEN_NVARCHAR:             # <<<<<<<<<<<<<<
- *                 sv = <Vector>vec
- *                 # Build a temporary contiguous buffer from arena slots via unified sel[i].
-*/
-      __pyx_t_3 = (((struct __pyx_vtabstruct_6draken_7vectors_6vector_Vector *)((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_v_vec)->__pyx_vtab)->unified(((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_v_vec))->type == DRAKEN_VARCHAR);
-      if (!__pyx_t_3) {
-      } else {
-        __pyx_t_7 = __pyx_t_3;
-        goto __pyx_L18_bool_binop_done;
-      }
-      __pyx_t_3 = (((struct __pyx_vtabstruct_6draken_7vectors_6vector_Vector *)((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_v_vec)->__pyx_vtab)->unified(((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_v_vec))->type == DRAKEN_NVARCHAR);
-      __pyx_t_7 = __pyx_t_3;
-      __pyx_L18_bool_binop_done:;
+      __pyx_t_8 = __Pyx_PyList_GET_ITEM_REF(__pyx_t_5, __pyx_t_2, __Pyx_ReferenceSharing_OwnStrongReference);
+      ++__pyx_t_2;
+      if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 89, __pyx_L7_error)
+      __Pyx_GOTREF(__pyx_t_8);
+      __Pyx_XDECREF_SET(__pyx_7genexpr__pyx_v_n, __pyx_t_8);
+      __pyx_t_8 = 0;
+      __pyx_t_7 = PyBytes_Check(__pyx_7genexpr__pyx_v_n); 
       if (__pyx_t_7) {
-
-        /* "draken/morsels/sort.pyx":268
- * 
- *             if (<Vector>vec).unified().type == DRAKEN_VARCHAR or (<Vector>vec).unified().type == DRAKEN_NVARCHAR:
- *                 sv = <Vector>vec             # <<<<<<<<<<<<<<
- *                 # Build a temporary contiguous buffer from arena slots via unified sel[i].
- *                 sort_uv = sv.unified()
-*/
-        __pyx_t_4 = __pyx_v_vec;
-        __Pyx_INCREF(__pyx_t_4);
-        __Pyx_XDECREF_SET(__pyx_v_sv, ((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_t_4));
-        __pyx_t_4 = 0;
-
-        /* "draken/morsels/sort.pyx":270
- *                 sv = <Vector>vec
- *                 # Build a temporary contiguous buffer from arena slots via unified sel[i].
- *                 sort_uv = sv.unified()             # <<<<<<<<<<<<<<
- *                 sort_arena = <DrakenStringArena*>sort_uv.data
- *                 sort_sel = <uint32_t*>sort_uv.selection
-*/
-        __pyx_v_sort_uv = ((struct __pyx_vtabstruct_6draken_7vectors_6vector_Vector *)__pyx_v_sv->__pyx_vtab)->unified(__pyx_v_sv);
-
-        /* "draken/morsels/sort.pyx":271
- *                 # Build a temporary contiguous buffer from arena slots via unified sel[i].
- *                 sort_uv = sv.unified()
- *                 sort_arena = <DrakenStringArena*>sort_uv.data             # <<<<<<<<<<<<<<
- *                 sort_sel = <uint32_t*>sort_uv.selection
- * 
-*/
-        __pyx_v_sort_arena = ((DrakenStringArena *)__pyx_v_sort_uv->data);
-
-        /* "draken/morsels/sort.pyx":272
- *                 sort_uv = sv.unified()
- *                 sort_arena = <DrakenStringArena*>sort_uv.data
- *                 sort_sel = <uint32_t*>sort_uv.selection             # <<<<<<<<<<<<<<
- * 
- *                 # Sorted-dictionary fast-path: a dict whose values are ascending
-*/
-        __pyx_v_sort_sel = ((uint32_t *)__pyx_v_sort_uv->selection);
-
-        /* "draken/morsels/sort.pyx":280
- *                 # included: both order by slots[code]). Replaces an O(total_bytes)
- *                 # copy + string compares with an integer radix sort on the codes.
- *                 if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n             # <<<<<<<<<<<<<<
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:
-*/
-        __pyx_t_3 = (__pyx_v_sort_uv->data_length > 1);
-        if (__pyx_t_3) {
-        } else {
-          __pyx_t_7 = __pyx_t_3;
-          goto __pyx_L21_bool_binop_done;
-        }
-
-        /* "draken/morsels/sort.pyx":281
- *                 # copy + string compares with an integer radix sort on the codes.
- *                 if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):             # <<<<<<<<<<<<<<
- *                     with nogil:
- *                         if asc:
-*/
-        __pyx_t_3 = (__pyx_v_sort_uv->data_length < ((uint32_t)__pyx_v_n));
-        if (__pyx_t_3) {
-        } else {
-          __pyx_t_7 = __pyx_t_3;
-          goto __pyx_L21_bool_binop_done;
-        }
-        __pyx_t_3 = ((__pyx_v_sort_uv->flags & DRAKEN_DICT_KEYS_SORTED) != 0);
-        __pyx_t_7 = __pyx_t_3;
-        __pyx_L21_bool_binop_done:;
-
-        /* "draken/morsels/sort.pyx":280
- *                 # included: both order by slots[code]). Replaces an O(total_bytes)
- *                 # copy + string compares with an integer radix sort on the codes.
- *                 if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n             # <<<<<<<<<<<<<<
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:
-*/
-        if (__pyx_t_7) {
-
-          /* "draken/morsels/sort.pyx":282
- *                 if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:             # <<<<<<<<<<<<<<
- *                         if asc:
- *                             for i in range(n):
-*/
-          {
-              PyThreadState * _save;
-              _save = PyEval_SaveThread();
-              __Pyx_FastGIL_Remember();
-              /*try:*/ {
-
-                /* "draken/morsels/sort.pyx":283
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:
- *                         if asc:             # <<<<<<<<<<<<<<
- *                             for i in range(n):
- *                                 keys[i] = <uint64_t>sort_sel[i]
-*/
-                if (__pyx_v_asc) {
-
-                  /* "draken/morsels/sort.pyx":284
- *                     with nogil:
- *                         if asc:
- *                             for i in range(n):             # <<<<<<<<<<<<<<
- *                                 keys[i] = <uint64_t>sort_sel[i]
- *                         else:
-*/
-                  __pyx_t_9 = __pyx_v_n;
-                  __pyx_t_11 = __pyx_t_9;
-                  for (__pyx_t_12 = 0; __pyx_t_12 < __pyx_t_11; __pyx_t_12+=1) {
-                    __pyx_v_i = __pyx_t_12;
-
-                    /* "draken/morsels/sort.pyx":285
- *                         if asc:
- *                             for i in range(n):
- *                                 keys[i] = <uint64_t>sort_sel[i]             # <<<<<<<<<<<<<<
- *                         else:
- *                             for i in range(n):
-*/
-                    (__pyx_v_keys[__pyx_v_i]) = ((uint64_t)(__pyx_v_sort_sel[__pyx_v_i]));
-                  }
-
-                  /* "draken/morsels/sort.pyx":283
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:
- *                         if asc:             # <<<<<<<<<<<<<<
- *                             for i in range(n):
- *                                 keys[i] = <uint64_t>sort_sel[i]
-*/
-                  goto __pyx_L29;
-                }
-
-                /* "draken/morsels/sort.pyx":287
- *                                 keys[i] = <uint64_t>sort_sel[i]
- *                         else:
- *                             for i in range(n):             # <<<<<<<<<<<<<<
- *                                 keys[i] = ~(<uint64_t>sort_sel[i])
- *                         if not vergesort_u64(perm_buf, tmp_buf, keys, n):
-*/
-                /*else*/ {
-                  __pyx_t_9 = __pyx_v_n;
-                  __pyx_t_11 = __pyx_t_9;
-                  for (__pyx_t_12 = 0; __pyx_t_12 < __pyx_t_11; __pyx_t_12+=1) {
-                    __pyx_v_i = __pyx_t_12;
-
-                    /* "draken/morsels/sort.pyx":288
- *                         else:
- *                             for i in range(n):
- *                                 keys[i] = ~(<uint64_t>sort_sel[i])             # <<<<<<<<<<<<<<
- *                         if not vergesort_u64(perm_buf, tmp_buf, keys, n):
- *                             _radix_sort(perm_buf, tmp_buf, keys, n, 8)
-*/
-                    (__pyx_v_keys[__pyx_v_i]) = (~((uint64_t)(__pyx_v_sort_sel[__pyx_v_i])));
-                  }
-                }
-                __pyx_L29:;
-
-                /* "draken/morsels/sort.pyx":289
- *                             for i in range(n):
- *                                 keys[i] = ~(<uint64_t>sort_sel[i])
- *                         if not vergesort_u64(perm_buf, tmp_buf, keys, n):             # <<<<<<<<<<<<<<
- *                             _radix_sort(perm_buf, tmp_buf, keys, n, 8)
- *                     continue
-*/
-                __pyx_t_7 = (!vergesort_u64(__pyx_v_perm_buf, __pyx_v_tmp_buf, __pyx_v_keys, __pyx_v_n));
-                if (__pyx_t_7) {
-
-                  /* "draken/morsels/sort.pyx":290
- *                                 keys[i] = ~(<uint64_t>sort_sel[i])
- *                         if not vergesort_u64(perm_buf, tmp_buf, keys, n):
- *                             _radix_sort(perm_buf, tmp_buf, keys, n, 8)             # <<<<<<<<<<<<<<
- *                     continue
- *                 sort_total_bytes = 0
-*/
-                  __pyx_f_6draken_7morsels_4sort__radix_sort(__pyx_v_perm_buf, __pyx_v_tmp_buf, __pyx_v_keys, __pyx_v_n, 8);
-
-                  /* "draken/morsels/sort.pyx":289
- *                             for i in range(n):
- *                                 keys[i] = ~(<uint64_t>sort_sel[i])
- *                         if not vergesort_u64(perm_buf, tmp_buf, keys, n):             # <<<<<<<<<<<<<<
- *                             _radix_sort(perm_buf, tmp_buf, keys, n, 8)
- *                     continue
-*/
-                }
-              }
-
-              /* "draken/morsels/sort.pyx":282
- *                 if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:             # <<<<<<<<<<<<<<
- *                         if asc:
- *                             for i in range(n):
-*/
-              /*finally:*/ {
-                /*normal exit:*/{
-                  __Pyx_FastGIL_Forget();
-                  PyEval_RestoreThread(_save);
-                  goto __pyx_L28;
-                }
-                __pyx_L28:;
-              }
-          }
-
-          /* "draken/morsels/sort.pyx":291
- *                         if not vergesort_u64(perm_buf, tmp_buf, keys, n):
- *                             _radix_sort(perm_buf, tmp_buf, keys, n, 8)
- *                     continue             # <<<<<<<<<<<<<<
- *                 sort_total_bytes = 0
- *                 for sort_di in range(n):
-*/
-          goto __pyx_L15_continue;
-
-          /* "draken/morsels/sort.pyx":280
- *                 # included: both order by slots[code]). Replaces an O(total_bytes)
- *                 # copy + string compares with an integer radix sort on the codes.
- *                 if (sort_uv.data_length > 1 and sort_uv.data_length < <uint32_t>n             # <<<<<<<<<<<<<<
- *                         and (sort_uv.flags & DRAKEN_DICT_KEYS_SORTED)):
- *                     with nogil:
-*/
-        }
-
-        /* "draken/morsels/sort.pyx":292
- *                             _radix_sort(perm_buf, tmp_buf, keys, n, 8)
- *                     continue
- *                 sort_total_bytes = 0             # <<<<<<<<<<<<<<
- *                 for sort_di in range(n):
- *                     sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
-*/
-        __pyx_v_sort_total_bytes = 0;
-
-        /* "draken/morsels/sort.pyx":293
- *                     continue
- *                 sort_total_bytes = 0
- *                 for sort_di in range(n):             # <<<<<<<<<<<<<<
- *                     sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                 sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
-*/
-        __pyx_t_9 = __pyx_v_n;
-        __pyx_t_11 = __pyx_t_9;
-        for (__pyx_t_12 = 0; __pyx_t_12 < __pyx_t_11; __pyx_t_12+=1) {
-          __pyx_v_sort_di = __pyx_t_12;
-
-          /* "draken/morsels/sort.pyx":294
- *                 sort_total_bytes = 0
- *                 for sort_di in range(n):
- *                     sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])             # <<<<<<<<<<<<<<
- *                 sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
-*/
-          __pyx_v_sort_total_bytes = (__pyx_v_sort_total_bytes + ((int64_t)str_length((&(__pyx_v_sort_arena->slots[(__pyx_v_sort_sel[__pyx_v_sort_di])])))));
-        }
-
-        /* "draken/morsels/sort.pyx":295
- *                 for sort_di in range(n):
- *                     sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                 sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))             # <<<<<<<<<<<<<<
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
- *                 if sort_offsets == NULL or sort_buf == NULL:
-*/
-        __pyx_v_sort_offsets = ((int32_t *)malloc(((__pyx_v_n + 1) * (sizeof(int32_t)))));
-
-        /* "draken/morsels/sort.pyx":296
- *                     sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                 sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)             # <<<<<<<<<<<<<<
- *                 if sort_offsets == NULL or sort_buf == NULL:
- *                     if sort_offsets != NULL:
-*/
-        __pyx_t_7 = (__pyx_v_sort_total_bytes > 0);
-        if (__pyx_t_7) {
-          __pyx_t_6 = __pyx_v_sort_total_bytes;
-        } else {
-          __pyx_t_6 = 1;
-        }
-        __pyx_v_sort_buf = ((uint8_t *)malloc(__pyx_t_6));
-
-        /* "draken/morsels/sort.pyx":297
- *                 sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
- *                 if sort_offsets == NULL or sort_buf == NULL:             # <<<<<<<<<<<<<<
- *                     if sort_offsets != NULL:
- *                         free(sort_offsets)
-*/
-        __pyx_t_3 = (__pyx_v_sort_offsets == NULL);
-        if (!__pyx_t_3) {
-        } else {
-          __pyx_t_7 = __pyx_t_3;
-          goto __pyx_L38_bool_binop_done;
-        }
-        __pyx_t_3 = (__pyx_v_sort_buf == NULL);
-        __pyx_t_7 = __pyx_t_3;
-        __pyx_L38_bool_binop_done:;
-        if (__pyx_t_7) {
-
-          /* "draken/morsels/sort.pyx":298
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
- *                 if sort_offsets == NULL or sort_buf == NULL:
- *                     if sort_offsets != NULL:             # <<<<<<<<<<<<<<
- *                         free(sort_offsets)
- *                     if sort_buf != NULL:
-*/
-          __pyx_t_7 = (__pyx_v_sort_offsets != NULL);
-          if (__pyx_t_7) {
-
-            /* "draken/morsels/sort.pyx":299
- *                 if sort_offsets == NULL or sort_buf == NULL:
- *                     if sort_offsets != NULL:
- *                         free(sort_offsets)             # <<<<<<<<<<<<<<
- *                     if sort_buf != NULL:
- *                         free(sort_buf)
-*/
-            free(__pyx_v_sort_offsets);
-
-            /* "draken/morsels/sort.pyx":298
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
- *                 if sort_offsets == NULL or sort_buf == NULL:
- *                     if sort_offsets != NULL:             # <<<<<<<<<<<<<<
- *                         free(sort_offsets)
- *                     if sort_buf != NULL:
-*/
-          }
-
-          /* "draken/morsels/sort.pyx":300
- *                     if sort_offsets != NULL:
- *                         free(sort_offsets)
- *                     if sort_buf != NULL:             # <<<<<<<<<<<<<<
- *                         free(sort_buf)
- *                     raise MemoryError()
-*/
-          __pyx_t_7 = (__pyx_v_sort_buf != NULL);
-          if (__pyx_t_7) {
-
-            /* "draken/morsels/sort.pyx":301
- *                         free(sort_offsets)
- *                     if sort_buf != NULL:
- *                         free(sort_buf)             # <<<<<<<<<<<<<<
- *                     raise MemoryError()
- *                 sort_offsets[0] = 0
-*/
-            free(__pyx_v_sort_buf);
-
-            /* "draken/morsels/sort.pyx":300
- *                     if sort_offsets != NULL:
- *                         free(sort_offsets)
- *                     if sort_buf != NULL:             # <<<<<<<<<<<<<<
- *                         free(sort_buf)
- *                     raise MemoryError()
-*/
-          }
-
-          /* "draken/morsels/sort.pyx":302
- *                     if sort_buf != NULL:
- *                         free(sort_buf)
- *                     raise MemoryError()             # <<<<<<<<<<<<<<
- *                 sort_offsets[0] = 0
- *                 sort_fill = 0
-*/
-          PyErr_NoMemory(); __PYX_ERR(0, 302, __pyx_L13_error)
-
-          /* "draken/morsels/sort.pyx":297
- *                 sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
- *                 sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
- *                 if sort_offsets == NULL or sort_buf == NULL:             # <<<<<<<<<<<<<<
- *                     if sort_offsets != NULL:
- *                         free(sort_offsets)
-*/
-        }
-
-        /* "draken/morsels/sort.pyx":303
- *                         free(sort_buf)
- *                     raise MemoryError()
- *                 sort_offsets[0] = 0             # <<<<<<<<<<<<<<
- *                 sort_fill = 0
- *                 for sort_di in range(n):
-*/
-        (__pyx_v_sort_offsets[0]) = 0;
-
-        /* "draken/morsels/sort.pyx":304
- *                     raise MemoryError()
- *                 sort_offsets[0] = 0
- *                 sort_fill = 0             # <<<<<<<<<<<<<<
- *                 for sort_di in range(n):
- *                     sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
-*/
-        __pyx_v_sort_fill = 0;
-
-        /* "draken/morsels/sort.pyx":305
- *                 sort_offsets[0] = 0
- *                 sort_fill = 0
- *                 for sort_di in range(n):             # <<<<<<<<<<<<<<
- *                     sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                     if sort_slen > 0:
-*/
-        __pyx_t_9 = __pyx_v_n;
-        __pyx_t_11 = __pyx_t_9;
-        for (__pyx_t_12 = 0; __pyx_t_12 < __pyx_t_11; __pyx_t_12+=1) {
-          __pyx_v_sort_di = __pyx_t_12;
-
-          /* "draken/morsels/sort.pyx":306
- *                 sort_fill = 0
- *                 for sort_di in range(n):
- *                     sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])             # <<<<<<<<<<<<<<
- *                     if sort_slen > 0:
- *                         memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)
-*/
-          __pyx_v_sort_slen = ((int64_t)str_length((&(__pyx_v_sort_arena->slots[(__pyx_v_sort_sel[__pyx_v_sort_di])]))));
-
-          /* "draken/morsels/sort.pyx":307
- *                 for sort_di in range(n):
- *                     sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                     if sort_slen > 0:             # <<<<<<<<<<<<<<
- *                         memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)
- *                     sort_fill += sort_slen
-*/
-          __pyx_t_7 = (__pyx_v_sort_slen > 0);
-          if (__pyx_t_7) {
-
-            /* "draken/morsels/sort.pyx":308
- *                     sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                     if sort_slen > 0:
- *                         memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)             # <<<<<<<<<<<<<<
- *                     sort_fill += sort_slen
- *                     sort_offsets[sort_di + 1] = <int32_t>sort_fill
-*/
-            (void)(memcpy((__pyx_v_sort_buf + __pyx_v_sort_fill), str_data((&(__pyx_v_sort_arena->slots[(__pyx_v_sort_sel[__pyx_v_sort_di])])), __pyx_v_sort_arena->arena), __pyx_v_sort_slen));
-
-            /* "draken/morsels/sort.pyx":307
- *                 for sort_di in range(n):
- *                     sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
- *                     if sort_slen > 0:             # <<<<<<<<<<<<<<
- *                         memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)
- *                     sort_fill += sort_slen
-*/
-          }
-
-          /* "draken/morsels/sort.pyx":309
- *                     if sort_slen > 0:
- *                         memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)
- *                     sort_fill += sort_slen             # <<<<<<<<<<<<<<
- *                     sort_offsets[sort_di + 1] = <int32_t>sort_fill
- *                 try:
-*/
-          __pyx_v_sort_fill = (__pyx_v_sort_fill + __pyx_v_sort_slen);
-
-          /* "draken/morsels/sort.pyx":310
- *                         memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)
- *                     sort_fill += sort_slen
- *                     sort_offsets[sort_di + 1] = <int32_t>sort_fill             # <<<<<<<<<<<<<<
- *                 try:
- *                     with nogil:
-*/
-          (__pyx_v_sort_offsets[(__pyx_v_sort_di + 1)]) = ((int32_t)__pyx_v_sort_fill);
-        }
-
-        /* "draken/morsels/sort.pyx":311
- *                     sort_fill += sort_slen
- *                     sort_offsets[sort_di + 1] = <int32_t>sort_fill
- *                 try:             # <<<<<<<<<<<<<<
- *                     with nogil:
- *                         _sort_strings(
-*/
-        /*try:*/ {
-
-          /* "draken/morsels/sort.pyx":312
- *                     sort_offsets[sort_di + 1] = <int32_t>sort_fill
- *                 try:
- *                     with nogil:             # <<<<<<<<<<<<<<
- *                         _sort_strings(
- *                             perm_buf, <uint32_t>n,
-*/
-          {
-              PyThreadState * _save;
-              _save = PyEval_SaveThread();
-              __Pyx_FastGIL_Remember();
-              /*try:*/ {
-
-                /* "draken/morsels/sort.pyx":313
- *                 try:
- *                     with nogil:
- *                         _sort_strings(             # <<<<<<<<<<<<<<
- *                             perm_buf, <uint32_t>n,
- *                             <const char*>sort_buf,
-*/
-                _sort_strings(__pyx_v_perm_buf, ((uint32_t)__pyx_v_n), ((char const *)__pyx_v_sort_buf), __pyx_v_sort_offsets, __pyx_v_asc);
-              }
-
-              /* "draken/morsels/sort.pyx":312
- *                     sort_offsets[sort_di + 1] = <int32_t>sort_fill
- *                 try:
- *                     with nogil:             # <<<<<<<<<<<<<<
- *                         _sort_strings(
- *                             perm_buf, <uint32_t>n,
-*/
-              /*finally:*/ {
-                /*normal exit:*/{
-                  __Pyx_FastGIL_Forget();
-                  PyEval_RestoreThread(_save);
-                  goto __pyx_L54;
-                }
-                __pyx_L54:;
-              }
-          }
-        }
-
-        /* "draken/morsels/sort.pyx":320
- *                         )
- *                 finally:
- *                     free(sort_offsets)             # <<<<<<<<<<<<<<
- *                     free(sort_buf)
- *             else:
-*/
-        /*finally:*/ {
-          /*normal exit:*/{
-            free(__pyx_v_sort_offsets);
-
-            /* "draken/morsels/sort.pyx":321
- *                 finally:
- *                     free(sort_offsets)
- *                     free(sort_buf)             # <<<<<<<<<<<<<<
- *             else:
- *                 #  Numeric / timestamp / date / bool / other (includes dict-encoded)
-*/
-            free(__pyx_v_sort_buf);
-            goto __pyx_L49;
-          }
-          __pyx_L49:;
-        }
-
-        /* "draken/morsels/sort.pyx":267
- *             vec = morsel._cxx_column(col_name)
- * 
- *             if (<Vector>vec).unified().type == DRAKEN_VARCHAR or (<Vector>vec).unified().type == DRAKEN_NVARCHAR:             # <<<<<<<<<<<<<<
- *                 sv = <Vector>vec
- *                 # Build a temporary contiguous buffer from arena slots via unified sel[i].
-*/
-        goto __pyx_L17;
-      }
-
-      /* "draken/morsels/sort.pyx":325
- *                 #  Numeric / timestamp / date / bool / other (includes dict-encoded)
- *                 # compress() returns a sortable signed int64 for all shapes.
- *                 signed_mv = vec.compress()             # <<<<<<<<<<<<<<
- *                 with nogil:
- *                     for i in range(n):
-*/
-      /*else*/ {
-        __pyx_t_8 = __pyx_v_vec;
-        __Pyx_INCREF(__pyx_t_8);
+        __Pyx_INCREF(__pyx_7genexpr__pyx_v_n);
+        __pyx_t_8 = __pyx_7genexpr__pyx_v_n;
+      } else {
+        __pyx_t_10 = __pyx_7genexpr__pyx_v_n;
+        __Pyx_INCREF(__pyx_t_10);
         __pyx_t_6 = 0;
         {
-          PyObject *__pyx_callargs[2] = {__pyx_t_8, NULL};
-          __pyx_t_4 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_compress, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-          __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
-          if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 325, __pyx_L13_error)
-          __Pyx_GOTREF(__pyx_t_4);
+          PyObject *__pyx_callargs[2] = {__pyx_t_10, NULL};
+          __pyx_t_9 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
+          if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 89, __pyx_L7_error)
+          __Pyx_GOTREF(__pyx_t_9);
         }
-        __pyx_t_13 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(__pyx_t_4, PyBUF_WRITABLE); if (unlikely(!__pyx_t_13.memview)) __PYX_ERR(0, 325, __pyx_L13_error)
-        __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-        __PYX_XCLEAR_MEMVIEW(&__pyx_v_signed_mv, 1);
-        __pyx_v_signed_mv = __pyx_t_13;
-        __pyx_t_13.memview = NULL;
-        __pyx_t_13.data = NULL;
-
-        /* "draken/morsels/sort.pyx":326
- *                 # compress() returns a sortable signed int64 for all shapes.
- *                 signed_mv = vec.compress()
- *                 with nogil:             # <<<<<<<<<<<<<<
- *                     for i in range(n):
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
-*/
-        {
-            PyThreadState * _save;
-            _save = PyEval_SaveThread();
-            __Pyx_FastGIL_Remember();
-            /*try:*/ {
-
-              /* "draken/morsels/sort.pyx":327
- *                 signed_mv = vec.compress()
- *                 with nogil:
- *                     for i in range(n):             # <<<<<<<<<<<<<<
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
- *                     if not vergesort_u64(perm_buf, tmp_buf, keys, n):
-*/
-              __pyx_t_9 = __pyx_v_n;
-              __pyx_t_11 = __pyx_t_9;
-              for (__pyx_t_12 = 0; __pyx_t_12 < __pyx_t_11; __pyx_t_12+=1) {
-                __pyx_v_i = __pyx_t_12;
-
-                /* "draken/morsels/sort.pyx":328
- *                 with nogil:
- *                     for i in range(n):
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor             # <<<<<<<<<<<<<<
- *                     if not vergesort_u64(perm_buf, tmp_buf, keys, n):
- *                         _radix_sort(perm_buf, tmp_buf, keys, n, 8)
-*/
-                __pyx_t_14 = __pyx_v_i;
-                (__pyx_v_keys[__pyx_v_i]) = (((uint64_t)(*((int64_t *) ( /* dim=0 */ ((char *) (((int64_t *) __pyx_v_signed_mv.data) + __pyx_t_14)) )))) ^ __pyx_v_key_xor);
-              }
-
-              /* "draken/morsels/sort.pyx":329
- *                     for i in range(n):
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
- *                     if not vergesort_u64(perm_buf, tmp_buf, keys, n):             # <<<<<<<<<<<<<<
- *                         _radix_sort(perm_buf, tmp_buf, keys, n, 8)
- * 
-*/
-              __pyx_t_7 = (!vergesort_u64(__pyx_v_perm_buf, __pyx_v_tmp_buf, __pyx_v_keys, __pyx_v_n));
-              if (__pyx_t_7) {
-
-                /* "draken/morsels/sort.pyx":330
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
- *                     if not vergesort_u64(perm_buf, tmp_buf, keys, n):
- *                         _radix_sort(perm_buf, tmp_buf, keys, n, 8)             # <<<<<<<<<<<<<<
- * 
- *         result = array("i", b"\x00" * (n * sizeof(uint32_t)))
-*/
-                __pyx_f_6draken_7morsels_4sort__radix_sort(__pyx_v_perm_buf, __pyx_v_tmp_buf, __pyx_v_keys, __pyx_v_n, 8);
-
-                /* "draken/morsels/sort.pyx":329
- *                     for i in range(n):
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
- *                     if not vergesort_u64(perm_buf, tmp_buf, keys, n):             # <<<<<<<<<<<<<<
- *                         _radix_sort(perm_buf, tmp_buf, keys, n, 8)
- * 
-*/
-              }
-            }
-
-            /* "draken/morsels/sort.pyx":326
- *                 # compress() returns a sortable signed int64 for all shapes.
- *                 signed_mv = vec.compress()
- *                 with nogil:             # <<<<<<<<<<<<<<
- *                     for i in range(n):
- *                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
-*/
-            /*finally:*/ {
-              /*normal exit:*/{
-                __Pyx_FastGIL_Forget();
-                PyEval_RestoreThread(_save);
-                goto __pyx_L59;
-              }
-              __pyx_L59:;
-            }
-        }
+        __pyx_t_8 = __pyx_t_9;
+        __pyx_t_9 = 0;
       }
-      __pyx_L17:;
-      __pyx_L15_continue:;
+      if (unlikely(__Pyx_ListComp_Append(__pyx_t_4, (PyObject*)__pyx_t_8))) __PYX_ERR(0, 89, __pyx_L7_error)
+      __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
     }
+    __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+    __Pyx_XDECREF(__pyx_7genexpr__pyx_v_n); __pyx_7genexpr__pyx_v_n = 0;
+    goto __pyx_L11_exit_scope;
+    __pyx_L7_error:;
+    __Pyx_XDECREF(__pyx_7genexpr__pyx_v_n); __pyx_7genexpr__pyx_v_n = 0;
+    goto __pyx_L1_error;
+    __pyx_L11_exit_scope:;
+  } /* exit inner scope */
+  __pyx_v_names_bytes = ((PyObject*)__pyx_t_4);
+  __pyx_t_4 = 0;
 
-    /* "draken/morsels/sort.pyx":332
- *                         _radix_sort(perm_buf, tmp_buf, keys, n, 8)
+  /* "draken/morsels/sort.pyx":91
+ *     cdef list names_bytes = [n if isinstance(n, bytes) else n.encode() for n in names]
  * 
- *         result = array("i", b"\x00" * (n * sizeof(uint32_t)))             # <<<<<<<<<<<<<<
- *         rv = result
- *         memcpy(&rv[0], perm_buf, n * sizeof(uint32_t))
+ *     for name, asc in zip(column_names, ascending):             # <<<<<<<<<<<<<<
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()
+ *         try:
 */
-    __pyx_t_8 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_array); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 332, __pyx_L13_error)
+  __pyx_t_5 = NULL;
+  __pyx_t_6 = 1;
+  {
+    PyObject *__pyx_callargs[3] = {__pyx_t_5, __pyx_v_column_names, __pyx_v_ascending};
+    __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_zip, __pyx_callargs+__pyx_t_6, (3-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
+    if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 91, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_4);
+  }
+  if (likely(PyList_CheckExact(__pyx_t_4)) || PyTuple_CheckExact(__pyx_t_4)) {
+    __pyx_t_5 = __pyx_t_4; __Pyx_INCREF(__pyx_t_5);
+    __pyx_t_2 = 0;
+    __pyx_t_11 = NULL;
+  } else {
+    __pyx_t_2 = -1; __pyx_t_5 = PyObject_GetIter(__pyx_t_4); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 91, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
-    __pyx_t_15 = __Pyx_PySequence_Multiply(__pyx_mstate_global->__pyx_kp_b__6, (__pyx_v_n * (sizeof(uint32_t)))); if (unlikely(!__pyx_t_15)) __PYX_ERR(0, 332, __pyx_L13_error)
-    __Pyx_GOTREF(__pyx_t_15);
-    __pyx_t_6 = 1;
-    #if CYTHON_UNPACK_METHODS
-    if (unlikely(PyMethod_Check(__pyx_t_5))) {
-      __pyx_t_8 = PyMethod_GET_SELF(__pyx_t_5);
-      assert(__pyx_t_8);
-      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_5);
+    __pyx_t_11 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_5); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 91, __pyx_L1_error)
+  }
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  for (;;) {
+    if (likely(!__pyx_t_11)) {
+      if (likely(PyList_CheckExact(__pyx_t_5))) {
+        {
+          Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_5);
+          #if !CYTHON_ASSUME_SAFE_SIZE
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 91, __pyx_L1_error)
+          #endif
+          if (__pyx_t_2 >= __pyx_temp) break;
+        }
+        __pyx_t_4 = __Pyx_PyList_GET_ITEM_REF(__pyx_t_5, __pyx_t_2, __Pyx_ReferenceSharing_OwnStrongReference);
+        ++__pyx_t_2;
+      } else {
+        {
+          Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_5);
+          #if !CYTHON_ASSUME_SAFE_SIZE
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 91, __pyx_L1_error)
+          #endif
+          if (__pyx_t_2 >= __pyx_temp) break;
+        }
+        #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+        __pyx_t_4 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_5, __pyx_t_2));
+        #else
+        __pyx_t_4 = __Pyx_PySequence_ITEM(__pyx_t_5, __pyx_t_2);
+        #endif
+        ++__pyx_t_2;
+      }
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 91, __pyx_L1_error)
+    } else {
+      __pyx_t_4 = __pyx_t_11(__pyx_t_5);
+      if (unlikely(!__pyx_t_4)) {
+        PyObject* exc_type = PyErr_Occurred();
+        if (exc_type) {
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 91, __pyx_L1_error)
+          PyErr_Clear();
+        }
+        break;
+      }
+    }
+    __Pyx_GOTREF(__pyx_t_4);
+    if ((likely(PyTuple_CheckExact(__pyx_t_4))) || (PyList_CheckExact(__pyx_t_4))) {
+      PyObject* sequence = __pyx_t_4;
+      Py_ssize_t size = __Pyx_PySequence_SIZE(sequence);
+      if (unlikely(size != 2)) {
+        if (size > 2) __Pyx_RaiseTooManyValuesError(2);
+        else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
+        __PYX_ERR(0, 91, __pyx_L1_error)
+      }
+      #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+      if (likely(PyTuple_CheckExact(sequence))) {
+        __pyx_t_8 = PyTuple_GET_ITEM(sequence, 0);
+        __Pyx_INCREF(__pyx_t_8);
+        __pyx_t_9 = PyTuple_GET_ITEM(sequence, 1);
+        __Pyx_INCREF(__pyx_t_9);
+      } else {
+        __pyx_t_8 = __Pyx_PyList_GET_ITEM_REF(sequence, 0, __Pyx_ReferenceSharing_SharedReference);
+        if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 91, __pyx_L1_error)
+        __Pyx_XGOTREF(__pyx_t_8);
+        __pyx_t_9 = __Pyx_PyList_GET_ITEM_REF(sequence, 1, __Pyx_ReferenceSharing_SharedReference);
+        if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 91, __pyx_L1_error)
+        __Pyx_XGOTREF(__pyx_t_9);
+      }
+      #else
+      __pyx_t_8 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 91, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_8);
+      __pyx_t_9 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 91, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_9);
+      #endif
+      __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+    } else {
+      Py_ssize_t index = -1;
+      __pyx_t_10 = PyObject_GetIter(__pyx_t_4); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 91, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_10);
+      __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+      __pyx_t_12 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_10);
+      index = 0; __pyx_t_8 = __pyx_t_12(__pyx_t_10); if (unlikely(!__pyx_t_8)) goto __pyx_L14_unpacking_failed;
+      __Pyx_GOTREF(__pyx_t_8);
+      index = 1; __pyx_t_9 = __pyx_t_12(__pyx_t_10); if (unlikely(!__pyx_t_9)) goto __pyx_L14_unpacking_failed;
+      __Pyx_GOTREF(__pyx_t_9);
+      if (__Pyx_IternextUnpackEndCheck(__pyx_t_12(__pyx_t_10), 2) < (0)) __PYX_ERR(0, 91, __pyx_L1_error)
+      __pyx_t_12 = NULL;
+      __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+      goto __pyx_L15_unpacking_done;
+      __pyx_L14_unpacking_failed:;
+      __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+      __pyx_t_12 = NULL;
+      if (__Pyx_IterFinish() == 0) __Pyx_RaiseNeedMoreValuesError(index);
+      __PYX_ERR(0, 91, __pyx_L1_error)
+      __pyx_L15_unpacking_done:;
+    }
+    __Pyx_XDECREF_SET(__pyx_v_name, __pyx_t_8);
+    __pyx_t_8 = 0;
+    __Pyx_XDECREF_SET(__pyx_v_asc, __pyx_t_9);
+    __pyx_t_9 = 0;
+
+    /* "draken/morsels/sort.pyx":92
+ * 
+ *     for name, asc in zip(column_names, ascending):
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()             # <<<<<<<<<<<<<<
+ *         try:
+ *             idx = names_bytes.index(key_bytes)
+*/
+    __pyx_t_7 = PyBytes_Check(__pyx_v_name); 
+    if (__pyx_t_7) {
+      __pyx_t_9 = __pyx_v_name;
+      __Pyx_INCREF(__pyx_t_9);
+      if (!(likely(PyBytes_CheckExact(__pyx_t_9))||((__pyx_t_9) == Py_None) || __Pyx_RaiseUnexpectedTypeError("bytes", __pyx_t_9))) __PYX_ERR(0, 92, __pyx_L1_error)
+      __pyx_t_4 = __pyx_t_9;
+      __pyx_t_9 = 0;
+    } else {
+      __pyx_t_8 = __pyx_v_name;
       __Pyx_INCREF(__pyx_t_8);
-      __Pyx_INCREF(__pyx__function);
-      __Pyx_DECREF_SET(__pyx_t_5, __pyx__function);
       __pyx_t_6 = 0;
+      {
+        PyObject *__pyx_callargs[2] = {__pyx_t_8, NULL};
+        __pyx_t_9 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+        __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
+        if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 92, __pyx_L1_error)
+        __Pyx_GOTREF(__pyx_t_9);
+      }
+      if (!(likely(PyBytes_CheckExact(__pyx_t_9))||((__pyx_t_9) == Py_None) || __Pyx_RaiseUnexpectedTypeError("bytes", __pyx_t_9))) __PYX_ERR(0, 92, __pyx_L1_error)
+      __pyx_t_4 = __pyx_t_9;
+      __pyx_t_9 = 0;
     }
-    #endif
-    {
-      PyObject *__pyx_callargs[3] = {__pyx_t_8, __pyx_mstate_global->__pyx_n_u_i, __pyx_t_15};
-      __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_5, __pyx_callargs+__pyx_t_6, (3-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
-      __Pyx_DECREF(__pyx_t_15); __pyx_t_15 = 0;
-      __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 332, __pyx_L13_error)
-      __Pyx_GOTREF(__pyx_t_4);
-    }
-    __pyx_v_result = __pyx_t_4;
+    __Pyx_XDECREF_SET(__pyx_v_key_bytes, ((PyObject*)__pyx_t_4));
     __pyx_t_4 = 0;
 
-    /* "draken/morsels/sort.pyx":333
- * 
- *         result = array("i", b"\x00" * (n * sizeof(uint32_t)))
- *         rv = result             # <<<<<<<<<<<<<<
- *         memcpy(&rv[0], perm_buf, n * sizeof(uint32_t))
- *         return result
+    /* "draken/morsels/sort.pyx":93
+ *     for name, asc in zip(column_names, ascending):
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()
+ *         try:             # <<<<<<<<<<<<<<
+ *             idx = names_bytes.index(key_bytes)
+ *         except ValueError:
 */
-    __pyx_t_16 = __Pyx_PyObject_to_MemoryviewSlice_dc_int(__pyx_v_result, PyBUF_WRITABLE); if (unlikely(!__pyx_t_16.memview)) __PYX_ERR(0, 333, __pyx_L13_error)
-    __pyx_v_rv = __pyx_t_16;
-    __pyx_t_16.memview = NULL;
-    __pyx_t_16.data = NULL;
-
-    /* "draken/morsels/sort.pyx":334
- *         result = array("i", b"\x00" * (n * sizeof(uint32_t)))
- *         rv = result
- *         memcpy(&rv[0], perm_buf, n * sizeof(uint32_t))             # <<<<<<<<<<<<<<
- *         return result
- * 
-*/
-    __pyx_t_14 = 0;
-    (void)(memcpy((&(*((int *) ( /* dim=0 */ ((char *) (((int *) __pyx_v_rv.data) + __pyx_t_14)) )))), __pyx_v_perm_buf, (__pyx_v_n * (sizeof(uint32_t)))));
-
-    /* "draken/morsels/sort.pyx":335
- *         rv = result
- *         memcpy(&rv[0], perm_buf, n * sizeof(uint32_t))
- *         return result             # <<<<<<<<<<<<<<
- * 
- *     finally:
-*/
-    __Pyx_XDECREF(__pyx_r);
-    __Pyx_INCREF(__pyx_v_result);
-    __pyx_r = __pyx_v_result;
-    goto __pyx_L12_return;
-  }
-
-  /* "draken/morsels/sort.pyx":338
- * 
- *     finally:
- *         PyMem_Free(perm_buf)             # <<<<<<<<<<<<<<
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)
-*/
-  /*finally:*/ {
-    __pyx_L13_error:;
-    /*exception exit:*/{
+    {
       __Pyx_PyThreadState_declare
       __Pyx_PyThreadState_assign
-      __pyx_t_20 = 0; __pyx_t_21 = 0; __pyx_t_22 = 0; __pyx_t_23 = 0; __pyx_t_24 = 0; __pyx_t_25 = 0;
-      __PYX_XCLEAR_MEMVIEW(&__pyx_t_13, 1);
-      __pyx_t_13.memview = NULL; __pyx_t_13.data = NULL;
-      __Pyx_XDECREF(__pyx_t_15); __pyx_t_15 = 0;
-      __PYX_XCLEAR_MEMVIEW(&__pyx_t_16, 1);
-      __pyx_t_16.memview = NULL; __pyx_t_16.data = NULL;
-      __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
-       __Pyx_ExceptionSwap(&__pyx_t_23, &__pyx_t_24, &__pyx_t_25);
-      if ( unlikely(__Pyx_GetException(&__pyx_t_20, &__pyx_t_21, &__pyx_t_22) < 0)) __Pyx_ErrFetch(&__pyx_t_20, &__pyx_t_21, &__pyx_t_22);
-      __Pyx_XGOTREF(__pyx_t_20);
-      __Pyx_XGOTREF(__pyx_t_21);
-      __Pyx_XGOTREF(__pyx_t_22);
-      __Pyx_XGOTREF(__pyx_t_23);
-      __Pyx_XGOTREF(__pyx_t_24);
-      __Pyx_XGOTREF(__pyx_t_25);
-      __pyx_t_17 = __pyx_lineno; __pyx_t_18 = __pyx_clineno; __pyx_t_19 = __pyx_filename;
-      {
-        PyMem_Free(__pyx_v_perm_buf);
+      __Pyx_ExceptionSave(&__pyx_t_13, &__pyx_t_14, &__pyx_t_15);
+      __Pyx_XGOTREF(__pyx_t_13);
+      __Pyx_XGOTREF(__pyx_t_14);
+      __Pyx_XGOTREF(__pyx_t_15);
+      /*try:*/ {
 
-        /* "draken/morsels/sort.pyx":339
- *     finally:
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)             # <<<<<<<<<<<<<<
- *         PyMem_Free(keys)
+        /* "draken/morsels/sort.pyx":94
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()
+ *         try:
+ *             idx = names_bytes.index(key_bytes)             # <<<<<<<<<<<<<<
+ *         except ValueError:
+ *             raise ValueError(f"unknown sort column {name!r}")
 */
-        PyMem_Free(__pyx_v_tmp_buf);
+        __pyx_t_4 = __Pyx_CallUnboundCMethod1(&__pyx_mstate_global->__pyx_umethod_PyList_Type__index, __pyx_v_names_bytes, __pyx_v_key_bytes); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 94, __pyx_L16_error)
+        __Pyx_GOTREF(__pyx_t_4);
+        __pyx_t_1 = __Pyx_PyIndex_AsSsize_t(__pyx_t_4); if (unlikely((__pyx_t_1 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 94, __pyx_L16_error)
+        __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+        __pyx_v_idx = __pyx_t_1;
 
-        /* "draken/morsels/sort.pyx":340
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)             # <<<<<<<<<<<<<<
+        /* "draken/morsels/sort.pyx":93
+ *     for name, asc in zip(column_names, ascending):
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()
+ *         try:             # <<<<<<<<<<<<<<
+ *             idx = names_bytes.index(key_bytes)
+ *         except ValueError:
 */
-        PyMem_Free(__pyx_v_keys);
       }
-      __Pyx_XGIVEREF(__pyx_t_23);
-      __Pyx_XGIVEREF(__pyx_t_24);
-      __Pyx_XGIVEREF(__pyx_t_25);
-      __Pyx_ExceptionReset(__pyx_t_23, __pyx_t_24, __pyx_t_25);
-      __Pyx_XGIVEREF(__pyx_t_20);
-      __Pyx_XGIVEREF(__pyx_t_21);
-      __Pyx_XGIVEREF(__pyx_t_22);
-      __Pyx_ErrRestore(__pyx_t_20, __pyx_t_21, __pyx_t_22);
-      __pyx_t_20 = 0; __pyx_t_21 = 0; __pyx_t_22 = 0; __pyx_t_23 = 0; __pyx_t_24 = 0; __pyx_t_25 = 0;
-      __pyx_lineno = __pyx_t_17; __pyx_clineno = __pyx_t_18; __pyx_filename = __pyx_t_19;
+      __Pyx_XDECREF(__pyx_t_13); __pyx_t_13 = 0;
+      __Pyx_XDECREF(__pyx_t_14); __pyx_t_14 = 0;
+      __Pyx_XDECREF(__pyx_t_15); __pyx_t_15 = 0;
+      goto __pyx_L23_try_end;
+      __pyx_L16_error:;
+      __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
+      __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
+      __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
+      __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
+
+      /* "draken/morsels/sort.pyx":95
+ *         try:
+ *             idx = names_bytes.index(key_bytes)
+ *         except ValueError:             # <<<<<<<<<<<<<<
+ *             raise ValueError(f"unknown sort column {name!r}")
+ *         item.col_idx = <size_t>idx
+*/
+      __pyx_t_16 = __Pyx_PyErr_ExceptionMatches(((PyObject *)(((PyTypeObject*)PyExc_ValueError))));
+      if (__pyx_t_16) {
+        __Pyx_AddTraceback("draken.morsels.sort._resolve_spec", __pyx_clineno, __pyx_lineno, __pyx_filename);
+        if (__Pyx_GetException(&__pyx_t_4, &__pyx_t_9, &__pyx_t_8) < 0) __PYX_ERR(0, 95, __pyx_L18_except_error)
+        __Pyx_XGOTREF(__pyx_t_4);
+        __Pyx_XGOTREF(__pyx_t_9);
+        __Pyx_XGOTREF(__pyx_t_8);
+
+        /* "draken/morsels/sort.pyx":96
+ *             idx = names_bytes.index(key_bytes)
+ *         except ValueError:
+ *             raise ValueError(f"unknown sort column {name!r}")             # <<<<<<<<<<<<<<
+ *         item.col_idx = <size_t>idx
+ *         item.ascending = bool(asc)
+*/
+        __pyx_t_17 = NULL;
+        __pyx_t_18 = __Pyx_PyObject_FormatSimpleAndDecref(PyObject_Repr(__pyx_v_name), __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_18)) __PYX_ERR(0, 96, __pyx_L18_except_error)
+        __Pyx_GOTREF(__pyx_t_18);
+        __pyx_t_19 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_unknown_sort_column, __pyx_t_18); if (unlikely(!__pyx_t_19)) __PYX_ERR(0, 96, __pyx_L18_except_error)
+        __Pyx_GOTREF(__pyx_t_19);
+        __Pyx_DECREF(__pyx_t_18); __pyx_t_18 = 0;
+        __pyx_t_6 = 1;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_17, __pyx_t_19};
+          __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_17); __pyx_t_17 = 0;
+          __Pyx_DECREF(__pyx_t_19); __pyx_t_19 = 0;
+          if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 96, __pyx_L18_except_error)
+          __Pyx_GOTREF(__pyx_t_10);
+        }
+        __Pyx_Raise(__pyx_t_10, 0, 0, 0);
+        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+        __PYX_ERR(0, 96, __pyx_L18_except_error)
+      }
+      goto __pyx_L18_except_error;
+
+      /* "draken/morsels/sort.pyx":93
+ *     for name, asc in zip(column_names, ascending):
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()
+ *         try:             # <<<<<<<<<<<<<<
+ *             idx = names_bytes.index(key_bytes)
+ *         except ValueError:
+*/
+      __pyx_L18_except_error:;
+      __Pyx_XGIVEREF(__pyx_t_13);
+      __Pyx_XGIVEREF(__pyx_t_14);
+      __Pyx_XGIVEREF(__pyx_t_15);
+      __Pyx_ExceptionReset(__pyx_t_13, __pyx_t_14, __pyx_t_15);
       goto __pyx_L1_error;
+      __pyx_L23_try_end:;
     }
-    __pyx_L12_return: {
-      __pyx_t_25 = __pyx_r;
-      __pyx_r = 0;
 
-      /* "draken/morsels/sort.pyx":338
+    /* "draken/morsels/sort.pyx":97
+ *         except ValueError:
+ *             raise ValueError(f"unknown sort column {name!r}")
+ *         item.col_idx = <size_t>idx             # <<<<<<<<<<<<<<
+ *         item.ascending = bool(asc)
+ *         spec.push_back(item)
+*/
+    __pyx_v_item.col_idx = ((size_t)__pyx_v_idx);
+
+    /* "draken/morsels/sort.pyx":98
+ *             raise ValueError(f"unknown sort column {name!r}")
+ *         item.col_idx = <size_t>idx
+ *         item.ascending = bool(asc)             # <<<<<<<<<<<<<<
+ *         spec.push_back(item)
+ *     return spec
+*/
+    __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_v_asc); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 98, __pyx_L1_error)
+    __pyx_v_item.ascending = (!(!__pyx_t_7));
+
+    /* "draken/morsels/sort.pyx":99
+ *         item.col_idx = <size_t>idx
+ *         item.ascending = bool(asc)
+ *         spec.push_back(item)             # <<<<<<<<<<<<<<
+ *     return spec
  * 
- *     finally:
- *         PyMem_Free(perm_buf)             # <<<<<<<<<<<<<<
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)
 */
-      PyMem_Free(__pyx_v_perm_buf);
-
-      /* "draken/morsels/sort.pyx":339
- *     finally:
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)             # <<<<<<<<<<<<<<
- *         PyMem_Free(keys)
-*/
-      PyMem_Free(__pyx_v_tmp_buf);
-
-      /* "draken/morsels/sort.pyx":340
- *         PyMem_Free(perm_buf)
- *         PyMem_Free(tmp_buf)
- *         PyMem_Free(keys)             # <<<<<<<<<<<<<<
-*/
-      PyMem_Free(__pyx_v_keys);
-      __pyx_r = __pyx_t_25;
-      __pyx_t_25 = 0;
-      goto __pyx_L0;
+    try {
+      __pyx_v_spec.push_back(__pyx_v_item);
+    } catch(...) {
+      __Pyx_CppExn2PyErr();
+      __PYX_ERR(0, 99, __pyx_L1_error)
     }
+
+    /* "draken/morsels/sort.pyx":91
+ *     cdef list names_bytes = [n if isinstance(n, bytes) else n.encode() for n in names]
+ * 
+ *     for name, asc in zip(column_names, ascending):             # <<<<<<<<<<<<<<
+ *         key_bytes = name if isinstance(name, bytes) else name.encode()
+ *         try:
+*/
   }
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "draken/morsels/sort.pyx":199
- * #  Public API
+  /* "draken/morsels/sort.pyx":100
+ *         item.ascending = bool(asc)
+ *         spec.push_back(item)
+ *     return spec             # <<<<<<<<<<<<<<
  * 
- * cpdef morsel_sort(Morsel morsel, list column_names, list ascending):             # <<<<<<<<<<<<<<
- *     """
- *     Compute a sort permutation for a Draken Morsel.
+ * 
+*/
+  __pyx_r = __pyx_v_spec;
+  goto __pyx_L0;
+
+  /* "draken/morsels/sort.pyx":77
+ * 
+ * 
+ * cdef vector[SortKeySpec] _resolve_spec(list names, list column_names, list ascending) except *:             # <<<<<<<<<<<<<<
+ *     """Resolve ORDER BY column names to positional indices against `names`
+ *     (a Morsel's _col_names) and pack into the C++ spec vector. Pure lookup
 */
 
   /* function exit code */
@@ -18060,34 +16975,916 @@ static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6dr
   __Pyx_XDECREF(__pyx_t_4);
   __Pyx_XDECREF(__pyx_t_5);
   __Pyx_XDECREF(__pyx_t_8);
-  __PYX_XCLEAR_MEMVIEW(&__pyx_t_13, 1);
-  __Pyx_XDECREF(__pyx_t_15);
-  __PYX_XCLEAR_MEMVIEW(&__pyx_t_16, 1);
-  __Pyx_AddTraceback("draken.morsels.sort.morsel_sort", __pyx_clineno, __pyx_lineno, __pyx_filename);
-  __pyx_r = 0;
+  __Pyx_XDECREF(__pyx_t_9);
+  __Pyx_XDECREF(__pyx_t_10);
+  __Pyx_XDECREF(__pyx_t_17);
+  __Pyx_XDECREF(__pyx_t_18);
+  __Pyx_XDECREF(__pyx_t_19);
+  __Pyx_AddTraceback("draken.morsels.sort._resolve_spec", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_pretend_to_initialize(&__pyx_r);
   __pyx_L0:;
-  __PYX_XCLEAR_MEMVIEW(&__pyx_v_signed_mv, 1);
-  __Pyx_XDECREF((PyObject *)__pyx_v_sv);
-  __PYX_XCLEAR_MEMVIEW(&__pyx_v_rv, 1);
-  __Pyx_XDECREF(__pyx_v_col_name);
-  __Pyx_XDECREF(__pyx_v_vec);
-  __Pyx_XDECREF(__pyx_v_result);
-  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_XDECREF(__pyx_v_key_bytes);
+  __Pyx_XDECREF(__pyx_v_names_bytes);
+  __Pyx_XDECREF(__pyx_v_name);
+  __Pyx_XDECREF(__pyx_v_asc);
+  __Pyx_XDECREF(__pyx_7genexpr__pyx_v_n);
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
+/* "draken/morsels/sort.pyx":103
+ * 
+ * 
+ * def sort_morsels(list morsels, list column_names, list ascending, limit=None,             # <<<<<<<<<<<<<<
+ *                   size_t chunk_rows=131072):
+ *     """
+*/
+
 /* Python wrapper */
-static PyObject *__pyx_pw_6draken_7morsels_4sort_5morsel_sort(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_6draken_7morsels_4sort_1sort_morsels(PyObject *__pyx_self, 
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
 PyObject *__pyx_args, PyObject *__pyx_kwds
 #endif
 ); /*proto*/
-PyDoc_STRVAR(__pyx_doc_6draken_7morsels_4sort_4morsel_sort, "\n    Compute a sort permutation for a Draken Morsel.\n\n    Parameters\n    ----------\n    morsel : Morsel\n        The morsel whose rows are to be sorted.\n    column_names : list[bytes]\n        Column names in sort-priority order, most significant first.\n    ascending : list[bool]\n        Sort direction per column; True = ascending, False = descending.\n\n    Returns\n    -------\n    array('i')\n        int32 permutation: result[i] is the original row index for sorted\n        position i.  Apply with ``morsel.take(perm)``.\n    ");
-static PyMethodDef __pyx_mdef_6draken_7morsels_4sort_5morsel_sort = {"morsel_sort", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_6draken_7morsels_4sort_5morsel_sort, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_6draken_7morsels_4sort_4morsel_sort};
-static PyObject *__pyx_pw_6draken_7morsels_4sort_5morsel_sort(PyObject *__pyx_self, 
+PyDoc_STRVAR(__pyx_doc_6draken_7morsels_4sort_sort_morsels, "\n    Sort rows across one or more Morsels through the shared sort core.\n\n    Parameters\n    ----------\n    morsels : list[Morsel]\n        Input morsels, in any order; rows are sorted across all of them together.\n    column_names : list[bytes | str]\n        ORDER BY columns, most significant first.\n    ascending : list[bool]\n        Sort direction per column; True = ascending, False = descending.\n    limit : int | None\n        Keep only the first `limit` rows after sorting (TopN fusion). None = full sort.\n    chunk_rows : int\n        Max rows per output Morsel.\n\n    Returns\n    -------\n    list[Morsel]\n        Sorted rows, gathered into dense output morsels of at most `chunk_rows` rows.\n    ");
+static PyMethodDef __pyx_mdef_6draken_7morsels_4sort_1sort_morsels = {"sort_morsels", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_6draken_7morsels_4sort_1sort_morsels, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_6draken_7morsels_4sort_sort_morsels};
+static PyObject *__pyx_pw_6draken_7morsels_4sort_1sort_morsels(PyObject *__pyx_self, 
+#if CYTHON_METH_FASTCALL
+PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
+#else
+PyObject *__pyx_args, PyObject *__pyx_kwds
+#endif
+) {
+  PyObject *__pyx_v_morsels = 0;
+  PyObject *__pyx_v_column_names = 0;
+  PyObject *__pyx_v_ascending = 0;
+  PyObject *__pyx_v_limit = 0;
+  size_t __pyx_v_chunk_rows;
+  #if !CYTHON_METH_FASTCALL
+  CYTHON_UNUSED Py_ssize_t __pyx_nargs;
+  #endif
+  CYTHON_UNUSED PyObject *const *__pyx_kwvalues;
+  PyObject* values[5] = {0,0,0,0,0};
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  PyObject *__pyx_r = 0;
+  __Pyx_RefNannyDeclarations
+  __Pyx_RefNannySetupContext("sort_morsels (wrapper)", 0);
+  #if !CYTHON_METH_FASTCALL
+  #if CYTHON_ASSUME_SAFE_SIZE
+  __pyx_nargs = PyTuple_GET_SIZE(__pyx_args);
+  #else
+  __pyx_nargs = PyTuple_Size(__pyx_args); if (unlikely(__pyx_nargs < 0)) return NULL;
+  #endif
+  #endif
+  __pyx_kwvalues = __Pyx_KwValues_FASTCALL(__pyx_args, __pyx_nargs);
+  {
+    PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_morsels,&__pyx_mstate_global->__pyx_n_u_column_names,&__pyx_mstate_global->__pyx_n_u_ascending,&__pyx_mstate_global->__pyx_n_u_limit,&__pyx_mstate_global->__pyx_n_u_chunk_rows,0};
+    const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 103, __pyx_L3_error)
+    if (__pyx_kwds_len > 0) {
+      switch (__pyx_nargs) {
+        case  5:
+        values[4] = __Pyx_ArgRef_FASTCALL(__pyx_args, 4);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[4])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  4:
+        values[3] = __Pyx_ArgRef_FASTCALL(__pyx_args, 3);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  3:
+        values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  2:
+        values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  1:
+        values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  0: break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+      const Py_ssize_t kwd_pos_args = __pyx_nargs;
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "sort_morsels", 0) < (0)) __PYX_ERR(0, 103, __pyx_L3_error)
+      if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)Py_None));
+      for (Py_ssize_t i = __pyx_nargs; i < 3; i++) {
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("sort_morsels", 0, 3, 5, i); __PYX_ERR(0, 103, __pyx_L3_error) }
+      }
+    } else {
+      switch (__pyx_nargs) {
+        case  5:
+        values[4] = __Pyx_ArgRef_FASTCALL(__pyx_args, 4);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[4])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  4:
+        values[3] = __Pyx_ArgRef_FASTCALL(__pyx_args, 3);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 103, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  3:
+        values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 103, __pyx_L3_error)
+        values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 103, __pyx_L3_error)
+        values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 103, __pyx_L3_error)
+        break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+      if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)Py_None));
+    }
+    __pyx_v_morsels = ((PyObject*)values[0]);
+    __pyx_v_column_names = ((PyObject*)values[1]);
+    __pyx_v_ascending = ((PyObject*)values[2]);
+    __pyx_v_limit = values[3];
+    if (values[4]) {
+      __pyx_v_chunk_rows = __Pyx_PyLong_As_size_t(values[4]); if (unlikely((__pyx_v_chunk_rows == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 104, __pyx_L3_error)
+    } else {
+      __pyx_v_chunk_rows = ((size_t)((size_t)0x20000));
+    }
+  }
+  goto __pyx_L6_skip;
+  __pyx_L5_argtuple_error:;
+  __Pyx_RaiseArgtupleInvalid("sort_morsels", 0, 3, 5, __pyx_nargs); __PYX_ERR(0, 103, __pyx_L3_error)
+  __pyx_L6_skip:;
+  goto __pyx_L4_argument_unpacking_done;
+  __pyx_L3_error:;
+  for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
+    Py_XDECREF(values[__pyx_temp]);
+  }
+  __Pyx_AddTraceback("draken.morsels.sort.sort_morsels", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_RefNannyFinishContext();
+  return NULL;
+  __pyx_L4_argument_unpacking_done:;
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsels), (&PyList_Type), 1, "morsels", 1))) __PYX_ERR(0, 103, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_column_names), (&PyList_Type), 1, "column_names", 1))) __PYX_ERR(0, 103, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_ascending), (&PyList_Type), 1, "ascending", 1))) __PYX_ERR(0, 103, __pyx_L1_error)
+  __pyx_r = __pyx_pf_6draken_7morsels_4sort_sort_morsels(__pyx_self, __pyx_v_morsels, __pyx_v_column_names, __pyx_v_ascending, __pyx_v_limit, __pyx_v_chunk_rows);
+
+  /* function exit code */
+  goto __pyx_L0;
+  __pyx_L1_error:;
+  __pyx_r = NULL;
+  for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
+    Py_XDECREF(values[__pyx_temp]);
+  }
+  goto __pyx_L7_cleaned_up;
+  __pyx_L0:;
+  for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
+    Py_XDECREF(values[__pyx_temp]);
+  }
+  __pyx_L7_cleaned_up:;
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+static PyObject *__pyx_pf_6draken_7morsels_4sort_sort_morsels(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_morsels, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending, PyObject *__pyx_v_limit, size_t __pyx_v_chunk_rows) {
+  struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_first = 0;
+  std::vector<SortKeySpec>  __pyx_v_spec;
+  std::vector<std::shared_ptr<CxxMorsel> >  __pyx_v_cxx_in;
+  struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_m = 0;
+  size_t __pyx_v_take_first;
+  std::vector<std::shared_ptr<CxxMorsel> >  __pyx_v_cxx_out;
+  ErrCtx __pyx_v_err;
+  int __pyx_v_ok;
+  size_t __pyx_v_i;
+  PyObject *__pyx_v_result = NULL;
+  PyObject *__pyx_r = NULL;
+  __Pyx_RefNannyDeclarations
+  int __pyx_t_1;
+  int __pyx_t_2;
+  PyObject *__pyx_t_3 = NULL;
+  std::vector<SortKeySpec>  __pyx_t_4;
+  Py_ssize_t __pyx_t_5;
+  PyObject *__pyx_t_6 = NULL;
+  std::shared_ptr<CxxMorsel>  __pyx_t_7;
+  size_t __pyx_t_8;
+  size_t __pyx_t_9;
+  PyObject *__pyx_t_10 = NULL;
+  char const *__pyx_t_11;
+  PyObject *__pyx_t_12 = NULL;
+  std::vector<std::shared_ptr<CxxMorsel> > ::size_type __pyx_t_13;
+  std::vector<std::shared_ptr<CxxMorsel> > ::size_type __pyx_t_14;
+  int __pyx_t_15;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("sort_morsels", 0);
+
+  /* "draken/morsels/sort.pyx":126
+ *         Sorted rows, gathered into dense output morsels of at most `chunk_rows` rows.
+ *     """
+ *     if not morsels:             # <<<<<<<<<<<<<<
+ *         return []
+ * 
+*/
+  if (__pyx_v_morsels == Py_None) __pyx_t_1 = 0;
+  else
+  {
+    Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_morsels);
+    if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 126, __pyx_L1_error)
+    __pyx_t_1 = (__pyx_temp != 0);
+  }
+
+  __pyx_t_2 = (!__pyx_t_1);
+  if (__pyx_t_2) {
+
+    /* "draken/morsels/sort.pyx":127
+ *     """
+ *     if not morsels:
+ *         return []             # <<<<<<<<<<<<<<
+ * 
+ *     cdef Morsel first = morsels[0]
+*/
+    __Pyx_XDECREF(__pyx_r);
+    __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 127, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+    __pyx_r = __pyx_t_3;
+    __pyx_t_3 = 0;
+    goto __pyx_L0;
+
+    /* "draken/morsels/sort.pyx":126
+ *         Sorted rows, gathered into dense output morsels of at most `chunk_rows` rows.
+ *     """
+ *     if not morsels:             # <<<<<<<<<<<<<<
+ *         return []
+ * 
+*/
+  }
+
+  /* "draken/morsels/sort.pyx":129
+ *         return []
+ * 
+ *     cdef Morsel first = morsels[0]             # <<<<<<<<<<<<<<
+ *     cdef vector[SortKeySpec] spec = _resolve_spec(first._col_names, column_names, ascending)
+ * 
+*/
+  if (unlikely(__pyx_v_morsels == Py_None)) {
+    PyErr_SetString(PyExc_TypeError, "'NoneType' object is not subscriptable");
+    __PYX_ERR(0, 129, __pyx_L1_error)
+  }
+  __pyx_t_3 = __Pyx_PyList_GET_ITEM(__pyx_v_morsels, 0);
+  __Pyx_INCREF(__pyx_t_3);
+  if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel))))) __PYX_ERR(0, 129, __pyx_L1_error)
+  __pyx_v_first = ((struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)__pyx_t_3);
+  __pyx_t_3 = 0;
+
+  /* "draken/morsels/sort.pyx":130
+ * 
+ *     cdef Morsel first = morsels[0]
+ *     cdef vector[SortKeySpec] spec = _resolve_spec(first._col_names, column_names, ascending)             # <<<<<<<<<<<<<<
+ * 
+ *     cdef vector[shared_ptr[CxxMorsel]] cxx_in
+*/
+  __pyx_t_3 = __pyx_v_first->_col_names;
+  __Pyx_INCREF(__pyx_t_3);
+  __pyx_t_4 = __pyx_f_6draken_7morsels_4sort__resolve_spec(((PyObject*)__pyx_t_3), __pyx_v_column_names, __pyx_v_ascending); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 130, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __pyx_v_spec = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_4);
+
+  /* "draken/morsels/sort.pyx":134
+ *     cdef vector[shared_ptr[CxxMorsel]] cxx_in
+ *     cdef Morsel m
+ *     for m in morsels:             # <<<<<<<<<<<<<<
+ *         cxx_in.push_back(morsel_to_cxx(m))
+ * 
+*/
+  if (unlikely(__pyx_v_morsels == Py_None)) {
+    PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
+    __PYX_ERR(0, 134, __pyx_L1_error)
+  }
+  __pyx_t_3 = __pyx_v_morsels; __Pyx_INCREF(__pyx_t_3);
+  __pyx_t_5 = 0;
+  for (;;) {
+    {
+      Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_3);
+      #if !CYTHON_ASSUME_SAFE_SIZE
+      if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 134, __pyx_L1_error)
+      #endif
+      if (__pyx_t_5 >= __pyx_temp) break;
+    }
+    __pyx_t_6 = __Pyx_PyList_GET_ITEM_REF(__pyx_t_3, __pyx_t_5, __Pyx_ReferenceSharing_OwnStrongReference);
+    ++__pyx_t_5;
+    if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 134, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_6);
+    if (!(likely(((__pyx_t_6) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_6, __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel))))) __PYX_ERR(0, 134, __pyx_L1_error)
+    __Pyx_XDECREF_SET(__pyx_v_m, ((struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)__pyx_t_6));
+    __pyx_t_6 = 0;
+
+    /* "draken/morsels/sort.pyx":135
+ *     cdef Morsel m
+ *     for m in morsels:
+ *         cxx_in.push_back(morsel_to_cxx(m))             # <<<<<<<<<<<<<<
+ * 
+ *     cdef size_t take_first = SIZE_MAX_C if limit is None else <size_t>limit
+*/
+    __pyx_t_7 = __pyx_f_6draken_7morsels_6morsel_morsel_to_cxx(__pyx_v_m); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 135, __pyx_L1_error)
+    try {
+      __pyx_v_cxx_in.push_back(__pyx_t_7);
+    } catch(...) {
+      __Pyx_CppExn2PyErr();
+      __PYX_ERR(0, 135, __pyx_L1_error)
+    }
+
+    /* "draken/morsels/sort.pyx":134
+ *     cdef vector[shared_ptr[CxxMorsel]] cxx_in
+ *     cdef Morsel m
+ *     for m in morsels:             # <<<<<<<<<<<<<<
+ *         cxx_in.push_back(morsel_to_cxx(m))
+ * 
+*/
+  }
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+
+  /* "draken/morsels/sort.pyx":137
+ *         cxx_in.push_back(morsel_to_cxx(m))
+ * 
+ *     cdef size_t take_first = SIZE_MAX_C if limit is None else <size_t>limit             # <<<<<<<<<<<<<<
+ *     cdef vector[shared_ptr[CxxMorsel]] cxx_out
+ *     cdef ErrCtx err
+*/
+  __pyx_t_2 = (__pyx_v_limit == Py_None);
+  if (__pyx_t_2) {
+    __pyx_t_8 = __pyx_v_6draken_7morsels_4sort_SIZE_MAX_C;
+  } else {
+    __pyx_t_9 = __Pyx_PyLong_As_size_t(__pyx_v_limit); if (unlikely((__pyx_t_9 == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 137, __pyx_L1_error)
+    __pyx_t_8 = ((size_t)__pyx_t_9);
+  }
+  __pyx_v_take_first = __pyx_t_8;
+
+  /* "draken/morsels/sort.pyx":142
+ *     cdef bint ok
+ * 
+ *     with nogil:             # <<<<<<<<<<<<<<
+ *         ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, cxx_out, err)
+ * 
+*/
+  {
+      PyThreadState * _save;
+      _save = PyEval_SaveThread();
+      __Pyx_FastGIL_Remember();
+      /*try:*/ {
+
+        /* "draken/morsels/sort.pyx":143
+ * 
+ *     with nogil:
+ *         ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, cxx_out, err)             # <<<<<<<<<<<<<<
+ * 
+ *     if not ok:
+*/
+        __pyx_v_ok = sort_morsels(__pyx_v_cxx_in, __pyx_v_spec, __pyx_v_take_first, __pyx_v_chunk_rows, __pyx_v_cxx_out, __pyx_v_err);
+      }
+
+      /* "draken/morsels/sort.pyx":142
+ *     cdef bint ok
+ * 
+ *     with nogil:             # <<<<<<<<<<<<<<
+ *         ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, cxx_out, err)
+ * 
+*/
+      /*finally:*/ {
+        /*normal exit:*/{
+          __Pyx_FastGIL_Forget();
+          PyEval_RestoreThread(_save);
+          goto __pyx_L9;
+        }
+        __pyx_L9:;
+      }
+  }
+
+  /* "draken/morsels/sort.pyx":145
+ *         ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, cxx_out, err)
+ * 
+ *     if not ok:             # <<<<<<<<<<<<<<
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
+ * 
+*/
+  __pyx_t_2 = (!__pyx_v_ok);
+  if (unlikely(__pyx_t_2)) {
+
+    /* "draken/morsels/sort.pyx":146
+ * 
+ *     if not ok:
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")             # <<<<<<<<<<<<<<
+ * 
+ *     cdef size_t i
+*/
+    __pyx_t_6 = NULL;
+    __pyx_t_2 = (__pyx_v_err.msg != NULL);
+    if (__pyx_t_2) {
+      __pyx_t_11 = __pyx_v_err.msg;
+      __pyx_t_5 = __Pyx_ssize_strlen(__pyx_t_11); if (unlikely(__pyx_t_5 == ((Py_ssize_t)-1))) __PYX_ERR(0, 146, __pyx_L1_error)
+      __pyx_t_12 = __Pyx_decode_c_string(__pyx_t_11, 0, __pyx_t_5, NULL, NULL, NULL); if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 146, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_12);
+      __Pyx_INCREF(__pyx_t_12);
+      __pyx_t_10 = __pyx_t_12;
+      __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+    } else {
+      __Pyx_INCREF(__pyx_mstate_global->__pyx_kp_u_sort_failed);
+      __pyx_t_10 = __pyx_mstate_global->__pyx_kp_u_sort_failed;
+    }
+    __pyx_t_8 = 1;
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_6, __pyx_t_10};
+      __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_8, (2-__pyx_t_8) | (__pyx_t_8*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+      __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 146, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_3);
+    }
+    __Pyx_Raise(__pyx_t_3, 0, 0, 0);
+    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+    __PYX_ERR(0, 146, __pyx_L1_error)
+
+    /* "draken/morsels/sort.pyx":145
+ *         ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, cxx_out, err)
+ * 
+ *     if not ok:             # <<<<<<<<<<<<<<
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
+ * 
+*/
+  }
+
+  /* "draken/morsels/sort.pyx":149
+ * 
+ *     cdef size_t i
+ *     result = []             # <<<<<<<<<<<<<<
+ *     for i in range(cxx_out.size()):
+ *         result.append(cxx_to_morsel(cxx_out[i]))
+*/
+  __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 149, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __pyx_v_result = ((PyObject*)__pyx_t_3);
+  __pyx_t_3 = 0;
+
+  /* "draken/morsels/sort.pyx":150
+ *     cdef size_t i
+ *     result = []
+ *     for i in range(cxx_out.size()):             # <<<<<<<<<<<<<<
+ *         result.append(cxx_to_morsel(cxx_out[i]))
+ *     return result
+*/
+  __pyx_t_13 = __pyx_v_cxx_out.size();
+  __pyx_t_14 = __pyx_t_13;
+  for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_14; __pyx_t_8+=1) {
+    __pyx_v_i = __pyx_t_8;
+
+    /* "draken/morsels/sort.pyx":151
+ *     result = []
+ *     for i in range(cxx_out.size()):
+ *         result.append(cxx_to_morsel(cxx_out[i]))             # <<<<<<<<<<<<<<
+ *     return result
+ * 
+*/
+    __pyx_t_3 = ((PyObject *)__pyx_f_6draken_7morsels_6morsel_cxx_to_morsel((__pyx_v_cxx_out[__pyx_v_i]))); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 151, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+    __pyx_t_15 = __Pyx_PyList_Append(__pyx_v_result, __pyx_t_3); if (unlikely(__pyx_t_15 == ((int)-1))) __PYX_ERR(0, 151, __pyx_L1_error)
+    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  }
+
+  /* "draken/morsels/sort.pyx":152
+ *     for i in range(cxx_out.size()):
+ *         result.append(cxx_to_morsel(cxx_out[i]))
+ *     return result             # <<<<<<<<<<<<<<
+ * 
+ * 
+*/
+  __Pyx_XDECREF(__pyx_r);
+  __Pyx_INCREF(__pyx_v_result);
+  __pyx_r = __pyx_v_result;
+  goto __pyx_L0;
+
+  /* "draken/morsels/sort.pyx":103
+ * 
+ * 
+ * def sort_morsels(list morsels, list column_names, list ascending, limit=None,             # <<<<<<<<<<<<<<
+ *                   size_t chunk_rows=131072):
+ *     """
+*/
+
+  /* function exit code */
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_3);
+  __Pyx_XDECREF(__pyx_t_6);
+  __Pyx_XDECREF(__pyx_t_10);
+  __Pyx_XDECREF(__pyx_t_12);
+  __Pyx_AddTraceback("draken.morsels.sort.sort_morsels", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = NULL;
+  __pyx_L0:;
+  __Pyx_XDECREF((PyObject *)__pyx_v_first);
+  __Pyx_XDECREF((PyObject *)__pyx_v_m);
+  __Pyx_XDECREF(__pyx_v_result);
+  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+/* "draken/morsels/sort.pyx":155
+ * 
+ * 
+ * cpdef morsel_sort(Morsel morsel, list column_names, list ascending):             # <<<<<<<<<<<<<<
+ *     """
+ *     Compute a sort permutation for a SINGLE Morsel  kept for callers that only
+*/
+
+static PyObject *__pyx_pw_6draken_7morsels_4sort_3morsel_sort(PyObject *__pyx_self, 
+#if CYTHON_METH_FASTCALL
+PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
+#else
+PyObject *__pyx_args, PyObject *__pyx_kwds
+#endif
+); /*proto*/
+static PyObject *__pyx_f_6draken_7morsels_4sort_morsel_sort(struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_morsel, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending, CYTHON_UNUSED int __pyx_skip_dispatch) {
+  std::vector<SortKeySpec>  __pyx_v_spec;
+  std::vector<std::shared_ptr<CxxMorsel> >  __pyx_v_cxx_in;
+  size_t __pyx_v_n;
+  std::vector<SortKeyColumn>  __pyx_v_keys;
+  ErrCtx __pyx_v_err;
+  int __pyx_v_ok;
+  std::vector<uint32_t>  __pyx_v_perm;
+  size_t __pyx_v_i;
+  PyObject *__pyx_v_result = NULL;
+  __Pyx_memviewslice __pyx_v_rv = { 0, 0, { 0 }, { 0 }, { 0 } };
+  PyObject *__pyx_r = NULL;
+  __Pyx_RefNannyDeclarations
+  PyObject *__pyx_t_1 = NULL;
+  std::vector<SortKeySpec>  __pyx_t_2;
+  std::shared_ptr<CxxMorsel>  __pyx_t_3;
+  size_t __pyx_t_4;
+  int __pyx_t_5;
+  PyObject *__pyx_t_6 = NULL;
+  PyObject *__pyx_t_7 = NULL;
+  size_t __pyx_t_8;
+  size_t __pyx_t_9;
+  char const *__pyx_t_10;
+  Py_ssize_t __pyx_t_11;
+  PyObject *__pyx_t_12 = NULL;
+  __Pyx_memviewslice __pyx_t_13 = { 0, 0, { 0 }, { 0 }, { 0 } };
+  Py_ssize_t __pyx_t_14;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("morsel_sort", 0);
+
+  /* "draken/morsels/sort.pyx":168
+ *         position i. Apply with ``morsel.take(perm)``.
+ *     """
+ *     cdef vector[SortKeySpec] spec = _resolve_spec(morsel._col_names, column_names, ascending)             # <<<<<<<<<<<<<<
+ * 
+ *     cdef vector[shared_ptr[CxxMorsel]] cxx_in
+*/
+  __pyx_t_1 = __pyx_v_morsel->_col_names;
+  __Pyx_INCREF(__pyx_t_1);
+  __pyx_t_2 = __pyx_f_6draken_7morsels_4sort__resolve_spec(((PyObject*)__pyx_t_1), __pyx_v_column_names, __pyx_v_ascending); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 168, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __pyx_v_spec = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_2);
+
+  /* "draken/morsels/sort.pyx":171
+ * 
+ *     cdef vector[shared_ptr[CxxMorsel]] cxx_in
+ *     cxx_in.push_back(morsel_to_cxx(morsel))             # <<<<<<<<<<<<<<
+ * 
+ *     cdef size_t n = <size_t>morsel.num_rows
+*/
+  __pyx_t_3 = __pyx_f_6draken_7morsels_6morsel_morsel_to_cxx(__pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 171, __pyx_L1_error)
+  try {
+    __pyx_v_cxx_in.push_back(__pyx_t_3);
+  } catch(...) {
+    __Pyx_CppExn2PyErr();
+    __PYX_ERR(0, 171, __pyx_L1_error)
+  }
+
+  /* "draken/morsels/sort.pyx":173
+ *     cxx_in.push_back(morsel_to_cxx(morsel))
+ * 
+ *     cdef size_t n = <size_t>morsel.num_rows             # <<<<<<<<<<<<<<
+ *     if n == 0:
+ *         return array("i")
+*/
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 173, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_4 = __Pyx_PyLong_As_size_t(__pyx_t_1); if (unlikely((__pyx_t_4 == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 173, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __pyx_v_n = ((size_t)__pyx_t_4);
+
+  /* "draken/morsels/sort.pyx":174
+ * 
+ *     cdef size_t n = <size_t>morsel.num_rows
+ *     if n == 0:             # <<<<<<<<<<<<<<
+ *         return array("i")
+ * 
+*/
+  __pyx_t_5 = (__pyx_v_n == 0);
+  if (__pyx_t_5) {
+
+    /* "draken/morsels/sort.pyx":175
+ *     cdef size_t n = <size_t>morsel.num_rows
+ *     if n == 0:
+ *         return array("i")             # <<<<<<<<<<<<<<
+ * 
+ *     cdef vector[SortKeyColumn] keys
+*/
+    __Pyx_XDECREF(__pyx_r);
+    __pyx_t_6 = NULL;
+    __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_array); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 175, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_7);
+    __pyx_t_4 = 1;
+    #if CYTHON_UNPACK_METHODS
+    if (unlikely(PyMethod_Check(__pyx_t_7))) {
+      __pyx_t_6 = PyMethod_GET_SELF(__pyx_t_7);
+      assert(__pyx_t_6);
+      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_7);
+      __Pyx_INCREF(__pyx_t_6);
+      __Pyx_INCREF(__pyx__function);
+      __Pyx_DECREF_SET(__pyx_t_7, __pyx__function);
+      __pyx_t_4 = 0;
+    }
+    #endif
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_6, __pyx_mstate_global->__pyx_n_u_i};
+      __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_7, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+      __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 175, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_1);
+    }
+    __pyx_r = __pyx_t_1;
+    __pyx_t_1 = 0;
+    goto __pyx_L0;
+
+    /* "draken/morsels/sort.pyx":174
+ * 
+ *     cdef size_t n = <size_t>morsel.num_rows
+ *     if n == 0:             # <<<<<<<<<<<<<<
+ *         return array("i")
+ * 
+*/
+  }
+
+  /* "draken/morsels/sort.pyx":181
+ *     cdef bint ok
+ *     cdef vector[uint32_t] perm
+ *     perm.resize(n)             # <<<<<<<<<<<<<<
+ * 
+ *     cdef size_t i
+*/
+  try {
+    __pyx_v_perm.resize(__pyx_v_n);
+  } catch(...) {
+    __Pyx_CppExn2PyErr();
+    __PYX_ERR(0, 181, __pyx_L1_error)
+  }
+
+  /* "draken/morsels/sort.pyx":184
+ * 
+ *     cdef size_t i
+ *     with nogil:             # <<<<<<<<<<<<<<
+ *         ok = build_sort_keys(cxx_in, spec, n, keys, err)
+ *         if ok:
+*/
+  {
+      PyThreadState * _save;
+      _save = PyEval_SaveThread();
+      __Pyx_FastGIL_Remember();
+      /*try:*/ {
+
+        /* "draken/morsels/sort.pyx":185
+ *     cdef size_t i
+ *     with nogil:
+ *         ok = build_sort_keys(cxx_in, spec, n, keys, err)             # <<<<<<<<<<<<<<
+ *         if ok:
+ *             for i in range(n):
+*/
+        __pyx_v_ok = build_sort_keys(__pyx_v_cxx_in, __pyx_v_spec, __pyx_v_n, __pyx_v_keys, __pyx_v_err);
+
+        /* "draken/morsels/sort.pyx":186
+ *     with nogil:
+ *         ok = build_sort_keys(cxx_in, spec, n, keys, err)
+ *         if ok:             # <<<<<<<<<<<<<<
+ *             for i in range(n):
+ *                 perm[i] = <uint32_t>i
+*/
+        if (__pyx_v_ok) {
+
+          /* "draken/morsels/sort.pyx":187
+ *         ok = build_sort_keys(cxx_in, spec, n, keys, err)
+ *         if ok:
+ *             for i in range(n):             # <<<<<<<<<<<<<<
+ *                 perm[i] = <uint32_t>i
+ *             sort_perm(keys, perm, SIZE_MAX_C)
+*/
+          __pyx_t_4 = __pyx_v_n;
+          __pyx_t_8 = __pyx_t_4;
+          for (__pyx_t_9 = 0; __pyx_t_9 < __pyx_t_8; __pyx_t_9+=1) {
+            __pyx_v_i = __pyx_t_9;
+
+            /* "draken/morsels/sort.pyx":188
+ *         if ok:
+ *             for i in range(n):
+ *                 perm[i] = <uint32_t>i             # <<<<<<<<<<<<<<
+ *             sort_perm(keys, perm, SIZE_MAX_C)
+ * 
+*/
+            (__pyx_v_perm[__pyx_v_i]) = ((uint32_t)__pyx_v_i);
+          }
+
+          /* "draken/morsels/sort.pyx":189
+ *             for i in range(n):
+ *                 perm[i] = <uint32_t>i
+ *             sort_perm(keys, perm, SIZE_MAX_C)             # <<<<<<<<<<<<<<
+ * 
+ *     if not ok:
+*/
+          sort_perm(__pyx_v_keys, __pyx_v_perm, __pyx_v_6draken_7morsels_4sort_SIZE_MAX_C);
+
+          /* "draken/morsels/sort.pyx":186
+ *     with nogil:
+ *         ok = build_sort_keys(cxx_in, spec, n, keys, err)
+ *         if ok:             # <<<<<<<<<<<<<<
+ *             for i in range(n):
+ *                 perm[i] = <uint32_t>i
+*/
+        }
+      }
+
+      /* "draken/morsels/sort.pyx":184
+ * 
+ *     cdef size_t i
+ *     with nogil:             # <<<<<<<<<<<<<<
+ *         ok = build_sort_keys(cxx_in, spec, n, keys, err)
+ *         if ok:
+*/
+      /*finally:*/ {
+        /*normal exit:*/{
+          __Pyx_FastGIL_Forget();
+          PyEval_RestoreThread(_save);
+          goto __pyx_L6;
+        }
+        __pyx_L6:;
+      }
+  }
+
+  /* "draken/morsels/sort.pyx":191
+ *             sort_perm(keys, perm, SIZE_MAX_C)
+ * 
+ *     if not ok:             # <<<<<<<<<<<<<<
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
+ * 
+*/
+  __pyx_t_5 = (!__pyx_v_ok);
+  if (unlikely(__pyx_t_5)) {
+
+    /* "draken/morsels/sort.pyx":192
+ * 
+ *     if not ok:
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")             # <<<<<<<<<<<<<<
+ * 
+ *     result = array("i", b"\x00" * (n * sizeof(uint32_t)))
+*/
+    __pyx_t_7 = NULL;
+    __pyx_t_5 = (__pyx_v_err.msg != NULL);
+    if (__pyx_t_5) {
+      __pyx_t_10 = __pyx_v_err.msg;
+      __pyx_t_11 = __Pyx_ssize_strlen(__pyx_t_10); if (unlikely(__pyx_t_11 == ((Py_ssize_t)-1))) __PYX_ERR(0, 192, __pyx_L1_error)
+      __pyx_t_12 = __Pyx_decode_c_string(__pyx_t_10, 0, __pyx_t_11, NULL, NULL, NULL); if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 192, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_12);
+      __Pyx_INCREF(__pyx_t_12);
+      __pyx_t_6 = __pyx_t_12;
+      __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+    } else {
+      __Pyx_INCREF(__pyx_mstate_global->__pyx_kp_u_sort_failed);
+      __pyx_t_6 = __pyx_mstate_global->__pyx_kp_u_sort_failed;
+    }
+    __pyx_t_4 = 1;
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_t_6};
+      __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+      __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 192, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_1);
+    }
+    __Pyx_Raise(__pyx_t_1, 0, 0, 0);
+    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+    __PYX_ERR(0, 192, __pyx_L1_error)
+
+    /* "draken/morsels/sort.pyx":191
+ *             sort_perm(keys, perm, SIZE_MAX_C)
+ * 
+ *     if not ok:             # <<<<<<<<<<<<<<
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
+ * 
+*/
+  }
+
+  /* "draken/morsels/sort.pyx":194
+ *         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
+ * 
+ *     result = array("i", b"\x00" * (n * sizeof(uint32_t)))             # <<<<<<<<<<<<<<
+ *     cdef int[::1] rv = result
+ *     memcpy(&rv[0], &perm[0], n * sizeof(uint32_t))
+*/
+  __pyx_t_6 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_array); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 194, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_7);
+  __pyx_t_12 = __Pyx_PySequence_Multiply(__pyx_mstate_global->__pyx_kp_b__6, (__pyx_v_n * (sizeof(uint32_t)))); if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 194, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_12);
+  __pyx_t_4 = 1;
+  #if CYTHON_UNPACK_METHODS
+  if (unlikely(PyMethod_Check(__pyx_t_7))) {
+    __pyx_t_6 = PyMethod_GET_SELF(__pyx_t_7);
+    assert(__pyx_t_6);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_7);
+    __Pyx_INCREF(__pyx_t_6);
+    __Pyx_INCREF(__pyx__function);
+    __Pyx_DECREF_SET(__pyx_t_7, __pyx__function);
+    __pyx_t_4 = 0;
+  }
+  #endif
+  {
+    PyObject *__pyx_callargs[3] = {__pyx_t_6, __pyx_mstate_global->__pyx_n_u_i, __pyx_t_12};
+    __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_7, __pyx_callargs+__pyx_t_4, (3-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+    __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+    __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 194, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_1);
+  }
+  __pyx_v_result = __pyx_t_1;
+  __pyx_t_1 = 0;
+
+  /* "draken/morsels/sort.pyx":195
+ * 
+ *     result = array("i", b"\x00" * (n * sizeof(uint32_t)))
+ *     cdef int[::1] rv = result             # <<<<<<<<<<<<<<
+ *     memcpy(&rv[0], &perm[0], n * sizeof(uint32_t))
+ *     return result
+*/
+  __pyx_t_13 = __Pyx_PyObject_to_MemoryviewSlice_dc_int(__pyx_v_result, PyBUF_WRITABLE); if (unlikely(!__pyx_t_13.memview)) __PYX_ERR(0, 195, __pyx_L1_error)
+  __pyx_v_rv = __pyx_t_13;
+  __pyx_t_13.memview = NULL;
+  __pyx_t_13.data = NULL;
+
+  /* "draken/morsels/sort.pyx":196
+ *     result = array("i", b"\x00" * (n * sizeof(uint32_t)))
+ *     cdef int[::1] rv = result
+ *     memcpy(&rv[0], &perm[0], n * sizeof(uint32_t))             # <<<<<<<<<<<<<<
+ *     return result
+*/
+  __pyx_t_14 = 0;
+  (void)(memcpy((&(*((int *) ( /* dim=0 */ ((char *) (((int *) __pyx_v_rv.data) + __pyx_t_14)) )))), (&(__pyx_v_perm[0])), (__pyx_v_n * (sizeof(uint32_t)))));
+
+  /* "draken/morsels/sort.pyx":197
+ *     cdef int[::1] rv = result
+ *     memcpy(&rv[0], &perm[0], n * sizeof(uint32_t))
+ *     return result             # <<<<<<<<<<<<<<
+*/
+  __Pyx_XDECREF(__pyx_r);
+  __Pyx_INCREF(__pyx_v_result);
+  __pyx_r = __pyx_v_result;
+  goto __pyx_L0;
+
+  /* "draken/morsels/sort.pyx":155
+ * 
+ * 
+ * cpdef morsel_sort(Morsel morsel, list column_names, list ascending):             # <<<<<<<<<<<<<<
+ *     """
+ *     Compute a sort permutation for a SINGLE Morsel  kept for callers that only
+*/
+
+  /* function exit code */
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_1);
+  __Pyx_XDECREF(__pyx_t_6);
+  __Pyx_XDECREF(__pyx_t_7);
+  __Pyx_XDECREF(__pyx_t_12);
+  __PYX_XCLEAR_MEMVIEW(&__pyx_t_13, 1);
+  __Pyx_AddTraceback("draken.morsels.sort.morsel_sort", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = 0;
+  __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_result);
+  __PYX_XCLEAR_MEMVIEW(&__pyx_v_rv, 1);
+  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+/* Python wrapper */
+static PyObject *__pyx_pw_6draken_7morsels_4sort_3morsel_sort(PyObject *__pyx_self, 
+#if CYTHON_METH_FASTCALL
+PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
+#else
+PyObject *__pyx_args, PyObject *__pyx_kwds
+#endif
+); /*proto*/
+PyDoc_STRVAR(__pyx_doc_6draken_7morsels_4sort_2morsel_sort, "\n    Compute a sort permutation for a SINGLE Morsel \342\200\224 kept for callers that only\n    want the permutation (cheaper than a full gather-into-new-Morsels when\n    there's exactly one input morsel). Uses the same build_sort_keys/sort_perm\n    core as sort_morsels above; no separate logic.\n\n    Returns\n    -------\n    array('i')\n        int32 permutation: result[i] is the original row index for sorted\n        position i. Apply with ``morsel.take(perm)``.\n    ");
+static PyMethodDef __pyx_mdef_6draken_7morsels_4sort_3morsel_sort = {"morsel_sort", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_6draken_7morsels_4sort_3morsel_sort, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_6draken_7morsels_4sort_2morsel_sort};
+static PyObject *__pyx_pw_6draken_7morsels_4sort_3morsel_sort(PyObject *__pyx_self, 
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -18119,38 +17916,38 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_morsel,&__pyx_mstate_global->__pyx_n_u_column_names,&__pyx_mstate_global->__pyx_n_u_ascending,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 199, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 155, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 199, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 155, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 199, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 155, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 199, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 155, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "morsel_sort", 0) < (0)) __PYX_ERR(0, 199, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "morsel_sort", 0) < (0)) __PYX_ERR(0, 155, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 3; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("morsel_sort", 1, 3, 3, i); __PYX_ERR(0, 199, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("morsel_sort", 1, 3, 3, i); __PYX_ERR(0, 155, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 3)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 199, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 155, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 199, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 155, __pyx_L3_error)
       values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 199, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 155, __pyx_L3_error)
     }
     __pyx_v_morsel = ((struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)values[0]);
     __pyx_v_column_names = ((PyObject*)values[1]);
@@ -18158,7 +17955,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("morsel_sort", 1, 3, 3, __pyx_nargs); __PYX_ERR(0, 199, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("morsel_sort", 1, 3, 3, __pyx_nargs); __PYX_ERR(0, 155, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -18169,10 +17966,10 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel, 1, "morsel", 0))) __PYX_ERR(0, 199, __pyx_L1_error)
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_column_names), (&PyList_Type), 1, "column_names", 1))) __PYX_ERR(0, 199, __pyx_L1_error)
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_ascending), (&PyList_Type), 1, "ascending", 1))) __PYX_ERR(0, 199, __pyx_L1_error)
-  __pyx_r = __pyx_pf_6draken_7morsels_4sort_4morsel_sort(__pyx_self, __pyx_v_morsel, __pyx_v_column_names, __pyx_v_ascending);
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel, 1, "morsel", 0))) __PYX_ERR(0, 155, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_column_names), (&PyList_Type), 1, "column_names", 1))) __PYX_ERR(0, 155, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_ascending), (&PyList_Type), 1, "ascending", 1))) __PYX_ERR(0, 155, __pyx_L1_error)
+  __pyx_r = __pyx_pf_6draken_7morsels_4sort_2morsel_sort(__pyx_self, __pyx_v_morsel, __pyx_v_column_names, __pyx_v_ascending);
 
   /* function exit code */
   goto __pyx_L0;
@@ -18191,7 +17988,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_6draken_7morsels_4sort_4morsel_sort(CYTHON_UNUSED PyObject *__pyx_self, struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_morsel, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending) {
+static PyObject *__pyx_pf_6draken_7morsels_4sort_2morsel_sort(CYTHON_UNUSED PyObject *__pyx_self, struct __pyx_obj_6draken_7morsels_6morsel_Morsel *__pyx_v_morsel, PyObject *__pyx_v_column_names, PyObject *__pyx_v_ascending) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -18200,7 +17997,7 @@ static PyObject *__pyx_pf_6draken_7morsels_4sort_4morsel_sort(CYTHON_UNUSED PyOb
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("morsel_sort", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_6draken_7morsels_4sort_morsel_sort(__pyx_v_morsel, __pyx_v_column_names, __pyx_v_ascending, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 199, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7morsels_4sort_morsel_sort(__pyx_v_morsel, __pyx_v_column_names, __pyx_v_ascending, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 155, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -19328,10 +19125,38 @@ static int __Pyx_modinit_variable_import_code(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_modinit_function_import_code(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_RefNannyDeclarations
   CYTHON_UNUSED_VAR(__pyx_mstate);
+  PyObject *__pyx_t_1 = NULL;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__Pyx_modinit_function_import_code", 0);
   /*--- Function import code ---*/
+  {
+    __pyx_t_1 = PyImport_ImportModule("draken.morsels.morsel"); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 1, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_1);
+    const char * __pyx_import_signature = __Pyx_PyBytes_AsString(__pyx_mstate_global->__pyx_kp_b_std_shared_ptr_CxxMorsel_struct);
+    #if !CYTHON_ASSUME_SAFE_MACROS
+    if (unlikely(!__pyx_import_signature)) __PYX_ERR(0, 1, __pyx_L1_error)
+    #endif
+    const char * __pyx_import_name = __pyx_import_signature + 161;
+    void (**const __pyx_import_pointers[])(void) = {(void (**)(void))&__pyx_f_6draken_7morsels_6morsel_morsel_to_cxx, (void (**)(void))&__pyx_f_6draken_7morsels_6morsel_cxx_to_morsel, (void (**)(void)) NULL};
+    void (**const *__pyx_import_pointer)(void) = __pyx_import_pointers;
+    const char *__pyx_import_current_signature = __pyx_import_signature;
+    while (*__pyx_import_pointer) {
+      if (__Pyx_ImportFunction_3_2_9(__pyx_t_1, __pyx_import_name, *__pyx_import_pointer, __pyx_import_current_signature) < (0)) __PYX_ERR(0, 1, __pyx_L1_error)
+      ++__pyx_import_pointer;
+      __pyx_import_name = strchr(__pyx_import_name, '\0') + 1;
+      __pyx_import_signature = strchr(__pyx_import_signature, '\0') + 1;
+      if (*__pyx_import_signature != '\0') __pyx_import_current_signature = __pyx_import_signature;
+    }
+    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  }
   __Pyx_RefNannyFinishContext();
   return 0;
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_1);
+  __Pyx_RefNannyFinishContext();
+  return -1;
 }
 
 #if CYTHON_PEP489_MULTI_PHASE_INIT
@@ -19359,7 +19184,7 @@ namespace {
   {
       PyModuleDef_HEAD_INIT,
       "sort",
-      __pyx_k_draken_morsels_sort_Permutation, /* m_doc */
+      __pyx_k_draken_morsels_sort_Python_calla, /* m_doc */
     #if CYTHON_USE_MODULE_STATE
       sizeof(__pyx_mstatetype), /* m_size */
     #else
@@ -19604,7 +19429,7 @@ __Pyx_RefNannySetupContext("PyInit_sort", 0);
   if (unlikely((__Pyx_modinit_type_init_code(__pyx_mstate) < 0))) __PYX_ERR(0, 1, __pyx_L1_error)
   if (unlikely((__Pyx_modinit_type_import_code(__pyx_mstate) < 0))) __PYX_ERR(0, 1, __pyx_L1_error)
   (void)__Pyx_modinit_variable_import_code(__pyx_mstate);
-  (void)__Pyx_modinit_function_import_code(__pyx_mstate);
+  if (unlikely((__Pyx_modinit_function_import_code(__pyx_mstate) < 0))) __PYX_ERR(0, 1, __pyx_L1_error)
   /*--- Execution code ---*/
 
   /* "View.MemoryView":108
@@ -20098,91 +19923,82 @@ __Pyx_RefNannySetupContext("PyInit_sort", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_pyx_unpickle_Enum, __pyx_t_4) < (0)) __PYX_ERR(1, 4, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/morsels/sort.pyx":40
+  /* "draken/morsels/sort.pyx":28
  * """
  * 
  * from array import array             # <<<<<<<<<<<<<<
  * 
- * from cpython.mem cimport PyMem_Malloc, PyMem_Free
+ * from libc.stddef cimport size_t
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_array};
-    __pyx_t_1 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_array, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 40, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_array, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 28, __pyx_L1_error)
   }
   __pyx_t_4 = __pyx_t_1;
   __Pyx_GOTREF(__pyx_t_4);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_array};
     __pyx_t_9 = 0; {
-      __pyx_t_5 = __Pyx_ImportFrom(__pyx_t_4, __pyx_imported_names[__pyx_t_9]); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 40, __pyx_L1_error)
+      __pyx_t_5 = __Pyx_ImportFrom(__pyx_t_4, __pyx_imported_names[__pyx_t_9]); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 28, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
-      if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_imported_names[__pyx_t_9], __pyx_t_5) < (0)) __PYX_ERR(0, 40, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_imported_names[__pyx_t_9], __pyx_t_5) < (0)) __PYX_ERR(0, 28, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     }
   }
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/morsels/sort.pyx":120
+  /* "draken/morsels/sort.pyx":74
  * 
  * 
- * def vergesort_stats():             # <<<<<<<<<<<<<<
- *     """Return (hits, misses) counters. hits = sorted by vergesort, misses = fell through to radix."""
- *     cdef uint64_t hits, misses
+ * cdef size_t SIZE_MAX_C = <size_t>-1             # <<<<<<<<<<<<<<
+ * 
+ * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7morsels_4sort_1vergesort_stats, 0, __pyx_mstate_global->__pyx_n_u_vergesort_stats, NULL, __pyx_mstate_global->__pyx_n_u_draken_morsels_sort, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 120, __pyx_L1_error)
+  __pyx_v_6draken_7morsels_4sort_SIZE_MAX_C = ((size_t)-1L);
+
+  /* "draken/morsels/sort.pyx":104
+ * 
+ * def sort_morsels(list morsels, list column_names, list ascending, limit=None,
+ *                   size_t chunk_rows=131072):             # <<<<<<<<<<<<<<
+ *     """
+ *     Sort rows across one or more Morsels through the shared sort core.
+*/
+  __pyx_t_4 = __Pyx_PyLong_FromSize_t(((size_t)0x20000)); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 104, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+
+  /* "draken/morsels/sort.pyx":103
+ * 
+ * 
+ * def sort_morsels(list morsels, list column_names, list ascending, limit=None,             # <<<<<<<<<<<<<<
+ *                   size_t chunk_rows=131072):
+ *     """
+*/
+  __pyx_t_5 = PyTuple_Pack(2, Py_None, __pyx_t_4); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 103, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7morsels_4sort_1sort_morsels, 0, __pyx_mstate_global->__pyx_n_u_sort_morsels, NULL, __pyx_mstate_global->__pyx_n_u_draken_morsels_sort, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 103, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vergesort_stats, __pyx_t_4) < (0)) __PYX_ERR(0, 120, __pyx_L1_error)
+  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_4, __pyx_t_5);
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_sort_morsels, __pyx_t_4) < (0)) __PYX_ERR(0, 103, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/morsels/sort.pyx":127
+  /* "draken/morsels/sort.pyx":155
  * 
- * 
- * def vergesort_reset():             # <<<<<<<<<<<<<<
- *     """Reset hit/miss counters to zero."""
- *     vergesort_reset_stats()
-*/
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7morsels_4sort_3vergesort_reset, 0, __pyx_mstate_global->__pyx_n_u_vergesort_reset, NULL, __pyx_mstate_global->__pyx_n_u_draken_morsels_sort, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 127, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_4);
-  #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
-  PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
-  #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vergesort_reset, __pyx_t_4) < (0)) __PYX_ERR(0, 127, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-
-  /* "draken/morsels/sort.pyx":193
- * #          same effect but inverted order
- * 
- * cdef inline uint64_t _asc_xor = <uint64_t>0x8000000000000000ULL             # <<<<<<<<<<<<<<
- * cdef inline uint64_t _desc_xor = <uint64_t>0x7FFFFFFFFFFFFFFFULL
- * 
-*/
-  __pyx_v_6draken_7morsels_4sort__asc_xor = ((uint64_t)0x8000000000000000ULL);
-
-  /* "draken/morsels/sort.pyx":194
- * 
- * cdef inline uint64_t _asc_xor = <uint64_t>0x8000000000000000ULL
- * cdef inline uint64_t _desc_xor = <uint64_t>0x7FFFFFFFFFFFFFFFULL             # <<<<<<<<<<<<<<
- * 
- * 
-*/
-  __pyx_v_6draken_7morsels_4sort__desc_xor = ((uint64_t)0x7FFFFFFFFFFFFFFFULL);
-
-  /* "draken/morsels/sort.pyx":199
- * #  Public API
  * 
  * cpdef morsel_sort(Morsel morsel, list column_names, list ascending):             # <<<<<<<<<<<<<<
  *     """
- *     Compute a sort permutation for a Draken Morsel.
+ *     Compute a sort permutation for a SINGLE Morsel  kept for callers that only
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7morsels_4sort_5morsel_sort, 0, __pyx_mstate_global->__pyx_n_u_morsel_sort, NULL, __pyx_mstate_global->__pyx_n_u_draken_morsels_sort, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 199, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7morsels_4sort_3morsel_sort, 0, __pyx_mstate_global->__pyx_n_u_morsel_sort, NULL, __pyx_mstate_global->__pyx_n_u_draken_morsels_sort, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 155, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_morsel_sort, __pyx_t_4) < (0)) __PYX_ERR(0, 199, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_morsel_sort, __pyx_t_4) < (0)) __PYX_ERR(0, 155, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "draken/morsels/sort.pyx":1
@@ -20232,6 +20048,7 @@ __Pyx_RefNannySetupContext("PyInit_sort", 0);
 
 static int __Pyx_InitCachedBuiltins(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
+  __pyx_builtin_zip = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_zip); if (!__pyx_builtin_zip) __PYX_ERR(0, 91, __pyx_L1_error)
   __pyx_builtin___import__ = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_import); if (!__pyx_builtin___import__) __PYX_ERR(1, 109, __pyx_L1_error)
   __pyx_builtin_enumerate = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_enumerate); if (!__pyx_builtin_enumerate) __PYX_ERR(1, 165, __pyx_L1_error)
   __pyx_builtin_Ellipsis = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_Ellipsis); if (!__pyx_builtin_Ellipsis) __PYX_ERR(1, 418, __pyx_L1_error)
@@ -20244,6 +20061,8 @@ static int __Pyx_InitCachedBuiltins(__pyx_mstatetype *__pyx_mstate) {
   __pyx_mstate->__pyx_umethod_PyDict_Type_pop.method_name = &__pyx_mstate->__pyx_n_u_pop;
   __pyx_mstate->__pyx_umethod_PyDict_Type_values.type = (PyObject*)&PyDict_Type;
   __pyx_mstate->__pyx_umethod_PyDict_Type_values.method_name = &__pyx_mstate->__pyx_n_u_values;
+  __pyx_mstate->__pyx_umethod_PyList_Type__index.type = (PyObject*)(&PyList_Type);
+  __pyx_mstate->__pyx_umethod_PyList_Type__index.method_name = &__pyx_mstate->__pyx_n_u_index;
   return 0;
   __pyx_L1_error:;
   return -1;
@@ -20336,42 +20155,42 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitConstants(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
   {
-    const struct { const unsigned int length: 10; } index[] = {{2},{35},{54},{37},{60},{24},{52},{26},{34},{33},{45},{22},{15},{179},{37},{32},{1},{1},{1},{1},{1},{8},{5},{6},{36},{15},{52},{23},{25},{7},{23},{6},{2},{6},{35},{9},{30},{50},{8},{20},{32},{22},{30},{37},{5},{8},{20},{8},{15},{3},{15},{12},{5},{9},{18},{4},{1},{9},{17},{18},{12},{8},{5},{8},{19},{15},{6},{9},{5},{5},{6},{7},{8},{12},{4},{1},{2},{10},{5},{13},{5},{8},{8},{7},{6},{4},{10},{6},{11},{4},{8},{4},{7},{8},{3},{4},{3},{14},{11},{10},{19},{14},{12},{10},{17},{13},{8},{12},{10},{12},{19},{5},{4},{5},{4},{4},{6},{8},{6},{6},{6},{15},{15},{1},{1},{7},{32},{915},{1}};
-    #if (CYTHON_COMPRESS_STRINGS) == 3 && __PYX_LIMITED_VERSION_HEX >= 0x030e0000 /* compression: zstd (1770 bytes) */
-const char* const cstring = "(\265/\375`\022\n\0057\000\nU\364\021:\360\0327\314\300\031\200\244\013e\200\007\004\254\220BR\001+\244\220t\241\032S\336vFlo\356QjmF\312\240k\220\210:\002\010\000d\224\231\267ax\024\001AF\024\001D\004\366\000\370\000#\0014\\I\356\317\361?w\257'\211`\357\267(\346\256;Z~\224\210\266\375\230yv\217\317t\235\207?\317\360\337\036\367\355\263\251\367\356\030-}8\367\203i\276\363?r\277G\021\347\245\366\211u\317\230\345\205\345\244h\247\010\367/\236\033\307\307\255s\366/\207p\256T\022\232\251\312:l2\233\341\2318\303z\233l]\222X\3631\367\372\217\336\377,M\023\365?\276|\236\231\326\313\335\367\211\370,s&\372\363\316c\3377\311\035\2165\010\326\361\275\344\276o\222k\374\305}r\337\363\371gx\233\276\217w\237S\341\252\255;'\3133\267G\\\376\374\244:\321y\237\270\374\270\353\270\367\231\346;Kr\223\270s\354\321\022\325\361\337K\021{\216\177\336}\034\316x\377\274O\021\373\306^\342\236s\374\326\374\374\036o_\232U\033\377\262c\277K\215\2516\357\341s\347r(\016\216\tS\"7;J\242~J\334;\321\014C\2634MOU\236a\030R\355pDuIr\222\334\235g\322$y\030j\316\375\347;/v4\027\206?\223^\227\307\334Y\236\347&\321\276\267.C\317CM\243\205\272\243~\237&Y\212Sb\306m1\237?\354<\374[\027\206\342\366\031\347w\347\037-\317R\244\225\\\354>\237\3030\244m\261\357\243\3346\032\n\277\310u\252|Ea\350\2717\3718\356\374\374\344\034\331h\236\226\177\326X,\3071\243\235\3530\374\274sq\314\274\307\317\177\322\313\216j\034\206[D\303\020\377\021\315\271\255q\331S0\315\014\336V\334\353\337\367\257\332\\\213`Q\267\253|&\r\305\217\333\243\364=\225O\355\271\356\274ff\367u\335\357^\336\241$\326}\213>\373M\346\036\212\270L\0335\312\333'\211\216\036\357\357\363\036\253R\360\317x\207Zg\233\221YM2*\006\354}\271\024mM#\250\001{m\035\352\005\214\353\2462\245\022\260\027\227\2039*\030\305\024dR\n\356\266>\266D\200\332\315bs\330\334\212\263\372\250\003\352A\n[\340\272\255\266uA\r\341\252\261#\353\230N\370\322\234~\244\017\013\257m\255\255W)\305\302\033s\221\332\210\366d7\326\327z\244\332T4\r\372-\034p\025\020\000|t\275V\251T\"}\245\260""\244\037\301\017\001\241\226\312\322\207\2037\267+\355fW\330\275\256\254/\252\200\332\222\n\244>^k\324\252\264\262v\\M\324\213\201W\346\006\270\270\366\326f\260P\252\306\300[s\037\334\263\315\255\t;\252\034\004\000\007]\267\324\226\242?\207\203\327\366\203\370\235Y-P+\006\270j\277\257e0\360\306\244~\r\0079*\204Z\363\223\375\274\326\001\001@\210L\215\251bJ\365\313\277\225\237\302\300\373Zy\352\204\372Ryi\005\001@A\327K+\246Z\014p\275\264\000\252\374\326\235\273\3477\252M4\374\350Y~o\356\363o\377=\327\215\031\345\365\372ND\020\010<\025\226\200\224\367\313\267\037\303\351\223c\007\\/\340\221\333k9\013\264V\2742 \217\013\363\372\342\017KB0!\361\276rT\215XE\204\205\204F\306\033cG2\336W+\265\206d\200\304`o\314Eh[\330\007\266\"\266\312\"\336*\252 U\017v\035\324M\301\246\242 okb\313\352\3462\265%>5\253\033\017\253\325V\336\332\001o\300\236\353\324\332\332Z{\301\"\254X\266&\325|\267\2145g\305J)\"rZ\030V\200mY\005V\232\024\002\366>9\005\235\216\202G\267\340\355&xc\022\254\261Jk\314\321\303\004k\245r\300^\246\245\340\322m\253\007t\252\271\027-\002+\022\361\242jP\032\001{k\253\007\354\225\210xm@\010\240\213;\322&\260\274u\226\361f`\001\320\327:\2616\026Ke\341\271\331\335\265@\\7\327\346\372\264$\266\365\003\2775V\306&\255\004+\316xk*F\305{a\361\336X\025\266g]R5*\336[QP\n\210\003\304j\rZ\035\266\203\r`i\324\236T\"\006\000\353\272\261\2725\201$\250\001\255R\n\031\032\021\021\021I\222$\035!\010\202a\240\024\231\0171A\347\324\214$%I\262l\006\362\256\210\211'\354\371!\347\350K4\320\226\325<\211\335 \027i\370R\2135\244\267\351M\212\254\325x\033\303\333/i\2401C\263\257_W2\022\222\333L\t\352\240s\315\271\262\3576\254\242\352\220\347\372\021H\270\215\214\302\202\201Bd\366\324\\(\000\226$\304\340\370\306(I\256Xp\202\257\2624\001\317\334\336\342\346\333ra\363\373n\364\202t\372D\016\0256#\005\312\014\\\370\250!!g\310\250\247M8J\367\335\244\247\327r\"^#\177>\213\230,\t\220\002\010\344\2405\361\267\314\317\304*\330\257In\364kMz\334\355\341\255I\366\220\024B\257u\260Uw\260\276\252\237\235""\303k\210\240\324%^\325\001\233\006\234\203\031\275_E\257\355a\336[\336%.Y\325q\200w\372S\360\031Qbx\201\220\346IB\233.\003&^\217+:v\225\030N*==%*2\371jNc\323\013ZUV'\023Du\313 \371\216\336\021\024\226\006f\204\006\273\031\020~A\306\260G\254V5\000\0167\300\000f\253\245\372N\344KP(P\360\335\235\316\036\356\261\332E\332=&!-(\302\324\337\231\223\262\355\267\326\216\304\210\261-7]!\220\321~\246\304\001%\217d\013\023\037\010\340U\305\034\374\034/\303/\327\030\337*\2606\3728\346\305\260\223\007yo\255\316\357\026M\302\305`o[\350@Y\310 \0257\020\265\220r\313}\302\360\024#\320\304H\323i`B\323\266\032\300\302@v\366p\274\3448^^SB\366hdHBQw\243\245\026\022\3376~C\375\324\003\033j\210\223\266\243\326\322Y\363\340\254\344qf\001v\252\023t\344\263\275eX]\201\022|t\204\336\236N9=\361\215\005P\252~\275\233\027\251\250)Q\235\240k\250\342\202(\246\332^R\n\342\322\307\306a :\220,\210\217\352\023TJ\255\236\004V\314\316k2A\350\200P\023\276>\017p\254\022\n\210|\036\022R.\204\273f\2535BUf\253\247\034\337\327\220\374\n\306\220\220\352\334\025di\337*>X\356\316[\313F\212x4\324";
-    PyObject *data = __Pyx_DecompressString(cstring, 1770, 3);
+    const struct { const unsigned int length: 8; } index[] = {{2},{35},{54},{37},{60},{24},{52},{26},{34},{33},{45},{22},{15},{179},{37},{32},{1},{1},{1},{1},{1},{8},{5},{6},{36},{15},{52},{23},{25},{7},{23},{6},{2},{6},{35},{9},{30},{50},{8},{11},{20},{32},{22},{30},{37},{20},{5},{8},{20},{8},{15},{3},{15},{12},{5},{9},{18},{4},{1},{10},{9},{17},{18},{12},{5},{6},{7},{8},{19},{15},{6},{9},{3},{5},{5},{5},{6},{7},{8},{12},{1},{2},{10},{5},{13},{5},{8},{5},{1},{8},{7},{4},{10},{6},{11},{7},{4},{8},{4},{7},{8},{3},{2},{4},{3},{14},{11},{10},{19},{14},{12},{10},{17},{13},{8},{6},{12},{10},{12},{19},{5},{4},{12},{4},{5},{4},{4},{6},{10},{8},{6},{6},{6},{1},{3},{1},{184},{221},{188},{1}};
+    #if (CYTHON_COMPRESS_STRINGS) == 3 && __PYX_LIMITED_VERSION_HEX >= 0x030e0000 /* compression: zstd (1435 bytes) */
+const char* const cstring = "(\265/\375`\351\010\215,\000\232E\344\rB \221\323\001\000\\2\010\003\0022\r(\021\204\325O{\252\267.\024*\3276\231R\222-\345\016\215\220\266\223\310R\363\255\032f\r\026/\360s\217!\377\007E\037\206\322\016\330\363RC\255G\337\303\002\353\223\271\000\272\000\304\000!owh\305\220\303h\313\222B\306\300\001\303\004\024*(\230~4Y\375\320vhZ-Q\372\253\t\256*\213\022&\3543\203\".\351t\270\023;,\273\244e\275XN\013\226\350\212\354\267\025\303\256\257\230\240\265\320C\353\350M\221m\255\270-\354>\0349\233\036\273T&K\021NqZ\247\323\276\246\344\217m\247Sh\277\303\215\231\236G?_8kI\347Um\325V\010\376\264/\023$l\313\365\231\212\246;\364\230l\275\372b:\331o\275\242\371\264F\366\311\017G\037b\310\375\260md\223E+S\210\342-\247}\347\366\212e\315_){W\311/=Kl\273\252.\010\356\020\357\371tlZ\226\312\312\nJ\013\210\276T\352\342\036\370Pr\254\226\005/\235\322d\302\352\344\275\237tF\013\316\322\264?\201Vz%\277\327\361\276\307o]X\265\344J+\260\007\023\356\030\323\345\323\376\254\247\034\341(\352\314\204y(\270\325N\201\266\013\264\322\247\244\363\304d\364\"\352]\202\243{\261\244\035\035z_\220\276\030\202\036K\266\235\227\324\366\272\326\333\352\334\264\362;l+\253\300\017\271\237\224\360\003I\347\304\023\252W\377\344\267]\252OW\214\260{\307\010ie\227\364\326\277'<\355\026\014\321\245\331\021\321\371\036v\370\333\231\366\350\035b\262\233\362\255&\256V\330\343t\2765o02P\"(\004\250\022\035\204\216\024GG\342<\270\006\0357H\232\201M\352\243\375\214\215&S\022\023\222 \305\201\001\221\261\221\301f\214\314\373Z\260\324\017%v\351\355\177\357\375\307k\353;\32666\346\357\333\337{\353\372\373\024em\301K*Q\025\22781z\257\353.\261G\021{\017\253\030\346R\337{\351\367\236u\337\273\232Nx\375\274\246\205]rN\217\364V\357=\274l\255\\\004\255\352\335\316\312Vk\373\272\264[\326\347\363I\217'N\371^\226\305\247\267F\227\010C\035\241\375G\347\373\026\275T\373F1\266\303\2207\235\177\253\255\321Sg\244&\207\357=OG\332-U\263|\326&\336\307\231\222\231P\004'2Y\026_\375\014\311H\206D\002kx\033\236\206\307#\314'%\262\014\305\304>""\366:t\220\357\010:\313\261p\nR\266\317\366\032\324@h\037\215\243}l\014:R\244\216\245\263\320\001\3506\\\006\002\325\202\001)P'\001\264)8\220\372p\034n\305\246\331\016\014H\241\252\323\205\023\213\256\005\007\342\036\307F\322<\006\304\244\270 -D\263)N\027\202\033\261)\3508\235\213\r\264I\320@T\264\330x\001C\200F\004\021M\306A\014\307\214\217\006\322\221\002\235>'\021\335\247\273\266\024\233\210\304\211p\0336\316\266b\323Q@\223\t\020\303\201\371\240\321\202\322\240ZN\245\316\243K\341B<:n|j\220\300X\250\222S\210n\004\367\341^h\0046)\220\217\314G\014\204\031\321 \201\nAi8\275\340\036t\260{\300qp0\264\002\233T\nM\243\t\320d61-,6L\004\200\373\250\021\245CJ\231\241\021\021IR\220\024: \204 b\314\314\0032\nE\256\021\311\310$iA\255,\373\006\2258\236\300\026\202\201p\250\264\233~A*9\331\302L\315W\254WY\032\030\271\375r\030\242$\2376\360\223@\336#wi\034gB\335q\014F\316\310\213sk\255\000+\217\345*\275\304\275\357\364\316Ky\231A<\201j\222\346}\023\336\240\257/J\366W\322Z\360O\272Yo|[q\217\227\2420\373Y\375\245E>\326\"'HH\006\251\365\022\244\234\016\200v`\364\321%\236d\227\354\243\222\355[A\206\227\317dc|\257\370\234\322\366\004\017n\300\274!T\031F\203\003\033=\376H\3401\307&\243\221i{\036hKc\323\335\353bs\277\302L\252\225J\030\262S&3\365a\232\202^B\nB\005\306Q\216\203-\232\34796\252\033e\221\032\235\n\277v\335\236*\203y_0DxA8Op\023j\344\021\235NY\006\022m\240\270\221Ku\213\244{f\2420\326\240\2603\252\210[l\263\241\035Z\274\177\220\025\252\355\246Z\366#\247\035M7\024\352M\374cY\277J!dUe\326\013\366:B\247T\031Ibd\374\264w=\371?\231\231\242\307\337\303\"\031Tl\035\235\317\301\231T\206\201\326\006\320\246\263\010-Uj\330Y|\335\336>\304\360\351Qk\304\201L\217\213\325\342\252\242\336-\330b\267\n\341\212\263\261o\035 \334\243\311\206\234D\021\014\001\227\2547\2602h\211\305\322=u\204\2165G\255\2256\002\272WO\352#\374\261\001\002d\371D\0133\366#r\3323C\323\252\364\232\262(\022j?\264GA\207\246\031\322\233\261\3153\3740\320\026$\217-\251\330z\036\246f\310\213mr\343P\240g\276.\007\220oiz""\317\215`G0woS[\3251m\226\262bs\005\302\337\303\324H4\271L\364\267\005\013\266\026\224\263\336r\240\020[\260\032";
+    PyObject *data = __Pyx_DecompressString(cstring, 1435, 3);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (1871 bytes) */
-const char* const cstring = "BZh91AY&SYcq\331H\000\001\r\177\377\377\377\377\377\377\377\377\177\377\373\377\375\277\377\377\366\300@@@@@@@@@@@@\000@\000`\006|\371\033\264\354\204l\326\330\323\026\\\007\006\252~\210%4\361OF\246\330\203Sjz&SmDyL'\242\031\033\325\014\232\003\324416CSC\324\336\244\375Q\372$\317T\321\352~\240\324\r\020S\312fCSBzG\241\2526\247\244\033(4\000\320\000\000\000\000\003@\000\000\000\004\0310\002`\000&\000\2150\214\000\000\000\023&\230\232\014\000\214\000\000\000\000\323@\211\246\251\220\023$\323\312m4i\036\241\352\032\006\200\000\0004\032\006\200\000\r\006\232\007\204\323H\321\006L\000\230\000\t\200#L#\000\000\000\004\311\246&\203\000#\000\000\000\000%\023A4\023\"=M\032h\304h\247\247\250\217H\365\036\2204\365\000\000\000\000\000\000\000\006\215\0009;5\0269\352\275\004N\226\346\352\r\344\337#\201x:\235S\006\220$- ?\372\007\374\010|\344\035e\221\327\001q\324\324L\2200\261D%\004_\025\265\353\236\266\303\002C\334\204\305\220:\2426\345DYJm\034\355z\230\202\022 <\256E\333s\236\032\301\030\223\253\320\374F\223\004\354\377x`\220Z\252@\275\213\361<\223V\264\224j5\020$l(0\312\261\377\260\276\021\266\032\371\037\243a\375~\201\267w\277oc~_\234\333\276z\364\361\235\307\2565\013\027$\237]\202\317\217\205\217M^\270p\266!Y\336\204`\207\316\341\356=G\376\362\363\246 =\202\377\2311\ru!D\2059\003\343\325\313d93,\340\333*\310\352ZoB\327R\252\342\231\214UX\240\244Q\024#\0358}<\264\260\272\314\002j\246H\000\354\322\024\352\203\324\206\210\245G+\001\201P\221A\010\330\224\266\225\206\002\314BK\352\232\301\314-/\034\352\363^\017\252\371\335\273\032V4GY8R\211\306D\303\205b\354\306\264k*\tr\231\360\212dK3t9\365\241\231\256\3245z,.6u@\3711\201\267\242\0237\237N%\261\204 BY`\"R\316\251\220\217NDt\212\230\320\320\347^\256\232\274vq\305\013\021\270\234\335\006?-\017i\331\210Q<\214\352\247\300\233\201`\345\020\2437\274\371l\203\026\340\200\226\301V\343\320~\251\257\243\352v\033 \225\205\006=J\314\377\271\305\263\271\377|?\005\305\033t~UF[(\026\337\312\3003k\262!\346:m\236\374\351\2776\242ca\225\210\017""\313\340V\006\267\263\326\244\\4*]\202\202T\205,\252\201\340(\304\311D|\024\017\016\256\324b\252,\367\344\254\2413[\243g\355ii\363\340\266'W\372&ks}\217\266\3219:\352I\24086:/\200B\370-\355\301}\372\300\373\372n\244\332\311\013\305\250\034\270\007\343c\234Q?\206A\3168\214\372t\235o\356\367\361\341\334\355\315\006\367L\030\013\223uf\333Y\264U\2734\213\237P5f\335d\037b\315_\343\314tr\333?\346\256Q\344\267\336\305h\205\206\007\016Tb&\316\265\220\005\023\343\223\225[\010\255\227\r\207\215\001(c\216XT]\224\241\000\241B<*\35544Q@z\352\357\337\221\326\250c\313]\225\342L]\227hBi\325\364g\215$\331a1\230\200\364U\222l\374\241$>\027d\341 \220%e\226\266L\365x\004\013C\357\250\210\203g))q\274\n \215\327\302\365\020\2550s@L\207\234\374\324\231\032\362\355\0051\n\241\342\325\201:\343R\360\211T\374xb\221UQ\373\250\224\251VU\312uW\264\345\302\234\332\351z\026\205Xf[\252\346\266\313\202\252\007\352jdtxhzN\220\254\024\222\233\013R\241\305\320\3432\346\313\372m\353\274\265\310D\355I \230\313t:m\201L\231\251:\014\304\201w\030\316a\316\030\210$\313\204\030\362\004\302\024\220l\371\266,}[2\237H\340\204\236\231\367\322\205\3448\3672\337\214PYh`\331\230f\035\023\334I!\265\303W\203n\242Y\250\220\020\321}\025\212\202\\\331\320Z\203\032T\333\210\204\204\032\000\207\034UH\323\234\207\231\322\305\022\327\316d\300\265\341I\326*\317\254\314\350\340\253,\016u\207\361\022\315\314\001\007\364\226\224\t\220cS\004iu\212EB*\364\220\224G\030\242\252\244\250\"\224\004\231\221\255\203\251\037\311\275`R\241ed\365\355L&E\234Q\203\032\320\333\316\251\300\346<\001\311\000\315d3\2137@\250,$\250\252\361\221\030\331p3\006`\261QUz\n2\265\254l\213nI\030\302hZ\025\227,\260j\325>S\323p\205\374K8x8\016\016\177AW\261h\327B\242\241\273\240Tq\2206\215\263\022!\206\344W\213\261M\004\304^'6z\234K(I\220U@t\\\211\352\335\3175\266\356'\220q79\267W]\241.\221\312\n\260\344\221\240\371\001|\202\217\232\005!)\232\2328l:<^\340ij\245G\022\273L5\255V\312\204\214\207@\260\270\222L^\334\324!H\3274\232\361H\322\322:Dq\201M\023\016r""\274F\005d\242k\234\271\312\366Z\325\305\251\267\002\305\t\231\227 \224I3\211 \324\311\313\212\004\014w\t\276\206\004\301i*p-\224\001]l3\t\326-5\236\322ev\246\312\"\312B'\301?\356@\300#4\3030}\014%R\006@\230[*p:Pt\0254\304\242\253\202\201\206\310\323\tE\310d\305\032\323p^'\315\244\322\352\334@0\031\315\216\016\222\263\214\315C\313[\206\016,\214\246%\314w\257p\263\\\021C\233HE%\244M9\014\206<\210\301\32502\r5\356{z\311\013=L9\0374\334\334\267c\353\306Bc\200\254Ud\322-\360\006\310F-\362\021\300\016!\237opk\2308\321\276\333\316\301\206\014-\020\325\340$\225\375c\034}\322\252\260\r\224\267\205\300\261\n7\234\022\312\024\3078\236Eq\362,r\t\017\317\017\024\355\006\0010\203\024\364wqC(]F\024\334{@\303$6]\017\206\023\354\013\247\230;U\003\320\013\344\361\3570\035&A\007\373\2669r\370\335\240\027\304\"\316u\227\364\373s\365(_\240\033 T\177\0241\204J\336\324(\317\335\255\375)\366\231\305\347\315\255;\263rr\342\234\325\240\322\224\242\247O\236O~\352\203\315\314\253K^\022\237[\275b\366\275w[\350\232\275|\201.hkAu\374\213\\'\326\377)$\244g_\203\207\327\225\026\274F\342w4R\216\226\246f\017\251Nl\335(rp\006\254\241\006\017,U\035\262}\230\272y\370P\243\234\306`\320\202kD\353\253\366\365\257\312\261\234\326j.\"\332\205\267\r\266\246\204\271\305\332\203\260\206\313V\020\274s\016F\333Z\257B\343\377\027rE8P\220cq\331H";
-    PyObject *data = __Pyx_DecompressString(cstring, 1871, 2);
+    #elif (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (1555 bytes) */
+const char* const cstring = "BZh91AY&SYJ\267\032\237\000\000\274\377\377\357\377\376\322g\367\377\327\277\363\377C\277\377\377\362@@@@@@@@@@@@@\000@\000P\005\214!\3554\310\005\001\242\333\003SB4\214jb\233M45\033@\206(\323#\324zC@\365\000\000\036\223\324z\236\241\223j\031\251\2152\207\000\000\320\000\320\006\200\000\r\030\200\001\240\000\000\000\001\240\003S\310\211\246\211\244\236\246\232z\206\321=@\000\000\001\246\200\320\000\000\000\r\032\017P\007\000\000\320\000\320\006\200\000\r\030\200\001\240\000\000\000\001\240\002SH\020\001C\025<\322\236\230&\246i=5244\000\000\000\000\320\320\006\215\014\201Y\247\032\024\\>\177O\350\254\021\201}\271\000\315\233\220\375\032\001\000@\210\023\340\334\241\236q\244\321\0314\254<\340\006\031E\007\254?\360:\031\231bS\016\342RB\017\231h\261\255\264>\313\035\2174--\243\351\371\372\302\372\352{x\025i\215/\265uSI\3654\027\3062\255\341;\323\n7\022OM\202\225\325\320\374\023\211\327\221\254\t\235\352\"\270\036vM\306\365\364\315\376\244\242\341\350\027\322\353\003Z\210BA\033\203\331\371\277H\033\257Q\301\245\365!\370\244\255\250\265\254\311\223\212\2571I\211\202\230S\tZ\024\323{L\301^\340\325\2644\021\ti'g\\G^\274\n\006\362\220*M\240-\273/\263\243\202\220n\2458\343\230\226\004\204\312+\022\np\234h\336\216r@F\224\204\374}J\254\002H\036\327\014\361l;\\\025\211\003\005\206\330\271\0205\366\2354\367\254P\205\223\336\313\033\232\242W\203UYZ\304\277\230)\264\300x(\354\343blG\324u\346\305\320\340;6\250\263\221,\t\302 [\320@\3364\355S\017\214\264\335\270\270\321\312\256\2762}\234\230;\306\263\246Y\244\332\325@#\t\301\231ub\324\\k)u\352\022\216k;\270\013\036\214\3038*\332\234\324E\241\235B\233\347\014\010,BtS\264T\222\230\345\252e\024\0100w\354p\306N\357D\240\346\315\326a\320z2W)e\336\314\314\373\260\336\312\332\203\277\376\026\232{?\234r\310n\257J\302\266\007\r]H\310ih\222Z%\241Bx\t\241|\363E*\214B\t\260\016K\t\211\024CS1\250\n\225\345r\217`T\022J\032\000Z\333kkswn\215Ka\033\0026\232mJQ\271T\243\317X\363\325\201_\0171\002{\327\300\273\0013\030\010I\236{waB$&\010n\325N\2242*""\034\216.'\234\245\200J\0065\026\023\024d`@00#\2054\353\336#S\001\031\3237\373 \307\032\330\255\\\243F[A\030e\315\360K\014\211\242\214\"\356\032ID\2344\216x\250\210\327t\242\335$\t\016\363\203\327kg(I\234Ad\243\341\271)IX\301\034\235\232\215\201\373\211\235\225\370\204\2729\3172\372\202\030\256l9 \232[\3578\313D\364\336i\3316\245\r\254l\263*\333\205%\035\326k\021n\265\270wV-\343lA\033,^\025\327\205\324/\343\204%\317\326\310.\217\033\333C\227\216\221n[B\361\221DiC/g^\366\276\346\346\210\227;\023;\311!)]kl\345\252V\246\266X\265)\002\t\004b[;\326%\244\222^\r$1v\331\300Z\024\270\2347\264a\013\265N\256\271\277*E\270\030\242\333k66\230O\276\3552)\2338\006\212\203\211mg\243r-\n\354\025s\267\310\223IE\234\035\025\265p\230^\322\354A\315\211\321\265l\326\305\354BA(\216\341\035\0229K\367\341\315\370\367\013\343\2035\333\016\327.\216{\rULK\024\321\312\304\357\030D\002\231H%\200d\220\301\212\340\"\374C:@\002#\003\247\000\235\217\212&\202jD\232\203UM\261\t&\253v\205\032\260\252\020hlM\355#\262\025\240\271\023-\025\3706F\265\2776\347\213\033\266G\231\356px\036\200\3550\340\302\\\"\255\344s\205\340\330\205HJD\031\240n^$$7Ws\216\315\266\321yDe\247\\s\245\232\331\031\362<&\362\246y\325T\255\327v\005I\233\207\212G'g\213\307x=rL\233X\227@\0239\2444\232\214F5\013\034\031H\231ecW\306\360\335\223\224,\n4\000,\023:\002\024gf\370r\323B\232\007(\357\r\305\234%8\222\341t\235\311G\027te;\305yHb\001:\024\305\263\336\203C\317%xk\334e\273:`\275\262\305G\033m/\203M\204\360&8D\302\313\270z\n\324~\371\210D\244\2407)\316\351\243Y\223\332\"\002\035l)Ag\031J\211\346\231\270\0264x\326T=U\323\255\234\313S-\247)URBL\326A\312\330\205\324u\265'R5\3427\023\02769\024\263\005]\365\201qv\300\361#\021\274$\327U[M\347R\253y\337}\270\266\177\333\212\005\214\241\237!\335 \204\300\242'\214\240*\353Yr\332\036\010\214\322Tm&\261\200\346\236\261\033\324\320TD\206\230\275\200\324\000\2104Dg\261\025\"\222\010\223\016\311\2608\031\332\000\303+\014H\300q\016\213\241I_6*\250&\324\337\003a\260\354t\276\226\370\376\244\253""\371{M\372b\317\367\327\333\370\273i\035H\003\277\210\212\346.\350uco\203\014\343\360\335\367\300C\230q`\036b\313\233\210\007\374\345\242\r\271\0077f|\367\370\344\303\206MxE\255\030\206\354\034u`\1772\371t@\376\306\240^|T\334\364\014\371\006\370\372s\215j\266\307\366\026\206~\213\327\306\r;\276\317\336\376H\254\365\356\303\322>\341\373\201\022\006I$D\240DI\032P\250k\264\212_\361w$S\205\t\004\253q\251\360";
+    PyObject *data = __Pyx_DecompressString(cstring, 1555, 2);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (1750 bytes) */
-const char* const cstring = "x\332}TMw\333\306\025\025m\311\221Z\265\241>-+R2t\035\323Ne&\364GO\222\332jh\331\211\225\234&bT\331\212\332\023\234!0$!\203\003\0223\240H\237\372\324K.\261\304\022K,\261\344\222K-\271\304R?\301?\241w\000\222\226\243\236\236#\201\363\361\336\233{\357\2733_\223\307n\265\312\034\3226\331\t1l&\010\267%a\235\246-\030\021\3221\r&v('6\267\272Dw\030\225\214PRI\223d\235Jb\n\242\333\\\2325\327v\00519i\260\206\355t\013\310R\245\250\020f\215\023i\023$\033w\222:i\204:r\0244*|\342\230\222V,6\nHAU\035\273\361\377rMn\260\01691e\235\310n\223\221\374h]:\224\213\204\306\273\2244\014\031\246\303tI\014\263\301\2700m.\236\214G\344SC1R\005\322\240\247\215\246\354\022Q\247(-\335&\300Um\207\350]Y\267y\201:\016\355\356^,\227\344\013\267\331\264\035\311\214]\336\246\226i\220\206m\260-\245-\202\231A\362z\236\240T\036\365\024\326\374\026\251!k\034\234\236\0109i\007x\036\376=\341\360\\q\260\253\344G\033j%\352\357$@\024d\203Yf\2059\320\021*\251\316\341\220\244E\234\354=\335\273s\377\313\373\204r\003J\036\343x\001t\025\335Bs\320q\024\254\270\246%q\230RP\024\310n\225tm\227p\006\230\350\\\023q\347\023d\235q\"\230T\003\222O\344\246\022\2745\244\233\274\226\037Ig\266\231\312\376\226Z\202\025~rer\220\355r\003G\362\261\207\250\2563T\277\225\320<\340I\373\221\004K\265\231\203\356J\326Ps\273\242`\027\266\363\267\377F\rC\343J\000E\207@\203/:\370X\214\n\234\300\341Z\350\211|\313m$\2728\254\345\002\216\201\025K\201B{\n\264\242\247\001\032\247\r\020R\225\250\320\031:\311k\244\341\242R\235*\364\340'\020\201\352\274&\353\017\317\031]\245\2444\267\177\273<\366\327\266a\n\305\307p\350K\306?G\003\005\263\304\347\n_\241\331\355\260\204lM'\267T\337k\211\343\224$\n\002\353H\306er\235&\256\002\2314\305P\242\010\363\025#\017\037\221/.\370\221\333\360B\225\272\226$\232\006\342\256\3164\215\030n\242+\267\371\035x\243mR\013\273\272\311M\211\315T\335\355\207\351\2057\336#wqM\271v\302\361\275\375\311\252;i$\265,[O^\r\205\215\030T\322\302\377\330M\355\256j\214\036\235Bi\177gw\367\251e\231Ma\nM\333\353v\360\377\004\256\326~""\204:?\263\352>\032\313\270\316\324\245(\274\273\037\350\355\270\252\226zL\323F\026\205\016\t\212I\253\251\350r\335\264\013\272\355\330.\374\317D\205\n\246C\030\345tM\033\017jL*\315\325\024A\232\t\247;Tg\025\252\277<\357#\335n4\035\270Y\207\311!\253\241\300ji\367\013\243\356\027T\367\ru\3154\260Ju\007\t\274\014\214\273\215\344\3722\307\261\235\252Ek\002\235mP9z\0374\255\352r]a\002\032\221\262\251\233R\230\246\241ifC=5\370U\217\241\252<a\224zed\030MkP\200\327\360\"\252\347\260a\252\353\254\236%,\331\206k%\277\ng\372\325\024X\305L\323F_\230\021_v\202\217\333\320\034\373D\200B\02324\355\246\246\301\324\232^g\372K\201\315d6\302\251\206\t\347d\344\362\246\251\277\304aO\3718\256\235\274\373\212\\\313\245Vz\330;\363NF\251\315\317-\200,\2065SH\325f<I#\240\030\215\356@2\036\30187\036WJ|\247\244\301\262\203=\326\024\322\306\277\343\252\336I,k\n/\030\272Mx\227\341qv\231\300\323TcJ\034\034\216\222\357\246\252\270\350L\275\311\234M_\363\027\336d\336^\231\232Y\363Z~\306_\365[A&\236\376}\357^\217\366N<\335_\360s\330\277953\373F\364r\275m\177\311\337Ibf\377\330;F\302B<\375\301\033\331+N\346g\323k\376\025\237\252e\247\267\324+\305\263\037\366\\\257\344\225\337\316N\315|\342[\341VD#\247\277\330/\306\323\233\376\277\302\215\250\034U\372\227\372\271xz\335\337\n\254(\027\335\215~\216Z\252@\327\273\354=\360/\373_\006\367\002\026\336\013Yt/\242\361\354\242\227\363\212\277\375\231S$\346z3\275\203t\236\3652\336\212w\034d\336\336\230\232\271r6;\337\373\301s\375\222\277\037d\202\217C'Z\216\376\321_\210\347\257z\377\016\212A)\236_\364nx\324\353b\027\253\253\236\025\334\016\213gX\275\351\317\007\245\240|6\237\365f\375i\377Y\3608\250\206;\341\177\372\306\340\326\351\215\323\372\360\371\341\360\360\327\341\257tH+qv\305;\364\313g\331u\377:\"Kqvs\270Y\214\256\3663q\366#\377\257A-,\277\315N-\254x\337\371\217\302K\341\365\360I\364A\364z\360xp<\334+\307k\233\376\213\340\273\360nX\216\257\255\307k\037\371\305x\203\0043\301A\230\013\2131\271\001\030\007\341g\321\263~\251_>\273\270s=\374>\252\367i\277""\245R\357\373\257\303Rx\024u\007W\0064\336\310\007\255\360w\321\355\376_\006K\203R\274\274\022g\377\024\024\343\354\262\367\203\357*v\361\362\255p.Z\357\027Q\373h\320>-+^/\206/\016\343\354'\376\253p\025z-\242-\373I\237@\345\353\340yX\034n}3\374\246<,\357\017\367\217\206G\377\214\263K\336\243\340r\360 \274\034~\025\355\240\203\313W\275\327\301N\000@\033\020\276\254\346]\004\024's\340P\243\203 \227\014\336\003D\202\271p=*F\245\350\250\337\036\224\007\365Sz\232\224|\025,\252\022\037\373\324\357B\304?G\207\3752h\277:]=m\r\367\320\214_\206\277\030C\203\017\371\311\360\244\023/\347\320PT\313\004k\341b\370 \232C\327\263\013\211\302\237\342\234\215\233\301q\224\2117n\207\013\361\306&\376`\243\225k\211\261\227\327\324\017l\273\260\t\317w\303L\274\262\252\026g\024\3401\213\203\340\263p\027\026\326\023G\003\236Dk3@\376U\377\333A.^\203\316\301\367\241\031\265\373\373\203\314\331\354\002<I\341\303g\320\305\001\036\030\365\017\275\262\272<\264\327\362.\301\272\367\023\202w\001\r\027\247\0054sK\027\355\376\323\177\001\376<T\352";
-    PyObject *data = __Pyx_DecompressString(cstring, 1750, 1);
+    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (1421 bytes) */
+const char* const cstring = "x\332\225UMo\033E\030vDLB\372AK\212@H\225\306\022\301I\225\2725\224\026U!(MR\010R\277\022Rq\241\243\361\356\330\236fwf\2753\233\330\225\220z\334\243\217{\334c\216>\366\230#\307\036}\354O\310O\340\231\331\265\233RT\204\024\217\307\273\357\307\363\274\357\363\276\271K\356%\3556\217\311\241\340G\304W\\\023\251\014\341\375HiN\264\211\205\317\365&\223D\311`@\274\2303\303\t#\255\302\311t\231!B\023OI#:\211J4\021\222\204<T\361\240\001/\033\212i-:\222\030E\340\354_wq\n\013\233\2624*\003\037\305\302\260V\300K\203\002T;V\341\207|\205\364y\237\034\t\323%f\020qR/\237\233\230I\355h\274u)\314\340!b\356\031\342\213\220K-\224\324[\223\033Y\362-#\033\2400\332\016#3 \272\313\020\332$\021\300\265UL\274\201\351*\331`q\314\006;\357\207s\376:\211\"\025\033\356\357\310C\026\010\237\204\312\347\253\266\2660\346>\251{u\202Pu\304\263X\353\253\244\003\257\211q\221\021\345d}\340Y{\3408<\265\034T\233<T\250\226\253\376\246\003b!\373<\020-\036\243\216\250\222\355\034\222\270\026I\362x\373\361\365[?\334\"L\372\250\344s\244\327@\327\362\0024\007\035G\300V\"\002\203d\266\202\272Av\332d\240\022\"9`\242s\021\354\316:\230.\227Dsc/\244\356\312\315\014xS\270\013\331\251\227\245\023\207\334z\337g\201\346\215G\211q\211T\"}\244\224\023\r1\317\343\210\276\354h\356K\327~8AR\207<Fw\r\017\355o\325\262\260\033\353\365\225\237\230\357Si\013`\351\020\324\340f\037G\300\231F\006\t\325\242\236\360\017\222\320\325%\346\275\004p|<\t,(\264\247\301Z^a@%\013A\310Fb\332\343\350\244\354\2200A\244.\263\350\301O\303\002\321e\307t\327\316\010\335\272\0244\327\377\371x\242\257u_h\313\307\217\331\001\2277\320@\315\003}\303\342kD\203>wd;\036Y\266}\3578\305\331\222X\010\274o\2704n\234\246\252\002\231\302\305\267E\321\342\005'k?\222\233\357\351Q*h\241\315\222\300\020JA<\3618\245\304O\\]\245\222\327\241\215C\301\002\274\365\204\024\006/\213\352\256\273\312\265\231@\212\265b\366\375wx\276\377\314\nxJ\367\235\367\323\247\311\264\247,\010\224\347\026\210\205I|fX\343_\336\026\312\2671\312\375\003\243\003\251\216\344;\235\335\330\333\334""\331\331\016\002\021i\241)}<\350\343\263\005\321\323\207(\336.o\357\241\357\\z\334\316L\343\355\370\240\365\223L\264\220 \245\245\202Q&\207l\252\004\246\007\322\023\252\341\251X%\030\017\256[Ls\317\353\002\020\215\325\021\362\272\221\240tr\351pc\233c\177\302\234\n\214D\314<\336b\336\301Y\301y\230\002\343\365\3730\260'\202S\352[\354\264\320J\243\324J\3032\366\355PR\220,\272\004N\330#\\&\241\033v\036\307\370Sq[\304\332\264\003\326\321\320C\310L\271U(m'\322\263\000\001M\027$\205\360q\204v9\341\333\256O\033}J\262PW)\261@\204\302\200O\310\300\205b\223\3325j\027\031~(?\t\334\267\305Z\234\324\002.\301[\246\224\226'T\214\223\037\341HBW;\260Q\007\021\n\023\251\210R\314\003\365\272\334;\320x\355~\225`\355\325\025\300\335\022\031\t\357\000Y\267\345\304\356\320\375\313\260\014{\t\013\212tou?\275\025\023r\346\001X\343\332\021\332\330\022j\214\013\245\330i%`\334\312!r\367\022\314\231\373$\236S\253\255\224e^\326Bk\254x\230\305\260\345\2216\n\2378\361\214Ao\251k\024\245\206\333\023|P\201$\302,p\354\375\204\353\376\013\021U^W\356\235\324\306\237-\236\256V\252\363/M\332\034\317\177\232\366\336\314~\231\315e\275|f<\373u\376`ty\2644\372\363\344\341\353\335\275\323\371J\365\223\264\232>\031\317_L\237g3\331\325\234\3450\277\232=;\276=Z\034\375\372\252{\302N\027*\013\347\306\363\027\322gY3\373%\277\177\274:\nNV\376j\276\231\235+2\024\256\213\331V>\227\037\036\357\215\252\243\275W\013'\265\323\217+\325\213\010=;\217\014\373\303\332\360N\266\224\365\254yg\370d\030\346\315\374\347\343\346\361\306x\366\\\332|9s\372U\245\272\344\300}\363\352\302\311\263\327{\277Y\377s\351\265\341\306\360\217\274\226#\335\225\341/\331\375\2746F\3368]L7,\267\004\257\237\234\236\2674\346\322\336p\006N\005X\232md\277\347O\217\277;n\217`\211\034\343\363\227\206\325\341~V\313\232\343KW\340\267\237]\3137\306\347?\007\232\266\r\374_\204\336\314^p<\276\317\346\363\217\362o\363\335\2747\236\375b\210c!\255\245\315\364^\312R3l\016\267\340|%\333\315\342\374\262#\247\215\177\367.\332\r\375\320\310\304k\233\375\376\003\327""\356uB\226\213\006\223B\222\2206\275]L2\275SJ\202\336.'\244\360!\327V*\377\337g\371\003\030V*\245\261Q\024K\245b\027\013\256\305\303G\177\003\027~\316\201";
+    PyObject *data = __Pyx_DecompressString(cstring, 1421, 1);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #else /* compression: none (2834 bytes) */
-const char* const bytes = ": Buffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.arrayIndirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Unable to convert item to object.>')?add_note and  at 0xat least one sort column is requiredcollections.abccolumn_names and ascending must have the same length<contiguous and direct><contiguous and indirect>disabledraken/morsels/sort.pyxenablegc (got got differing extents in dimension isenableditemsize <= 0 for cython.arrayno default __reduce__ due to non-trivial __cinit__ object><strided and direct><strided and direct or indirect><strided and indirect>unable to allocate array data.unable to allocate shape and strides.ASCIIEllipsis__Pyx_PyDict_NextRefSequenceView.MemoryViewabcallocate_buffer__annotate__arrayascendingasyncio.coroutinesbasec__class____class_getitem__cline_in_tracebackcolumn_namescompresscount__dict__draken.morsels.sortdtype_is_objectencodeenumerateerrorflagsformatfortran__func____getstate__hitsiid__import__index_is_coroutineitemsitemsize__main__memviewmissesmode__module__morselmorsel_sortname__name__ndim__new__num_rowsobjpackpop__pyx_checksum__pyx_state__pyx_type__pyx_unpickle_Enum__pyx_vtable____qualname____reduce____reduce_cython____reduce_ex__register__set_name__setdefault__setstate____setstate_cython__shapesizestartstepstopstruct__test__unpackupdatevaluesvergesort_resetvergesort_statsx\000\200\001\340\004\031\230\021\200\001\360\006\000\005\030\220q\230\001\230\026\230q\240\001\330\004\013\2103\210a\210w""\220c\230\021\230!\200\001\360&\000\005\010\200s\210!\210>\230\023\230C\230q\240\001\330\010\016\210j\230\001\230\021\330\004\007\200t\2101\330\010\016\210j\230\001\230\021\340\004\030\230\006\230a\330\004\007\200r\210\023\210A\330\010\017\210u\220A\220Q\360\010\000\005\037\230l\250,\260a\260r\270\022\2701\330\004\035\230\\\250\034\260Q\260b\270\002\270!\330\004\032\230,\240l\260!\2602\260R\260q\330\004\007\200y\220\003\2205\230\003\2308\2403\240e\2503\250e\2603\260a\330\010\022\220!\2201\330\010\022\220!\2201\330\010\022\220!\2201\330\010\t\360\006\000\005\t\210\005\210U\220!\2201\330\010\020\220\001\220\025\220j\240\001\360$\000\005\006\340\010\014\210K\220u\230A\230S\240\001\240\036\250r\260\024\260T\270\021\330\014\027\220|\2401\240A\330\014\022\220$\220a\220y\240\001\240\021\330\014\026\220l\240)\2501\340\014\022\220&\230\014\240A\240Q\340\014\020\220\010\230\004\230H\240B\240f\250C\250\177\270d\300(\310$\310h\320VX\320X^\320^a\320ab\330\020\025\220X\230Q\340\020\032\230\"\230H\240A\330\020\035\320\0351\260\027\270\001\330\020\033\230;\240g\250Q\360\020\000\021\025\220G\230=\250\002\250\"\250D\260\007\260}\300B\300j\320PQ\330\030\035\230W\240G\2502\250Q\330\031\032\330\030\033\2301\330\034 \240\005\240U\250!\2501\330 $\240A\240U\250*\260H\270A\270Q\340\034 \240\005\240U\250!\2501\330 $\240A\240U\250\"\250J\260h\270a\270q\330\030\033\2304\230}\250A\250Z\260y\300\006\300a\330\034'\240q\250\n\260)\2706\300\023\300A\330\024\025\330\020#\2401\330\020\024\220K\230u\240A\240Q\330\024(\250\t\260\032\2701\270A\270Z\300v\310Q\310h\320VW\320WX\330\020\037\230z\250\026\250r\260\022\2602\260S\270\002\270!\330\020\033\230:\240V\2501\320,@\320@Q\320QS\320SZ\320Z[\330\020\023\220=\240\003\2405\250\003\2509\260C\260q\330\024\027\220}\240C\240q\330\030\034\230A\230Q\330\024\027\220y\240\003\2401\330\030\034\230A\230Q\330\024\025\330\020\034\230A\230U\240!\330\020\034\230A\330\020\024\220K\230u\240A\240Q\330\024 \240\t\250\032\2601\260A\260Z\270v\300Q\300h\310a\310q\330\024\027""\220z\240\022\2401\330\030\036\230a\230y\250\002\250+\260X\270Q\270a\270z\310\026\310q\320PX\320XY\320Yd\320dn\320nw\320wx\330\024!\240\021\330\024 \240\001\240\030\250\022\2505\260\t\270\021\330\020\021\330\031\032\330\030%\240Q\330\034&\240j\260\001\330\034)\250\021\330\034\035\330\034\035\360\006\000\025\031\230\001\230\021\330\024\030\230\001\230\021\360\010\000\021\035\230C\230y\250\001\330\025\026\330\024\030\230\005\230U\240!\2401\330\030\034\230A\230U\240*\250I\260Q\260c\270\022\2701\330\024\027\220t\230=\250\001\250\032\2609\270F\300!\330\030#\2401\240J\250i\260v\270S\300\001\340\010\021\220\025\220a\220u\230H\240C\240r\250\022\2501\330\010\r\210Q\330\010\016\210a\210q\220\002\220!\2204\220z\240\022\2402\240Q\330\010\017\210q\360\006\000\t\023\220!\2201\330\010\022\220!\2201\330\010\022\220!\2201O";
+    #else /* compression: none (2537 bytes) */
+const char* const bytes = ": Buffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.arrayIndirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Unable to convert item to object.>')?add_note and  at 0xat least one sort column is requiredcollections.abccolumn_names and ascending must have the same length<contiguous and direct><contiguous and indirect>disabledraken/morsels/sort.pyxenablegc (got got differing extents in dimension isenableditemsize <= 0 for cython.arrayno default __reduce__ due to non-trivial __cinit__ object>sort failed<strided and direct><strided and direct or indirect><strided and indirect>unable to allocate array data.unable to allocate shape and strides.unknown sort column ASCIIEllipsis__Pyx_PyDict_NextRefSequenceView.MemoryViewabcallocate_buffer__annotate__arrayascendingasyncio.coroutinesbasecchunk_rows__class____class_getitem__cline_in_tracebackcolumn_namescountcxx_incxx_out__dict__draken.morsels.sortdtype_is_objectencodeenumerateerrerrorfirstflagsformatfortran__func____getstate__iid__import__index_is_coroutineitemsitemsizelimitm__main__memviewmode__module__morselmorsel_sortmorselsname__name__ndim__new__num_rowsobjokpackpop__pyx_checksum__pyx_state__pyx_type__pyx_unpickle_Enum__pyx_vtable____qualname____reduce____reduce_cython____reduce_ex__registerresult__set_name__setdefault__setstate____setstate_cython__shapesizesort_morselsspecstartstepstopstructtake_first__test__unpackupdatevaluesxzip\000\320\000B\300!\330\022\023\360,\000\005\010\200t\2101""\330\010\017\210q\340\004\030\230\007\230q\240\001\330\004$\240M\260\021\260%\260}\300N\320RS\360\010\000\005\t\210\005\210Q\330\010\016\210j\230\001\230\035\240a\240q\340\004\035\230^\2506\260\023\260J\270h\300a\360\n\000\n\013\330\010\r\210^\2301\230H\240F\250,\260l\300)\3101\340\004\007\200t\2101\330\010\016\210j\230\001\230\023\230D\240\007\240v\250S\260\005\260S\270\n\300!\360\006\000\005\016\210Q\330\004\010\210\005\210U\220!\2207\230%\230q\330\010\016\210g\220Q\220m\2401\240G\2501\250A\330\004\013\2101\200\001\360\032\000\005%\240M\260\021\260&\270\r\300^\320ST\360\006\000\005\013\210*\220A\220]\240!\2401\340\004\024\220H\230F\240!\330\004\007\200r\210\023\210A\330\010\017\210u\220A\220Q\360\014\000\005\t\210\007\210q\220\001\360\006\000\n\013\330\010\r\210_\230A\230X\240V\2503\250f\260A\330\010\013\2101\330\014\020\220\005\220U\230!\2301\330\020\024\220A\220U\230*\240A\330\014\025\220Q\220f\230F\240!\340\004\007\200t\2101\330\010\016\210j\230\001\230\023\230D\240\007\240v\250S\260\005\260S\270\n\300!\340\004\r\210U\220!\2205\230\010\240\003\2402\240R\240q\330\004\027\220q\330\004\n\210!\2101\210B\210a\210t\2201\220D\230\001\230\024\230R\230r\240\021\330\004\013\2101std::shared_ptr<CxxMorsel>  (struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)\000struct __pyx_obj_6draken_7morsels_6morsel_Morsel *(std::shared_ptr<CxxMorsel> )\000morsel_to_cxx\000cxx_to_morselO";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif
     PyObject **stringtab = __pyx_mstate->__pyx_string_tab;
     Py_ssize_t pos = 0;
-    for (int i = 0; i < 124; i++) {
+    for (int i = 0; i < 135; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyUnicode_DecodeUTF8(bytes + pos, bytes_length, NULL);
-      if (likely(string) && i >= 44) PyUnicode_InternInPlace(&string);
+      if (likely(string) && i >= 46) PyUnicode_InternInPlace(&string);
       if (unlikely(!string)) {
         Py_XDECREF(data);
         __PYX_ERR(0, 1, __pyx_L1_error)
@@ -20379,7 +20198,7 @@ const char* const bytes = ": Buffer view does not expose stridesCan only create 
       stringtab[i] = string;
       pos += bytes_length;
     }
-    for (int i = 124; i < 129; i++) {
+    for (int i = 135; i < 140; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyBytes_FromStringAndSize(bytes + pos, bytes_length);
       stringtab[i] = string;
@@ -20390,14 +20209,14 @@ const char* const bytes = ": Buffer view does not expose stridesCan only create 
       }
     }
     Py_XDECREF(data);
-    for (Py_ssize_t i = 0; i < 129; i++) {
+    for (Py_ssize_t i = 0; i < 140; i++) {
       if (unlikely(PyObject_Hash(stringtab[i]) == -1)) {
         __PYX_ERR(0, 1, __pyx_L1_error)
       }
     }
     #if CYTHON_IMMORTAL_CONSTANTS
     {
-      PyObject **table = stringtab + 124;
+      PyObject **table = stringtab + 135;
       for (Py_ssize_t i=0; i<5; ++i) {
         #if PY_VERSION_HEX >= 0x030F0000
         PyUnstable_SetImmortal(table[i]);
@@ -20457,10 +20276,10 @@ const char* const bytes = ": Buffer view does not expose stridesCan only create 
 }
 /* #### Code section: init_codeobjects ### */
 typedef struct {
-    unsigned int argcount : 2;
+    unsigned int argcount : 3;
     unsigned int num_posonly_args : 1;
     unsigned int num_kwonly_args : 1;
-    unsigned int nlocals : 2;
+    unsigned int nlocals : 4;
     unsigned int flags : 10;
     unsigned int first_line : 8;
 } __Pyx_PyCode_New_function_description;
@@ -20479,19 +20298,14 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   PyObject* tuple_dedup_map = PyDict_New();
   if (unlikely(!tuple_dedup_map)) return -1;
   {
-    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 120};
-    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_hits, __pyx_mstate->__pyx_n_u_misses};
-    __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_morsels_sort_pyx, __pyx_mstate->__pyx_n_u_vergesort_stats, __pyx_mstate->__pyx_kp_b_iso88591_q_q_3awc, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
+    const __Pyx_PyCode_New_function_description descr = {5, 0, 0, 15, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 103};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_morsels, __pyx_mstate->__pyx_n_u_column_names, __pyx_mstate->__pyx_n_u_ascending, __pyx_mstate->__pyx_n_u_limit, __pyx_mstate->__pyx_n_u_chunk_rows, __pyx_mstate->__pyx_n_u_first, __pyx_mstate->__pyx_n_u_spec, __pyx_mstate->__pyx_n_u_cxx_in, __pyx_mstate->__pyx_n_u_m, __pyx_mstate->__pyx_n_u_take_first, __pyx_mstate->__pyx_n_u_cxx_out, __pyx_mstate->__pyx_n_u_err, __pyx_mstate->__pyx_n_u_ok, __pyx_mstate->__pyx_n_u_i, __pyx_mstate->__pyx_n_u_result};
+    __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_morsels_sort_pyx, __pyx_mstate->__pyx_n_u_sort_morsels, __pyx_mstate->__pyx_kp_b_iso88591_B_t1_q_q_M_NRS_Q_j_aq_6_Jha_1HF, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 0, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 127};
-    PyObject* const varnames[] = {0};
-    __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_morsels_sort_pyx, __pyx_mstate->__pyx_n_u_vergesort_reset, __pyx_mstate->__pyx_kp_b_iso88591__8, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
-  }
-  {
-    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 199};
+    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 155};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_column_names, __pyx_mstate->__pyx_n_u_ascending};
-    __pyx_mstate_global->__pyx_codeobj_tab[2] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_morsels_sort_pyx, __pyx_mstate->__pyx_n_u_morsel_sort, __pyx_mstate->__pyx_kp_b_iso88591_s_Cq_j_t1_j_a_r_A_uAQ_l_ar_1_Qb, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[2])) goto bad;
+    __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_morsels_sort_pyx, __pyx_mstate->__pyx_n_u_morsel_sort, __pyx_mstate->__pyx_kp_b_iso88591_M_ST_A_1_HF_r_A_uAQ_q__AXV3fA_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }
   Py_DECREF(tuple_dedup_map);
   return 0;
@@ -20574,6 +20388,155 @@ end:
     return (__Pyx_RefNannyAPIStruct *)r;
 }
 #endif
+
+/* PyErrExceptionMatches (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+static int __Pyx_PyErr_ExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
+    Py_ssize_t i, n;
+    n = PyTuple_GET_SIZE(tuple);
+    for (i=0; i<n; i++) {
+        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
+    }
+    for (i=0; i<n; i++) {
+        if (__Pyx_PyErr_GivenExceptionMatches(exc_type, PyTuple_GET_ITEM(tuple, i))) return 1;
+    }
+    return 0;
+}
+static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err) {
+    int result;
+    PyObject *exc_type;
+#if PY_VERSION_HEX >= 0x030C00A6
+    PyObject *current_exception = tstate->current_exception;
+    if (unlikely(!current_exception)) return 0;
+    exc_type = (PyObject*) Py_TYPE(current_exception);
+    if (exc_type == err) return 1;
+#else
+    exc_type = tstate->curexc_type;
+    if (exc_type == err) return 1;
+    if (unlikely(!exc_type)) return 0;
+#endif
+    #if CYTHON_AVOID_BORROWED_REFS
+    Py_INCREF(exc_type);
+    #endif
+    if (unlikely(PyTuple_Check(err))) {
+        result = __Pyx_PyErr_ExceptionMatchesTuple(exc_type, err);
+    } else {
+        result = __Pyx_PyErr_GivenExceptionMatches(exc_type, err);
+    }
+    #if CYTHON_AVOID_BORROWED_REFS
+    Py_DECREF(exc_type);
+    #endif
+    return result;
+}
+#endif
+
+/* PyErrFetchRestore (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb) {
+#if PY_VERSION_HEX >= 0x030C00A6
+    PyObject *tmp_value;
+    assert(type == NULL || (value != NULL && type == (PyObject*) Py_TYPE(value)));
+    if (value) {
+        #if CYTHON_COMPILING_IN_CPYTHON
+        if (unlikely(((PyBaseExceptionObject*) value)->traceback != tb))
+        #endif
+            PyException_SetTraceback(value, tb);
+    }
+    tmp_value = tstate->current_exception;
+    tstate->current_exception = value;
+    Py_XDECREF(tmp_value);
+    Py_XDECREF(type);
+    Py_XDECREF(tb);
+#else
+    PyObject *tmp_type, *tmp_value, *tmp_tb;
+    tmp_type = tstate->curexc_type;
+    tmp_value = tstate->curexc_value;
+    tmp_tb = tstate->curexc_traceback;
+    tstate->curexc_type = type;
+    tstate->curexc_value = value;
+    tstate->curexc_traceback = tb;
+    Py_XDECREF(tmp_type);
+    Py_XDECREF(tmp_value);
+    Py_XDECREF(tmp_tb);
+#endif
+}
+static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb) {
+#if PY_VERSION_HEX >= 0x030C00A6
+    PyObject* exc_value;
+    exc_value = tstate->current_exception;
+    tstate->current_exception = 0;
+    *value = exc_value;
+    *type = NULL;
+    *tb = NULL;
+    if (exc_value) {
+        *type = (PyObject*) Py_TYPE(exc_value);
+        Py_INCREF(*type);
+        #if CYTHON_COMPILING_IN_CPYTHON
+        *tb = ((PyBaseExceptionObject*) exc_value)->traceback;
+        Py_XINCREF(*tb);
+        #else
+        *tb = PyException_GetTraceback(exc_value);
+        #endif
+    }
+#else
+    *type = tstate->curexc_type;
+    *value = tstate->curexc_value;
+    *tb = tstate->curexc_traceback;
+    tstate->curexc_type = 0;
+    tstate->curexc_value = 0;
+    tstate->curexc_traceback = 0;
+#endif
+}
+#endif
+
+/* PyObjectGetAttrStr (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_USE_TYPE_SLOTS
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name) {
+    PyTypeObject* tp = Py_TYPE(obj);
+    if (likely(tp->tp_getattro))
+        return tp->tp_getattro(obj, attr_name);
+    return PyObject_GetAttr(obj, attr_name);
+}
+#endif
+
+/* PyObjectGetAttrStrNoError (used by GetBuiltinName) */
+#if __PYX_LIMITED_VERSION_HEX < 0x030d0000
+static void __Pyx_PyObject_GetAttrStr_ClearAttributeError(void) {
+    __Pyx_PyThreadState_declare
+    __Pyx_PyThreadState_assign
+    if (likely(__Pyx_PyErr_ExceptionMatches(PyExc_AttributeError)))
+        __Pyx_PyErr_Clear();
+}
+#endif
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name) {
+    PyObject *result;
+#if __PYX_LIMITED_VERSION_HEX >= 0x030d0000
+    (void) PyObject_GetOptionalAttr(obj, attr_name, &result);
+    return result;
+#else
+#if CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_TYPE_SLOTS
+    PyTypeObject* tp = Py_TYPE(obj);
+    if (likely(tp->tp_getattro == PyObject_GenericGetAttr)) {
+        return _PyObject_GenericGetAttrWithDict(obj, attr_name, NULL, 1);
+    }
+#endif
+    result = __Pyx_PyObject_GetAttrStr(obj, attr_name);
+    if (unlikely(!result)) {
+        __Pyx_PyObject_GetAttrStr_ClearAttributeError();
+    }
+    return result;
+#endif
+}
+
+/* GetBuiltinName */
+static PyObject *__Pyx_GetBuiltinName(PyObject *name) {
+    PyObject* result = __Pyx_PyObject_GetAttrStrNoError(__pyx_mstate_global->__pyx_b, name);
+    if (unlikely(!result) && !PyErr_Occurred()) {
+        PyErr_Format(PyExc_NameError,
+            "name '%U' is not defined", name);
+    }
+    return result;
+}
 
 /* TupleAndListFromArray (used by fastcall) */
 #if !CYTHON_COMPILING_IN_CPYTHON && CYTHON_METH_FASTCALL
@@ -20936,16 +20899,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_CallOneArg(PyObject *func, PyObjec
     PyObject *args[2] = {NULL, arg};
     return __Pyx_PyObject_FastCall(func, args+1, 1 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
 }
-
-/* PyObjectGetAttrStr (used by UnpackUnboundCMethod) */
-#if CYTHON_USE_TYPE_SLOTS
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name) {
-    PyTypeObject* tp = Py_TYPE(obj);
-    if (likely(tp->tp_getattro))
-        return tp->tp_getattro(obj, attr_name);
-    return PyObject_GetAttr(obj, attr_name);
-}
-#endif
 
 /* UnpackUnboundCMethod (used by CallUnboundCMethod0) */
 #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030C0000
@@ -21660,145 +21613,6 @@ static int __Pyx__ArgTypeTest(PyObject *obj, PyTypeObject *type, const char *nam
     __Pyx_DECREF_TypeName(type_name);
     __Pyx_DECREF_TypeName(obj_type_name);
     return 0;
-}
-
-/* PyErrExceptionMatches (used by PyObjectGetAttrStrNoError) */
-#if CYTHON_FAST_THREAD_STATE
-static int __Pyx_PyErr_ExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
-    Py_ssize_t i, n;
-    n = PyTuple_GET_SIZE(tuple);
-    for (i=0; i<n; i++) {
-        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
-    }
-    for (i=0; i<n; i++) {
-        if (__Pyx_PyErr_GivenExceptionMatches(exc_type, PyTuple_GET_ITEM(tuple, i))) return 1;
-    }
-    return 0;
-}
-static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err) {
-    int result;
-    PyObject *exc_type;
-#if PY_VERSION_HEX >= 0x030C00A6
-    PyObject *current_exception = tstate->current_exception;
-    if (unlikely(!current_exception)) return 0;
-    exc_type = (PyObject*) Py_TYPE(current_exception);
-    if (exc_type == err) return 1;
-#else
-    exc_type = tstate->curexc_type;
-    if (exc_type == err) return 1;
-    if (unlikely(!exc_type)) return 0;
-#endif
-    #if CYTHON_AVOID_BORROWED_REFS
-    Py_INCREF(exc_type);
-    #endif
-    if (unlikely(PyTuple_Check(err))) {
-        result = __Pyx_PyErr_ExceptionMatchesTuple(exc_type, err);
-    } else {
-        result = __Pyx_PyErr_GivenExceptionMatches(exc_type, err);
-    }
-    #if CYTHON_AVOID_BORROWED_REFS
-    Py_DECREF(exc_type);
-    #endif
-    return result;
-}
-#endif
-
-/* PyErrFetchRestore (used by PyObjectGetAttrStrNoError) */
-#if CYTHON_FAST_THREAD_STATE
-static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb) {
-#if PY_VERSION_HEX >= 0x030C00A6
-    PyObject *tmp_value;
-    assert(type == NULL || (value != NULL && type == (PyObject*) Py_TYPE(value)));
-    if (value) {
-        #if CYTHON_COMPILING_IN_CPYTHON
-        if (unlikely(((PyBaseExceptionObject*) value)->traceback != tb))
-        #endif
-            PyException_SetTraceback(value, tb);
-    }
-    tmp_value = tstate->current_exception;
-    tstate->current_exception = value;
-    Py_XDECREF(tmp_value);
-    Py_XDECREF(type);
-    Py_XDECREF(tb);
-#else
-    PyObject *tmp_type, *tmp_value, *tmp_tb;
-    tmp_type = tstate->curexc_type;
-    tmp_value = tstate->curexc_value;
-    tmp_tb = tstate->curexc_traceback;
-    tstate->curexc_type = type;
-    tstate->curexc_value = value;
-    tstate->curexc_traceback = tb;
-    Py_XDECREF(tmp_type);
-    Py_XDECREF(tmp_value);
-    Py_XDECREF(tmp_tb);
-#endif
-}
-static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb) {
-#if PY_VERSION_HEX >= 0x030C00A6
-    PyObject* exc_value;
-    exc_value = tstate->current_exception;
-    tstate->current_exception = 0;
-    *value = exc_value;
-    *type = NULL;
-    *tb = NULL;
-    if (exc_value) {
-        *type = (PyObject*) Py_TYPE(exc_value);
-        Py_INCREF(*type);
-        #if CYTHON_COMPILING_IN_CPYTHON
-        *tb = ((PyBaseExceptionObject*) exc_value)->traceback;
-        Py_XINCREF(*tb);
-        #else
-        *tb = PyException_GetTraceback(exc_value);
-        #endif
-    }
-#else
-    *type = tstate->curexc_type;
-    *value = tstate->curexc_value;
-    *tb = tstate->curexc_traceback;
-    tstate->curexc_type = 0;
-    tstate->curexc_value = 0;
-    tstate->curexc_traceback = 0;
-#endif
-}
-#endif
-
-/* PyObjectGetAttrStrNoError (used by GetBuiltinName) */
-#if __PYX_LIMITED_VERSION_HEX < 0x030d0000
-static void __Pyx_PyObject_GetAttrStr_ClearAttributeError(void) {
-    __Pyx_PyThreadState_declare
-    __Pyx_PyThreadState_assign
-    if (likely(__Pyx_PyErr_ExceptionMatches(PyExc_AttributeError)))
-        __Pyx_PyErr_Clear();
-}
-#endif
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name) {
-    PyObject *result;
-#if __PYX_LIMITED_VERSION_HEX >= 0x030d0000
-    (void) PyObject_GetOptionalAttr(obj, attr_name, &result);
-    return result;
-#else
-#if CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_TYPE_SLOTS
-    PyTypeObject* tp = Py_TYPE(obj);
-    if (likely(tp->tp_getattro == PyObject_GenericGetAttr)) {
-        return _PyObject_GenericGetAttrWithDict(obj, attr_name, NULL, 1);
-    }
-#endif
-    result = __Pyx_PyObject_GetAttrStr(obj, attr_name);
-    if (unlikely(!result)) {
-        __Pyx_PyObject_GetAttrStr_ClearAttributeError();
-    }
-    return result;
-#endif
-}
-
-/* GetBuiltinName */
-static PyObject *__Pyx_GetBuiltinName(PyObject *name) {
-    PyObject* result = __Pyx_PyObject_GetAttrStrNoError(__pyx_mstate_global->__pyx_b, name);
-    if (unlikely(!result) && !PyErr_Occurred()) {
-        PyErr_Format(PyExc_NameError,
-            "name '%U' is not defined", name);
-    }
-    return result;
 }
 
 /* RaiseException */
@@ -23322,6 +23136,123 @@ static CYTHON_INLINE long __Pyx_div_long(long a, long b, int b_is_constant) {
     return q - adapt_python;
 }
 
+/* IterFinish */
+static CYTHON_INLINE int __Pyx_IterFinish(void) {
+    PyObject* exc_type;
+    __Pyx_PyThreadState_declare
+    __Pyx_PyThreadState_assign
+    exc_type = __Pyx_PyErr_CurrentExceptionType();
+    if (unlikely(exc_type)) {
+        if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration)))
+            return -1;
+        __Pyx_PyErr_Clear();
+        return 0;
+    }
+    return 0;
+}
+
+/* UnpackItemEndCheck */
+static int __Pyx_IternextUnpackEndCheck(PyObject *retval, Py_ssize_t expected) {
+    if (unlikely(retval)) {
+        Py_DECREF(retval);
+        __Pyx_RaiseTooManyValuesError(expected);
+        return -1;
+    }
+    return __Pyx_IterFinish();
+}
+
+/* PyObjectCall2Args (used by CallUnboundCMethod1) */
+static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2) {
+    PyObject *args[3] = {NULL, arg1, arg2};
+    return __Pyx_PyObject_FastCall(function, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
+}
+
+/* CallUnboundCMethod1 */
+#if CYTHON_COMPILING_IN_CPYTHON
+static CYTHON_INLINE PyObject* __Pyx_CallUnboundCMethod1(__Pyx_CachedCFunction* cfunc, PyObject* self, PyObject* arg) {
+    int was_initialized =  __Pyx_CachedCFunction_GetAndSetInitializing(cfunc);
+    if (likely(was_initialized == 2 && cfunc->func)) {
+        int flag = cfunc->flag;
+        if (flag == METH_O) {
+            return __Pyx_CallCFunction(cfunc, self, arg);
+        } else if (flag == METH_FASTCALL) {
+            return __Pyx_CallCFunctionFast(cfunc, self, &arg, 1);
+        } else if (flag == (METH_FASTCALL | METH_KEYWORDS)) {
+            return __Pyx_CallCFunctionFastWithKeywords(cfunc, self, &arg, 1, NULL);
+        }
+    }
+#if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
+    else if (unlikely(was_initialized == 1)) {
+        __Pyx_CachedCFunction tmp_cfunc = {
+#ifndef __cplusplus
+            0
+#endif
+        };
+        tmp_cfunc.type = cfunc->type;
+        tmp_cfunc.method_name = cfunc->method_name;
+        return __Pyx__CallUnboundCMethod1(&tmp_cfunc, self, arg);
+    }
+#endif
+    PyObject* result = __Pyx__CallUnboundCMethod1(cfunc, self, arg);
+    __Pyx_CachedCFunction_SetFinishedInitializing(cfunc);
+    return result;
+}
+#endif
+static PyObject* __Pyx__CallUnboundCMethod1(__Pyx_CachedCFunction* cfunc, PyObject* self, PyObject* arg){
+    PyObject *result = NULL;
+    if (unlikely(!cfunc->func && !cfunc->method) && unlikely(__Pyx_TryUnpackUnboundCMethod(cfunc) < 0)) return NULL;
+#if CYTHON_COMPILING_IN_CPYTHON
+    if (cfunc->func && (cfunc->flag & METH_VARARGS)) {
+        PyObject *args = PyTuple_New(1);
+        if (unlikely(!args)) return NULL;
+        Py_INCREF(arg);
+        PyTuple_SET_ITEM(args, 0, arg);
+        if (cfunc->flag & METH_KEYWORDS)
+            result = __Pyx_CallCFunctionWithKeywords(cfunc, self, args, NULL);
+        else
+            result = __Pyx_CallCFunction(cfunc, self, args);
+        Py_DECREF(args);
+    } else
+#endif
+    {
+        result = __Pyx_PyObject_Call2Args(cfunc->method, self, arg);
+    }
+    return result;
+}
+
+/* decode_c_string */
+static CYTHON_INLINE PyObject* __Pyx_decode_c_string(
+         const char* cstring, Py_ssize_t start, Py_ssize_t stop,
+         const char* encoding, const char* errors,
+         PyObject* (*decode_func)(const char *s, Py_ssize_t size, const char *errors)) {
+    Py_ssize_t length;
+    if (unlikely((start < 0) | (stop < 0))) {
+        size_t slen = strlen(cstring);
+        if (unlikely(slen > (size_t) PY_SSIZE_T_MAX)) {
+            PyErr_SetString(PyExc_OverflowError,
+                            "c-string too long to convert to Python");
+            return NULL;
+        }
+        length = (Py_ssize_t) slen;
+        if (start < 0) {
+            start += length;
+            if (start < 0)
+                start = 0;
+        }
+        if (stop < 0)
+            stop += length;
+    }
+    if (unlikely(stop <= start))
+        return __Pyx_NewRef(__pyx_mstate_global->__pyx_empty_unicode);
+    length = stop - start;
+    cstring += start;
+    if (decode_func) {
+        return decode_func(cstring, length, errors);
+    } else {
+        return PyUnicode_Decode(cstring, length, encoding, errors);
+    }
+}
+
 /* AllocateExtensionType */
 static PyObject *__Pyx_AllocateExtensionType(PyTypeObject *t, int is_final) {
     if (is_final || likely(!__Pyx_PyType_HasFeature(t, Py_TPFLAGS_IS_ABSTRACT))) {
@@ -24149,6 +24080,62 @@ static PyTypeObject *__Pyx_ImportType_3_2_9(PyObject *module, const char *module
 bad:
     Py_XDECREF(result);
     return NULL;
+}
+#endif
+
+/* PxdImportShared (used by FunctionImport) */
+#ifndef __PYX_HAVE_RT_ImportFromPxd_3_2_9
+#define __PYX_HAVE_RT_ImportFromPxd_3_2_9
+static int __Pyx_ImportFromPxd_3_2_9(PyObject *module, const char *name, void **p, const char *sig, const char *what) {
+    PyObject *d = 0;
+    PyObject *cobj = 0;
+    d = PyObject_GetAttrString(module, "__pyx_capi__");
+    if (!d)
+        goto bad;
+#if (defined(Py_LIMITED_API) && Py_LIMITED_API >= 0x030d0000) || (!defined(Py_LIMITED_API) && PY_VERSION_HEX >= 0x030d0000)
+    PyDict_GetItemStringRef(d, name, &cobj);
+#else
+    cobj = PyDict_GetItemString(d, name);
+    Py_XINCREF(cobj);
+#endif
+    if (!cobj) {
+        PyErr_Format(PyExc_ImportError,
+            "%.200s does not export expected C %.8s %.200s",
+                PyModule_GetName(module), what, name);
+        goto bad;
+    }
+    if (!PyCapsule_IsValid(cobj, sig)) {
+        PyErr_Format(PyExc_TypeError,
+            "C %.8s %.200s.%.200s has wrong signature (expected %.500s, got %.500s)",
+             what, PyModule_GetName(module), name, sig, PyCapsule_GetName(cobj));
+        goto bad;
+    }
+    *p = PyCapsule_GetPointer(cobj, sig);
+    if (!(*p))
+        goto bad;
+    Py_DECREF(d);
+    Py_DECREF(cobj);
+    return 0;
+bad:
+    Py_XDECREF(d);
+    Py_XDECREF(cobj);
+    return -1;
+}
+#endif
+
+/* FunctionImport */
+#ifndef __PYX_HAVE_RT_ImportFunction_3_2_9
+#define __PYX_HAVE_RT_ImportFunction_3_2_9
+static int __Pyx_ImportFunction_3_2_9(PyObject *module, const char *funcname, void (**f)(void), const char *sig) {
+    union {
+        void (*fp)(void);
+        void *p;
+    } tmp;
+    int result = __Pyx_ImportFromPxd_3_2_9(module, funcname, &tmp.p, sig, "function");
+    if (result == 0) {
+        *f = tmp.fp;
+    }
+    return result;
 }
 #endif
 
@@ -27009,29 +26996,6 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   }
   
 /* ObjectToMemviewSlice */
-  static CYTHON_INLINE __Pyx_memviewslice __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(PyObject *obj, int writable_flag) {
-      __Pyx_memviewslice result = __Pyx_MEMSLICE_INIT;
-      __Pyx_BufFmt_StackElem stack[1];
-      int axes_specs[] = { (__Pyx_MEMVIEW_DIRECT | __Pyx_MEMVIEW_CONTIG) };
-      int retcode;
-      if (obj == Py_None) {
-          result.memview = (struct __pyx_memoryview_obj *) Py_None;
-          return result;
-      }
-      retcode = __Pyx_ValidateAndInit_memviewslice(axes_specs, __Pyx_IS_C_CONTIG,
-                                                   (PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) | writable_flag, 1,
-                                                   &__Pyx_TypeInfo_nn_int64_t, stack,
-                                                   &result, obj);
-      if (unlikely(retcode == -1))
-          goto __pyx_fail;
-      return result;
-  __pyx_fail:
-      result.memview = NULL;
-      result.data = NULL;
-      return result;
-  }
-  
-/* ObjectToMemviewSlice */
   static CYTHON_INLINE __Pyx_memviewslice __Pyx_PyObject_to_MemoryviewSlice_dc_int(PyObject *obj, int writable_flag) {
       __Pyx_memviewslice result = __Pyx_MEMSLICE_INIT;
       __Pyx_BufFmt_StackElem stack[1];
@@ -27124,6 +27088,256 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return new_mvs;
   }
   
+/* CIntFromPy */
+  static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *x) {
+  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wconversion"
+  #endif
+      const size_t neg_one = (size_t) -1, const_zero = (size_t) 0;
+  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+  #pragma GCC diagnostic pop
+  #endif
+      const int is_unsigned = neg_one > const_zero;
+      if (unlikely(!PyLong_Check(x))) {
+          size_t val;
+          PyObject *tmp = __Pyx_PyNumber_Long(x);
+          if (!tmp) return (size_t) -1;
+          val = __Pyx_PyLong_As_size_t(tmp);
+          Py_DECREF(tmp);
+          return val;
+      }
+      if (is_unsigned) {
+  #if CYTHON_USE_PYLONG_INTERNALS
+          if (unlikely(__Pyx_PyLong_IsNeg(x))) {
+              goto raise_neg_overflow;
+          } else if (__Pyx_PyLong_IsCompact(x)) {
+              __PYX_VERIFY_RETURN_INT(size_t, __Pyx_compact_upylong, __Pyx_PyLong_CompactValueUnsigned(x))
+          } else {
+              const digit* digits = __Pyx_PyLong_Digits(x);
+              assert(__Pyx_PyLong_DigitCount(x) > 1);
+              switch (__Pyx_PyLong_DigitCount(x)) {
+                  case 2:
+                      if ((8 * sizeof(size_t) > 1 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) >= 2 * PyLong_SHIFT)) {
+                              return (size_t) (((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
+                          }
+                      }
+                      break;
+                  case 3:
+                      if ((8 * sizeof(size_t) > 2 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) >= 3 * PyLong_SHIFT)) {
+                              return (size_t) (((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
+                          }
+                      }
+                      break;
+                  case 4:
+                      if ((8 * sizeof(size_t) > 3 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) >= 4 * PyLong_SHIFT)) {
+                              return (size_t) (((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
+                          }
+                      }
+                      break;
+              }
+          }
+  #endif
+  #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A7
+          if (unlikely(Py_SIZE(x) < 0)) {
+              goto raise_neg_overflow;
+          }
+  #else
+          {
+              int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
+              if (unlikely(result < 0))
+                  return (size_t) -1;
+              if (unlikely(result == 1))
+                  goto raise_neg_overflow;
+          }
+  #endif
+          if ((sizeof(size_t) <= sizeof(unsigned long))) {
+              __PYX_VERIFY_RETURN_INT_EXC(size_t, unsigned long, PyLong_AsUnsignedLong(x))
+          } else if ((sizeof(size_t) <= sizeof(unsigned PY_LONG_LONG))) {
+              __PYX_VERIFY_RETURN_INT_EXC(size_t, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
+          }
+      } else {
+  #if CYTHON_USE_PYLONG_INTERNALS
+          if (__Pyx_PyLong_IsCompact(x)) {
+              __PYX_VERIFY_RETURN_INT(size_t, __Pyx_compact_pylong, __Pyx_PyLong_CompactValue(x))
+          } else {
+              const digit* digits = __Pyx_PyLong_Digits(x);
+              assert(__Pyx_PyLong_DigitCount(x) > 1);
+              switch (__Pyx_PyLong_SignedDigitCount(x)) {
+                  case -2:
+                      if ((8 * sizeof(size_t) - 1 > 1 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
+                              return (size_t) (((size_t)-1)*(((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                          }
+                      }
+                      break;
+                  case 2:
+                      if ((8 * sizeof(size_t) > 1 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
+                              return (size_t) ((((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                          }
+                      }
+                      break;
+                  case -3:
+                      if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
+                              return (size_t) (((size_t)-1)*(((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                          }
+                      }
+                      break;
+                  case 3:
+                      if ((8 * sizeof(size_t) > 2 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
+                              return (size_t) ((((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                          }
+                      }
+                      break;
+                  case -4:
+                      if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) - 1 > 4 * PyLong_SHIFT)) {
+                              return (size_t) (((size_t)-1)*(((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                          }
+                      }
+                      break;
+                  case 4:
+                      if ((8 * sizeof(size_t) > 3 * PyLong_SHIFT)) {
+                          if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                              __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                          } else if ((8 * sizeof(size_t) - 1 > 4 * PyLong_SHIFT)) {
+                              return (size_t) ((((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                          }
+                      }
+                      break;
+              }
+          }
+  #endif
+          if ((sizeof(size_t) <= sizeof(long))) {
+              __PYX_VERIFY_RETURN_INT_EXC(size_t, long, PyLong_AsLong(x))
+          } else if ((sizeof(size_t) <= sizeof(PY_LONG_LONG))) {
+              __PYX_VERIFY_RETURN_INT_EXC(size_t, PY_LONG_LONG, PyLong_AsLongLong(x))
+          }
+      }
+      {
+          size_t val;
+          int ret = -1;
+  #if PY_VERSION_HEX >= 0x030d00A6 && !CYTHON_COMPILING_IN_LIMITED_API
+          Py_ssize_t bytes_copied = PyLong_AsNativeBytes(
+              x, &val, sizeof(val), Py_ASNATIVEBYTES_NATIVE_ENDIAN | (is_unsigned ? Py_ASNATIVEBYTES_UNSIGNED_BUFFER | Py_ASNATIVEBYTES_REJECT_NEGATIVE : 0));
+          if (unlikely(bytes_copied == -1)) {
+          } else if (unlikely(bytes_copied > (Py_ssize_t) sizeof(val))) {
+              goto raise_overflow;
+          } else {
+              ret = 0;
+          }
+  #elif PY_VERSION_HEX < 0x030d0000 && !(CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API) || defined(_PyLong_AsByteArray)
+          int one = 1; int is_little = (int)*(unsigned char *)&one;
+          unsigned char *bytes = (unsigned char *)&val;
+          ret = _PyLong_AsByteArray((PyLongObject *)x,
+                                      bytes, sizeof(val),
+                                      is_little, !is_unsigned);
+  #else
+          PyObject *v;
+          PyObject *stepval = NULL, *mask = NULL, *shift = NULL;
+          int bits, remaining_bits, is_negative = 0;
+          int chunk_size = (sizeof(long) < 8) ? 30 : 62;
+          if (likely(PyLong_CheckExact(x))) {
+              v = __Pyx_NewRef(x);
+          } else {
+              v = PyNumber_Long(x);
+              if (unlikely(!v)) return (size_t) -1;
+              assert(PyLong_CheckExact(v));
+          }
+          {
+              int result = PyObject_RichCompareBool(v, Py_False, Py_LT);
+              if (unlikely(result < 0)) {
+                  Py_DECREF(v);
+                  return (size_t) -1;
+              }
+              is_negative = result == 1;
+          }
+          if (is_unsigned && unlikely(is_negative)) {
+              Py_DECREF(v);
+              goto raise_neg_overflow;
+          } else if (is_negative) {
+              stepval = PyNumber_Invert(v);
+              Py_DECREF(v);
+              if (unlikely(!stepval))
+                  return (size_t) -1;
+          } else {
+              stepval = v;
+          }
+          v = NULL;
+          val = (size_t) 0;
+          mask = PyLong_FromLong((1L << chunk_size) - 1); if (unlikely(!mask)) goto done;
+          shift = PyLong_FromLong(chunk_size); if (unlikely(!shift)) goto done;
+          for (bits = 0; bits < (int) sizeof(size_t) * 8 - chunk_size; bits += chunk_size) {
+              PyObject *tmp, *digit;
+              long idigit;
+              digit = PyNumber_And(stepval, mask);
+              if (unlikely(!digit)) goto done;
+              idigit = PyLong_AsLong(digit);
+              Py_DECREF(digit);
+              if (unlikely(idigit < 0)) goto done;
+              val |= ((size_t) idigit) << bits;
+              tmp = PyNumber_Rshift(stepval, shift);
+              if (unlikely(!tmp)) goto done;
+              Py_DECREF(stepval); stepval = tmp;
+          }
+          Py_DECREF(shift); shift = NULL;
+          Py_DECREF(mask); mask = NULL;
+          {
+              long idigit = PyLong_AsLong(stepval);
+              if (unlikely(idigit < 0)) goto done;
+              remaining_bits = ((int) sizeof(size_t) * 8) - bits - (is_unsigned ? 0 : 1);
+              if (unlikely(idigit >= (1L << remaining_bits)))
+                  goto raise_overflow;
+              val |= ((size_t) idigit) << bits;
+          }
+          if (!is_unsigned) {
+              if (unlikely(val & (((size_t) 1) << (sizeof(size_t) * 8 - 1))))
+                  goto raise_overflow;
+              if (is_negative)
+                  val = ~val;
+          }
+          ret = 0;
+      done:
+          Py_XDECREF(shift);
+          Py_XDECREF(mask);
+          Py_XDECREF(stepval);
+  #endif
+          if (unlikely(ret))
+              return (size_t) -1;
+          return val;
+      }
+  raise_overflow:
+      PyErr_SetString(PyExc_OverflowError,
+          "value too large to convert to size_t");
+      return (size_t) -1;
+  raise_neg_overflow:
+      PyErr_SetString(PyExc_OverflowError,
+          "can't convert negative value to size_t");
+      return (size_t) -1;
+  }
+  
 /* PyObjectVectorCallKwBuilder (used by CIntToPy) */
   #if CYTHON_VECTORCALL
   static int __Pyx_VectorcallBuilder_AddArg(PyObject *key, PyObject *value, PyObject *builder, PyObject **args, int n) {
@@ -27157,30 +27371,30 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   #endif
   
 /* CIntToPy */
-  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint64_t(uint64_t value) {
+  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
   #pragma GCC diagnostic push
   #pragma GCC diagnostic ignored "-Wconversion"
   #endif
-      const uint64_t neg_one = (uint64_t) -1, const_zero = (uint64_t) 0;
+      const long neg_one = (long) -1, const_zero = (long) 0;
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
   #pragma GCC diagnostic pop
   #endif
       const int is_unsigned = neg_one > const_zero;
       if (is_unsigned) {
-          if (sizeof(uint64_t) < sizeof(long)) {
+          if (sizeof(long) < sizeof(long)) {
               return PyLong_FromLong((long) value);
-          } else if (sizeof(uint64_t) <= sizeof(unsigned long)) {
+          } else if (sizeof(long) <= sizeof(unsigned long)) {
               return PyLong_FromUnsignedLong((unsigned long) value);
   #if !CYTHON_COMPILING_IN_PYPY
-          } else if (sizeof(uint64_t) <= sizeof(unsigned PY_LONG_LONG)) {
+          } else if (sizeof(long) <= sizeof(unsigned PY_LONG_LONG)) {
               return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
   #endif
           }
       } else {
-          if (sizeof(uint64_t) <= sizeof(long)) {
+          if (sizeof(long) <= sizeof(long)) {
               return PyLong_FromLong((long) value);
-          } else if (sizeof(uint64_t) <= sizeof(PY_LONG_LONG)) {
+          } else if (sizeof(long) <= sizeof(PY_LONG_LONG)) {
               return PyLong_FromLongLong((PY_LONG_LONG) value);
           }
       }
@@ -27194,7 +27408,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           }
   #elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
           int one = 1; int little = (int)*(unsigned char *)&one;
-          return _PyLong_FromByteArray(bytes, sizeof(uint64_t),
+          return _PyLong_FromByteArray(bytes, sizeof(long),
                                        little, !is_unsigned);
   #else
           int one = 1; int little = (int)*(unsigned char *)&one;
@@ -27202,7 +27416,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           PyObject *py_bytes = NULL, *order_str = NULL;
           from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
           if (!from_bytes) return NULL;
-          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(uint64_t));
+          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(long));
           if (!py_bytes) goto limited_bad;
           order_str = PyUnicode_FromString(little ? "little" : "big");
           if (!order_str) goto limited_bad;
@@ -27225,73 +27439,111 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
   }
   
-/* CIntToPy */
-  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value) {
-  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wconversion"
+/* PyObjectCallMethod1 (used by UpdateUnpickledDict) */
+  #if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
+  static PyObject* __Pyx__PyObject_CallMethod1(PyObject* method, PyObject* arg) {
+      PyObject *result = __Pyx_PyObject_CallOneArg(method, arg);
+      Py_DECREF(method);
+      return result;
+  }
   #endif
-      const int neg_one = (int) -1, const_zero = (int) 0;
-  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-  #pragma GCC diagnostic pop
-  #endif
-      const int is_unsigned = neg_one > const_zero;
-      if (is_unsigned) {
-          if (sizeof(int) < sizeof(long)) {
-              return PyLong_FromLong((long) value);
-          } else if (sizeof(int) <= sizeof(unsigned long)) {
-              return PyLong_FromUnsignedLong((unsigned long) value);
-  #if !CYTHON_COMPILING_IN_PYPY
-          } else if (sizeof(int) <= sizeof(unsigned PY_LONG_LONG)) {
-              return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
-  #endif
-          }
-      } else {
-          if (sizeof(int) <= sizeof(long)) {
-              return PyLong_FromLong((long) value);
-          } else if (sizeof(int) <= sizeof(PY_LONG_LONG)) {
-              return PyLong_FromLongLong((PY_LONG_LONG) value);
-          }
-      }
-      {
-          unsigned char *bytes = (unsigned char *)&value;
-  #if !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x030d00A4
-          if (is_unsigned) {
-              return PyLong_FromUnsignedNativeBytes(bytes, sizeof(value), -1);
-          } else {
-              return PyLong_FromNativeBytes(bytes, sizeof(value), -1);
-          }
-  #elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
-          int one = 1; int little = (int)*(unsigned char *)&one;
-          return _PyLong_FromByteArray(bytes, sizeof(int),
-                                       little, !is_unsigned);
+  static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg) {
+  #if CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000))
+      PyObject *args[2] = {obj, arg};
+      (void) __Pyx_PyObject_CallOneArg;
+      (void) __Pyx_PyObject_Call2Args;
+      return PyObject_VectorcallMethod(method_name, args, 2 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
   #else
-          int one = 1; int little = (int)*(unsigned char *)&one;
-          PyObject *from_bytes, *result = NULL, *kwds = NULL;
-          PyObject *py_bytes = NULL, *order_str = NULL;
-          from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
-          if (!from_bytes) return NULL;
-          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(int));
-          if (!py_bytes) goto limited_bad;
-          order_str = PyUnicode_FromString(little ? "little" : "big");
-          if (!order_str) goto limited_bad;
-          {
-              PyObject *args[3+(CYTHON_VECTORCALL ? 1 : 0)] = { NULL, py_bytes, order_str };
-              if (!is_unsigned) {
-                  kwds = __Pyx_MakeVectorcallBuilderKwds(1);
-                  if (!kwds) goto limited_bad;
-                  if (__Pyx_VectorcallBuilder_AddArgStr("signed", __Pyx_NewRef(Py_True), kwds, args+3, 0) < 0) goto limited_bad;
-              }
-              result = __Pyx_Object_Vectorcall_CallFromBuilder(from_bytes, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET, kwds);
-          }
-          limited_bad:
-          Py_XDECREF(kwds);
-          Py_XDECREF(order_str);
-          Py_XDECREF(py_bytes);
-          Py_XDECREF(from_bytes);
+      PyObject *method = NULL, *result;
+      int is_method = __Pyx_PyObject_GetMethod(obj, method_name, &method);
+      if (likely(is_method)) {
+          result = __Pyx_PyObject_Call2Args(method, obj, arg);
+          Py_DECREF(method);
           return result;
-  #endif
       }
+      if (unlikely(!method)) return NULL;
+      return __Pyx__PyObject_CallMethod1(method, arg);
+  #endif
+  }
+  
+/* UpdateUnpickledDict */
+  static int __Pyx__UpdateUnpickledDict(PyObject *obj, PyObject *state, Py_ssize_t index) {
+      PyObject *state_dict = __Pyx_PySequence_ITEM(state, index);
+      if (unlikely(!state_dict)) {
+          return -1;
+      }
+      int non_empty = PyObject_IsTrue(state_dict);
+      if (non_empty == 0) {
+          Py_DECREF(state_dict);
+          return 0;
+      } else if (unlikely(non_empty == -1)) {
+          return -1;
+      }
+      PyObject *dict;
+      #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030A0000
+      dict = PyObject_GetAttrString(obj, "__dict__");
+      #else
+      dict = PyObject_GenericGetDict(obj, NULL);
+      #endif
+      if (unlikely(!dict)) {
+          Py_DECREF(state_dict);
+          return -1;
+      }
+      int result;
+      if (likely(PyDict_CheckExact(dict))) {
+          result = PyDict_Update(dict, state_dict);
+      } else {
+          PyObject *obj_result = __Pyx_PyObject_CallMethod1(dict, __pyx_mstate_global->__pyx_n_u_update, state_dict);
+          if (likely(obj_result)) {
+              Py_DECREF(obj_result);
+              result = 0;
+          } else {
+              result = -1;
+          }
+      }
+      Py_DECREF(state_dict);
+      Py_DECREF(dict);
+      return result;
+  }
+  static int __Pyx_UpdateUnpickledDict(PyObject *obj, PyObject *state, Py_ssize_t index) {
+      Py_ssize_t state_size = __Pyx_PyTuple_GET_SIZE(state);
+      #if !CYTHON_ASSUME_SAFE_SIZE
+      if (unlikely(state_size == -1)) return -1;
+      #endif
+      if (state_size <= index) {
+          return 0;
+      }
+      return __Pyx__UpdateUnpickledDict(obj, state, index);
+  }
+  
+/* CheckUnpickleChecksum */
+  static void __Pyx_RaiseUnpickleChecksumError(long checksum, long checksum1, long checksum2, long checksum3, const char *members) {
+      PyObject *pickle_module = PyImport_ImportModule("pickle");
+      if (unlikely(!pickle_module)) return;
+      PyObject *pickle_error = PyObject_GetAttrString(pickle_module, "PickleError");
+      Py_DECREF(pickle_module);
+      if (unlikely(!pickle_error)) return;
+      if (checksum2 == checksum1) {
+          PyErr_Format(pickle_error, "Incompatible checksums (0x%x vs (0x%x) = (%s))",
+              checksum, checksum1, members);
+      } else if (checksum3 == checksum2) {
+          PyErr_Format(pickle_error, "Incompatible checksums (0x%x vs (0x%x, 0x%x) = (%s))",
+              checksum, checksum1, checksum2, members);
+      } else {
+          PyErr_Format(pickle_error, "Incompatible checksums (0x%x vs (0x%x, 0x%x, 0x%x) = (%s))",
+              checksum, checksum1, checksum2, checksum3, members);
+      }
+      Py_DECREF(pickle_error);
+  }
+  static int __Pyx_CheckUnpickleChecksum(long checksum, long checksum1, long checksum2, long checksum3, const char *members) {
+      int found = 0;
+      found |= checksum1 == checksum;
+      found |= checksum2 == checksum;
+      found |= checksum3 == checksum;
+      if (likely(found))
+          return 0;
+      __Pyx_RaiseUnpickleChecksumError(checksum, checksum1, checksum2, checksum3, members);
+      return -1;
   }
   
 /* CIntFromPy */
@@ -27542,188 +27794,6 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       PyErr_SetString(PyExc_OverflowError,
           "can't convert negative value to int");
       return (int) -1;
-  }
-  
-/* CIntToPy */
-  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_unsigned_int(unsigned int value) {
-  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wconversion"
-  #endif
-      const unsigned int neg_one = (unsigned int) -1, const_zero = (unsigned int) 0;
-  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-  #pragma GCC diagnostic pop
-  #endif
-      const int is_unsigned = neg_one > const_zero;
-      if (is_unsigned) {
-          if (sizeof(unsigned int) < sizeof(long)) {
-              return PyLong_FromLong((long) value);
-          } else if (sizeof(unsigned int) <= sizeof(unsigned long)) {
-              return PyLong_FromUnsignedLong((unsigned long) value);
-  #if !CYTHON_COMPILING_IN_PYPY
-          } else if (sizeof(unsigned int) <= sizeof(unsigned PY_LONG_LONG)) {
-              return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
-  #endif
-          }
-      } else {
-          if (sizeof(unsigned int) <= sizeof(long)) {
-              return PyLong_FromLong((long) value);
-          } else if (sizeof(unsigned int) <= sizeof(PY_LONG_LONG)) {
-              return PyLong_FromLongLong((PY_LONG_LONG) value);
-          }
-      }
-      {
-          unsigned char *bytes = (unsigned char *)&value;
-  #if !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x030d00A4
-          if (is_unsigned) {
-              return PyLong_FromUnsignedNativeBytes(bytes, sizeof(value), -1);
-          } else {
-              return PyLong_FromNativeBytes(bytes, sizeof(value), -1);
-          }
-  #elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
-          int one = 1; int little = (int)*(unsigned char *)&one;
-          return _PyLong_FromByteArray(bytes, sizeof(unsigned int),
-                                       little, !is_unsigned);
-  #else
-          int one = 1; int little = (int)*(unsigned char *)&one;
-          PyObject *from_bytes, *result = NULL, *kwds = NULL;
-          PyObject *py_bytes = NULL, *order_str = NULL;
-          from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
-          if (!from_bytes) return NULL;
-          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(unsigned int));
-          if (!py_bytes) goto limited_bad;
-          order_str = PyUnicode_FromString(little ? "little" : "big");
-          if (!order_str) goto limited_bad;
-          {
-              PyObject *args[3+(CYTHON_VECTORCALL ? 1 : 0)] = { NULL, py_bytes, order_str };
-              if (!is_unsigned) {
-                  kwds = __Pyx_MakeVectorcallBuilderKwds(1);
-                  if (!kwds) goto limited_bad;
-                  if (__Pyx_VectorcallBuilder_AddArgStr("signed", __Pyx_NewRef(Py_True), kwds, args+3, 0) < 0) goto limited_bad;
-              }
-              result = __Pyx_Object_Vectorcall_CallFromBuilder(from_bytes, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET, kwds);
-          }
-          limited_bad:
-          Py_XDECREF(kwds);
-          Py_XDECREF(order_str);
-          Py_XDECREF(py_bytes);
-          Py_XDECREF(from_bytes);
-          return result;
-  #endif
-      }
-  }
-  
-/* PyObjectCall2Args (used by PyObjectCallMethod1) */
-  static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2) {
-      PyObject *args[3] = {NULL, arg1, arg2};
-      return __Pyx_PyObject_FastCall(function, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
-  }
-  
-/* PyObjectCallMethod1 (used by UpdateUnpickledDict) */
-  #if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
-  static PyObject* __Pyx__PyObject_CallMethod1(PyObject* method, PyObject* arg) {
-      PyObject *result = __Pyx_PyObject_CallOneArg(method, arg);
-      Py_DECREF(method);
-      return result;
-  }
-  #endif
-  static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg) {
-  #if CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000))
-      PyObject *args[2] = {obj, arg};
-      (void) __Pyx_PyObject_CallOneArg;
-      (void) __Pyx_PyObject_Call2Args;
-      return PyObject_VectorcallMethod(method_name, args, 2 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
-  #else
-      PyObject *method = NULL, *result;
-      int is_method = __Pyx_PyObject_GetMethod(obj, method_name, &method);
-      if (likely(is_method)) {
-          result = __Pyx_PyObject_Call2Args(method, obj, arg);
-          Py_DECREF(method);
-          return result;
-      }
-      if (unlikely(!method)) return NULL;
-      return __Pyx__PyObject_CallMethod1(method, arg);
-  #endif
-  }
-  
-/* UpdateUnpickledDict */
-  static int __Pyx__UpdateUnpickledDict(PyObject *obj, PyObject *state, Py_ssize_t index) {
-      PyObject *state_dict = __Pyx_PySequence_ITEM(state, index);
-      if (unlikely(!state_dict)) {
-          return -1;
-      }
-      int non_empty = PyObject_IsTrue(state_dict);
-      if (non_empty == 0) {
-          Py_DECREF(state_dict);
-          return 0;
-      } else if (unlikely(non_empty == -1)) {
-          return -1;
-      }
-      PyObject *dict;
-      #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030A0000
-      dict = PyObject_GetAttrString(obj, "__dict__");
-      #else
-      dict = PyObject_GenericGetDict(obj, NULL);
-      #endif
-      if (unlikely(!dict)) {
-          Py_DECREF(state_dict);
-          return -1;
-      }
-      int result;
-      if (likely(PyDict_CheckExact(dict))) {
-          result = PyDict_Update(dict, state_dict);
-      } else {
-          PyObject *obj_result = __Pyx_PyObject_CallMethod1(dict, __pyx_mstate_global->__pyx_n_u_update, state_dict);
-          if (likely(obj_result)) {
-              Py_DECREF(obj_result);
-              result = 0;
-          } else {
-              result = -1;
-          }
-      }
-      Py_DECREF(state_dict);
-      Py_DECREF(dict);
-      return result;
-  }
-  static int __Pyx_UpdateUnpickledDict(PyObject *obj, PyObject *state, Py_ssize_t index) {
-      Py_ssize_t state_size = __Pyx_PyTuple_GET_SIZE(state);
-      #if !CYTHON_ASSUME_SAFE_SIZE
-      if (unlikely(state_size == -1)) return -1;
-      #endif
-      if (state_size <= index) {
-          return 0;
-      }
-      return __Pyx__UpdateUnpickledDict(obj, state, index);
-  }
-  
-/* CheckUnpickleChecksum */
-  static void __Pyx_RaiseUnpickleChecksumError(long checksum, long checksum1, long checksum2, long checksum3, const char *members) {
-      PyObject *pickle_module = PyImport_ImportModule("pickle");
-      if (unlikely(!pickle_module)) return;
-      PyObject *pickle_error = PyObject_GetAttrString(pickle_module, "PickleError");
-      Py_DECREF(pickle_module);
-      if (unlikely(!pickle_error)) return;
-      if (checksum2 == checksum1) {
-          PyErr_Format(pickle_error, "Incompatible checksums (0x%x vs (0x%x) = (%s))",
-              checksum, checksum1, members);
-      } else if (checksum3 == checksum2) {
-          PyErr_Format(pickle_error, "Incompatible checksums (0x%x vs (0x%x, 0x%x) = (%s))",
-              checksum, checksum1, checksum2, members);
-      } else {
-          PyErr_Format(pickle_error, "Incompatible checksums (0x%x vs (0x%x, 0x%x, 0x%x) = (%s))",
-              checksum, checksum1, checksum2, checksum3, members);
-      }
-      Py_DECREF(pickle_error);
-  }
-  static int __Pyx_CheckUnpickleChecksum(long checksum, long checksum1, long checksum2, long checksum3, const char *members) {
-      int found = 0;
-      found |= checksum1 == checksum;
-      found |= checksum2 == checksum;
-      found |= checksum3 == checksum;
-      if (likely(found))
-          return 0;
-      __Pyx_RaiseUnpickleChecksumError(checksum, checksum1, checksum2, checksum3, members);
-      return -1;
   }
   
 /* CIntFromPy */
@@ -27977,30 +28047,30 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   }
   
 /* CIntToPy */
-  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value) {
+  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
   #pragma GCC diagnostic push
   #pragma GCC diagnostic ignored "-Wconversion"
   #endif
-      const long neg_one = (long) -1, const_zero = (long) 0;
+      const int neg_one = (int) -1, const_zero = (int) 0;
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
   #pragma GCC diagnostic pop
   #endif
       const int is_unsigned = neg_one > const_zero;
       if (is_unsigned) {
-          if (sizeof(long) < sizeof(long)) {
+          if (sizeof(int) < sizeof(long)) {
               return PyLong_FromLong((long) value);
-          } else if (sizeof(long) <= sizeof(unsigned long)) {
+          } else if (sizeof(int) <= sizeof(unsigned long)) {
               return PyLong_FromUnsignedLong((unsigned long) value);
   #if !CYTHON_COMPILING_IN_PYPY
-          } else if (sizeof(long) <= sizeof(unsigned PY_LONG_LONG)) {
+          } else if (sizeof(int) <= sizeof(unsigned PY_LONG_LONG)) {
               return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
   #endif
           }
       } else {
-          if (sizeof(long) <= sizeof(long)) {
+          if (sizeof(int) <= sizeof(long)) {
               return PyLong_FromLong((long) value);
-          } else if (sizeof(long) <= sizeof(PY_LONG_LONG)) {
+          } else if (sizeof(int) <= sizeof(PY_LONG_LONG)) {
               return PyLong_FromLongLong((PY_LONG_LONG) value);
           }
       }
@@ -28014,7 +28084,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           }
   #elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
           int one = 1; int little = (int)*(unsigned char *)&one;
-          return _PyLong_FromByteArray(bytes, sizeof(long),
+          return _PyLong_FromByteArray(bytes, sizeof(int),
                                        little, !is_unsigned);
   #else
           int one = 1; int little = (int)*(unsigned char *)&one;
@@ -28022,7 +28092,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           PyObject *py_bytes = NULL, *order_str = NULL;
           from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
           if (!from_bytes) return NULL;
-          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(long));
+          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(int));
           if (!py_bytes) goto limited_bad;
           order_str = PyUnicode_FromString(little ? "little" : "big");
           if (!order_str) goto limited_bad;

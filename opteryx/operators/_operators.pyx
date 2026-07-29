@@ -131,6 +131,13 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
 cdef extern from "core/alloc.h" nogil:
     void draken_free(void* ptr)
 
+cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_tel" nogil:
+    double gb_tel_hash_s "opteryx::engine::groupby_tel::hash_s" ()
+    double gb_tel_probe_s "opteryx::engine::groupby_tel::probe_s" ()
+    double gb_tel_apply_s "opteryx::engine::groupby_tel::apply_s" ()
+    long long gb_tel_calls "opteryx::engine::groupby_tel::calls_count" ()
+    void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
+
 # The bridge is the ONLY correct way to reach the shared execution tracer
 # state from this .so — see draken/core/trace_bridge_c.h's header comment.
 # Do NOT `cdef extern from "engine/trace.hpp"` any of draken_trace's own
@@ -476,6 +483,24 @@ def instr_gil_worker_report():
             "ns": <long long>_gil_instr_sites[i].ns,
         })
     return out
+
+
+def reset_groupby_telemetry():
+    """Zero the GroupBySink hash/probe/apply phase accumulators (groupby_tel.hpp).
+    Diagnostic only — call before a traced query to attribute the reading to it."""
+    gb_tel_reset()
+
+
+def get_groupby_telemetry():
+    """Return a dict with GroupBySink's Pass A/B/C phase timing (seconds) since the
+    last reset: hash_s (key hashing), probe_s (hash-table find_or_insert + lane
+    growth), apply_s (per-aggregate-function state update)."""
+    return {
+        "hash_s":  gb_tel_hash_s(),
+        "probe_s": gb_tel_probe_s(),
+        "apply_s": gb_tel_apply_s(),
+        "calls":   gb_tel_calls(),
+    }
 
 
 # -----------------------------------------------------------------------------

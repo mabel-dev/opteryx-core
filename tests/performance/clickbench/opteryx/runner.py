@@ -327,6 +327,10 @@ if __name__ == "__main__":  # pragma: no cover
         import collections
 
         from opteryx.utils import mermaid as _mermaid
+        from opteryx.operators._operators import get_groupby_telemetry
+        from opteryx.operators._operators import reset_groupby_telemetry
+        from rugo.rugo_native import get_cpp_telemetry
+        from rugo.rugo_native import reset_cpp_telemetry
 
         # Real per-operator self-time only exists once the query has actually run:
         # the physical-plan Python objects never execute on the native engine (the
@@ -344,12 +348,21 @@ if __name__ == "__main__":  # pragma: no cover
         suite_plan_ns = 0
         suite_exec_ns = 0
         per_query_rows = []  # (query_num, exec_ms, top_operator, top_share)
+        # Sub-phase breakdowns for the two operators that dominate suite_self above —
+        # groupby_tel (src/cpp/engine/groupby_tel.hpp) and rugo_tel (the Parquet
+        # decoder's existing phase accumulators). Both are global process-wide
+        # atomics, so reset before / read after each query in this already-serial,
+        # one-query-at-a-time tracing pass gives a clean per-query attribution.
+        suite_gb_phase = collections.defaultdict(float)  # groupby phase -> seconds
+        suite_pq_phase = collections.defaultdict(float)  # parquet decode phase -> seconds
 
         for index, (statement, _err) in enumerate(STATEMENTS):
             statement = statement.replace("{DATASET}", f"{DATASET.value}")
             query_num = f"Q{(index + 1):02d}"
             gc.collect()
             session = None
+            reset_groupby_telemetry()
+            reset_cpp_telemetry()
             try:
                 session = opteryx.session()
                 for _ in session.execute_to_morsels(f"EXPLAIN ANALYZE {statement}"):
@@ -370,6 +383,14 @@ if __name__ == "__main__":  # pragma: no cover
                     suite_self[name] += t
                 suite_plan_ns += session._telemetry.time_planning
                 suite_exec_ns += session._telemetry.time_executing
+
+                gb_tel = get_groupby_telemetry()
+                for phase in ("hash_s", "probe_s", "apply_s"):
+                    suite_gb_phase[phase] += gb_tel[phase]
+                pq_tel = get_cpp_telemetry()
+                for phase, seconds in pq_tel.items():
+                    if phase.endswith("_s"):
+                        suite_pq_phase[phase] += seconds
 
                 total = sum(op_self.values()) or 1
                 top_name, top_t = max(op_self.items(), key=lambda x: x[1], default=("-", 0))
@@ -405,6 +426,36 @@ if __name__ == "__main__":  # pragma: no cover
             f"\n{'Planning (total)':<34} {suite_plan_ns / 1e6:>9.2f}ms"
             f"\n{'Execution (total, traced)':<34} {suite_exec_ns / 1e6:>9.2f}ms"
         )
+
+        # Sub-phase breakdown within Grouped Aggregate (Hashed) — where suite_self
+        # above only shows it as one number. hash_s = key hashing (Pass A), probe_s
+        # = hash-table find_or_insert + lane growth (Pass B), apply_s = per-aggregate-
+        # function state update (Pass C). See groupby_tel.hpp.
+        gb_total = sum(suite_gb_phase.values()) or 1
+        print(f"\n{'=' * 80}")
+        print("GROUPED AGGREGATE PHASE BREAKDOWN (hash / probe / apply)")
+        print(f"{'=' * 80}\n")
+        print(f"{'Phase':<20} {'Time':>12} {'Share':>8}")
+        print("-" * 42)
+        gb_labels = {"hash_s": "Hash keys (A)", "probe_s": "Probe/insert (B)", "apply_s": "Apply aggs (C)"}
+        for phase, seconds in sorted(suite_gb_phase.items(), key=lambda x: -x[1]):
+            print(f"{gb_labels.get(phase, phase):<20} {seconds * 1000:>9.2f}ms {100.0 * seconds / gb_total:>6.1f}%")
+        print("-" * 42)
+        print(f"{'TOTAL':<20} {gb_total * 1000:>9.2f}ms")
+
+        # Sub-phase breakdown within Parquet Read's decode step — already computed by
+        # the existing rugo_tel accumulators (rugo/src/parquet/telemetry.hpp), just
+        # not previously surfaced anywhere.
+        pq_total = sum(suite_pq_phase.values()) or 1
+        print(f"\n{'=' * 80}")
+        print("PARQUET READ DECODE PHASE BREAKDOWN")
+        print(f"{'=' * 80}\n")
+        print(f"{'Phase':<20} {'Time':>12} {'Share':>8}")
+        print("-" * 42)
+        for phase, seconds in sorted(suite_pq_phase.items(), key=lambda x: -x[1]):
+            print(f"{phase:<20} {seconds * 1000:>9.2f}ms {100.0 * seconds / pq_total:>6.1f}%")
+        print("-" * 42)
+        print(f"{'TOTAL':<20} {pq_total * 1000:>9.2f}ms")
 
     if failed > 0:
         print("\n\033[38;2;139;233;253m\033[3mFAILURES\033[0m")

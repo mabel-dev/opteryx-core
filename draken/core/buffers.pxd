@@ -111,6 +111,9 @@ cdef extern from "core/buffers.h":
         size_t        arena_cap
         uint8_t*      null_bitmap
         uint8_t       owns_buffers
+        # 1 = long-form payload bytes were never materialized. Explicit state;
+        # do NOT infer it from `arena`/`arena_cap`. See buffers.h for the rule.
+        uint8_t       payloads_elided
         DrakenType    type
 
     # Array column (list<T>)

@@ -182,7 +182,10 @@ PyObject* draken_vector_own_string(
     uint8_t*          validity,
     uint32_t          length,
     DrakenType        type,             // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
-    const uint64_t*   keyhash = nullptr);  // E37: per-row hash seed (length entries) or NULL; COPIED (not owned)
+    const uint64_t*   keyhash = nullptr,  // E37: per-row hash seed (length entries) or NULL; COPIED (not owned)
+    // 1 = the caller's long-form slots carry lengths but NO payload bytes. Stored
+    // verbatim on the resulting DrakenStringArena; never inferred from arena_len.
+    bool              payloads_elided = false);
 
 // draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
 //

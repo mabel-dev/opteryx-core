@@ -304,10 +304,7 @@ def visit_function_dataset(
         if protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
-                    f"READ_JSONL('{path}'): glob patterns are not supported for gs:// paths. "
-                    "READ_JSONL never uses this process's platform GCS credentials, so it only "
-                    "ever does a plain, unauthenticated GET of a single object -- there is no "
-                    "anonymous bucket-listing call available to resolve a glob against."
+                    f"READ_JSONL('{path}'): glob patterns are not supported for gs:// paths."
                 )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
@@ -500,11 +497,7 @@ def visit_function_dataset(
         if protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
-                    f"READ_PARQUET('{path}'): glob patterns are not supported for gs:// "
-                    "paths. READ_PARQUET never uses this process's platform GCS "
-                    "credentials, so it only ever does a plain, unauthenticated GET of "
-                    "a single object -- there is no anonymous bucket-listing call "
-                    "available to resolve a glob against."
+                    f"READ_PARQUET('{path}'): glob patterns are not supported for gs:// paths."
                 )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,

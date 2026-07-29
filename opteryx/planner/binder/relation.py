@@ -118,6 +118,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         InvalidInternalStateError,
     )
     from opteryx.expression import NodeType
+    from opteryx.managers.permissions import can_perform_action
     from opteryx.models import LogicalColumn
     from opteryx.types.schema import RelationSchema
 
@@ -132,8 +133,11 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
     create_target = getattr(node, "create_target", False)
     if_not_exists = getattr(node, "if_not_exists", False)
+    or_replace = getattr(node, "or_replace", False)
 
     if create_target:
+        node.is_replace = False
+        existing_column_names = None
         if node.connector.relation_exists(node.relation_name):
             if if_not_exists:
                 node.is_noop = True
@@ -142,10 +146,25 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 node.column_mapping = None
                 node.target_column_names = None
                 return node, context
-            raise ValueError(
-                f"relation already exists: {node.relation_name} "
-                "(CTAS does not append to existing relations; use INSERT)"
-            )
+            if not or_replace:
+                raise ValueError(
+                    f"relation already exists: {node.relation_name} "
+                    "(CTAS does not append to existing relations; use INSERT)"
+                )
+            # CREATE OR REPLACE on an existing relation has the same blast
+            # radius as DROP (the old relation's data/history is gone) - reuse
+            # that tier rather than inventing a new one.
+            if not can_perform_action(context.execution_context, node.relation_name, action="DROP"):
+                raise PermissionError(
+                    f"User does not have permission to replace table {node.relation_name}"
+                )
+            node.is_replace = True
+            existing_column_names = node.connector.relation_column_names(node.relation_name)
+        else:
+            if not can_perform_action(context.execution_context, node.relation_name, action="CREATE"):
+                raise PermissionError(
+                    f"User does not have permission to create table {node.relation_name}"
+                )
 
         if getattr(self, "graph", None) is None or node.source_tail_id is None:
             raise InvalidInternalStateError(
@@ -189,6 +208,27 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 identity=mint_column_identity(getattr(node, "relation_name", None), target_name),
             )
             target_columns.append(flat)
+
+        if existing_column_names is not None and not getattr(
+            node.connector, "supports_schema_evolution_on_replace", False
+        ):
+            # Schema-preserving REPLACE only for connectors that can't evolve
+            # schema (e.g. the catalog connector has no public primitive to
+            # write a new schema version outside create_dataset's internal
+            # path) - a changed column set fails loud here rather than
+            # silently committing data the declared schema can't describe.
+            # Column-name comparison only, not full type fidelity - the
+            # catalog's stored schema and Opteryx's RelationSchema are two
+            # independent type representations with no bridge between them yet.
+            new_names = [c.name for c in target_columns]
+            if set(new_names) != set(existing_column_names) or len(new_names) != len(
+                existing_column_names
+            ):
+                raise UnsupportedSyntaxError(
+                    f"CREATE OR REPLACE {node.relation_name}: the SELECT's columns "
+                    f"({new_names}) differ from the existing relation's columns "
+                    f"({existing_column_names}) - schema-changing REPLACE is not yet supported"
+                )
 
         target_schema = RelationSchema(
             name=node.relation_name,

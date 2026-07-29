@@ -2371,6 +2371,7 @@ struct GroupBySink : Sink {
             // same DRAM-probe wall the group tables had.
             for (const GBCountDistinct& d : P.cd) l.entries_total += d.size();
         }
+        GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
         if (l.entries_total > kGBFlushEntries)
             flush_locals(static_cast<GroupByGlobal&>(gs), l);
         return SinkResult::CONTINUE;
