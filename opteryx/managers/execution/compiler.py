@@ -2395,9 +2395,19 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                             "cpu_time": row["cpu_time"],
                         }
                     else:
-                        agg["records_in"] = row["records_in"]
+                        # records_out/bytes_out: last-row-wins is correct — the
+                        # terminal stage's OUTPUT is the node's real output.
+                        # records_in/bytes_in: a "source" row structurally has no
+                        # input (a Source has no upstream — see executor.hpp) so
+                        # its 0 must not clobber a real reading an earlier
+                        # sink/operator row already captured for this identity
+                        # (DISTINCT/GROUP BY/SORT: the sink measures real input,
+                        # then a later buffer-reading pipeline carries the SAME
+                        # identity as a "source" continuation).
+                        if row["role"] != "source":
+                            agg["records_in"] = row["records_in"]
+                            agg["bytes_in"] = row["bytes_in"]
                         agg["records_out"] = row["records_out"]
-                        agg["bytes_in"] = row["bytes_in"]
                         agg["bytes_out"] = row["bytes_out"]
                         agg["calls"] += row["calls"]
                         agg["execution_time"] += row["execution_time"]
