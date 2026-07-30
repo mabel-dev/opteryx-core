@@ -8,7 +8,7 @@ Coverage matrix:
   shapes:       sequence / constant / dict
   no descriptor: DATE32 must carry no logical-type descriptor
   ops:          compare_scalar, compare_vector, hash, min, max, between, in_list,
-                take, materialize, compress
+                take, materialize, dictionary_encode
   hypothesis:   round-trip identity, ordering preserved
 """
 
@@ -354,7 +354,7 @@ class TestInList:
 
 
 # ===========================================================================
-# 11.  take / materialize / compress
+# 11.  take / materialize / dictionary_encode
 # ===========================================================================
 
 class TestTake:
@@ -389,12 +389,12 @@ class TestMaterialize:
 
 class TestCompress:
     def test_preserves_type(self):
-        r = seq([D_2024, D_2025]).compress()
+        r = seq([D_2024, D_2025]).dictionary_encode()
         assert r.type == dn.DrakenType.DATE32
 
     def test_roundtrip(self):
         src = [D_2024, None, D_2025, EPOCH]
-        assert pylist(seq(src).compress().materialize()) == src
+        assert pylist(seq(src).dictionary_encode().materialize()) == src
 
 
 # ===========================================================================

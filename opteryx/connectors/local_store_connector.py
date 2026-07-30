@@ -649,6 +649,7 @@ class LocalStoreTable(BaseTable):
         file_entries: List[FileEntry] = []
         min_k_vector = None
         histogram_vector = None
+        char_class_vector = None
         if descriptor.current_snapshot is not None:
             snapshot_path = os.path.join(relation_dir, descriptor.current_snapshot)
             with open(snapshot_path, "r") as f:
@@ -662,8 +663,13 @@ class LocalStoreTable(BaseTable):
                     fe.file_path = os.path.join(relation_dir, fe.file_path)
                 min_k_vector = native.get("min_k_hashes")
                 histogram_vector = native.get("histogram_counts")
+                char_class_vector = native.get("char_class_counts")
 
         self.manifest = Manifest(
-            file_entries, self.schema, min_k_vector=min_k_vector, histogram_vector=histogram_vector
+            file_entries,
+            self.schema,
+            min_k_vector=min_k_vector,
+            histogram_vector=histogram_vector,
+            char_class_vector=char_class_vector,
         )
         return self.schema, self.manifest

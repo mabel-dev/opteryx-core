@@ -9,7 +9,7 @@ Coverage matrix:
   shapes:       sequence / constant / dict
   mandatory desc: no descriptor on TIME32/TIME64 = hard error at factory
   ops:          compare_scalar, compare_vector, hash, min, max, between, in_list,
-                take, materialize, compress
+                take, materialize, dictionary_encode
   cross-unit:   compare_vector with mismatched units must throw
   unit validation: TIME32 rejects "us"/"ns"; TIME64 rejects "s"/"ms"
   hypothesis:   round-trip identity, ordering preserved, cross-unit throw
@@ -445,7 +445,7 @@ class TestInList:
 
 
 # ===========================================================================
-# 11.  take / materialize / compress — type and unit preservation
+# 11.  take / materialize / dictionary_encode — type and unit preservation
 # ===========================================================================
 
 class TestTake:
@@ -480,12 +480,12 @@ class TestMaterialize:
 
 class TestCompress:
     def test_t32_preserves_type(self):
-        r = t32([T_NOON, T_LATE], unit="s").compress()
+        r = t32([T_NOON, T_LATE], unit="s").dictionary_encode()
         assert r.type == dn.DrakenType.TIME32
 
     def test_t64_roundtrip(self):
         src = [T_NOON, None, T_LATE, MIDNIGHT]
-        assert pylist(t64(src).compress().materialize()) == src
+        assert pylist(t64(src).dictionary_encode().materialize()) == src
 
 
 # ===========================================================================

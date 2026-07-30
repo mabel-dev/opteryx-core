@@ -33,21 +33,22 @@
 #include "ops/vec_result.h"       // VecResult — owned vector from op kernels
 #include "ops/int64_reductions.h" // i64_sum, i64_min, i64_max
 #include "ops/int64_arithmetic.h" // i64_add, i64_sub, …
-#include "ops/int64_gather.h"     // i64_take, i64_materialize, i64_compress
-#include "ops/int128_gather.h"    // i128_take, i128_slice, i128_materialize, i128_compress (DECIMAL128)
+#include "ops/int64_gather.h"     // i64_take, i64_materialize, i64_dictionary_encode
+#include "ops/int128_gather.h"    // i128_take, i128_slice, i128_materialize, i128_dictionary_encode (DECIMAL128)
 #include "ops/int64_compare.h"    // i64_compare_scalar, i64_compare_vector
 #include "ops/int64_predicates.h" // i64_between, i64_in_list + CarcharSet
 #include "ops/fixed_int_ops.h"    // int8/16/32 kernels (D.6)
 #include "ops/float_ops.h"        // float32/64 kernels (D.7)
 #include "ops/string_hash.h"        // hash_string
 #include "ops/string_compare.h"     // str_compare_scalar, str_compare_vector
-#include "ops/string_gather.h"      // str_take, str_materialize, str_compress
+#include "ops/string_gather.h"      // str_take, str_materialize, str_dictionary_encode
 #include "ops/string_predicates.h"  // str_in_list
 #include "ops/interval_ops.h"       // D.12 — DRAKEN_INTERVAL kernels
 #include "ops/int_bitwise.h"        // E.2 — AND/OR/XOR/NOT/SHL/SHR across int8/16/32/64
 #include "ops/decimal_arith.h"     // E.32 — scale-aware DECIMAL arithmetic kernels
 #include "ops/uint64_arithmetic.h" // E33 — u64_add, u64_sub, … (genuine unsigned semantics)
 #include "ops/uint64_compare.h"    // E33 — u64_compare_scalar, u64_compare_vector
+#include "ops/ordinalize.h"        // int64 ordinal-key kernels (histogram / pruning)
 
 // ---------------------------------------------------------------------------
 // TypeOps: one entry per DrakenType in the dispatch table.
@@ -73,7 +74,12 @@ typedef VecResult (*UnaryArithFn)(const DrakenVector& a);
 typedef VecResult (*TakeFn)(const DrakenVector&, const int32_t* indices, uint32_t n);
 typedef VecResult (*SliceFn)(const DrakenVector&, uint32_t start, uint32_t length);
 typedef VecResult (*MatFn)(const DrakenVector&);
-typedef VecResult (*CompFn)(const DrakenVector&);
+// Dict-encode: dedupe into a Dict-shaped vector. Full logical length and null
+// rows are UNCHANGED -- distinct from drop_nulls (ARRAY/FP16/NULL only,
+// handled directly in the nanobind binding, not through this ops table),
+// which is a different operation entirely (2026-07-30 disambiguation: both
+// used to be called "compress").
+typedef VecResult (*DictEncodeFn)(const DrakenVector&);
 
 // C.3 — compare ops: int64 scalar/value and int64 × int64 vector.
 // op codes: 0=eq 1=ne 2=gt 3=ge 4=lt 5=le
@@ -114,6 +120,10 @@ typedef VecResult (*FloatScalarArithFn)(const DrakenVector&, double);
 typedef VecResult (*FloatCmpScalarFn)(const DrakenVector&, double, int);
 typedef VecResult (*FloatBetweenFn)(const DrakenVector&, double, double, bool, bool);
 
+// Ordinal-key kernel: one int64_t monotonic key per logical row, written into
+// a caller-owned out buffer. See ops/ordinalize.h for the per-type contract.
+typedef void (*OrdinalizeFn)(const DrakenVector&, int64_t*, uint32_t);
+
 struct TypeOps {
     // C.1
     void (*hash)(const DrakenVector&, uint64_t*, uint32_t);
@@ -139,7 +149,7 @@ struct TypeOps {
     TakeFn  take;
     SliceFn slice;
     MatFn   materialize;
-    CompFn  compress;
+    DictEncodeFn  dictionary_encode;
     // C.3 — compare → DRAKEN_BOOL result
     CmpScalarFn compare_scalar;
     CmpVecFn    compare_vector;
@@ -168,6 +178,8 @@ struct TypeOps {
     UnaryArithFn  bitwise_not;
     BinaryArithFn bitwise_shl;
     BinaryArithFn bitwise_shr;
+    // Ordinal-key kernel — histogram bucketing / plan-time pruning.
+    OrdinalizeFn ordinalize;
 };
 
 // ---------------------------------------------------------------------------
@@ -261,6 +273,11 @@ struct OpsTable {
 
     OpsTable() noexcept {
         std::memset(entries, 0, sizeof(entries));
+        // DRAKEN_NULL — every row is null by construction; ordinalize trivially
+        // (matches draken_hash's DRAKEN_NULL handling, boxed at the nanobind
+        // layer for hash() but table-registered here for ordinalize since
+        // draken_ordinalize_shaped always dispatches through this table).
+        entries[DRAKEN_NULL].ordinalize = draken::ops::ordinalize_null;
         // C.1
         entries[DRAKEN_INT64].hash       = hash_int64;
         // C.2 — reductions
@@ -285,18 +302,20 @@ struct OpsTable {
         entries[DRAKEN_INT64].take           = draken::ops::i64_take;
         entries[DRAKEN_INT64].slice          = draken::ops::i64_slice;
         entries[DRAKEN_INT64].materialize    = draken::ops::i64_materialize;
-        entries[DRAKEN_INT64].compress       = draken::ops::i64_compress;
+        entries[DRAKEN_INT64].dictionary_encode        = draken::ops::i64_dictionary_encode;
         // C.3 — compare
         entries[DRAKEN_INT64].compare_scalar = draken::ops::i64_compare_scalar;
         entries[DRAKEN_INT64].compare_vector = draken::ops::i64_compare_vector;
         // C.4 — predicates
         entries[DRAKEN_INT64].between        = draken::ops::i64_between;
         entries[DRAKEN_INT64].in_list        = draken::ops::i64_in_list;
+        entries[DRAKEN_INT64].ordinalize     = draken::ops::ordinalize_widen<int64_t>;
 
         // BOOL — bit-packed hash kernel; keying for GROUP BY / DISTINCT / JOIN
         // on a boolean key. Storage/compare/take handled elsewhere; only the
         // keying hash slot lives here.
         entries[DRAKEN_BOOL].hash          = draken::ops::hash_bool;
+        entries[DRAKEN_BOOL].ordinalize    = draken::ops::ordinalize_bool;
 
         // D.6 — INT8
         entries[DRAKEN_INT8].hash          = draken::ops::hash_int8;
@@ -317,11 +336,12 @@ struct OpsTable {
         entries[DRAKEN_INT8].take          = draken::ops::i8_take;
         entries[DRAKEN_INT8].slice         = draken::ops::i8_slice;
         entries[DRAKEN_INT8].materialize   = draken::ops::i8_materialize;
-        entries[DRAKEN_INT8].compress      = draken::ops::i8_compress;
+        entries[DRAKEN_INT8].dictionary_encode       = draken::ops::i8_dictionary_encode;
         entries[DRAKEN_INT8].compare_scalar = draken::ops::i8_compare_scalar;
         entries[DRAKEN_INT8].compare_vector = draken::ops::i8_compare_vector;
         entries[DRAKEN_INT8].between       = draken::ops::i8_between;
         entries[DRAKEN_INT8].in_list       = draken::ops::i8_in_list;
+        entries[DRAKEN_INT8].ordinalize    = draken::ops::ordinalize_widen<int8_t>;
 
         // D.6 — INT16
         entries[DRAKEN_INT16].hash          = draken::ops::hash_int16;
@@ -342,11 +362,12 @@ struct OpsTable {
         entries[DRAKEN_INT16].take          = draken::ops::i16_take;
         entries[DRAKEN_INT16].slice         = draken::ops::i16_slice;
         entries[DRAKEN_INT16].materialize   = draken::ops::i16_materialize;
-        entries[DRAKEN_INT16].compress      = draken::ops::i16_compress;
+        entries[DRAKEN_INT16].dictionary_encode       = draken::ops::i16_dictionary_encode;
         entries[DRAKEN_INT16].compare_scalar = draken::ops::i16_compare_scalar;
         entries[DRAKEN_INT16].compare_vector = draken::ops::i16_compare_vector;
         entries[DRAKEN_INT16].between       = draken::ops::i16_between;
         entries[DRAKEN_INT16].in_list       = draken::ops::i16_in_list;
+        entries[DRAKEN_INT16].ordinalize    = draken::ops::ordinalize_widen<int16_t>;
 
         // D.6 — INT32
         entries[DRAKEN_INT32].hash          = draken::ops::hash_int32;
@@ -367,11 +388,12 @@ struct OpsTable {
         entries[DRAKEN_INT32].take          = draken::ops::i32_take;
         entries[DRAKEN_INT32].slice         = draken::ops::i32_slice;
         entries[DRAKEN_INT32].materialize   = draken::ops::i32_materialize;
-        entries[DRAKEN_INT32].compress      = draken::ops::i32_compress;
+        entries[DRAKEN_INT32].dictionary_encode       = draken::ops::i32_dictionary_encode;
         entries[DRAKEN_INT32].compare_scalar = draken::ops::i32_compare_scalar;
         entries[DRAKEN_INT32].compare_vector = draken::ops::i32_compare_vector;
         entries[DRAKEN_INT32].between       = draken::ops::i32_between;
         entries[DRAKEN_INT32].in_list       = draken::ops::i32_in_list;
+        entries[DRAKEN_INT32].ordinalize    = draken::ops::ordinalize_widen<int32_t>;
 
         // D.7 — FLOAT32
         entries[DRAKEN_FLOAT32].hash              = draken::ops::hash_float32;
@@ -392,11 +414,12 @@ struct OpsTable {
         entries[DRAKEN_FLOAT32].take              = draken::ops::f32_take;
         entries[DRAKEN_FLOAT32].slice             = draken::ops::f32_slice;
         entries[DRAKEN_FLOAT32].materialize       = draken::ops::f32_materialize;
-        entries[DRAKEN_FLOAT32].compress          = draken::ops::f32_compress;
+        entries[DRAKEN_FLOAT32].dictionary_encode           = draken::ops::f32_dictionary_encode;
         entries[DRAKEN_FLOAT32].float_compare_scalar = draken::ops::f32_compare_scalar;
         entries[DRAKEN_FLOAT32].compare_vector    = draken::ops::f32_compare_vector;
         entries[DRAKEN_FLOAT32].float_between     = draken::ops::f32_between;
         entries[DRAKEN_FLOAT32].in_list           = draken::ops::f32_in_list;
+        entries[DRAKEN_FLOAT32].ordinalize        = draken::ops::ordinalize_float32;
 
         // D.7 — FLOAT64
         entries[DRAKEN_FLOAT64].hash              = draken::ops::hash_float64;
@@ -417,11 +440,12 @@ struct OpsTable {
         entries[DRAKEN_FLOAT64].take              = draken::ops::f64_take;
         entries[DRAKEN_FLOAT64].slice             = draken::ops::f64_slice;
         entries[DRAKEN_FLOAT64].materialize       = draken::ops::f64_materialize;
-        entries[DRAKEN_FLOAT64].compress          = draken::ops::f64_compress;
+        entries[DRAKEN_FLOAT64].dictionary_encode           = draken::ops::f64_dictionary_encode;
         entries[DRAKEN_FLOAT64].float_compare_scalar = draken::ops::f64_compare_scalar;
         entries[DRAKEN_FLOAT64].compare_vector    = draken::ops::f64_compare_vector;
         entries[DRAKEN_FLOAT64].float_between     = draken::ops::f64_between;
         entries[DRAKEN_FLOAT64].in_list           = draken::ops::f64_in_list;
+        entries[DRAKEN_FLOAT64].ordinalize        = draken::ops::ordinalize_float64;
 
         // D.10 / E.32 — DECIMAL: hash/compare/gather/reduction are identical to INT64
         // (scale is transparent to these ops). Arithmetic is scale-aware and intercepted
@@ -442,19 +466,20 @@ struct OpsTable {
         entries[DRAKEN_DECIMAL].neg   = nullptr;
 
         // DECIMAL128 (int128, 16-byte): only the GATHER ops dispatch through OpsTable
-        // (slice/take/materialize/compress). Arithmetic, hash, reductions, and compare
+        // (slice/take/materialize/dictionary_encode). Arithmetic, hash, reductions, and compare
         // are all intercepted at the nanobind boundary BEFORE OpsTable (decimal_arith.h
         // kernels), so those slots stay null. These four are itemsize-specific (16-byte),
         // so they can't reuse the int64 slots the way DRAKEN_DECIMAL does.
         entries[DRAKEN_DECIMAL128].take        = draken::ops::i128_take;
         entries[DRAKEN_DECIMAL128].slice       = draken::ops::i128_slice;
         entries[DRAKEN_DECIMAL128].materialize = draken::ops::i128_materialize;
-        entries[DRAKEN_DECIMAL128].compress    = draken::ops::i128_compress;
+        entries[DRAKEN_DECIMAL128].dictionary_encode     = draken::ops::i128_dictionary_encode;
         // hash slot: needed by the multi-column key-hash path (c_hash → draken_hash)
         // and group-by/join keying. Cross-tier consistent with the int64 hash.
         entries[DRAKEN_DECIMAL128].hash        = hash_decimal128;
+        // .ordinalize deliberately left unregistered -- see ops/ordinalize.h.
 
-        // E33 — UINT8/16/32/64. Gather ops (take/slice/materialize/compress),
+        // E33 — UINT8/16/32/64. Gather ops (take/slice/materialize/dictionary_encode),
         // hash (GROUP BY/JOIN keys), arithmetic/compare/reductions/between/
         // in_list for all four widths — UINT8/16/32 fit safely in the existing
         // int64_t-based templates; UINT64 uses dedicated genuine-unsigned
@@ -475,7 +500,7 @@ struct OpsTable {
         entries[DRAKEN_UINT8].take        = draken::ops::u8_take;
         entries[DRAKEN_UINT8].slice       = draken::ops::u8_slice;
         entries[DRAKEN_UINT8].materialize = draken::ops::u8_materialize;
-        entries[DRAKEN_UINT8].compress    = draken::ops::u8_compress;
+        entries[DRAKEN_UINT8].dictionary_encode     = draken::ops::u8_dictionary_encode;
         entries[DRAKEN_UINT8].add           = draken::ops::u8_add;
         entries[DRAKEN_UINT8].sub           = draken::ops::u8_sub;
         entries[DRAKEN_UINT8].mul           = draken::ops::u8_mul;
@@ -493,12 +518,13 @@ struct OpsTable {
         entries[DRAKEN_UINT8].sum           = draken::ops::u8_sum;
         entries[DRAKEN_UINT8].min_r         = draken::ops::u8_min;
         entries[DRAKEN_UINT8].max_r         = draken::ops::u8_max;
+        entries[DRAKEN_UINT8].ordinalize    = draken::ops::ordinalize_widen<uint8_t>;
 
         entries[DRAKEN_UINT16].hash        = draken::ops::hash_uint16;
         entries[DRAKEN_UINT16].take        = draken::ops::u16_take;
         entries[DRAKEN_UINT16].slice       = draken::ops::u16_slice;
         entries[DRAKEN_UINT16].materialize = draken::ops::u16_materialize;
-        entries[DRAKEN_UINT16].compress    = draken::ops::u16_compress;
+        entries[DRAKEN_UINT16].dictionary_encode     = draken::ops::u16_dictionary_encode;
         entries[DRAKEN_UINT16].add           = draken::ops::u16_add;
         entries[DRAKEN_UINT16].sub           = draken::ops::u16_sub;
         entries[DRAKEN_UINT16].mul           = draken::ops::u16_mul;
@@ -516,12 +542,13 @@ struct OpsTable {
         entries[DRAKEN_UINT16].sum           = draken::ops::u16_sum;
         entries[DRAKEN_UINT16].min_r         = draken::ops::u16_min;
         entries[DRAKEN_UINT16].max_r         = draken::ops::u16_max;
+        entries[DRAKEN_UINT16].ordinalize    = draken::ops::ordinalize_widen<uint16_t>;
 
         entries[DRAKEN_UINT32].hash        = draken::ops::hash_uint32;
         entries[DRAKEN_UINT32].take        = draken::ops::u32_take;
         entries[DRAKEN_UINT32].slice       = draken::ops::u32_slice;
         entries[DRAKEN_UINT32].materialize = draken::ops::u32_materialize;
-        entries[DRAKEN_UINT32].compress    = draken::ops::u32_compress;
+        entries[DRAKEN_UINT32].dictionary_encode     = draken::ops::u32_dictionary_encode;
         entries[DRAKEN_UINT32].add           = draken::ops::u32_add;
         entries[DRAKEN_UINT32].sub           = draken::ops::u32_sub;
         entries[DRAKEN_UINT32].mul           = draken::ops::u32_mul;
@@ -539,12 +566,13 @@ struct OpsTable {
         entries[DRAKEN_UINT32].sum           = draken::ops::u32_sum;
         entries[DRAKEN_UINT32].min_r         = draken::ops::u32_min;
         entries[DRAKEN_UINT32].max_r         = draken::ops::u32_max;
+        entries[DRAKEN_UINT32].ordinalize    = draken::ops::ordinalize_widen<uint32_t>;
 
         entries[DRAKEN_UINT64].hash        = draken::ops::hash_uint64;
         entries[DRAKEN_UINT64].take        = draken::ops::u64_take;
         entries[DRAKEN_UINT64].slice       = draken::ops::u64_slice;
         entries[DRAKEN_UINT64].materialize = draken::ops::u64_materialize;
-        entries[DRAKEN_UINT64].compress    = draken::ops::u64_compress;
+        entries[DRAKEN_UINT64].dictionary_encode     = draken::ops::u64_dictionary_encode;
         entries[DRAKEN_UINT64].add           = draken::ops::u64_add;
         entries[DRAKEN_UINT64].sub           = draken::ops::u64_sub;
         entries[DRAKEN_UINT64].mul           = draken::ops::u64_mul;
@@ -562,6 +590,7 @@ struct OpsTable {
         entries[DRAKEN_UINT64].max_r         = draken::ops::u64_max;
         entries[DRAKEN_UINT64].between        = draken::ops::u64_between;
         entries[DRAKEN_UINT64].in_list        = draken::ops::u64_in_list;
+        entries[DRAKEN_UINT64].ordinalize     = draken::ops::ordinalize_uint64;
 
         // D.8 — TIMESTAMP64: physical dispatch reuses INT64 kernels.
         // Hot path dispatches on DRAKEN_TIMESTAMP64 and never reads the logical
@@ -595,7 +624,8 @@ struct OpsTable {
         entries[DRAKEN_INTERVAL].take             = draken::ops::interval_take;
         entries[DRAKEN_INTERVAL].slice            = draken::ops::interval_slice;
         entries[DRAKEN_INTERVAL].materialize      = draken::ops::interval_materialize;
-        entries[DRAKEN_INTERVAL].compress         = draken::ops::interval_compress;
+        entries[DRAKEN_INTERVAL].dictionary_encode          = draken::ops::interval_dictionary_encode;
+        entries[DRAKEN_INTERVAL].ordinalize       = draken::ops::ordinalize_interval;
 
         // D.2 — VARCHAR: hash + compare
         entries[DRAKEN_VARCHAR].hash               = draken::ops::hash_string;
@@ -605,11 +635,12 @@ struct OpsTable {
         entries[DRAKEN_VARCHAR].take               = draken::ops::str_take;
         entries[DRAKEN_VARCHAR].slice              = draken::ops::str_slice;
         entries[DRAKEN_VARCHAR].materialize        = draken::ops::str_materialize;
-        entries[DRAKEN_VARCHAR].compress           = draken::ops::str_compress;
+        entries[DRAKEN_VARCHAR].dictionary_encode            = draken::ops::str_dictionary_encode;
         // D.4 — VARCHAR: in_list (hash-only; §1 exception same as str eq/hash)
         entries[DRAKEN_VARCHAR].in_list            = draken::ops::str_in_list;
         // D.x — VARCHAR: between (lexicographic; slot+arena bounds)
         entries[DRAKEN_VARCHAR].str_between        = draken::ops::str_between;
+        entries[DRAKEN_VARCHAR].ordinalize         = draken::ops::ordinalize_string;
 
         // E.7 — NVARCHAR: identical storage; same ops as VARCHAR
         entries[DRAKEN_NVARCHAR].hash               = draken::ops::hash_string;
@@ -618,9 +649,10 @@ struct OpsTable {
         entries[DRAKEN_NVARCHAR].take               = draken::ops::str_take;
         entries[DRAKEN_NVARCHAR].slice              = draken::ops::str_slice;
         entries[DRAKEN_NVARCHAR].materialize        = draken::ops::str_materialize;
-        entries[DRAKEN_NVARCHAR].compress           = draken::ops::str_compress;
+        entries[DRAKEN_NVARCHAR].dictionary_encode            = draken::ops::str_dictionary_encode;
         entries[DRAKEN_NVARCHAR].in_list            = draken::ops::str_in_list;
         entries[DRAKEN_NVARCHAR].str_between        = draken::ops::str_between;
+        entries[DRAKEN_NVARCHAR].ordinalize         = draken::ops::ordinalize_string;
 
         // E.7 — VARBINARY: identical storage; same ops as VARCHAR
         entries[DRAKEN_VARBINARY].hash               = draken::ops::hash_string;
@@ -629,19 +661,21 @@ struct OpsTable {
         entries[DRAKEN_VARBINARY].take               = draken::ops::str_take;
         entries[DRAKEN_VARBINARY].slice              = draken::ops::str_slice;
         entries[DRAKEN_VARBINARY].materialize        = draken::ops::str_materialize;
-        entries[DRAKEN_VARBINARY].compress           = draken::ops::str_compress;
+        entries[DRAKEN_VARBINARY].dictionary_encode            = draken::ops::str_dictionary_encode;
         entries[DRAKEN_VARBINARY].in_list            = draken::ops::str_in_list;
+        entries[DRAKEN_VARBINARY].ordinalize         = draken::ops::ordinalize_string;
 
         // VARIANT — German-string storage (JSON text); shares the string kernels so
-        // VARIANT vectors flow through take/slice/materialize/compress/hash/joins.
+        // VARIANT vectors flow through take/slice/materialize/dictionary_encode/hash/joins.
         entries[DRAKEN_VARIANT].hash               = draken::ops::hash_string;
         entries[DRAKEN_VARIANT].compare_vector     = draken::ops::str_compare_vector;
         entries[DRAKEN_VARIANT].str_compare_scalar = draken::ops::str_compare_scalar;
         entries[DRAKEN_VARIANT].take               = draken::ops::str_take;
         entries[DRAKEN_VARIANT].slice              = draken::ops::str_slice;
         entries[DRAKEN_VARIANT].materialize        = draken::ops::str_materialize;
-        entries[DRAKEN_VARIANT].compress           = draken::ops::str_compress;
+        entries[DRAKEN_VARIANT].dictionary_encode            = draken::ops::str_dictionary_encode;
         entries[DRAKEN_VARIANT].in_list            = draken::ops::str_in_list;
+        entries[DRAKEN_VARIANT].ordinalize         = draken::ops::ordinalize_string;
 
         // E.2 — INT8 bitwise
         entries[DRAKEN_INT8].bitwise_and = draken::ops::i8_bitwise_and;
@@ -695,6 +729,119 @@ static inline void draken_hash(const DrakenVector& v, uint64_t* out, uint32_t n)
     if (idx >= OpsTable::kSize || g_ops_table().entries[idx].hash == nullptr)
         throw std::invalid_argument("draken_hash: unsupported type");
     g_ops_table().entries[idx].hash(v, out, n);
+}
+
+// ---------------------------------------------------------------------------
+// draken_ordinalize: the ordinal-key twin of draken_hash. One table lookup +
+// one indirect call; unsupported types throw.
+// ---------------------------------------------------------------------------
+static inline void draken_ordinalize(const DrakenVector& v, int64_t* out, uint32_t n) {
+    const unsigned idx = static_cast<unsigned>(v.type);
+    if (idx >= OpsTable::kSize || g_ops_table().entries[idx].ordinalize == nullptr)
+        throw std::invalid_argument("draken_ordinalize: unsupported type");
+    g_ops_table().entries[idx].ordinalize(v, out, n);
+}
+
+// ---------------------------------------------------------------------------
+// draken_ordinalize_shaped — shape-preserving ordinal-key vector. Mirrors
+// draken_hash_shaped's dense/compressed contract (see its comment below) with
+// one difference: unlike a keying hash, an ordinal key IS the useful payload
+// itself (no further "mix" step), so the compressed path ordinalizes only the
+// k distinct values directly via a dense view -- the same trick
+// draken_hash_distinct uses to hash distinct values, inlined here since the
+// result is the payload rather than a hash seed.
+//
+// Returns an INT64 VecResult, self-contained (owned data/selection):
+//   dense (dl == n) -> data = n ordinal keys, global identity selection
+//   compressed       -> data = k ordinal keys (k+1 with a trailing
+//                        ORDINAL_NULL slot for nullable columns), selection
+//                        = OWNED copy of codes (null rows -> the extra slot)
+// Null rows get ORDINAL_NULL (INT64_MIN), consistent with the dense kernels
+// -- this is why r.validity stays nullptr: nulls are baked as a sentinel
+// VALUE, not represented via a separate validity bitmap on the result.
+// ---------------------------------------------------------------------------
+static inline VecResult draken_ordinalize_shaped(const DrakenVector& v) {
+    VecResult r;
+    r.type              = DRAKEN_INT64;
+    r.flags             = 0u;
+    r.owns_selection    = false;
+    r.validity          = nullptr;
+    r.validity_embedded = 0u;
+    r.ts_unit           = 0xFFu;
+    const uint32_t n    = v.length;
+
+    // DRAKEN_NULL is self-describing (data_length==0, no data, a CONSTANT
+    // zero selection -- not an identity one) -- it doesn't fit the generic
+    // dense/compressed model at all (data_length==0 there means "zero
+    // distinct values to ordinalize", which is a different thing from "every
+    // row is null"). Handled directly: every row is ORDINAL_NULL, dense.
+    if (v.type == DRAKEN_NULL) {
+        int64_t* data = static_cast<int64_t*>(
+            draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
+        if (data == nullptr) throw std::bad_alloc();
+        for (uint32_t i = 0; i < n; ++i) data[i] = draken::ops::ORDINAL_NULL;
+        r.data           = data;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return r;
+    }
+
+    if (n == 0u || draken_is_dense(&v)) {
+        int64_t* data = static_cast<int64_t*>(
+            draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
+        if (data == nullptr) throw std::bad_alloc();
+        if (n > 0u) draken_ordinalize(v, data, n);
+        r.data           = data;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return r;
+    }
+
+    // Compressed: ordinalize the k distinct values via a dense view (ignores
+    // the source's selection/validity -- same construction draken_hash_distinct
+    // uses), then remap logical rows onto those k (+1 null) slots.
+    const uint32_t k = v.data_length;
+    const bool nullable = (v.validity != nullptr);
+    const uint32_t out_k = nullable ? (k + 1u) : k;
+
+    int64_t* data = static_cast<int64_t*>(draken_malloc(out_k * sizeof(int64_t)));
+    if (data == nullptr) throw std::bad_alloc();
+    if (k > 0u) {
+        DrakenVector dv = v;
+        dv.selection   = draken_identity_sel(k);
+        dv.length      = k;
+        dv.data_length = k;
+        dv.validity    = nullptr;
+        dv.flags       = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        draken_ordinalize(dv, data, k);
+    }
+
+    uint32_t* codes = static_cast<uint32_t*>(draken_malloc(n * sizeof(uint32_t)));
+    if (codes == nullptr) { draken_free(data); throw std::bad_alloc(); }
+
+    if (!nullable) {
+        std::memcpy(codes, v.selection, static_cast<size_t>(n) * sizeof(uint32_t));
+    } else {
+        data[k] = draken::ops::ORDINAL_NULL;
+        const uint8_t* val = v.validity;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint64_t is_valid = (val[i >> 3] >> (i & 7u)) & 1u;
+            codes[i] = is_valid ? v.selection[i] : k;
+        }
+    }
+
+    r.data           = data;
+    r.selection      = codes;
+    r.owns_selection = true;
+    r.data_length    = out_k;
+    r.length         = n;
+    return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -997,11 +1144,11 @@ static inline VecResult draken_materialize(const DrakenVector& v) {
     return g_ops_table().entries[idx].materialize(v);
 }
 
-static inline VecResult draken_compress(const DrakenVector& v) {
+static inline VecResult draken_dictionary_encode(const DrakenVector& v) {
     const unsigned idx = static_cast<unsigned>(v.type);
-    if (idx >= OpsTable::kSize || g_ops_table().entries[idx].compress == nullptr)
-        throw std::invalid_argument("draken_compress: unsupported type");
-    return g_ops_table().entries[idx].compress(v);
+    if (idx >= OpsTable::kSize || g_ops_table().entries[idx].dictionary_encode == nullptr)
+        throw std::invalid_argument("draken_dictionary_encode: unsupported type");
+    return g_ops_table().entries[idx].dictionary_encode(v);
 }
 
 // C.3 — compare dispatch entry points.

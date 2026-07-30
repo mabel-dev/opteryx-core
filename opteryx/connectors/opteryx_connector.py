@@ -315,6 +315,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
             schema=self.schema,
             min_k_vector=sketch_vectors.get("min_k_hashes"),
             histogram_vector=sketch_vectors.get("histogram_counts"),
+            char_class_vector=sketch_vectors.get("char_class_counts"),
         )
 
         return self.schema, self.manifest

@@ -17,7 +17,7 @@ Coverage (D.12 acceptance criteria):
   in_list:           membership, null rows, empty set
   arithmetic:        interval + interval, interval - interval, neg; component-wise
   min / max:         basic, null skip, all-null raises, empty raises
-  take / materialize / compress: shape round-trip
+  take / materialize / dictionary_encode: shape round-trip
 """
 
 import pytest
@@ -515,7 +515,7 @@ class TestMinMax:
 
 
 # ===========================================================================
-# 13. Take / materialize / compress
+# 13. Take / materialize / dictionary_encode
 # ===========================================================================
 
 class TestGather:
@@ -540,12 +540,12 @@ class TestGather:
         assert m.type == dn.DrakenType.INTERVAL
         assert pylist(m) == [(1, 0), (2, 0), (1, 0), (2, 0)]
 
-    def test_compress_basic(self):
+    def test_dictionary_encode_basic(self):
         v = iv([(1, 0), (1, 0), (2, 0)])
-        c = v.compress()
+        c = v.dictionary_encode()
         assert c.type == dn.DrakenType.INTERVAL
         assert len(c) <= 3  # may be deduped
 
-    def test_compress_type_preserved(self):
+    def test_dictionary_encode_type_preserved(self):
         v = iv([(1, 0), (2, 0)])
-        assert v.compress().type == dn.DrakenType.INTERVAL
+        assert v.dictionary_encode().type == dn.DrakenType.INTERVAL

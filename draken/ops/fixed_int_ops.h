@@ -20,7 +20,7 @@
 // SUM / MIN / MAX:
 //   Accumulate into int64_t (avoids narrow-type overflow in reductions).
 //
-// GATHER (take / materialize / compress):
+// GATHER (take / materialize / dictionary_encode):
 //   Result type stays T (same width). Compact T elements in output.
 //
 // HASH:
@@ -905,7 +905,7 @@ static inline VecResult fixed_int_neg(const DrakenVector& a) {
 }
 
 // ===========================================================================
-// GATHER — take / materialize / compress (result stays type T)
+// GATHER — take / materialize / dictionary_encode (result stays type T)
 // ===========================================================================
 
 template<typename T, DrakenType TAG>
@@ -982,7 +982,7 @@ static inline VecResult fixed_int_materialize(const DrakenVector& v) {
 }
 
 template<typename T, DrakenType TAG>
-static inline VecResult fixed_int_compress(const DrakenVector& v) {
+static inline VecResult fixed_int_dictionary_encode(const DrakenVector& v) {
     const uint32_t n        = v.length;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
@@ -1352,7 +1352,7 @@ static inline VecResult fixed_int_slice(const DrakenVector& v, uint32_t start, u
 
 static inline VecResult i8_slice(const DrakenVector& v, uint32_t s, uint32_t n)  { return fixed_int_slice<int8_t,  DRAKEN_INT8>(v, s, n); }
 static inline VecResult i8_materialize(const DrakenVector& v)                    { return fixed_int_materialize<int8_t,  DRAKEN_INT8>(v); }
-static inline VecResult i8_compress(const DrakenVector& v)                       { return fixed_int_compress<int8_t,  DRAKEN_INT8>(v); }
+static inline VecResult i8_dictionary_encode(const DrakenVector& v)                       { return fixed_int_dictionary_encode<int8_t,  DRAKEN_INT8>(v); }
 static inline VecResult i8_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<int8_t>(v, lo, hi, li, hi_i); }
 static inline VecResult i8_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<int8_t>(v, s); }
 
@@ -1377,7 +1377,7 @@ static inline VecResult i16_neg(const DrakenVector& a)                          
 static inline VecResult i16_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<int16_t, DRAKEN_INT16>(v, idx, n); }
 static inline VecResult i16_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<int16_t, DRAKEN_INT16>(v, s, n); }
 static inline VecResult i16_materialize(const DrakenVector& v)                    { return fixed_int_materialize<int16_t, DRAKEN_INT16>(v); }
-static inline VecResult i16_compress(const DrakenVector& v)                       { return fixed_int_compress<int16_t, DRAKEN_INT16>(v); }
+static inline VecResult i16_dictionary_encode(const DrakenVector& v)                       { return fixed_int_dictionary_encode<int16_t, DRAKEN_INT16>(v); }
 static inline VecResult i16_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<int16_t>(v, lo, hi, li, hi_i); }
 static inline VecResult i16_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<int16_t>(v, s); }
 
@@ -1402,12 +1402,12 @@ static inline VecResult i32_neg(const DrakenVector& a)                          
 static inline VecResult i32_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<int32_t, DRAKEN_INT32>(v, idx, n); }
 static inline VecResult i32_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<int32_t, DRAKEN_INT32>(v, s, n); }
 static inline VecResult i32_materialize(const DrakenVector& v)                    { return fixed_int_materialize<int32_t, DRAKEN_INT32>(v); }
-static inline VecResult i32_compress(const DrakenVector& v)                       { return fixed_int_compress<int32_t, DRAKEN_INT32>(v); }
+static inline VecResult i32_dictionary_encode(const DrakenVector& v)                       { return fixed_int_dictionary_encode<int32_t, DRAKEN_INT32>(v); }
 static inline VecResult i32_between(const DrakenVector& v, int64_t lo, int64_t hi, bool li, bool hi_i) { return fixed_int_between<int32_t>(v, lo, hi, li, hi_i); }
 static inline VecResult i32_in_list(const DrakenVector& v, const opteryx::carchar::CarcharSet& s) { return fixed_int_in_list<int32_t>(v, s); }
 
 // ===========================================================================
-// E33 — unsigned gather ops (take/slice/materialize/compress). These templates
+// E33 — unsigned gather ops (take/slice/materialize/dictionary_encode). These templates
 // are signedness-agnostic (pure value copies via data[selection[i]] — no
 // arithmetic, no comparison), so instantiating them for uint8_t/16/32/64 needs
 // no new logic, only registration. Arithmetic/comparison/hash/aggregation
@@ -1416,17 +1416,17 @@ static inline VecResult i32_in_list(const DrakenVector& v, const opteryx::carcha
 static inline VecResult u8_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint8_t, DRAKEN_UINT8>(v, idx, n); }
 static inline VecResult u8_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint8_t, DRAKEN_UINT8>(v, s, n); }
 static inline VecResult u8_materialize(const DrakenVector& v) { return fixed_int_materialize<uint8_t, DRAKEN_UINT8>(v); }
-static inline VecResult u8_compress(const DrakenVector& v) { return fixed_int_compress<uint8_t, DRAKEN_UINT8>(v); }
+static inline VecResult u8_dictionary_encode(const DrakenVector& v) { return fixed_int_dictionary_encode<uint8_t, DRAKEN_UINT8>(v); }
 
 static inline VecResult u16_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint16_t, DRAKEN_UINT16>(v, idx, n); }
 static inline VecResult u16_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint16_t, DRAKEN_UINT16>(v, s, n); }
 static inline VecResult u16_materialize(const DrakenVector& v) { return fixed_int_materialize<uint16_t, DRAKEN_UINT16>(v); }
-static inline VecResult u16_compress(const DrakenVector& v) { return fixed_int_compress<uint16_t, DRAKEN_UINT16>(v); }
+static inline VecResult u16_dictionary_encode(const DrakenVector& v) { return fixed_int_dictionary_encode<uint16_t, DRAKEN_UINT16>(v); }
 
 static inline VecResult u32_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint32_t, DRAKEN_UINT32>(v, idx, n); }
 static inline VecResult u32_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint32_t, DRAKEN_UINT32>(v, s, n); }
 static inline VecResult u32_materialize(const DrakenVector& v) { return fixed_int_materialize<uint32_t, DRAKEN_UINT32>(v); }
-static inline VecResult u32_compress(const DrakenVector& v) { return fixed_int_compress<uint32_t, DRAKEN_UINT32>(v); }
+static inline VecResult u32_dictionary_encode(const DrakenVector& v) { return fixed_int_dictionary_encode<uint32_t, DRAKEN_UINT32>(v); }
 
 // Hash reuses fixed_int_hash directly even at 64-bit width: for values whose
 // high bit is set (>= 2^63) the int64_t cast inside the template just
@@ -1446,7 +1446,7 @@ static inline VecResult u64_in_list(const DrakenVector& v, const opteryx::carcha
 static inline VecResult u64_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return fixed_int_take<uint64_t, DRAKEN_UINT64>(v, idx, n); }
 static inline VecResult u64_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return fixed_int_slice<uint64_t, DRAKEN_UINT64>(v, s, n); }
 static inline VecResult u64_materialize(const DrakenVector& v) { return fixed_int_materialize<uint64_t, DRAKEN_UINT64>(v); }
-static inline VecResult u64_compress(const DrakenVector& v) { return fixed_int_compress<uint64_t, DRAKEN_UINT64>(v); }
+static inline VecResult u64_dictionary_encode(const DrakenVector& v) { return fixed_int_dictionary_encode<uint64_t, DRAKEN_UINT64>(v); }
 
 // ===========================================================================
 // E33 — same-type OpsTable kernels for UINT8/16/32 (arithmetic, compare,

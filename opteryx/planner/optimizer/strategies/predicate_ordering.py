@@ -24,6 +24,12 @@ appended after the simple predicates in their original order.
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
+from opteryx.planner.cost_estimation.predicate_cost import (
+    BASIC_COMPARISON_COSTS,
+    OPERATION_COSTS,
+    base_cost as _base_cost,
+    catalog_function_cost as _catalog_function_cost,
+)
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
@@ -36,40 +42,6 @@ from .optimization_strategy import (
     OptimizerContext,
     get_nodes_of_type_from_logical_plan,
 )
-
-# Approximate of the time in seconds (3sf) to compare 1 million records
-# These are the core comparisons, Eq, NotEq, Gt, GtEq, Lt, LtEq
-BASIC_COMPARISON_COSTS = {
-    LogicalCategory.ARRAY: 10.00,  # expensive
-    LogicalCategory.VARBINARY: 0.058,  # varies based on length, this is 50 bytes
-    LogicalCategory.NVARCHAR: 10.00,  # JSON/complex text (treat as expensive)
-    LogicalCategory.BOOLEAN: 0.003,
-    LogicalCategory.DATE: 0.008,
-    LogicalCategory.DECIMAL: 1.533,
-    LogicalCategory.FLOAT: 0.002,
-    LogicalCategory.INTEGER: 0.001,
-    LogicalCategory.INTERVAL: 10.00,  # expensive
-    LogicalCategory.TIMESTAMP: 0.008,
-    LogicalCategory.TIME: 10.00,  # expensive
-    LogicalCategory.VARCHAR: 0.231,  # varies based on length, this is 50 chars
-    LogicalCategory.NULL: 10.00,  # for completeness
-    None: 10.00,  # unknown type — treat as expensive
-}
-
-# Operation-specific costs (override type-based costs)
-# Pattern matching operations are significantly more expensive than simple comparisons
-OPERATION_COSTS = {
-    "InStr": 2.5,  # substring search (Volnitsky algorithm)
-    "IInStr": 2.5,  # case-insensitive substring search
-    "NotInStr": 2.5,
-    "NotIInStr": 2.5,
-    "Like": 2.5,  # pattern matching
-    "ILike": 2.5,
-    "NotLike": 2.5,
-    "NotILike": 2.5,
-    "RLike": 3.0,  # regex is even more expensive
-    "NotRLike": 3.0,
-}
 
 # If we have no data, we assume these default selectivities
 DEFAULT_SELECTIVITY = {
@@ -104,33 +76,6 @@ def _estimate_selectivity(condition):
 
     op = getattr(condition, "value", None)
     return DEFAULT_SELECTIVITY.get(op, 0.5)
-
-
-def _base_cost(condition):
-    op = getattr(condition, "value", None)
-    if op in OPERATION_COSTS:
-        return OPERATION_COSTS[op]
-    col = getattr(condition, "left", None)
-    col_type = getattr(col, "schema_column", None)
-    if col_type is None:
-        return 10.0
-    return BASIC_COMPARISON_COSTS.get(col_type.category, 10.0)
-
-
-def _catalog_function_cost(node) -> float:
-    """Sum catalog cost estimates for all FUNCTION nodes in the expression subtree.
-
-    Falls back to 100.0 µs/million for any function with cost 0.0 (legacy backfill entries
-    that don't have measured costs should be treated as expensive, not free).
-    """
-    from opteryx.expression.functions import get_catalog
-
-    _UNKNOWN_COST = 100.0
-    total = 0.0
-    for func_node in get_all_nodes_of_type(node, (NodeType.FUNCTION,)):
-        cost = get_catalog().get_cost(func_node.value) or 0.0
-        total += cost if cost > 0.0 else _UNKNOWN_COST
-    return total
 
 
 def _order_complex_predicates(predicates, telemetry):

@@ -175,7 +175,8 @@ v.neg()   # negation → same type
 
 ```python
 v.take(indices: list[int])  # gather by row indices → Vector (same type)
-v.compress(mask: Vector)    # filter rows where BOOL mask is True → Vector
+v.drop_nulls()              # keep only valid rows, shrinking length (NULL/ARRAY/FP16 only)
+v.dictionary_encode()       # dedupe into a Dict shape; length and null rows unchanged
 v.materialize()             # expand dict shape to dense
 ```
 
@@ -311,9 +312,8 @@ ids    = dn.vector_from_sequence([1, 2, 3, None, 5])
 names  = dn.vector_from_string_sequence(["alice", "bob", "carol", None, "eve"])
 active = dn.vector_from_bool_sequence([True, False, True, None, True])
 
-# Filter rows where active is True
-mask   = active.bool_not().bool_not()         # identity, just for illustration
-result = names.compress(active)
+# Gather rows by explicit index
+result = names.take([0, 2, 4])
 
 print(result.to_pylist())   # ['alice', 'carol', 'eve']
 print(ids.sum())            # 11

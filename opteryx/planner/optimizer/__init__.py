@@ -307,7 +307,7 @@ class OptimizerVisitor:
                     strategy.optimization_technique == "cost"
                     and getattr(current_plan, "statistics_are_stale", True)
                 ):
-                    current_plan = refresh_statistics(current_plan)
+                    current_plan = refresh_statistics(current_plan, telemetry=self.telemetry)
                 before = (len(current_plan), len(current_plan.edges()))
                 current_plan = self.traverse(current_plan, strategy)
                 self.telemetry.add_plan_rewrite(

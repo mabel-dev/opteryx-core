@@ -106,6 +106,12 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # caller who needs a trace to hold `platform_admin`.
     "trace": (BOOLEAN, config.OPTERYX_TRACE, VariableOwner.USER, Visibility.UNRESTRICTED),
     "match_threshold": (FLOAT64, config.MATCH_THRESHOLD, VariableOwner.USER, Visibility.UNRESTRICTED),
+    # Bind-time only (see binder.py's COMPARISON_OPERATOR handling), same
+    # capture-at-bind reasoning as match_threshold above. UNRESTRICTED: tuning
+    # a cost-estimation coefficient for one's own query is not a data-access
+    # grant, same reasoning as match_threshold.
+    "like_selectivity_decay": (
+        FLOAT64, config.LIKE_SELECTIVITY_DECAY, VariableOwner.USER, Visibility.UNRESTRICTED),
     # Late-materialization tuning is per-QUERY: the right values depend on this
     # query's predicate selectivity, not on the deployment.
     "parquet_late_materialization_abandon_after": (

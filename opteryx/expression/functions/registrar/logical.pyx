@@ -28,6 +28,15 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
     class other_functions:
         null_if = staticmethod(_lf_null_if)
 
+    # IFNULL/IFNOTNULL share COALESCE's branch-type resolver+validation
+    # (_coalesce_return_type, defined in the package __init__ this file is
+    # `include`d into) but need their own name in the error it raises.
+    def _ifnull_return_type(arg_nodes):
+        return _coalesce_return_type(arg_nodes, func_name="IFNULL")
+
+    def _ifnotnull_return_type(arg_nodes):
+        return _coalesce_return_type(arg_nodes, func_name="IFNOTNULL")
+
     # COALESCE/IFNULL/IFNOTNULL/IIF are c-native: the bytecode builder resolves
     # draken_{name} from the kernel registry and sets BC_INSTR_C_NATIVE, and every
     # VM arm gates on that flag before reading callable_ref. There is no Python
@@ -78,7 +87,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="value", type_family="any"),
                         ParameterSpec(name="default", type_family="any"),
                     ),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_ifnull_return_type),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -104,7 +113,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="value", type_family="any"),
                         ParameterSpec(name="result", type_family="any"),
                     ),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_ifnotnull_return_type),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

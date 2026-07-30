@@ -19,6 +19,7 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar import fixed_value_function
+from opteryx.expression.functions.registrar import _check_blend_compatible
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
@@ -685,6 +686,26 @@ def inner_binder(
             branch_nodes = list(node.results or [])
             if node.else_result is not None:
                 branch_nodes.append(node.else_result)
+            # THEN/ELSE branches blend the same way COALESCE/IFNULL/IIF do (same
+            # native families — see _check_blend_compatible), whether this CASE
+            # later lowers to draken_if_then_else, IFNULL/IIF, or the BC_CASE
+            # Python path. Reject an incompatible mix here, at the one point that
+            # sees every branch and the actual CASE the user wrote, rather than
+            # downstream where only a bare type code survives.
+            typed_branches = [
+                (branch, getattr(branch, "schema_column", None).column_type)
+                for branch in branch_nodes
+                if getattr(branch, "schema_column", None) is not None
+                and branch.schema_column.column_type is not None
+                and branch.schema_column.column_type != _CT_NULL
+            ]
+            try:
+                _check_blend_compatible(typed_branches, "CASE")
+            except IncompatibleTypesError as _case_err:
+                _case_col = node.alias or column_name
+                raise IncompatibleTypesError(
+                    message=f"{_case_err} (column '{_case_col}')"
+                ) from _case_err
             for branch in branch_nodes:
                 sc = getattr(branch, "schema_column", None)
                 if sc is not None and sc.column_type is not None and sc.column_type != _CT_NULL:
@@ -901,6 +922,25 @@ def inner_binder(
                     _coerce_literal(node.right, node.left)
                 elif node.left is not None and node.left.node_type == NodeType.LITERAL:
                     _coerce_literal(node.left, node.right)
+
+            # Capture like_selectivity_decay at BIND time, before predicate_rewriter
+            # later mutates node.value from Like/ILike/NotLike/NotILike to
+            # InStr/IInStr/NotInStr/NotIInStr IN PLACE ON THIS SAME NODE (see
+            # predicate_rewriter.INSTR_REWRITES) — the char-class LIKE selectivity
+            # estimator (opteryx.planner.cost_estimation.selectivity._selectivity_instr)
+            # reads it via plain attribute access. Same reasoning as match_threshold's
+            # bind-time capture above: a compiled plan must keep answering the
+            # selectivity question it was compiled for, so a later SET cannot reach
+            # back and change an already-bound plan's estimate.
+            if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
+                "Like",
+                "ILike",
+                "NotLike",
+                "NotILike",
+            ):
+                node.like_selectivity_decay = context.execution_context.variables[
+                    "like_selectivity_decay"
+                ]
 
             # The type-mismatch check recurses the whole subtree for AND/OR/XOR
             # nodes, but inner_binder already visits every comparison leaf

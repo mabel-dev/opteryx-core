@@ -4,7 +4,7 @@ Native correctness tests for DRAKEN_VARCHAR dict-encoded vectors (Milestone D.3)
 Coverage:
   dict_ingest   : dedup, codes, data_length, round-trip via to_pylist
   materialize   : dict / constant / dense → dense; nulls, empty, long strings
-  compress      : dense → dict; dedup; round-trip materialize(compress(dense))==dense
+  dictionary_encode: dense → dict; dedup; round-trip materialize(dictionary_encode(dense))==dense
   take          : gather by index; repeats, out-of-order, nulls, empty
   d2_on_dict    : hash / eq / compare on dict shape == results on materialized dense
   hash32_reuse  : dict unique slots carry same hash32 as D.1 ingestion
@@ -183,70 +183,70 @@ class TestMaterialize:
 
 
 class TestCompress:
-    def test_compress_deduplicates(self):
+    def test_dictionary_encode_deduplicates(self):
         src = ["a", "b", "a", "c"]
-        c = dense(src).compress()
+        c = dense(src).dictionary_encode()
         assert c.is_dict
         assert c.data_length == 3
         assert py(c) == src
 
-    def test_compress_roundtrip(self):
+    def test_dictionary_encode_roundtrip(self):
         src = ["p", "q", "p", "r", "q", "q"]
-        m = dense(src).compress().materialize()
+        m = dense(src).dictionary_encode().materialize()
         assert py(m) == src
 
-    def test_compress_roundtrip_long_strings(self):
+    def test_dictionary_encode_roundtrip_long_strings(self):
         long_a = "alpha_" * 10
         long_b = "beta__" * 10
         src = [long_a, long_b, long_a, None, long_b]
-        m = dense(src).compress().materialize()
+        m = dense(src).dictionary_encode().materialize()
         assert py(m) == src
 
-    def test_compress_all_unique(self):
+    def test_dictionary_encode_all_unique(self):
         src = [f"unique_{i}" for i in range(50)]
-        c = dense(src).compress()
+        c = dense(src).dictionary_encode()
         assert c.data_length == 50
         assert py(c) == src
 
-    def test_compress_all_same(self):
+    def test_dictionary_encode_all_same(self):
         src = ["same"] * 20
-        c = dense(src).compress()
+        c = dense(src).dictionary_encode()
         assert c.data_length == 1
         assert py(c) == src
 
-    def test_compress_all_null(self):
+    def test_dictionary_encode_all_null(self):
         src = [None] * 5
-        c = dense(src).compress()
+        c = dense(src).dictionary_encode()
         assert py(c) == src
 
-    def test_compress_empty(self):
-        c = dense([]).compress()
+    def test_dictionary_encode_empty(self):
+        c = dense([]).dictionary_encode()
         assert py(c) == []
 
-    def test_compress_preserves_nulls(self):
+    def test_dictionary_encode_preserves_nulls(self):
         src = [None, "x", None, "y", "x"]
-        m = dense(src).compress().materialize()
+        m = dense(src).dictionary_encode().materialize()
         assert py(m) == src
 
-    def test_compress_then_compress(self):
-        # compress(compress(dense)) should not break anything.
+    def test_dictionary_encode_then_dictionary_encode(self):
+        # dictionary_encode(dictionary_encode(dense)) should not break anything.
         src = ["a", "b", "a"]
-        cc = dense(src).compress().compress()
+        cc = dense(src).dictionary_encode().dictionary_encode()
         assert py(cc.materialize()) == src
 
-    def test_materialize_compress_roundtrip_boundary(self):
+    def test_materialize_dictionary_encode_roundtrip_boundary(self):
         src = ["a" * 11, "b" * 12, "c" * 13, "a" * 11]
-        m = dense(src).compress().materialize()
+        m = dense(src).dictionary_encode().materialize()
         assert py(m) == src
 
-    def test_hash32_reuse_in_compress(self):
-        # The unique slots in a compress result must carry the same (length, prefix,
+    def test_hash32_reuse_in_dictionary_encode(self):
+        # The unique slots in a dictionary_encode result must carry the same (length, prefix,
         # hash32) as D.1 ingestion would produce for the same string.
         long_s = "verylongstring_" + "x" * 30
-        # Build dense via D.1, then compress.
+        # Build dense via D.1, then dictionary_encode.
         d = dense([long_s, "other", long_s])
-        c = d.compress()
-        # Find the slot index for long_s in the compressed vector.
+        c = d.dictionary_encode()
+        # Find the slot index for long_s in the dictionary_encoded vector.
         # materialize gives correct values so we know the mapping.
         m = c.materialize()
         assert m[0] == long_s
@@ -482,10 +482,10 @@ class TestRAII:
             m = base.materialize()
             del m
 
-    def test_compress_create_destroy_loop(self):
+    def test_dictionary_encode_create_destroy_loop(self):
         base = dense(["x", "y", "x", "z"] * 25)
         for _ in range(200):
-            c = base.compress()
+            c = base.dictionary_encode()
             del c
 
     def test_take_create_destroy_loop(self):
@@ -500,7 +500,7 @@ class TestRAII:
         for _ in range(100):
             v = dictv(data)
             m = v.materialize()
-            c = m.compress()
+            c = m.dictionary_encode()
             del v, m, c
 
     def test_chain_ops_no_crash(self):
@@ -509,7 +509,7 @@ class TestRAII:
         src[::10] = [None] * (len(src[::10]))  # scatter nulls
         v = dictv(src)
         m = v.materialize()
-        c = m.compress()
+        c = m.dictionary_encode()
         m2 = c.materialize()
         assert py(m2) == src
 
@@ -536,15 +536,15 @@ class TestEdgeCases:
         assert py(r) == []
         assert r.length == 0
 
-    def test_compress_already_dict(self):
-        # compressing a dict-encoded vector should work (via uniform access).
+    def test_dictionary_encode_already_dict(self):
+        # dictionary_encoding a dict-encoded vector should work (via uniform access).
         v = dictv(["p", "q", "p", "r"])
-        c = v.compress()
+        c = v.dictionary_encode()
         assert py(c.materialize()) == ["p", "q", "p", "r"]
 
-    def test_materialize_then_compress_then_materialize(self):
+    def test_materialize_then_dictionary_encode_then_materialize(self):
         src = ["one", "two", "one", "three", "two"]
-        result = dense(src).materialize().compress().materialize()
+        result = dense(src).materialize().dictionary_encode().materialize()
         assert py(result) == src
 
     def test_take_produces_dense_with_identity_flags(self):

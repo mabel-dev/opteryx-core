@@ -5,7 +5,7 @@ Design contract (06_value_encoding.md):
   - type == NULL ⟹ every row null; no data buffer, no validity buffer.
   - Self-describing: readers short-circuit on the type tag.
   - Ops: hash → null-hash sentinel; compare/between/in_list → all-NULL bool (3VL);
-         take/materialize → still null; compress → empty null; reductions → 0 / raise.
+         take/materialize → still null; drop_nulls → empty null; reductions → 0 / raise.
 
 All tests import draken.draken_native directly; no import opteryx.
 """
@@ -155,7 +155,7 @@ class TestNullCompareOps:
 
 
 # ===========================================================================
-# 5. take / materialize / compress
+# 5. take / materialize / drop_nulls
 # ===========================================================================
 
 class TestNullGatherOps:
@@ -176,13 +176,13 @@ class TestNullGatherOps:
         assert len(result) == 5
         assert result.to_pylist() == [None] * 5
 
-    def test_compress_returns_empty_null(self):
-        result = null_vec(5).compress()
+    def test_drop_nulls_returns_empty_null(self):
+        result = null_vec(5).drop_nulls()
         assert result.type == dn.DrakenType.NULL
         assert len(result) == 0
 
-    def test_compress_empty_null(self):
-        result = null_vec(0).compress()
+    def test_drop_nulls_empty_null(self):
+        result = null_vec(0).drop_nulls()
         assert result.type == dn.DrakenType.NULL
         assert len(result) == 0
 

@@ -1,5 +1,5 @@
 """
-Native unit tests for int64 C.2 ops: sum / min / max / arithmetic / take / materialize / compress.
+Native unit tests for int64 C.2 ops: sum / min / max / arithmetic / take / materialize / dictionary_encode.
 
 These tests assert the CORRECT answer.
 Coverage matrix (per 04_testing.md §1 and the ticket acceptance criteria):
@@ -14,7 +14,7 @@ Coverage matrix (per 04_testing.md §1 and the ticket acceptance criteria):
                  neg(INT64_MIN)→INT64_MIN; null propagation for binary ops
     take:        repeats, out-of-order, empty indices, null source
     materialize: round-trip all three shapes
-    compress:    round-trip materialize(compress(v)) == v
+    dictionary_encode: round-trip materialize(dictionary_encode(v)) == v
 """
 
 import pytest
@@ -442,7 +442,7 @@ class TestCompress:
     def _roundtrip(self, lst):
         """Compress a sequence then materialize back; must equal original."""
         v = make(lst)
-        return pylist(v.compress().materialize())
+        return pylist(v.dictionary_encode().materialize())
 
     def test_empty_roundtrip(self):
         assert self._roundtrip([]) == []
@@ -477,27 +477,27 @@ class TestCompress:
         src = [i % 7 for i in range(10_000)]
         assert self._roundtrip(src) == src
 
-    def test_compress_produces_dict_shape(self):
+    def test_dictionary_encode_produces_dict_shape(self):
         v = make([1, 2, 1, 3, 2])
-        c = v.compress()
-        # compress of a 5-row vector with 3 unique values → dict (data_length < length)
+        c = v.dictionary_encode()
+        # dictionary_encode of a 5-row vector with 3 unique values → dict (data_length < length)
         assert c.is_dict
         assert c.data_length == 3
 
-    def test_constant_shape_compress_roundtrip(self):
+    def test_constant_shape_dictionary_encode_roundtrip(self):
         v = make_const(99, 5)
-        m = v.compress().materialize()
+        m = v.dictionary_encode().materialize()
         assert pylist(m) == [99, 99, 99, 99, 99]
 
-    def test_dict_shape_compress_roundtrip(self):
+    def test_dict_shape_dictionary_encode_roundtrip(self):
         v = make_dict([10, 20], [0, 1, 0, 1])
-        m = v.compress().materialize()
+        m = v.dictionary_encode().materialize()
         assert pylist(m) == [10, 20, 10, 20]
 
-    def test_all_null_compress_constant_shape(self):
-        # all-null compresses to a constant shape: data_length=1, all rows null
+    def test_all_null_dictionary_encode_constant_shape(self):
+        # all-null dictionary_encodes to a constant shape: data_length=1, all rows null
         v = make([None, None, None])
-        c = v.compress()
+        c = v.dictionary_encode()
         assert c.data_length == 1   # one dummy dict entry
         assert c.length == 3
         # round-trip still gives all nulls

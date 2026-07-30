@@ -300,8 +300,23 @@ def explain(
         stat = node_stats_by_nid.get(node_id)
         return round((stat.get("self_time", 0) or 0) / 1e6, 3) if stat else 0.0
 
+    # est_rows is planning-time (no execution needed), so it's available for
+    # plain EXPLAIN too, not just ANALYZE -- the physical plan graph is keyed
+    # by the same nid as the logical plan (see create_physical_plan), so this
+    # correlates directly against statistics_refresh's estimate, no separate
+    # identity mapping needed. Empty/0 when refresh_statistics never ran for
+    # this node (e.g. an input lacked real row counts -- see result_size_guard).
+    est_rows_by_nid = {
+        entry["nid"]: entry["row_count"]
+        for entry in (getattr(telemetry, "estimated_row_counts", None) or [])
+    }
+
+    def _est_row_count(node_id):
+        return int(est_rows_by_nid.get(node_id, 0) or 0)
+
     tree_col = [row[0] for row in op_rows]
     details_col = [row[1] for row in op_rows]
+    est_rows_col = [_est_row_count(row[3]) for row in op_rows]
     rows_col = [_row_count(row[3]) for row in op_rows]
     time_col = [_time_ms(row[3]) for row in op_rows]
     self_col = [_self_ms(row[3]) for row in op_rows]
@@ -321,6 +336,7 @@ def explain(
     if opt_items:
         tree_col.append("OPTIMIZATIONS")
         details_col.append("")
+        est_rows_col.append(0)
         rows_col.append(0)
         time_col.append(0.0)
         self_col.append(0.0)
@@ -328,6 +344,7 @@ def explain(
             connector = "└─ " if index == len(opt_items) - 1 else "├─ "
             tree_col.append(connector + label)
             details_col.append(f"applied {count}×" if count > 1 else "applied")
+            est_rows_col.append(0)
             rows_col.append(0)
             time_col.append(0.0)
             self_col.append(0.0)
@@ -342,6 +359,7 @@ def explain(
     if shape_changes:
         tree_col.append("REWRITE TRACE")
         details_col.append("")
+        est_rows_col.append(0)
         rows_col.append(0)
         time_col.append(0.0)
         self_col.append(0.0)
@@ -353,14 +371,16 @@ def explain(
             details_col.append(
                 f"nodes {node_before}→{node_after}, edges {edge_before}→{edge_after}"
             )
+            est_rows_col.append(0)
             rows_col.append(0)
             time_col.append(0.0)
             self_col.append(0.0)
 
-    columns = ["tree", "details"]
+    columns = ["tree", "details", "est_rows"]
     vectors = [
         vector_from_sequence(tree_col, dtype=DrakenType.VARCHAR),
         vector_from_sequence(details_col, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(est_rows_col, dtype=DrakenType.INT64),
     ]
     if analyze:
         # time_ms is INCLUSIVE (own + downstream); self_ms is this operator's own

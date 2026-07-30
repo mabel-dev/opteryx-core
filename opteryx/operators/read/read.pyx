@@ -104,6 +104,7 @@ cdef class ReaderNode(BasePlanNode):
 
     cdef public object alias
     cdef public object dataset
+    cdef public object relation
     cdef public object connector
     cdef public object predicates
     cdef public object limit
@@ -114,6 +115,10 @@ cdef class ReaderNode(BasePlanNode):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.alias = parameters.get("alias")
         self.dataset = parameters.get("dataset")
+        # Only set for a plain Scan (catalog/filesystem table) -- READ_JSONL/
+        # READ_PARQUET FunctionDataset nodes carry the source path in `dataset`
+        # instead and never set `relation`.
+        self.relation = parameters.get("relation")
         self.connector = parameters.get("connector")
         self.predicates = parameters.get("predicates", [])
         self.limit = parameters.get("limit")
@@ -147,8 +152,11 @@ cdef class ReaderNode(BasePlanNode):
     @property
     def config(self):
         """Additional details for this step"""
-        dataset_name = str(self.dataset)
-        if self.alias:
+        # A plain Scan never populates `dataset` (only READ_JSONL/READ_PARQUET
+        # FunctionDataset nodes do) -- fall back to the relation name so the
+        # table isn't rendered as the literal string "None".
+        dataset_name = str(self.dataset) if self.dataset is not None else str(self.relation)
+        if self.alias and self.alias != self.relation:
             return f"{dataset_name} AS {self.alias}"
         return dataset_name
 

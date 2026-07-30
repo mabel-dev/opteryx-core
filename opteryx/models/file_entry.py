@@ -45,6 +45,17 @@ class FileEntry:
     # raw min/max lists (for direct access if needed)
     min_values: Optional[List] = None
     max_values: Optional[List] = None
+    # Positional (by field_id, parallel to min_values/max_values), populated by
+    # ANALYZE's native per-file statistics pass (opteryx.operators.table_management
+    # ._analyze) — see manifest_io.py's _MANIFEST_COLUMNS. None for a FileEntry no
+    # native pass has touched (e.g. catalog DataFile / parquet-footer origin).
+    null_counts: Optional[List[Optional[int]]] = None
+    min_lengths: Optional[List[Optional[int]]] = None
+    max_lengths: Optional[List[Optional[int]]] = None
+    # Total string byte count per column (string-family columns only; None
+    # elsewhere) — the numerator half of avg_length = char_total_bytes /
+    # true_non_null_count, computed at read time from the now-real null_counts.
+    char_total_bytes: Optional[List[Optional[int]]] = None
     # Lazy typed column stats from Parquet footer (FileColumnStats Cython object).
     # Populated by the filesystem connector; None for catalog/datafile path.
     # Access via column_stats.get_min(field_id) etc — no Python dicts created

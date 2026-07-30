@@ -14,7 +14,7 @@ Coverage per type:
   neg:          -INT8_MIN=128→INT16; -INT16_MIN=32768→INT32; -INT32_MIN→INT64
   cross-width:  INT8+INT16→INT32; INT8+INT32→INT64; INT16+INT32→INT64
                 compare_vector cross-width: all 6 ops, both directions, discriminating values
-  gather:       take / materialize / compress
+  gather:       take / materialize / dictionary_encode
 """
 
 import pytest
@@ -536,7 +536,7 @@ class TestCrossWidthCompare:
 
 
 # ---------------------------------------------------------------------------
-# GATHER — take / materialize / compress
+# GATHER — take / materialize / dictionary_encode
 # ---------------------------------------------------------------------------
 
 class TestGather:
@@ -554,9 +554,9 @@ class TestGather:
         m = v.materialize()
         assert py(m) == [99, 99, 99, 99]
 
-    def test_i8_compress_and_materialize(self):
+    def test_i8_dictionary_encode_and_materialize(self):
         v = i8([1, 2, 1, 3, 2])
-        c = v.compress()
+        c = v.dictionary_encode()
         m = c.materialize()
         assert py(m) == [1, 2, 1, 3, 2]
 
@@ -564,9 +564,9 @@ class TestGather:
         v = i8([1, 2, 3])
         assert v.take([0]).type == dn.DrakenType.INT8
 
-    def test_i16_compress_type_preserved(self):
+    def test_i16_dictionary_encode_type_preserved(self):
         v = i16([10, 20, 10])
-        assert v.compress().type == dn.DrakenType.INT16
+        assert v.dictionary_encode().type == dn.DrakenType.INT16
 
     def test_i32_materialize_type_preserved(self):
         v = i32([100])

@@ -1,5 +1,5 @@
 #pragma once
-// draken/ops/int64_gather.h — take / materialize / compress for int64 vectors.
+// draken/ops/int64_gather.h — take / materialize / dictionary_encode for int64 vectors.
 //
 // take(v, indices, n):
 //   Gather v[indices[i]] for i in [0,n). Indices are logical-row positions.
@@ -10,14 +10,14 @@
 //   Expand any shape (dense/constant/dict) to an owned dense vector by running
 //   data[selection[i]] for all i. Validity is copied. Result always has IDENTITY flag.
 //
-// compress(v):
+// dictionary_encode(v):
 //   Dict-encode an int64 vector. Finds unique non-null values (in order of first
 //   appearance), assigns codes 0..k-1. Null rows get code 0 but are marked null in
 //   validity. Returns a dict-encoded VecResult.
 //   Special case — all-null or empty: returns a constant-shape vector (data_length=1,
 //   data[0]=0) with the original validity to avoid a zero-size dict.
 //
-// Round-trip guarantee: materialize(compress(v)) produces the same logical values as v.
+// Round-trip guarantee: materialize(dictionary_encode(v)) produces the same logical values as v.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -232,7 +232,7 @@ static inline VecResult i64_materialize(const DrakenVector& v) {
 // the original validity to avoid a zero-length dict (which breaks the access
 // model since any selection code would be out-of-bounds).
 // ---------------------------------------------------------------------------
-static inline VecResult i64_compress(const DrakenVector& v) {
+static inline VecResult i64_dictionary_encode(const DrakenVector& v) {
     const uint32_t n    = v.length;
     const int64_t* data = static_cast<const int64_t*>(v.data);
     const uint8_t* src_null = v.validity;

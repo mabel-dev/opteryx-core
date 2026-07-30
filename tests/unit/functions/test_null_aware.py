@@ -20,7 +20,10 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
+import pytest
+
 import opteryx
+from opteryx.exceptions import IncompatibleTypesError
 
 
 def _col(sql, name="k"):
@@ -159,6 +162,49 @@ def test_zero_times_column_fold_preserves_null():
         assert out.count(0.0) == len(out) - 1, (sql, out)
         # id == 3 is the third row in $planets.
         assert out[2] is None, (sql, out)
+
+
+def test_ifnull_incompatible_branch_types_rejected_at_bind_time():
+    # A scalar branch against an ARRAY branch cannot be blended by the native
+    # kernel (draken_ifnull only handles BOOLEAN/string/fixed-numeric families).
+    # This must fail at bind time, naming the mismatched branches, rather than
+    # surface as a bare native error like "type 80 cannot be promoted with
+    # type 4" once the SQL context is gone.
+    with pytest.raises(IncompatibleTypesError):
+        _col("SELECT IFNULL(id, [1, 2, 3]) AS k FROM $planets")
+
+
+def test_coalesce_incompatible_branch_types_rejected_at_bind_time():
+    with pytest.raises(IncompatibleTypesError):
+        _col("SELECT COALESCE(id, name, 9) AS k FROM $planets")
+
+
+def test_iif_incompatible_branch_types_rejected_at_bind_time():
+    with pytest.raises(IncompatibleTypesError):
+        _col("SELECT IIF(true, id, [1, 2, 3]) AS k FROM $planets")
+
+
+def test_ifnotnull_incompatible_branch_types_rejected_at_bind_time():
+    with pytest.raises(IncompatibleTypesError):
+        _col("SELECT IFNOTNULL(id, [1, 2, 3]) AS k FROM $planets")
+
+
+def test_case_incompatible_types_named_at_bind_time():
+    # CASE's own binder validates all THEN/ELSE branches directly (before any
+    # optimizer rewrite to IFNULL/IIF, and before the plan compiler's separate
+    # draken_if_then_else lowering) — so the error must name CASE and the
+    # target column, not a downstream function the user never wrote.
+    with pytest.raises(IncompatibleTypesError, match=r"CASE:.*\(column 'f'\)"):
+        _col("SELECT CASE WHEN id IS NULL THEN [1, 2, 3] ELSE id END AS f FROM $planets")
+
+
+def test_case_general_condition_incompatible_types_named_at_bind_time():
+    # A CASE whose condition isn't a NULL-check (so it can't be rewritten to
+    # IFNULL, and its condition form makes it ineligible for the optimizer's
+    # narrow IIF rewrite too) previously reached the native draken_if_then_else
+    # kernel unvalidated, surfacing "branch types differ (80 vs 1)".
+    with pytest.raises(IncompatibleTypesError, match=r"CASE:.*\(column 'g'\)"):
+        _col("SELECT CASE WHEN id > 3 THEN [1, 2, 3] ELSE id END AS g FROM $planets")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -22,6 +22,8 @@ This module exposes helpers so domain modules can import them as:
 
 from typing import Any
 
+from draken.draken_native import DrakenType
+from opteryx.exceptions import IncompatibleTypesError
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -166,25 +168,124 @@ def _make(
     )
 
 
-def _coalesce_return_type(arg_nodes):
+def _coalesce_return_type(arg_nodes, func_name="COALESCE"):
     """Return the first non-null compatible ColumnType across all args."""
     from opteryx.types import find_compatible_type
 
-    column_types = [
-        n.schema_column.column_type
+    branches = [
+        (n, n.schema_column.column_type)
         for n in arg_nodes
         if getattr(n, "schema_column", None) is not None
         and n.schema_column.column_type is not None
         and n.schema_column.column_type.category not in (LogicalCategory.NULL, None)
     ]
-    return find_compatible_type(column_types) or _CT_NULL
+    _check_blend_compatible(branches, func_name)
+    return find_compatible_type([ct for _, ct in branches]) or _CT_NULL
 
 
 def _iif_return_type(arg_nodes):
     """IIF(cond, when_true, when_false): common type of the two value branches,
     NULL-aware. The condition (arg 0) is excluded; a NULL branch defers to the
     other (so NULLIF's lowering IIF(a = b, NULL, a) resolves to a's type)."""
-    return _coalesce_return_type(arg_nodes[1:])
+    return _coalesce_return_type(arg_nodes[1:], func_name="IIF")
+
+
+# ---------------------------------------------------------------------------
+# COALESCE/IFNULL/IFNOTNULL/IIF branch-type validation.
+#
+# The native kernel (draken/ops/kernels/function_null_conditional.cpp,
+# nc_dispatch) only blends branches within one family — BOOLEAN, string
+# (VARCHAR/NVARCHAR/VARBINARY), or a fixed-width numeric/temporal scalar —
+# and fails loud with a bare "type <code> cannot be promoted with type <code>"
+# message if a branch falls outside that family, or two fixed branches can't
+# promote (e.g. a signed/unsigned int mix, or DATE vs INT64). That is a
+# genuine runtime type mismatch, but by the time it reaches the kernel the
+# offending SQL expression is gone — only DrakenType integers remain. This
+# mirrors the same promotion rules here, against the same DrakenType.physical
+# vocabulary (CLAUDE.md §14: one type object end to end), so an incompatible
+# call is rejected at bind time, naming the actual branches.
+# ---------------------------------------------------------------------------
+
+_NC_STRING_TYPES = frozenset((DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY))
+_NC_SIGNED_INT = frozenset((DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64))
+_NC_FLOAT = frozenset((DrakenType.FLOAT32, DrakenType.FLOAT64))
+_NC_FIXED = _NC_SIGNED_INT | _NC_FLOAT | frozenset((
+    DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+    DrakenType.DATE32, DrakenType.TIME32, DrakenType.TIME64, DrakenType.TIMESTAMP64,
+))
+
+
+def _nc_promote_fixed(a, b):
+    """Mirrors nc_promote_fixed; None is its DRAKEN_NULL "cannot promote" sentinel."""
+    if a == b:
+        return a
+    if a in _NC_SIGNED_INT and b in _NC_SIGNED_INT:
+        return DrakenType.INT64
+    if (a in _NC_SIGNED_INT or a in _NC_FLOAT) and (b in _NC_SIGNED_INT or b in _NC_FLOAT):
+        return DrakenType.FLOAT64
+    return None
+
+
+def _nc_describe_branch(node):
+    if node.node_type == 42:  # NodeType.LITERAL
+        return f"literal {node.value!r}"
+    if node.node_type == 38:  # NodeType.IDENTIFIER
+        name = node.query_column or node.source_column or node.value
+        return f"column '{name}'"
+    return "expression"
+
+
+def _check_blend_compatible(branches, func_name):
+    """branches: list[(node, ColumnType)], already filtered to non-NULL types."""
+    if len(branches) < 2:
+        return
+    node0, ct0 = branches[0]
+    t0 = ct0.physical
+
+    def _fail(node_i, ct_i):
+        raise IncompatibleTypesError(
+            message=(
+                f"{func_name}: {_nc_describe_branch(node0)} is {ct0} but "
+                f"{_nc_describe_branch(node_i)} is {ct_i} — {func_name} branches must "
+                "share a compatible type (all BOOLEAN, all string, or a blendable "
+                "numeric/temporal scalar mix). Use CAST to align the branches."
+            )
+        )
+
+    if t0 == DrakenType.BOOL:
+        for node_i, ct_i in branches[1:]:
+            if ct_i.physical != DrakenType.BOOL:
+                _fail(node_i, ct_i)
+        return
+
+    if t0 in _NC_STRING_TYPES:
+        for node_i, ct_i in branches[1:]:
+            if ct_i.physical not in _NC_STRING_TYPES:
+                _fail(node_i, ct_i)
+        return
+
+    if t0 in _NC_FIXED:
+        out = t0
+        for node_i, ct_i in branches[1:]:
+            ti = ct_i.physical
+            if ti not in _NC_FIXED:
+                _fail(node_i, ct_i)
+            promoted = _nc_promote_fixed(out, ti)
+            if promoted is None:
+                _fail(node_i, ct_i)
+            out = promoted
+        return
+
+    # t0 itself isn't in any blendable family (DECIMAL/DECIMAL128, ARRAY, INTERVAL,
+    # VARIANT, VECTOR_FP16) — the kernel rejects this regardless of the other
+    # branches, so fail here without even looking at them.
+    raise IncompatibleTypesError(
+        message=(
+            f"{func_name}: {_nc_describe_branch(node0)} is {ct0}, which {func_name} "
+            "cannot blend — only BOOLEAN, string, and numeric/temporal scalar branches "
+            "are supported."
+        )
+    )
 
 
 def _datepart_return_type(arg_nodes):

@@ -943,11 +943,29 @@ dispatcher: Dict[str, Callable] = {
 
 
 # Dispatcher conditions
-def _rebind_function_node(function_node):
-    """Rebind a newly-created function node to its catalog entry."""
+def _rebind_function_node(function_node, origin: str = None):
+    """Rebind a newly-created function node to its catalog entry.
+
+    `origin` names the SQL construct this node was rewritten from (e.g.
+    "CASE"). A branch-type mismatch (IncompatibleTypesError) only becomes
+    visible once the catalog resolves this synthetic node — by which point
+    the user's original syntax is gone, so the error would otherwise name a
+    function (e.g. IFNULL) they never wrote. Re-raising with `origin` and the
+    target column attached points back at what's actually in their query.
+    """
+    from opteryx.exceptions import IncompatibleTypesError
     from opteryx.expression.functions import get_catalog
 
-    resolved = get_catalog().resolve(function_node.value, list(function_node.parameters))
+    try:
+        resolved = get_catalog().resolve(function_node.value, list(function_node.parameters))
+    except IncompatibleTypesError as err:
+        if origin is None:
+            raise
+        column = function_node.alias or getattr(function_node.schema_column, "name", None)
+        where = f" (column '{column}')" if column else ""
+        raise IncompatibleTypesError(
+            message=f"{err} [the optimizer rewrote a {origin} expression{where} into {function_node.value}]"
+        ) from err
     if resolved is None:
         raise ValueError(f"Unable to resolve function '{function_node.value}'")
     function_node.function_ref = resolved
@@ -996,7 +1014,7 @@ def _rewrite_case_node(node, telemetry: QueryTelemetry):
                 alias=node.alias,
                 schema_column=node.schema_column,
             )
-            _rebind_function_node(new_node)
+            _rebind_function_node(new_node, origin="CASE")
             return new_node
 
     # CASE WHEN c THEN y ELSE z END → IIF(c, y, z) when condition and both branches are safe
@@ -1009,7 +1027,7 @@ def _rewrite_case_node(node, telemetry: QueryTelemetry):
             alias=node.alias,
             schema_column=node.schema_column,
         )
-        _rebind_function_node(new_node)
+        _rebind_function_node(new_node, origin="CASE")
         return new_node
 
     return node

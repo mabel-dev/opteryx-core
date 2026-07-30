@@ -70,6 +70,8 @@ class Manifest:
         schema: RelationSchema,
         min_k_vector=None,
         histogram_vector=None,
+        bounds_are_ordinal: bool = False,
+        char_class_vector=None,
     ):
         """
         Initialize Manifest with file entries and schema.
@@ -85,11 +87,31 @@ class Manifest:
                 (NDV, membership pruning) are simply unavailable.
             histogram_vector: optional native ``array<array<int64>>`` Vector of
                 per-file, per-column histogram bins, used the same way.
+            char_class_vector: optional native ``array<array<uint64>>`` Vector of
+                per-file, per-column 8-class byte counts (VARCHAR/NVARCHAR/
+                VARBINARY columns only), used the same way as min_k_vector/
+                histogram_vector — backs the LIKE '%needle%' selectivity
+                char-class estimator. None when the relation has no char-class
+                stats (nothing ANALYZE'd, or a catalog predating this accessor).
+            bounds_are_ordinal: True when every FileEntry in `files` carries
+                lower_bounds/upper_bounds encoded as ``Vector.ordinalize()``
+                ordinal int64 keys (ANALYZE's native per-file statistics pass —
+                see opteryx.models.manifest_io.write_manifest_parquet's
+                docstring). `prune_files` ordinalizes predicate literals through
+                `ColumnType.ordinalize` before comparing against bounds when
+                this is set. False (default) means bounds are real decoded
+                values (catalog DataFile bounds, LocalStoreConnector's
+                parquet-footer bounds) — the two representations are never
+                mixed within one Manifest instance, so this is a single flag
+                for the whole object, set explicitly by the producer
+                (filesystem_connector.py) rather than inferred.
         """
         self.files = files
         self.schema = schema
         self._min_k_vector = min_k_vector
         self._histogram_vector = histogram_vector
+        self._char_class_vector = char_class_vector
+        self.bounds_are_ordinal = bounds_are_ordinal
         # The sketch vectors are built once over the FULL file set and are indexed
         # by original file position. prune_files shrinks self.files, so we track the
         # surviving original row indices to keep native reductions aligned with the
@@ -139,6 +161,35 @@ class Manifest:
     # ================================================================
     # File Pruning (called by optimizer)
     # ================================================================
+
+    def _column_type(self, column_name: str):
+        """ColumnType for `column_name`, resolved by NAME against the current
+        schema — never by position (projection pushdown may prune `self.schema`
+        to a subset of columns, same trap `_resolve_field_id` documents). Used
+        only to ordinalize predicate literals when `bounds_are_ordinal`; returns
+        None when the column isn't in scope (predicate skipped, not guessed).
+        """
+        for col in self.schema.columns:
+            if col.name == column_name:
+                return col.column_type
+        return None
+
+    def _ordinalize_literal(self, column_name: str, literal_value: Any) -> Optional[Any]:
+        """Convert `literal_value` into the ordinal int64 key space used by
+        this Manifest's (ordinal-encoded) bounds for `column_name`. Returns
+        None when the column's type can't be resolved, or when the physical
+        type has no scalar ordinalize kernel (TIMESTAMP64/TIME32/TIME64/
+        DECIMAL128 — see ColumnType.ordinalize) — callers treat None as "can't
+        safely compare", the same conservative skip `_comparable_literal`
+        already uses elsewhere in this function, not a silent wrong answer.
+        """
+        column_type = self._column_type(column_name)
+        if column_type is None:
+            return None
+        try:
+            return column_type.ordinalize(literal_value)
+        except ValueError:
+            return None
 
     def prune_files(self, predicates: List) -> None:
         """
@@ -231,7 +282,16 @@ class Manifest:
                     max_value = file_entry.upper_bounds.get(field_id)
 
                     if min_value is not None and max_value is not None:
-                        comparable_value = _comparable_literal(literal_value, min_value)
+                        compare_value = literal_value
+                        if self.bounds_are_ordinal:
+                            # Bounds are Vector.ordinalize() ordinal keys, not real
+                            # values (see __init__'s bounds_are_ordinal docstring) -
+                            # the literal must go through the SAME transform before
+                            # it is comparable to min_value/max_value.
+                            compare_value = self._ordinalize_literal(column_name, literal_value)
+                            if compare_value is None:
+                                continue
+                        comparable_value = _comparable_literal(compare_value, min_value)
                         if comparable_value is None:
                             # Bound is stored in a representation this literal can't
                             # be safely compared against (e.g. a string literal
@@ -273,8 +333,14 @@ class Manifest:
                     max_value = file_entry.upper_bounds.get(field_id)
 
                     if min_value is not None and max_value is not None:
-                        comparable_lower = _comparable_literal(lower, min_value)
-                        comparable_upper = _comparable_literal(upper, min_value)
+                        compare_lower, compare_upper = lower, upper
+                        if self.bounds_are_ordinal:
+                            compare_lower = self._ordinalize_literal(column_name, lower)
+                            compare_upper = self._ordinalize_literal(column_name, upper)
+                            if compare_lower is None or compare_upper is None:
+                                continue
+                        comparable_lower = _comparable_literal(compare_lower, min_value)
+                        comparable_upper = _comparable_literal(compare_upper, min_value)
                         if comparable_lower is None or comparable_upper is None:
                             continue
                         if max_value < comparable_lower or min_value > comparable_upper:
@@ -339,6 +405,7 @@ class Manifest:
             null_fraction = None
             if has_null_counts:
                 null_fraction = self.estimate_null_fraction(col_name)
+            char_class_stats = self.get_char_class_stats(col_name)
             columns[identity] = ColumnStatistics(
                 column_name=col_name,
                 data_type=str(getattr(col, "type", "")),
@@ -346,8 +413,70 @@ class Manifest:
                 value_range=ColumnRange(),
                 histogram=self.get_distogram(col_name),
                 null_fraction=null_fraction,
+                class_proportions=char_class_stats[0] if char_class_stats else None,
+                avg_length=char_class_stats[1] if char_class_stats else None,
             )
         return RelationStatistics(row_count=total_rows, columns=columns)
+
+    # ================================================================
+    # Char-class stats (LIKE '%needle%' selectivity)
+    # ================================================================
+
+    def get_char_class_stats(self, column: str) -> Optional[Tuple[dict, float]]:
+        """(class_proportions, avg_length) for `column`, or None.
+
+        Backs the LIKE '%needle%' char-class selectivity estimator
+        (opteryx.planner.cost_estimation.selectivity). None when the relation
+        has no char-class stats for this column (nothing ANALYZE'd, a
+        non-string column, or a catalog predating this accessor — the same
+        "no signal, fall through to the flat constant" shape estimate_cardinality/
+        get_distogram already use for their own missing-vector case).
+
+        class_proportions: {class_name: fraction of this column's bytes in
+        that class}, the 8 classes opteryx.planner.cost_estimation.selectivity
+        uses. avg_length: mean string length in bytes, DERIVED here (not
+        stored) as char_total_bytes / max(1, true_non_null_count) — the
+        total-bytes figure is exactly sum(class totals) (every byte belongs
+        to one class), and true_non_null_count comes from summing this
+        column's real null_counts against record_count across the manifest's
+        live files (post-prune) — both boxed on FileEntry, not the native
+        vector, so a plain Python sum over files (not rows) is fine here.
+        """
+        if self._char_class_vector is None:
+            return None
+
+        field_id = self._sketch_index(column)
+        if field_id is None:
+            return None
+
+        from opteryx.compiled.nanobind.vectors import char_class_field_totals
+        from opteryx.planner.cost_estimation.selectivity import _CHAR_CLASSES
+
+        handle = self._native_handle(self._char_class_vector)
+        totals = char_class_field_totals(handle, field_id, self._live_rows)
+        if totals is None:
+            return None
+
+        total_bytes = sum(totals)
+        if total_bytes <= 0:
+            return None
+
+        class_proportions = {
+            name: totals[i] / total_bytes for i, name in enumerate(_CHAR_CLASSES)
+        }
+
+        non_null_rows = 0
+        for file_entry in self.files:
+            null_counts = file_entry.null_counts
+            null_count = (
+                null_counts[field_id]
+                if null_counts and field_id < len(null_counts) and null_counts[field_id] is not None
+                else 0
+            )
+            non_null_rows += max(0, (file_entry.record_count or 0) - null_count)
+
+        avg_length = total_bytes / max(1, non_null_rows)
+        return class_proportions, avg_length
 
     # ================================================================
     # Histograms / Distograms
@@ -487,12 +616,28 @@ class Manifest:
             end = offsets[original_row + 1]
             if end <= start:
                 continue
-            if file_entry.min_values is None or file_entry.max_values is None:
+            # Prefer the positional min_values/max_values list (catalog/
+            # LocalStoreConnector FileEntry — unchanged behavior). Fall back to
+            # lower_bounds/upper_bounds (dict keyed by the SAME positional
+            # index for ANALYZE-manifest-sourced bounds — see
+            # filesystem_connector.py's _read_dataset_manifest) for a FileEntry
+            # that only carries the dict form, e.g. a filesystem-connector
+            # dataset built from ANALYZE's manifest, which never sets the list
+            # form at all (mirrors manifest_io._file_entry_bounds_as_values'
+            # own "prefer list, else decode dict" precedence).
+            if (
+                file_entry.min_values is not None
+                and file_entry.max_values is not None
+                and field_id < len(file_entry.min_values)
+                and field_id < len(file_entry.max_values)
+            ):
+                col_min = file_entry.min_values[field_id]
+                col_max = file_entry.max_values[field_id]
+            elif file_entry.lower_bounds is not None and file_entry.upper_bounds is not None:
+                col_min = file_entry.lower_bounds.get(field_id)
+                col_max = file_entry.upper_bounds.get(field_id)
+            else:
                 continue
-            if field_id >= len(file_entry.min_values) or field_id >= len(file_entry.max_values):
-                continue
-            col_min = file_entry.min_values[field_id]
-            col_max = file_entry.max_values[field_id]
             if col_min is None or col_max is None:
                 continue
             dgram = load_counts_i64(counts[start:end], float(col_min), float(col_max))
@@ -696,5 +841,6 @@ class Manifest:
             # Sketches are whole-relation native vectors, not per-file lists.
             "has_k_hashes": self._min_k_vector is not None,
             "has_histograms": self._histogram_vector is not None,
+            "has_char_class_stats": self._char_class_vector is not None,
         }
 

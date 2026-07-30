@@ -40,15 +40,22 @@ _MANIFEST_COLUMNS = {
     "histogram_bins": "INTEGER",
     "min_values": "ARRAY",
     "max_values": "ARRAY",
-    "min_values_display": "ARRAY",
-    "max_values_display": "ARRAY",
+    "field_ids": "ARRAY",
     "min_lengths": "ARRAY",
     "max_lengths": "ARRAY",
+    "char_class_counts": "ARRAY",
+    "char_total_bytes": "ARRAY",
 }
 
 # Columns whose whole-column native draken Vector the planner reduces with
-# native kernels (KMV NDV, histogram fold) rather than the boxed per-file lists.
-_SKETCH_VECTOR_COLUMNS = ("min_k_hashes", "histogram_counts")
+# native kernels (KMV NDV, histogram fold, char-class fold) rather than the
+# boxed per-file lists.
+_SKETCH_VECTOR_COLUMNS = ("min_k_hashes", "histogram_counts", "char_class_counts")
+
+# Fixed equi-width histogram bucket count, shared by every producer (ANALYZE,
+# the catalog writer) so `histogram_bins` means the same thing regardless of
+# which one wrote a given manifest row.
+HISTOGRAM_BINS = 32
 
 # The per-dataset manifest ANALYZE writes for a plain filesystem dataset, stored
 # alongside the data files it describes.
@@ -132,7 +139,13 @@ def _file_entry_bounds_as_values(file_entry: FileEntry, schema) -> Tuple[List, L
     return min_values, max_values
 
 
-def _file_entry_to_manifest_dict(file_entry: FileEntry, schema, sketch: Optional[List]) -> dict:
+def _file_entry_to_manifest_dict(
+    file_entry: FileEntry,
+    schema,
+    sketch: Optional[List],
+    histogram: Optional[List],
+    char_class: Optional[List],
+) -> dict:
     min_values, max_values = _file_entry_bounds_as_values(file_entry, schema)
     return {
         "file_path": file_entry.file_path,
@@ -141,21 +154,36 @@ def _file_entry_to_manifest_dict(file_entry: FileEntry, schema, sketch: Optional
         "file_size_in_bytes": file_entry.file_size_in_bytes,
         "uncompressed_size_in_bytes": file_entry.uncompressed_size_in_bytes,
         "column_uncompressed_sizes_in_bytes": file_entry.column_uncompressed_sizes_in_bytes or [],
-        "null_counts": [],
+        "null_counts": file_entry.null_counts or [],
         "min_k_hashes": sketch or [],
-        "histogram_counts": [],
-        "histogram_bins": 0,
+        "histogram_counts": histogram or [],
+        "histogram_bins": HISTOGRAM_BINS if histogram else 0,
         "min_values": min_values,
         "max_values": max_values,
-        "min_values_display": [],
-        "max_values_display": [],
-        "min_lengths": [],
-        "max_lengths": [],
+        "field_ids": list(range(len(schema.columns))),
+        "min_lengths": file_entry.min_lengths or [],
+        "max_lengths": file_entry.max_lengths or [],
+        "char_class_counts": char_class or [],
+        "char_total_bytes": file_entry.char_total_bytes or [],
     }
 
 
+def _nested_int64_array_column(dn, values: List, element_type: int):
+    """A positional-per-field, fixed-width-per-field nested INT64 array column
+    (histogram_counts' per-file [[bin_count,...] per field], char_class_counts'
+    per-file [[class_count,...]*8 per field]) — same two-level nesting shape
+    min_k_hashes uses, minus its xxhash-specific unsigned-wraparound masking
+    (these are small non-negative counts, never near even int64's range, let
+    alone needing an unsigned leaf)."""
+    return dn.vector_array_from_sequence(values, element_type=element_type, nesting_depth=2)
+
+
 def write_manifest_parquet(
-    file_entries: List[FileEntry], schema, sketches: Optional[Dict[str, List]] = None
+    file_entries: List[FileEntry],
+    schema,
+    sketches: Optional[Dict[str, List]] = None,
+    histograms: Optional[Dict[str, List]] = None,
+    char_classes: Optional[Dict[str, List]] = None,
 ) -> bytes:
     """Serialize a list of FileEntry into one manifest Parquet file (bytes).
 
@@ -164,12 +192,32 @@ def write_manifest_parquet(
     per-field physical types for decoding serialized-bytes bounds (see
     _decode_bound); pass the relation's RelationSchema.
 
-    `sketches` carries the KMV min-k hashes as ``{file_path: positional list}``,
-    positional against `schema.columns`. They are passed explicitly rather than
-    read off FileEntry: on the read side sketches live only as native vectors
-    (the kernels consume those), so FileEntry does not carry them and there is
-    no boxed copy to drift. Producers that compute sketches (ANALYZE) supply this;
-    everyone else omits it and the column is written empty.
+    `sketches`, `histograms`, and `char_classes` each carry one nested-array
+    statistic as ``{file_path: positional-by-field-id list}``: KMV min-k
+    hashes, per-column histogram bin counts, and per-column 8-class byte
+    counts respectively. They are passed explicitly rather than read off
+    FileEntry: on the read side these live only as native vectors (the
+    planner's kernels consume those directly), so FileEntry does not carry
+    boxed copies that could drift from the vector. Producers that compute
+    them (ANALYZE) supply the relevant dict; everyone else omits it and the
+    column is written empty.
+
+    NOTE on min_values/max_values semantics: for FileEntry produced by
+    ANALYZE's native per-file pass, these are `Vector.ordinalize()` ordinal
+    keys (see draken/ops/ordinalize.h), not real decoded values — an int64
+    ordinal key IS the real value only for plain signed-integer physical
+    types (an identity widen); for float/uint64/string/interval it is a
+    monotonic but lossy transform. A literal must be converted with
+    `ColumnType.ordinalize(value)` (opteryx/types/logical_type.py) before
+    comparing against these bounds. This differs from the pre-existing
+    parquet-footer-stats path (`_decode_bound`/`_serialize_bound`), which
+    stores real decoded values — the two representations are NOT
+    interchangeable; do not compare one against the other. Consumer:
+    filesystem_connector.py's `_read_dataset_manifest` reads these bounds into
+    FileEntry.lower_bounds/upper_bounds and constructs its Manifest with
+    `bounds_are_ordinal=True`, so `Manifest.prune_files` knows to ordinalize
+    predicate literals before comparing (see Manifest.__init__'s
+    `bounds_are_ordinal` docstring).
     """
     from draken import draken_native as _dn
     from draken.interop.vector_sequence import vector_from_sequence
@@ -177,8 +225,17 @@ def write_manifest_parquet(
     from rugo.parquet import write_parquet
 
     sketches = sketches or {}
+    histograms = histograms or {}
+    char_classes = char_classes or {}
     normalized = [
-        _file_entry_to_manifest_dict(fe, schema, sketches.get(fe.file_path)) for fe in file_entries
+        _file_entry_to_manifest_dict(
+            fe,
+            schema,
+            sketches.get(fe.file_path),
+            histograms.get(fe.file_path),
+            char_classes.get(fe.file_path),
+        )
+        for fe in file_entries
     ]
 
     morsel = Morsel()
@@ -201,6 +258,19 @@ def write_manifest_parquet(
                 _dn.vector_array_from_sequence(
                     values, element_type=_dn.DrakenType.UINT64.value, nesting_depth=2
                 ),
+            )
+        elif name == "histogram_counts":
+            # INT64 leaf: matches the reader kernel's contract exactly
+            # (opteryx/compiled/nanobind/vector_sketch_reduce.cpp's
+            # histogram_field_slices throws TypeError on anything else).
+            morsel.append_vector(
+                name, _nested_int64_array_column(_dn, values, _dn.DrakenType.INT64.value)
+            )
+        elif name == "char_class_counts":
+            # INT64 leaf for the same reason and for consistency with
+            # histogram_counts — counts, never near uint64 wraparound.
+            morsel.append_vector(
+                name, _nested_int64_array_column(_dn, values, _dn.DrakenType.INT64.value)
             )
         else:
             morsel.append_vector(name, vector_from_sequence(values, dtype=dtype))
@@ -285,23 +355,45 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
                 max_values=max_values or None,
                 column_uncompressed_sizes_in_bytes=columns["column_uncompressed_sizes_in_bytes"][i]
                 or None,
+                null_counts=columns["null_counts"][i] or None,
+                min_lengths=columns["min_lengths"][i] or None,
+                max_lengths=columns["max_lengths"][i] or None,
+                char_total_bytes=columns["char_total_bytes"][i] or None,
             )
         )
     return entries, native
 
 
-def read_manifest_sketches(data: bytes) -> Dict[str, List]:
-    """Boxed per-file min-k sketches as ``{file_path: positional list}``.
-
-    The write-side counterpart of write_manifest_parquet's `sketches` argument,
-    for producers that must merge with what is already stored (ANALYZE preserving
-    columns it isn't re-analyzing). Boxing is fine here: this is admin-path, not
+def _read_manifest_nested_column(data: bytes, column: str) -> Dict[str, List]:
+    """Boxed per-file nested-array column as ``{file_path: positional list}``,
+    for any of the three per-file nested statistics (min_k_hashes,
+    histogram_counts, char_class_counts). Shared implementation for producers
+    that must merge with what is already stored (ANALYZE preserving columns/
+    files it isn't re-analyzing). Boxing is fine here: this is admin-path, not
     the planner's hot path — which reads the native vectors instead.
     """
     columns, row_count, _native = read_manifest_columns(data)
     if row_count == 0:
         return {}
     return {
-        columns["file_path"][i]: [list(col or []) for col in (columns["min_k_hashes"][i] or [])]
+        columns["file_path"][i]: [list(col or []) for col in (columns[column][i] or [])]
         for i in range(row_count)
     }
+
+
+def read_manifest_sketches(data: bytes) -> Dict[str, List]:
+    """Boxed per-file min-k sketches as ``{file_path: positional list}``. See
+    _read_manifest_nested_column."""
+    return _read_manifest_nested_column(data, "min_k_hashes")
+
+
+def read_manifest_histograms(data: bytes) -> Dict[str, List]:
+    """Boxed per-file histogram bin counts as ``{file_path: positional list}``.
+    See _read_manifest_nested_column."""
+    return _read_manifest_nested_column(data, "histogram_counts")
+
+
+def read_manifest_char_classes(data: bytes) -> Dict[str, List]:
+    """Boxed per-file char-class byte counts as ``{file_path: positional list}``.
+    See _read_manifest_nested_column."""
+    return _read_manifest_nested_column(data, "char_class_counts")

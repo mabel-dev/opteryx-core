@@ -6,7 +6,7 @@ Design contract (06_value_encoding.md, 01_ownership.md):
   - Access: child[offsets[sel[i]] : offsets[sel[i]+1]] for logical row i.
   - None row → null (validity bit clear); [] row → valid empty sublist.
   - Child type inferred: int → INT64, str → STRING, list → ARRAY (recursive).
-  - Supported ops: take, materialize, compress, array_length, array_get.
+  - Supported ops: take, materialize, drop_nulls, array_length, array_get.
   - Unsupported ops (hash, compare, sum/min/max, arithmetic) throw.
   - sizeof(DrakenVector) == 40 (child held out-of-line via child_owner).
   - No shared/borrowed children; RAII frees whole subtree on parent destruct.
@@ -414,35 +414,35 @@ class TestMaterialize:
 
 
 # ===========================================================================
-# 9. compress (keep valid rows only)
+# 9. drop_nulls (keep valid rows only)
 # ===========================================================================
 
 class TestCompress:
-    def test_compress_no_nulls(self):
+    def test_drop_nulls_no_nulls(self):
         data = [[1, 2], [3, 4]]
         v = arr(data)
-        c = v.compress()
+        c = v.drop_nulls()
         assert c.to_pylist() == data
 
-    def test_compress_removes_nulls(self):
+    def test_drop_nulls_removes_nulls(self):
         v = arr([None, [1, 2], None, [3]])
-        c = v.compress()
+        c = v.drop_nulls()
         assert c.to_pylist() == [[1, 2], [3]]
 
-    def test_compress_all_null(self):
+    def test_drop_nulls_all_null(self):
         v = arr([None, None, None])
-        c = v.compress()
+        c = v.drop_nulls()
         assert len(c) == 0
         assert c.to_pylist() == []
 
-    def test_compress_empty_sublists_kept(self):
+    def test_drop_nulls_empty_sublists_kept(self):
         v = arr([None, [], [1]])
-        c = v.compress()
+        c = v.drop_nulls()
         assert c.to_pylist() == [[], [1]]
 
-    def test_compress_array_of_array(self):
+    def test_drop_nulls_array_of_array(self):
         v = arr([[[1, 2]], None, [[3, 4]]])
-        c = v.compress()
+        c = v.drop_nulls()
         assert c.to_pylist() == [[[1, 2]], [[3, 4]]]
 
 
@@ -544,10 +544,10 @@ class TestRAII:
             _ = v.to_pylist()
             del v
 
-    def test_compress_raii(self):
+    def test_drop_nulls_raii(self):
         for _ in range(500):
             v = arr([None, [1, 2, 3], None, [4, 5]])
-            c = v.compress()
+            c = v.drop_nulls()
             _ = c.to_pylist()
             del c
             del v
@@ -605,9 +605,9 @@ def test_hypothesis_take_roundtrip(data):
 
 @given(st.lists(nullable_sublist_int, max_size=20))
 @settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
-def test_hypothesis_compress_removes_only_nulls(data):
+def test_hypothesis_drop_nulls_removes_only_nulls(data):
     v = arr(data)
-    c = v.compress()
+    c = v.drop_nulls()
     expected = [row for row in data if row is not None]
     assert c.to_pylist() == expected
 

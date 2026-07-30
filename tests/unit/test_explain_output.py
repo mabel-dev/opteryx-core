@@ -9,8 +9,11 @@ Previously plain EXPLAIN emitted an opaque ``identity / bytes_in / bytes_out``
 table with no operator names or structure. It now emits:
   * a ``tree`` column — the indented operator tree (with ├─/└─ branches),
   * a ``details`` column — each operator's config,
+  * an ``est_rows`` column — the planner's row-count estimate (statistics_refresh),
+    available even without ANALYZE since it needs no execution,
   * an OPTIMIZATIONS section listing which optimizer rules fired,
-  * and, for EXPLAIN ANALYZE, ``rows`` and ``time_ms`` columns.
+  * and, for EXPLAIN ANALYZE, ``rows`` and ``time_ms`` columns -- the actual
+    numbers to compare est_rows against.
 """
 
 import os
@@ -69,9 +72,29 @@ def test_explain_lists_optimizations():
 
 def test_explain_analyze_adds_stats_columns():
     names, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
-    assert names == ["tree", "details", "rows", "time_ms", "self_ms"]
+    assert names == ["tree", "details", "est_rows", "rows", "time_ms", "self_ms"]
     # the single scan's row count surfaces (5 nations in region 1)
     assert max(data["rows"]) == 5, data["rows"]
+
+
+def test_explain_has_est_rows_without_analyze():
+    # est_rows is a planning-time number (statistics_refresh's estimate) --
+    # available without running the query, unlike rows/time_ms/self_ms.
+    names, data = _explain("EXPLAIN SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
+    assert names == ["tree", "details", "est_rows"]
+    scan_idx = next(i for i, line in enumerate(data["tree"]) if "Parquet Read" in line)
+    assert data["est_rows"][scan_idx] > 0, data["est_rows"]
+
+
+def test_explain_est_rows_can_be_compared_against_actual_rows():
+    # The whole point: est_rows (planner's guess) vs rows (what actually
+    # happened) sitting side by side, to catch a bad estimate at a glance.
+    names, data = _explain(
+        "EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1"
+    )
+    scan_idx = next(i for i, line in enumerate(data["tree"]) if "Parquet Read" in line)
+    assert data["est_rows"][scan_idx] > 0
+    assert data["rows"][scan_idx] == 5
 
 
 def test_explain_analyze_filter_applies_predicate():

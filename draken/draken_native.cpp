@@ -43,6 +43,7 @@ namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
 #include "core/interval_slot.h"
+#include "core/bitmap_ops.h"          // simd_popcount (null_count)
 #include "utf8.h"                    // E.26: UTF-8 validation (utf8nvalid) for NVARCHAR
 #include "logical_type.h"
 #include "fp16/fp16.h"   // fp16_ieee_from_fp32_value / fp16_ieee_to_fp32_value (D.11)
@@ -2137,9 +2138,9 @@ static VectorOwner make_fp16_materialize(const VectorOwner& v) {
     return owner;
 }
 
-// D.11: fp16 compress — keep only valid rows, producing a dense all-valid output.
-static VectorOwner make_fp16_compress(const VectorOwner& v) {
-    require_fp16_descriptor(v, "compress");
+// D.11: fp16 drop_nulls — keep only valid rows, producing a dense all-valid output.
+static VectorOwner make_fp16_drop_nulls(const VectorOwner& v) {
+    require_fp16_descriptor(v, "drop_nulls");
     const uint32_t dim    = v.logical_type->dimension;
     const uint32_t length = v.vec.length;
     const uint16_t* src   = static_cast<const uint16_t*>(v.vec.data);
@@ -4426,7 +4427,7 @@ static VectorOwner make_interval_dict(
 static VectorOwner make_array_take(const VectorOwner& v,
                                    const int32_t* indices, uint32_t n);
 static VectorOwner make_array_materialize(const VectorOwner& v);
-static VectorOwner make_array_compress(const VectorOwner& v);
+static VectorOwner make_array_drop_nulls(const VectorOwner& v);
 
 // ---------------------------------------------------------------------------
 // Readback helper: decode logical row row_idx of an ARRAY vector to Python list.
@@ -5012,10 +5013,10 @@ static VectorOwner make_array_materialize(const VectorOwner& v) {
 }
 
 // ---------------------------------------------------------------------------
-// D.13: array compress — keep only valid rows (drop null rows).
+// D.13: array drop_nulls — keep only valid rows (drop null rows).
 // Result owns its own offsets + a compacted child.
 // ---------------------------------------------------------------------------
-static VectorOwner make_array_compress(const VectorOwner& v) {
+static VectorOwner make_array_drop_nulls(const VectorOwner& v) {
     const uint32_t length      = v.vec.length;
     const int32_t* src_offsets = static_cast<const int32_t*>(v.vec.data);
 
@@ -6590,6 +6591,112 @@ NB_MODULE(draken_native, m) {
         .value("UINT16",       DRAKEN_UINT16)
         .value("UINT32",       DRAKEN_UINT32)
         .value("UINT64",       DRAKEN_UINT64)
+        // ------------------------------------------------------------------
+        // ordinalize(value) — scalar twin of Vector.ordinalize(). Converts one
+        // Python literal into the same int64 ordinal-key space the vector
+        // kernels produce for this physical type (ops/ordinalize.h), so
+        // plan-time code (predicate-literal vs. file min/max ordinal bounds,
+        // i.e. pruning) can compare without materialising a Vector.
+        //
+        // DECIMAL: the key is the literal's OWN unscaled mantissa at ITS
+        // natural scale (py_scalar_to_unscaled_scale) — comparable to a
+        // column's ordinal keys only if the column shares that scale; no
+        // rescaling happens here (see ops/ordinalize.h's DECIMAL note).
+        //
+        // DECIMAL128 and TIMESTAMP64/TIME32/TIME64: NOT SUPPORTED here.
+        // DECIMAL128 deliberately has no ordinalize kernel at all (see
+        // ops/ordinalize.h). TIMESTAMP64/TIME32/TIME64's raw physical
+        // value's unit lives on LogicalType, not DrakenType, so this
+        // physical-type-only entry point can't disambiguate seconds/ms/us/ns
+        // without guessing. Both throw rather than silently guessing.
+        .def("ordinalize", [](DrakenType self, nb::object value) -> int64_t {
+            PyObject* obj = value.ptr();
+            switch (self) {
+                case DRAKEN_INT64: {
+                    const long long v = PyLong_AsLongLong(obj);
+                    if (v == -1 && PyErr_Occurred()) throw nb::python_error();
+                    return draken::ops::ordinalize_scalar_widen<int64_t>(v);
+                }
+                case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32:
+                case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32:
+                case DRAKEN_BOOL: {
+                    // Narrow types: range-check against the DECLARED type,
+                    // matching vector_intN_from_sequence/vector_uintN_from_sequence
+                    // (e.g. vector_int8_from_sequence([100000]) raises
+                    // "int8: value out of range") -- this scalar entry point must
+                    // reject the same values, not silently widen them.
+                    const long long v = PyLong_AsLongLong(obj);
+                    if (v == -1 && PyErr_Occurred()) throw nb::python_error();
+                    long long lo, hi;
+                    const char* type_name;
+                    switch (self) {
+                        case DRAKEN_INT8:   lo = INT8_MIN;  hi = INT8_MAX;  type_name = "int8";  break;
+                        case DRAKEN_INT16:  lo = INT16_MIN; hi = INT16_MAX; type_name = "int16"; break;
+                        case DRAKEN_INT32:  lo = INT32_MIN; hi = INT32_MAX; type_name = "int32"; break;
+                        case DRAKEN_UINT8:  lo = 0; hi = UINT8_MAX;  type_name = "uint8";  break;
+                        case DRAKEN_UINT16: lo = 0; hi = UINT16_MAX; type_name = "uint16"; break;
+                        case DRAKEN_UINT32: lo = 0; hi = UINT32_MAX; type_name = "uint32"; break;
+                        default:            lo = 0; hi = 1; type_name = "bool"; break;  // DRAKEN_BOOL
+                    }
+                    if (v < lo || v > hi) {
+                        throw std::invalid_argument(
+                            std::string("ordinalize: value out of range for ") + type_name);
+                    }
+                    return draken::ops::ordinalize_scalar_widen<int64_t>(v);
+                }
+                case DRAKEN_UINT64: {
+                    const unsigned long long v = PyLong_AsUnsignedLongLong(obj);
+                    if (v == static_cast<unsigned long long>(-1) && PyErr_Occurred())
+                        throw nb::python_error();
+                    return draken::ops::ordinalize_scalar_u64(static_cast<uint64_t>(v));
+                }
+                case DRAKEN_FLOAT32:
+                    return draken::ops::ordinalize_scalar_f32(static_cast<float>(PyFloat_AsDouble(obj)));
+                case DRAKEN_FLOAT64:
+                    return draken::ops::ordinalize_scalar_f64(PyFloat_AsDouble(obj));
+                case DRAKEN_DECIMAL: {
+                    __int128 unscaled; uint8_t scale;
+                    py_scalar_to_unscaled_scale(obj, unscaled, scale);
+                    (void)scale;  // caller's responsibility -- see docstring above
+                    // DECIMAL is int64-backed (p<=18) -- but that's only true
+                    // for a value actually AT that precision. Enforce it rather
+                    // than assume it: matches vector_decimal_from_sequence,
+                    // which raises "decimal: unscaled value does not fit in
+                    // int64 range" for the identical case. A plain narrowing
+                    // cast here would silently wrap instead of raising.
+                    if (unscaled > static_cast<__int128>(INT64_MAX) ||
+                        unscaled < static_cast<__int128>(INT64_MIN)) {
+                        throw std::invalid_argument(
+                            "ordinalize: decimal unscaled value does not fit in int64 range");
+                    }
+                    return static_cast<int64_t>(unscaled);
+                }
+                case DRAKEN_DATE32:
+                    return draken::ops::ordinalize_scalar_widen<int32_t>(py_date_to_days(obj));
+                case DRAKEN_INTERVAL: {
+                    const DrakenIntervalSlot s = py_to_interval_slot(value);
+                    return draken::ops::ordinalize_scalar_interval(s.months, s.us);
+                }
+                case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR:
+                case DRAKEN_VARBINARY: case DRAKEN_VARIANT: {
+                    const char* p = nullptr;
+                    Py_ssize_t len = 0;
+                    if (PyUnicode_Check(obj)) {
+                        p = PyUnicode_AsUTF8AndSize(obj, &len);
+                        if (!p) throw nb::python_error();
+                    } else if (PyBytes_Check(obj)) {
+                        if (PyBytes_AsStringAndSize(obj, const_cast<char**>(&p), &len) < 0)
+                            throw nb::python_error();
+                    } else {
+                        throw std::invalid_argument("ordinalize: expected str or bytes");
+                    }
+                    return draken::ops::ordinalize_scalar_bytes8(
+                        reinterpret_cast<const uint8_t*>(p), static_cast<uint32_t>(len));
+                }
+                default:
+                    throw std::invalid_argument("ordinalize: unsupported type for scalar ordinalize");
+            }
+        })
         .export_values();
 
     // ------------------------------------------------------------------
@@ -6956,6 +7063,24 @@ NB_MODULE(draken_native, m) {
             return hash_shaped_impl(v);
         })
         // ----------------------------------------------------------------
+        // ordinalize — shape-preserving int64 ORDINAL KEY vector. Replaces the
+        // Python to_pylist()-loop shim (2026-07-30). Used by the catalog
+        // manifest builder to compute per-column min/max/histogram bins, and
+        // by anything needing a monotonic (not necessarily total-order) int64
+        // proxy for a column's natural order — see ops/ordinalize.h for the
+        // per-type contract and the DECIMAL/DECIMAL128/string caveats.
+        // Compressed input → ordinalize only the data_length distinct values,
+        // not every row — the whole reason this exists as a native kernel
+        // rather than a per-row Python loop over Tb-scale data.
+        .def("ordinalize", [](const VectorOwner& v) -> VectorOwner {
+            if (v.vec.type == DRAKEN_ARRAY)
+                throw std::invalid_argument("ordinalize: not supported for DRAKEN_ARRAY");
+            if (v.vec.type == DRAKEN_VECTOR_FP16)
+                throw std::invalid_argument("ordinalize: not supported for DRAKEN_VECTOR_FP16");
+            nb::gil_scoped_release _gil;
+            return vecresult_to_owner(draken_ordinalize_shaped(v.vec));
+        })
+        // ----------------------------------------------------------------
         // C.2 — reductions
         // sum(): empty or all-null → 0 (int) / 0.0 (float) / Decimal('0.00…') (decimal).
         // DECIMAL: accumulates unscaled int64 values then converts at the edge.
@@ -7130,6 +7255,181 @@ NB_MODULE(draken_native, m) {
             // E33: see the identical note in sum() above.
             if (v.vec.type == DRAKEN_UINT64) return nb::cast(static_cast<uint64_t>(val));
             return nb::cast(val);
+        })
+        // ----------------------------------------------------------------
+        // null_count(): native null-row count via validity-bitmap popcount.
+        // Replaces the is_null()-then-Python-sum() pattern (is_null() itself
+        // boxes the whole column via to_pylist() -- see _vector_shim.pyx) with
+        // one native pass; no per-row Python at all. validity == nullptr means
+        // "all valid" (unified-format convention) -> 0 nulls, no bitmap touched.
+        // Manual tail-byte masking (not a bare simd_popcount over the whole
+        // buffer): the bitmap is allocated in whole bytes ((length+7)/8), so a
+        // length not a multiple of 8 leaves padding bits in the final byte
+        // whose value is not a documented contract.
+        .def("null_count", [](const VectorOwner& v) -> int64_t {
+            const uint32_t n = v.vec.length;
+            if (v.vec.validity == nullptr) return 0;
+            int64_t valid_count;
+            {
+                nb::gil_scoped_release _gil;
+                const uint32_t full_bytes = n >> 3;
+                const uint32_t tail_bits = n & 7u;
+                size_t popcount = simd_popcount(v.vec.validity, full_bytes);
+                if (tail_bits != 0u) {
+                    const uint8_t tail_byte = v.vec.validity[full_bytes];
+                    const uint8_t mask = static_cast<uint8_t>((1u << tail_bits) - 1u);
+                    popcount += static_cast<size_t>(__builtin_popcount(
+                        static_cast<unsigned int>(tail_byte & mask)));
+                }
+                valid_count = static_cast<int64_t>(popcount);
+            }
+            return static_cast<int64_t>(n) - valid_count;
+        })
+        // ----------------------------------------------------------------
+        // ordinal_min_max()/histogram_bucket(): operate on THIS vector as
+        // ordinalize()'s own INT64 output. CRITICAL CONTRACT (see
+        // ops/ordinalize.h): ordinalize()'s output carries no validity bitmap
+        // of its own -- null input rows are encoded as the sentinel
+        // ORDINAL_NULL (INT64_MIN) baked into the data. The generic .min()/
+        // .max() above trust the (absent) bitmap and would treat that
+        // sentinel as real data, so min() on a nullable ordinalized column
+        // silently returns INT64_MIN. These two explicitly filter it instead.
+        // Used by ANALYZE-style per-file statistics passes (opteryx's
+        // _analyze.py, the catalog's _compute_column_stats) to get file-wide
+        // min/max/histogram for a column of ANY type via one uniform int64
+        // pipeline, without a Python-level min()/max()/bucketing loop.
+        //
+        // ordinal_min_max() returns None when every row is null / the column
+        // is empty, mirroring "no min/max for this file/column" as a
+        // checkable value rather than raising (unlike the generic .min()/
+        // .max(), for which an all-null/empty column is an error condition).
+        .def("ordinal_min_max", [](const VectorOwner& v) -> nb::object {
+            if (v.vec.type != DRAKEN_INT64)
+                throw std::invalid_argument(
+                    "ordinal_min_max: column must be INT64 (the output of Vector.ordinalize())");
+            const uint32_t n = v.vec.length;
+            int64_t vmin = std::numeric_limits<int64_t>::max();
+            int64_t vmax = std::numeric_limits<int64_t>::min();
+            bool any = false;
+            {
+                nb::gil_scoped_release _gil;
+                const int64_t* data = static_cast<const int64_t*>(v.vec.data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    const int64_t val = data[v.vec.selection[i]];
+                    if (val == draken::ops::ORDINAL_NULL) continue;
+                    any = true;
+                    if (val < vmin) vmin = val;
+                    if (val > vmax) vmax = val;
+                }
+            }
+            if (!any) return nb::none();
+            return nb::make_tuple(nb::int_(vmin), nb::int_(vmax));
+        })
+        // vmin == vmax (single distinct non-null value) puts every non-null
+        // value in bin 0 rather than dividing by zero.
+        .def("histogram_bucket", [](const VectorOwner& v, int64_t vmin, int64_t vmax,
+                                     int64_t n_bins) -> nb::list {
+            if (v.vec.type != DRAKEN_INT64)
+                throw std::invalid_argument(
+                    "histogram_bucket: column must be INT64 (the output of Vector.ordinalize())");
+            if (n_bins <= 0)
+                throw std::invalid_argument("histogram_bucket: n_bins must be positive");
+            const uint32_t n = v.vec.length;
+            const int64_t span = vmax - vmin;
+            std::vector<int64_t> counts(static_cast<size_t>(n_bins), 0);
+            {
+                nb::gil_scoped_release _gil;
+                const int64_t* data = static_cast<const int64_t*>(v.vec.data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    const int64_t val = data[v.vec.selection[i]];
+                    if (val == draken::ops::ORDINAL_NULL) continue;
+                    int64_t bin;
+                    if (span <= 0) {
+                        bin = 0;
+                    } else {
+                        // Equi-width bucket, clamped: floating-point rounding
+                        // at the vmax boundary can otherwise land one bin
+                        // past the end.
+                        const double frac =
+                            static_cast<double>(val - vmin) / static_cast<double>(span);
+                        bin = static_cast<int64_t>(frac * static_cast<double>(n_bins - 1));
+                        if (bin < 0) bin = 0;
+                        if (bin >= n_bins) bin = n_bins - 1;
+                    }
+                    counts[static_cast<size_t>(bin)] += 1;
+                }
+            }
+            nb::list out;
+            for (int64_t b = 0; b < n_bins; ++b)
+                out.append(nb::cast(counts[static_cast<size_t>(b)]));
+            return out;
+        }, nb::arg("vmin"), nb::arg("vmax"), nb::arg("n_bins") = 32)
+        // ----------------------------------------------------------------
+        // char_class_stats(): per-column byte-class histogram (8 fixed
+        // classes -- 0=upper 1=lower 2=digit 3=whitespace 4=punct_text
+        // 5=semantic 6=extended 7=control), total byte count, and
+        // (min_length, max_length) for a VARCHAR/NVARCHAR/VARBINARY vector,
+        // in one native pass. Backs the LIKE '%needle%' selectivity char-class
+        // estimator's ANALYZE-time stats collection, plus min_lengths/
+        // max_lengths pruning (opteryx's _analyze.py, the catalog's
+        // _compute_column_stats). The 256-entry table is a byte-for-byte port
+        // of opteryx-core's scratch/like_selectivity/stats.py `_BYTE_CLASS` --
+        // NOT re-derived by hand, to avoid transcription drift between the
+        // offline-validated Python classifier and this kernel. Every byte
+        // 0-255 classifies into exactly one class -- there is no "other"
+        // bucket. NULL rows are skipped entirely.
+        .def("char_class_stats", [](const VectorOwner& v) -> nb::object {
+            static const uint8_t BYTE_CLASS[256] = {
+                7, 7, 7, 7, 7, 7, 7, 7, 7, 3, 3, 3, 3, 3, 7, 7,
+                7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+                3, 4, 4, 5, 5, 5, 5, 4, 4, 4, 5, 5, 4, 4, 4, 5,
+                2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 5, 4, 5, 5, 5, 4,
+                5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5,
+                5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5, 5, 5, 5, 7,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+            };
+            const bool is_str = v.vec.type == DRAKEN_VARCHAR
+                              || v.vec.type == DRAKEN_NVARCHAR
+                              || v.vec.type == DRAKEN_VARBINARY;
+            if (!is_str)
+                throw std::invalid_argument(
+                    "char_class_stats: expected a string Vector (VARCHAR, NVARCHAR, or VARBINARY)");
+            const uint32_t n = v.vec.length;
+            uint64_t counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            uint64_t total_bytes = 0;
+            uint32_t min_len = 0xFFFFFFFFu;
+            uint32_t max_len = 0;
+            bool any = false;
+            {
+                nb::gil_scoped_release _gil;
+                const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v.vec.data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    if (!row_is_valid(v.vec, i)) continue;
+                    const DrakenStringSlot* slot = &sa->slots[v.vec.selection[i]];
+                    const uint8_t* p = str_data(slot, sa->arena);
+                    const uint32_t len = str_length(slot);
+                    for (uint32_t j = 0; j < len; ++j) counts[BYTE_CLASS[p[j]]] += 1;
+                    total_bytes += len;
+                    if (len < min_len) min_len = len;
+                    if (len > max_len) max_len = len;
+                    any = true;
+                }
+            }
+            nb::list counts_list;
+            for (int k = 0; k < 8; ++k) counts_list.append(nb::int_(counts[k]));
+            nb::object length_range = any
+                ? nb::object(nb::make_tuple(nb::int_(min_len), nb::int_(max_len)))
+                : nb::none();
+            return nb::make_tuple(counts_list, nb::int_(total_bytes), length_range);
         })
         // ----------------------------------------------------------------
         // C.2 — arithmetic (vector × vector or vector × scalar)
@@ -7387,7 +7687,7 @@ NB_MODULE(draken_native, m) {
         },
             "SQL ALL (bool_and reduction). True/False/None. Empty → True.")
         // ----------------------------------------------------------------
-        // C.2 — take / materialize / compress
+        // C.2 — take / materialize / drop_nulls / dictionary_encode
         // logical_type is propagated: the output vector has the same unit/offset
         // as the input (the physical instant values are reordered, not reinterpreted).
         .def("take", [](const VectorOwner& v, nb::list indices) -> VectorOwner {
@@ -7444,16 +7744,28 @@ NB_MODULE(draken_native, m) {
             result.logical_type = v.logical_type;
             return result;
         })
-        .def("compress", [](const VectorOwner& v) -> VectorOwner {
+        // 2026-07-30: `compress` split into two unambiguous operations that used
+        // to share one overloaded name:
+        //   drop_nulls        — keep only valid rows, shrinking logical length.
+        //                        Currently only implemented for NULL/ARRAY/FP16;
+        //                        every other type throws (not yet built).
+        //   dictionary_encode — dedupe into a Dict-shaped vector. Logical length
+        //                        and null rows are UNCHANGED (see draken_dictionary_encode).
+        .def("drop_nulls", [](const VectorOwner& v) -> VectorOwner {
             // Pure C++ on DrakenVector structs — release the GIL for the body.
             nb::gil_scoped_release _gil;
-            // D.11: null — all rows are null → 0 valid rows after compress.
+            // D.11: null — all rows are null → 0 valid rows after drop_nulls.
             if (v.vec.type == DRAKEN_NULL) return make_null_vector(0u);
             // D.13: array — keep only valid rows, compacting child.
-            if (v.vec.type == DRAKEN_ARRAY) return make_array_compress(v);
+            if (v.vec.type == DRAKEN_ARRAY) return make_array_drop_nulls(v);
             // D.11: fp16 — keep only valid rows.
-            if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_compress(v);
-            auto result = vecresult_to_owner(draken_compress(v.vec));
+            if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_drop_nulls(v);
+            throw std::invalid_argument("drop_nulls: not yet implemented for this type");
+        })
+        .def("dictionary_encode", [](const VectorOwner& v) -> VectorOwner {
+            // Pure C++ on DrakenVector structs — release the GIL for the body.
+            nb::gil_scoped_release _gil;
+            auto result = vecresult_to_owner(draken_dictionary_encode(v.vec));
             result.vec.type     = v.vec.type;
             result.logical_type = v.logical_type;
             return result;
@@ -8414,7 +8726,7 @@ NB_MODULE(draken_native, m) {
         "Build a dense int64 Vector from a Python sequence. None elements become nulls.\n"
         "All-valid input leaves validity==NULL (normalization invariant).");
 
-    // C.2 factories — constant and dict shapes for testing take/materialize/compress.
+    // C.2 factories — constant and dict shapes for testing take/materialize/drop_nulls/dictionary_encode.
     m.def("vector_from_constant",
         [](nb::object value, uint32_t length) {
             return make_int64_constant(value, length);

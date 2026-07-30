@@ -8,7 +8,7 @@ Design contract (06_value_encoding.md):
   - None rows → null; readback gives per-row float lists.
   - Unsupported ops (ordering/arithmetic/similarity) throw.
   - hash: canonical fp16 bits; consistent across identical inputs.
-  - take/materialize/compress preserve fp16 encoding.
+  - take/materialize/drop_nulls preserve fp16 encoding.
 
 All tests import draken.draken_native directly; no import opteryx.
 """
@@ -256,7 +256,7 @@ class TestFp16UnsupportedOps:
 
 
 # ===========================================================================
-# 6. take / materialize / compress
+# 6. take / materialize / drop_nulls
 # ===========================================================================
 
 class TestFp16GatherOps:
@@ -302,23 +302,23 @@ class TestFp16GatherOps:
         out = result.to_pylist()
         assert out[1] is None
 
-    def test_compress_removes_null_rows(self):
+    def test_drop_nulls_removes_null_rows(self):
         v = fp16([[1.0, 2.0], None, [3.0, 4.0]])
-        result = v.compress()
+        result = v.drop_nulls()
         assert result.type == dn.DrakenType.VECTOR_FP16
         assert len(result) == 2
         out = result.to_pylist()
         assert all(row is not None for row in out)
 
-    def test_compress_all_null(self):
+    def test_drop_nulls_all_null(self):
         v = dn.vector_fp16_from_sequence([None, None], 3)
-        result = v.compress()
+        result = v.drop_nulls()
         assert len(result) == 0
 
-    def test_compress_no_nulls(self):
+    def test_drop_nulls_no_nulls(self):
         rows = [[1.0, 2.0], [3.0, 4.0]]
         v = fp16(rows)
-        result = v.compress()
+        result = v.drop_nulls()
         assert len(result) == 2
 
 

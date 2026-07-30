@@ -95,6 +95,15 @@ exact match; under a semantic capability (MiniLM) 0.5 separates related from unr
 text. Tune per embedder with `SET match_threshold`.
 """
 
+LIKE_SELECTIVITY_DECAY: float = float(get("LIKE_SELECTIVITY_DECAY", 0.7))
+"""Geometric decay applied per-position when estimating infix `LIKE '%needle%'`
+selectivity from a column's char-class statistics (see
+opteryx.planner.cost_estimation.selectivity._decayed_char_class_selectivity).
+0.7 is the value validated offline against 371K real NVD VARCHAR rows (see
+scratch/like_selectivity's report) — lower values discount later needle
+characters faster, blunting how far a long needle can drive the estimate
+toward zero. Tune per deployment with `SET like_selectivity_decay`."""
+
 VALIDATE_OPTIMIZER_PLANS: bool = get_bool("VALIDATE_OPTIMIZER_PLANS", False)
 """Debug guardrail: when set, the optimizer checks plan structural invariants
 after every strategy and raises (naming the offending strategy) on corruption.

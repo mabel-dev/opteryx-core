@@ -1,5 +1,5 @@
 #pragma once
-// draken/ops/string_gather.h — take / materialize / compress for DRAKEN_VARCHAR.
+// draken/ops/string_gather.h — take / materialize / dictionary_encode for DRAKEN_VARCHAR.
 //
 // All three ops produce owned, self-contained string vectors.
 //
@@ -37,7 +37,7 @@
 //   The stored hash32 in every unique slot is the XXH3 content hash (lower 32 bits
 //   of XXH3_64bits) — identical to D.1 ingestion invariant.
 //
-// Round-trip: materialize(compress(dense)) produces the same logical values.
+// Round-trip: materialize(dictionary_encode(dense)) produces the same logical values.
 //
 // ACCESS PATTERN: all loops use data[selection[i]] — no shape discrimination.
 
@@ -623,11 +623,11 @@ static inline VecResult str_take(const DrakenVector& v,
 // non-null value.  All-null / empty: constant-shape (data_length=1).
 //
 // XXH3 content hash reuse: each unique slot's hash32 was set by str_init_extern
-// (or str_init_inline leaves hash32 unused) during ingestion.  New compress
+// (or str_init_inline leaves hash32 unused) during ingestion.  New dictionary_encode
 // preserves whatever hash32 is in the source slots — deterministic because D.1
 // and the dict ingestion factory both use XXH3_64bits.
 // ---------------------------------------------------------------------------
-static inline VecResult str_compress(const DrakenVector& v) {
+static inline VecResult str_dictionary_encode(const DrakenVector& v) {
     const uint32_t          n    = v.length;
     const DrakenStringArena* sa  = static_cast<const DrakenStringArena*>(v.data);
     const DrakenStringSlot*  src_s = sa->slots;
@@ -702,7 +702,7 @@ static inline VecResult str_compress(const DrakenVector& v) {
         }
     }
     if (total_arena > static_cast<size_t>(UINT32_MAX))
-        throw std::overflow_error("str_compress: arena exceeds 4 GB");
+        throw std::overflow_error("str_dictionary_encode: arena exceeds 4 GB");
 
     // Phase 3: allocate data block + codes buffer.
     StrBlock sb = sg_alloc_str_block(dict_size, total_arena);

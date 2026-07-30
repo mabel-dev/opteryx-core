@@ -27,8 +27,10 @@ according to their semantics:
   * AggregateAndGroup — output rows = product of group-key NDVs (capped);
     only group-key columns survive; their histograms drop.
   * Aggregate (no groups) — 1 row.
-  * Limit — min(input, limit); NDVs cap at the new row count.
-  * Distinct — group-by over all columns; histograms drop; NDVs cap.
+  * Limit / HeapSort (OperatorFusion's fused Order+Limit) — min(input, limit);
+    NDVs cap at the new row count.
+  * Distinct — group-by over the columns the child actually outputs (not every
+    column statistics_refresh still has attached); histograms drop; NDVs cap.
   * Union — sum of row counts; ranges widen (min lower / max upper); NDVs
     sum; histograms drop.
   * Project / pass-through — inherits child stats unchanged.
@@ -68,7 +70,6 @@ _UNKNOWN_ROW_COUNT = 1_000_000
 _PASS_THROUGH_TYPES = {
     LogicalPlanStepType.Project,
     LogicalPlanStepType.Order,
-    LogicalPlanStepType.HeapSort,
     LogicalPlanStepType.Exit,
     LogicalPlanStepType.Subquery,
     LogicalPlanStepType.Explain,
@@ -223,10 +224,58 @@ def _column_identity(col) -> Optional[bytes]:
     return identity if isinstance(identity, bytes) else None
 
 
+def _predicate_note(nid, node_type, relation, condition, selectivity, stats=None) -> dict:
+    """Self-contained telemetry record for one predicate's estimate.
+
+    Cost is looked up from cost_estimation.predicate_cost -- the same model
+    PredicateOrderingStrategy uses to order filters -- rather than duplicated
+    here. Never raises: an unreadable condition just gets an empty rendering,
+    telemetry must not be able to break query planning.
+
+    `estimator` is diagnostic only ("char_class_decay" | "flat_fallback" |
+    None) -- which selectivity estimator fired for an infix LIKE predicate,
+    computed by re-checking the same tier condition
+    cost_estimation.selectivity._selectivity_instr uses (WITHOUT re-running
+    estimation) rather than threading a return value out of it. None for
+    every other predicate kind, or when `stats` isn't available -- omitting
+    this field entirely reproduces prior behavior exactly, same contract as
+    the rest of this module's telemetry.
+    """
+    from opteryx.expression import format_expression
+    from opteryx.planner.cost_estimation.predicate_cost import predicate_cost
+
+    try:
+        condition_text = format_expression(condition)
+    except Exception:
+        condition_text = None
+    try:
+        cost = predicate_cost(condition)
+    except Exception:
+        cost = None
+    estimator = None
+    if stats is not None:
+        try:
+            from opteryx.planner.cost_estimation.selectivity import predicate_estimator_tag
+
+            estimator = predicate_estimator_tag(condition, stats)
+        except Exception:
+            estimator = None
+    return {
+        "nid": nid,
+        "node_type": node_type,
+        "relation": relation,
+        "condition": condition_text,
+        "selectivity": selectivity,
+        "cost": cost,
+        "estimator": estimator,
+    }
+
+
 def _scan_stats(
     node: LogicalPlanNode,
     plan: Optional["LogicalPlan"] = None,
     nid: Optional[str] = None,
+    predicate_notes: Optional[list] = None,
 ) -> RelationStatistics:
     schema = getattr(node, "schema", None)
     manifest = getattr(node, "manifest", None)
@@ -262,6 +311,8 @@ def _scan_stats(
             value_range = ColumnRange()
             histogram = None
             null_fraction = None
+            class_proportions = None
+            avg_length = None
             if manifest is not None:
                 try:
                     distinct_count = manifest.estimate_cardinality(col_name)
@@ -276,6 +327,12 @@ def _scan_stats(
                         null_fraction = manifest.estimate_null_fraction(col_name)
                     except Exception:
                         null_fraction = None
+                try:
+                    char_class_stats = manifest.get_char_class_stats(col_name)
+                except Exception:
+                    char_class_stats = None
+                if char_class_stats is not None:
+                    class_proportions, avg_length = char_class_stats
             # Keyed by identity; the manifest accessors above are name-based
             # because manifest statistics are per-relation and unambiguous.
             columns[identity] = ColumnStatistics(
@@ -285,6 +342,8 @@ def _scan_stats(
                 value_range=value_range,
                 histogram=histogram,
                 null_fraction=null_fraction,
+                class_proportions=class_proportions,
+                avg_length=avg_length,
             )
 
     base = RelationStatistics(row_count=int(row_count), columns=columns)
@@ -306,6 +365,12 @@ def _scan_stats(
                     except Exception:
                         s = 1.0
                     selectivity *= s
+                    if predicate_notes is not None:
+                        predicate_notes.append(
+                            _predicate_note(
+                                nid, "Scan", getattr(node, "relation", None), conj, s, base
+                            )
+                        )
                     # Tighten column value_ranges from the filter's bounds so
                     # range-aware consumers (CorrelatedFilters, join-key
                     # intersection) see the post-filter range, not just a row count.
@@ -317,16 +382,36 @@ def _scan_stats(
                     base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
     # Predicates already pushed onto this scan (post-PredicatePushdown) have no
-    # Filter node for the leaf-local walk to find, so narrow column ranges from
-    # them directly. Row-count selectivity for these is already applied via the
-    # scan's own row estimates upstream; here we only tighten the ranges.
+    # Filter node for the leaf-local walk to find, so apply the same selectivity
+    # treatment here directly: reduce row_count and narrow column ranges. This
+    # multiplies on top of whatever manifest/row-group pruning already reduced
+    # `row_count` to above (min/max skipping whole row-groups) -- that pruning
+    # says nothing about the match rate *within* a retained row-group, so it is
+    # not a substitute for statistical selectivity, only a head start on it.
     scan_predicates = getattr(node, "predicates", None)
     if scan_predicates:
+        from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
+
+        selectivity = 1.0
         narrowed_columns = base.columns
         for condition in scan_predicates:
+            try:
+                s = float(estimate_selectivity(condition, base))
+            except Exception:
+                s = 1.0
+            selectivity *= s
+            if predicate_notes is not None:
+                predicate_notes.append(
+                    _predicate_note(
+                        nid, "Scan", getattr(node, "relation", None), condition, s, base
+                    )
+                )
             narrowed_columns = _narrow_filter_columns(narrowed_columns, condition)
-        if narrowed_columns is not base.columns:
-            base = RelationStatistics(row_count=base.row_count, columns=narrowed_columns)
+        new_rows = base.row_count
+        if selectivity != 1.0:
+            new_rows = max(1, int(base.row_count * selectivity))
+        if new_rows != base.row_count or narrowed_columns is not base.columns:
+            base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
     return base
 
@@ -369,6 +454,7 @@ def _filter_stats(
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
     plan: LogicalPlan,
     nid: str,
+    predicate_notes: Optional[list] = None,
 ) -> RelationStatistics:
     """Apply selectivity for conjuncts that haven't already been folded into
     the underlying Scan stats by ``_scan_stats``.
@@ -405,6 +491,8 @@ def _filter_stats(
         except Exception:
             s = 1.0
         selectivity *= s
+        if predicate_notes is not None:
+            predicate_notes.append(_predicate_note(nid, "Filter", None, conj, s, base))
         narrowed_columns = _narrow_filter_columns(narrowed_columns, conj)
 
     if selectivity == 1.0 and narrowed_columns is base.columns:
@@ -415,9 +503,22 @@ def _filter_stats(
     return RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
 
+def _join_note(nid, join_type, left_rows, right_rows, out_rows, key_count) -> dict:
+    return {
+        "nid": nid,
+        "join_type": join_type,
+        "left_row_count": left_rows,
+        "right_row_count": right_rows,
+        "row_count": out_rows,
+        "key_count": key_count,
+    }
+
+
 def _join_stats(
     node: LogicalPlanNode,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    nid: Optional[str] = None,
+    join_notes: Optional[list] = None,
 ) -> RelationStatistics:
     left, right = _split_join_children(child_stats)
     left = left or _empty_stats()
@@ -427,6 +528,10 @@ def _join_stats(
 
     if join_type == "cross join" or join_type is None:
         out_rows = max(1, left.row_count * right.row_count)
+        if join_notes is not None:
+            join_notes.append(
+                _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
+            )
         merged = _drop_histograms(_merge_columns(left, right))
         return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
 
@@ -440,6 +545,10 @@ def _join_stats(
         estimator_type = "outer"
     elif join_type in ("left semi", "left anti", "left anti null-aware"):
         # Semi/anti emit only left-side columns; right contributes nothing.
+        if join_notes is not None:
+            join_notes.append(
+                _join_note(nid, join_type, left.row_count, right.row_count, left.row_count, 0)
+            )
         return RelationStatistics(
             row_count=left.row_count,
             columns=_cap_ndvs(left.columns, left.row_count),
@@ -447,45 +556,58 @@ def _join_stats(
 
     left_keys = _join_key_identities(getattr(node, "left_columns", None))
     right_keys = _join_key_identities(getattr(node, "right_columns", None))
-    left_key = left_keys[0] if left_keys else None
-    right_key = right_keys[0] if right_keys else None
 
-    if left_key is None or right_key is None or join_type == "non equi":
+    if not left_keys or not right_keys or join_type == "non equi":
         # Without a usable equi key, fall back to a cross-product upper bound;
         # JoinOrdering already guards against nested-loop blow-up by row count.
         out_rows = max(1, left.row_count * right.row_count)
+        if join_notes is not None:
+            join_notes.append(
+                _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
+            )
         merged = _drop_histograms(_merge_columns(left, right))
         return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
 
-    left_col = left.get_column(left_key)
-    right_col = right.get_column(right_key)
-    left_ndv = left_col.distinct_count if left_col else None
-    right_ndv = right_col.distinct_count if right_col else None
-    # When NDV is absent on both sides (common with Parquet files that omit
-    # distinct-count row-group statistics), fall back to tdom = min(row_counts).
-    # Assuming FK-PK structure, the smaller relation upper-bounds the distinct
-    # key count, giving a far better estimate than a flat 0.1 selectivity.
-    # Ebergen (2022) §3.2.  Only fires when BOTH sides are unknown — if one
-    # side has a real NDV, _key_selectivity already uses it.
-    if left_ndv is None and right_ndv is None:
-        tdom = max(1, min(left.row_count, right.row_count))
-        left_ndv = tdom
-        right_ndv = tdom
-    left_key_stats = KeyStats(
-        ndv=left_ndv,
-        null_fraction=left_col.null_fraction if left_col else None,
-    )
-    right_key_stats = KeyStats(
-        ndv=right_ndv,
-        null_fraction=right_col.null_fraction if right_col else None,
-    )
+    # A composite equi-key (`ON a.x = b.x AND a.y = b.y`) must have EVERY key
+    # pair's selectivity multiplied in -- estimate_join_cardinality already
+    # does this correctly given a multi-entry equi_keys list (see its
+    # independence-assumption docstring), and _intersect_join_keys below
+    # already loops over every pair. Using only keys[0] silently dropped every
+    # key past the first, understating a composite key's true selectivity and
+    # overestimating the join (the same "signal exists, never reaches the
+    # estimator" shape as the pushed-predicate and DISTINCT-NDV gaps above).
+    equi_keys = []
+    for left_key, right_key in zip(left_keys, right_keys):
+        left_col = left.get_column(left_key)
+        right_col = right.get_column(right_key)
+        left_ndv = left_col.distinct_count if left_col else None
+        right_ndv = right_col.distinct_count if right_col else None
+        # When NDV is absent on both sides (common with Parquet files that omit
+        # distinct-count row-group statistics), fall back to tdom = min(row_counts).
+        # Assuming FK-PK structure, the smaller relation upper-bounds the distinct
+        # key count, giving a far better estimate than a flat 0.1 selectivity.
+        # Ebergen (2022) §3.2.  Only fires when BOTH sides are unknown — if one
+        # side has a real NDV, _key_selectivity already uses it.
+        if left_ndv is None and right_ndv is None:
+            tdom = max(1, min(left.row_count, right.row_count))
+            left_ndv = tdom
+            right_ndv = tdom
+        equi_keys.append((
+            KeyStats(ndv=left_ndv, null_fraction=left_col.null_fraction if left_col else None),
+            KeyStats(ndv=right_ndv, null_fraction=right_col.null_fraction if right_col else None),
+        ))
+
     out_rows = estimate_join_cardinality(
         left_rows=left.row_count,
         right_rows=right.row_count,
         join_type=_JOIN_TYPE_FOR_CARDINALITY[estimator_type],
-        equi_keys=[(left_key_stats, right_key_stats)],
+        equi_keys=equi_keys,
         extra_predicates_selectivity=1.0,
     )
+    if join_notes is not None:
+        join_notes.append(
+            _join_note(nid, join_type, left.row_count, right.row_count, out_rows, len(equi_keys))
+        )
     merged = _drop_histograms(_merge_columns(left, right))
     # Equi-join: matching join keys see their range intersected and NDV reduced
     # to min(left, right). Non-key columns just get NDV capped at output rows.
@@ -566,14 +688,54 @@ def _limit_stats(
     return RelationStatistics(row_count=new_rows, columns=_cap_ndvs(base.columns, new_rows))
 
 
+def _child_output_identities(plan: Optional["LogicalPlan"], nid: Optional[str]) -> Optional[set]:
+    """Column identities the single child of ``nid`` actually outputs, if known.
+
+    Distinct has no output-column list of its own -- it dedups whatever tuple
+    its one child emits, and ProjectionPushdown narrows that child's `.columns`
+    to the real output set (e.g. a Scan feeding `SELECT DISTINCT n_name` has
+    `.columns == [n_name]` even though its RelationStatistics still carries
+    every column in the table). Returns None when there is no single child or
+    its output list is unavailable, so the caller can fall back safely.
+    """
+    if plan is None or nid is None:
+        return None
+    edges = list(plan.ingoing_edges(nid))
+    if len(edges) != 1:
+        return None
+    child = plan[edges[0][0]]
+    columns = getattr(child, "columns", None)
+    if not columns:
+        return None
+    out = {identity for identity in (_column_identity(c) for c in columns) if identity}
+    return out or None
+
+
 def _distinct_stats(
     node: LogicalPlanNode,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    plan: Optional["LogicalPlan"] = None,
+    nid: Optional[str] = None,
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
     if not base.columns:
         return base
-    ndvs = [col.distinct_count for col in base.columns.values()]
+
+    # Scope the NDV product to the columns actually being distinct-ed. Without
+    # this, a `SELECT DISTINCT n_name` still sees every column statistics_refresh
+    # attached to the underlying Scan (Project/pass-through nodes don't narrow
+    # RelationStatistics.columns), so an unrelated high-cardinality column (a
+    # timestamp, an id, ...) inflates the NDV product and the result collapses
+    # right back to the input row count via the cap below -- silently
+    # defeating the estimate DISTINCT was supposed to produce.
+    scoped_identities = _child_output_identities(plan, nid)
+    columns_for_ndv = base.columns
+    if scoped_identities:
+        relevant = {k: v for k, v in base.columns.items() if k in scoped_identities}
+        if relevant:
+            columns_for_ndv = relevant
+
+    ndvs = [col.distinct_count for col in columns_for_ndv.values()]
     out_rows = estimate_group_by_cardinality(base.row_count, ndvs)
     # Distinct collapses duplicates — distribution shape changes (histograms
     # invalid); each column's NDV is bounded by the output row count.
@@ -913,15 +1075,44 @@ def _join_key_identities(columns) -> List[bytes]:
 
 
 class StatisticsRefreshVisitor:
-    """Bottom-up walker that attaches ``RelationStatistics`` to every node."""
+    """Bottom-up walker that attaches ``RelationStatistics`` to every node.
 
-    def __init__(self, plan: LogicalPlan):
+    ``telemetry``, when given, additionally records per-predicate selectivity
+    and cost and per-join cardinality inputs as they're computed (see
+    ``_predicate_note``/``_join_note``) -- diagnostic detail only, never
+    consulted for correctness. ``run()`` also then records one row-count
+    entry per node so estimated-vs-actual comparisons don't require a second
+    plan walk elsewhere.
+    """
+
+    def __init__(self, plan: LogicalPlan, telemetry=None):
         self.plan = plan
         self._visited: set = set()
+        self.telemetry = telemetry
+        self.predicate_notes: Optional[list] = [] if telemetry is not None else None
+        self.join_notes: Optional[list] = [] if telemetry is not None else None
 
     def run(self) -> None:
         for nid in self.plan.get_exit_points():
             self._visit(nid)
+        if self.telemetry is not None:
+            self._record_telemetry()
+
+    def _record_telemetry(self) -> None:
+        row_counts = []
+        for nid, node in self.plan.nodes(True):
+            stats = getattr(node, "statistics", None)
+            if stats is None:
+                continue
+            row_counts.append({
+                "nid": nid,
+                "node_type": node.node_type.name,
+                "relation": getattr(node, "relation", None),
+                "row_count": stats.row_count,
+            })
+        self.telemetry._reading["estimated_row_counts"] = row_counts
+        self.telemetry._reading["predicate_estimates"] = self.predicate_notes
+        self.telemetry._reading["join_estimates"] = self.join_notes
 
     def _visit(self, nid: str) -> None:
         if nid in self._visited:
@@ -948,19 +1139,19 @@ class StatisticsRefreshVisitor:
         nt = node.node_type
 
         if nt == LogicalPlanStepType.Scan:
-            return _scan_stats(node, self.plan, nid)
+            return _scan_stats(node, self.plan, nid, self.predicate_notes)
         if nt == LogicalPlanStepType.Filter:
-            return _filter_stats(node, child_stats, self.plan, nid)
+            return _filter_stats(node, child_stats, self.plan, nid, self.predicate_notes)
         if nt in (LogicalPlanStepType.Join, LogicalPlanStepType.DependentJoin):
-            return _join_stats(node, child_stats)
+            return _join_stats(node, child_stats, nid, self.join_notes)
         if nt == LogicalPlanStepType.AggregateAndGroup:
             return _aggregate_stats(node, child_stats)
         if nt == LogicalPlanStepType.Aggregate:
             return _empty_stats(row_count=1)
-        if nt == LogicalPlanStepType.Limit:
+        if nt in (LogicalPlanStepType.Limit, LogicalPlanStepType.HeapSort):
             return _limit_stats(node, child_stats)
         if nt == LogicalPlanStepType.Distinct:
-            return _distinct_stats(node, child_stats)
+            return _distinct_stats(node, child_stats, self.plan, nid)
         if nt == LogicalPlanStepType.Union:
             return _union_stats(child_stats)
         if nt in (LogicalPlanStepType.Intersect, LogicalPlanStepType.Except):
@@ -972,13 +1163,20 @@ class StatisticsRefreshVisitor:
         return _first_child_stats(child_stats) or _empty_stats()
 
 
-def refresh_statistics(plan: LogicalPlan) -> LogicalPlan:
+def refresh_statistics(plan: LogicalPlan, telemetry=None) -> LogicalPlan:
     """Recompute statistics for every node in ``plan``.
 
     Walks the plan bottom-up from each exit point and attaches a
     ``RelationStatistics`` to every node as ``node.statistics``. Clears the
     plan's ``statistics_are_stale`` flag on completion.
+
+    When ``telemetry`` is given, also records the planner's per-node row-count
+    estimates, per-predicate selectivity/cost, and per-join cardinality inputs
+    onto ``telemetry._reading`` (``estimated_row_counts`` / ``predicate_estimates``
+    / ``join_estimates``) -- diagnostic detail for comparing estimate vs actual,
+    never consulted by planning itself. Omitting ``telemetry`` (the default)
+    skips this entirely; existing callers are unaffected.
     """
-    StatisticsRefreshVisitor(plan).run()
+    StatisticsRefreshVisitor(plan, telemetry).run()
     plan.statistics_are_stale = False
     return plan

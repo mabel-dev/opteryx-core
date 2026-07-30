@@ -219,6 +219,19 @@ class ColumnType:
                 f"(unsupported)"
             )
 
+    def ordinalize(self, value) -> int:
+        """Scalar ordinal key for `value`, in the same int64 space
+        `Vector.ordinalize()` produces for a column of this physical type
+        (see draken/ops/ordinalize.h). Lets plan-time code (e.g. file pruning
+        against ordinalize()-encoded manifest min/max bounds) compare a
+        predicate literal against those bounds without materialising a
+        Vector. Pure passthrough to `DrakenType.ordinalize` — TIMESTAMP64/
+        TIME32/TIME64/DECIMAL128 are not supported there and raise, since
+        this physical-only entry point cannot resolve the unit/precision
+        `self.logical` carries; not silently guessed.
+        """
+        return self.physical.ordinalize(value)
+
     def __str__(self) -> str:
         if self.physical == DrakenType.DECIMAL or self.physical == DrakenType.DECIMAL128:
             return f"DECIMAL({self.logical.precision}, {self.logical.scale})"

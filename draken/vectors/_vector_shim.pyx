@@ -191,6 +191,32 @@ cdef class Vector:
     def max(self):
         return self._nb.max()
 
+    def null_count(self):
+        # Native null-row count (validity-bitmap popcount) -- see this
+        # class's own is_null() below for the slow, still-unfixed shim this
+        # deliberately does NOT go through.
+        return self._nb.null_count()
+
+    def ordinal_min_max(self):
+        # min/max of THIS vector treated as ordinalize()'s own INT64 output --
+        # correctly excludes the ORDINAL_NULL sentinel ordinalize() bakes into
+        # the data for null rows (its output has no validity bitmap of its
+        # own). Do not call .min()/.max() directly on ordinalize() output if
+        # the column can contain nulls -- see draken_native.cpp's
+        # ordinal_min_max binding for the full contract.
+        return self._nb.ordinal_min_max()
+
+    def histogram_bucket(self, vmin, vmax, n_bins=32):
+        # Bucket THIS ordinalize()'d INT64 vector into n_bins equi-width bins
+        # given vmin/vmax from ordinal_min_max(). Excludes ORDINAL_NULL rows.
+        return self._nb.histogram_bucket(vmin, vmax, n_bins)
+
+    def char_class_stats(self):
+        # Per-column byte-class histogram/total-bytes/length-range for a
+        # VARCHAR/NVARCHAR/VARBINARY vector -- see draken_native.cpp's
+        # char_class_stats binding for the class table and contract.
+        return self._nb.char_class_stats()
+
     def is_null_at(self, idx):
         return self._nb.is_null_at(idx)
 
@@ -282,43 +308,30 @@ cdef class Vector:
         from draken.vectors.vector import Vector as _V
         return _V(self._nb.materialize())
 
-    def compress(self):
-        # sort.pyx expects int64_t[::1] memoryview — sortable int64 keys.
-        # For E.24 shim: convert to int64 sort keys via to_pylist().
-        # Keys only need to be order-preserving (monotonic), not the exact
-        # stored representation — so temporal values map to an epoch int.
-        import struct
-        import datetime as _dt
-        from array import array as _array
-        vals = self._nb.to_pylist()
-        type_name = self._nb.type.name
-        keys = []
-        if type_name in ("FLOAT32", "FLOAT64"):
-            for v in vals:
-                if v is None:
-                    keys.append(-0x8000000000000000)
-                else:
-                    # IEEE 754 bit cast to sortable int64
-                    bits = struct.unpack('Q', struct.pack('d', float(v)))[0]
-                    if bits & 0x8000000000000000:
-                        bits ^= 0xFFFFFFFFFFFFFFFF
-                    keys.append(bits & 0x7FFFFFFFFFFFFFFF)
-        else:
-            for v in vals:
-                if v is None:
-                    keys.append(-0x8000000000000000)
-                elif isinstance(v, bool):
-                    keys.append(1 if v else 0)
-                elif isinstance(v, _dt.datetime):
-                    # microseconds since epoch — monotonic, fits int64
-                    keys.append(int(v.timestamp() * 1_000_000))
-                elif isinstance(v, _dt.date):
-                    keys.append(v.toordinal())
-                elif isinstance(v, _dt.timedelta):
-                    keys.append(int(v.total_seconds() * 1_000_000))
-                else:
-                    keys.append(int(v))
-        return _array('q', keys)
+    def ordinalize(self):
+        # Renamed from `compress` (2026-07-30) to disambiguate from the two
+        # OTHER things called "compress" elsewhere in draken: the native
+        # Vector.compress() (dict-encode for most types / drop-nulls for
+        # ARRAY-FP16-NULL) and the never-implemented `compress(mask)` in
+        # README.md. Converts values to monotonic int64 ORDINAL keys -- used
+        # by opteryx_catalog's manifest builder (via rugo's Morsel -> this
+        # shim Vector) to compute per-column min/max/histogram bins over
+        # Tb-scale data.
+        #
+        # Native kernel (draken/ops/ordinalize.h), not a Python loop: this
+        # was a to_pylist()-boxing shim per the same "no Python on the
+        # execution path" rule as the rest of draken (.claude/CLAUDE.md §2)
+        # -- and it never supported strings at all (see ordinalize.h's
+        # VARCHAR/NVARCHAR/VARBINARY/VARIANT kernel, which this delegate
+        # now covers along with every other type in the dispatch table).
+        #
+        # Returns a shape-preserving native INT64 Vector (dict-compressed
+        # input stays compressed -- only the data_length distinct values are
+        # ordinalized, not every row), matching sort.pyx's expectation of a
+        # comparable int64 key per logical position via .to_pylist()/.data.
+        # Same wrapping convention as hash_shaped() above.
+        from draken.vectors.vector import Vector as _V
+        return _V(self._nb.ordinalize())
 
     cdef DrakenVector* unified(self) noexcept:
         return <DrakenVector*>self._dv

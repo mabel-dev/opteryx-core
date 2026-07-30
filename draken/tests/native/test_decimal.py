@@ -10,7 +10,7 @@ Coverage (D.10 acceptance criteria):
   ingestion errors: precision exceeded / sub-scale precision / int64 overflow / NaN / Inf
   mandatory desc:  no descriptor = hard error (enforced at factory level)
   same-scale ops:  compare_scalar, compare_vector, hash, sum, min, max, between, in_list,
-                   take, materialize, compress
+                   take, materialize, dictionary_encode
   cross-scale:     compare_vector with mismatched scales must throw
   hypothesis:      round-trip ordering, cross-scale throw
 """
@@ -420,7 +420,7 @@ class TestPredicates:
 
 
 # ===========================================================================
-# 9. Take / materialize / compress
+# 9. Take / materialize / dictionary_encode
 # ===========================================================================
 
 class TestGather:
@@ -461,15 +461,15 @@ class TestGather:
         assert m.logical_type_precision == 7
         assert m.logical_type_scale == 3
 
-    def test_compress_basic(self):
+    def test_dictionary_encode_basic(self):
         v = dec([Decimal('1.00'), Decimal('1.00'), Decimal('2.00')])
-        c = v.compress()
+        c = v.dictionary_encode()
         assert c.type == dn.DrakenType.DECIMAL
         assert set(pylist(c)) == {Decimal('1.00'), Decimal('2.00')}
 
-    def test_compress_preserves_descriptor(self):
+    def test_dictionary_encode_preserves_descriptor(self):
         v = dec([Decimal('1.00'), Decimal('2.00')], precision=9, scale=2)
-        c = v.compress()
+        c = v.dictionary_encode()
         assert c.logical_type_precision == 9
         assert c.logical_type_scale == 2
 

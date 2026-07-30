@@ -13,7 +13,10 @@ import pytest
 
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ConcurrentModificationError
+from opteryx.expression import NodeType
+from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
+from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.types.logical_type import INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
@@ -279,3 +282,43 @@ def test_file_entry_manifest_round_trip(connector, simple_schema):
     assert restored.uncompressed_size_in_bytes == entry.uncompressed_size_in_bytes
     assert restored.lower_bounds[0] == 5
     assert restored.upper_bounds[0] == 95
+
+
+def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector, simple_schema):
+    """LocalStoreConnector's manifest bounds are real decoded values
+    (parquet_writer._serialize_bound / manifest_io._decode_bound) — a
+    physically separate path from ANALYZE's ordinal-encoded filesystem-
+    connector manifest (opteryx/models/manifest.py's `bounds_are_ordinal`).
+    A Manifest built from this round-trip must default bounds_are_ordinal to
+    False and prune using the literal AS-IS, exactly as before that flag
+    existed."""
+    entry = FileEntry(
+        file_path="data.parquet",
+        file_format="PARQUET",
+        record_count=1000,
+        file_size_in_bytes=50000,
+        lower_bounds={0: (5).to_bytes(8, "big", signed=True)},
+        upper_bounds={0: (95).to_bytes(8, "big", signed=True)},
+    )
+
+    from opteryx.models.manifest_io import write_manifest_parquet
+
+    data = write_manifest_parquet([entry], simple_schema)
+    restored_entries, _native = read_manifest_file_entries(data)
+
+    manifest = Manifest(files=restored_entries, schema=simple_schema)
+    assert manifest.bounds_are_ordinal is False
+
+    def _comparison(column_name, op, value):
+        identifier = Node(NodeType.IDENTIFIER, source_column=column_name)
+        literal = Node(NodeType.LITERAL, value=value)
+        return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
+
+    # id's real range is [5, 95] — 1000 is out of range and must prune.
+    manifest.prune_files([_comparison("id", "Gt", 1000)])
+    assert manifest.files == []
+
+    manifest = Manifest(files=restored_entries, schema=simple_schema)
+    # 50 is within [5, 95] and must be kept.
+    manifest.prune_files([_comparison("id", "Eq", 50)])
+    assert len(manifest.files) == 1

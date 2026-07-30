@@ -96,6 +96,37 @@ def test_an_explicit_limit_rescues_the_query():
     assert _run("SELECT p1.id FROM $planets p1 CROSS JOIN $planets p2 LIMIT 10", limit=50) == 10
 
 
+def test_order_by_limit_rescues_the_query():
+    # Regression: OperatorFusionStrategy fuses an adjacent Order+Limit into a single
+    # HeapSort node carrying `.limit`, but statistics_refresh treated HeapSort as a
+    # bare pass-through and never applied that limit, so the plan-time estimate was
+    # the full (unlimited) row count -- rejecting queries an ordinary LIMIT would
+    # have rescued.
+    assert (
+        _run(
+            "SELECT p1.id FROM $planets p1 CROSS JOIN $planets p2 ORDER BY p1.id DESC LIMIT 10",
+            limit=50,
+        )
+        == 10
+    )
+
+
+def test_explain_does_not_apply_the_inner_querys_estimate():
+    # Regression reported 2026-07-30: `EXPLAIN SELECT DISTINCT project FROM
+    # opteryx.test.pypi WHERE project LIKE '%opteryx%'` was rejected as
+    # "estimated to return" billions of rows. EXPLAIN wraps the inner query's
+    # plan (`... -> Exit -> Explain`); the guard scanned for any node of type
+    # Exit and found the INNER query's Exit node, enforcing the limit against a
+    # row count EXPLAIN never streams -- its own output is a plan description,
+    # not the inner query's result set. A limit far below the inner query's
+    # real estimate must not raise.
+    rows = _run(
+        "EXPLAIN SELECT p1.id FROM $planets p1 CROSS JOIN $planets p2",
+        limit=50,
+    )
+    assert rows > 0
+
+
 def test_under_the_limit_is_untouched():
     assert _run("SELECT * FROM $planets", limit=1_000_000) == 9
 
@@ -139,6 +170,64 @@ def test_default_limit_does_not_disturb_ordinary_queries():
     for morsel in session.execute_to_morsels("SELECT * FROM $planets"):
         rows += morsel.num_rows
     assert rows == 9
+
+
+# ── pushed-down predicates must not blind the plan-time estimate ────────────────
+#
+# Regression for the bug reported 2026-07-29: `WHERE project = 'x'` against a
+# billion-row table was rejected as "estimated to return" ~the full table, even
+# though only a handful of rows actually matched. Root cause: PredicatePushdown
+# moves a selective single-table predicate off the Filter node and onto
+# Scan.predicates, and the plan-time estimator failed to apply selectivity to
+# that path -- see test_scan_filter_pushdown.py for the statistics-level proof.
+# These tests prove the fix at the level the bug was reported at: does the
+# query actually run.
+
+@pytest.mark.skipif(
+    not os.path.isdir("testdata/tpch_001"),
+    reason="testdata/tpch_001 not populated",
+)
+def test_selective_pushed_down_filter_is_not_rejected():
+    # nation has 25 rows; exactly one is named BRAZIL. n_name = 'BRAZIL' is a
+    # VARCHAR equality the filesystem connector pushes onto the Scan, deleting
+    # the Filter node before the estimate runs. A limit of 5 sits strictly
+    # between the correct estimate (~1-2) and the old bug's estimate (the full
+    # 25) -- this only passes if selectivity was actually applied.
+    assert (
+        _run(
+            "SELECT n_name FROM testdata.tpch_001.nation WHERE n_name = 'BRAZIL'",
+            limit=5,
+        )
+        == 1
+    )
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("testdata/tpch_001"),
+    reason="testdata/tpch_001 not populated",
+)
+def test_distinct_over_selective_pushed_down_filter_is_not_rejected():
+    assert (
+        _run(
+            "SELECT DISTINCT n_name FROM testdata.tpch_001.nation WHERE n_name = 'BRAZIL'",
+            limit=5,
+        )
+        == 1
+    )
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("testdata/tpch_001"),
+    reason="testdata/tpch_001 not populated",
+)
+def test_unfiltered_scan_over_the_limit_is_still_rejected():
+    # Guard against the fix over-correcting: with no predicate to push, the
+    # estimate must still be the real (too-large) manifest count.
+    with pytest.raises(ResultTooLargeError) as exc:
+        _run("SELECT * FROM testdata.tpch_001.nation", limit=5)
+    assert exc.value.estimated is True
+    assert exc.value.rows == 25
+    assert exc.value.limit == 5
 
 
 if __name__ == "__main__":  # pragma: no cover

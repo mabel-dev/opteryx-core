@@ -15,7 +15,7 @@ Coverage matrix (per 04_testing.md §1 and the D.8 acceptance criteria):
   shapes:          sequence / constant / dict
   mandatory desc:  no descriptor on TIMESTAMP64 = hard error (enforced at factory)
   ops:             compare_scalar, compare_vector, hash, min, max, between, in_list,
-                   take, materialize, compress
+                   take, materialize, dictionary_encode
   cross-unit:      compare_vector with mismatched units must throw
   hypothesis:      round-trip ordering, round-trip identity, cross-unit throw
 """
@@ -679,7 +679,7 @@ class TestInList:
 
 
 # ===========================================================================
-# 14.  take / materialize / compress — type preservation
+# 14.  take / materialize / dictionary_encode — type preservation
 # ===========================================================================
 
 class TestTake:
@@ -730,20 +730,20 @@ class TestMaterialize:
 
 
 class TestCompress:
-    def test_compress_preserves_type(self):
+    def test_dictionary_encode_preserves_type(self):
         v = ts([DT_2024, DT_2025])
-        r = v.compress()
+        r = v.dictionary_encode()
         assert r.type == dn.DrakenType.TIMESTAMP64
 
-    def test_compress_preserves_logical_unit(self):
+    def test_dictionary_encode_preserves_logical_unit(self):
         v = ts([DT_2024], unit="s")
-        r = v.compress()
+        r = v.dictionary_encode()
         assert r.logical_type_unit == "s"
 
-    def test_compress_materialize_roundtrip(self):
+    def test_dictionary_encode_materialize_roundtrip(self):
         src = [DT_2024, None, DT_2025, EPOCH]
         v = ts(src)
-        assert pylist(v.compress().materialize()) == src
+        assert pylist(v.dictionary_encode().materialize()) == src
 
 
 # ===========================================================================

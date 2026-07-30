@@ -80,6 +80,17 @@ class ColumnStatistics:
 
     null_fraction: Optional[float] = None
 
+    # LIKE '%needle%' char-class selectivity estimator inputs (VARCHAR/
+    # NVARCHAR/VARBINARY columns only; None elsewhere or when no ANALYZE has
+    # produced char-class stats). class_proportions: {class_name: proportion
+    # of this column's bytes in that class}, the 8 classes from
+    # opteryx.planner.cost_estimation.selectivity's char-class estimator.
+    # avg_length: mean string length in bytes, derived (not stored) from
+    # char_total_bytes / true_non_null_count at read time — see
+    # Manifest.get_char_class_stats.
+    class_proportions: Optional[dict] = None
+    avg_length: Optional[float] = None
+
 
 @dataclass
 class RelationStatistics:

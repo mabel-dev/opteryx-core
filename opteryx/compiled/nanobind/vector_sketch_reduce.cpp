@@ -254,6 +254,55 @@ static nb::object histogram_field_slices(nb::object column, int64_t field_id) {
     return nb::make_tuple(counts_b, offsets_b);
 }
 
+// char_class_field_totals(column, field_id, rows=None) -> Optional[list[8]]
+//
+// column: array<array<int64>> Vector for one manifest's `char_class_counts`
+// (8-class byte histogram per file per column — see draken's
+// Vector.char_class_stats()). field_id: positional data-file column index.
+//
+// Sums that column's 8-class leaf across every file (or, when `rows` is
+// given, only those outer row indices — the manifest's surviving files
+// after pruning, same `rows` convention as kmv_ndv). Unlike
+// histogram_field_slices this returns one relation-wide total, not per-file
+// slices: the char-class selectivity estimator (opteryx/planner/
+// cost_estimation/selectivity.py) only needs aggregate class proportions
+// for the whole column, never a per-file breakdown. Returns None when the
+// column has no char-class data anywhere (every file's slice for field_id
+// is absent/malformed) — distinguishes "no stats" from "stats are all zero".
+static nb::object char_class_field_totals(nb::object column, int64_t field_id,
+                                          std::optional<std::vector<uint32_t>> rows = std::nullopt) {
+    const NestedArrayView v = make_nested_view(column);
+    if (v.leaf->type != DRAKEN_INT64)
+        throw nb::type_error("char_class_field_totals: leaf type must be INT64");
+    if (field_id < 0)
+        return nb::none();
+
+    const int64_t* ldata = static_cast<const int64_t*>(v.leaf->data);
+    int64_t totals[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    bool any = false;
+
+    auto sum_row = [&](uint32_t i) {
+        with_field_slice(v, i, field_id, [&](int32_t g0, int32_t g1) {
+            if (g1 - g0 != 8) return;   // absent/malformed slice for this file -- skip
+            any = true;
+            for (int32_t g = g0; g < g1; ++g) {
+                totals[g - g0] += v.leaf_valid(g) ? ldata[v.lsel[static_cast<uint32_t>(g)]] : 0;
+            }
+        });
+    };
+
+    if (rows.has_value()) {
+        for (uint32_t i : *rows) sum_row(i);
+    } else {
+        for (uint32_t i = 0, n = v.n_files(); i < n; ++i) sum_row(i);
+    }
+
+    if (!any) return nb::none();
+    nb::list out;
+    for (int k = 0; k < 8; ++k) out.append(nb::int_(totals[k]));
+    return out;
+}
+
 void register_vector_sketch_reduce(nb::module_ &m) {
     m.def("kmv_ndv", &kmv_ndv,
         nb::arg("column"), nb::arg("field_id"), nb::arg("rows") = nb::none(),
@@ -273,4 +322,11 @@ void register_vector_sketch_reduce(nb::module_ &m) {
         "Gather one column's per-file histogram bin counts from an array<array<int64>> "
         "Vector into flat (counts_bytes int64, offsets_bytes int32[n_files+1]) for "
         "zero-copy load_counts_i64 + merge. Empty range for files lacking the column.");
+
+    m.def("char_class_field_totals", &char_class_field_totals,
+        nb::arg("column"), nb::arg("field_id"), nb::arg("rows") = nb::none(),
+        "Sum one column's 8-class byte counts across every file (or, when `rows` is "
+        "given, only those outer row indices) from a manifest's array<array<int64>> "
+        "char_class_counts Vector. Returns list[8] of int, or None if the column has "
+        "no char-class data anywhere.");
 }

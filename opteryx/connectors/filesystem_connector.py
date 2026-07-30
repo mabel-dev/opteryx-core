@@ -24,7 +24,8 @@ from opteryx.types.schema import RelationSchema
 OS_SEP = os.sep
 PARQUET_SUFFIX = ".parquet"
 
-# Process-global manifest cache: dataset -> (signature, file_entries, min_k, histogram).
+# Process-global manifest cache: dataset -> (signature, file_entries, min_k,
+# histogram, bounds_are_ordinal, char_class).
 # The gateway connector is recreated per query, so the built manifest (list +
 # stat + per-file footer-stats parse, ~5ms on a 99-file dataset) would otherwise
 # be rebuilt every time. Keyed on a (name, size, mtime) file-set signature, so
@@ -314,15 +315,25 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             # COUNT(*) sets it to []), so the cached list is never handed out raw.
             # The sketch vectors are immutable and shared (kernels only read them).
             return schema, Manifest(
-                list(cached[1]), schema, min_k_vector=cached[2], histogram_vector=cached[3]
+                list(cached[1]),
+                schema,
+                min_k_vector=cached[2],
+                histogram_vector=cached[3],
+                bounds_are_ordinal=cached[4],
+                char_class_vector=cached[5],
             )
 
         # ANALYZE's per-dataset manifest, when it describes exactly this file set.
         # Order matters: the sketch vectors' rows are positional to the manifest's
         # rows, so file_entries must be built in that same order to stay aligned.
-        ordered_names, min_k_vector, histogram_vector = self._read_dataset_manifest(
-            manifest_path, parquet_names
+        ordered_names, min_k_vector, histogram_vector, char_class_vector, manifest_bounds = (
+            self._read_dataset_manifest(manifest_path, parquet_names)
         )
+        # manifest_bounds' lower/upper bounds (when present) are ANALYZE's
+        # Vector.ordinalize() ordinal keys, not real values — this Manifest's
+        # bounds_are_ordinal flag must travel with them so prune_files knows to
+        # ordinalize predicate literals before comparing (see Manifest.__init__).
+        bounds_are_ordinal = bool(manifest_bounds)
 
         # Miss (or first build): build the manifest from file metadata.
         # Build FileEntry objects from file metadata
@@ -349,12 +360,15 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     record_count = 0
                     column_stats = None
 
+                manifest_lower, manifest_upper = manifest_bounds.get(blob_name, (None, None))
                 entry = FileEntry(
                     file_path=blob_name,
                     file_format=file_format,
                     record_count=record_count,
                     file_size_in_bytes=file_size,
                     column_stats=column_stats,
+                    lower_bounds=manifest_lower,
+                    upper_bounds=manifest_upper,
                 )
                 file_entries.append(entry)
 
@@ -366,6 +380,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 # a misaligned one is a wrong answer.
                 min_k_vector = None
                 histogram_vector = None
+                char_class_vector = None
                 continue
 
         # Cache an INDEPENDENT copy of the file list (the returned manifest below
@@ -378,32 +393,50 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             list(file_entries),
             min_k_vector,
             histogram_vector,
+            bounds_are_ordinal,
+            char_class_vector,
         )
         return schema, Manifest(
-            file_entries, schema, min_k_vector=min_k_vector, histogram_vector=histogram_vector
+            file_entries,
+            schema,
+            min_k_vector=min_k_vector,
+            histogram_vector=histogram_vector,
+            bounds_are_ordinal=bounds_are_ordinal,
+            char_class_vector=char_class_vector,
         )
 
     def _read_dataset_manifest(self, manifest_path, parquet_names):
-        """ANALYZE's per-dataset manifest, as ``(ordered_names, min_k, histogram)``.
+        """ANALYZE's per-dataset manifest, as
+        ``(ordered_names, min_k, histogram, char_class, bounds_by_path)``.
 
         Returns the data files in the manifest's own row order — the sketch vectors
         are positional to those rows, so the caller must build its FileEntry list in
         this order to keep row i describing ordered_names[i].
 
-        The sketches are used ONLY when the manifest describes exactly the current
-        file set. A dataset directory is ad-hoc: files can be added or removed under
-        it at any time, and a manifest that has drifted holds an INCOMPLETE picture —
-        `estimate_cardinality` returns an EXACT count when the merged sketch is under
-        K, so serving it from a partial file set would be a wrong answer, not a worse
-        estimate. On any drift (or no manifest) the sketches are dropped and the
-        globbed order is returned; ANALYZE re-run restores them.
+        `bounds_by_path` maps each file's path to its
+        ``(lower_bounds, upper_bounds)`` dicts as read straight off the manifest —
+        ANALYZE's `Vector.ordinalize()` ordinal int64 keys, NOT real decoded
+        values (see manifest_io.write_manifest_parquet's docstring). The caller
+        must pair this with `Manifest(bounds_are_ordinal=True)` so `prune_files`
+        ordinalizes predicate literals before comparing; it must never be merged
+        with a real-value bounds source (e.g. LocalStoreConnector's footer
+        bounds) within one Manifest.
+
+        The sketches (and bounds) are used ONLY when the manifest describes
+        exactly the current file set. A dataset directory is ad-hoc: files can be
+        added or removed under it at any time, and a manifest that has drifted
+        holds an INCOMPLETE picture — `estimate_cardinality` returns an EXACT
+        count when the merged sketch is under K, so serving it from a partial
+        file set would be a wrong answer, not a worse estimate. On any drift (or
+        no manifest) the sketches and bounds are dropped and the globbed order is
+        returned; ANALYZE re-run restores them.
         """
         from opteryx.models.manifest_io import read_manifest_file_entries
 
         # No manifest is the norm (a dataset nobody has ANALYZE'd) — an explicit
         # check, not an exception, so a genuine read failure below stays visible.
         if not os.path.isfile(manifest_path):
-            return parquet_names, None, None
+            return parquet_names, None, None, None, {}
 
         try:
             stream = self.filesystem.open_input_stream(manifest_path)
@@ -414,13 +447,22 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             stream.close()
             entries, native = read_manifest_file_entries(payload)
         except (OSError, ValueError, RuntimeError):
-            return parquet_names, None, None
+            return parquet_names, None, None, None, {}
 
         ordered = [entry.file_path for entry in entries]
         if set(ordered) != set(parquet_names):
-            return parquet_names, None, None
+            return parquet_names, None, None, None, {}
 
-        return ordered, native.get("min_k_hashes"), native.get("histogram_counts")
+        bounds_by_path = {
+            entry.file_path: (entry.lower_bounds, entry.upper_bounds) for entry in entries
+        }
+        return (
+            ordered,
+            native.get("min_k_hashes"),
+            native.get("histogram_counts"),
+            native.get("char_class_counts"),
+            bounds_by_path,
+        )
 
 
 class FileSystemConnector(BaseConnector):

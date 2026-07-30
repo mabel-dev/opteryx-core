@@ -1,10 +1,10 @@
 #pragma once
-// draken/ops/int128_gather.h — take / slice / materialize / compress for
+// draken/ops/int128_gather.h — take / slice / materialize / dictionary_encode for
 // int128-backed vectors (DRAKEN_DECIMAL128, the "correct-but-scalar" decimal tier).
 //
 // A byte-for-byte mirror of int64_gather.h with two differences: the element type
 // is __int128 (16-byte storage) and the result tag is DRAKEN_DECIMAL128. The slice
-// / take / materialize / compress nanobind wrappers restore the original type and
+// / take / materialize / dictionary_encode nanobind wrappers restore the original type and
 // logical descriptor (precision/scale) after dispatch, so these kernels only have
 // to move the right number of bytes.
 //
@@ -27,7 +27,7 @@
 namespace draken { namespace ops {
 
 // std::hash<__int128> is not portable (absent under libc++). Hash the two 64-bit
-// halves for the compress dictionary map.
+// halves for the dictionary_encode dictionary map.
 struct i128_hash {
     size_t operator()(__int128 v) const noexcept {
         const uint64_t lo = static_cast<uint64_t>(static_cast<unsigned __int128>(v));
@@ -167,7 +167,7 @@ static inline VecResult i128_materialize(const DrakenVector& v) {
 // ---------------------------------------------------------------------------
 // COMPRESS — dict-encode an int128 vector (see int64_gather.h for the algorithm).
 // ---------------------------------------------------------------------------
-static inline VecResult i128_compress(const DrakenVector& v) {
+static inline VecResult i128_dictionary_encode(const DrakenVector& v) {
     const uint32_t n     = v.length;
     const __int128* data = static_cast<const __int128*>(v.data);
     const uint8_t* src_null = v.validity;

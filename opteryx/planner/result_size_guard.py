@@ -67,6 +67,15 @@ def check_estimated_result_size(plan, limit: int, telemetry=None):
 
     No-op (returns the plan unchanged) when the limit is not positive, when any
     input lacks real statistics, or when no estimate could be produced.
+
+    Also a no-op when the plan's actual output isn't a plain `Exit` -- e.g.
+    `EXPLAIN SELECT ...` wraps the inner query's plan (`... -> Exit -> Explain`)
+    but its own output is a plan description, not the inner query's row set.
+    The inner `Exit` node still exists (and still carries the inner query's
+    row-count estimate), but it is no longer the plan's terminal node once
+    Explain sits above it -- checking the graph's real exit point catches this
+    instead of a linear scan for any node of type Exit, which would find and
+    enforce the limit against a row count EXPLAIN never streams.
     """
     if not limit or limit <= 0:
         return plan
@@ -76,18 +85,19 @@ def check_estimated_result_size(plan, limit: int, telemetry=None):
     # Statistics are refreshed opportunistically during optimization (only when a
     # strategy asks for them), so a simple scan reaches here with none attached.
     # Refresh only now that the inputs are known to be trustworthy — this is the
-    # one place that pays for it, and only for plans it can actually act on.
+    # one place that pays for it, and only for plans it can actually act on. This
+    # runs even for EXPLAIN (where enforcement below is skipped): EXPLAIN's own
+    # `est_rows` column reads these same `.statistics` attachments.
     from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
     if getattr(plan, "statistics_are_stale", True):
-        plan = refresh_statistics(plan)
+        plan = refresh_statistics(plan, telemetry=telemetry)
 
-    estimate = None
-    for nid in plan.nodes():
-        node = plan[nid]
-        if node.node_type == LogicalPlanStepType.Exit:
-            estimate = getattr(getattr(node, "statistics", None), "row_count", None)
-            break
+    exit_points = plan.get_exit_points()
+    if len(exit_points) != 1 or plan[exit_points[0]].node_type != LogicalPlanStepType.Exit:
+        return plan
+
+    estimate = getattr(getattr(plan[exit_points[0]], "statistics", None), "row_count", None)
 
     if estimate is not None and estimate > limit:
         if telemetry is not None:

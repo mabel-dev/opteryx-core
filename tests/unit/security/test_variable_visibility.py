@@ -220,6 +220,21 @@ def test_unrestricted_variable_needs_no_entitlement_to_set():
     assert session.context.variables["match_threshold"] == 0.9
 
 
+def test_like_selectivity_decay_is_unrestricted_and_settable():
+    # Same shape as match_threshold above: tuning a cost-estimation
+    # coefficient for one's own query is not a data-access grant.
+    assert SYSTEM_VARIABLES_DEFAULTS["like_selectivity_decay"][3] == Visibility.UNRESTRICTED
+    assert SYSTEM_VARIABLES_DEFAULTS["like_selectivity_decay"][2] == VariableOwner.USER
+
+    session = opteryx.session(user="mallory")
+    for _ in session.execute_to_morsels("SET like_selectivity_decay TO 0.8;"):
+        pass
+    assert session.context.variables["like_selectivity_decay"] == 0.8
+
+    shown = {n for n, _ in _shown()}
+    assert "like_selectivity_decay" in shown
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

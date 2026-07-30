@@ -701,8 +701,8 @@ static inline VecResult float_neg(const DrakenVector& a) {
 }
 
 // ===========================================================================
-// GATHER — take / materialize / compress (result stays type T).
-// compress uses bit-cast key for NaN-safe deduplication.
+// GATHER — take / materialize / dictionary_encode (result stays type T).
+// dictionary_encode uses bit-cast key for NaN-safe deduplication.
 // ===========================================================================
 
 template<typename T, DrakenType TAG>
@@ -769,7 +769,7 @@ static inline VecResult float_materialize(const DrakenVector& v) {
 }
 
 template<typename T, DrakenType TAG>
-static inline VecResult float_compress(const DrakenVector& v) {
+static inline VecResult float_dictionary_encode(const DrakenVector& v) {
     const uint32_t n        = v.length;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
@@ -1082,7 +1082,7 @@ static inline VecResult float_slice(const DrakenVector& v, uint32_t start, uint3
 
 static inline VecResult f32_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return float_slice<float,  DRAKEN_FLOAT32>(v, s, n); }
 static inline VecResult f32_materialize(const DrakenVector& v)                       { return float_materialize<float, DRAKEN_FLOAT32>(v); }
-static inline VecResult f32_compress(const DrakenVector& v)                          { return float_compress<float, DRAKEN_FLOAT32>(v); }
+static inline VecResult f32_dictionary_encode(const DrakenVector& v)                          { return float_dictionary_encode<float, DRAKEN_FLOAT32>(v); }
 static inline VecResult f32_compare_scalar(const DrakenVector& v, double s, int op)  { return float_compare_scalar<float>(v, s, op); }
 static inline VecResult f32_compare_vector(const DrakenVector& a, const DrakenVector& b, int op) { return float_compare_vector<float>(a, b, op); }
 static inline VecResult f32_between(const DrakenVector& v, double lo, double hi, bool li, bool hi_i) { return float_between<float>(v, lo, hi, li, hi_i); }
@@ -1107,7 +1107,7 @@ static inline VecResult f64_neg(const DrakenVector& a)                          
 static inline VecResult f64_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return float_take<double, DRAKEN_FLOAT64>(v, idx, n); }
 static inline VecResult f64_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return float_slice<double, DRAKEN_FLOAT64>(v, s, n); }
 static inline VecResult f64_materialize(const DrakenVector& v)                       { return float_materialize<double, DRAKEN_FLOAT64>(v); }
-static inline VecResult f64_compress(const DrakenVector& v)                          { return float_compress<double, DRAKEN_FLOAT64>(v); }
+static inline VecResult f64_dictionary_encode(const DrakenVector& v)                          { return float_dictionary_encode<double, DRAKEN_FLOAT64>(v); }
 static inline VecResult f64_compare_scalar(const DrakenVector& v, double s, int op)  { return float_compare_scalar<double>(v, s, op); }
 static inline VecResult f64_compare_vector(const DrakenVector& a, const DrakenVector& b, int op) { return float_compare_vector<double>(a, b, op); }
 static inline VecResult f64_between(const DrakenVector& v, double lo, double hi, bool li, bool hi_i) { return float_between<double>(v, lo, hi, li, hi_i); }

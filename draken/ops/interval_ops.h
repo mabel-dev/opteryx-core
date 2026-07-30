@@ -14,7 +14,7 @@
 //   add/sub: months±months, us±us.  neg: −months, −us.
 //   mul/div/mod/scalar arithmetic: unsupported (null dispatch slots → throw).
 //
-// MOVEMENT (take/materialize/compress): standard 16-byte slot gather.
+// MOVEMENT (take/materialize/dictionary_encode): standard 16-byte slot gather.
 //
 // MIN/MAX: use interval_find_min / interval_find_max (custom scans) at the
 //   Python edge; not registered in the ReduceFn slots (different return shape).
@@ -628,7 +628,7 @@ static inline VecResult interval_materialize(const DrakenVector& v) {
 // ---------------------------------------------------------------------------
 // COMPRESS — keep only valid rows in a dense all-valid output.
 // ---------------------------------------------------------------------------
-static inline VecResult interval_compress(const DrakenVector& v) {
+static inline VecResult interval_dictionary_encode(const DrakenVector& v) {
     const uint32_t n = v.length;
     const DrakenIntervalSlot* data = static_cast<const DrakenIntervalSlot*>(v.data);
     const uint8_t* src_null = v.validity;

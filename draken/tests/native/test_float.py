@@ -9,7 +9,7 @@ Covers:
   - IEEE arithmetic: 1.0/0.0 → +inf; -1.0/0.0 → -inf; 0.0/0.0 → NaN.
   - compare_scalar / compare_vector (6 ops) with total-order semantics.
   - between / in_list with canonical NaN and -0.0.
-  - take / materialize / compress (layout ops).
+  - take / materialize / dictionary_encode (layout ops).
   - Constant and dict shapes.
   - Cross-type int64 × float64 throws (no silent lossy promotion).
 """
@@ -484,7 +484,7 @@ class TestInList:
 
 
 # ---------------------------------------------------------------------------
-# Layout ops: take / materialize / compress
+# Layout ops: take / materialize / dictionary_encode
 # ---------------------------------------------------------------------------
 
 class TestLayoutOps:
@@ -498,19 +498,19 @@ class TestLayoutOps:
         m = v.materialize()
         assert m.to_pylist() == pytest.approx([1.0, 2.0, 3.0])
 
-    def test_compress_deduplicates(self):
+    def test_dictionary_encode_deduplicates(self):
         v = f64([1.0, 2.0, 1.0, 3.0])
-        c = v.compress()
+        c = v.dictionary_encode()
         assert c.is_dict
         assert c.data_length < 4
         vals = sorted(x for x in c.to_pylist() if x is not None)
         assert vals == pytest.approx([1.0, 1.0, 2.0, 3.0])
 
-    def test_compress_nan_dedup(self):
-        # Multiple NaN rows compress to a single distinct value — that is the
+    def test_dictionary_encode_nan_dedup(self):
+        # Multiple NaN rows dictionary_encode to a single distinct value — that is the
         # constant shape (data_length == 1), not dict (which is 1 < dl < length).
         v = f64([NAN, NAN, NAN])
-        c = v.compress()
+        c = v.dictionary_encode()
         assert c.is_constant
         assert c.is_compressed
         assert not c.is_dict
