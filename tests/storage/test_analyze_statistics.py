@@ -494,6 +494,39 @@ def test_no_char_class_stats_for_non_string_column():
         _clean()
 
 
+def test_analyze_does_not_crash_on_array_columns():
+    """Vector.ordinalize() explicitly does not support DRAKEN_ARRAY (or
+    VECTOR_FP16/DECIMAL128) -- calling it unguarded would crash ANALYZE for
+    the whole file the moment it reached one of these columns. testdata.
+    astronauts has two real ARRAY<VARCHAR> columns (alma_mater, missions) --
+    confirm the min/max/histogram pass degrades that one column to "no
+    stats" instead of aborting every other column's analysis too."""
+    manifest_glob = "testdata/astronauts/_opteryx_manifest.parquet"
+    for p in glob.glob(manifest_glob):
+        os.remove(p)
+    try:
+        _run("ANALYZE TABLE testdata.astronauts")
+        eng = connector_factory("testdata.astronauts", None).table_engine(
+            "testdata.astronauts", telemetry=None
+        )
+        schema, _ = eng.get_dataset_metadata()
+        with open(glob.glob(manifest_glob)[0], "rb") as handle:
+            entries, _native = read_manifest_file_entries(handle.read())
+
+        alma_mater_idx = next(i for i, c in enumerate(schema.columns) if c.name == "alma_mater")
+        name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
+
+        # The ARRAY column has no ordinal min/max (unsupported type)...
+        assert entries[0].min_values[alma_mater_idx] is None
+        # ...but every OTHER column's stats still landed -- the ARRAY column
+        # didn't abort the rest of the file's analysis.
+        assert entries[0].min_values[name_idx] is not None
+        assert entries[0].null_counts[alma_mater_idx] is not None  # null_count has no such gap
+    finally:
+        for p in glob.glob(manifest_glob):
+            os.remove(p)
+
+
 def test_analyze_unknown_column_fails_loud():
     from opteryx.exceptions import ColumnNotFoundError
 

@@ -181,9 +181,22 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
             record_count += morsel.num_rows
             for name in targets:
                 col = morsel.column(name)
-                sketches[name].update(col.hash())
+                # ARRAY (and possibly other nested/complex types) don't
+                # support native hashing -- no min-k sketch for those,
+                # everything else works (mirrors the catalog's own
+                # _compute_column_stats).
+                try:
+                    sketches[name].update(col.hash())
+                except ValueError:
+                    pass
                 null_counts[name] += col.null_count()
-                ordinal_vectors[name].append(col.ordinalize())
+                # ordinalize() doesn't support ARRAY/VECTOR_FP16/DECIMAL128
+                # (see draken/ops/ordinalize.h) -- no min/max/histogram for
+                # those columns rather than crashing the whole ANALYZE.
+                try:
+                    ordinal_vectors[name].append(col.ordinalize())
+                except ValueError:
+                    pass
                 if name in string_targets:
                     counts, total_bytes, lengths = col.char_class_stats()
                     for i in range(8):
