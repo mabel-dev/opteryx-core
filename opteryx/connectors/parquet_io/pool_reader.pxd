@@ -159,6 +159,11 @@ cdef class NativeScanPlan:
     # precision-scale (see LC_* packing in native_parquet_scan_source.hpp). 0 = none.
     cdef vector[uint8_t] decimal_columns
     cdef vector[int] logical_coerce
+    # R6: parallel to column_names. `array_columns[i]` = 1 marks an ARRAY (parquet
+    # LIST) column. Those always land DK_POOL — a column with repetition levels has
+    # no direct kind — so this flag is what routes the pool blob to the native
+    # TAG_ARRAY decoder rather than the decimal / varchar ones.
+    cdef vector[uint8_t] array_columns
     # E37: parallel to column_names. 1 = this column is a GROUP BY/JOIN/DISTINCT key
     # downstream, so the native Source carries its hash seed (keyhash_buf). All-zero
     # (the default) → no sidecar built — the pay-for-use gate.
@@ -192,6 +197,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     file_sizes=*,
     string_types=*,
     decimal_columns=*,
+    array_columns=*,
     logical_coerce=*,
     hash_key_columns=*,
     length_only_columns=*,

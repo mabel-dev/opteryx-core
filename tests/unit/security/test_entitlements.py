@@ -28,7 +28,9 @@ from opteryx.exceptions import PermissionsError, ProgrammingError
 
 
 def _user_rows(session):
-    for morsel in session.execute_to_morsels("SELECT * FROM $user;"):
+    # `SHOW USER` is the only surface — `$user` is internal-only, so there is no
+    # `SELECT * FROM $user` route to the same rows.
+    for morsel in session.execute_to_morsels("SHOW USER;"):
         return [(r[0], r[1]) for r in morsel]
     return []
 

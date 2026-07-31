@@ -7,7 +7,11 @@ from typing import List, Tuple
 
 from opteryx.expression import ExpressionColumn, NodeType
 from opteryx.models import LogicalColumn, Node
-from opteryx.planner.binder.binder import merge_schemas
+from opteryx.planner.binder.binder import (
+    _bound_cast_node,
+    _descriptor_carries_meaning,
+    merge_schemas,
+)
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
@@ -328,10 +332,11 @@ def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -
     CAST node to bind it. Mirrors the same pattern used for the CONCAT-argument
     CAST wrapper in optimizer/strategies/predicate_rewriter.py.
 
-    `.value` is set to `str(target)` — the canonical ColumnType string form,
-    `parse_column_type`'s documented inverse — so anything that re-reads it
-    (EXPLAIN, re-serialization) sees a real, round-trippable type name rather
-    than a guessed keyword.
+    The CAST node itself is built by `_bound_cast_node` (binder.py), which emits the
+    shape the lowering reads: BARE type name in `.value` plus LITERAL parameters.
+    `str(target)` was used here, and its parametrized display form ("DECIMAL(22, 2)")
+    matches no resolver arm — a UNION coercing any leg to DECIMAL died with
+    "No native CAST kernel for INT64 → DECIMAL(22, 2)".
 
     A NULL-typed LITERAL is retyped in place instead of CAST-wrapped: there is
     no NULL-to-anything native cast kernel (a NULL literal carries no value to
@@ -350,20 +355,21 @@ def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -
         if schema_column is None:
             continue
         current_type = schema_column.column_type
+        # A matching CATEGORY is enough only for types whose tag tells the whole
+        # story (binder._descriptor_carries_meaning). Legs at DECIMAL(10,2) and
+        # DECIMAL(10,4), or at timestamp[ms] and timestamp[us], all passed this
+        # guard UNCAST and then concatenated raw payloads under ONE declared
+        # scale/unit: SUM over the decimal union was silently 100x wrong, and the
+        # timestamp pair hit Morsel.combine's "mismatched unit/offset_minutes".
+        # Those legs now go through a real rescale cast.
         if current_type is not None and current_type.category == target.category:
-            continue
+            if current_type == target or not _descriptor_carries_meaning(target):
+                continue
         if col.node_type == NodeType.LITERAL and col.value is None:
             col.type = target
             schema_column.column_type = target
             continue
-        columns[i] = Node(
-            node_type=NodeType.CAST,
-            left=col,
-            value=str(target),
-            parameters=(),
-            alias=getattr(col, "alias", None),
-            schema_column=ExpressionColumn(name="", column_type=target),
-        )
+        columns[i] = _bound_cast_node(col, target)
 
 
 def _validate_set_operation_types(

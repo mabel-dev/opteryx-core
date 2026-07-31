@@ -26,13 +26,14 @@ from opteryx.types.schema import RelationSchema
 
 # Datasets that exist ONLY to back a dedicated SQL surface and are therefore not
 # addressable by name in user SQL. `$variables` is reachable exclusively through
-# `SHOW VARIABLES` (see logical_planner.plan_show_variables), so that there is a
-# single surface for reading session variables rather than two that can drift.
+# `SHOW VARIABLES` and `$user` exclusively through `SHOW USER` (see
+# logical_planner.plan_show_variables), so that each has a SINGLE surface rather
+# than two that can drift.
 #
 # The flag in WELL_KNOWN_DATASETS below is `suggestable`, which only governs
 # "did you mean?" hints — it does NOT gate access (`$no_table` is suggestable=False
 # and freely queryable). Enforcement lives in binder.visit_scan.
-INTERNAL_ONLY_DATASETS = frozenset({"$variables"})
+INTERNAL_ONLY_DATASETS = frozenset({"$variables", "$user"})
 
 WELL_KNOWN_DATASETS = {
     "$planets": ("opteryx.managers.virtual_datasets.planet_data", True),
@@ -40,7 +41,7 @@ WELL_KNOWN_DATASETS = {
     "$derived": ("opteryx.managers.virtual_datasets.derived_data", False),
     "$no_table": ("opteryx.managers.virtual_datasets.no_table_data", False),
     "$telemetry": ("opteryx.managers.virtual_datasets.telemetry", True),
-    "$user": ("opteryx.managers.virtual_datasets.user", True),
+    "$user": ("opteryx.managers.virtual_datasets.user", False),
 }
 
 

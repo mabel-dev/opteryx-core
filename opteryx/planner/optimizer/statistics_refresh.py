@@ -232,14 +232,19 @@ def _predicate_note(nid, node_type, relation, condition, selectivity, stats=None
     here. Never raises: an unreadable condition just gets an empty rendering,
     telemetry must not be able to break query planning.
 
-    `estimator` is diagnostic only ("char_class_decay" | "flat_fallback" |
-    None) -- which selectivity estimator fired for an infix LIKE predicate,
-    computed by re-checking the same tier condition
-    cost_estimation.selectivity._selectivity_instr uses (WITHOUT re-running
-    estimation) rather than threading a return value out of it. None for
-    every other predicate kind, or when `stats` isn't available -- omitting
-    this field entirely reproduces prior behavior exactly, same contract as
-    the rest of this module's telemetry.
+    `estimator` is diagnostic only -- which selectivity estimator tier fired
+    for a LIKE-family predicate, computed by re-checking the same tier
+    conditions the estimators themselves use (WITHOUT re-running estimation)
+    rather than threading a return value out of them. See
+    cost_estimation.selectivity.predicate_estimator_tag for the authoritative
+    list of tags -- currently: "char_class_decay" | "flat_fallback" for an
+    infix LIKE ('%foo%'); "ordinal_range" | "ordinal_bounds" | "flat_fallback"
+    for a case-sensitive prefix LIKE ('foo%'); "char_class_prefix" |
+    "flat_fallback" for a case-insensitive prefix LIKE; "char_class_suffix" |
+    "flat_fallback" for a suffix LIKE ('%foo') of either case sensitivity.
+    None for every other predicate kind, or when `stats` isn't available --
+    omitting this field entirely reproduces prior behavior exactly, same
+    contract as the rest of this module's telemetry.
     """
     from opteryx.expression import format_expression
     from opteryx.planner.cost_estimation.predicate_cost import predicate_cost
@@ -313,6 +318,8 @@ def _scan_stats(
             null_fraction = None
             class_proportions = None
             avg_length = None
+            ordinal_bounds = None
+            length_bounds = None
             if manifest is not None:
                 try:
                     distinct_count = manifest.estimate_cardinality(col_name)
@@ -333,6 +340,14 @@ def _scan_stats(
                     char_class_stats = None
                 if char_class_stats is not None:
                     class_proportions, avg_length = char_class_stats
+                try:
+                    ordinal_bounds = manifest.get_ordinal_bounds(col_name)
+                except Exception:
+                    ordinal_bounds = None
+                try:
+                    length_bounds = manifest.get_length_bounds(col_name)
+                except Exception:
+                    length_bounds = None
             # Keyed by identity; the manifest accessors above are name-based
             # because manifest statistics are per-relation and unambiguous.
             columns[identity] = ColumnStatistics(
@@ -344,6 +359,8 @@ def _scan_stats(
                 null_fraction=null_fraction,
                 class_proportions=class_proportions,
                 avg_length=avg_length,
+                ordinal_bounds=ordinal_bounds,
+                length_bounds=length_bounds,
             )
 
     base = RelationStatistics(row_count=int(row_count), columns=columns)

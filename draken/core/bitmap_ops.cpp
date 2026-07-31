@@ -326,4 +326,18 @@ VecResult draken_vm_bool_not(const DrakenVector* a, uint32_t num_rows) {
     return r;
 }
 
+VecResult draken_vm_bool_truth_test(int op, const DrakenVector* a, uint32_t num_rows) {
+    uint8_t *sda = nullptr, *sva = nullptr;
+    VecResult r;
+    try {
+        const DrakenVector na = vm_normalize_bool(a, num_rows, sda, sva);
+        r = draken::ops::bool_truth_test(na, op);
+    } catch (...) {
+        r = vm_bool_error();
+    }
+    if (sda) draken_free(sda);
+    if (sva) draken_free(sva);
+    return r;
+}
+
 }  // extern "C"

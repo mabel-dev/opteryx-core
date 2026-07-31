@@ -9,7 +9,10 @@ from libc.stddef cimport size_t
 from libcpp.string cimport string
 
 from draken.core.buffers cimport DrakenVector, DrakenType
-from draken.core.buffers cimport DRAKEN_ARRAY, DRAKEN_NULL, DRAKEN_VECTOR_FP16
+from draken.core.buffers cimport (
+    DRAKEN_ARRAY, DRAKEN_NULL, DRAKEN_VECTOR_FP16,
+    DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_DECIMAL, DRAKEN_DECIMAL128,
+)
 
 # Shared native value renderer (draken/interop/value_format.hpp) — the SAME
 # per-value formatting rugo's write_jsonl uses, so Vector._to_json() output
@@ -60,6 +63,73 @@ cdef extern from "interop/draken_to_arrow.h" nogil:
         ArrowArray*         out_array,
         ArrowSchema*        out_schema,
     ) except +
+
+
+# Types draken_export_to_arrow() (interop/draken_to_arrow.h) NEVER supports,
+# regardless of shape -- see its trailing "DECIMAL, DECIMAL128, TIME32, TIME64,
+# ARRAY, FP16 -- not supported here" branch. to_arrow() falls back to
+# pa.array(to_pylist()) for these, which is fine when real values are present
+# (pyarrow infers the type from them) but breaks when the list is empty or
+# all-NULL -- pyarrow has nothing to infer from and silently produces
+# pa.null(), erasing the declared type. build_arrow_type_for() below resolves
+# the pyarrow type explicitly from the vector's own descriptor instead.
+def build_arrow_type_for(nb_desc, pa):
+    """Explicit pyarrow type for `nb_desc`'s (a draken_native Vector) declared
+    DrakenType -- used by to_arrow()'s fallback so type information survives
+    even with zero (or all-NULL) rows. Also used for DECIMAL/DECIMAL128 even
+    when non-empty: pyarrow's own inference sizes precision off the digits
+    actually present in the Decimal values, not the column's declared
+    precision/scale, which is wrong and can vary morsel to morsel.
+
+    Covers every DrakenType, not just the 5 gap types above, because an
+    ARRAY's child can be any physical type (recursion below).
+    """
+    from draken.draken_native import DrakenType as _DT
+    dt = nb_desc.type
+    if dt == _DT.INT8:          return pa.int8()
+    if dt == _DT.INT16:         return pa.int16()
+    if dt == _DT.INT32:         return pa.int32()
+    if dt == _DT.INT64:         return pa.int64()
+    if dt == _DT.UINT8:         return pa.uint8()
+    if dt == _DT.UINT16:        return pa.uint16()
+    if dt == _DT.UINT32:        return pa.uint32()
+    if dt == _DT.UINT64:        return pa.uint64()
+    if dt == _DT.FLOAT32:       return pa.float32()
+    if dt == _DT.FLOAT64:       return pa.float64()
+    if dt == _DT.BOOL:          return pa.bool_()
+    if dt == _DT.DATE32:        return pa.date32()
+    if dt == _DT.TIMESTAMP64:   return pa.timestamp("us")
+    if dt in (_DT.VARCHAR, _DT.NVARCHAR, _DT.VARIANT):
+        return pa.string()
+    if dt == _DT.VARBINARY:     return pa.binary()
+    if dt == _DT.INTERVAL:      return pa.month_day_nano_interval()
+    if dt == _DT.NULL:          return pa.null()
+    if dt in (_DT.DECIMAL, _DT.DECIMAL128):
+        precision = nb_desc.logical_type_precision
+        scale = nb_desc.logical_type_scale
+        if precision is None or scale is None:
+            raise RuntimeError(f"{dt}: vector missing precision/scale descriptor")
+        return pa.decimal128(precision, scale)
+    if dt == _DT.TIME32:
+        unit = nb_desc.logical_type_unit
+        if unit is None:
+            raise RuntimeError("TIME32: vector missing unit descriptor")
+        return pa.time32(unit)
+    if dt == _DT.TIME64:
+        unit = nb_desc.logical_type_unit
+        if unit is None:
+            raise RuntimeError("TIME64: vector missing unit descriptor")
+        return pa.time64(unit)
+    if dt == _DT.VECTOR_FP16:
+        # to_pylist() decodes fp16 rows to plain Python float lists (double
+        # precision), never pa.float16() elements -- match that shape.
+        return pa.list_(pa.float64())
+    if dt == _DT.ARRAY:
+        child_dt = nb_desc.array_child_type
+        if child_dt is None:
+            raise RuntimeError("ARRAY: vector missing child type descriptor")
+        return pa.list_(build_arrow_type_for(nb_desc.array_child, pa))
+    raise RuntimeError(f"build_arrow_type_for: unmapped DrakenType {dt}")
 
 
 cdef class Vector:
@@ -182,6 +252,12 @@ cdef class Vector:
         from draken.vectors.vector import Vector as _V
         return _V(self._nb.hash_shaped())
 
+    def unique(self):
+        # First-occurrence-index permutation (INT32 Vector), only supported
+        # on a hash_shaped() output. See draken_native.cpp's "unique" binding.
+        from draken.vectors.vector import Vector as _V
+        return _V(self._nb.unique())
+
     def sum(self):
         return self._nb.sum()
 
@@ -286,8 +362,14 @@ cdef class Vector:
         """Convert this Vector to a pyarrow.Array via the Arrow C Data Interface.
 
         Dense numeric/bool/string/interval types are translated in C++ without
-        going through Python object boxing.  Dict, constant, TIME, DECIMAL128,
-        and ARRAY fall back to to_pylist().
+        going through Python object boxing. Dict, constant, DECIMAL, DECIMAL128,
+        TIME32/64, ARRAY and VECTOR_FP16 fall back to to_pylist(); of those,
+        DECIMAL, DECIMAL128, TIME32/64, ARRAY and VECTOR_FP16 use an explicit
+        pyarrow type from the vector's own descriptor (build_arrow_type_for)
+        rather than value inference, so an empty or all-NULL result keeps its
+        declared type (plain dict/constant-encoded ordinary types still rely on
+        inference — they always carry real values whenever they reach this
+        fallback at all).
         """
         try:
             import pyarrow as pa
@@ -301,7 +383,23 @@ cdef class Vector:
         if draken_export_to_arrow(dv, &arr, &schema):
             return pa.Array._import_from_c(<size_t>&arr, <size_t>&schema)
         # Fallback: types not supported by the C++ exporter (dict, constant,
-        # TIME32/64, DECIMAL128, ARRAY).
+        # DECIMAL, DECIMAL128, TIME32/64, ARRAY, VECTOR_FP16).
+        #
+        # DECIMAL, DECIMAL128, TIME32/64, ARRAY and VECTOR_FP16 land here
+        # regardless of shape -- every dense/dict/constant vector of these
+        # types, not just dict/constant-encoded ones. For those, resolve the
+        # pyarrow type explicitly from the vector's own descriptor
+        # (build_arrow_type_for) instead of letting pa.array() infer it from
+        # to_pylist() -- inference silently collapses to pa.null() when the
+        # list is empty or all-NULL, and for DECIMAL/DECIMAL128 is wrong even
+        # when non-empty (see build_arrow_type_for's docstring). Plain
+        # dict/constant-encoded columns of ordinary types (VARCHAR, INT64, ...)
+        # keep relying on inference here -- their to_pylist() carries real
+        # values whenever they reach this fallback at all.
+        if dv.type == DRAKEN_TIME32 or dv.type == DRAKEN_TIME64 \
+                or dv.type == DRAKEN_DECIMAL or dv.type == DRAKEN_DECIMAL128 \
+                or dv.type == DRAKEN_ARRAY or dv.type == DRAKEN_VECTOR_FP16:
+            return pa.array(self._nb.to_pylist(), type=build_arrow_type_for(self._nb, pa))
         return pa.array(self._nb.to_pylist())
 
     def materialize(self):

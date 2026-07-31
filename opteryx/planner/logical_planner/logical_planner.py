@@ -1575,38 +1575,21 @@ def plan_show_columns(statement, **kwargs):
     return plan
 
 
-def plan_show_variables(statement, **kwargs):
-    """SHOW VARIABLES — planned as a scan of the `$variables` virtual dataset.
+def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> LogicalPlan:
+    """`SELECT * FROM <virtual dataset>`, built by the planner rather than typed.
 
-    The parser folds every bare `SHOW <words>` form into a single `ShowVariable`
-    node carrying the trailing words: `SHOW VARIABLES` gives an empty list,
-    `SHOW TIME ZONE` gives ["TIME", "ZONE"]. Only the empty form is ours.
-
-    `SHOW VARIABLES LIKE '<pattern>'` parses to ["LIKE"] with the pattern
-    DISCARDED by the parser, so it cannot be honoured here — it is rejected
-    rather than silently answered with the unfiltered list, which would be a
-    wrong answer wearing the shape of a right one.
+    Shared by the `SHOW` forms that are just a wildcard read of a virtual dataset,
+    so `SHOW VARIABLES` and `SHOW USER` cannot drift into producing different plan
+    shapes for the same job.
     """
-    root_node = "ShowVariable"
     plan = LogicalPlan()
 
-    words = [part["value"].upper() for part in statement[root_node]["variable"]]
-    if words == ["LIKE"]:
-        # The parser discards the pattern, so we cannot apply it.
-        raise UnsupportedSyntaxError(
-            "Opteryx does not support `SHOW VARIABLES LIKE`; use `SHOW VARIABLES`."
-        )
-    if words:
-        raise UnsupportedSyntaxError(
-            f"Opteryx does not support 'SHOW {' '.join(words)}'; use `SHOW VARIABLES`."
-        )
-
     from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
-    from_step.relation = "$variables"
-    from_step.alias = "$variables"
-    # `$variables` is INTERNAL_ONLY_DATASETS — binder.visit_scan rejects it unless
-    # this flag marks the scan as planner-built rather than user-typed.
-    from_step.internal_relation = True
+    from_step.relation = relation
+    from_step.alias = relation
+    # For a relation in INTERNAL_ONLY_DATASETS, binder.visit_scan rejects the scan
+    # unless this flag marks it as planner-built rather than user-typed.
+    from_step.internal_relation = internal_relation
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
@@ -1620,6 +1603,41 @@ def plan_show_variables(statement, **kwargs):
     plan.add_edge(previous_step_id, step_id)
 
     return plan
+
+
+def plan_show_variables(statement, **kwargs):
+    """SHOW VARIABLES and SHOW USER — planned as scans of a virtual dataset.
+
+    The parser folds every bare `SHOW <words>` form into a single `ShowVariable`
+    node carrying the trailing words: `SHOW VARIABLES` gives an empty list,
+    `SHOW USER` gives ["USER"], `SHOW TIME ZONE` gives ["TIME", "ZONE"]. So this
+    one builder is the front door for every form the parser did not recognise,
+    and it has to name the ones that are ours.
+
+    `SHOW VARIABLES LIKE '<pattern>'` parses to ["LIKE"] with the pattern
+    DISCARDED by the parser, so it cannot be honoured here — it is rejected
+    rather than silently answered with the unfiltered list, which would be a
+    wrong answer wearing the shape of a right one.
+    """
+    root_node = "ShowVariable"
+
+    words = [part["value"].upper() for part in statement[root_node]["variable"]]
+    if not words:
+        # `$variables` is INTERNAL_ONLY_DATASETS: SHOW VARIABLES is its only surface.
+        return _plan_virtual_dataset_scan("$variables", internal_relation=True)
+    if words == ["USER"]:
+        # `$user` is INTERNAL_ONLY_DATASETS on the same rule as `$variables`:
+        # SHOW USER is its only surface.
+        return _plan_virtual_dataset_scan("$user", internal_relation=True)
+    if words == ["LIKE"]:
+        # The parser discards the pattern, so we cannot apply it.
+        raise UnsupportedSyntaxError(
+            "Opteryx does not support `SHOW VARIABLES LIKE`; use `SHOW VARIABLES`."
+        )
+    raise UnsupportedSyntaxError(
+        f"Opteryx does not support 'SHOW {' '.join(words)}'; "
+        "supported forms are `SHOW VARIABLES` and `SHOW USER`."
+    )
 
 
 def plan_show_create_query(statement, **kwargs):

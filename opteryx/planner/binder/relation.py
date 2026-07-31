@@ -17,11 +17,21 @@ def visit_create_relation(self, node: Node, context: BindingContext) -> Tuple[No
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
         raise ReadOnlyConnectorError(
             f"connector for {node.relation_name} does not support CREATE TABLE"
+        )
+
+    # Same tier as CTAS's fresh-create branch in visit_insert - creating a
+    # brand-new relation requires writer or owner, checked here rather than
+    # left to the connector (some connectors, e.g. the catalog, auto-vivify
+    # the workspace/collection on first write with no gate of their own).
+    if not can_perform_action(context.execution_context, node.relation_name, action="CREATE"):
+        raise PermissionError(
+            f"User does not have permission to create table {node.relation_name}"
         )
 
     node.columns = []
@@ -64,11 +74,18 @@ def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
         raise ReadOnlyConnectorError(
             f"connector for {node.relation_name} does not support TRUNCATE TABLE"
+        )
+
+    # TRUNCATE is a bulk row delete - same tier as DELETE.
+    if not can_perform_action(context.execution_context, node.relation_name, action="DELETE"):
+        raise PermissionError(
+            f"User does not have permission to truncate table {node.relation_name}"
         )
 
     node.columns = []
@@ -242,6 +259,12 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
     if not node.connector.relation_exists(node.relation_name):
         raise DatasetNotFoundError(connector=node.connector, dataset=node.relation_name)
+
+    # Appending rows to an existing relation - same tier as CREATE VIEW/COMMENT.
+    if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to insert into {node.relation_name}"
+        )
 
     # Read schema from dataset.json.
     relation_dir = node.connector._relation_dir(node.relation_name)

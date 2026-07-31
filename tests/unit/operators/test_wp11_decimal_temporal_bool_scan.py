@@ -145,34 +145,207 @@ def test_bool_all_constant(tmp_path, monkeypatch):
     _assert_parity(tmp_path, monkeypatch, cols, "b")
 
 
-def _assert_fail_closed(tmp_path, monkeypatch, columns, sql_tail):
-    """Write `columns`, run `SELECT {sql_tail}` natural and forced-trampoline, assert
-    the natural path FELL CLOSED to StreamingScanSource and both paths agree."""
-    ds = _write(str(tmp_path / "wp11fc"), columns)
-    proj, _, where = sql_tail.partition(" WHERE ")
-    sql = "SELECT %s FROM '%s'" % (proj, ds)
-    if where:
-        sql += " WHERE %s" % where
-    nat, nat_src = _drain(sql, False, monkeypatch)
-    tmp, _ = _drain(sql, True, monkeypatch)
-    assert nat_src == ["StreamingScanSource"], nat_src
-    assert nat == tmp
-    return nat[1]
+# R5 close-out — a BOOL PREDICATE INPUT is now native too. These two tests were
+# `test_bool_predicate_role2_fails_closed` / `test_bool_role3_filter_only_fails_closed`:
+# WP-11 fail-closed a bool predicate input because draken_compare_dv's type switch
+# had no DRAKEN_BOOL branch, so every bool comparison declined to nullptr and the
+# relocated ExprFilter (no fallback) raised err_op=11. draken/ops/bool_compare.h now
+# supplies that branch — BOOL is BIT-PACKED, so it needs its own kernel rather than a
+# fixed-width instantiation: it reads bit `selection[i]` of the bitmap for each logical
+# row (the uniform §11 access path — dense / constant / dict all correct through it),
+# orders FALSE < TRUE, and marks a result row NULL when EITHER operand row is NULL.
+# _assert_parity is the correctness gate: the native survivor set must equal the
+# forced-trampoline survivor set, values and descriptor.
 
 
-def test_bool_predicate_role2_fails_closed(tmp_path, monkeypatch):
-    # A BOOL column as a predicate input is NOT c-native-safe in the relocated
-    # ExprFilter (err_op=11), so the scan fails CLOSED to the trampoline (which
-    # evaluates it correctly) rather than relocate and crash. Native bool comparison
-    # is a follow-on; bool PROJECTIONS still go native (see test_bool_projection).
+def test_bool_predicate_role2_now_native(tmp_path, monkeypatch):
     cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    rows = _assert_fail_closed(tmp_path, monkeypatch, cols, "b, n WHERE b = true")
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b = true")
     assert len(rows) == 100
 
 
-def test_bool_role3_filter_only_fails_closed(tmp_path, monkeypatch):
+def test_bool_predicate_eq_false(tmp_path, monkeypatch):
     cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _assert_fail_closed(tmp_path, monkeypatch, cols, "n WHERE b = true")
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b = false")
+    assert len(rows) == 100
+
+
+def test_bool_predicate_not_equal(tmp_path, monkeypatch):
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b <> true")
+    assert len(rows) == 100
+
+
+def test_bool_role3_filter_only_now_native(tmp_path, monkeypatch):
+    """The BOOL column is READ for the filter but never emitted (role 3) — the
+    strictest shape, since a role-3 column must also be native-admissible."""
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
+    assert len(rows) == 100
+
+
+def test_bool_predicate_with_nulls(tmp_path, monkeypatch):
+    """A NULL bool row is UNKNOWN, never a survivor, for `= true` OR `= false` —
+    the compare_vector null contract (result NULL if EITHER operand is NULL), which
+    is what the bit-packed kernel must reproduce over the validity bitmap. 80 TRUE /
+    40 FALSE / 80 NULL: the two survivor sets must be disjoint and sum to 120."""
+    cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40),
+            "n": (pa.int64(), list(range(200)))}
+    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
+    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = false")
+    _, u_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NULL")
+    assert len(t_rows) == 80
+    assert len(f_rows) == 40
+    assert len(u_rows) == 80
+    assert not (set(t_rows) & set(f_rows))
+    assert len(t_rows) + len(f_rows) + len(u_rows) == 200
+
+
+def test_bool_predicate_all_null(tmp_path, monkeypatch):
+    """Every row UNKNOWN → no survivors on either polarity."""
+    cols = {"b": (pa.bool_(), [None] * 200), "n": (pa.int64(), list(range(200)))}
+    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
+    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = false")
+    assert t_rows == () and f_rows == ()
+
+
+def test_bool_predicate_all_constant(tmp_path, monkeypatch):
+    """A single-valued bool column decodes to the CONSTANT shape (data_length == 1,
+    selection = the global zero vector). The kernel has no shape discriminant, so
+    this must come out through the same uniform bit read."""
+    cols = {"b": (pa.bool_(), [True] * 200), "n": (pa.int64(), list(range(200)))}
+    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
+    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = false")
+    assert len(t_rows) == 200
+    assert f_rows == ()
+
+
+def test_bool_predicate_composed_with_int(tmp_path, monkeypatch):
+    """Bool compare AND int compare in ONE relocated c-native span."""
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols,
+                             "b, n WHERE b = true AND n > 100")
+    # b is true on even n; n > 100 leaves the even values 102..198 → 49 rows.
+    assert len(rows) == 49
+
+
+def test_bool_predicate_unaligned_tail(tmp_path, monkeypatch):
+    """Row count not a multiple of 8 — the bitmap's partial last byte. A kernel that
+    wrote past the logical length would show up as phantom survivors."""
+    n = 203
+    cols = {"b": (pa.bool_(), [i % 3 == 0 for i in range(n)]),
+            "n": (pa.int64(), list(range(n)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
+    assert len(rows) == len([i for i in range(n) if i % 3 == 0])
+
+
+# ---------------------------------------------------------------------------
+# `IS TRUE` / `IS FALSE` / `IS NOT TRUE` / `IS NOT FALSE` — the SQL `IS`-predicate
+# form, a distinct bytecode opcode (UOP_IS_TRUE et al.) from `= TRUE`/`<> TRUE`
+# above, with different NULL semantics: `NULL IS TRUE` is FALSE (never NULL),
+# whereas `NULL = TRUE` is NULL (never a survivor). `draken_vm_bool_truth_test`
+# (draken/core/bitmap_ops.cpp, over draken/ops/bool_logical.h::bool_truth_test)
+# is the never-null kernel; `_dv_unary_bool_test_c` (evaluation.pyx) wires it
+# into the nogil VM's BC_UNARY_OP dispatch.
+# ---------------------------------------------------------------------------
+
+
+def test_bool_is_true_predicate_now_native(tmp_path, monkeypatch):
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS TRUE")
+    assert len(rows) == 100
+
+
+def test_bool_is_false_predicate_now_native(tmp_path, monkeypatch):
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS FALSE")
+    assert len(rows) == 100
+
+
+def test_bool_is_not_true_predicate_now_native(tmp_path, monkeypatch):
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS NOT TRUE")
+    assert len(rows) == 100
+
+
+def test_bool_is_not_false_predicate_now_native(tmp_path, monkeypatch):
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS NOT FALSE")
+    assert len(rows) == 100
+
+
+def test_bool_is_predicate_role3_filter_only_now_native(tmp_path, monkeypatch):
+    """The BOOL column is READ for the filter but never emitted (role 3)."""
+    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
+    assert len(rows) == 100
+
+
+def test_bool_is_predicate_with_nulls(tmp_path, monkeypatch):
+    """The NULL-collapsing semantics that make IS TRUE/FALSE a DISTINCT opcode from
+    `= TRUE`/`= FALSE`: a NULL row is never a survivor for IS TRUE or IS FALSE, but
+    IS ALWAYS a survivor for IS NOT TRUE and IS NOT FALSE (unlike `<> TRUE`/`!= FALSE`,
+    which are also NULL, never survivors, for a NULL operand). 80 TRUE / 40 FALSE /
+    80 NULL out of 200."""
+    cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40),
+            "n": (pa.int64(), list(range(200)))}
+    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
+    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS FALSE")
+    _, nt_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT TRUE")
+    _, nf_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT FALSE")
+    assert len(t_rows) == 80
+    assert len(f_rows) == 40
+    assert len(nt_rows) == 120   # FALSE ∪ NULL
+    assert len(nf_rows) == 160   # TRUE ∪ NULL
+    assert not (set(t_rows) & set(f_rows))
+    # every NULL row survives BOTH negated forms; every non-NULL row survives exactly one
+    null_rows = set(nt_rows) & set(nf_rows)
+    assert len(null_rows) == 80
+    assert set(nt_rows) == set(f_rows) | null_rows
+    assert set(nf_rows) == set(t_rows) | null_rows
+    assert set(t_rows) | set(f_rows) | null_rows == set(t_rows) | set(nt_rows) | set(nf_rows)
+    assert len(set(t_rows) | set(f_rows) | null_rows) == 200
+
+
+def test_bool_is_predicate_all_null(tmp_path, monkeypatch):
+    """Every row NULL → IS TRUE/FALSE have no survivors; IS NOT TRUE/IS NOT FALSE
+    survive on EVERY row (unlike `<> TRUE`/`!= FALSE`, which stay NULL too)."""
+    cols = {"b": (pa.bool_(), [None] * 200), "n": (pa.int64(), list(range(200)))}
+    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
+    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS FALSE")
+    _, nt_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT TRUE")
+    _, nf_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT FALSE")
+    assert t_rows == () and f_rows == ()
+    assert len(nt_rows) == 200 and len(nf_rows) == 200
+
+
+def test_bool_is_predicate_all_constant(tmp_path, monkeypatch):
+    """A single-valued bool column decodes to the CONSTANT shape (data_length == 1,
+    selection = the global zero vector) — the kernel has no shape discriminant, so
+    this must come out through the same uniform bit read as bool_and/bool_or."""
+    cols = {"b": (pa.bool_(), [True] * 200), "n": (pa.int64(), list(range(200)))}
+    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
+    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS FALSE")
+    assert len(t_rows) == 200
+    assert f_rows == ()
+
+
+def test_bool_is_predicate_unaligned_tail(tmp_path, monkeypatch):
+    """Row count not a multiple of 8 — the bitmap's partial last byte. A kernel that
+    wrote past the logical length would show up as phantom survivors."""
+    n = 203
+    cols = {"b": (pa.bool_(), [i % 3 == 0 for i in range(n)]),
+            "n": (pa.int64(), list(range(n)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
+    assert len(rows) == len([i for i in range(n) if i % 3 == 0])
+
+
+def test_bool_is_true_projection(tmp_path, monkeypatch):
+    """IS TRUE as a PROJECTED expression (not a predicate) — exercises the same
+    opcode through ExprMultiProjectOperator / `bytecode_ops_all_c_native`'s
+    projection-eligibility path rather than the Filter-node predicate path."""
+    cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40)}
+    _assert_parity(tmp_path, monkeypatch, cols, "b IS TRUE AS t, b IS FALSE AS f")
 
 
 # ── DATE ─────────────────────────────────────────────────────────────────────

@@ -617,6 +617,11 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     from opteryx.exceptions import DatabaseError
     from opteryx.managers.permissions import can_perform_action
 
+    # Captured before the case-fold below so connectors that opt in via
+    # requires_original_case (e.g. MabelConnector's preserve_sql_case) can
+    # recover exactly what the user typed - once .lower() runs, the original
+    # casing is gone for good.
+    original_relation = node.relation
     node.relation = node.relation.lower()
 
     # Internal-only relations back a dedicated SQL surface and must not be
@@ -627,8 +632,11 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     from opteryx.connectors.virtual_data_connector import INTERNAL_ONLY_DATASETS
 
     if node.relation in INTERNAL_ONLY_DATASETS and not node.internal_relation:
+        # Name the surface that replaces the one they typed. A generic "use SHOW
+        # VARIABLES" would send a `$user` caller to the wrong statement.
+        surface = {"$variables": "SHOW VARIABLES", "$user": "SHOW USER"}[node.relation]
         raise UnsupportedSyntaxError(
-            f"'{node.relation}' cannot be queried directly; use `SHOW VARIABLES`."
+            f"'{node.relation}' cannot be queried directly; use `{surface}`."
         )
 
     if node.alias in context.relations:
@@ -655,6 +663,8 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         engine_kwargs["at_date"] = node.at_date
     if getattr(gateway, "requires_execution_context", False):
         engine_kwargs["execution_context"] = context.execution_context
+    if getattr(gateway, "requires_original_case", False):
+        engine_kwargs["original_relation"] = original_relation
 
     # Reuse the dataset resolved by the catalog resolution step, if present, so
     # table_engine doesn't re-read the catalog. Absent → normal binding path.

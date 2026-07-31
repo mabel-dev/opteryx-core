@@ -104,10 +104,22 @@ public:
         if (!ready_ || !py_future_) {
             return;
         }
+        // Format string is "(O)", NOT "O": PyObject_CallMethod builds its argument
+        // tuple via Py_BuildValue, which for a SINGLE format unit returns the
+        // converted object itself rather than a 1-tuple containing it (documented
+        // Py_BuildValue behaviour). With plain "O", a result_/exception_ that is
+        // itself a tuple (e.g. the common `return idx, value` task shape) is then
+        // used AS the call's argument tuple, so its elements are unpacked as
+        // separate positional arguments — set_result(*result_) instead of
+        // set_result(result_) — raising a silently-swallowed TypeError below and
+        // leaving the Future PENDING forever. The parens force Py_BuildValue to
+        // always wrap in a genuine 1-tuple regardless of what result_/exception_
+        // is. (Found via a hung concurrent.futures.Future when the pooled task's
+        // return value was a tuple.)
         if (exception_) {
-            PyObject_CallMethod(py_future_, "set_exception", "O", exception_);
+            PyObject_CallMethod(py_future_, "set_exception", "(O)", exception_);
         } else if (result_) {
-            PyObject_CallMethod(py_future_, "set_result", "O", result_);
+            PyObject_CallMethod(py_future_, "set_result", "(O)", result_);
         }
         PyErr_Clear();  // Swallow any error from the set_* call itself.
 

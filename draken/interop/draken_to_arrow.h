@@ -13,12 +13,18 @@
 //
 // Supported types (dense identity selection):
 //   INT8/16/32/64, FLOAT32/64, DATE32, TIMESTAMP64 (µs), BOOL,
-//   VARCHAR/NVARCHAR/VARIANT (→ utf8), VARBINARY (→ binary), INTERVAL,
-//   NULL, DECIMAL (→ int64 unscaled value; precision/scale lost)
+//   VARCHAR/NVARCHAR/VARIANT (→ utf8), VARBINARY (→ binary), INTERVAL, NULL
 //
 // Dict-encoded and constant vectors return false — caller falls back.
 // TIME32/TIME64 return false — units not recoverable at this level.
-// DECIMAL128, ARRAY, FP16 return false.
+// DECIMAL, DECIMAL128, ARRAY, FP16 return false — this format has no way to
+// carry precision/scale (they live on the LogicalType descriptor, not the
+// DrakenVector, §11/§14): the caller's fallback reads the declared descriptor
+// off the Python-side Vector instead (build_arrow_type_for in
+// draken/vectors/_vector_shim.pyx). DECIMAL used to be "supported" here as a
+// bare unscaled int64 — silently wrong for every caller except the one
+// (Morsel.hash-style raw access) that wanted the unscaled payload on purpose;
+// to_arrow() is not that caller.
 //
 // Non-identity permutations (data_length == length, DRAKEN_SEL_IDENTITY not set)
 // are gathered into a fresh buffer before export.
@@ -217,7 +223,6 @@ static bool draken_export_to_arrow(const DrakenVector* dv,
         case DRAKEN_INT16:       fmt = "s";    isize = 2; break;
         case DRAKEN_INT32:       fmt = "i";    isize = 4; break;
         case DRAKEN_INT64:       fmt = "l";    isize = 8; break;
-        case DRAKEN_DECIMAL:     fmt = "l";    isize = 8; break;  // unscaled int64
         case DRAKEN_FLOAT32:     fmt = "f";    isize = 4; break;
         case DRAKEN_FLOAT64:     fmt = "g";    isize = 8; break;
         case DRAKEN_DATE32:      fmt = "tdD";  isize = 4; break;
@@ -290,6 +295,6 @@ static bool draken_export_to_arrow(const DrakenVector* dv,
         return true;
     }
 
-    // TIME32, TIME64, DECIMAL128, ARRAY, FP16 — not supported here.
+    // DECIMAL, DECIMAL128, TIME32, TIME64, ARRAY, FP16 — not supported here.
     return false;
 }

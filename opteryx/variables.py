@@ -27,20 +27,30 @@ Owner decides WHO may write the value — it is the write-side authority:
                submitting service); no one sets it by hand
 
 Visibility decides WHO may READ it, and is an independent axis:
-    UNRESTRICTED - listed for everyone
-    RESTRICTED   - listed only for `platform_admin`, and additionally requires
+    UNRESTRICTED - readable by everyone
+    RESTRICTED   - readable only by `platform_admin`, and additionally requires
                    that entitlement to write (see __setitem__)
+
+RESTRICTED is enforced on BOTH read surfaces — `SHOW VARIABLES` omits the row
+(variables_data.py) and `SELECT @@name` raises (see `as_column`). They must stay
+in step: for a while only the first was gated, so a non-admin who could not SEE
+`local_store_root` in `SHOW VARIABLES` could still read it with `SELECT
+@@local_store_root`, which made RESTRICTED cosmetic for anyone who knew a name.
 
 For variables we're creating and naming, use sensible defaults and if it's a
 feature flag, name the variable for the state the user probably doesn't want -
 e.g. disable_optimizer (default to False)
 """
 
+import sys
+import sysconfig
 from enum import Enum
 from typing import Any, Dict, Tuple, Type
 
 from opteryx import config
 from opteryx.__version__ import __version__
+from opteryx.compiled.platform import cpu_count as _cpu_count
+from opteryx.compiled.platform import physical_memory_total_bytes
 from opteryx.compiled.simd_probe import cpu_architecture
 from opteryx.exceptions import PermissionsError, VariableNotFoundError
 from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
@@ -73,17 +83,37 @@ PLATFORM_ADMIN_ENTITLEMENT = "platform_admin"
 
 VariableSchema = Tuple[Type, Any, VariableOwner, Visibility]
 
+
+def _python_version() -> str:
+    """The host interpreter version, with the free-threaded build marked.
+
+    The `t` suffix is not cosmetic: 3.14.5 and 3.14.5t are different runtimes with
+    different concurrency behaviour, and a report that collapsed them would be
+    useless for exactly the questions this variable exists to answer.
+    """
+    version = "%d.%d.%d" % sys.version_info[:3]
+    if sysconfig.get_config_var("Py_GIL_DISABLED"):
+        return version + "t"
+    return version
+
 # fmt: off
 SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # ── INTERNAL — the runtime decides these; nobody sets them by hand ──────────
     # Session identity, asserted by the submitting service at session construction.
     # UNRESTRICTED: a caller seeing their own identity is not a disclosure — it is
-    # already theirs, and `SELECT * FROM $user` reports it regardless.
+    # already theirs, and `SHOW USER` reports it regardless.
     "external_user": (VARCHAR, "", VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     "user_memberships": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     # Platform capabilities held by the caller (e.g. `data_admin`). Defaults to EMPTY —
     # an unset entitlement list must never be read as "has everything".
     "user_entitlements": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
+    # Who pays for this session (ExecutionContext.billing_account). Distinct from
+    # `external_user`: many users can bill to one account. UNRESTRICTED on the same
+    # reasoning as `external_user` — it is the caller's OWN attribution, not another
+    # tenant's. INTERNAL-owned, so a caller cannot re-point their own billing.
+    # Never empty in practice: query_session substitutes DEFAULT_BILLING_ACCOUNT
+    # when the submitting service asserts none.
+    "billing_account": (VARCHAR, "", VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     # Detected from the CPU at import; there is no env var and no SET for these.
     "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.INTERNAL, Visibility.RESTRICTED),
     # UNRESTRICTED: already public via `SELECT VERSION()`, so hiding it from
@@ -235,6 +265,28 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "instrument_engine": (BOOLEAN, config.OPTERYX_INSTRUMENT_ENGINE, VariableOwner.SERVER, Visibility.RESTRICTED),
     "disable_gc_during_query": (BOOLEAN, config.OPTERYX_DISABLE_GC_DURING_QUERY, VariableOwner.SERVER, Visibility.RESTRICTED),
     "validate_optimizer_plans": (BOOLEAN, config.VALIDATE_OPTIMIZER_PLANS, VariableOwner.SERVER, Visibility.RESTRICTED),
+
+    # ── SERVER — host facts, detected once at import ────────────────────────────
+    # No env var and no SET: these describe the machine the process landed on, so
+    # SERVER ("fixed per instantiation") is the honest owner. RESTRICTED for the
+    # same reason as `architecture` and `gcp_project_id` — they describe the
+    # DEPLOYMENT, not the caller's query, and an ordinary caller learning the host's
+    # RAM or interpreter build learns nothing about their own data.
+    "python_version": (VARCHAR, _python_version(), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # `sys.platform` rather than the native is_linux/is_macos probes in
+    # opteryx.compiled.platform: those answer two yes/no questions and collapse
+    # everything else (BSD, Windows) to a silent "neither", which would report a
+    # host we don't recognise as if we'd checked and found nothing.
+    "operating_system": (VARCHAR, sys.platform, VariableOwner.SERVER, Visibility.RESTRICTED),
+    # BYTES, named so — matches manifest_cache_bytes. Total physical RAM as the
+    # kernel reports it; on a container this is the HOST's RAM, not the cgroup
+    # limit, so it is not a memory budget and must not be read as one.
+    "physical_memory_bytes": (INT64, physical_memory_total_bytes(), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # LOGICAL CPUs (hardware threads), not physical cores — the same number
+    # std::thread::hardware_concurrency reports. Same container caveat as the RAM
+    # above: this is the host's count, not the cgroup's CPU quota, so it is not
+    # the parallelism budget. `max_execution_workers` is that.
+    "cpu_count": (INT64, _cpu_count(), VariableOwner.SERVER, Visibility.RESTRICTED),
 }
 # fmt: on
 
@@ -315,13 +367,27 @@ class SystemVariablesContainer:
         return SystemVariablesContainer(owner)
 
     def as_column(self, key: str):
-        """Return a variable as a CONSTANT column"""
+        """Return a variable as a CONSTANT column.
+
+        This is the `SELECT @@name` read path (binder.create_variable_node), and it
+        is the SECOND surface RESTRICTED has to hold: `SHOW VARIABLES` omitting the
+        row is worthless if the value is still one `@@name` away. Ad-hoc `@x` user
+        variables never reach the check — they are registered UNRESTRICTED by
+        __setitem__ and belong to the caller who set them.
+        """
         from opteryx.types.schema import ConstantColumn
 
         # system variables aren't stored with the @@
         variable = self._variables[key[2:]] if key.startswith("@@") else self._variables.get(key)
         if not variable:
             raise VariableNotFoundError(key)
+        if variable[3] == Visibility.RESTRICTED and not self._caller_is_platform_admin():
+            # Deliberately NOT VariableNotFoundError: this variable does exist, and
+            # reporting it as missing would be a lie that also hands out a
+            # does-it-exist oracle via the "did you mean" suggestions.
+            raise PermissionsError(
+                f"Reading `{key}` requires the `{PLATFORM_ADMIN_ENTITLEMENT}` entitlement."
+            )
         return ConstantColumn(name=key, column_type=variable[0], value=variable[1])
 
 

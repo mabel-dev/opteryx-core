@@ -99,5 +99,10 @@ extern "C" {
 VecResult draken_vm_bool_binop(int op, const DrakenVector* a, const DrakenVector* b,
                                uint32_t num_rows);
 VecResult draken_vm_bool_not(const DrakenVector* a, uint32_t num_rows);
+
+// IS TRUE / IS FALSE / IS NOT TRUE / IS NOT FALSE — never-null truth test
+// (op: 0=IS_TRUE 1=IS_FALSE 2=IS_NOT_TRUE 3=IS_NOT_FALSE). See bool_logical.h
+// bool_truth_test for the NULL-collapsing semantics (distinct from Kleene AND/OR/NOT).
+VecResult draken_vm_bool_truth_test(int op, const DrakenVector* a, uint32_t num_rows);
 }
 #endif

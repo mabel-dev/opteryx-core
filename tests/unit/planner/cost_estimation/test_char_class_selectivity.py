@@ -37,6 +37,7 @@ from opteryx.planner.cost_estimation.selectivity import (
     predicate_estimator_tag,
 )
 from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStatistics
+from opteryx.types.logical_type import NVARCHAR, VARCHAR
 
 _IDENTITY = b"tes_col_00000001"
 
@@ -54,20 +55,23 @@ _UNIFORM_PROPORTIONS = {
 }
 
 
-def _stats(class_proportions=_UNIFORM_PROPORTIONS, avg_length=50.0, distinct_count=None):
+def _stats(
+    class_proportions=_UNIFORM_PROPORTIONS, avg_length=50.0, distinct_count=None, length_bounds=None
+):
     col = ColumnStatistics(
         column_name="col",
         data_type="VARCHAR",
         class_proportions=class_proportions,
         avg_length=avg_length,
         distinct_count=distinct_count,
+        length_bounds=length_bounds,
     )
     return RelationStatistics(row_count=1000, columns={_IDENTITY: col})
 
 
-def _instr_node(needle, decay=0.7, op="InStr"):
+def _instr_node(needle, decay=0.7, op="InStr", column_type=VARCHAR):
     identifier = Node(NodeType.IDENTIFIER, source_column="col")
-    identifier.schema_column = Node(NodeType.IDENTIFIER, identity=_IDENTITY)
+    identifier.schema_column = Node(NodeType.IDENTIFIER, identity=_IDENTITY, column_type=column_type)
     literal = Node(NodeType.LITERAL, value=needle)
     node = Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
     node.like_selectivity_decay = decay
@@ -231,6 +235,52 @@ def test_not_instr_is_the_complement_of_instr():
     s = estimate_selectivity(node, stats)
     not_s = estimate_selectivity(not_node, stats)
     assert s == pytest_approx(1.0 - not_s)
+
+
+# ── hard length guard: needle longer than the column's real max ────────────
+#
+# _containment_selectivity's n_positions already tends toward 0 as needle_len
+# approaches avg_length, but that's a SOFT, probabilistic mechanism keyed on
+# the AVERAGE -- it can (a) coincidentally still be nonzero for a needle just
+# past avg_length but under max_length (which is correct, still possible),
+# and it conflates "improbable relative to average" with "impossible". The
+# new hard guard is a separate, certain, MAX-length-based short-circuit that
+# fires before any of that probabilistic math, independent of avg_length.
+
+
+def test_selectivity_instr_hard_zero_when_needle_exceeds_max_length():
+    stats = _stats(length_bounds=(3, 10))
+    node = _instr_node("this needle is far longer than ten bytes", decay=0.7)
+    s = _selectivity_instr(_IDENTITY, "this needle is far longer than ten bytes", node, stats)
+    assert s == 0.0
+
+
+def test_selectivity_instr_not_hard_zeroed_within_max_length():
+    stats = _stats(length_bounds=(3, 50))
+    node = _instr_node("hello", decay=0.7)
+    s = _selectivity_instr(_IDENTITY, "hello", node, stats)
+    assert s != 0.0
+
+
+def test_selectivity_instr_hard_guard_skipped_for_nvarchar():
+    # Same byte-vs-char risk as the STARTS_WITH guard -- NVARCHAR length
+    # stats from the external catalog producer are character-based, so the
+    # guard must not fire even when needle_len appears to exceed max_length.
+    stats = _stats(length_bounds=(1, 3))
+    node = _instr_node("this needle is far longer than three bytes", decay=0.7, column_type=NVARCHAR)
+    s = _selectivity_instr(
+        _IDENTITY, "this needle is far longer than three bytes", node, stats
+    )
+    assert s != 0.0  # falls through to the normal char-class/decay math instead
+
+
+def test_not_instr_hard_zero_complements_to_one():
+    stats = _stats(length_bounds=(3, 10))
+    needle = "this needle is far longer than ten bytes"
+    node = _instr_node(needle, decay=0.7, op="InStr")
+    not_node = _instr_node(needle, decay=0.7, op="NotInStr")
+    assert estimate_selectivity(node, stats) == 0.0
+    assert estimate_selectivity(not_node, stats) == 1.0
 
 
 if __name__ == "__main__":  # pragma: no cover

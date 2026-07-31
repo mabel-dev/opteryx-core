@@ -14,7 +14,7 @@ from libcpp.memory cimport shared_ptr
 
 from draken.morsels.morsel cimport Morsel
 from draken.morsels.cxx_morsel cimport (
-    CxxMorsel, cxx_morsel_raw_ptr,
+    CxxMorsel, cxx_morsel_raw_ptr, cxx_morsel_nbytes,
     cxx_morsel_shallow_copy, cxx_morsel_to_handle, cxx_morsel_delete,
     cxx_select_c, cxx_take_c,
 )
@@ -63,6 +63,23 @@ cdef inline Vector _take_native_with_null(Vector col, const int32_t* idx, uint32
     cdef object nb_obj = <object>raw
     _morsel_decref(raw)
     return Vector(nb_obj)
+
+
+cdef size_t _vector_nbytes_with_array_children(Vector v):
+    """draken_vector_nbytes(v._dv) (offsets, for a DRAKEN_ARRAY column) plus,
+    recursively, the owned child subtree reached via the nanobind array_child
+    accessor. Used for materialized (PyObject-backed) morsels' Morsel.nbytes,
+    where there is no VectorOwner/child_owner reachable from Cython directly
+    (unlike the Cxx-backed path, which delegates to cxx_morsel_nbytes and its
+    child_owner walk). Guards on array_child_type first, same pattern as
+    Vector._to_json, since array_child raises for a non-array/childless vector.
+    """
+    cdef size_t total = draken_vector_nbytes(v._dv)
+    cdef Vector child
+    if v._dv != NULL and v._dv.type == DRAKEN_ARRAY and v._nb.array_child_type is not None:
+        child = Vector(v._nb.array_child)
+        total += _vector_nbytes_with_array_children(child)
+    return total
 
 # C++ hash functions for the cdef c_hash method. draken_hash dispatches per
 # DrakenType; simd_mix_hash mixes per-column hashes into a running buffer.
@@ -350,25 +367,29 @@ cdef class Morsel:
     @property
     def nbytes(self):
         """Approximate in-memory footprint (bytes): the real owned payload of every
-        column vector — fixed-width data, the string arena for the string family, and
-        validity bitmaps — summed via the native draken_vector_nbytes helper. Replaces
-        the old flat rows×cols×8 estimate, which grossly undercounted variable-length
-        string columns (a wide, string-heavy result buffered against this figure could
-        blow far past an intended memory cap). See buffers.h for the exact per-type
-        accounting and the DRAKEN_ARRAY under-count limitation."""
+        column vector — offsets/fixed-width data, the string arena for the string
+        family, and validity bitmaps — summed via the native draken_vector_nbytes
+        helper. Replaces the old flat rows×cols×8 estimate, which grossly
+        undercounted variable-length string columns (a wide, string-heavy result
+        buffered against this figure could blow far past an intended memory cap).
+        DRAKEN_ARRAY columns additionally recurse into their owned child subtree
+        (offsets alone would still miss the actual element data) — the Cxx-backed
+        path via cxx_morsel_nbytes's child_owner walk, the materialized-PyObject
+        path via the array_child accessor (_vector_nbytes_with_array_children),
+        since there is no VectorOwner reachable from a bare nanobind Vector at
+        this layer. See buffers.h for the exact per-type accounting."""
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
         cdef size_t total = 0
         cdef Vector v
         if self._cxx is not None:
-            # Cxx-backed: read each column's DrakenVector straight off the substrate,
-            # no per-column Vector materialization.
-            for i in range(n):
-                total += draken_vector_nbytes(self._col_view(i))
+            # Cxx-backed: delegate to the C++ substrate twin (cxx_morsel.h),
+            # which recurses into DRAKEN_ARRAY child_owner subtrees.
+            total = cxx_morsel_nbytes(self._cxx_ptr)
         else:
             for i in range(n):
                 v = self._get_column(i)
-                total += draken_vector_nbytes(v._dv)
+                total += _vector_nbytes_with_array_children(v)
         return total
 
     @property
@@ -571,7 +592,13 @@ cdef class Morsel:
                 if colorize:
                     return "\033[38;2;64;75;108m\033[3m" + s.ljust(width) + "\033[0m"
                 return s.ljust(width)
-            s = str(val)
+            if isinstance(val, bytes):
+                try:
+                    s = val.decode("utf-8")
+                except UnicodeDecodeError:
+                    s = val.hex()
+            else:
+                s = str(val)
             if len(s) > width:
                 s = s[:width - 1] + "\u2026"
             s = s.ljust(width)
@@ -596,7 +623,7 @@ cdef class Morsel:
             if isinstance(val, _dt.time):
                 return "\033[38;2;26;185;67m" + s + "\033[0m"
             if isinstance(val, bytes):
-                return "\033[38;5;228m" + s + "\033[0m"
+                return "\033[38;2;196;160;0m" + s + "\033[0m"
             return s
 
         RESET  = "\033[0m"

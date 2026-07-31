@@ -661,6 +661,7 @@ cdef extern from "core/bitmap_ops.h" nogil:
     VecResult draken_vm_bool_binop(int op, const DrakenVector* a, const DrakenVector* b,
                                    uint32_t num_rows) nogil
     VecResult draken_vm_bool_not(const DrakenVector* a, uint32_t num_rows) nogil
+    VecResult draken_vm_bool_truth_test(int op, const DrakenVector* a, uint32_t num_rows) nogil
 
 # Function-pointer typedefs per Decision 3 (Phase 9 design, §Post-design)
 ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) nogil
@@ -1320,6 +1321,42 @@ cdef inline int _dv_not_c(
     return _dv_vecresult_adopt_c(&vr, dv_store, dv_stack, sp, arena)
 
 
+cdef inline int _dv_unary_bool_test_c(
+    int uop,                      # UOP_IS_TRUE / UOP_IS_FALSE / UOP_IS_NOT_TRUE / UOP_IS_NOT_FALSE
+    DrakenVector** dv_stack,
+    DrakenVector* dv_store,
+    Py_ssize_t* sp_io,
+    DrakenFrameArena* arena,
+    uint32_t num_rows,
+) noexcept nogil:
+    """IS TRUE / IS FALSE / IS NOT TRUE / IS NOT FALSE over a BOOL input: a
+    never-null truth test via the uniform data[selection[i]] kernel
+    (draken_vm_bool_truth_test — bool_logical.h's bool_truth_test). Mirrors
+    _dv_not_c's arena/adopt idiom; op-code mapping matches _bv_truth_test_native's
+    _BV_IS_TRUE/_BV_IS_FALSE/_BV_IS_NOT_TRUE/_BV_IS_NOT_FALSE convention."""
+    cdef Py_ssize_t sp = sp_io[0]
+    cdef DrakenVector* dv_left_ptr
+    cdef VecResult vr
+    cdef int op
+    sp -= 1
+    dv_left_ptr = dv_stack[sp]
+    if dv_left_ptr == NULL:
+        return 1
+    if uop == UOP_IS_TRUE:
+        op = _BV_IS_TRUE
+    elif uop == UOP_IS_FALSE:
+        op = _BV_IS_FALSE
+    elif uop == UOP_IS_NOT_TRUE:
+        op = _BV_IS_NOT_TRUE
+    else:
+        op = _BV_IS_NOT_FALSE
+    vr = draken_vm_bool_truth_test(op, dv_left_ptr, num_rows)
+    if vr.data == NULL:
+        return 2
+    sp_io[0] = sp + 1
+    return _dv_vecresult_adopt_c(&vr, dv_store, dv_stack, sp, arena)
+
+
 cdef inline int _dv_unary_null_c(
     int uop,                      # UOP_IS_NULL or UOP_IS_NOT_NULL
     DrakenVector** dv_stack,
@@ -1795,6 +1832,12 @@ cdef int c_execute_dv_inner(
                                         or slot.op_code == UOP_IS_NOT_NULL):
             rc = _dv_unary_null_c(slot.op_code, dv_stack, dv_store, &sp, arena,
                                   nbytes, num_rows)
+        elif opcode == BC_UNARY_OP and (slot.op_code == UOP_IS_TRUE
+                                        or slot.op_code == UOP_IS_FALSE
+                                        or slot.op_code == UOP_IS_NOT_TRUE
+                                        or slot.op_code == UOP_IS_NOT_FALSE):
+            rc = _dv_unary_bool_test_c(slot.op_code, dv_stack, dv_store, &sp,
+                                       arena, num_rows)
         elif opcode == BC_FUNCTION and (slot.flags & BC_INSTR_C_NATIVE) != 0:
             # Phase 9a-fn: C-ABI function kernel, dispatched with NO Python between
             # the VM and the kernel (the whole point — see engine_cutover memory).

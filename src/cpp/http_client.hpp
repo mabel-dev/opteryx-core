@@ -181,6 +181,30 @@ public:
         const HttpTuning* tuning = nullptr
     );
 
+    /**
+     * Perform multiple HTTP HEAD requests concurrently (single-threaded CURLM).
+     *
+     * Mirrors get_many(): a local CURLM* event loop for this call only, all N
+     * HEAD requests run concurrently on the calling thread. This is the batch
+     * counterpart to head() — callers resolving metadata for many objects
+     * (e.g. a manifest fan-out) must use this instead of dispatching per-path
+     * head() calls onto a Python-level thread pool: that pattern requires each
+     * worker thread to cross back into the interpreter (GIL acquire, Python
+     * object construction) once per path, which is exactly the native/Python
+     * boundary this engine forbids on anything but the planning hand-off.
+     * head_many() keeps the whole batch on the native side; the GIL is
+     * released once for the entire call, not once per request.
+     *
+     * @param requests  Vector of (url, headers) pairs
+     * @param tuning    Optional per-call override; nullptr uses default_tuning()
+     * @return Vector of response-header maps (lower-case keys), same order as requests
+     * @throws HttpError on any network error, timeout, or HTTP 4xx/5xx
+     */
+    std::vector<std::map<std::string, std::string>> head_many(
+        const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
+        const HttpTuning* tuning = nullptr
+    );
+
     // Process-wide defaults, each resolved from its OPTERYX_HTTP_* env var
     // exactly once (Meyer's singleton) and cached for the life of the process.
     // This is what get()/get_many() fall back to when called with tuning=nullptr.

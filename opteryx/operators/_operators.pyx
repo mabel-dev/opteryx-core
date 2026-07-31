@@ -21,6 +21,7 @@ from draken.morsels.morsel cimport cxx_morsel_from_vectors_sp, cxx_select_sp
 from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos, cxx_morsel_delete
 from draken.morsels.cxx_morsel cimport cxx_morsel_nbytes
 from draken.morsels.cxx_morsel cimport cxx_slice_c, cxx_hash_c, cxx_take_c, cxx_cast_column_c
+from draken.morsels.cxx_morsel cimport cxx_morsel_materialize_native_c
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector, mix_hash
 from draken.core.buffers cimport (
@@ -48,6 +49,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_COMPARE, BC_BINARY_OP, BC_CAST,
     BC_CMP_INLIST_INLINE, BC_INSTR_C_NATIVE, BC_C_NATIVE_FIXED, BC_C_NATIVE_STRING,
     BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_UNARY_OP, UOP_IS_NULL, UOP_IS_NOT_NULL, BC_FUNCTION,
+    UOP_IS_TRUE, UOP_IS_FALSE, UOP_IS_NOT_TRUE, UOP_IS_NOT_FALSE,
     BC_EXTRACTION,
     BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_COMPARE,
 )
@@ -197,7 +199,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[int]* string_types,
                                     const cppvector[uint8_t]* decimal_columns,
                                     const cppvector[int]* logical_coerce,
-                                    const cppvector[uint8_t]* hash_key_columns)
+                                    const cppvector[uint8_t]* hash_key_columns,
+                                    const cppvector[uint8_t]* array_columns,
+                                    int64_t row_limit)
         void set_buffer_source(size_t p, size_t buf)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
                              cppvector[void*] lit_dv, ExprFilterFn fn,
@@ -215,6 +219,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_queue_sink(size_t p, MorselQueue* q)
         void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
+                              cppvector[string] key_names,
                               cppvector[AggSpec2] specs, size_t buf)
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf)
         void set_buffer_append_sink(size_t p, size_t buf)
@@ -1771,6 +1776,13 @@ cdef void _scan_pull_run_inner(void* scan_ptr, shared_ptr[CxxMorsel]* out,
                 return
             if cxm.get().state == MorselState.END_OF_STREAM:
                 continue
+            # Strip any Python-object-backed column ownership before this morsel
+            # crosses into the C++ Source (StreamingScanSource::get_morsel's `out`):
+            # a fresh, plain-C++-owned copy has no py_deleter, so a concurrent
+            # worker tearing down a DIFFERENT pulled morsel can never race a
+            # Py_DECREF against this one under free-threaded builds. See
+            # cxx_morsel_materialize_native in draken/draken_native.cpp.
+            cxm = shared_ptr[CxxMorsel](cxx_morsel_materialize_native_c(cxm.get()))
             out[0] = cxm
             finished[0] = 0
             err_code[0] = 0
@@ -2012,6 +2024,18 @@ def bytecode_is_c_native_predicate(CompiledBytecode bc):
     if last in (BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
                 BC_COMPARE, BC_UNARY_OP):
         return True
+    # BC_LOAD_LIT_BOOL is the ONE load that is already a mask: it materialises a
+    # DENSE `num_rows`-wide bitmap in the frame arena (c_execute_dv_inner), which
+    # is precisely cxx_mask_c's contract — no other load qualifies, because a
+    # BC_LOAD_COL bool column may arrive dict- or constant-shaped. A predicate
+    # that constant-folds to a single literal reaches the filter as exactly this
+    # one-instruction program: `WHERE 1 = 0`, an integer column compared against
+    # a non-integral literal (`id = 4.5`), and the empty visibility-filter set
+    # (apply_visibility_filters' TRUE=FALSE block-everything node). Constant TRUE
+    # never gets here — ConstantFoldingStrategy deletes that Filter outright —
+    # so before this the FALSE half of the same fold was simply unrunnable.
+    if last == BC_LOAD_LIT_BOOL:
+        return True
     # Bool-returning C-ABI function kernels (LIKE family) — marked at bind time
     # with BC_RESULT_WRAP_AS_BOOL (0x20, compiled_expression.pyx flag contract).
     return (last == BC_FUNCTION
@@ -2041,7 +2065,9 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
             return False
         if op == BC_UNARY_OP:
             opc = bc.instrs[k].op_code
-            if opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL:
+            if (opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL
+                    or opc == UOP_IS_TRUE or opc == UOP_IS_FALSE
+                    or opc == UOP_IS_NOT_TRUE or opc == UOP_IS_NOT_FALSE):
                 continue
             return False
         if op == BC_BINARY_OP or op == BC_CAST:
@@ -2155,7 +2181,7 @@ cdef class NativePlan:
         self._e.set_scan_source(p, <void*><PyObject*>scan, _scan_pull_trampoline,
                                 serialize_pull)
 
-    def set_native_scan_source(self, size_t p, NativeScanPlan splan):
+    def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers
         pull decoded row groups straight from the rugo IO pipeline — no GIL
         trampoline, no per-morsel thread attach. Only reachable when the plan-time
@@ -2175,12 +2201,23 @@ cdef class NativePlan:
         # the decimal decoder; `logical_coerce` carries the DATE/TIMESTAMP/TIME/
         # DECIMAL retag kind + unit / precision-scale so those projections land
         # byte-identically to the trampoline scan.
+        # R6: `array_columns` does the same job for ARRAY (parquet LIST) columns —
+        # they always land DK_POOL (repetition levels ⇒ no direct kind), and the
+        # flag is what distinguishes that blob from the decimal / varchar pool
+        # shapes so the right native decoder claims it.
+        # R2: `row_limit` is the scan-pushed LIMIT (None → -1, unlimited). The scan
+        # enforces it itself — LimitPushdownStrategy removes the Limit node from the
+        # plan when it pushes, so nothing downstream truncates.
+        cdef int64_t c_row_limit = -1
+        if row_limit is not None:
+            c_row_limit = <int64_t>row_limit
         self._e.set_native_scan_source(p, splan.pipeline_ptr, splan.footer_map,
                                        &splan.work_items, &splan.column_names,
                                        splan.in_flight_limit,
                                        pool_ptr, &splan.string_types,
                                        &splan.decimal_columns, &splan.logical_coerce,
-                                       &splan.hash_key_columns)
+                                       &splan.hash_key_columns, &splan.array_columns,
+                                       c_row_limit)
 
     def close_scan_plans(self):
         """Cancel + shut down every NativeScanPlan's IO pipeline. MUST only run
@@ -2210,11 +2247,14 @@ cdef class NativePlan:
         operand col_idx | -1), ...] in output-column order."""
         self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf)
 
-    def set_groupby_sink(self, size_t p, list key_idx, list specs, size_t buf):
+    def set_groupby_sink(self, size_t p, list key_idx, list key_names, list specs, size_t buf):
         cdef cppvector[size_t] keys
+        cdef cppvector[string] knames
         for i in key_idx:
             keys.push_back(<size_t>i)
-        self._e.set_groupby_sink(p, keys, _agg_spec_from_list(specs), buf)
+        for n in key_names:
+            knames.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
+        self._e.set_groupby_sink(p, keys, knames, _agg_spec_from_list(specs), buf)
 
     def set_distinct_sink(self, size_t p, list on_idx, size_t buf):
         """``on_idx`` = dedup key column indices; empty list = every column."""

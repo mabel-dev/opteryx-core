@@ -378,7 +378,7 @@ def explain(
 
     columns = ["tree", "details", "est_rows"]
     vectors = [
-        vector_from_sequence(tree_col, dtype=DrakenType.VARCHAR),
+        vector_from_sequence([row.encode("utf-8") for row in tree_col], dtype=DrakenType.VARBINARY),
         vector_from_sequence(details_col, dtype=DrakenType.VARCHAR),
         vector_from_sequence(est_rows_col, dtype=DrakenType.INT64),
     ]

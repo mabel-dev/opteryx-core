@@ -30,7 +30,10 @@ def _explain(sql):
     """Return (column_names, {col: [values]}) for the first EXPLAIN morsel."""
     morsel = list(opteryx.session().execute_to_morsels(sql))[0]
     names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
-    data = {n: morsel.column(morsel.column_names[i]).to_pylist() for i, n in enumerate(names)}
+    data = {
+        n: [v.decode() if isinstance(v, bytes) else v for v in morsel.column(morsel.column_names[i]).to_pylist()]
+        for i, n in enumerate(names)
+    }
     return names, data
 
 

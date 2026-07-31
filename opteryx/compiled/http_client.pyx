@@ -41,6 +41,9 @@ cdef extern from "http_client.hpp":
         vector[vector[unsigned char]] get_many(
             vector[pair[string, cpp_map[string, string]]] requests
         ) except + nogil
+        vector[cpp_map[string, string]] head_many(
+            vector[pair[string, cpp_map[string, string]]] requests
+        ) except + nogil
 
 
 cdef class HttpClient:
@@ -52,8 +55,13 @@ cdef class HttpClient:
       - get() / head(): thread-safe via curl_easy_perform(). Each call owns its
         own CURL* easy handle. A CURLSH* share handle provides shared
         connection/DNS cache across threads.
-      - get_many(): runs all N transfers concurrently on the calling thread via
-        a local CURLM event loop. GIL is released for the entire batch.
+      - get_many() / head_many(): run all N requests concurrently on the calling
+        thread via a local CURLM event loop. GIL is released for the entire
+        batch. Callers resolving many URLs at once (e.g. a manifest fan-out)
+        MUST use these instead of looping a thread pool over get()/head() --
+        that pattern forces each worker thread to cross back into the
+        interpreter once per URL, which is off-limits outside the
+        planning/execution hand-off.
 
     Example:
         client = HttpClient(max_connections=128, timeout_ms=60000)
@@ -64,6 +72,10 @@ cdef class HttpClient:
             ("https://example.com/b.parquet", {"Range": "bytes=100-199"}),
         ])
         meta = client.head("https://example.com/file.parquet")
+        metas = client.head_many([
+            ("https://example.com/a.parquet", {}),
+            ("https://example.com/b.parquet", {}),
+        ])
         client.close()
     """
 
@@ -144,6 +156,42 @@ cdef class HttpClient:
             results = self._client.get_many(cpp_requests)
 
         return [bytes(r) for r in results]
+
+    def head_many(self, list requests):
+        """Batch HTTP HEAD. Returns list of header dicts, same order as requests.
+
+        Args:
+            requests: list of (url: str, headers: dict) tuples
+
+        GIL is released for the entire batch -- all N HEAD requests run
+        concurrently in C++ via a local CURLM event loop, same as get_many().
+        This is the batch counterpart callers MUST use instead of dispatching
+        per-path head() calls onto a Python-level thread pool.
+        """
+        if self._closed:
+            raise RuntimeError("HttpClient is closed")
+
+        cdef vector[pair[string, cpp_map[string, string]]] cpp_requests
+        cdef pair[string, cpp_map[string, string]] cpp_req
+        cdef cpp_map[string, string] cpp_headers
+
+        for url, headers in requests:
+            cpp_req.first = <string>(<bytes>url.encode('utf-8'))
+            cpp_headers.clear()
+            if headers:
+                for k, v in headers.items():
+                    cpp_headers[<string>k.encode('utf-8')] = <string>v.encode('utf-8')
+            cpp_req.second = cpp_headers
+            cpp_requests.push_back(cpp_req)
+
+        cdef vector[cpp_map[string, string]] results
+        with nogil:
+            results = self._client.head_many(cpp_requests)
+
+        return [
+            {k.decode('utf-8'): v.decode('utf-8') for k, v in r}
+            for r in results
+        ]
 
     def close(self):
         """Release connection pool. Safe to call multiple times."""

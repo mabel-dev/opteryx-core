@@ -33,18 +33,39 @@ non-scan reasons — whole-query native-support gaps, out of scope for A0).
 
 Residual reasons for the 13 A0 fallbacks:
 
-| Reason (guard) | A0 count | after A1 | after A2 | after A3 | reachable? |
-|---|---:|---:|---:|---:|---|
-| `footer_gate` (R7b) | **10** | **1** | 1 | 1 | ✔ observed |
-| `zero_projection` (R1) | 2 | 2 | **0** | 0 | ✖ closed (A2) |
-| `fused_topn` (R3) | 1 | 1 | 1 | 1 | ✔ observed (see below — partially closed) |
-| `pushed_limit` (R2) | 0 | 0 | 0 | 0 | ✔ hand-set |
-| `unlowerable_predicate` (R4) | 0 | 0 | 0 | 0 | ✔ hand-set (regex) |
-| `bool_predicate_input` (R5) | 0 | 0 | 0 | 0 | ✔ hand-set |
-| `unsigned_predicate_input` (R5b, A1) | — | 0 | 0 | 0 | ✔ hand-set |
-| `non_admissible_kind:<T>` (R6) | 0 | 0 | 0 | 0 | ✔ hand-set (ARRAY) |
-| `no_manifest` (R7a) | 0 | 0 | 0 | 0 | ✖ no SQL trigger |
-| `temporal_predicate_input` (new, A2) | — | — | 0 | 0 | ✔ observed (missions dataset, not in battery) |
+**Latest census (after the R2 + R7b-temporal + R5 + R6 close-outs): 165 scans,
+164 native, 1 trampoline — `fused_topn` only.**
+
+⚠ The census corpus (clickbench + tpch) contains **no array columns**, so it
+never reported R6 at all and its 164/165 flattered the frontier. On ordinary
+data ARRAY was the single biggest real-world source of the trampoline — a plain
+`SELECT *` over `testdata.astronauts` or `testdata/flat/formats/parquet` dropped
+the WHOLE scan — which is why R6's close-out below is measured against a
+purpose-built corpus, not this battery.
+
+| Reason (guard) | A0 count | after A1 | after A2 | after A3 | now | reachable? |
+|---|---:|---:|---:|---:|---:|---|
+| `footer_gate` (R7b) | **10** | **1** | 1 | 1 | **0** | ✔ schema evolution only |
+| `zero_projection` (R1) | 2 | 2 | **0** | 0 | 0 | ✖ closed (A2) |
+| `fused_topn` (R3) | 1 | 1 | 1 | 1 | 1 | ✔ observed (composed shape — see below) |
+| `pushed_limit` (R2) | 0 | 0 | 0 | 0 | **0** | ✖ closed (R2 close-out) |
+| `unlowerable_predicate` (R4) | 0 | 0 | 0 | 0 | 0 | ⚠ marker stale — see below |
+| `bool_predicate_input` (R5) | 0 | 0 | 0 | 0 | 0 | ✖ retired (R5 close-out) |
+| `unsigned_predicate_input` (R5b, A1) | — | 0 | 0 | 0 | 0 | ✖ retired (A1) |
+| `non_admissible_kind:<T>` (R6) | 0 | 0 | 0 | 0 | 0 | ✖ retired (R6 close-out) |
+| `no_manifest` (R7a) | 0 | 0 | 0 | 0 | 0 | ✖ no SQL trigger |
+| `temporal_predicate_input` (new, A2) | — | — | 0 | 0 | 0 | ✔ observed (missions dataset, not in battery) |
+
+⚠ **`unlowerable_predicate` (R4) — the frontier marker is STALE, unverified.**
+`test_category_now_native[unlowerable_predicate]` and its reachability twin are
+currently RED (strict-xfail xpass): the hand-set trigger
+(`... WHERE text RLIKE 'a'`) now selects the **native** Source, i.e. the regex
+predicate lowers to a c-native span. That was NOT done by the R2/R7b close-outs —
+neither touches `bytecode_is_all_c_native`, and the trigger has no LIMIT so the R2
+guard never applied to it — so R4 appears to have been closed incidentally by the
+native RLIKE kernel work. **Not investigated or retired here**, because item 7
+below marks R4 hands-off pending other WIP. Someone owning R4 should confirm the
+whole category (not just this one trigger) and retire the marker.
 
 `footer_gate` was **77% of all A0 fallbacks**. **A1 closed the integer sub-case**:
 after A1 the battery has 4 trampoline scans (native 154 / 158), and `footer_gate`
@@ -75,10 +96,14 @@ from reality:
 
 1. **R6 example "a TIME column projected" is STALE.** Post-WP-11, TIME is
    *admitted* (routed through the int path as INT64) — projecting a TIME column
-   goes **native**, not to the trampoline. The real R6 trigger is a column whose
-   `ColumnType` has **no physical `DrakenType`** — e.g. `ARRAY` (tagged
-   `non_admissible_kind:NONE`; `_physical_type` returns `None`). The reason code
-   carries the offending type name (or `NONE`) so R6 sub-censuses by type.
+   goes **native**, not to the trampoline. The real R6 trigger was `ARRAY`.
+   ⚠ This finding ALSO said ARRAY has no physical `DrakenType` and is tagged
+   `non_admissible_kind:NONE`; **that was wrong**. `ColumnType.physical` for an
+   array column is `DrakenType.ARRAY`, and the observed reason code was always
+   `non_admissible_kind:ARRAY`. The guard's own inline comment carried the same
+   error and is corrected in the R6 close-out below. The reason code carries the
+   offending type name (or `NONE` when a column genuinely has no physical tag),
+   so R6 sub-censuses by type.
 
 2. **R4 is reachable but narrow, and is partly masked by a HARD ERROR.** A
    non-c-native predicate triggers R4 (`unlowerable_predicate`) **only when it is
@@ -138,8 +163,30 @@ narrow ints widen to INT64 and work in every role, including as predicate inputs
 No width is left fail-closed for projection/aggregation — UINT64 has a native
 `DRAKEN_UINT64` vector (no truncation).
 
-**Remaining `footer_gate` (census 1):** `EventTime::TIMESTAMP[ms]` — a temporal-cast
-column, not an integer case (out of A1 scope).
+**Remaining `footer_gate` (census 1 → 0) — CLOSED (temporal-cast close-out).**
+`EventTime::TIMESTAMP[ms]` is a column whose parquet footer carries **no temporal
+annotation at all** (a bare int64): the temporal-ness comes from a SQL `CAST`, not
+the file. The compiler classifies the read column as kind `"timestamp"`, but
+`native_scan_supported`'s timestamp branch required the FOOTER's own logical type
+to already start with `timestamp[` — so the scan failed closed.
+
+This was NOT a decode gap. The native path is already unit-parametrized end to end
+(`logical_coerce` → `LC_TIMESTAMP` + unit → `build_temporal_column`;
+`safe_logical` already treats a bare int64 as direct-eligible), so the only change
+was widening the gate's kind-classification to also admit an int64 column whose
+logical annotation is empty or `int64`. Anything else still fails closed.
+
+Verified the cast is a pure bit-REINTERPRET with no epoch rescale, so admitting it
+cannot change values: `EventTime` holds Unix SECONDS, and the trampoline reads
+`::TIMESTAMP[s]` → 2013-07-27, `[ms]` → 1970-01-16, `[us]` → 1970-01-01. The native
+scan now reproduces all three **byte-identically** (SHA-matched against output
+captured from the trampoline before the change) — see
+`test_cast_driven_timestamp_now_native` and
+`test_cast_driven_timestamp_matches_trampoline`.
+
+`footer_gate` stays reachable as a residual only via **schema evolution** (a
+projected column absent from some files — `HAND_SET["footer_gate"]`), which is a
+distinct, still-open structural gap.
 
 ### 2. `zero_projection` (R1) — census 2 → **0** — **CLOSED (A2)**
 `not scan.columns` — a scan with an empty projection. Inventory finding (A2):
@@ -175,22 +222,215 @@ that guard (`temporal_predicate_input`, alongside the BOOL/unsigned checks in
 unaffected. A native DATE/TIMESTAMP-comparison kernel is a follow-on
 (R4/R5-adjacent, not part of A2's scope).
 
-### 3. `pushed_limit` (R2) — **census 0** (reachable) — *small–medium*
-`scan.limit is not None` — LIMIT semantics currently live in the trampoline scan.
-* **Needs:** early-stop (stop after N rows) in `NativeParquetScanSource`.
-  Independent, small.
+### 3. `pushed_limit` (R2) — census 0 → **CLOSED**
+`scan.limit is not None` — LIMIT semantics used to live in the trampoline scan
+(`_records_to_read` / `_limit_exhausted`, sliced in `_commit_morsel_cxx`).
 
-### 4. `non_admissible_kind:<T>` (R6) — **census 0** (ARRAY reachable) — *structural (per type)*
-A read-set column of a kind with no native decode. Only `ARRAY` (`:NONE`)
-observed. Per-type and independent; ARRAY implies **nested decode** → structural.
-* **Needs:** a native decode for each offending type (start with the type the
-  prod corpus actually hits; ARRAY is the known one).
+**Close-out (done).** `NativeParquetScanSource` now carries `row_limit`
+(`-1` == unlimited; threaded compiler → `NativePlan.set_native_scan_source` →
+`Engine::set_native_scan_source` → the Source):
 
-### 5. `bool_predicate_input` (R5) — **census 0** (reachable) — *small–medium*
-A `BOOL` column used as a **predicate input** (WP-11 fail-closed; bool comparison
-raises err_op=11). BOOL columns that are only *projected* already decode natively.
-* **Needs:** BOOL in the c-native span (a c-native bool-comparison kernel).
-  **Overlaps R4** (both are c-native kernel coverage).
+1. **Correctness — the scan enforces the cap itself.** This is NOT merely an I/O
+   optimization: `LimitPushdownStrategy._apply_to_scan` **removes the Limit node
+   from the plan** when it pushes into a scan (`remove_node(heal=True)`), so
+   there is no downstream `LimitOperator` left to truncate. `get_morsel` claims
+   each morsel's share of the quota under the Source's existing global mutex
+   (`rows_emitted`, guarded together with the submit/receive counters so the
+   claim and the submit decision see one consistent view) and truncates the
+   morsel that crosses the boundary via `cxx_slice_c`. A worker that finds the
+   quota already filled drains its row group and emits nothing.
+2. **I/O — uncontributing row groups are never decoded.** The footer already
+   carries every row group's exact row count (`RowGroupStats::num_rows`), so
+   `limit_submit_cap()` walks the work list ONCE in `make_global` and caps the
+   submit frontier at the first row group that satisfies the limit. Without this
+   the prefetch window still ran ahead: `in_flight_limit` (== workers+2) **plus
+   one row group per worker that races in before the first morsel is emitted** —
+   measured 31 row groups for `LIMIT 5` over `tpch_1.lineitem`. With the cap it
+   decodes **1**.
+
+Measured on `testdata.tpch_1.lineitem` (96 row groups, 6,001,215 rows):
+
+| query | row groups decoded | bytes fetched |
+|---|---:|---:|
+| `LIMIT 5` | **1** | 13,414 |
+| `LIMIT 100000` | 3 | 40,252 |
+| `LIMIT 5000000` | 80 | 1,622,461 |
+| full scan | 96 | 1,937,327 |
+
+Row identity is unspecified for a LIMIT without ORDER BY, and pushdown only
+fires with no pushed predicate and no OFFSET (`limit_pushdown.py` refuses on
+`scan_node.predicates`), so nothing is lost by the native path's completion
+order — the trampoline is equally order-nondeterministic at dop>1 (concurrent
+`_single_pass_next` pulls commit under `_scan_mtx` in completion order, not file
+order).
+
+Gates: `make q` 216/216, `make tpch` 22/22, census `pushed_limit` 0. Exact
+row-count parity verified for limits below / at / above a row-group boundary and
+above the whole table — see `test_pushed_limit_now_native`,
+`test_pushed_limit_row_count_exact`, and
+`test_pushed_limit_skips_uncontributing_row_groups` in
+`tests/unit/operators/test_native_scan_residual_gate.py`. The reason code is
+retired from `HAND_SET` (no longer reachable), same convention as R5b.
+
+### 4. `non_admissible_kind:<T>` (R6) — census 0 → **CLOSED (ARRAY)**
+A read-set column (projected OR role-3 filter-only) of a kind with no native
+decode. `ARRAY` was the only type ever observed on it — and, unlike the census
+count suggests, it was the **dominant real-world residual**: the battery has no
+array columns, but on ordinary data a plain `SELECT *` over
+`testdata.astronauts`, `testdata/flat/formats/parquet` or
+`testdata/flat/struct_array` failed the whole scan closed on one list column.
+
+**Inventory finding: the producer side was already native; only the consumer was
+not.** A parquet LIST column carries repetition levels, and rugo's
+`direct_kind_for` (`rugo/src/parquet/io_pipeline.hpp`) routes *any* column with
+rep levels to `DK_POOL` — there is no direct list kind, regardless of encoding.
+`ipc_serialize.hpp::serialize_list_column` then writes it as the recursive
+**TAG_ARRAY (11)** wire format. Both scan paths share that producer verbatim; the
+trampoline's only extra step was parsing TAG_ARRAY in **Cython**
+(`column_deserializer.pyx::_build_array_vector{,_nested,_string,_numeric}`) and
+boxing the result through the PyObject-returning `draken_vector_own_array*`
+family. So this was never "nested decode" work — it was one missing consumer.
+
+**Close-out (done).** Four coordinated changes:
+
+1. **New native decoder — `src/cpp/engine/native_array_pool_decode.hpp`.** A
+   faithful, PyObject-free port of those four Cython functions, plus the
+   `draken_vector_own_array{,_numeric,_child}` bodies they hand off to. It builds
+   a dense `DRAKEN_ARRAY` parent over int32 offsets whose
+   `VectorOwner::child_owner` (`draken/core/vector_owner.h`) owns the element
+   vector outright — the destructor chains, so no lifetime plumbing of its own
+   was invented. Every child tag `serialize_list_column` can emit is handled:
+   `CHILD_INT64/INT32/UINT64/FLOAT32/FLOAT64/BOOL/STRING`, and `CHILD_ARRAY`,
+   which recurses for `list<list<...>>` of arbitrary depth. Unlike the Cython
+   reference it bounds-checks every read against the pool blob's length: a
+   native worker thread has no Python exception to unwind into, so a malformed
+   blob must surface as an `ErrCtx`, not an OOB read.
+2. **Native Source** (`native_parquet_scan_source.hpp`) — a new
+   `array_columns[i]` plan flag (parallel to `column_names`, the same mechanism
+   as `decimal_columns` / `varchar_columns`) routes the DK_POOL blob to that
+   decoder. The flag is load-bearing, not decoration: all three pool shapes
+   (decimal / varchar / array) are indistinguishable from the `DirectKind`
+   alone. A column planned ARRAY that arrives on any other DirectKind fails
+   loud rather than reading a direct buffer as a list.
+3. **Footer gate** (`native_scan_supported`, `pool_reader.pyx`) — a new `"array"`
+   kind admits a column whose rugo footer logical type starts with `array<`,
+   whose `max_repetition_level >= 1`, and whose (leaf) physical type is one
+   `serialize_list_column` can actually emit. `int96` and
+   `fixed_len_byte_array` leaves stay closed — rugo *throws* on them, on both
+   paths, so admitting them would only move where the same error surfaces.
+4. **Compiler** (`_native_scan_plan`, `compiler.py`) — `DrakenType.ARRAY` gets
+   its own classifier branch instead of falling into the R6 bail, and builds
+   `array_columns`. The bail's own comment was **stale and wrong** (it claimed
+   ARRAY has no physical tag and reports `:NONE`; the observed code was always
+   `:ARRAY`) — corrected, along with a note of what is actually left behind it.
+
+**The one coercion.** `_wp11_logical_coerce`'s scalar retags do not apply to a
+list, but `ARRAY<TIMESTAMP>` does need one: parquet stores the leaf as physical
+int64 and the IPC list format carries no logical type, so without a retag the
+elements read back as raw micros. The trampoline fixes this with
+`vector_retag_array_child_as_timestamp64` driven by `_sp_array_ts_unit_map`
+(`parquet_read.pyx`); the native path mirrors it exactly via a new
+`LC_ARRAY_TIMESTAMP` packing. `ARRAY<DATE>` gets **no** retag — because the
+trampoline gives it none either. Parity is the bar, not judgement.
+
+**Deliberately still closed.** MAP and STRUCT are unchanged and were never behind
+this guard: STRUCT is annotated `json` by rugo's footer and binds as a string
+column (it already went native), and MAP is refused by the footer gate as
+`footer_gate`. Both verified against real files rather than assumed. The
+`varchar` branch's LIST rejection was NOT relaxed — an `array<...>`-annotated
+column is classified `"array"` by the compiler and never reaches that branch.
+
+**Verification.** The trampoline's answers were captured BEFORE the change and
+compared after: 31 queries over 6 datasets, hashing **every row's full nested
+value** (not row counts), all **SHA-identical**. On top of that,
+`tests/unit/operators/test_wp_r6_array_scan.py` is an A/B harness running each
+query natively and forced-trampoline **in one process**, over every element type,
+`SELECT *`, mixed projections, role-3 (filter-only) arrays, zero-projection
+`COUNT(*)`, and the operators that actually consume a list (`UNNEST`,
+`ARRAY_CONTAINS`, `LENGTH`, `ARRAY_AGG`). The four null-ish shapes are pinned
+*by value* because they are genuinely different and a decoder can collapse them:
+a NULL list (`None`), an EMPTY list (`[]`), a list of NULLs (`[None]`), and a
+NULL *inner* list inside a nested one (`[[7, None], None, []]`).
+
+The pre-existing ARRAY datasets are all VARCHAR-element and mostly uniform, which
+is exactly the trap that makes a broken decoder look correct, so
+`dev/generate_array_testdata.py` writes `testdata/flat/array_types` — every
+element type, both string arenas (inline and >12-byte), NULL/empty/NULL-bearing
+lists, and `list<list<int64>>`, across two row groups.
+
+Gates: `make q` 217/217, `make tpch` 22/22, census `non_admissible_kind` **0**
+(165 scans, 164 native), ASan clean on the array query set. `tests/unit/operators`
+95 failures before and after (all pre-existing). The reason code is retired from
+`HAND_SET` — same convention as R2 / R5 / R5b — because it now has **no reachable
+SQL trigger**: a sweep of every parquet dataset under `testdata/` finds none.
+What remains behind the guard (VARIANT, INTERVAL, VECTOR_FP16, a DECIMAL/temporal
+column with an unusable logical descriptor) is defensive, like `no_manifest`/R7a.
+
+### 5. `bool_predicate_input` (R5) — census 0 → **CLOSED**
+A `BOOL` column used as a **predicate input** failed the whole scan closed
+(WP-11 fail-closed). BOOL columns that are only *projected* already decoded
+natively and were never affected.
+
+**Root cause was one missing switch branch, not a missing engine capability.**
+`bytecode_is_all_c_native` correctly reported the predicate lowerable, and the
+relocated `ExprFilter` ran the same bytecode VM as everything else — but
+`draken_compare_dv`'s type switch (`draken/ops/compare_dv.cpp`) had no
+`DRAKEN_BOOL` case, so every bool comparison hit `default: return nullptr`
+("declined, use the caller's fallback"). The native ExprFilter **has** no
+fallback, so it surfaced that as `err_op=11`. Same failure shape as the A1
+`unsigned_predicate_input` (R5b) retirement, and it is retired the same way.
+
+**Close-out (done).** Two changes:
+
+1. **New kernel — `draken/ops/bool_compare.h` (`bool_compare_vector`).** Unlike
+   R5b, BOOL could **not** be closed by literal coercion + dispatching an
+   existing kernel: both operands already arrive tagged `DRAKEN_BOOL` (the
+   literal via `BC_LOAD_LIT_BOOL`, which materialises a dense bitmap directly —
+   it never goes through `_coerce_literal_physical`), so the type-match gate was
+   already passing. What was missing is a kernel that can *read* a bool vector:
+   BOOL is **bit-packed**, so `data` is a bitmap and `data[selection[i]]` means
+   *bit* `selection[i]` — no fixed-width compare kernel can address it.
+   The kernel is ONE uniform loop over the bitmap, per CLAUDE.md §11 — dense,
+   constant (`selection` = the global zero vector) and dict (owned codes) all
+   read correctly through the same path, with **no shape discriminant**.
+   `validity` is indexed by the LOGICAL row `i` (the vector contract), not by
+   `selection[i]`. Ordering is SQL's `FALSE < TRUE`; nulls follow the
+   `compare_vector` contract (result row NULL when **either** operand row is
+   NULL — *not* Kleene AND/OR, which is `bool_logical.h`'s job).
+2. **Guard removed** (`_native_scan_plan`, `compiler.py`) — the
+   `_physical_type(sc) == DrakenType.BOOL` bail is gone; the reason code is
+   retired from `HAND_SET` (no longer reachable), same convention as R2 / R5b.
+
+**Verification.** The trampoline's answers were captured BEFORE the change and
+compared after: every query's survivor set is **SHA-identical**, on `= TRUE`,
+`= FALSE`, `<> TRUE`, `!= FALSE`, projected-and-filtered, role-3 (filter-only),
+composed with an int predicate, zero-projection `COUNT(*)`, and a NULL-bearing
+bool column (80 TRUE / 40 FALSE / 80 NULL — the NULL rows survive neither
+polarity, on either path). Gates: `make q` 217/217, `make tpch` 22/22, census
+`bool_predicate_input` **0** (165 scans, 164 native). See
+`test_bool_predicate_input_now_native` /
+`test_bool_predicate_survivor_count_matches_trampoline` in
+`tests/unit/operators/test_native_scan_residual_gate.py`, the A/B parity harness
+(native vs forced-trampoline in one run) in
+`tests/unit/operators/test_wp11_decimal_temporal_bool_scan.py` — which is where
+WP-11's two `*_fails_closed` bool tests lived and are now `*_now_native` — and
+the C++ bitmap assertions in `_compare_dv_smoke_test`
+(`draken/tests/native/test_compare_dv.py`).
+
+**Deliberately NOT done (would need architect agreement).** The kernel has no
+byte-wise dense fast path. The overwhelmingly common shape — a dense-identity
+bool column against `BC_LOAD_LIT_BOOL`'s dense literal bitmap — could compare 8
+rows per instruction with plain word ops, the way `bool_and`/`bool_or` in
+`bool_logical.h` already do for their identity-selection inputs. That is
+encoding-shape-specialized dispatch, which CLAUDE.md §11 says must be surfaced
+before implementing, so only the uniform path is here.
+
+**Adjacent, NOT closed by this (separate gap):** `WHERE <bool col> IS TRUE` /
+`IS FALSE` still hard-errors at `compiler.py:454` ("a … predicate outside the
+c-native kernel set") — a different opcode, unchanged by this work, and part of
+the R4-adjacent hard-error class described in finding 2 above. A bare
+`WHERE <bool col>` is rejected earlier still, by the planner, as unsupported
+syntax.
 
 ### 6. `fused_topn` (R3) — census 1 → **1** — **PARTIALLY CLOSED (A3)**
 `scan._topn_sort_name is not None` — an `ORDER BY … LIMIT` fused into the scan

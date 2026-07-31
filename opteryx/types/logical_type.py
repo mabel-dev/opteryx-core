@@ -222,15 +222,67 @@ class ColumnType:
     def ordinalize(self, value) -> int:
         """Scalar ordinal key for `value`, in the same int64 space
         `Vector.ordinalize()` produces for a column of this physical type
-        (see draken/ops/ordinalize.h). Lets plan-time code (e.g. file pruning
-        against ordinalize()-encoded manifest min/max bounds) compare a
+        (see draken/ops/ordinalize.h). Lets plan-time code — file pruning
+        against ordinalize()-encoded manifest min/max bounds — compare a
         predicate literal against those bounds without materialising a
-        Vector. Pure passthrough to `DrakenType.ordinalize` — TIMESTAMP64/
-        TIME32/TIME64/DECIMAL128 are not supported there and raise, since
-        this physical-only entry point cannot resolve the unit/precision
-        `self.logical` carries; not silently guessed.
+        Vector.
+
+        Mostly a passthrough to `DrakenType.ordinalize`, with two cases that
+        physical-only entry point deliberately refuses because it cannot see
+        the `LogicalType` descriptor this class carries:
+
+        DATE32/TIMESTAMP64/TIME32/TIME64 — the physical entry point wants a
+        `datetime.date`/`datetime`/`time` OBJECT (and refuses TIMESTAMP/TIME
+        outright, since their unit lives on `LogicalType` and cannot be
+        guessed from the physical tag). That is not the situation here: by
+        the time a literal reaches file pruning the binder has already
+        normalised it to the column's own raw physical integer — a DATE
+        literal binds to `-7305`, days since epoch, NOT a `datetime.date`;
+        a TIMESTAMP literal binds to raw micros. For all four types
+        `ordinalize` is an identity widen from INT32/INT64, so that
+        already-raw integer IS the ordinal key and no conversion is wanted.
+        Passing it to the physical entry point would raise, and pruning would
+        silently stop happening on exactly the columns most often filtered
+        (dates and timestamps on log tables). A non-integer reaching here
+        means the bind-time normalisation assumption no longer holds, so it
+        raises rather than guessing a unit — the caller then skips pruning,
+        which costs speed, never correctness.
+
+        DECIMAL/DECIMAL128 — raises. A stored DECIMAL bound is the unscaled
+        mantissa at the COLUMN's scale, while `DrakenType.DECIMAL.ordinalize`
+        returns the mantissa at the LITERAL's own natural scale
+        (`Decimal("1.5")` -> 15, never 15000 for a scale-4 column), so the
+        two are only comparable when the scales happen to coincide. Aligning
+        them needs rescaling semantics (rounding direction on truncation)
+        that are not pinned down anywhere, so this refuses instead of
+        inventing them. Pruning is skipped for DECIMAL, exactly as it is
+        today — `_comparable_literal` already declines a `Decimal` literal
+        against an integer bound.
         """
-        return self.physical.ordinalize(value)
+        physical = self.physical
+
+        if physical in (
+            DrakenType.DATE32,
+            DrakenType.TIMESTAMP64,
+            DrakenType.TIME32,
+            DrakenType.TIME64,
+        ):
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            raise ValueError(
+                f"ordinalize: {physical!r} expects a bind-normalised integer literal "
+                f"(the raw physical value at the column's unit); got "
+                f"{type(value).__name__}"
+            )
+
+        if physical in (DrakenType.DECIMAL, DrakenType.DECIMAL128):
+            raise ValueError(
+                f"ordinalize: {physical!r} is not supported — a stored DECIMAL bound is "
+                "the mantissa at the column's scale, which cannot be compared against a "
+                "literal's own-scale mantissa without rescaling"
+            )
+
+        return physical.ordinalize(value)
 
     def __str__(self) -> str:
         if self.physical == DrakenType.DECIMAL or self.physical == DrakenType.DECIMAL128:

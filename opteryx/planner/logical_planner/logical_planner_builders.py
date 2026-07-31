@@ -56,6 +56,9 @@ from opteryx.types.logical_type import (
     TIME as _CT_TIME,
 )
 from opteryx.types.logical_type import (
+    UINT64 as _CT_UINT64,
+)
+from opteryx.types.logical_type import (
     TIMESTAMP as _CT_TIMESTAMP,
 )
 from opteryx.types.logical_type import (
@@ -1338,6 +1341,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
         )
 
     key_value = key_node.value
+    identifier_name = format_expression(identifier_node)
     if isinstance(key_value, str):
         key_value = f"'{key_value}'"
         return Node(
@@ -1345,7 +1349,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
             value="Arrow",
             left=identifier_node,
             right=key_node,
-            alias=alias or f"{identifier_node.current_name} -> {key_value}",
+            alias=alias or f"{identifier_name} -> {key_value}",
         )
 
     return Node(
@@ -1353,7 +1357,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
         value="MapAccess",
         left=identifier_node,
         right=key_node,
-        alias=alias or f"{identifier_node.current_name}[{key_value}]",
+        alias=alias or f"{identifier_name}[{key_value}]",
     )
 
 
@@ -1414,6 +1418,42 @@ def literal_null(branch=None, alias: Optional[List[str]] = None, key=None):
     return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
 
 
+def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Node:
+    """Build a LITERAL node for an exact integer, choosing the narrowest native tier
+    that holds it. The SINGLE place integer literal typing is decided, so the type tag
+    and the value can never disagree — the failure mode that motivated it is a fold
+    that rewrites `value` and leaves `type` describing the old one (see `unary_op`,
+    and _coerce_literal's note in binder.py for the same bug in the binder).
+
+    INT64 -> UINT64 -> DECIMAL(precision, 0). The UINT64 tier matters because it keeps
+    a literal in (2^63-1, 2^64-1] in the INTEGER category, the same category as the
+    unsigned columns it gets compared against; as a DECIMAL it reached the compare as
+    a type no kernel handles and failed at RUN time (err_op=11). Above UINT64 the
+    engine's only wider native numeric tier is DECIMAL128 (int128-backed, max 38
+    digits) — e.g. CAST(123456789012345678901234567890 AS DECIMAL(38,3)) — and an
+    exact DECIMAL(precision, 0) is used rather than letting the value reach
+    _materialise_constant_literal's generic INT64 fallback, which nb::cast<int64_t>()s
+    and throws std::bad_cast for out-of-range values.
+    """
+    if -(2**63) <= value <= 2**63 - 1:
+        return Node(NodeType.LITERAL, type=_CT_INT64, value=value, alias=alias)
+    if 0 <= value <= 2**64 - 1:
+        return Node(NodeType.LITERAL, type=_CT_UINT64, value=value, alias=alias)
+    decimal_value = decimal.Decimal(value)
+    precision = len(decimal_value.as_tuple().digits)
+    if precision > 38:
+        raise SqlError(
+            f"Integer literal {value} has {precision} digits; the maximum "
+            "supported precision is 38."
+        )
+    return Node(
+        NodeType.LITERAL,
+        type=_CT_DECIMAL(precision, 0),
+        value=decimal_value,
+        alias=alias,
+    )
+
+
 def literal_number(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a literal number branch"""
     # we have one internal numeric type
@@ -1421,33 +1461,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
     value = branch[0]
     try:
         # Try converting to int first
-        value = int(value)
-        if -(2**63) <= value <= 2**63 - 1:
-            return Node(
-                NodeType.LITERAL,
-                type=_CT_INT64,
-                value=value,
-                alias=alias,
-            )
-        # Overflows INT64 (e.g. CAST(12345678901234567890 AS DECIMAL(38,3))) — the
-        # engine's only wider native numeric tier is DECIMAL128 (int128-backed,
-        # max 38 digits). Materialise as an exact DECIMAL(precision, 0) literal
-        # instead of silently truncating or reaching _materialise_constant_literal's
-        # generic INT64 fallback, which nb::cast<int64_t>()s and throws std::bad_cast
-        # for out-of-range values.
-        decimal_value = decimal.Decimal(value)
-        precision = len(decimal_value.as_tuple().digits)
-        if precision > 38:
-            raise SqlError(
-                f"Integer literal {value} has {precision} digits; the maximum "
-                "supported precision is 38."
-            )
-        return Node(
-            NodeType.LITERAL,
-            type=_CT_DECIMAL(precision, 0),
-            value=decimal_value,
-            alias=alias,
-        )
+        return integer_literal_node(int(value), alias)
     except ValueError:
         # If int conversion fails, try converting to float
         value = float(value)
@@ -1644,10 +1658,19 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
         return Node(node_type=NodeType.NOT, centre=centre)
     if branch["op"] == "Minus":
         centre = build(branch["expr"], alias=alias)
-        # Constant-fold numeric literals (e.g. `-5`).
+        # Constant-fold numeric literals (e.g. `-5`). An INTEGER literal must be
+        # RE-TYPED from the negated value, not just have its value flipped: the
+        # parser hands us `-N` as unary minus over the POSITIVE literal N, so a wide
+        # value lands here already tagged UINT64, and negating in place left a
+        # negative int under an unsigned tag (std::bad_cast at materialisation).
+        # integer_literal_node is the single typing rule — see its docstring.
         if centre.node_type == NodeType.LITERAL and isinstance(centre.value, (int, float)):
-            centre.value = 0 - centre.value
-            return centre
+            if isinstance(centre.value, float):
+                centre.value = 0 - centre.value
+                return centre
+            # int (and bool, its subclass — `-TRUE` folds to -1 as it always has,
+            # now tagged INT64 rather than keeping the operand's BOOLEAN tag).
+            return integer_literal_node(0 - centre.value, alias)
         # General case: lower unary minus on an expression to `0 - expr`.
         zero = Node(NodeType.LITERAL, type=_CT_INT64, value=0)
         return Node(

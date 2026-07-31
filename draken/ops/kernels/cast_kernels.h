@@ -114,6 +114,21 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* vector);
 
 VecResult draken_cast_date32_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* vector);
+
+// DECIMAL -> DECIMAL, named by the SOURCE tier (int64-backed / int128-backed); the
+// TARGET tier comes from binary_op_ctx.result_precision (>18 -> int128). ctx also
+// carries the source scale in left_scale and the target scale in result_scale — the
+// vector itself has neither. Widening overflow and inexact narrowing both raise.
+VecResult draken_cast_decimal_to_decimal(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_decimal(void* ctx, const DrakenVector* vector);
+
+// INTEGER -> DECIMAL, named by the SOURCE width (int64 / narrow signed / any
+// unsigned); one core behind all three. An integer is a decimal at scale 0, so the
+// payload is value * 10^result_scale. Target tier from binary_op_ctx.result_precision
+// (>18 -> int128); an out-of-range value raises rather than wrapping.
+VecResult draken_cast_int64_to_decimal(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_decimal(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* vector);
 // Implemented as draken_cast_date_to_string (the registered/forward-declared name).

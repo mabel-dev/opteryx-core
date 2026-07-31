@@ -64,11 +64,19 @@ _STRING_CATEGORIES = frozenset(
 )
 
 
+def _is_catalog_backed(table_engine) -> bool:
+    """True for a catalog-backed dataset, whose ANALYZE is delegated to the
+    catalog itself (see _analyze_catalog.py) rather than computed here."""
+    from opteryx.connectors.opteryx_connector import OpteryxTable
+
+    return isinstance(table_engine, OpteryxTable)
+
+
 def _require_local(table_engine) -> None:
     if not isinstance(getattr(table_engine, "filesystem", None), OpteryxLocalFileSystem):
         raise UnsupportedSyntaxError(
-            "ANALYZE / DROP STATISTICS is currently supported only for local "
-            "filesystem datasets."
+            "ANALYZE / DROP STATISTICS is not supported for this dataset's "
+            "storage backend."
         )
 
 
@@ -258,7 +266,9 @@ def _write_manifest_atomic(
     os.replace(tmp, manifest_path)
 
 
-def analyze_table(table_engine, columns: Optional[Sequence[str]]) -> int:
+def analyze_table(
+    table_engine, columns: Optional[Sequence[str]], author: Optional[str] = None
+) -> int:
     """Compute native per-file statistics for ``columns`` (or all columns)
     over every parquet file of the dataset and write them into the dataset's
     single manifest — KMV sketch, null count, min/max, histogram, record
@@ -273,7 +283,18 @@ def analyze_table(table_engine, columns: Optional[Sequence[str]]) -> int:
     and files not re-analyzed keep their existing statistics.
 
     Returns the number of files analyzed.
+
+    A catalog-backed dataset is delegated to the catalog's own statistics
+    refresh instead (see _analyze_catalog.analyze_table_catalog) — everything
+    below this branch is the local-filesystem implementation. `author` is only
+    meaningful on that catalog path (it records who committed the resulting
+    snapshot); the local path has no snapshot chain and ignores it.
     """
+    if _is_catalog_backed(table_engine):
+        from opteryx.operators.table_management._analyze_catalog import analyze_table_catalog
+
+        return analyze_table_catalog(table_engine, columns, author=author)
+
     _require_local(table_engine)
     schema = table_engine.get_dataset_schema()
     column_count = len(schema.columns)
@@ -399,7 +420,15 @@ def drop_statistics(table_engine, columns: Optional[Sequence[str]]) -> int:
     manifest is not an error. Returns the number of files whose statistics were
     modified (or, for a whole-manifest delete, the file count it described).
     Never touches the parquet data files.
+
+    Not supported for catalog-backed datasets: their manifest entries carry
+    statistics from the moment each file is written, so there is no
+    "statistics absent" state to drop back to — the manifest row itself would
+    have to go, which would delete the dataset's record of the file.
     """
+    if _is_catalog_backed(table_engine):
+        raise UnsupportedSyntaxError("DROP STATISTICS is not supported for this dataset.")
+
     _require_local(table_engine)
     manifest_path = _manifest_path(table_engine)
     if not os.path.exists(manifest_path):

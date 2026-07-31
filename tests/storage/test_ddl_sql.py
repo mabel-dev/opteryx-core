@@ -102,6 +102,23 @@ def test_create_table_readonly_connector_rejected(tmp_path):
         list(session.execute_to_morsels("CREATE TABLE somefile.foo (a BIGINT)"))
 
 
+def test_create_table_requires_writer_or_owner(tmp_path):
+    """Plain CREATE TABLE (column-defs form) must be permission-checked, same
+    as CTAS - a reader-only session cannot create a brand-new relation."""
+    _setup_workspace(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+    with pytest.raises(PermissionError, match="permission to create table"):
+        list(reader.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    assert not (tmp_path / "ws" / "events").exists()
+
+
+def test_create_table_allowed_for_writer(tmp_path):
+    _setup_workspace(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
+    list(writer.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    assert (tmp_path / "ws" / "events" / "dataset.json").exists()
+
+
 def test_drop_table_removes_folder(tmp_path):
     """DROP TABLE removes the table folder."""
     _setup_workspace(tmp_path)
@@ -384,6 +401,20 @@ def test_owner_can_drop_table_and_view(tmp_path):
 
     assert not (tmp_path / "ws" / "v" / "view.json").exists()
     assert not (tmp_path / "ws" / "t").exists()
+
+
+def test_truncate_requires_writer_or_owner(tmp_path):
+    owner = _seed_relations(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+    with pytest.raises(PermissionError, match="permission to truncate table"):
+        list(reader.execute_to_morsels("TRUNCATE TABLE ws.t"))
+
+
+def test_insert_into_existing_requires_writer_or_owner(tmp_path):
+    owner = _seed_relations(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+    with pytest.raises(PermissionError, match="permission to insert into"):
+        list(reader.execute_to_morsels("INSERT INTO ws.t VALUES (1)"))
 
 
 def test_writer_retains_non_drop_ddl(tmp_path):

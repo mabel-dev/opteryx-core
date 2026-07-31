@@ -9,7 +9,12 @@ and reports per-step results.
 Coverage:
   * INT64 EQ produces correct DRAKEN_BOOL bitmap
   * FLOAT64 LT produces correct DRAKEN_BOOL bitmap
-  * Unsupported type returns NULL (Stage B: BOOL not covered)
+  * BOOL EQ / LT produce correct DRAKEN_BOOL bitmaps (bit-packed operands)
+  * DATE32 EQ / TIMESTAMP64 LT produce correct DRAKEN_BOOL bitmaps
+  * DECIMAL EQ (int64-backed) produces correct DRAKEN_BOOL bitmap — routed
+    through the same i64_compare_vector kernel as INT64/TIMESTAMP64
+  * DECIMAL128 (int128-backed) returns NULL — no compare kernel yet
+  * Unsupported type returns NULL (ARRAY — no compare kernel)
   * Cross-type operands return NULL
   * Length mismatch returns NULL
   * Out-of-range op_code returns NULL
@@ -19,7 +24,26 @@ Coverage:
 
 import pytest
 
-from draken.draken_native import _compare_dv_smoke_test
+from draken.draken_native import _bool_compare_fastpath_fuzz_test, _compare_dv_smoke_test
+
+
+def test_bool_compare_fastpath_matches_uniform_path():
+    """R5 close-out follow-up: bool_compare_vector's dense-identity byte-wise
+    fast path (draken/ops/bool_compare.h) must be bit-for-bit identical to the
+    uniform bit-by-bit loop it fast-paths around. The C++ fuzz harness builds
+    the same random logical values two ways — dense-identity (hits the fast
+    path) and dict-encoded (non-identity, forces the uniform loop) — across
+    varied lengths (including non-multiple-of-8) and with/without nulls, over
+    all 6 ops, and reports any mismatch.
+    """
+    result = _bool_compare_fastpath_fuzz_test()
+
+    assert result["cases_run"] > 0
+    assert result["mismatches"] == 0, (
+        f"fast path diverged from the uniform path in {result['mismatches']} "
+        f"of {result['cases_run']} cases"
+    )
+    assert result["all_match"] is True
 
 
 def test_compare_dv_smoke():
@@ -34,6 +58,13 @@ def test_compare_dv_smoke():
         "float64_lt_returns_non_null",
         "float64_lt_result_is_bool",
         "float64_lt_bitmap",
+        # R5 close-out — BOOL is a supported branch now (bit-packed kernel),
+        # so `unsupported_type_returns_null` is asserted against ARRAY instead.
+        "bool_eq_returns_non_null",
+        "bool_eq_result_is_bool",
+        "bool_eq_bitmap",
+        "bool_lt_returns_non_null",
+        "bool_lt_bitmap",
         "unsupported_type_returns_null",
         "cross_type_returns_null",
         "length_mismatch_returns_null",
@@ -47,7 +78,10 @@ def test_compare_dv_smoke():
         "timestamp64_lt_result_is_bool",
         "timestamp64_lt_bitmap",
         "varchar_smoke_skipped",
-        "decimal_returns_null_pending_descriptor",
+        "decimal_eq_returns_non_null",
+        "decimal_eq_result_is_bool",
+        "decimal_eq_bitmap",
+        "decimal128_returns_null_pending_kernel",
         "destroy_no_crash",
     }
 

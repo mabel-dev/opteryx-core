@@ -1852,6 +1852,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     file_sizes=None,
     string_types=None,
     decimal_columns=None,
+    array_columns=None,
     logical_coerce=None,
     hash_key_columns=None,
     length_only_columns=None,
@@ -1934,6 +1935,14 @@ cpdef NativeScanPlan open_native_scan_plan(
     else:
         for _sti in range(len(column_names)):
             plan.logical_coerce.push_back(0)
+    # R6: per-column ARRAY (parquet LIST) flag. Defaults to all-zero so every
+    # pre-R6 caller keeps the exact fail-loud behaviour on an unflagged DK_POOL.
+    if array_columns is not None:
+        for _sti in range(len(column_names)):
+            plan.array_columns.push_back(<uint8_t>array_columns[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.array_columns.push_back(0)
 
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
@@ -2045,15 +2054,17 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     is False, the trampoline path needs the same footers), that EVERY projected
     column in EVERY row group of EVERY file:
       - is present (no schema evolution on this path), and
-      - has a footer physical/logical type that provably decodes to a DirectKind
-        the native Source supports (io_pipeline.hpp direct_kind_for + its
-        Stage-4a logical gate): plain numeric only. DATE/TIMESTAMP (they rely on
-        the pool-consumer's schema coercion, which the native Source does not
-        do), int-backed DECIMAL (descriptor contract), BOOL, strings and nested
-        columns all refuse — those scans stay on the trampoline Source.
+      - has a footer physical/logical type that provably decodes to a shape the
+        native Source can build (io_pipeline.hpp direct_kind_for + its Stage-4a
+        logical gate, plus the Source's own pool-path decoders).
 
-    ``expected_kinds[i]`` pairs with ``column_names[i]``: "int" (schema INT64 —
-    parquet int32 widens to DK_INT64 on decode), "float32" or "float64".
+    ``expected_kinds[i]`` pairs with ``column_names[i]`` and is one of "int"
+    (every integer width and signedness, plus parquet TIME), "float32",
+    "float64", "varchar", "bool", "date", "timestamp", "decimal64",
+    "decimal128", or "array" (R6 — a parquet LIST column, decoded natively from
+    its TAG_ARRAY pool blob). Everything else — MAP, STRUCT/json, int96,
+    fixed_len_byte_array — has no `expected_kinds` spelling at all and so refuses
+    at the first loop below; those scans stay on the trampoline Source.
 
     Encoding is deliberately NOT checked: for single-pass (mask-free) decode,
     plain, pure-dict (prefer_dict) and mixed dict+plain chunks all land on
@@ -2108,6 +2119,10 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     cdef string s_timestamp = b"timestamp["
     cdef string s_time = b"time["
     cdef string s_decimal = b"decimal"
+    # R6: rugo's metadata.cpp emits "array<child>" for a LIST-annotated column
+    # (ResolveArrayLogicalType); the ColumnStats physical_type is the LEAF's, and
+    # max_repetition_level >= 1 is the structural proof it really is a list.
+    cdef string s_array = b"array<"
     cdef vector[string] wanted
     cdef list kinds = []
     cdef dict orig_to_cpp
@@ -2120,7 +2135,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
         wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
         kind = expected_kinds[k]
         if kind not in ("int", "float32", "float64", "varchar", "bool",
-                        "decimal64", "decimal128", "date", "timestamp"):
+                        "decimal64", "decimal128", "date", "timestamp", "array"):
             return False
         kinds.append(kind)
 
@@ -2203,13 +2218,39 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         # A plain string / raw-binary column: parquet byte_array whose
                         # rugo footer logical_type is "varchar" (UTF8 → VARCHAR/NVARCHAR)
                         # or "binary" (un-annotated byte_array → VARBINARY), or empty.
-                        # Reject fixed_len_byte_array, and LIST/MAP/DECIMAL/json/struct/
-                        # array/ENUM annotations — those decode nested/decimal, not a
-                        # string vector, so they stay on the trampoline (fail-closed).
+                        # Reject fixed_len_byte_array, and MAP/DECIMAL/json/struct/ENUM
+                        # annotations — those decode nested/decimal, not a string
+                        # vector, so they stay on the trampoline (fail-closed). LIST
+                        # is rejected HERE too, and that is not the R6 relaxation: an
+                        # "array<...>"-annotated column is classified kind "array" by
+                        # the compiler, never "varchar", so reaching this branch with
+                        # one means the schema and the footer disagree.
                         if csp.physical_type != s_byte_array:
                             return False
                         if csp.logical_type.size() != 0 and \
                                 csp.logical_type != s_varchar and csp.logical_type != s_binary:
+                            return False
+                    elif kind == "array":
+                        # R6: a parquet LIST column. rugo's footer logical_type is
+                        # "array<child>" and the column chunk is the flattened LEAF,
+                        # so `physical_type` is the ELEMENT's physical type and
+                        # max_repetition_level >= 1 proves the repetition structure
+                        # that makes direct_kind_for route it to the pool.
+                        #
+                        # The admitted element physical types are exactly the ones
+                        # rugo's serialize_list_column can emit (ipc_serialize.hpp);
+                        # it THROWS on anything else, on both scan paths. So
+                        # int96 (timestamp[ns] legacy) and fixed_len_byte_array
+                        # (int128-backed DECIMAL, UUID) fail closed here rather than
+                        # being admitted into a decode that cannot happen.
+                        if csp.logical_type.find(s_array) != 0:
+                            return False
+                        if csp.max_repetition_level < 1:
+                            return False
+                        if csp.physical_type != s_int32 and csp.physical_type != s_int64 and \
+                                csp.physical_type != s_float32 and csp.physical_type != s_float64 and \
+                                csp.physical_type != s_boolean and \
+                                csp.physical_type != s_byte_array:
                             return False
                     elif kind == "bool":
                         # WP-11: parquet BOOLEAN → DK_BOOL dense (1 byte/row). No
@@ -2226,7 +2267,21 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         # WP-11: TIMESTAMP → int64 with logical "timestamp[unit]".
                         if csp.physical_type != s_int64:
                             return False
-                        if csp.logical_type.find(s_timestamp) != 0:
+                        # R7b close-out: a CAST-driven retag (`EventTime::TIMESTAMP[ms]`)
+                        # asks for a TIMESTAMP column whose FOOTER carries no temporal
+                        # annotation at all — a bare int64 (empty or "int64" logical).
+                        # The temporal-ness comes from SQL, not the file. Admit it: the
+                        # cast is a pure bit-REINTERPRET (no epoch rescale — verified
+                        # against the trampoline, where EventTime's Unix SECONDS read as
+                        # `::TIMESTAMP[s]` → 2013, `[ms]` → 1970-01-16, `[us]` →
+                        # 1970-01-01), and the native decode path is already
+                        # unit-parametrized (`logical_coerce` → LC_TIMESTAMP + unit →
+                        # build_temporal_column), byte-identically to the trampoline's
+                        # `_coerce_vectors`. Anything OTHER than a temporal or bare-int64
+                        # annotation still fails closed.
+                        if csp.logical_type.size() != 0 and \
+                                csp.logical_type != s_int64 and \
+                                csp.logical_type.find(s_timestamp) != 0:
                             return False
                     elif kind == "decimal64" or kind == "decimal128":
                         # WP-11: DECIMAL — rugo footer logical "decimal(p,s)". p≤18 is

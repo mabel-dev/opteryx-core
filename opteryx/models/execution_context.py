@@ -76,6 +76,7 @@ class ExecutionContext:
             ("user_memberships", list(self.memberships or [])),
             ("external_user", self.user or ""),
             ("user_entitlements", list(self.entitlements or [])),
+            ("billing_account", self.billing_account or ""),
         ):
             var_type, _old_value, owner, visibility = self.variables._variables[name]
             self.variables._variables[name] = (var_type, value, owner, visibility)

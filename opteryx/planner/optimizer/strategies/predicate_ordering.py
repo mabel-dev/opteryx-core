@@ -78,13 +78,34 @@ def _estimate_selectivity(condition):
     return DEFAULT_SELECTIVITY.get(op, 0.5)
 
 
-def _order_complex_predicates(predicates, telemetry):
-    """Order function-containing predicates by estimated catalog cost."""
+def _order_complex_predicates(predicates, telemetry, relation_stats=None):
+    """Order function-containing predicates by selectivity/cost when a
+    predicate's selectivity is estimable, falling back to catalog cost alone
+    otherwise.
+
+    Ranks by the same ``(selectivity - 1.0) / cost`` formula
+    ``cost_estimation.predicate_ordering`` uses for simple predicates, with
+    cost as an explicit secondary key. This is a strict generalization of the
+    previous cost-only sort, not a behavior change for predicates
+    ``estimate_selectivity`` has no model for (e.g. most FUNCTION calls):
+    those resolve to selectivity 1.0, so the primary key ties at 0 for all of
+    them and the secondary (cost) key reproduces the old ``sorted(costs)``
+    order exactly. Only predicates with a real estimator (currently
+    _STARTS_WITH/_CI_STARTS_WITH, bare or AND/NOT-wrapped) move based on
+    actual selectivity.
+    """
     if len(predicates) <= 1:
         return predicates
 
     costs = [_catalog_function_cost(p.condition) for p in predicates]
-    order = sorted(range(len(predicates)), key=lambda i: costs[i])
+    if relation_stats is not None:
+        selectivities = [estimate_selectivity(p.condition, relation_stats) for p in predicates]
+    else:
+        selectivities = [1.0] * len(predicates)
+    order = sorted(
+        range(len(predicates)),
+        key=lambda i: ((selectivities[i] - 1.0) / costs[i], costs[i]),
+    )
     ordered = [predicates[i] for i in order]
 
     if any(predicates[i] is not ordered[i] for i in range(len(ordered))):
@@ -236,7 +257,7 @@ def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:
         simple.append(pred)
 
     ordered_simple = _order_simple_predicates(simple, telemetry, relation_stats)
-    ordered_complex = _order_complex_predicates(complex_preds, telemetry)
+    ordered_complex = _order_complex_predicates(complex_preds, telemetry, relation_stats)
 
     # Maintain original order for complex/function predicates appended after simples
     return ordered_simple + ordered_complex

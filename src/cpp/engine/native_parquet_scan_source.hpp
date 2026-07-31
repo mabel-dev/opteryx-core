@@ -30,9 +30,10 @@
 //   - Fixed-width direct columns: DK_INT64/FLOAT32/FLOAT64/DK_BOOL (dense or
 //     dict-shaped, DK_BOOL dense) plus DK_DECIMAL128 (dense only — rugo's decode
 //     layer has no "dict-encoded DECIMAL128" direct kind; a dictionary-encoded
-//     DECIMAL128 column classifies as DK_POOL and is NOT handled here). The
-//     DK_POOL (list) path is NOT handled here; hitting one sets ErrCtx and stops
-//     the scan rather than guessing.
+//     DECIMAL128 column classifies as DK_POOL and is NOT handled here). A DK_POOL
+//     column is decoded only when the plan flagged what it is (decimal / varchar /
+//     array, below); an unflagged one sets ErrCtx and stops the scan rather than
+//     guessing.
 //   - WP-11: a projected DATE / TIMESTAMP / int64-backed DECIMAL column decodes
 //     physically as int64 (DK_INT64/DICT) or DK_POOL; the plan flags it via
 //     `logical_coerce` (parallel to column_names) and build_column retags it to
@@ -73,6 +74,17 @@
 //     (draken/core/vector_owner.h) instead — any consumer reading a possibly-
 //     long VARCHAR value must resolve the arena from the owning CxxColumn
 //     (`.own->arena_buf.get()`), not assume inline-only.
+//   - R6: ARRAY (parquet LIST) columns ARE handled. A list column always carries
+//     repetition levels, so rugo's direct_kind_for classifies it DK_POOL
+//     unconditionally (there is no direct list kind) and serializes it as
+//     TAG_ARRAY; `array_columns[i]` (parallel to column_names, same convention as
+//     decimal_columns / varchar_columns) is the plan-time flag that routes it to
+//     native_array_pool_decode.hpp — a faithful port of the trampoline's Cython
+//     `_build_array_vector*`. Nested list<list<...>> included. The parent is a
+//     dense DRAKEN_ARRAY of int32 offsets whose VectorOwner::child_owner owns the
+//     element vector. An ARRAY<TIMESTAMP> leaf is retagged via LC_ARRAY_TIMESTAMP
+//     (the trampoline's `vector_retag_array_child_as_timestamp64`). MAP and STRUCT
+//     stay fail-closed at the plan-time gate.
 // Planning (opening files, fetching footers, pruning row groups, sizing the
 // pool) stays exactly where the phase split puts it: Python, done once, before
 // any of this runs — see NativeScanPlan / open_native_scan_plan in pool_reader.pyx.
@@ -94,8 +106,15 @@
 #include "memory_pool.hpp"        // opteryx::MemoryPool
 #include "native_decimal_pool_decode.hpp"  // build_pool_decimal_column
 #include "native_varchar_pool_decode.hpp"  // build_pool_varchar_dict_column
+#include "native_array_pool_decode.hpp"    // build_pool_array_column (R6)
 #include "logical_type.h"                  // LogicalType / logical_type_intern (WP-11 descriptors)
 #include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
+
+// R2 (scan-pushed LIMIT) row truncation. Lives in draken next to the take/slice
+// machinery; resolved at load time from draken_native, the same dynamic-lookup
+// path native_unnest.hpp's cxx_unnest_c uses.
+extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length);
+extern "C" void cxx_morsel_delete(CxxMorsel* m);
 
 namespace opteryx::engine {
 
@@ -103,16 +122,22 @@ namespace opteryx::engine {
 // Mirrors the trampoline scan's `_sp_coerce_ops` exactly, packed into one int so it
 // threads through the existing `vector<int>`-style plan→native channel:
 //   bits [0:4]  kind   0=none 1=decimal(int64-backed) 3=date32 4=timestamp64
+//                       5=array-with-timestamp-element
 //                       (decimal128 is self-describing via DK_DECIMAL128 +
 //                       ColumnOut.dec_* and needs NO entry; parquet TIME is
 //                       decoded as plain INT64 — the binder does not model a TIME
 //                       logical type — so it takes the ordinary int path, not a
 //                       coercion kind)
-//   bits [4:8]  unit   0=s 1=ms 2=us 3=ns  (timestamp only)
+//   bits [4:8]  unit   0=s 1=ms 2=us 3=ns  (timestamp, and array<timestamp>, only)
 //   bits [8:16] precision  (int64-backed decimal only)
 //   bits [16:24] scale      (int64-backed decimal only)
 enum : int {
     LC_NONE = 0, LC_DECIMAL64 = 1, LC_DATE = 3, LC_TIMESTAMP = 4,
+    // R6: ARRAY whose ELEMENT is a TIMESTAMP. The parquet list<timestamp> leaf
+    // decodes as physical int64 and the IPC wire format carries no logical type,
+    // so the child needs the same unit-carrying retag the scalar case gets —
+    // mirroring the trampoline's `_sp_array_ts_unit_map` / op kind 4.
+    LC_ARRAY_TIMESTAMP = 5,
 };
 static inline int lc_kind(int packed)      { return packed & 0xF; }
 static inline int lc_unit(int packed)      { return (packed >> 4) & 0xF; }
@@ -123,6 +148,14 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     std::mutex mtx;
     int next_to_submit = 0;
     int results_received = 0;
+    // R2 (scan-pushed LIMIT): rows already handed downstream, across ALL workers.
+    // Guarded by `mtx` together with the submit/receive counters — the emit
+    // decision and the submit decision must see one consistent view.
+    int64_t rows_emitted = 0;
+    // R2: work-item frontier beyond which no row group can contribute to the
+    // LIMIT (computed once from the footer row counts; == work_items->size()
+    // when unlimited). Read-only after make_global.
+    int submit_cap = 0;
 };
 
 struct NativeParquetScanSource : Source {
@@ -168,6 +201,31 @@ struct NativeParquetScanSource : Source {
     // null/empty → no column keyed → NO sidecar built (the pay-for-use gate; plain
     // SELECT / LIKE / standalone rugo build nothing). See E37 §7.2.
     const std::vector<uint8_t>* hash_key_columns;
+    // R6: same convention as `decimal_columns` / `varchar_columns`, for ARRAY
+    // (parquet LIST) columns — `array_columns[i]` = 1 marks a projected column the
+    // plan knows (from the schema) is an ARRAY, and which therefore ALWAYS lands
+    // DK_POOL: rugo's direct_kind_for classifies any column with repetition levels
+    // as pool-routed, regardless of encoding, and serializes it as TAG_ARRAY. The
+    // flag is what tells this Source which decoder owns that blob; without it the
+    // three pool shapes (decimal / varchar / array) are indistinguishable from the
+    // DirectKind alone. null/empty for every scan with no array columns.
+    const std::vector<uint8_t>* array_columns;
+    // R2: scan-pushed LIMIT — the maximum number of rows this scan may emit in
+    // total, across every worker. -1 == unlimited (every pre-R2 caller).
+    //
+    // This is a CORRECTNESS obligation, not just an I/O optimization: when
+    // LimitPushdownStrategy pushes a LIMIT into a scan it REMOVES the Limit node
+    // from the plan (limit_pushdown.py::_apply_to_scan → remove_node(heal=True)),
+    // so there is no downstream LimitOperator left to truncate. The scan is the
+    // only thing enforcing it — exactly as the trampoline's `_records_to_read`
+    // slice in `_commit_morsel_cxx` already does.
+    //
+    // Pushdown only happens for a scan with NO pushed predicate (limit_pushdown
+    // refuses on `scan_node.predicates`) and no OFFSET, so "the first N rows in
+    // whatever order the row groups complete" is a valid answer — the trampoline
+    // is equally order-nondeterministic at dop>1 (concurrent `_single_pass_next`
+    // pulls commit under `_scan_mtx` in completion order, not file order).
+    int64_t row_limit;
 
     NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
                             const std::unordered_map<std::string, FileStats>* footer_map_,
@@ -179,17 +237,54 @@ struct NativeParquetScanSource : Source {
                             const std::vector<uint8_t>* varchar_columns_ = nullptr,
                             const std::vector<int>* string_types_ = nullptr,
                             const std::vector<int>* logical_coerce_ = nullptr,
-                            const std::vector<uint8_t>* hash_key_columns_ = nullptr)
+                            const std::vector<uint8_t>* hash_key_columns_ = nullptr,
+                            const std::vector<uint8_t>* array_columns_ = nullptr,
+                            int64_t row_limit_ = -1)
         : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
           column_names(column_names_), in_flight_limit(in_flight_limit_),
           pool(pool_), decimal_columns(decimal_columns_), varchar_columns(varchar_columns_),
           string_types(string_types_), logical_coerce(logical_coerce_),
-          hash_key_columns(hash_key_columns_) {}
+          hash_key_columns(hash_key_columns_), array_columns(array_columns_),
+          row_limit(row_limit_) {}
+
+    // R6: is projected column i a plan-flagged ARRAY column?
+    bool is_array_column(size_t i) const {
+        return array_columns != nullptr && i < array_columns->size()
+            && (*array_columns)[i] != 0;
+    }
 
     // E37: does projected column i want its hash seed carried? Default false.
     bool wants_keyhash(size_t i) const {
         return hash_key_columns != nullptr && i < hash_key_columns->size()
             && (*hash_key_columns)[i] != 0;
+    }
+
+    // R2: how many row groups, taken in work-item order, are enough to satisfy
+    // `row_limit`? The footer already carries every row group's exact row count
+    // (RowGroupStats::num_rows), so this is an EXACT plan-time bound, not a
+    // guess — no need to decode a row group to discover it was unnecessary.
+    // Returns work_items->size() when unlimited or when the whole scan is needed.
+    //
+    // Without this, `LIMIT 5` still submits the full prefetch window
+    // (`in_flight_limit`, == workers+2) plus one row group per worker that races
+    // in before the first morsel is emitted — measured 31 row groups for a
+    // LIMIT 5 over tpch_1.lineitem. Capping the frontier here reads exactly the
+    // one row group that can actually contribute.
+    int limit_submit_cap() const {
+        const int n_items = static_cast<int>(work_items->size());
+        if (row_limit < 0 || footer_map == nullptr) return n_items;
+        int64_t cumulative = 0;
+        for (int i = 0; i < n_items; ++i) {
+            auto fit = footer_map->find((*work_items)[i].first);
+            // A path we cannot resolve here is not a place to guess — fall back to
+            // the unbounded frontier and let submit_one fail loud on it.
+            if (fit == footer_map->end()) return n_items;
+            const size_t rg_idx = static_cast<size_t>((*work_items)[i].second);
+            if (rg_idx >= fit->second.row_groups.size()) return n_items;
+            cumulative += fit->second.row_groups[rg_idx].num_rows;
+            if (cumulative >= row_limit) return i + 1;
+        }
+        return n_items;
     }
 
     // Packed coercion plan for projected column i (0 = none).
@@ -209,7 +304,12 @@ struct NativeParquetScanSource : Source {
     }
 
     std::unique_ptr<GlobalSourceState> make_global() override {
-        return std::make_unique<NativeParquetScanGlobal>();
+        auto g = std::make_unique<NativeParquetScanGlobal>();
+        // Computed once, before any worker runs (make_global is called on the
+        // driver thread ahead of the fan-out), so get_morsel never re-walks the
+        // work list under its lock.
+        g->submit_cap = limit_submit_cap();
+        return g;
     }
     std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
         return std::make_unique<LocalSourceState>();
@@ -392,7 +492,29 @@ struct NativeParquetScanSource : Source {
     // logical_type descriptor (draken's own `require_decimal_descriptor` contract).
     bool build_column(rugo::MorselRef& result, size_t i, CxxColumn& out, ErrCtx& err) {
         int dk = result.columns[i].direct_kind;
+        // R6: an ARRAY column has repetition levels, so direct_kind_for routes it
+        // to the pool unconditionally. Anything else means the plan's schema and
+        // the decoded data disagree — a direct-kind buffer read as a list would be
+        // silent garbage, so fail loud instead.
+        if (is_array_column(i) && dk != rugo::DK_POOL) {
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: column planned as ARRAY did not decode "
+                      "to the pool path";
+            return false;
+        }
         if (dk == rugo::DK_POOL) {
+            if (is_array_column(i)) {
+                if (pool == nullptr) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: ARRAY column with no wired MemoryPool";
+                    return false;
+                }
+                const int packed = coerce_for(i);
+                return build_pool_array_column(
+                    pool, result.columns[i].ref_id,
+                    lc_kind(packed) == LC_ARRAY_TIMESTAMP ? 1 : 0,
+                    lc_unit(packed), out, err);
+            }
             bool is_decimal = pool != nullptr && decimal_columns != nullptr &&
                                i < decimal_columns->size() && (*decimal_columns)[i] != 0;
             if (is_decimal) {
@@ -537,13 +659,29 @@ struct NativeParquetScanSource : Source {
                 std::lock_guard<std::mutex> lock(g.mtx);
                 submit_start = g.next_to_submit;
                 submit_end = submit_start;
-                int n_items = static_cast<int>(work_items->size());
-                while (submit_end < n_items &&
+                // R2: the frontier is the footer-derived cap (== work_items->size()
+                // with no LIMIT), so row groups that provably cannot contribute to
+                // the LIMIT are never submitted at all.
+                int n_items = g.submit_cap;
+                // R2: once a scan-pushed LIMIT is satisfied, stop submitting NEW
+                // row-group work. Without this the prefetch window keeps running
+                // ahead (`in_flight_limit` == workers+2 row groups) and decodes
+                // data no one will ever read — on a large file that is the whole
+                // scan, which is precisely what pushing the LIMIT down is for.
+                // Already-submitted work is still drained below: we must not
+                // abandon the pipeline with results outstanding, so the bounded
+                // in-flight window is the (intended, small) overshoot.
+                const bool limit_met = (row_limit >= 0 && g.rows_emitted >= row_limit);
+                while (!limit_met && submit_end < n_items &&
                        (submit_end - g.results_received) < in_flight_limit) {
                     submit_end += 1;
                 }
                 g.next_to_submit = submit_end;
-                if (g.results_received >= n_items) {
+                // Done when every row group we actually submitted has been
+                // accounted for. With no limit `next_to_submit` reaches `n_items`,
+                // so this is identical to the pre-R2 `results_received >= n_items`;
+                // with a limit it also terminates on the frozen submit frontier.
+                if (g.results_received >= g.next_to_submit) {
                     return SourceResult::FINISHED;
                 }
                 g.results_received += 1;
@@ -614,6 +752,34 @@ struct NativeParquetScanSource : Source {
                     return SourceResult::FINISHED;
                 }
                 m->columns.push_back(std::move(col));
+            }
+            // R2: claim this morsel's share of the scan-pushed LIMIT. The claim and
+            // the truncation must be one atomic decision across workers, otherwise
+            // two workers each see "room for 5" and 10 rows escape.
+            if (row_limit >= 0) {
+                const int64_t nrows = static_cast<int64_t>(m->num_rows());
+                int64_t take;
+                {
+                    std::lock_guard<std::mutex> lock(g.mtx);
+                    const int64_t remaining = row_limit - g.rows_emitted;
+                    if (remaining <= 0) continue;  // another worker filled the quota
+                    take = (nrows < remaining) ? nrows : remaining;
+                    g.rows_emitted += take;
+                }
+                if (take < nrows) {
+                    // Keep the first `take` rows. cxx_slice_c resolves from
+                    // draken_native at load time, the same dynamic-lookup path
+                    // native_unnest.hpp's cxx_unnest_c uses.
+                    CxxMorsel* sliced = cxx_slice_c(m.get(), 0u, static_cast<uint32_t>(take));
+                    if (sliced == nullptr) {
+                        err.code = 1;
+                        err.msg = "NativeParquetScanSource: LIMIT slice failed";
+                        return SourceResult::FINISHED;
+                    }
+                    auto sm = std::make_shared<CxxMorsel>(std::move(*sliced));
+                    cxx_morsel_delete(sliced);
+                    m = std::move(sm);
+                }
             }
             out = std::move(m);
             return SourceResult::HAVE_MORE;

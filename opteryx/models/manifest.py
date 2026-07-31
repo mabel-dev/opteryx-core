@@ -415,6 +415,8 @@ class Manifest:
                 null_fraction=null_fraction,
                 class_proportions=char_class_stats[0] if char_class_stats else None,
                 avg_length=char_class_stats[1] if char_class_stats else None,
+                ordinal_bounds=self.get_ordinal_bounds(col_name),
+                length_bounds=self.get_length_bounds(col_name),
             )
         return RelationStatistics(row_count=total_rows, columns=columns)
 
@@ -477,6 +479,108 @@ class Manifest:
 
         avg_length = total_bytes / max(1, non_null_rows)
         return class_proportions, avg_length
+
+    def get_ordinal_bounds(self, column: str) -> Optional[Tuple[int, int]]:
+        """Relation-wide (lo, hi) ordinal-key bounds for `column`, or None.
+
+        Backs the STARTS_WITH ordinal-bounds selectivity estimator tier
+        (opteryx.planner.cost_estimation.selectivity) — a coarser, cheaper
+        fallback than a full histogram: just the overall span, aggregated
+        from each live file's min_values/max_values, no bin-level detail.
+        None when `bounds_are_ordinal` is False (the bounds are real decoded
+        values, not ordinal keys — see __init__'s docstring), the column
+        isn't found, or no file carries a usable bound for it.
+
+        A "usable" bound excludes both `None` (the local ANALYZE path's "not
+        computed" marker — see _analyze_one_file's `min_max = None`) AND any
+        negative value: a genuine ColumnType.ordinalize() key for a
+        string-family column is always >= 0 (draken/ops/ordinalize.h treats
+        the byte prefix as unsigned before the sign-fitting right-shift), so
+        a negative entry can only be a producer's own "no real bound"
+        sentinel (e.g. the catalog manifest builder's NULL_FLAG = -(1<<63)
+        for a column outside its compressible-categories set) smuggled
+        through as a plain int rather than None — never real string data.
+
+        Reads FileEntry.lower_bounds/upper_bounds (the dict form, keyed by
+        the SAME field_id `_resolve_field_id` returns), never min_values/
+        max_values (the list form) directly — that list is positional in
+        whatever order its producer emitted it, NOT indexable by field_id:
+        a catalog-backed FileEntry's field_ids can start above 0 or have
+        gaps (FileEntry.from_datafile re-keys lower_bounds/upper_bounds via
+        `zip(field_ids, min_values)` precisely because of this), so
+        `min_values[field_id]` silently reads a DIFFERENT column's bound
+        when field_id != position. prune_files has the same requirement and
+        already uses the dict form for exactly this reason.
+        """
+        if not self.bounds_are_ordinal:
+            return None
+        field_id = self._resolve_field_id(column)
+        if field_id is None:
+            return None
+
+        lo: Optional[int] = None
+        hi: Optional[int] = None
+        for file_entry in self.files:
+            lower_bounds = file_entry.lower_bounds
+            upper_bounds = file_entry.upper_bounds
+            if not lower_bounds or not upper_bounds:
+                continue
+            v_min = lower_bounds.get(field_id)
+            v_max = upper_bounds.get(field_id)
+            if v_min is None or v_max is None or v_min < 0 or v_max < 0:
+                continue
+            lo = v_min if lo is None else min(lo, v_min)
+            hi = v_max if hi is None else max(hi, v_max)
+
+        if lo is None or hi is None:
+            return None
+        return lo, hi
+
+    def get_length_bounds(self, column: str) -> Optional[Tuple[int, int]]:
+        """Relation-wide (min_length, max_length) in bytes for `column`, or None.
+
+        Backs the length-aware hard-impossibility guard shared by the
+        containment-style selectivity estimators (STARTS_WITH, INSTR,
+        ENDS_WITH — opteryx.planner.cost_estimation.selectivity): a needle
+        longer than the column's observed maximum length can never match, a
+        cheap, certain check with no probabilistic reasoning needed. No
+        `bounds_are_ordinal` gate here (unlike get_ordinal_bounds) — a
+        string's byte length is never ordinal-encoded, it's always a plain
+        integer regardless of how the value bounds are stored.
+
+        Excludes non-positive bounds (`<= 0`), not just `None`: the catalog's
+        stats builder initializes min_len/max_len to 0 and only overwrites
+        them if the file has a non-null value for the column, so `0` is
+        ambiguous between "no data computed for this file" and "a genuinely
+        empty string" — treating it as a real bound risks a false-positive
+        "impossible" verdict for a column that simply has no stats yet.
+
+        Reads FileEntry.min_length_bounds/max_length_bounds (the field_id-
+        correct dict form), never the positional min_lengths/max_lengths
+        list — same field_id-vs-position requirement get_ordinal_bounds has,
+        see that method's docstring for the full reasoning.
+        """
+        field_id = self._resolve_field_id(column)
+        if field_id is None:
+            return None
+
+        lo: Optional[int] = None
+        hi: Optional[int] = None
+        for file_entry in self.files:
+            min_length_bounds = file_entry.min_length_bounds
+            max_length_bounds = file_entry.max_length_bounds
+            if not min_length_bounds or not max_length_bounds:
+                continue
+            v_min = min_length_bounds.get(field_id)
+            v_max = max_length_bounds.get(field_id)
+            if v_min is None or v_max is None or v_min <= 0 or v_max <= 0:
+                continue
+            lo = v_min if lo is None else min(lo, v_min)
+            hi = v_max if hi is None else max(hi, v_max)
+
+        if lo is None or hi is None:
+            return None
+        return lo, hi
 
     # ================================================================
     # Histograms / Distograms

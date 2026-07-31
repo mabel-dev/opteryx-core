@@ -338,3 +338,220 @@ def test_unsupported_ordinalize_type_skips_pruning_without_crashing():
     # Can't safely ordinalize a TIMESTAMP literal at this entry point — the
     # predicate is skipped (file kept), not used to wrongly prune or crash.
     assert len(manifest.files) == 1
+
+
+# ---------------------------------------------------------------------------
+# Manifest.get_ordinal_bounds — backs the STARTS_WITH ordinal-bounds
+# selectivity estimator tier. field_id is the trap: a catalog-backed dataset
+# assigns real, non-positional field_ids (observed live: insert_id=1,
+# labels=2, log_name=3, receive_timestamp=4, ...) and FileEntry.min_values/
+# max_values are a PLAIN POSITIONAL list (0-indexed by load-time schema
+# order), never indexable by field_id directly — only lower_bounds/
+# upper_bounds (the dict form) are correctly re-keyed by real field_id. Using
+# `min_values[field_id]` instead of `lower_bounds.get(field_id)` silently
+# reads a DIFFERENT column's bound whenever field_id != position — this is
+# exactly the bug this section pins down.
+# ---------------------------------------------------------------------------
+
+
+def _multi_col_schema(*, names_and_field_ids):
+    return RelationSchema(
+        name="t",
+        columns=[
+            SchemaColumn(
+                name=name,
+                column_type=VARCHAR,
+                identity=mint_column_identity("t", name),
+                field_id=field_id,
+            )
+            for name, field_id in names_and_field_ids
+        ],
+    )
+
+
+def _bounded_file_entry(bounds: dict, record_count: int = 10):
+    """A FileEntry whose lower_bounds/upper_bounds dict is keyed by the field_ids
+    given in `bounds` (``{field_id: (lower, upper)}``) — the dict form catalog
+    FileEntry.from_datafile produces via ``zip(field_ids, min_values)``, i.e.
+    what Manifest.get_ordinal_bounds must read, not the positional list."""
+    return FileEntry(
+        file_path="f1",
+        file_format="PARQUET",
+        record_count=record_count,
+        file_size_in_bytes=0,
+        lower_bounds={fid: lo for fid, (lo, _hi) in bounds.items()},
+        upper_bounds={fid: hi for fid, (_lo, hi) in bounds.items()},
+    )
+
+
+def test_get_ordinal_bounds_uses_real_field_id_not_position():
+    # Three columns; field_ids deliberately offset/non-sequential from
+    # position, mirroring the live catalog schema that exposed this bug
+    # (log_name at POSITION 1 but real field_id 3).
+    schema = _multi_col_schema(
+        names_and_field_ids=[("a", 1), ("log_name", 3), ("c", 4)]
+    )
+    entry = _bounded_file_entry(
+        {
+            1: (VARCHAR.ordinalize("aaa"), VARCHAR.ordinalize("azz")),
+            3: (VARCHAR.ordinalize("log-alpha"), VARCHAR.ordinalize("log-omega")),
+            4: (VARCHAR.ordinalize("ccc"), VARCHAR.ordinalize("czz")),
+        }
+    )
+    manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
+
+    bounds = manifest.get_ordinal_bounds("log_name")
+
+    assert bounds == (VARCHAR.ordinalize("log-alpha"), VARCHAR.ordinalize("log-omega"))
+    # Not column "a"'s or "c"'s bounds — the exact failure mode of indexing
+    # min_values[field_id] against a 0-indexed positional list.
+    assert bounds != (VARCHAR.ordinalize("aaa"), VARCHAR.ordinalize("azz"))
+    assert bounds != (VARCHAR.ordinalize("ccc"), VARCHAR.ordinalize("czz"))
+
+
+def test_get_ordinal_bounds_aggregates_across_files():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    lo1, hi1 = VARCHAR.ordinalize("mango"), VARCHAR.ordinalize("peach")
+    lo2, hi2 = VARCHAR.ordinalize("apple"), VARCHAR.ordinalize("kiwi")
+    entries = [
+        _bounded_file_entry({0: (lo1, hi1)}),
+        _bounded_file_entry({0: (lo2, hi2)}),
+    ]
+    manifest = Manifest(files=entries, schema=schema, bounds_are_ordinal=True)
+
+    assert manifest.get_ordinal_bounds("value") == (min(lo1, lo2), max(hi1, hi2))
+
+
+def test_get_ordinal_bounds_excludes_negative_sentinel():
+    # A negative bound can only be a producer's own "no real bound" sentinel
+    # (e.g. the catalog manifest builder's NULL_FLAG = -(1<<63) for a column
+    # outside its compressible-categories set) — never a genuine
+    # string-family ordinal key (draken/ops/ordinalize.h's byte-prefix
+    # transform is always non-negative). A file carrying only the sentinel
+    # must not corrupt the aggregate with it.
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    real_lo, real_hi = VARCHAR.ordinalize("mango"), VARCHAR.ordinalize("peach")
+    entries = [
+        _bounded_file_entry({0: (-(1 << 63), -(1 << 63))}),  # sentinel-only file
+        _bounded_file_entry({0: (real_lo, real_hi)}),
+    ]
+    manifest = Manifest(files=entries, schema=schema, bounds_are_ordinal=True)
+
+    assert manifest.get_ordinal_bounds("value") == (real_lo, real_hi)
+
+
+def test_get_ordinal_bounds_all_sentinel_returns_none():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entry = _bounded_file_entry({0: (-(1 << 63), -(1 << 63))})
+    manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
+
+    assert manifest.get_ordinal_bounds("value") is None
+
+
+def test_get_ordinal_bounds_none_when_bounds_not_ordinal():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entry = _bounded_file_entry({0: (10, 20)})
+    manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=False)
+
+    assert manifest.get_ordinal_bounds("value") is None
+
+
+def test_get_ordinal_bounds_none_for_unknown_column():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entry = _bounded_file_entry({0: (10, 20)})
+    manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
+
+    assert manifest.get_ordinal_bounds("missing") is None
+
+
+# ---------------------------------------------------------------------------
+# Manifest.get_length_bounds — backs the length-aware hard-impossibility
+# guard shared by STARTS_WITH/INSTR/ENDS_WITH selectivity estimation. Same
+# field_id-vs-position trap as get_ordinal_bounds: FileEntry.min_lengths/
+# max_lengths (the plain list) is positional by write order, never indexable
+# by real field_id — only min_length_bounds/max_length_bounds (the dict form
+# FileEntry.from_datafile now builds via zip(field_ids, min_lengths)) is
+# field_id-correct. No bounds_are_ordinal gate (lengths are plain integers
+# regardless); non-positive bounds are excluded instead (0 is ambiguous
+# between "no data" and "genuinely empty string" — see get_length_bounds'
+# own docstring).
+# ---------------------------------------------------------------------------
+
+
+def _length_bounded_file_entry(bounds: dict, record_count: int = 10):
+    """A FileEntry whose min_length_bounds/max_length_bounds dict is keyed by
+    the field_ids given in `bounds` (``{field_id: (min_len, max_len)}``)."""
+    return FileEntry(
+        file_path="f1",
+        file_format="PARQUET",
+        record_count=record_count,
+        file_size_in_bytes=0,
+        min_length_bounds={fid: lo for fid, (lo, _hi) in bounds.items()},
+        max_length_bounds={fid: hi for fid, (_lo, hi) in bounds.items()},
+    )
+
+
+def test_get_length_bounds_uses_real_field_id_not_position():
+    schema = _multi_col_schema(names_and_field_ids=[("a", 1), ("log_name", 3), ("c", 4)])
+    entry = _length_bounded_file_entry({1: (2, 5), 3: (40, 60), 4: (7, 9)})
+    manifest = Manifest(files=[entry], schema=schema)
+
+    bounds = manifest.get_length_bounds("log_name")
+
+    assert bounds == (40, 60)
+    assert bounds != (2, 5)
+    assert bounds != (7, 9)
+
+
+def test_get_length_bounds_aggregates_across_files():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entries = [
+        _length_bounded_file_entry({0: (10, 25)}),
+        _length_bounded_file_entry({0: (5, 30)}),
+    ]
+    manifest = Manifest(files=entries, schema=schema)
+
+    assert manifest.get_length_bounds("value") == (5, 30)
+
+
+def test_get_length_bounds_excludes_non_positive_values():
+    # 0 is the catalog's "no data computed for this file" default (min_len =
+    # max_len = 0, only overwritten when the file has a non-null value) --
+    # ambiguous with a genuinely empty string, so treated as no signal, not
+    # a real bound of 0.
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entries = [
+        _length_bounded_file_entry({0: (0, 0)}),  # no-data-computed file
+        _length_bounded_file_entry({0: (8, 12)}),
+    ]
+    manifest = Manifest(files=entries, schema=schema)
+
+    assert manifest.get_length_bounds("value") == (8, 12)
+
+
+def test_get_length_bounds_all_non_positive_returns_none():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entry = _length_bounded_file_entry({0: (0, 0)})
+    manifest = Manifest(files=[entry], schema=schema)
+
+    assert manifest.get_length_bounds("value") is None
+
+
+def test_get_length_bounds_does_not_require_bounds_are_ordinal():
+    # Unlike get_ordinal_bounds, lengths are never ordinal-encoded -- must
+    # work identically regardless of bounds_are_ordinal.
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entry = _length_bounded_file_entry({0: (8, 12)})
+    manifest_ordinal = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
+    manifest_real = Manifest(files=[entry], schema=schema, bounds_are_ordinal=False)
+
+    assert manifest_ordinal.get_length_bounds("value") == (8, 12)
+    assert manifest_real.get_length_bounds("value") == (8, 12)
+
+
+def test_get_length_bounds_none_for_unknown_column():
+    schema = _multi_col_schema(names_and_field_ids=[("value", 0)])
+    entry = _length_bounded_file_entry({0: (8, 12)})
+    manifest = Manifest(files=[entry], schema=schema)
+
+    assert manifest.get_length_bounds("missing") is None

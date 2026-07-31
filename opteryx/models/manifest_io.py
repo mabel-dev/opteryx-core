@@ -342,6 +342,14 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
         max_values = columns["max_values"][i] or []
         lower_bounds = {j: v for j, v in enumerate(min_values) if v is not None} or None
         upper_bounds = {j: v for j, v in enumerate(max_values) if v is not None} or None
+        min_lengths = columns["min_lengths"][i] or []
+        max_lengths = columns["max_lengths"][i] or []
+        # Field_id-correct dict form alongside the positional min_lengths/
+        # max_lengths list below -- same reasoning as lower_bounds/upper_bounds
+        # above. Local field_id == position (this manifest's own producer,
+        # ANALYZE, writes it that way), so plain enumerate() is correct here.
+        min_length_bounds = {j: v for j, v in enumerate(min_lengths) if v is not None} or None
+        max_length_bounds = {j: v for j, v in enumerate(max_lengths) if v is not None} or None
         entries.append(
             FileEntry(
                 file_path=columns["file_path"][i],
@@ -356,8 +364,10 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
                 column_uncompressed_sizes_in_bytes=columns["column_uncompressed_sizes_in_bytes"][i]
                 or None,
                 null_counts=columns["null_counts"][i] or None,
-                min_lengths=columns["min_lengths"][i] or None,
-                max_lengths=columns["max_lengths"][i] or None,
+                min_lengths=min_lengths or None,
+                max_lengths=max_lengths or None,
+                min_length_bounds=min_length_bounds,
+                max_length_bounds=max_length_bounds,
                 char_total_bytes=columns["char_total_bytes"][i] or None,
             )
         )

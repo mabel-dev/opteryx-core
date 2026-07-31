@@ -1908,13 +1908,19 @@ struct GroupByGlobal : GlobalSinkState {
 
 struct GroupBySink : Sink {
     std::vector<size_t> key_idx;
+    std::vector<std::string> key_names;   // identity per key_idx entry — CxxMorsel::names
+                                           // requires one entry per column (see cxx_morsel.h);
+                                           // this sink is the one output producer that didn't
+                                           // carry them, which stayed invisible until
+                                           // cxx_unnest's drop_source path indexed into it.
     std::vector<AggSpec2> specs;
     MorselBuffer* out;
     size_t chunk_rows;
 
-    GroupBySink(std::vector<size_t> keys, std::vector<AggSpec2> s, MorselBuffer* b,
-                size_t chunk = 131072)
-        : key_idx(std::move(keys)), specs(std::move(s)), out(b), chunk_rows(chunk) {}
+    GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
+                std::vector<AggSpec2> s, MorselBuffer* b, size_t chunk = 131072)
+        : key_idx(std::move(keys)), key_names(std::move(knames)), specs(std::move(s)),
+          out(b), chunk_rows(chunk) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GroupByGlobal>();
@@ -2631,6 +2637,7 @@ struct GroupBySink : Sink {
             for (size_t k = 0; k < merged.keycols.size(); ++k) {
                 m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
                 if (err.code != 0) return;
+                m->names.push_back(key_names[k]);
             }
             for (size_t s = 0; s < nspecs; ++s) {
                 GBKind kind = g.kinds[s];
@@ -2663,6 +2670,7 @@ struct GroupBySink : Sink {
                 }
                 m->columns.push_back(emit_lane_column(g.meta[s], kind, lv, n, err));
                 if (err.code != 0) return;
+                m->names.push_back(specs[s].name);
             }
             out_morsels.push_back(std::move(m));
         }

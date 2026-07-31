@@ -49,6 +49,16 @@ class TableManagementNode(BasePlanNode):
     def config(self):  # pragma: no cover - simple string
         return f"{self.action} {self.table_name}"
 
+    @property
+    def _author(self):
+        """The session user this operation is attributed to, or None when
+        unauthenticated. None is passed through rather than substituted, so a
+        store that requires attribution rejects the write instead of recording
+        an invented identity (same contract as Insert/RelationManagement)."""
+        from opteryx.variables import resolve
+
+        return resolve("external_user", self.properties.variables, None) or None
+
     def __call__(self, morsel=None, **kwargs) -> NonTabularResult:
         # Perform the action and return a NonTabularResult object
 
@@ -58,7 +68,7 @@ class TableManagementNode(BasePlanNode):
 
             connector = connector_factory(self.table_name, telemetry=self.telemetry)
             table_engine = connector.table_engine(self.table_name, telemetry=self.telemetry)
-            written = analyze_table(table_engine, self.columns)
+            written = analyze_table(table_engine, self.columns, author=self._author)
             return NonTabularResult(record_count=written, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_statistics":

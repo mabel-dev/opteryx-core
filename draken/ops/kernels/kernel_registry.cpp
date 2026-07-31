@@ -348,6 +348,14 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_date32_to_timestamp", (kernel_fn_t)&draken_cast_date32_to_timestamp},
     {"draken_cast_timestamp_rescale", (kernel_fn_t)&draken_cast_timestamp_rescale},
     {"draken_cast_float_to_decimal", (kernel_fn_t)&draken_cast_float_to_decimal},
+    // DECIMAL → DECIMAL rescale, keyed on the SOURCE tier; the target tier rides in
+    // the ctx precision. Both scales come from the ctx (the vector carries neither).
+    {"draken_cast_decimal_to_decimal", (kernel_fn_t)&draken_cast_decimal_to_decimal},
+    {"draken_cast_decimal128_to_decimal", (kernel_fn_t)&draken_cast_decimal128_to_decimal},
+    // INTEGER → DECIMAL, keyed on the source width; target tier from the ctx precision.
+    {"draken_cast_int64_to_decimal", (kernel_fn_t)&draken_cast_int64_to_decimal},
+    {"draken_cast_integer_to_decimal", (kernel_fn_t)&draken_cast_integer_to_decimal},
+    {"draken_cast_uint_to_decimal", (kernel_fn_t)&draken_cast_uint_to_decimal},
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},
     {"draken_cast_timestamp_to_string", (kernel_fn_t)&draken_cast_timestamp_to_string},

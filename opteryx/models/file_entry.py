@@ -52,6 +52,18 @@ class FileEntry:
     null_counts: Optional[List[Optional[int]]] = None
     min_lengths: Optional[List[Optional[int]]] = None
     max_lengths: Optional[List[Optional[int]]] = None
+    # Field_id-correct dict form of min_lengths/max_lengths (mirrors
+    # lower_bounds/upper_bounds alongside min_values/max_values above) — the
+    # positional list form is NOT safely indexable by a real catalog field_id
+    # (it's positional by write order, parallel to a separate field_ids list;
+    # see the exact bug this fixed: Manifest.get_ordinal_bounds indexing
+    # min_values[field_id] directly silently read a different column's
+    # bound). Populated by from_datafile (catalog path, field_id-keyed via
+    # zip(field_ids, min_lengths)) and manifest_io.read_manifest_file_entries
+    # (local path, positionally-keyed via enumerate() since local field_id
+    # == position). None where neither producer has touched a column.
+    min_length_bounds: Optional[Dict[int, int]] = None
+    max_length_bounds: Optional[Dict[int, int]] = None
     # Total string byte count per column (string-family columns only; None
     # elsewhere) — the numerator half of avg_length = char_total_bytes /
     # true_non_null_count, computed at read time from the now-real null_counts.
@@ -132,8 +144,53 @@ class FileEntry:
             elif max_values and isinstance(max_values, list):
                 upper_bounds = {i: val for i, val in enumerate(max_values) if val is not None}
 
+            # Same field_id-vs-position treatment for string lengths — the
+            # catalog's ParquetManifestEntry.to_dict() carries "min_lengths"/
+            # "max_lengths" as positional lists parallel to field_ids, exactly
+            # like min_values/max_values (verified against the installed
+            # opteryx_catalog package). Prior to this, from_datafile silently
+            # dropped these entirely (min_length_bounds/max_length_bounds
+            # were never set), so the length-aware selectivity guards had no
+            # signal at all for catalog-backed datasets.
+            min_lengths = entry.get("min_lengths")
+            max_lengths = entry.get("max_lengths")
+            min_length_bounds = None
+            max_length_bounds = None
+            if (
+                field_ids
+                and isinstance(field_ids, list)
+                and isinstance(min_lengths, list)
+                and len(field_ids) == len(min_lengths)
+            ):
+                min_length_bounds = {
+                    fid: val
+                    for fid, val in zip(field_ids, min_lengths)
+                    if fid is not None and val is not None
+                }
+            elif min_lengths and isinstance(min_lengths, list):
+                min_length_bounds = {i: val for i, val in enumerate(min_lengths) if val is not None}
+
+            if (
+                field_ids
+                and isinstance(field_ids, list)
+                and isinstance(max_lengths, list)
+                and len(field_ids) == len(max_lengths)
+            ):
+                max_length_bounds = {
+                    fid: val
+                    for fid, val in zip(field_ids, max_lengths)
+                    if fid is not None and val is not None
+                }
+            elif max_lengths and isinstance(max_lengths, list):
+                max_length_bounds = {i: val for i, val in enumerate(max_lengths) if val is not None}
+
         else:
-            # Fallback: try direct attribute access
+            # Fallback: try direct attribute access. No known producer of this
+            # shape carries string-length stats, so length_bounds stay None —
+            # the length-aware selectivity guards degrade to "no signal" here,
+            # same as any other FileEntry no stats pass has touched.
+            min_length_bounds = None
+            max_length_bounds = None
             file_path = getattr(datafile, "file_path", None)
             record_count = getattr(datafile, "record_count", 0)
             file_size = getattr(datafile, "file_size_in_bytes", 0)
@@ -177,6 +234,8 @@ class FileEntry:
             column_uncompressed_sizes_in_bytes=column_uncompressed_sizes,
             min_values=min_values,
             max_values=max_values,
+            min_length_bounds=min_length_bounds,
+            max_length_bounds=max_length_bounds,
         )
 
     def to_dict(self) -> dict:

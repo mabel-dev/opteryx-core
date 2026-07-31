@@ -57,12 +57,20 @@ test_cases = [
     ("SELECT * FROM $planets", {"$planets": [[("name", "Eq", "Earth"), ("id", "Eq", 4)], [("id", "Gt", 7)]]}, (2, 20)),
     ("SELECT * FROM $planets", {"$planets": [[("id", "Eq", 4)], [("name", "Like", "M%")]]}, (2, 20)),
 
-    ("SELECT * FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId", {"$planets": [("id", "Eq", 3)]}, (1, 28)),
-    ("SELECT * FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId", {"$planets": [("id", "Gt", 3)], "testdata.satellites": [("id", "Lt", 10)]}, (12, 28)),
-    ("SELECT * FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId",  {}, (179, 28)),
-    ("SELECT * FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId",  {"testdata.satellites": [("id", "Lt", 4)]}, (10, 28)),
+    # Joins. These project QUALIFIED columns rather than `SELECT *`: planets and
+    # satellites share `id`/`name`/`density`, and a result carrying two columns with
+    # the same output name is rejected by design (AmbiguousIdentifierError, raised in
+    # opteryx/operators/exit/exit.pyx — callers must qualify or alias). These cases
+    # were written before that decision and still expected the 28-/40-column
+    # `SELECT *` results. What they exist to pin is the ROW COUNT — that a visibility
+    # filter attaches to the right relation and survives each join type — and those
+    # counts are unchanged from the originals.
+    ("SELECT p.id, s.id AS satellite_id FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId", {"$planets": [("id", "Eq", 3)]}, (1, 2)),
+    ("SELECT p.id, s.id AS satellite_id FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId", {"$planets": [("id", "Gt", 3)], "testdata.satellites": [("id", "Lt", 10)]}, (12, 2)),
+    ("SELECT p.id, s.id AS satellite_id FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId",  {}, (179, 2)),
+    ("SELECT p.id, s.id AS satellite_id FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId",  {"testdata.satellites": [("id", "Lt", 4)]}, (10, 2)),
 
-    ("SELECT * FROM $planets p1 JOIN $planets p2 ON p1.id = p2.id", {"$planets": [("id", "Gt", 3)], "p2": [("name", "NotEq", "X")]}, (6, 40)),
+    ("SELECT p1.id, p2.id AS id2 FROM $planets p1 JOIN $planets p2 ON p1.id = p2.id", {"$planets": [("id", "Gt", 3)], "p2": [("name", "NotEq", "X")]}, (6, 2)),
 
     ("SELECT * FROM $planets WHERE id = 4", {"$planets": [("id", "Eq", 4)]}, (1, 20)),
     ("SELECT * FROM $planets WHERE name = 'Mars'", {"$planets": [("name", "Eq", "Mars")]}, (1, 20)),
@@ -86,7 +94,8 @@ test_cases = [
     ("SELECT * FROM $planets WHERE id IN (3,4)", {"$planets": [("id", "NotEq", 4)]}, (1, 20)),  # only id=3 remains
     ("SELECT * FROM $planets WHERE id = 4", {"$planets": [("id", "NotEq", 4)]}, (0, 20)),
     ("SELECT * FROM $planets WHERE id = 4", {"$planets": [[("id", "Eq", 4)], [("id", "Eq", 5)]]}, (1, 20)),  # SQL restricts
-    ("SELECT * FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.id = 4", {"testdata.satellites": [("id", "Gt", 5)]}, (0, 28)),
+    # Qualified projection for the same reason as the join block above.
+    ("SELECT p.id, s.id AS satellite_id FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.id = 4", {"testdata.satellites": [("id", "Gt", 5)]}, (0, 2)),
 
     # double list brackets
     ("SELECT * FROM $planets WHERE name LIKE 'M%'", {"$planets": [[("name", "Like", "M%")]]}, (2, 20)),

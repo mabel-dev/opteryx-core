@@ -76,15 +76,19 @@ static inline const DrakenVector* cxx_column_child_vec(const CxxMorsel* m,
 }
 
 // Approximate in-memory footprint (bytes) of a morsel: the sum of each column
-// view's real owned payload (draken_vector_nbytes — fixed data, string arena, and
-// validity). The C++-substrate twin of Morsel.nbytes; both count only the top-level
-// column views, so DRAKEN_ARRAY children are under-counted identically on both
-// paths (see draken_vector_nbytes in buffers.h). nogil-safe: pure field reads.
+// view's real owned payload (draken_vector_nbytes — offsets/fixed data, string
+// arena, and validity), PLUS -- for DRAKEN_ARRAY columns -- the owned child
+// subtree (draken_vector_owner_nbytes, recursing through nested arrays via
+// c.own->child_owner; unreachable from c.view alone, see buffers.h). The
+// C++-substrate twin of Morsel.nbytes; both now do the same array-aware
+// accounting. nogil-safe: pure field reads, no allocation.
 static inline size_t cxx_morsel_nbytes(const CxxMorsel* m) noexcept {
     if (m == nullptr) return 0u;
     size_t total = 0u;
     for (const CxxColumn& c : m->columns) {
         total += draken_vector_nbytes(&c.view);
+        if (c.view.type == DRAKEN_ARRAY && c.own && c.own->child_owner)
+            total += draken_vector_owner_nbytes(c.own->child_owner.get());
         // E37: carried key-hash seed buffer (one uint64 per data-element) is
         // owner-held, invisible to the view-only draken_vector_nbytes, so add it
         // here to keep the morsel footprint (and the OOM guard) honest.

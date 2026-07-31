@@ -114,9 +114,12 @@ __all__ = (
     "OpteryxConnector",
     "OpteryxTable",
     "FileSystemConnector",
+    "MabelConnector",
     # Factory functions for filesystem connectors
     "create_local_connector",
     "create_gcs_connector",
+    "create_local_mabel_connector",
+    "create_gcs_mabel_connector",
     # Utilities
     "set_default_connector",
     "TableType",
@@ -333,6 +336,18 @@ def __getattr__(connector_name: str):
         from opteryx.connectors.local_store_connector import LocalStoreConnector
 
         return LocalStoreConnector
+    if connector_name == "MabelConnector":
+        from opteryx.connectors.mabel_connector import MabelConnector
+
+        return MabelConnector
+    if connector_name == "create_local_mabel_connector":
+        from opteryx.connectors.mabel_connector import create_local_mabel_connector
+
+        return create_local_mabel_connector
+    if connector_name == "create_gcs_mabel_connector":
+        from opteryx.connectors.mabel_connector import create_gcs_mabel_connector
+
+        return create_gcs_mabel_connector
     if connector_name == "GcpCloudStorageConnector":
         # Return FileSystemConnector with GCS filesystem
         return create_gcs_connector

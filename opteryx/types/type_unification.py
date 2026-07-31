@@ -21,13 +21,19 @@ cases (VECTOR results of arithmetic, unknown ops) raise rather than guess.
 
 from __future__ import annotations
 
+import decimal as _decimal
+
 from draken.draken_native import DrakenType
 
 from opteryx.types import logical_type as lt
 from opteryx.types.logical_type import ColumnType
 from opteryx.types.logical_type import LogicalCategory
 
-__all__ = ["compute_result_logical_type"]
+__all__ = ["NOT_LITERAL", "compute_result_logical_type", "compute_selection_result_type"]
+
+# Sentinel for "this branch is not a literal" — `None` cannot serve, it is a
+# legitimate literal value (a typed NULL).
+NOT_LITERAL = object()
 
 
 # Integer width ordering (matches Draken's enum-ordinal width logic for signed ints).
@@ -149,6 +155,89 @@ def _decimal_result(left: ColumnType, right: ColumnType, op: str) -> ColumnType:
     else:
         raise NotImplementedError(f"no DECIMAL result rule for operator {op!r}")
     return _make_decimal(precision, scale)
+
+
+def _selection_branch_ps(ct: ColumnType, literal) -> tuple:
+    """(precision, scale) a single CASE/IIF branch's values need.
+
+    A LITERAL is sized by its own magnitude, not by the width of the type the parser
+    handed it: `ELSE 0` needs ONE digit, not INT64's nineteen, and `ELSE 0.00` needs
+    three, not the DECIMAL(38, 18) the bare-decimal default (Decision F) gives it.
+    Sizing literals by their declared type is exactly what pushed an ordinary
+    `CASE WHEN ... THEN decimal_col ELSE 0 END` over the int64 tier.
+
+    A non-literal is sized by its declared type — that is all we know about it.
+    """
+    if literal is not NOT_LITERAL and literal is not None and not isinstance(literal, bool):
+        if isinstance(literal, int):
+            digits = len(str(abs(literal)))
+            return digits, 0
+        sign, digits_tuple, exponent = _decimal_as_tuple(literal)
+        if sign is not None:
+            scale = -exponent if exponent < 0 else 0
+            # An exponent > 0 (e.g. Decimal('1E+3')) means digits ABOVE the last
+            # stored digit; count them into the precision or the value won't fit.
+            precision = len(digits_tuple) + (exponent if exponent > 0 else 0)
+            return max(precision, scale), scale
+    return _decimal_ps(ct)
+
+
+def _decimal_as_tuple(value):
+    """`Decimal.as_tuple()` for a finite Decimal; `(None, (), 0)` for anything else.
+
+    A literal reaching here is any Python scalar the parser produced, so the type
+    test lives here rather than at each call site. A non-finite Decimal's exponent is
+    a string ('n'/'N'/'F') — those fall back to declared-type sizing.
+    """
+    if not isinstance(value, _decimal.Decimal):
+        return None, (), 0
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        return None, (), 0
+    return sign, digits, exponent
+
+
+def compute_selection_result_type(branches) -> "ColumnType | None":
+    """Result ColumnType for a SELECTION over `branches` — CASE, and anything else
+    that RETURNS one branch's value unchanged rather than combining them.
+
+    `branches` is a sequence of `(ColumnType, literal_value_or_NOT_LITERAL)`.
+
+    Binary-op promotion is the wrong rule here, and using it is a real bug:
+    `compute_result_logical_type(..., "Plus", ...)` grows precision to hold `a + b`,
+    but a CASE never adds anything — it hands back one branch verbatim. The result
+    only has to REPRESENT each branch, so:
+
+        scale     = max(branch scales)
+        precision = max(branch integer digits) + scale
+
+    Additive promotion inflated `DECIMAL(15, 2)` blended with `0` to `DECIMAL(22, 2)`
+    — across the int64/int128 tier boundary, for no representational reason.
+
+    Returns None for anything that is not an all-DECIMAL/INTEGER mix containing at
+    least one DECIMAL; the caller keeps `find_compatible_type` for those (strings,
+    temporals, and the FLOAT mix, whose rules are not this function's business).
+
+    Precision past 38 clamps (`_make_decimal`) rather than raising, matching the rest
+    of the module: the declared headroom is rarely filled, and a value that genuinely
+    does not fit fails loud in the cast kernel at execute time.
+    """
+    items = list(branches)
+    if len(items) < 2:
+        return None
+    categories = [ct.category for ct, _ in items]
+    if LogicalCategory.DECIMAL not in categories:
+        return None
+    if any(c not in (LogicalCategory.DECIMAL, LogicalCategory.INTEGER) for c in categories):
+        return None
+
+    scale = 0
+    int_digits = 0
+    for ct, literal in items:
+        p, s = _selection_branch_ps(ct, literal)
+        scale = max(scale, s)
+        int_digits = max(int_digits, p - s)
+    return _make_decimal(int_digits + scale, scale)
 
 
 def _int_result_type(left: ColumnType, right: ColumnType) -> ColumnType:

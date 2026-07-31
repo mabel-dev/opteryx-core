@@ -51,8 +51,7 @@ def assert_scan_native(sql):
 @pytest.mark.parametrize("expected_reason,sql", list(census.HAND_SET.items()))
 def test_residual_reason_reachable(expected_reason, sql):
     """Each canonical query forces exactly its guard and tags the matching reason.
-    `non_admissible_kind` carries a `:<DrakenType>` suffix (ARRAY → :NONE), so match
-    on the prefix."""
+    A reason may carry a `:<detail>` suffix, so match on the prefix."""
     sources, reasons, err = census.scan_residuals(sql)
     assert err is None, f"query raised: {err}"
     assert set(sources.values()) == {"StreamingScanSource"}, (
@@ -92,12 +91,23 @@ def test_native_scan_records_no_residual():
 # regression on Q24 (losing the trampoline's two-pass late-mat decode-skip on
 # a wide SELECT * over a selective predicate). HAND_SET["fused_topn"] is now
 # that composed-shape trigger, so it stays in the open frontier below.
+#
+# `pushed_limit` (R2) is CLOSED: NativeParquetScanSource enforces a scan-pushed
+# LIMIT natively (see test_pushed_limit_now_native below), so it is no longer a
+# reachable residual and has left both this list and HAND_SET.
+#
+# `bool_predicate_input` (R5) is CLOSED: draken_compare_dv now has a DRAKEN_BOOL
+# branch (see test_bool_predicate_input_now_native below), so a BOOL predicate
+# input is admitted natively and the reason code has left this list and HAND_SET.
+#
+# `non_admissible_kind` (R6) is CLOSED: ARRAY was the only kind it was ever
+# observed with, and ARRAY now decodes natively (see test_array_column_now_native
+# below). The reason code has no reachable SQL trigger left, so it has left this
+# list and HAND_SET — see the retirement note in dev/native_residual_census.py for
+# what stays behind the guard defensively.
 _OPEN_CATEGORIES = [
-    ("pushed_limit", census.HAND_SET["pushed_limit"]),
     ("fused_topn", census.HAND_SET["fused_topn"]),
     ("unlowerable_predicate", census.HAND_SET["unlowerable_predicate"]),
-    ("bool_predicate_input", census.HAND_SET["bool_predicate_input"]),
-    ("non_admissible_kind", census.HAND_SET["non_admissible_kind"]),
 ]
 
 
@@ -162,6 +172,329 @@ def test_unsigned_predicate_input_now_native(sql):
     assert err is None, f"query raised: {err}"
     assert set(sources.values()) == {"NativeParquetScanSource"}, sources
     assert reasons == {}, reasons
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — R5 `bool_predicate_input`. Was the strict-xfail frontier; now real
+# passing assertions.
+#
+# The gate existed because `draken_compare_dv`'s type switch had NO DRAKEN_BOOL
+# branch: every bool comparison fell to `default: return nullptr` ("declined"),
+# which the relocated c-native ExprFilter — which has no fallback — surfaced as
+# err_op=11. So the whole scan failed closed even though
+# `bytecode_is_all_c_native` correctly reported the predicate lowerable.
+#
+# BOOL cannot reuse a fixed-width kernel: its `data` buffer is BIT-PACKED, so
+# `data[selection[i]]` means *bit* selection[i]. `draken/ops/bool_compare.h` is
+# that kernel — a uniform loop over the bitmap (dense / constant / dict all read
+# correctly through it), FALSE < TRUE ordering, and the compare_vector null
+# contract (result row NULL when EITHER operand row is NULL, NOT Kleene AND/OR).
+# It is NOT discriminant-free: dense-identity operands WITH nulls take a
+# byte-wise fast path, a CLAUDE.md §11 shape discriminant added without the
+# pre-approval §11 requires and ratified after the fact. See that header's
+# ACCESS comment; a fuzz test asserts the two paths agree bit-for-bit.
+#
+# Value parity against the trampoline is asserted in
+# tests/unit/operators/test_wp11_decimal_temporal_bool_scan.py (the A/B harness:
+# native vs forced-trampoline in one run, covering NULLs and every role).
+# ---------------------------------------------------------------------------
+
+_BOOL_FLAT = "testdata/flat/formats/parquet"   # user_verified: 711 TRUE / 99289 FALSE
+
+
+@pytest.mark.parametrize("sql", [
+    # projected + predicate (role-2)
+    "SELECT user_id, user_verified FROM '%s' WHERE user_verified = TRUE" % _BOOL_FLAT,
+    "SELECT user_id FROM '%s' WHERE user_verified = FALSE" % _BOOL_FLAT,
+    "SELECT user_id FROM '%s' WHERE user_verified <> TRUE" % _BOOL_FLAT,
+    "SELECT user_id FROM '%s' WHERE user_verified != FALSE" % _BOOL_FLAT,
+    # role-3: the BOOL column is READ for the filter but never emitted
+    "SELECT user_id FROM '%s' WHERE user_verified = TRUE" % _BOOL_FLAT,
+    # composed with a non-bool predicate in the same c-native span
+    "SELECT user_id FROM '%s' WHERE user_verified = TRUE AND followers > 100" % _BOOL_FLAT,
+    # zero-projection (A2 shape) over a bool predicate
+    "SELECT COUNT(*) FROM '%s' WHERE user_verified = TRUE" % _BOOL_FLAT,
+    # the canonical HAND_SET trigger this category was censused by
+    "SELECT userid FROM 'testdata/flat/ten_files' WHERE user_verified = TRUE",
+])
+def test_bool_predicate_input_now_native(sql):
+    """R5 close-out: a BOOL column used as a c-native predicate input now selects
+    the zero-Python native Source, in every role. The reason code no longer exists."""
+    sources, reasons, err = census.scan_residuals(sql)
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+@pytest.mark.parametrize("predicate,expected", [
+    ("user_verified = TRUE", 711),
+    ("user_verified = FALSE", 99289),
+    ("user_verified <> TRUE", 99289),
+    ("user_verified != FALSE", 711),
+])
+def test_bool_predicate_survivor_count_matches_trampoline(predicate, expected):
+    """The survivor counts the TRAMPOLINE produced before the kernel landed —
+    captured from the pre-change path, not re-derived from the new one. A bool
+    compare that inverted an op, mis-read the bit-packed layout, or dropped the
+    validity mask would move these."""
+    import opteryx
+
+    session = opteryx.session()
+    rows = sum(
+        morsel.num_rows
+        for morsel in session.execute_to_morsels(
+            "SELECT user_id FROM '%s' WHERE %s" % (_BOOL_FLAT, predicate))
+    )
+    assert rows == expected
+    assert set(session._telemetry.as_dict()["scan_sources"].values()) == {
+        "NativeParquetScanSource"}
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — the `compiler.py` hard-error class for `IS TRUE` / `IS FALSE` /
+# `IS NOT TRUE` / `IS NOT FALSE` over a BOOL column (the R5 close-out above
+# widened `bool = TRUE/FALSE`; this is the adjacent SQL `IS`-predicate form,
+# a distinct UOP_IS_TRUE/UOP_IS_FALSE/UOP_IS_NOT_TRUE/UOP_IS_NOT_FALSE bytecode
+# opcode with different NULL semantics — `NULL IS TRUE` is FALSE, not NULL, so
+# it cannot reuse the compare kernel).
+#
+# `bytecode_ops_all_c_native` (opteryx/operators/_operators.pyx) previously
+# admitted only UOP_IS_NULL/UOP_IS_NOT_NULL for BC_UNARY_OP; a bare `WHERE
+# bool_col IS TRUE` predicate does not push to the scan, becomes a standalone
+# Filter node, and hard-errored at `compiler.py`'s `_lower_expression`
+# ("... outside the c-native kernel set ... no fallback engine"). The nogil
+# span (`c_execute_dv_inner`) had no DV*-only kernel for these ops at all.
+#
+# `draken/ops/bool_logical.h::bool_truth_test` supplies that kernel — the
+# SAME uniform `data[selection[i]]` loop as `bool_and`/`bool_or`/`bool_not`,
+# but a never-null truth test (result is unconditionally all-valid) rather
+# than Kleene NULL-preserving logic. `_dv_unary_bool_test_c` (evaluation.pyx)
+# wires it into the VM; `bytecode_ops_all_c_native` and `build_bytecode`'s
+# `is_all_c_native` (compiled_expression.pyx) both admit the four opcodes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT user_id FROM '%s' WHERE user_verified IS TRUE" % _BOOL_FLAT,
+    "SELECT user_id FROM '%s' WHERE user_verified IS FALSE" % _BOOL_FLAT,
+    "SELECT user_id FROM '%s' WHERE user_verified IS NOT TRUE" % _BOOL_FLAT,
+    "SELECT user_id FROM '%s' WHERE user_verified IS NOT FALSE" % _BOOL_FLAT,
+    # role-3 (filter-only, column never emitted)
+    "SELECT user_id FROM '%s' WHERE user_verified IS TRUE" % _BOOL_FLAT,
+    # composed with a non-bool predicate in the same c-native span
+    "SELECT user_id FROM '%s' WHERE user_verified IS TRUE AND followers > 100" % _BOOL_FLAT,
+    # zero-projection (A2 shape) over an IS-predicate
+    "SELECT COUNT(*) FROM '%s' WHERE user_verified IS TRUE" % _BOOL_FLAT,
+    # the canonical trigger this task's reproduction used
+    "SELECT userid FROM 'testdata/flat/ten_files' WHERE user_verified IS TRUE",
+])
+def test_bool_is_predicate_now_native(sql):
+    """IS TRUE/FALSE/NOT TRUE/NOT FALSE over a BOOL predicate input now selects
+    the zero-Python native Source, in every role, matching the R5 `= TRUE`
+    close-out's coverage shape exactly."""
+    sources, reasons, err = census.scan_residuals(sql)
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+@pytest.mark.parametrize("predicate,expected", [
+    ("user_verified IS TRUE", 711),
+    ("user_verified IS FALSE", 99289),
+    ("user_verified IS NOT TRUE", 99289),
+    ("user_verified IS NOT FALSE", 711),
+])
+def test_bool_is_predicate_survivor_count_matches_eq_form(predicate, expected):
+    """`_BOOL_FLAT` has no NULLs, so IS TRUE/FALSE must match the already-verified
+    `= TRUE`/`= FALSE` survivor counts (`test_bool_predicate_survivor_count_matches_trampoline`)
+    exactly — a kernel that mishandled the never-null collapse would only show up
+    once NULLs are present (covered by the A/B harness in
+    test_wp11_decimal_temporal_bool_scan.py), so this pins the NULL-free baseline."""
+    import opteryx
+
+    session = opteryx.session()
+    rows = sum(
+        morsel.num_rows
+        for morsel in session.execute_to_morsels(
+            "SELECT user_id FROM '%s' WHERE %s" % (_BOOL_FLAT, predicate))
+    )
+    assert rows == expected
+    assert set(session._telemetry.as_dict()["scan_sources"].values()) == {
+        "NativeParquetScanSource"}
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — R6 `non_admissible_kind:ARRAY`. Was the strict-xfail frontier; now
+# real passing assertions.
+#
+# A parquet LIST column always lands DK_POOL — rugo's direct_kind_for routes any
+# column with repetition levels to the pool, regardless of encoding — and is
+# serialized as TAG_ARRAY by ipc_serialize.hpp. Both scan paths share that
+# producer; only the consumer differed. `src/cpp/engine/native_array_pool_decode.hpp`
+# is the PyObject-free port of the trampoline's Cython `_build_array_vector*`
+# (column_deserializer.pyx), and `array_columns` (plan-time, parallel to
+# column_names — the same mechanism as decimal_columns / varchar_columns) is what
+# tells the Source that a given pool blob is a list rather than a decimal/varchar.
+#
+# Value parity against the trampoline is asserted in
+# tests/unit/operators/test_wp_r6_array_scan.py (the A/B harness: native vs
+# forced-trampoline in one run, covering every element type, empty lists, NULL
+# lists, NULL elements inside a present list, and nested list<list<...>>).
+# ---------------------------------------------------------------------------
+
+_ARRAY_TYPES = "testdata/flat/array_types"   # the R6 parity corpus (dev/generate_array_testdata.py)
+_STRUCT_ARRAY = "testdata/flat/struct_array"
+
+
+@pytest.mark.parametrize("sql", [
+    # the canonical HAND_SET trigger this category was censused by
+    "SELECT data FROM '%s'" % _STRUCT_ARRAY,
+    "SELECT id, data FROM '%s'" % _STRUCT_ARRAY,
+    # every element type the wire format can carry, in isolation
+    "SELECT ints FROM '%s'" % _ARRAY_TYPES,
+    "SELECT strs FROM '%s'" % _ARRAY_TYPES,
+    "SELECT floats FROM '%s'" % _ARRAY_TYPES,
+    "SELECT bools FROM '%s'" % _ARRAY_TYPES,
+    "SELECT stamps FROM '%s'" % _ARRAY_TYPES,
+    "SELECT smalls FROM '%s'" % _ARRAY_TYPES,
+    "SELECT uints FROM '%s'" % _ARRAY_TYPES,
+    "SELECT nested FROM '%s'" % _ARRAY_TYPES,          # list<list<int64>>
+    # an array column alongside ordinary columns, and SELECT *
+    "SELECT id, ints, strs FROM '%s'" % _ARRAY_TYPES,
+    "SELECT * FROM '%s'" % _ARRAY_TYPES,
+    "SELECT * FROM testdata.astronauts",
+    "SELECT * FROM 'testdata/flat/formats/parquet'",
+    # ROLE-3: the array column is READ for the pushed predicate but never emitted
+    "SELECT id FROM '%s' WHERE ints IS NULL" % _ARRAY_TYPES,
+    "SELECT id FROM '%s' WHERE ints IS NOT NULL" % _ARRAY_TYPES,
+    # zero-projection (A2 shape) over an array predicate input
+    "SELECT COUNT(*) FROM '%s' WHERE strs IS NULL" % _ARRAY_TYPES,
+    # array-consuming SQL over the native scan
+    "SELECT ARRAY_CONTAINS(ints, 5) FROM '%s'" % _ARRAY_TYPES,
+    "SELECT u FROM '%s' CROSS JOIN UNNEST(ints) AS u" % _ARRAY_TYPES,
+])
+def test_array_column_now_native(sql):
+    """R6 close-out: a read-set ARRAY column (projected OR role-3 filter-only) now
+    selects the zero-Python native Source. The reason code no longer exists."""
+    sources, reasons, err = census.scan_residuals(sql)
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+def test_struct_column_does_not_reach_the_r6_guard():
+    """STRUCT stays outside R6 entirely, and always did: rugo's footer annotates a
+    struct node `json`, so the binder types it as a string column and the scan is
+    admitted through the ordinary VARCHAR path — it never had a `non_admissible_kind`
+    tag to close. Pinned so a future type-system change that starts routing STRUCT
+    through the R6 guard is visible rather than silent."""
+    sources, reasons, err = census.scan_residuals("SELECT * FROM 'testdata/flat/struct'")
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — R7b `footer_gate`, CAST-driven temporal retag.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+def test_cast_driven_timestamp_now_native(unit):
+    """R7b close-out: `EventTime::TIMESTAMP[unit]` asks for a TIMESTAMP column whose
+    FOOTER carries no temporal annotation (a bare int64) — the temporal-ness comes
+    from the SQL cast, not the file. This was the last `footer_gate` residual in the
+    census battery. The cast is a pure bit-reinterpret and the native decode path is
+    already unit-parametrized, so only the gate's kind-classification needed widening."""
+    assert_scan_native(
+        "SELECT EventTime::TIMESTAMP[%s] FROM %s" % (unit, _TINY))
+
+
+@pytest.mark.parametrize("unit", ["s", "ms", "us"])
+def test_cast_driven_timestamp_matches_trampoline(unit):
+    """The retag must be VALUE-identical to the trampoline's `_coerce_vectors`, not
+    merely admitted. EventTime holds Unix SECONDS, so reinterpreting it at each unit
+    lands on a different (but exactly predictable) instant — these are the values the
+    trampoline produced before the scan went native."""
+    import datetime
+
+    import opteryx
+
+    expected = {
+        "s": datetime.datetime(2013, 7, 27, 20, 0, tzinfo=datetime.timezone.utc),
+        "ms": datetime.datetime(1970, 1, 16, 21, 55, 55, 200000,
+                                tzinfo=datetime.timezone.utc),
+        "us": datetime.datetime(1970, 1, 1, 0, 22, 54, 955200,
+                                tzinfo=datetime.timezone.utc),
+    }[unit]
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+            "SELECT EventTime::TIMESTAMP[%s] AS t FROM %s ORDER BY t LIMIT 5"
+            % (unit, _TINY)):
+        morsel.materialize()
+        rows.extend(morsel[i] for i in range(morsel.num_rows))
+    assert rows, "query returned no rows"
+    assert rows[0][0] == expected, (unit, rows[0][0], expected)
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — R2 `pushed_limit`. Was the strict-xfail frontier; now hard passes.
+# ---------------------------------------------------------------------------
+
+_LIMIT_FLAT = "testdata/flat/formats/parquet"
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT followers FROM '%s' LIMIT 5" % _LIMIT_FLAT,
+    "SELECT followers FROM '%s' LIMIT 1" % _LIMIT_FLAT,
+    # LIMIT above the row-group boundary, and above the whole table
+    "SELECT followers FROM '%s' LIMIT 100000" % _LIMIT_FLAT,
+    "SELECT followers FROM '%s' LIMIT 10000000" % _LIMIT_FLAT,
+    "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT 5",
+])
+def test_pushed_limit_now_native(sql):
+    """R2 close-out: a scan-pushed LIMIT selects the zero-Python native Source.
+    The reason code is no longer reachable (retired from HAND_SET)."""
+    sources, reasons, err = census.scan_residuals(sql)
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+@pytest.mark.parametrize("limit", [1, 2, 5, 99, 100, 1000, 65535, 65536, 100000, 10000000])
+def test_pushed_limit_row_count_exact(limit):
+    """R2 is a CORRECTNESS obligation, not just an I/O optimization:
+    LimitPushdownStrategy REMOVES the Limit node from the plan when it pushes into
+    a scan, so the Source is the only thing enforcing the cap. Exercises limits
+    below, at, and above a row-group boundary, and above the whole table."""
+    import opteryx
+
+    table_rows = 6001215  # testdata.tpch_1.lineitem
+    session = opteryx.session()
+    rows = sum(
+        morsel.num_rows
+        for morsel in session.execute_to_morsels(
+            "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT %d" % limit)
+    )
+    assert rows == min(limit, table_rows)
+
+
+def test_pushed_limit_skips_uncontributing_row_groups():
+    """The I/O win the pushdown exists for: row groups that provably cannot
+    contribute to the LIMIT are never decoded. The submit frontier is capped from
+    the footer's per-row-group row counts, so a small LIMIT over a 96-row-group
+    file decodes ONE row group — not the whole prefetch window (in_flight_limit,
+    == workers+2, plus one per worker racing in before the first emit)."""
+    import opteryx
+
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(
+            "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT 5"):
+        pass
+    diagnostics = session._telemetry.as_dict()["io_scan_diagnostics"][0]
+    # The full scan decodes 96 row groups; LIMIT 5 fits entirely in the first.
+    assert diagnostics["enqueue_count"] == 1, diagnostics
 
 
 # ---------------------------------------------------------------------------

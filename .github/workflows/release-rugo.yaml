@@ -6,7 +6,8 @@ name: Release rugo to PyPI
 # `rugo-*` tag (or a rugo- GitHub Release) never fires the opteryx pipeline, and
 # vice versa.
 #
-# Unlike opteryx_core (3.14 / x86-64 only), rugo targets a broad matrix:
+# Unlike opteryx_core (Linux 3.12/3.13/3.14 x86-64, macOS 3.14 arm64 only),
+# rugo targets a broad matrix:
 #   Python  : 3.11, 3.12, 3.13, 3.14 (GIL)
 #   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
 on:

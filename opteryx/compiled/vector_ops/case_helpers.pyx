@@ -252,12 +252,21 @@ def assemble_fixed(
     int16_t[::1] branch_id,
     list rows_per_branch,
     int32_t[::1] unmatched,
+    int dec_precision=-1,
+    int dec_scale=-1,
 ):
     """Scatter fixed-width branch parts into a new output Vector.
 
     Output DrakenType is derived from the first non-None, non-DRAKEN_NULL part
     (or else_part if no valid parts exist).
     Rows not covered by any branch and with no else_part become NULL.
+
+    dec_precision/dec_scale: the CASE's BIND-TIME declared DECIMAL descriptor,
+    -1 when undeclared. A DECIMAL vector's scale is a LogicalType detail that
+    the DrakenVector does not carry (§11/§14) and the expression VM does NOT
+    re-attach — it is stamped back at the ExprProject boundary, which this
+    path (constant folding) sits upstream of. So the branch part vectors
+    arrive descriptor-less and the declared pair is the only real source.
     """
     cdef Py_ssize_t bid_py
     cdef Py_ssize_t num_parts = len(parts)
@@ -381,14 +390,26 @@ def assemble_fixed(
         any_null = True
 
     cdef Vector out_vec = _vec_from_decoded(out_data, out_validity, <uint32_t>n, out_dtype)
-    # DECIMAL is int64-backed; the scatter above copies raw storage but not the
-    # scale/precision descriptor. Carry it from the template so downstream ops
-    # (sum, to_float64, grouped collectors) can read scale.
+    # DECIMAL is int-backed; the scatter above copies raw storage but not the
+    # scale/precision descriptor. Without one the unscaled integer is unreadable,
+    # so downstream ops (sum, to_float64, grouped collectors) need it stamped on.
+    # The BIND-TIME declared pair wins: the template is a raw VM result, which
+    # carries no descriptor at all on this path (see the docstring).
+    cdef object tmpl_precision
+    cdef object tmpl_scale
     if out_dtype == DRAKEN_DECIMAL or out_dtype == DRAKEN_DECIMAL128:
-        out_vec._nb.set_decimal_descriptor(
-            template_vec._nb.logical_type_precision,
-            template_vec._nb.logical_type_scale,
-        )
+        if dec_precision >= 1 and dec_scale >= 0:
+            out_vec._nb.set_decimal_descriptor(dec_precision, dec_scale)
+        else:
+            tmpl_precision = template_vec._nb.logical_type_precision
+            tmpl_scale = template_vec._nb.logical_type_scale
+            if tmpl_precision is None or tmpl_scale is None:
+                raise ValueError(
+                    "assemble_fixed: DECIMAL result has no scale — neither the CASE's "
+                    "declared type nor the branch vector carries one, and an unscaled "
+                    "integer cannot be read without it"
+                )
+            out_vec._nb.set_decimal_descriptor(tmpl_precision, tmpl_scale)
     return out_vec
 
 

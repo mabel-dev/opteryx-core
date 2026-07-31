@@ -312,11 +312,13 @@ static inline size_t draken_type_fixed_itemsize(DrakenType t) {
 // ~0.84MB data vs ~4.19MB codes), so omitting them undercounted footprint ~5x
 // and deferred spill/flush past the safe point.
 //
-// KNOWN LIMITATION — DRAKEN_ARRAY: an array's child values hang off the owning
+// KNOWN LIMITATION — DRAKEN_ARRAY: an array's CHILD values hang off the owning
 // VectorOwner, not off this DrakenVector, so they are unreachable from this
-// pointer alone and are NOT counted (only the validity bitmap is). Array-typed
-// result columns are therefore under-counted; precise array accounting needs a
-// VectorOwner-based API and is out of scope here.
+// pointer alone and are NOT counted here (this function only counts the array
+// vector's own offsets buffer, below). Callers that hold the owning VectorOwner
+// (or a shared_ptr thereof, e.g. CxxColumn::own) should additionally recurse
+// into child_owner — see draken_vector_owner_nbytes in vector_owner.h — rather
+// than trust this function alone for array-typed columns.
 static inline size_t draken_vector_nbytes(const DrakenVector* v) {
     if (v == NULL) return 0u;
     size_t bytes = 0u;
@@ -337,8 +339,16 @@ static inline size_t draken_vector_nbytes(const DrakenVector* v) {
         case DRAKEN_BOOL:
             bytes += (n + 7u) >> 3;  // 1 bit per physical value
             break;
+        case DRAKEN_ARRAY:
+            // Own payload: int32_t offsets[length+1] (see draken_native.cpp's
+            // D.13 layout comment) -- sized off the LOGICAL row count, not
+            // data_length/n, since arrays are always stored dense (identity
+            // selection, per the same comment). Child subtree bytes are NOT
+            // included (see KNOWN LIMITATION above).
+            bytes += ((size_t)v->length + 1u) * sizeof(int32_t);
+            break;
         default:
-            // Fixed-width families; 0 for array/fp16/null/non-native (see notes).
+            // Fixed-width families; 0 for fp16/null/non-native (see notes).
             bytes += n * draken_type_fixed_itemsize(v->type);
             break;
     }

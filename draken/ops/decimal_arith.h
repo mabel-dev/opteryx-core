@@ -127,6 +127,46 @@ static inline VecResult widen_i64_to_dec128(const DrakenVector& v) {
     return make_decimal128_result(dst, copy_validity(v.validity, n), n);
 }
 
+// Widen an INT8/INT16/INT32 vector to a dense int64 buffer (sign-extending),
+// resolving the source shape via uniform data[selection[i]] access (§11). Brings a
+// narrow-int operand up to the tier the DECIMAL(int64)×INT64 and DECIMAL128
+// promotion kernels already read (they stride int64/int128 only) — this is the
+// widening the closure used to do in Python before calling those same kernels.
+// Caller owns the returned data/validity buffers.
+static inline VecResult widen_narrow_int_to_i64(const DrakenVector& v) {
+    const uint32_t n = v.length;
+    int64_t* dst = alloc_i64(n);
+    switch (v.type) {
+        case DRAKEN_INT8: {
+            const int8_t* sd = static_cast<const int8_t*>(v.data);
+            for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<int64_t>(sd[v.selection[i]]);
+            break;
+        }
+        case DRAKEN_INT16: {
+            const int16_t* sd = static_cast<const int16_t*>(v.data);
+            for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<int64_t>(sd[v.selection[i]]);
+            break;
+        }
+        case DRAKEN_INT32: {
+            const int32_t* sd = static_cast<const int32_t*>(v.data);
+            for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<int64_t>(sd[v.selection[i]]);
+            break;
+        }
+        default:
+            throw std::invalid_argument("widen_narrow_int_to_i64: expected INT8/16/32");
+    }
+    VecResult r;
+    r.data           = dst;
+    r.validity       = copy_validity(v.validity, n);
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_INT64;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
 // E33 — widen a DRAKEN_UINT64 vector to int128 DRAKEN_DECIMAL128. Zero-extends
 // (not sign-extends): a UINT64 value >= 2^63 is always a large POSITIVE __int128,
 // never negative — this is the matrix's escape valve for UINT64 paired with a

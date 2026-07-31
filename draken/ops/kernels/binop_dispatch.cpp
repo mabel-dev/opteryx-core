@@ -401,8 +401,8 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
                 "draken_binop: length mismatch: left=%u right=%u", left->length, right->length);
 
         const int op = static_cast<const binary_op_ctx*>(ctx)->op_code;
-        const DrakenType lt = left->type;
-        const DrakenType rt = right->type;
+        DrakenType lt = left->type;
+        DrakenType rt = right->type;
 
         auto is_int = [](DrakenType t) {
             return t == DRAKEN_INT8 || t == DRAKEN_INT16 ||
@@ -416,6 +416,47 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         auto is_float = [](DrakenType t) {
             return t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64;
         };
+
+        // DECIMAL(int64)/DECIMAL128 paired with a NARROW int (INT8/16/32): widen the
+        // narrow side to INT64 up front, then every DECIMAL branch below (the
+        // DECIMAL×INT64 int64-tier kernel, and the DECIMAL128 promotion block) already
+        // handles DECIMAL op INT64 — no separate decimal math needed here. This is
+        // exactly the widening the Python closure (_build_arithmetic_closure) used to
+        // do before calling the same dec_*/dec128_* kernels; only int8/16/32 ever
+        // reached the closure for a DECIMAL pairing (_c_native_binop's own guard
+        // ensures the OTHER side is always DECIMAL/DECIMAL128 when this fires — a
+        // narrow int paired with anything else takes the plain-integer path below and
+        // never reaches here). The widened buffer is freed by NarrowIntWidenGuard on
+        // every exit from this function, including exception unwinding.
+        struct NarrowIntWidenGuard {
+            VecResult buf{};
+            bool active = false;
+            ~NarrowIntWidenGuard() {
+                if (active) { draken_free(buf.data); draken_free(buf.validity); }
+            }
+        } niw;
+        DrakenVector left_widened{};
+        DrakenVector right_widened{};
+        auto is_narrow_int = [](DrakenType t) {
+            return t == DRAKEN_INT8 || t == DRAKEN_INT16 || t == DRAKEN_INT32;
+        };
+        auto is_decimalish = [](DrakenType t) {
+            return t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128;
+        };
+        if (is_narrow_int(lt) && is_decimalish(rt)) {
+            niw.buf = draken::ops::widen_narrow_int_to_i64(*left);
+            niw.active = true;
+            left_widened = draken_vector_from_dense(niw.buf.data, niw.buf.length, DRAKEN_INT64, niw.buf.validity);
+            left = &left_widened;
+            lt = DRAKEN_INT64;
+        } else if (is_narrow_int(rt) && is_decimalish(lt)) {
+            niw.buf = draken::ops::widen_narrow_int_to_i64(*right);
+            niw.active = true;
+            right_widened = draken_vector_from_dense(niw.buf.data, niw.buf.length, DRAKEN_INT64, niw.buf.validity);
+            right = &right_widened;
+            rt = DRAKEN_INT64;
+        }
+
         const bool both_numeric =
             (is_int(lt) || is_uint(lt) || is_float(lt)) &&
             (is_int(rt) || is_uint(rt) || is_float(rt));
@@ -482,8 +523,9 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         // ctx left/right scale. Only DRAKEN_DECIMAL (int64) × DRAKEN_INT64 with an
         // int64-tier result (precision ≤ 18); when the bound result precision exceeds
         // 18 the result is DECIMAL128 and falls to the promotion block below (which
-        // widens both operands to int128). Narrower ints (INT8/16/32) stay on the
-        // closure, which widens them itself.
+        // widens both operands to int128). A narrow int (INT8/16/32) operand already
+        // became DRAKEN_INT64 above (the widening block right after lt/rt), so it
+        // lands here too — this arm doesn't need to know narrow ints existed.
         if (((lt == DRAKEN_DECIMAL && rt == DRAKEN_INT64) ||
              (lt == DRAKEN_INT64 && rt == DRAKEN_DECIMAL)) &&
             static_cast<const binary_op_ctx*>(ctx)->result_precision <= 18) {
@@ -519,9 +561,9 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
         // §11-uniform, validity preserved) and the dec128_* kernels run. The result is
         // always DECIMAL128 (the wrap reattaches precision/scale from ctx). The int64
         // DEC×DEC / DEC×INT64 branches above handle only the int64-tier (≤18) results;
-        // their DECIMAL128-result variants fall through here. Narrower ints (INT8/16/32)
-        // are not int64-stride and stay on the closure (the _c_native_binop guard keeps
-        // them off this path).
+        // their DECIMAL128-result variants fall through here. A narrow int (INT8/16/32)
+        // operand is already DRAKEN_INT64 by the time control reaches here (widened up
+        // front, right after lt/rt) — this block just sees an ordinary INT64 operand.
         {
             auto is_i64_decimalish = [](DrakenType t) {
                 return t == DRAKEN_DECIMAL || t == DRAKEN_INT64;
@@ -801,11 +843,12 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
             return binop_ip_in_cidr(left, right);
         }
 
-        // Not yet C-native (later P9.1 sub-stages): decimal × NARROW int (INT8/16/32 —
-        // these stay on the closure, which widens them), and any remaining exotic combos.
+        // Not yet C-native (later P9.1 sub-stages): UINT64 × narrow int, and any
+        // remaining exotic combos. DECIMAL × narrow int is covered above (widened to
+        // INT64 up front, right after lt/rt), so it never reaches this fallthrough.
         return draken_error_sentinel_fmt(
             "draken_binop: combination not yet C-native (covers int/float32/float64 arithmetic, "
-            "true-divide, DECIMAL×DECIMAL, DECIMAL128×DECIMAL128, DECIMAL×INT64, "
+            "true-divide, DECIMAL×DECIMAL, DECIMAL128×DECIMAL128, DECIMAL×INT64, DECIMAL×narrow-int, "
             "DECIMAL128×INT64, cross-kind DECIMAL×DECIMAL128, int64→int128 promotion to "
             "DECIMAL128, decimal×float): "
             "op=%d left_type=%d right_type=%d", op, (int)lt, (int)rt);

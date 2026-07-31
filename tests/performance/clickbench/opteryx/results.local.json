@@ -62,7 +62,7 @@ current (15.44s)
 (10.65 seconds) <- DuckDB Baseline
 
 make tpch - (2002.2ms) (28-JUL) [4.05x]
-make medicare1 - (462.1ms) (28-JUL)
+make medicare1 - (456.1ms) (31-JUL)
 make job - (48075.1ms) (28-JUL)
 make h2o - (2496.0ms) (2 fails) (28-JUL)
 make jsonbench (29383.2ms) (28-JUL)

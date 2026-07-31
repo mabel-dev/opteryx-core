@@ -19,11 +19,15 @@ from typing import List, Optional
 
 import pytest
 
+# Importing opteryx.planner.optimizer (the package) resolves the optimizer <->
+# cost_estimation.selectivity import cycle first (see the same workaround in
+# tests/unit/planner/cost_estimation/test_char_class_selectivity.py).
+import opteryx.planner.optimizer  # noqa: F401
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
-from opteryx.types.logical_type import INT64
+from opteryx.types.logical_type import INT64, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn
 
 
@@ -347,6 +351,89 @@ class TestLike:
     def test_not_like_prefix(self):
         m = _bare_manifest()
         assert m.estimate_selectivity(_cmp("NotLike", "x", "abc%")) == 0.75
+
+
+# ---------------------------------------------------------------------------
+# STARTS_WITH (predicate_rewriter's FUNCTION-node form of "x LIKE 'foo%'")
+#
+# Manifest.get_distogram already bins VARCHAR histograms in ColumnType.
+# ordinalize()'s ordinal-key space (_analyze.py ordinalizes every morsel
+# before binning) -- these tests exercise that real fold, not a synthetic
+# Distogram, to pin down the assumption _selectivity_starts_with depends on:
+# a VARCHAR column's histogram min/max are ALREADY ordinal keys, so the
+# predicate's literal just needs the same ColumnType.ordinalize() transform
+# before being compared against it.
+# ---------------------------------------------------------------------------
+
+
+def _varchar_schema(*names: str) -> RelationSchema:
+    return RelationSchema(
+        name="t",
+        columns=[SchemaColumn(name=n, column_type=VARCHAR, identity=_ident(n)) for n in names],
+    )
+
+
+def _varchar_identifier(name: str) -> Node:
+    n = Node(node_type=NodeType.IDENTIFIER)
+    n.value = name
+    n.source_column = name
+    n.schema_column = SchemaColumn(name=name, column_type=VARCHAR, identity=_ident(name))
+    return n
+
+
+def _starts_with(op: str, col: str, prefix: bytes) -> Node:
+    n = Node(node_type=NodeType.FUNCTION)
+    n.value = op
+    n.parameters = [_varchar_identifier(col), _literal(prefix)]
+    return n
+
+
+def _varchar_histogram_manifest(
+    column: str = "x",
+    *,
+    counts: Optional[List[int]] = None,
+    col_min_str: str = "alpha",
+    col_max_str: str = "omega",
+    record_count: Optional[int] = None,
+) -> Manifest:
+    """Manifest with a single file carrying a VARCHAR histogram for `column`,
+    with ordinalized min/max -- exactly what Manifest._native_distogram folds
+    against for a real ANALYZE'd relation."""
+    if counts is None:
+        counts = [10] * 50
+    rc = record_count if record_count is not None else sum(counts)
+    col_min = VARCHAR.ordinalize(col_min_str)
+    col_max = VARCHAR.ordinalize(col_max_str)
+    file = _file(record_count=rc, min_values=[col_min], max_values=[col_max])
+    return Manifest(
+        files=[file],
+        schema=_varchar_schema(column),
+        histogram_vector=_histogram_vector([[counts]]),
+    )
+
+
+class TestStartsWith:
+    def test_narrow_prefix_inside_range_is_selective(self):
+        m = _varchar_histogram_manifest(col_min_str="alpha", col_max_str="omega")
+        s = m.estimate_selectivity(_starts_with("_STARTS_WITH", "x", b"al"))
+        assert 0.0 <= s < 1.0
+
+    def test_prefix_entirely_outside_range_is_near_zero(self):
+        m = _varchar_histogram_manifest(col_min_str="a", col_max_str="m")
+        s = m.estimate_selectivity(_starts_with("_STARTS_WITH", "x", b"zzz"))
+        assert s == pytest.approx(0.0, abs=1e-6)
+
+    def test_no_stats_falls_back_to_prefix_constant(self):
+        m = Manifest(files=[_file(record_count=100)], schema=_varchar_schema("x"))
+        s = m.estimate_selectivity(_starts_with("_STARTS_WITH", "x", b"foo"))
+        assert s == 0.25
+
+    def test_not_starts_with_is_the_complement(self):
+        m = _varchar_histogram_manifest(col_min_str="alpha", col_max_str="omega")
+        inner = _starts_with("_STARTS_WITH", "x", b"al")
+        s = m.estimate_selectivity(inner)
+        not_s = m.estimate_selectivity(_not(inner))
+        assert s == pytest.approx(1.0 - not_s)
 
 
 # ---------------------------------------------------------------------------

@@ -143,7 +143,8 @@ cdef _compute_compiled(list result_bcs, else_bc, morsel, rows_per_branch, unmatc
     return parts, else_part
 
 
-def build_case_fn(list cond_bcs, list result_bcs, else_bc, int kernel_type):
+def build_case_fn(list cond_bcs, list result_bcs, else_bc, int kernel_type,
+                  int dec_precision=-1, int dec_scale=-1):
     """Bind-time factory: compile CASE WHEN into a morsel→vector callable.
 
     Returns a Python closure suitable for storage in BC_CASE slot.callable_ref.
@@ -155,12 +156,19 @@ def build_case_fn(list cond_bcs, list result_bcs, else_bc, int kernel_type):
     else_bc:        CompiledBytecode for ELSE, or None.
     kernel_type:    Pre-resolved kernel type (_ASSEMBLE_BOOL, _ASSEMBLE_FIXED,
                     or _ASSEMBLE_STRING). -1 indicates runtime type dispatch.
+    dec_precision/dec_scale: the CASE's declared DECIMAL descriptor (-1 when the
+                    result is not DECIMAL, or its type is unresolved). Branch
+                    parts come straight off the expression VM, which does not
+                    carry the scale on the vector — bind time is the only place
+                    that knows it. See assemble_fixed.
     """
     if not cond_bcs:
         raise ValueError("build_case_fn: cond_bcs must be non-empty")
 
     # Capture kernel_type at bind time. It's captured in the closure as a Python int.
     kt = kernel_type
+    dec_p = dec_precision
+    dec_s = dec_scale
 
     def _case_fn(morsel):
         n = morsel.num_rows
@@ -186,7 +194,8 @@ def build_case_fn(list cond_bcs, list result_bcs, else_bc, int kernel_type):
         elif kt == _ASSEMBLE_STRING:
             return assemble_flat_string(parts, else_part, branch_id, pos_in_branch, n)
         elif kt == _ASSEMBLE_FIXED:
-            return assemble_fixed(parts, else_part, branch_id, rows_per_branch, unmatched)
+            return assemble_fixed(parts, else_part, branch_id, rows_per_branch, unmatched,
+                                  dec_p, dec_s)
         else:
             # Runtime dispatch fallback (kt == -1, inferred_type was None)
             if isinstance(first, BoolVector):
@@ -194,6 +203,7 @@ def build_case_fn(list cond_bcs, list result_bcs, else_bc, int kernel_type):
             first_type = getattr(first, "type", None)
             if first_type in (_draken_native.VARCHAR, _draken_native.NVARCHAR):
                 return assemble_flat_string(parts, else_part, branch_id, pos_in_branch, n)
-            return assemble_fixed(parts, else_part, branch_id, rows_per_branch, unmatched)
+            return assemble_fixed(parts, else_part, branch_id, rows_per_branch, unmatched,
+                                  dec_p, dec_s)
 
     return _case_fn

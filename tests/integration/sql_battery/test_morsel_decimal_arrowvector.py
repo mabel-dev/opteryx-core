@@ -1,28 +1,41 @@
-import pyarrow as pa
-from decimal import Decimal
+import sys
+import os
 
-from draken.morsels.morsel import Morsel
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+import pyarrow
+
+import opteryx
 
 
 def test_decimal_column_empty_and_take_empty():
-    # Create a decimal128 column which typically maps to the ArrowVector
-    dec_type = pa.decimal128(5, 1)
-    arr = pa.array([Decimal("3.7"), Decimal("8.9")], type=dec_type)
-    tbl = pa.table({"d": arr})
+    """A DECIMAL128 column reduced to zero rows keeps its row count and column
+    names through Morsel.take([]) — same as every other physical type.
 
-    morsel = Morsel.from_arrow(tbl)
-    # Ensure we created a morsel with two rows
-    assert morsel.num_rows == 2
+    Construction goes through the real engine (SQL → session.execute_to_morsels)
+    rather than Morsel.from_arrow(), which no longer exists on Morsel; pyarrow is
+    only the read-side oracle here (to_arrow()), which CLAUDE.md §4 allows in
+    tests. Morsel.empty() has also been removed — take([]) is the current way to
+    reach a zero-row morsel.
+    """
+    session = opteryx.session()
+    morsel = next(iter(session.execute_to_morsels("SELECT CAST(gravity AS DECIMAL(30,4)) AS d FROM $planets")))
+    assert morsel.num_rows == 9
 
-    # Call empty() and verify to_arrow works and preserves schema
-    morsel.empty()
-    out = morsel.to_arrow()
+    empty = morsel.take([])
+    assert empty.num_rows == 0
+    out = empty.to_arrow()
     assert out.num_rows == 0
-    assert out.schema.names == tbl.schema.names
+    assert out.schema.names == ["d"]
 
-    # Recreate and test take([])
-    morsel = Morsel.from_arrow(tbl)
-    morsel.take([])
-    out2 = morsel.to_arrow()
-    assert out2.num_rows == 0
-    assert out2.schema.names == tbl.schema.names
+    # DECIMAL128 keeps its declared (precision, scale) through to_arrow() even
+    # at zero rows: Vector.to_arrow()'s fallback (_vector_shim.pyx) resolves
+    # the pyarrow type from the vector's own descriptor (build_arrow_type_for)
+    # instead of inferring it from an empty to_pylist(), which pyarrow can't
+    # do and used to silently collapse to pa.null().
+    assert out.schema.field("d").type == pyarrow.decimal128(30, 4)
+
+
+if __name__ == "__main__":
+    test_decimal_column_empty_and_take_empty()
+    print("✅ test_decimal_column_empty_and_take_empty")

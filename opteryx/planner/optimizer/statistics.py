@@ -91,6 +91,48 @@ class ColumnStatistics:
     class_proportions: Optional[dict] = None
     avg_length: Optional[float] = None
 
+    # STARTS_WITH (prefix LIKE) ordinal-bounds selectivity estimator input
+    # (VARCHAR/NVARCHAR/VARBINARY columns only; None elsewhere, or when the
+    # manifest's bounds aren't ordinalized, or when no file carries a real
+    # bound for this column). (lo, hi): the relation-wide ordinal-key range —
+    # min/max of ColumnType.ordinalize() applied to this column's real
+    # values across every live file — aggregated from Manifest per-file
+    # min_values/max_values. This is a WEAKER, cheaper signal than `histogram`
+    # (no bin-level detail, just the overall span) and is populated
+    # independently of it: a relation can have ordinal_bounds without ever
+    # having been ANALYZE'd for a histogram (per-file min/max exist from
+    # ordinary writes; the richer histogram/char-class stats need an explicit
+    # ANALYZE pass). Deliberately NOT the same field as `value_range`
+    # (ColumnRange): that field is untyped/unused today and, if wired up
+    # later, is expected to carry REAL decoded values for numeric columns —
+    # mixing ordinal keys into it would silently corrupt any future numeric
+    # consumer that doesn't know to check `bounds_are_ordinal` first.
+    ordinal_bounds: Optional[tuple] = None
+
+    # Length-aware hard-impossibility guard input, shared by the
+    # containment-style selectivity estimators (STARTS_WITH, INSTR,
+    # ENDS_WITH — opteryx.planner.cost_estimation.selectivity). (min_length,
+    # max_length): relation-wide observed string byte-length range, from
+    # Manifest.get_length_bounds. Distinct from `avg_length` above:
+    # avg_length is a soft, probabilistic signal (a needle close to the
+    # average is less LIKELY to match); length_bounds is a hard, certain one
+    # (a needle longer than the observed maximum CANNOT match — no
+    # probability involved). Populated independently of histogram/
+    # class_proportions, same as ordinal_bounds.
+    #
+    # NOTE (NVARCHAR caveat): min/max length as computed by the external
+    # catalog stats builder is CHARACTER length (Python len() on a decoded
+    # str), not BYTE length, while every selectivity estimator here compares
+    # against a needle's BYTE length (predicate literals are bytes by the
+    # time they reach selectivity.py) and the local ANALYZE path's native
+    # char_class_stats() kernel is byte-based. UTF-8 byte length >= char
+    # length always, so a catalog-sourced max_length used as a byte ceiling
+    # can UNDER-state the true limit for non-ASCII content — risking a false
+    # "impossible" verdict. Consumers MUST skip the hard guard for NVARCHAR
+    # columns (where non-ASCII content concentrates in practice) and only
+    # trust this field for VARCHAR/VARBINARY, where it's safe either way.
+    length_bounds: Optional[tuple] = None
+
 
 @dataclass
 class RelationStatistics:

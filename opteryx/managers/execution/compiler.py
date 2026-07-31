@@ -140,6 +140,11 @@ def _logical_tuple(ct):
 _LC_DECIMAL64 = 1
 _LC_DATE = 3
 _LC_TIMESTAMP = 4
+# R6: ARRAY whose ELEMENT is a TIMESTAMP — the parquet list<timestamp> leaf decodes
+# as physical int64 and the IPC wire format carries no logical type, so the CHILD
+# vector needs the same unit-carrying retag the scalar case gets. Mirrors the
+# trampoline scan's `_sp_array_ts_unit_map` (parquet_read.pyx coerce op kind 4).
+_LC_ARRAY_TIMESTAMP = 5
 # TimestampUnit enum-name → draken unit code (matches logical_type.h TimestampUnit).
 _TS_UNIT_TO_INT = {"SECONDS": 0, "MILLISECONDS": 1, "MICROSECONDS": 2, "NANOSECONDS": 3}
 
@@ -153,6 +158,24 @@ def _wp11_unit(sc):
     if lg is None or lg.unit is None:
         return 2
     return _TS_UNIT_TO_INT.get(lg.unit.name, 2)
+
+
+def _r6_array_element_coerce(sc):
+    """R6: packed logical-coercion for an ARRAY read-set column (0 = none).
+
+    The ONLY element coercion the trampoline scan performs is ARRAY<TIMESTAMP>:
+    `_sp_array_ts_unit_map` in parquet_read.pyx retags the INT64 leaf to
+    TIMESTAMP64 with the ELEMENT's unit, because parquet stores a list<timestamp>
+    leaf as physical int64 and the IPC list format carries no logical type. Every
+    other element type (including ARRAY<DATE>, which the trampoline also leaves as
+    its raw int32 leaf) passes through untouched — parity, not judgement."""
+    ct = sc.column_type
+    element = ct.element if ct is not None else None
+    if element is None or element.physical != DrakenType.TIMESTAMP64:
+        return 0
+    lg = element.logical
+    unit = 2 if lg is None or lg.unit is None else _TS_UNIT_TO_INT.get(lg.unit.name, 2)
+    return _LC_ARRAY_TIMESTAMP | (unit << 4)
 
 
 def _wp11_logical_coerce(sc, pt):
@@ -989,9 +1012,18 @@ class _Compiler:
 
         if kind == "FilterNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
+            # A computed ARRAY operand inside the predicate (e.g. `SPLIT(x)[i] = ...`)
+            # needs the same materialize-and-reference hoist projections get — see
+            # _hoist_array_operands. Narrow back to the original layout afterward: the
+            # hoisted column is a filter-internal helper, not something anything above
+            # the filter asked for.
+            hoisted_layout = self._hoist_array_operands(p, [node.filter], list(layout))
             bc = self._lower_expression(node.filter, "a filter predicate")
-            const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, layout)
-            self.nplan.add_expr_filter(p, bc, layout, const_col_idx, const_scalar_vecs)
+            const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, hoisted_layout)
+            self.nplan.add_expr_filter(p, bc, hoisted_layout, const_col_idx, const_scalar_vecs)
+            if hoisted_layout != layout:
+                indices = [hoisted_layout.index(identity) for identity in layout]
+                self.nplan.add_select(p, indices, list(layout))
             return p, layout
 
         if kind == "ProjectionNode":
@@ -1079,7 +1111,7 @@ class _Compiler:
             layout = self._project_agg_operands(p, node, layout)
             specs = self._parse_aggregates(aggs, layout)
             buf = self.nplan.new_buffer()
-            self.nplan.set_groupby_sink(p, key_idx, specs, buf)
+            self.nplan.set_groupby_sink(p, key_idx, group_cols, specs, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = list(group_cols) + [spec[0] for spec in specs]
@@ -1271,8 +1303,17 @@ class _Compiler:
         having = getattr(node, "_having_condition", None)
         if having is None:
             return
+        # Same computed-ARRAY-operand hoist as the FilterNode branch (see
+        # compile_node) — HAVING lowers through the identical _lower_expression
+        # gate, so it needs the identical fix. Narrow back afterward; callers don't
+        # capture a returned layout from this method, so `layout` must stay accurate
+        # for whatever runs after add_expr_filter on this same pipeline.
+        hoisted_layout = self._hoist_array_operands(p, [having], list(layout))
         bc = self._lower_expression(having, "a HAVING predicate")
-        self.nplan.add_expr_filter(p, bc, layout)
+        self.nplan.add_expr_filter(p, bc, hoisted_layout)
+        if hoisted_layout != layout:
+            indices = [hoisted_layout.index(identity) for identity in layout]
+            self.nplan.add_select(p, indices, list(layout))
 
     def _sort_spec(self, p, order_by, layout):
         if not order_by:
@@ -1369,10 +1410,16 @@ class _Compiler:
             # rides on the ColumnSelectOperator's zero_col_rows degenerate path.
             self.scan_residual_reasons[scan.identity] = "zero_projection"
             return None
-        if getattr(scan, "limit", None) is not None:
-            # R2: scan-pushed LIMIT semantics live in the trampoline scan
-            self.scan_residual_reasons[scan.identity] = "pushed_limit"
-            return None
+        # R2 (CLOSED): a scan-pushed LIMIT is now enforced natively —
+        # NativeParquetScanSource carries `row_limit`, claims each morsel's share
+        # under its global mutex, truncates the morsel that crosses the boundary,
+        # and stops submitting new row-group work once the quota is met (so a
+        # `LIMIT 10` over a large file no longer runs the prefetch window across
+        # the whole scan). This is a correctness obligation, not just an I/O win:
+        # LimitPushdownStrategy REMOVES the Limit node when it pushes into a scan,
+        # so nothing downstream truncates. Row identity is unspecified for a
+        # LIMIT without ORDER BY, and the trampoline is equally order-
+        # nondeterministic at dop>1, so no guarantee is lost.
         # R3 (fused_topn) — CLOSED for the NO-PREDICATE case only. `scan.
         # _topn_sort_name`/`_topn_limit` is a trampoline-only decode-skip HINT
         # (WP-02 §9 pass-2 shrink): the downstream HeapSortNode always compiles
@@ -1439,18 +1486,18 @@ class _Compiler:
                     sc = getattr(ident, "schema_column", None)
                     if sc is None:
                         continue
-                    # WP-11 fail-closed: a BOOL column used as a predicate input is not
-                    # safely evaluable by the relocated c-native ExprFilter (bool
-                    # comparison raises err_op=11), even though bytecode_is_all_c_native
-                    # reports it lowerable. Rather than relocate and crash, fail the
-                    # whole scan closed so the predicate stays on the trampoline (which
-                    # evaluates it correctly). BOOL columns that are only PROJECTED (not
-                    # a predicate input) are unaffected — they decode natively. A native
-                    # c-native bool comparison kernel is a follow-on.
-                    if _physical_type(sc) == DrakenType.BOOL:
-                        # R5: BOOL column used as a predicate input (WP-11 fail-closed)
-                        self.scan_residual_reasons[scan.identity] = "bool_predicate_input"
-                        return None
+                    # NOTE (was "R5 / WP-11 fail-closed"): a BOOL column used as a
+                    # predicate input used to fail the whole scan closed here
+                    # (`bool_predicate_input`), because draken_compare_dv's type
+                    # switch had no DRAKEN_BOOL branch — every bool comparison
+                    # declined to nullptr, which on the relocated ExprFilter (no
+                    # fallback) raised err_op=11. draken/ops/bool_compare.h now
+                    # supplies that branch: BOOL is BIT-PACKED, so it needs its own
+                    # kernel rather than a fixed-width instantiation, reading
+                    # bit `selection[i]` of the bitmap for every logical row (the
+                    # uniform §11 access contract, no shape discriminant) with
+                    # FALSE < TRUE ordering and NULL-if-either-operand-NULL. So a
+                    # BOOL predicate input is admitted, same as a projected one.
                     # NOTE (was "A2 fail-closed"): a DATE32/TIMESTAMP64 predicate input
                     # used to fail the scan closed here, on the premise that the
                     # relocated ExprFilter's kernel could not evaluate a temporal
@@ -1518,6 +1565,18 @@ class _Compiler:
                 string_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)
+            elif pt == DrakenType.ARRAY:
+                # R6: a parquet LIST column. It ALWAYS lands DK_POOL (repetition
+                # levels ⇒ direct_kind_for has no direct kind for it) and is
+                # serialized as TAG_ARRAY; `array_columns` (built below from the
+                # same read_scs order) routes it to the native TAG_ARRAY decoder.
+                # The element type is carried on the WIRE (the child_type_tag byte),
+                # so nothing needs packing for it — except ARRAY<TIMESTAMP>, whose
+                # int64 leaf needs the unit-carrying retag the trampoline applies.
+                kinds.append("array")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(_r6_array_element_coerce(sc))
             elif coerce is not None:
                 # WP-11: DECIMAL / DATE / TIMESTAMP / TIME. `coerce` is (kind_str,
                 # is_int64_decimal, packed) — None here means the logical descriptor
@@ -1531,11 +1590,15 @@ class _Compiler:
                 # R6: a read-set column (projected OR role-3 filter-only) of a
                 # not-yet-admissible kind fails the whole scan closed. Deliberate
                 # strict check: role-3 columns must also be native-admissible.
-                # Carry the offending DrakenType so R6 can be sub-censused by type
-                # (e.g. whether an ARRAY, or a missing-descriptor DECIMAL/temporal,
-                # dominates). `pt` is the column's physical type here; it is None
-                # for a column whose ColumnType has no physical tag (e.g. ARRAY),
-                # so guard the name lookup.
+                # Carry the offending DrakenType so R6 can be sub-censused by type.
+                # `pt` is the column's physical type; it is None when the column's
+                # ColumnType carries no physical tag at all, so guard the lookup.
+                #
+                # ARRAY used to be the dominant reason code here and is now CLOSED
+                # (see the DrakenType.ARRAY branch above). What still lands here is
+                # STRUCT/MAP (`json`-annotated), a DECIMAL or temporal column whose
+                # logical descriptor is missing/out of range (`_wp11_logical_coerce`
+                # returning None), and anything else with no native decode.
                 self.scan_residual_reasons[scan.identity] = (
                     "non_admissible_kind:" + (pt.name if pt is not None else "NONE"))
                 return None
@@ -1544,6 +1607,11 @@ class _Compiler:
         # read_scs; all-zero when nothing keys (SELECT */LIKE) → no sidecar built.
         _key_ids = self._hash_key_identities()
         hash_key_columns = [1 if sc.identity in _key_ids else 0 for sc in read_scs]
+        # R6: which read columns are ARRAY (parquet LIST). Parallel to read_scs, and
+        # exactly the columns the loop above classified kind "array" — the native
+        # Source needs the positional flag because all three pool shapes (decimal /
+        # varchar / array) arrive as an indistinguishable DK_POOL blob.
+        array_columns = [1 if _physical_type(sc) == DrakenType.ARRAY else 0 for sc in read_scs]
         # Columns the optimizer proved are read ONLY through length-answerable
         # operations (LengthOnlyColumnStrategy) — the decoder records each value's
         # length but skips copying long-value payloads, which nothing reads.
@@ -1599,6 +1667,7 @@ class _Compiler:
             file_sizes=file_sizes or None,
             string_types=string_types,
             decimal_columns=decimal_columns,
+            array_columns=array_columns,
             logical_coerce=logical_coerce,
             hash_key_columns=hash_key_columns,
             length_only_columns=length_only_columns,
@@ -1682,7 +1751,11 @@ class _Compiler:
                 "columns_read": len(reloc[1]) if reloc is not None else len(scan.columns),
             }
             p = self.nplan.new_pipeline()
-            self.nplan.set_native_scan_source(p, splan)
+            # R2: a scan-pushed LIMIT is enforced BY the scan — LimitPushdownStrategy
+            # removes the Limit node from the plan when it pushes (limit_pushdown.py
+            # `_apply_to_scan`), so no downstream LimitOperator truncates. Pushdown
+            # only fires with no pushed predicate and no OFFSET.
+            self.nplan.set_native_scan_source(p, splan, getattr(scan, "limit", None))
             self._remember_types(scan.columns)
             if reloc is None:
                 return p, [col.schema_column.identity for col in scan.columns]

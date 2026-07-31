@@ -309,13 +309,28 @@ class OpteryxTable(Diachronic, PredicatePushable):
             sketch_vectors = {}
             _warn_no_native_sketches()
 
-        # Create Manifest with files and schema
+        # Create Manifest with files and schema.
+        #
+        # bounds_are_ordinal: the catalog's stats builder stores min/max as
+        # `Vector.ordinalize()` keys, not real values (see the catalog's
+        # _compute_column_stats). For most types that key IS the value — an
+        # identity widen for signed ints, and for DATE/TIMESTAMP/TIME the raw
+        # physical integer, which is also what the binder normalises those
+        # literals to — which is why pruning appeared to work. FLOAT is the
+        # exception and was silently WRONG: its ordinal key is an
+        # order-preserving BIT transform, so a file whose gm ranges 0.1..0.9
+        # stored bounds of 4591870180066957722..4606281698874543309, and
+        # `WHERE gm = 0.5` compared 0.5 against those and pruned the file that
+        # actually held the matching rows. Declaring the encoding sends
+        # predicate literals through ColumnType.ordinalize first, so both
+        # sides are in the same space.
         self.manifest = Manifest(
             files=file_entries,
             schema=self.schema,
             min_k_vector=sketch_vectors.get("min_k_hashes"),
             histogram_vector=sketch_vectors.get("histogram_counts"),
             char_class_vector=sketch_vectors.get("char_class_counts"),
+            bounds_are_ordinal=True,
         )
 
         return self.schema, self.manifest

@@ -321,4 +321,58 @@ static VecResult bool_not(const DrakenVector& a) {
     return bool_make_result(out_val, out_vld, n, out_vld == nullptr);
 }
 
+// ---------------------------------------------------------------------------
+// IS TRUE / IS FALSE / IS NOT TRUE / IS NOT FALSE — never-null truth test.
+//   op: 0=IS_TRUE 1=IS_FALSE 2=IS_NOT_TRUE 3=IS_NOT_FALSE
+//   IS_TRUE      = data & validity
+//   IS_FALSE     = ~data & validity
+//   IS_NOT_TRUE  = ~data | ~validity
+//   IS_NOT_FALSE = data | ~validity
+// validity == nullptr is treated as an all-valid (0xFF) byte/bit throughout —
+// the SAME av-fill idiom bool_and/bool_or use above.
+// Result is ALWAYS all-valid (a truth test never yields NULL — SQL semantics,
+// unlike bool_and/or/xor/not, which are Kleene NULL-preserving).
+// ---------------------------------------------------------------------------
+
+static VecResult bool_truth_test(const DrakenVector& a, int op) {
+    const uint32_t n     = a.length;
+    const uint32_t bm    = (n + 7u) >> 3;
+    const uint8_t* adata = static_cast<const uint8_t*>(a.data);
+    const uint8_t* av    = a.validity;
+
+    size_t val_alloc;
+    uint8_t* out_val = bool_alloc_buf(bm, val_alloc);
+
+    if (a.flags & DRAKEN_SEL_IDENTITY) {
+        for (uint32_t k = 0u; k < bm; ++k) {
+            const uint8_t aval = adata[k];
+            const uint8_t av_b = av ? av[k] : 0xFFu;
+            uint8_t bit;
+            switch (op) {
+                case 0:  bit = aval & av_b; break;
+                case 1:  bit = static_cast<uint8_t>(~aval) & av_b; break;
+                case 2:  bit = static_cast<uint8_t>(~aval) | static_cast<uint8_t>(~av_b); break;
+                default: bit = aval | static_cast<uint8_t>(~av_b); break;
+            }
+            out_val[k] = bit;
+        }
+        bool_mask_tail(out_val, bm, n);
+    } else {
+        for (uint32_t i = 0u; i < n; ++i) {
+            const uint32_t val = bool_get_val(adata, a.selection[i]);
+            const uint32_t vld = av ? bool_get_valid(av, i) : 1u;
+            uint32_t bit;
+            switch (op) {
+                case 0:  bit = val & vld; break;
+                case 1:  bit = (1u - val) & vld; break;
+                case 2:  bit = (1u - val) | (1u - vld); break;
+                default: bit = val | (1u - vld); break;
+            }
+            if (bit) out_val[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+    }
+
+    return bool_make_result(out_val, nullptr, n, true);
+}
+
 }} // namespace draken::ops

@@ -17,6 +17,12 @@ jobs:
       max-parallel: 8
       matrix:
         include:
+          - runner-python: "3.12"
+            pybuild: "3.12"
+            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
+          - runner-python: "3.13"
+            pybuild: "3.13"
+            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
           - runner-python: "3.14"
             pybuild: "3.14"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
@@ -163,6 +169,20 @@ jobs:
 
       - name: Create source dist
         run: python setup.py sdist
+
+      - name: Stage linux 3.12 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-3.12
+          path: dist-linux-3.12
+      - run: mv -v dist-linux-3.12/* dist/
+
+      - name: Stage linux 3.13 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-3.13
+          path: dist-linux-3.13
+      - run: mv -v dist-linux-3.13/* dist/
 
       - name: Stage linux 3.14 (GIL)
         uses: actions/download-artifact@v4.1.7

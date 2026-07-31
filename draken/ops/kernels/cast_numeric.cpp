@@ -785,6 +785,238 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
     });
 }
 
+// --- DECIMAL → DECIMAL (either tier, any scale) --------------------------------
+//
+// The unscaled payload is meaningless without its scale, and the DrakenVector does
+// NOT carry one (§11/§14) — so BOTH scales ride in the binary_op_ctx the binder
+// fills: `left_scale` is the SOURCE scale, `result_scale`/`result_precision` the
+// TARGET (precision > 18 selects the int128 tier). Same mechanism the DECIMAL
+// binop and `_to_string` cast kernels already use.
+//
+// Until this kernel existed there was NO decimal→decimal cast at all: the pair
+// fell through `_c_native_cast` to the Python closure, which the native engine
+// refuses ("outside the c-native kernel set"). That made every promoted-DECIMAL
+// CASE/blend unrunnable once the promotion crossed the int64→int128 tier.
+//
+// Value policy mirrors _build_decimal_closure (casts.pyx) — a declared type is a
+// contract, not a hint:
+//   - widening (target scale > source): multiply by 10^delta, overflow FAILS LOUD.
+//   - narrowing (target scale < source): exact only. Digits that would be DROPPED
+//     fail loud; trailing zeros re-pad silently (DECIMAL(5,3) 1500 → DECIMAL(5,1) 15).
+//   - a value outside the DECLARED precision fails loud rather than being stored
+//     and silently mis-read later.
+// Null rows are skipped entirely (placeholder 0, validity copied): their payload is
+// undefined, and range-checking undefined bytes would raise on a row SQL never reads.
+//
+// DENSE output (uniform data[selection[j]] gather over logical rows), matching the
+// float→decimal kernel above.
+
+// 10^k as __int128; k is bounded by the DECIMAL(38) precision cap.
+static __int128 dec_pow10(int k) noexcept {
+    __int128 r = 1;
+    while (k-- > 0) r *= 10;
+    return r;
+}
+
+// One (source tier → destination tier) rescale loop. Written as a macro rather than
+// a template because this translation unit is one extern "C" block (templates are
+// not permitted there), and as four specialisations rather than one branchy loop so
+// the per-row path carries no tier test (§3).
+#define DRAKEN_DEC_RESCALE_LOOP(SRC_T, DST_T)                                          \
+    for (uint32_t j = 0u; j < n; ++j) {                                                \
+        DST_T* dst = reinterpret_cast<DST_T*>(out) + j;                                \
+        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { *dst = 0; continue; } \
+        __int128 x = static_cast<__int128>(                                            \
+            static_cast<const SRC_T*>(v->data)[v->selection[j]]);                      \
+        if (delta > 0) {                                                               \
+            if (x > mul_lim || x < -mul_lim) {                                         \
+                draken_free(out);                                                      \
+                return draken_error_sentinel_fmt(                                      \
+                    "cast decimal->decimal: value overflows DECIMAL(%d, %d)",          \
+                    (int)c->result_precision, (int)c->result_scale);                   \
+            }                                                                          \
+            x *= factor;                                                               \
+        } else if (delta < 0) {                                                        \
+            if (x % factor != 0) {                                                     \
+                draken_free(out);                                                      \
+                return draken_error_sentinel_fmt(                                      \
+                    "cast decimal->decimal: value has more decimal places than the "   \
+                    "declared scale %d", (int)c->result_scale);                        \
+            }                                                                          \
+            x /= factor;                                                               \
+        }                                                                              \
+        if (x >= dec_lim || x <= -dec_lim) {                                           \
+            draken_free(out);                                                          \
+            return draken_error_sentinel_fmt(                                          \
+                "cast decimal->decimal: value overflows DECIMAL(%d, %d)",              \
+                (int)c->result_precision, (int)c->result_scale);                       \
+        }                                                                              \
+        *dst = static_cast<DST_T>(x);                                                  \
+    }
+
+static VecResult decimal_to_decimal_core(void* ctx, const DrakenVector* v, bool src128) {
+    if (!v) return draken_error_sentinel("Input vector is null");
+    const DrakenType want = src128 ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+    if (v->type != want)
+        return draken_error_sentinel_fmt("cast decimal->decimal: expected %d, got %d",
+                                         (int)want, (int)v->type);
+    if (!ctx) return draken_error_sentinel("cast decimal->decimal: missing ctx (scales)");
+    const auto* c = static_cast<const binary_op_ctx*>(ctx);
+    if (c->result_precision == 0u || c->result_precision > 38u)
+        return draken_error_sentinel_fmt("cast decimal->decimal: bad target precision %d",
+                                         (int)c->result_precision);
+
+    const int delta = static_cast<int>(c->result_scale) - static_cast<int>(c->left_scale);
+    const __int128 factor  = dec_pow10(delta >= 0 ? delta : -delta);
+    const __int128 dec_lim = dec_pow10(static_cast<int>(c->result_precision));
+    // Largest magnitude that can still be multiplied by `factor` without leaving the
+    // declared precision — checked BEFORE the multiply, so it can never wrap.
+    const __int128 mul_lim = (delta > 0) ? (dec_lim - 1) / factor : 0;
+
+    const bool dst128 = c->result_precision > 18u;
+    const uint32_t n = v->length;
+    const size_t es = dst128 ? 16u : 8u;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
+    if (!out) return draken_error_sentinel("Allocation failed");
+    const uint8_t* val_in = v->validity;
+
+    if (src128) {
+        if (dst128) { DRAKEN_DEC_RESCALE_LOOP(__int128, __int128) }
+        else        { DRAKEN_DEC_RESCALE_LOOP(__int128, int64_t) }
+    } else {
+        if (dst128) { DRAKEN_DEC_RESCALE_LOOP(int64_t, __int128) }
+        else        { DRAKEN_DEC_RESCALE_LOOP(int64_t, int64_t) }
+    }
+
+    VecResult r;
+    r.data = out;
+    r.type = dst128 ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+    r.validity_embedded = 0u;
+    r.ts_unit = 0xFFu;
+    r.dec_precision = c->result_precision;
+    r.dec_scale = c->result_scale;
+    r.length = n; r.data_length = n;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.validity = kernel_copy_validity(v);
+    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    return r;
+}
+
+#undef DRAKEN_DEC_RESCALE_LOOP
+
+VecResult draken_cast_decimal_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return decimal_to_decimal_core(ctx, v, /*src128=*/false); });
+}
+
+VecResult draken_cast_decimal128_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return decimal_to_decimal_core(ctx, v, /*src128=*/true); });
+}
+
+// --- INTEGER → DECIMAL ---------------------------------------------------------
+//
+// An integer IS a decimal at scale 0, so the stored unscaled payload is simply
+// value * 10^target_scale. ctx = binary_op_ctx: result_scale / result_precision
+// (>18 selects the int128 tier). `left_scale` is unused — an integer source has no
+// scale of its own.
+//
+// This closed the last hole in the promoted-DECIMAL blend: a CASE (or UNION leg)
+// pairing an INTEGER COLUMN with a DECIMAL branch needs exactly this cast, and with
+// no kernel for it the plan compiler refused the whole query ("outside the c-native
+// kernel set"). Integer LITERALS never needed it — the binder retypes those in place.
+//
+// The multiply is range-checked against the DECLARED precision BEFORE it happens, so
+// an out-of-range value fails loud instead of wrapping — same contract as the
+// decimal→decimal rescale above. Null rows are skipped (undefined payload).
+
+#define DRAKEN_INT_TO_DEC_LOOP(SRC_T, DST_T)                                           \
+    for (uint32_t j = 0u; j < n; ++j) {                                                \
+        DST_T* dst = reinterpret_cast<DST_T*>(out) + j;                                \
+        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { *dst = 0; continue; } \
+        __int128 x = static_cast<__int128>(                                            \
+            static_cast<const SRC_T*>(v->data)[v->selection[j]]);                      \
+        if (x > mul_lim || x < -mul_lim) {                                             \
+            draken_free(out);                                                          \
+            return draken_error_sentinel_fmt(                                          \
+                "cast integer->decimal: value overflows DECIMAL(%d, %d)",              \
+                (int)c->result_precision, (int)c->result_scale);                       \
+        }                                                                              \
+        *dst = static_cast<DST_T>(x * factor);                                         \
+    }
+
+// Both destination tiers for one source width. `dst128` is loop-invariant, so this
+// keeps the per-row path free of any tier test (§3).
+#define DRAKEN_INT_TO_DEC_SRC(SRC_T)                                                   \
+    if (dst128) { DRAKEN_INT_TO_DEC_LOOP(SRC_T, __int128) }                            \
+    else        { DRAKEN_INT_TO_DEC_LOOP(SRC_T, int64_t) }
+
+static VecResult int_to_decimal_core(void* ctx, const DrakenVector* v, const char* who) {
+    if (!v) return draken_error_sentinel("Input vector is null");
+    if (!ctx) return draken_error_sentinel_fmt("%s: missing ctx (scale)", who);
+    const auto* c = static_cast<const binary_op_ctx*>(ctx);
+    if (c->result_precision == 0u || c->result_precision > 38u)
+        return draken_error_sentinel_fmt("%s: bad target precision %d",
+                                         who, (int)c->result_precision);
+
+    const __int128 factor  = dec_pow10(static_cast<int>(c->result_scale));
+    const __int128 dec_lim = dec_pow10(static_cast<int>(c->result_precision));
+    const __int128 mul_lim = (dec_lim - 1) / factor;
+
+    const bool dst128 = c->result_precision > 18u;
+    const uint32_t n = v->length;
+    const size_t es = dst128 ? 16u : 8u;
+    uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
+    if (!out) return draken_error_sentinel("Allocation failed");
+    const uint8_t* val_in = v->validity;
+
+    switch (v->type) {
+        case DRAKEN_INT8:   { DRAKEN_INT_TO_DEC_SRC(int8_t)   break; }
+        case DRAKEN_INT16:  { DRAKEN_INT_TO_DEC_SRC(int16_t)  break; }
+        case DRAKEN_INT32:  { DRAKEN_INT_TO_DEC_SRC(int32_t)  break; }
+        case DRAKEN_INT64:  { DRAKEN_INT_TO_DEC_SRC(int64_t)  break; }
+        case DRAKEN_UINT8:  { DRAKEN_INT_TO_DEC_SRC(uint8_t)  break; }
+        case DRAKEN_UINT16: { DRAKEN_INT_TO_DEC_SRC(uint16_t) break; }
+        case DRAKEN_UINT32: { DRAKEN_INT_TO_DEC_SRC(uint32_t) break; }
+        case DRAKEN_UINT64: { DRAKEN_INT_TO_DEC_SRC(uint64_t) break; }
+        default:
+            draken_free(out);
+            return draken_error_sentinel_fmt("%s: expected an integer source, got %d",
+                                             who, (int)v->type);
+    }
+
+    VecResult r;
+    r.data = out;
+    r.type = dst128 ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+    r.validity_embedded = 0u;
+    r.ts_unit = 0xFFu;
+    r.dec_precision = c->result_precision;
+    r.dec_scale = c->result_scale;
+    r.length = n; r.data_length = n;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.validity = kernel_copy_validity(v);
+    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    return r;
+}
+
+#undef DRAKEN_INT_TO_DEC_SRC
+#undef DRAKEN_INT_TO_DEC_LOOP
+
+// Three entry points, one core — the names follow the established source-width
+// convention (`_int64_`, `_integer_` for INT8/16/32, `_uint_` for every unsigned
+// width) so the bind-time table in casts.pyx reads like its INT64/FLOAT64 siblings.
+VecResult draken_cast_int64_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return int_to_decimal_core(ctx, v, "cast int64->decimal"); });
+}
+
+VecResult draken_cast_integer_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return int_to_decimal_core(ctx, v, "cast integer->decimal"); });
+}
+
+VecResult draken_cast_uint_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return int_to_decimal_core(ctx, v, "cast uint->decimal"); });
+}
+
 }  // extern "C"
 
 // ---- ARRAY → VARCHAR ---------------------------------------------------------------

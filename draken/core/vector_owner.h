@@ -90,3 +90,19 @@ struct VectorOwner {
     VectorOwner& operator=(VectorOwner&&)      = default;
     ~VectorOwner()                             = default;
 };
+
+// In-memory footprint (bytes) of a VectorOwner's payload, INCLUDING (for
+// DRAKEN_ARRAY) the owned child subtree -- unlike draken_vector_nbytes alone,
+// which only ever sees the bare DrakenVector and so cannot reach child_owner
+// (see the KNOWN LIMITATION note on draken_vector_nbytes in buffers.h).
+// Recurses through nested arrays (ARRAY<ARRAY<...>>); each level counts its
+// own offsets/data/validity via draken_vector_nbytes, plus whatever its own
+// child_owner contributes.
+static inline size_t draken_vector_owner_nbytes(const VectorOwner* owner) noexcept {
+    size_t total = 0u;
+    while (owner != nullptr) {
+        total += draken_vector_nbytes(&owner->vec);
+        owner = owner->child_owner.get();
+    }
+    return total;
+}

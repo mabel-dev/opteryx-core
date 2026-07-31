@@ -31,6 +31,7 @@ from typing import Optional
 from opteryx.expression import NodeType
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage.distogram import count_up_to
+from opteryx.types.logical_type import DrakenType
 
 
 _SWAPPED_OP = {
@@ -85,6 +86,23 @@ def _selectivity(node, stats: RelationStatistics) -> float:
 
     if nt == NodeType.COMPARISON_OPERATOR:
         return _selectivity_comparison(node, stats)
+
+    if nt == NodeType.FUNCTION:
+        # predicate_rewriter.py rewrites a prefix LIKE/ILIKE ("x LIKE
+        # 'foo%'") into a `_STARTS_WITH`/`_CI_STARTS_WITH` FUNCTION node, and a
+        # suffix LIKE/ILIKE ("x LIKE '%foo'") into a `_ENDS_WITH`/
+        # `_CI_ENDS_WITH` FUNCTION node, before this dispatcher ever sees it --
+        # see the estimators below. Every other FUNCTION falls through to 1.0
+        # (no selectivity model).
+        if node.value == "_STARTS_WITH":
+            return _selectivity_starts_with(node, stats)
+        if node.value == "_CI_STARTS_WITH":
+            return _selectivity_ci_starts_with(node, stats)
+        if node.value == "_ENDS_WITH":
+            return _selectivity_ends_with(node, stats)
+        if node.value == "_CI_ENDS_WITH":
+            return _selectivity_ci_ends_with(node, stats)
+        return 1.0
 
     return 1.0
 
@@ -544,13 +562,67 @@ def predicate_estimator_tag(predicate, stats: RelationStatistics) -> Optional[st
     """Which selectivity estimator would fire for `predicate` — diagnostic
     telemetry only (opteryx.planner.optimizer.statistics_refresh._predicate_note).
 
-    Mirrors _selectivity_instr's own tier check WITHOUT re-running estimation
-    (no float math, just the same presence/None checks). Returns
+    Mirrors _selectivity_instr's/_selectivity_starts_with's/
+    _selectivity_ci_starts_with's/_selectivity_ends_with's/
+    _selectivity_ci_ends_with's own tier checks WITHOUT re-running
+    estimation (no float math, just the same presence/None checks). Returns
     "char_class_decay" | "flat_fallback" for an infix LIKE predicate
     (InStr/IInStr/NotInStr/NotIInStr — the rewritten form of "x LIKE
-    '%pattern%'"), None for every other predicate kind — other predicate
-    kinds have no estimator tiers worth surfacing yet.
+    '%pattern%'"), "ordinal_range" | "ordinal_bounds" | "flat_fallback" for a
+    prefix LIKE predicate (_STARTS_WITH — "x LIKE 'foo%'": a full histogram,
+    else just the relation-wide min/max span, else no signal at all),
+    "char_class_prefix" | "flat_fallback" for a case-insensitive prefix LIKE
+    predicate (_CI_STARTS_WITH — "x ILIKE 'foo%'"), "char_class_suffix" |
+    "flat_fallback" for a suffix LIKE predicate of either case sensitivity
+    (_ENDS_WITH/_CI_ENDS_WITH — "x LIKE '%foo'"/"x ILIKE '%foo'": no
+    ordinal-range tier exists for a suffix at all, see the module comment
+    above _selectivity_ends_with), None for every other predicate kind —
+    other predicate kinds have no estimator tiers worth surfacing yet.
     """
+    if getattr(predicate, "node_type", None) == NodeType.FUNCTION:
+        if predicate.value == "_STARTS_WITH":
+            operands = _two_operand_function_operands(predicate)
+            if operands is None:
+                return "flat_fallback"
+            column_node, identity, _prefix = operands
+            col = stats.columns.get(identity)
+            if col is None or _physical_type(column_node) is None:
+                return "flat_fallback"
+            if col.histogram is not None:
+                return "ordinal_range"
+            if col.ordinal_bounds is not None:
+                return "ordinal_bounds"
+            return "flat_fallback"
+        if predicate.value == "_CI_STARTS_WITH":
+            operands = _two_operand_function_operands(predicate)
+            if operands is None:
+                return "flat_fallback"
+            _column_node, identity, _prefix = operands
+            col = stats.columns.get(identity)
+            if (
+                col is not None
+                and col.class_proportions is not None
+                and col.avg_length
+                and col.avg_length > 0
+            ):
+                return "char_class_prefix"
+            return "flat_fallback"
+        if predicate.value in ("_ENDS_WITH", "_CI_ENDS_WITH"):
+            operands = _two_operand_function_operands(predicate)
+            if operands is None:
+                return "flat_fallback"
+            _column_node, identity, _suffix = operands
+            col = stats.columns.get(identity)
+            if (
+                col is not None
+                and col.class_proportions is not None
+                and col.avg_length
+                and col.avg_length > 0
+            ):
+                return "char_class_suffix"
+            return "flat_fallback"
+        return None
+
     if getattr(predicate, "node_type", None) != NodeType.COMPARISON_OPERATOR:
         return None
     op = predicate.value
@@ -587,6 +659,21 @@ def _selectivity_instr(identity: bytes, literal_value, node, stats: RelationStat
     decay = node.like_selectivity_decay  # plain attribute access — Node.__getattr__
     # returns None for any never-set attribute; bind-time capture is Part D
     # (opteryx/planner/binder/binder.py), not this module's concern.
+    if needle is not None:
+        # Hard guard first: node is the full comparison (InStr/IInStr), not a
+        # FUNCTION node's isolated column parameter -- resolve whichever side
+        # is the bound identifier to get its physical type. `literal_value`
+        # is already the decoded scalar (via _literal_scalar upstream), which
+        # may have lost the original byte length for a str -- re-derive byte
+        # length from `needle` is wrong for the same reason noted in
+        # _selectivity_ci_starts_with (needle can be a decoded str); use the
+        # RAW literal bytes when available, falling back to needle's own
+        # length only if literal_value wasn't bytes to begin with.
+        column_node = node.left if _identifier_identity(node.left) == identity else node.right
+        physical = _physical_type(column_node)
+        raw_len = len(literal_value) if isinstance(literal_value, (bytes, bytearray)) else len(needle)
+        if _exceeds_max_length(raw_len, col, physical):
+            return 0.0
     if (
         col is not None
         and needle is not None
@@ -597,3 +684,417 @@ def _selectivity_instr(identity: bytes, literal_value, node, stats: RelationStat
     ):
         return _decayed_char_class_selectivity(needle, col.class_proportions, col.avg_length, decay)
     return _LIKE_INFIX_SELECTIVITY
+
+
+# ---- prefix STARTS_WITH ('foo%') estimators ---------------------------------
+#
+# predicate_rewriter.py rewrites a prefix LIKE/ILIKE ("x LIKE 'foo%'") into a
+# `_STARTS_WITH`/`_CI_STARTS_WITH` FUNCTION node before selectivity estimation
+# ever runs, so these are reached via the NodeType.FUNCTION dispatch branch in
+# `_selectivity`, not `_selectivity_comparison`.
+#
+# _STARTS_WITH (case-sensitive) reuses infrastructure built for a different
+# purpose (scan-level file pruning): ColumnType.ordinalize() (draken) turns a
+# VARCHAR value into a lexicographic-order-preserving int64 key by packing its
+# first 8 bytes big-endian, then right-shifting by 1 to fit a non-negative
+# int64 (zero-padded if shorter -- see draken/ops/ordinalize.h). That shift is
+# a floor-by-2, so it's still strictly order-preserving (monotonic), which is
+# all range comparison below needs -- but it costs the LOWEST bit of the 8th
+# byte: two 8-byte-or-longer values sharing their first 7 bytes and differing
+# by exactly 1 in their 8th byte collide onto the same key (adjacent values
+# binned into the same ordered bucket, not a total order past 7 bytes). And
+# Manifest.get_distogram already bins VARCHAR histograms in that same
+# ordinal-key space (_analyze.py ordinalizes every morsel before binning,
+# unconditionally for string-family columns). "Starts with prefix" is exactly
+# the ordinal-key range [ordinalize(prefix), ordinalize(prefix 0xFF-padded to
+# 8 bytes)] -- ordinalize zero-pads a short value automatically, so the lower
+# bound is ordinalize(prefix) directly; the upper bound needs the 0xFF padding
+# built explicitly. Prefixes >= 8 bytes collide with any other value sharing
+# an identical first 8 bytes (and, per the low-bit note above, occasionally
+# one further value one apart in its 8th byte) -- treated as a point density
+# via the same bin-width technique _selectivity_eq uses for an exact-value
+# lookup.
+#
+# _CI_STARTS_WITH (case-insensitive) can NOT reuse that range lookup: case
+# variants ('Foo'/'foo'/'FOO') land in disjoint regions of ordinal-key space,
+# not one contiguous range. It keeps a char-class probability model instead --
+# structurally simpler than the infix estimator (_decayed_char_class_selectivity)
+# since a prefix match is anchored at position 0: no n_positions search, no
+# decay**i damping, just the product of each needle character's per-class
+# match probability, merging upper+lower for an alphabetic character (a
+# case-insensitive match accepts either case in the data).
+
+
+def _physical_type(column_node):
+    """The column's DrakenType (ColumnType.physical), or None.
+
+    Resolved off the bound IDENTIFIER node itself -- predicate_rewriter
+    reuses the original comparison's `left` node verbatim when building the
+    `_STARTS_WITH`/`_CI_STARTS_WITH` FUNCTION node, so `schema_column` (and
+    its `column_type`) is already populated from bind time.
+    """
+    schema_column = getattr(column_node, "schema_column", None)
+    column_type = getattr(schema_column, "column_type", None) if schema_column is not None else None
+    return getattr(column_type, "physical", None) if column_type is not None else None
+
+
+def _exceeds_max_length(needle_len: int, col, physical) -> bool:
+    """True when `needle_len` provably exceeds the column's observed maximum
+    string length -- a hard, certain "impossible match" signal shared by
+    every containment-style estimator below (STARTS_WITH, INSTR, ENDS_WITH,
+    and their case-insensitive variants): a needle longer than anything that
+    has ever appeared in the column cannot match, no probability involved.
+    This is a stronger, cheaper check than any of those estimators' existing
+    avg_length-based soft dampening, and should run first.
+
+    Skipped for NVARCHAR. The external catalog's length stats are CHARACTER-
+    based (Python len() on a decoded str -- opteryx_catalog's
+    _compute_column_stats, verified directly against the installed package),
+    while every needle length compared against col.length_bounds here is
+    BYTE-based (predicate literals are bytes by the time they reach this
+    module; the local ANALYZE path's native char_class_stats() kernel is
+    also byte-based, self-consistently). UTF-8 byte length is always >= char
+    length, so a catalog-sourced max_length can UNDER-state the true byte
+    ceiling for non-ASCII content, risking a false "impossible" verdict for
+    a needle that's actually still possible. VARCHAR/VARBINARY don't have
+    this risk (VARBINARY has no text encoding at all to be ambiguous about;
+    VARCHAR is trusted as-is -- an explicit product decision that non-ASCII
+    content concentrates in NVARCHAR in practice, not a technical guarantee).
+    """
+    if physical == DrakenType.NVARCHAR:
+        return False
+    length_bounds = getattr(col, "length_bounds", None) if col is not None else None
+    if length_bounds is None:
+        return False
+    _min_length, max_length = length_bounds
+    return needle_len > max_length
+
+
+def _two_operand_function_operands(node):
+    """(column_node, identity, literal_bytes) for a _STARTS_WITH/_CI_STARTS_WITH/
+    _ENDS_WITH/_CI_ENDS_WITH FUNCTION node, or None when any part can't be
+    resolved. Generic across all four -- predicate_rewriter.py builds each as
+    the same shape, `FUNCTION(col, literal)`, differing only in which end of
+    the string the literal anchors to (a distinction the caller applies, not
+    this helper).
+
+    An empty literal is valid and reachable (`LIKE '%'` rewrites to
+    `_STARTS_WITH(col, '')`, matching every non-null value) -- callers handle
+    it correctly (empty needle / full-span ordinal range), so it is not
+    rejected here.
+    """
+    params = getattr(node, "parameters", None)
+    if not params or len(params) != 2:
+        return None
+    column_node, literal_node = params[0], params[1]
+    identity = _identifier_identity(column_node)
+    if identity is None:
+        return None
+    literal_bytes = getattr(literal_node, "value", None)
+    if isinstance(literal_bytes, str):
+        literal_bytes = literal_bytes.encode("utf-8")
+    if not isinstance(literal_bytes, bytes):
+        return None
+    return column_node, identity, literal_bytes
+
+
+def _selectivity_starts_with(node, stats: RelationStatistics) -> float:
+    """Four tiers, richest signal first:
+
+    0. Hard length guard (_exceeds_max_length): a prefix longer than the
+       column's observed maximum string length cannot match ANY row --
+       0.0, certain, no probability involved. Runs before anything else.
+    1. Histogram (col.histogram): exact range/point density against the
+       column's binned ordinal-key distribution -- see the module-level
+       comment above for the range/point-density derivation.
+    2. Ordinal bounds only (col.ordinal_bounds), when no histogram exists
+       (e.g. per-file min/max are populated at ordinary write time, but the
+       richer histogram needs an explicit ANALYZE that hasn't run): a
+       relation-wide [lo, hi] with no bin-level detail. A prefix range
+       entirely outside it can't match anything -> 0.0. One that overlaps
+       gets a uniform-density estimate (the fraction of the observed span
+       covered by the prefix's ordinal range) -- the standard textbook
+       fallback when only min/max are known, but computed from a REAL
+       observed range instead of a made-up constant. The >=8-byte point case
+       has no span to interpolate over, so it prefers NDV (1/distinct_count,
+       same fallback _selectivity_eq uses) when known.
+    3. Flat constant (_LIKE_PREFIX_SELECTIVITY): no stats at all.
+
+    The >=8-byte point-density case (tiers 1 and 2) is where ordinalize's
+    precision genuinely runs out -- bytes past the first ~8 are invisible to
+    the ordinal-key comparison, so a "match" there is only ever a coincidence
+    of the visible prefix, not a verified full match. That branch gets an
+    additional avg_length-based soft discount (mirrors
+    _selectivity_ci_starts_with's), on top of the hard guard above: a needle
+    close to or longer than the average string length is less likely to be a
+    genuine match than the raw bucket density alone suggests. The <8-byte
+    RANGE case does NOT get this discount -- it's already an exact
+    computation against the real observed distribution (a too-short value
+    naturally zero-pads to sort below the prefix range and is excluded on
+    its own), so an extra discount there would double-count uncertainty
+    that's already reflected in the real data.
+    """
+    operands = _two_operand_function_operands(node)
+    if operands is None:
+        return _LIKE_PREFIX_SELECTIVITY
+    column_node, identity, prefix = operands
+
+    col = stats.columns.get(identity)
+    physical = _physical_type(column_node)
+    if col is None or physical is None:
+        return _LIKE_PREFIX_SELECTIVITY
+
+    if _exceeds_max_length(len(prefix), col, physical):
+        return 0.0
+
+    # Exact-integer ordinal keys -- kept as Python ints (arbitrary precision)
+    # for every comparison against col.ordinal_bounds (also exact ints, from
+    # Manifest.get_ordinal_bounds). float(int) on a value this large (up to
+    # ~2**62) silently rounds -- e.g. float(4051330591175588409) rounds DOWN
+    # to 4051330591175588352, a different integer -- which previously made an
+    # exact-match prefix compare as spuriously "less than" its own bound.
+    # Only the histogram tier below, which needs Distogram's float64 API,
+    # converts to float, and only for that one call.
+    try:
+        lo_key = physical.ordinalize(prefix)
+    except ValueError:
+        return _LIKE_PREFIX_SELECTIVITY
+    if not isinstance(lo_key, int):
+        return _LIKE_PREFIX_SELECTIVITY
+
+    pad = 8 - min(len(prefix), 8)
+    hi_key = None
+    if pad > 0:
+        try:
+            hi_key = physical.ordinalize(prefix[:8] + b"\xff" * pad)
+        except ValueError:
+            return _LIKE_PREFIX_SELECTIVITY
+        if not isinstance(hi_key, int):
+            return _LIKE_PREFIX_SELECTIVITY
+
+    # Only meaningful (and only computed) for the point-density case
+    # (hi_key is None) -- see the docstring's discount rationale.
+    point_discount = 1.0
+    if hi_key is None and col.avg_length and col.avg_length > 0:
+        point_discount = min(1.0, col.avg_length / len(prefix))
+
+    dgram = col.histogram
+    if dgram is not None:
+        total = float(dgram.count())
+        if total > 0:
+            lo_f = float(lo_key)
+            if hi_key is None:
+                # Prefix >= 8 bytes: every string sharing this 8-byte prefix
+                # collides to lo_key -- a point density, not a range.
+                bins_len = dgram.bin_count
+                span = dgram.max - dgram.min
+                if bins_len > 1 and span > 0:
+                    bin_width = span / bins_len
+                    below = _count_up_to(dgram, lo_f - bin_width / 2.0)
+                    above = _count_up_to(dgram, lo_f + bin_width / 2.0)
+                    return _clamp01((above - below) / total * point_discount)
+                # Degenerate histogram (e.g. a single bin) -- fall through to
+                # the ordinal-bounds/constant tiers below rather than give up.
+            else:
+                below = _count_up_to(dgram, lo_f)
+                above = _count_up_to(dgram, float(hi_key))
+                return _clamp01((above - below) / total)
+
+    bounds = col.ordinal_bounds
+    if bounds is not None:
+        bound_lo, bound_hi = bounds
+        query_hi = hi_key if hi_key is not None else lo_key
+        if query_hi < bound_lo or lo_key > bound_hi:
+            return 0.0
+        span = bound_hi - bound_lo
+        if span <= 0:
+            # Degenerate/constant observed range, and the disjoint check
+            # above already confirmed it falls inside the query range.
+            return _clamp01(1.0 * point_discount) if hi_key is None else 1.0
+        if hi_key is None:
+            ndv = col.distinct_count
+            if ndv and ndv > 0:
+                return _clamp01((1.0 / ndv) * point_discount)
+            return _clamp01(_LIKE_PREFIX_SELECTIVITY * point_discount)
+        overlap = min(query_hi, bound_hi) - max(lo_key, bound_lo)
+        return _clamp01(overlap / span)
+
+    return _clamp01(_LIKE_PREFIX_SELECTIVITY * point_discount) if hi_key is None else _LIKE_PREFIX_SELECTIVITY
+
+
+def _ci_char_probability(c: str, class_proportions: dict) -> float:
+    """Per-character match probability for the case-insensitive prefix
+    estimator. For an alphabetic character, sums the upper- and
+    lower-class proportions before dividing by a single case's cardinality
+    (26) -- 'upper' and 'lower' have equal cardinality, so
+    P(byte matches either case) = prop_upper/26 + prop_lower/26 =
+    (prop_upper + prop_lower)/26, NOT the naive (prop_upper + prop_lower)
+    over the SUMMED cardinality (52), which would silently halve the true
+    probability. Every other class is unaffected by case and uses its own
+    proportion/cardinality unchanged.
+    """
+    cls = _classify_char(c)
+    if cls in ("upper", "lower"):
+        cardinality = _CLASS_CARDINALITY["lower"]  # == _CLASS_CARDINALITY["upper"]
+        prop = class_proportions.get("upper", 0.0) + class_proportions.get("lower", 0.0)
+    else:
+        cardinality = _CLASS_CARDINALITY.get(cls, 256)
+        prop = class_proportions.get(cls, 0.0)
+    return prop / cardinality if cardinality > 0 else 0.0
+
+
+def _selectivity_ci_starts_with(node, stats: RelationStatistics) -> float:
+    operands = _two_operand_function_operands(node)
+    if operands is None:
+        return _LIKE_PREFIX_SELECTIVITY
+    column_node, identity, prefix = operands
+
+    col = stats.columns.get(identity)
+    needle = _like_needle_str(prefix)
+    if (
+        col is None
+        or needle is None
+        or col.class_proportions is None
+        or not col.avg_length
+        or col.avg_length <= 0
+    ):
+        return _LIKE_PREFIX_SELECTIVITY
+    if not needle:
+        return 1.0
+
+    # Byte length of the literal, NOT len(needle) -- `needle` is the decoded
+    # Python str from _like_needle_str, so its len() is CHARACTER count. The
+    # guard (and col.length_bounds) compares in bytes; using char count here
+    # would silently reintroduce the exact byte-vs-char mismatch the guard's
+    # NVARCHAR skip exists to avoid, just on this side of the comparison.
+    if _exceeds_max_length(len(prefix), col, _physical_type(column_node)):
+        return 0.0
+
+    log_p_pos = 0.0
+    for c in needle:
+        p_char = _ci_char_probability(c, col.class_proportions)
+        log_p_pos += math.log(p_char) if p_char > 0 else _LOG_PCHAR_FLOOR
+    p_prefix = math.exp(log_p_pos)
+
+    discount = min(1.0, col.avg_length / len(needle))
+    return _clamp01(p_prefix * discount)
+
+
+# ---- suffix ENDS_WITH ('%foo') estimators -----------------------------------
+#
+# predicate_rewriter.py rewrites a suffix LIKE/ILIKE ("x LIKE '%foo'") into a
+# `_ENDS_WITH`/`_CI_ENDS_WITH` FUNCTION node before selectivity estimation ever
+# runs, reached via the same NodeType.FUNCTION dispatch branch as STARTS_WITH.
+#
+# Unlike a prefix, a suffix has no ordinal-key range at all: ColumnType.
+# ordinalize() keys on a string's FIRST 8 bytes, so two values sharing an
+# identical suffix but differing prefixes ordinalize to unrelated keys, and a
+# column-wide min/max says nothing about what strings end with. Neither
+# _selectivity_starts_with's ordinal-range/ordinal-bounds tiers nor
+# Manifest.get_ordinal_bounds are applicable here -- there is no richer tier
+# above the char-class model for EITHER case sensitivity, so both variants
+# share one tier: the char-class product below, falling back to the flat
+# _LIKE_PREFIX_SELECTIVITY constant when no char-class stats exist.
+#
+# The infix estimator (_decayed_char_class_selectivity) models a needle that
+# could START at any of n_positions candidate offsets, summing/damping across
+# all of them (`1 - exp(-n_positions * p_pos)` with a decay**i per-position
+# discount) -- that model does not apply here. A suffix has exactly ONE valid
+# anchor position (the string's last len(needle) characters), so this is a
+# straight per-character product with no position search and no decay, the
+# same structural shape _selectivity_ci_starts_with already uses anchored at
+# position 0. The two ENDS_WITH variants differ only in which per-character
+# probability function they use (plain class proportion vs case-merged), so
+# they share _anchored_char_class_selectivity below rather than duplicating
+# the loop.
+
+
+def _plain_char_probability(c: str, class_proportions: dict) -> float:
+    """Per-character match probability for the case-sensitive suffix
+    estimator -- the same class_proportion/cardinality lookup
+    _decayed_char_class_selectivity uses per position, factored out so
+    _selectivity_ends_with doesn't duplicate it.
+    """
+    cls = _classify_char(c)
+    cardinality = _CLASS_CARDINALITY.get(cls, 256)
+    prop = class_proportions.get(cls, 0.0)
+    return prop / cardinality if cardinality > 0 else 0.0
+
+
+def _anchored_char_class_selectivity(
+    needle: str, class_proportions: dict, avg_length: float, char_probability
+) -> float:
+    """Single-anchor char-class product shared by `_selectivity_ends_with`
+    and `_selectivity_ci_ends_with`. ``char_probability`` is
+    `_plain_char_probability` or `_ci_char_probability`, applied per
+    character with no position search and no decay (see module comment
+    above) plus the same avg_length/needle_len width discount
+    `_selectivity_ci_starts_with` uses: a needle longer than the column's
+    average string length can't fit as a suffix of an average row.
+    """
+    if not needle:
+        return 1.0
+    log_p = 0.0
+    for c in needle:
+        p_char = char_probability(c, class_proportions)
+        log_p += math.log(p_char) if p_char > 0 else _LOG_PCHAR_FLOOR
+    p_suffix = math.exp(log_p)
+
+    discount = min(1.0, avg_length / len(needle))
+    return _clamp01(p_suffix * discount)
+
+
+def _selectivity_ends_with(node, stats: RelationStatistics) -> float:
+    operands = _two_operand_function_operands(node)
+    if operands is None:
+        return _LIKE_PREFIX_SELECTIVITY
+    column_node, identity, suffix = operands
+
+    col = stats.columns.get(identity)
+    needle = _like_needle_str(suffix)
+    if (
+        col is None
+        or needle is None
+        or col.class_proportions is None
+        or not col.avg_length
+        or col.avg_length <= 0
+    ):
+        return _LIKE_PREFIX_SELECTIVITY
+    if not needle:
+        return 1.0
+
+    # Byte length of the literal (see _selectivity_ci_starts_with's identical
+    # note): `needle` is the decoded str, `suffix` is the original bytes.
+    if _exceeds_max_length(len(suffix), col, _physical_type(column_node)):
+        return 0.0
+
+    return _anchored_char_class_selectivity(
+        needle, col.class_proportions, col.avg_length, _plain_char_probability
+    )
+
+
+def _selectivity_ci_ends_with(node, stats: RelationStatistics) -> float:
+    operands = _two_operand_function_operands(node)
+    if operands is None:
+        return _LIKE_PREFIX_SELECTIVITY
+    column_node, identity, suffix = operands
+
+    col = stats.columns.get(identity)
+    needle = _like_needle_str(suffix)
+    if (
+        col is None
+        or needle is None
+        or col.class_proportions is None
+        or not col.avg_length
+        or col.avg_length <= 0
+    ):
+        return _LIKE_PREFIX_SELECTIVITY
+    if not needle:
+        return 1.0
+
+    if _exceeds_max_length(len(suffix), col, _physical_type(column_node)):
+        return 0.0
+
+    return _anchored_char_class_selectivity(
+        needle, col.class_proportions, col.avg_length, _ci_char_probability
+    )

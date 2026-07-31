@@ -198,6 +198,32 @@ def test_case_incompatible_types_named_at_bind_time():
         _col("SELECT CASE WHEN id IS NULL THEN [1, 2, 3] ELSE id END AS f FROM $planets")
 
 
+def test_case_mismatched_but_compatible_widths_are_cast_aligned():
+    # id is INT8, CAST(id AS INTEGER) is INT64 — compatible (same numeric
+    # family) but not physically identical. draken_if_then_else (the native
+    # kernel this may lower to) does no promotion of its own, so the binder
+    # must CAST-align the mismatched branch rather than reject the query.
+    out = _col("SELECT CASE WHEN id > 3 THEN CAST(id AS INTEGER) ELSE id END AS k FROM $planets")
+    assert out == list(range(1, 10)), out
+
+
+def test_case_int_float_branches_are_cast_aligned():
+    out = _col("SELECT CASE WHEN id > 3 THEN mass ELSE id END AS k FROM $planets")
+    assert all(isinstance(v, float) for v in out), out
+
+
+def test_case_identical_decimal_branches_not_rewidened():
+    # Both branches already share one DECIMAL(p, s) — must pass through
+    # unchanged, not get recomputed via find_compatible_type's DECIMAL-promotion
+    # path (which has no "already equal" fast case and always widens, producing
+    # a DECIMAL-to-DECIMAL rescale no native CAST kernel supports).
+    out = _col(
+        "SELECT CASE WHEN id > 3 THEN CAST(1.5 AS DECIMAL(10,2)) "
+        "ELSE CAST(2.5 AS DECIMAL(10,2)) END AS k FROM $planets"
+    )
+    assert len(out) == 9, out
+
+
 def test_case_general_condition_incompatible_types_named_at_bind_time():
     # A CASE whose condition isn't a NULL-check (so it can't be rewritten to
     # IFNULL, and its condition form makes it ineligible for the optimizer's

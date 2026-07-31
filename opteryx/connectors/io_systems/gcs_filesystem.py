@@ -7,32 +7,14 @@ Uses Opteryx's stream wrappers for high-performance GCS access.
 import os
 import threading
 import urllib.parse
-from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
 from typing import Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
-from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 
-# GCS connection pool tuning.
-# 16 was too conservative. Testing shows optimal around 96 for GCS bandwidth saturation.
-# This balances concurrency with connection overhead (libcurl internal pooling uses 128 max).
-_MAX_PARALLEL_HEAD_REQUESTS = 96
 _GCP_AUTH_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
-
-
-def _get_gcs_head_pool():
-    """Get GCS HEAD-request pool via thread_pool_manager."""
-    return get_filesystem_pool(protocol="gcs", max_workers=_MAX_PARALLEL_HEAD_REQUESTS)
-
-
-# Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
-# This ensures that even if pools are shut down (e.g., in tests), the proxy will
-# get the fresh recreated pool from the cache on next access.
-_GCS_HEAD_POOL = LazyPoolProxy(_get_gcs_head_pool)
 
 
 def get_storage_credentials():
@@ -254,34 +236,37 @@ class OpteryxGcsFileSystem:
 
         from opteryx.utils import paths as path_utils
 
-        def _head_one(idx: int, path: str, bearer: str) -> Tuple[int, FileInfo]:
+        def _object_url(path: str) -> str:
             norm_path = path[5:] if path.startswith("gs://") else path
             bucket, _, _, _ = path_utils.get_parts(norm_path)
             object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
-            url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-            headers = self.http_client.head(
-                url,
-                headers={"Authorization": bearer},
-            )
-            size = int(headers.get("content-length", 0))
-            return idx, FileInfo(path=path, type=FileType.File, size=size)
+            return f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
         # Capture a single valid bearer token for this batch.
         bearer = self._bearer
 
-        # Fast path: avoid pool overhead for the common single-path case.
+        # Fast path: avoid batch overhead for the common single-path case.
         if len(paths) == 1:
-            _, info = _head_one(0, paths[0], bearer)
+            headers = self.http_client.head(
+                _object_url(paths[0]),
+                headers={"Authorization": bearer},
+            )
+            size = int(headers.get("content-length", 0))
+            info = FileInfo(path=paths[0], type=FileType.File, size=size)
             return info if single_path else [info]
 
-        # Fan out HEAD requests in parallel; preserve caller's path order.
-        infos: List["FileInfo"] = [None] * len(paths)  # type: ignore[assignment]
-        futures = [
-            _GCS_HEAD_POOL.submit(_head_one, idx, path, bearer) for idx, path in enumerate(paths)
+        # Fan out all HEAD requests in ONE native libcurl batch (a single C++
+        # CURLM event loop, one GIL release for the whole call) instead of a
+        # Python-level thread pool: dispatching per-path head() calls onto a
+        # pool would force each worker thread to cross back into the
+        # interpreter once per path, which is off-limits outside the
+        # planning/execution hand-off.
+        requests = [(_object_url(path), {"Authorization": bearer}) for path in paths]
+        headers_list = self.http_client.head_many(requests)
+        infos = [
+            FileInfo(path=path, type=FileType.File, size=int(headers.get("content-length", 0)))
+            for path, headers in zip(paths, headers_list)
         ]
-        for fut in as_completed(futures):
-            idx, info = fut.result()
-            infos[idx] = info
 
         return infos[0] if single_path else infos
 

@@ -18,6 +18,7 @@
 #include "ops/fixed_int_ops.h"   // i8/i16/i32 + u8/u16/u32 compare_vector
 #include "ops/uint64_compare.h"  // u64_compare_vector (UINT64)
 #include "ops/string_compare.h"  // str_compare_vector (VARCHAR/NVARCHAR/VARBINARY)
+#include "ops/bool_compare.h"    // bool_compare_vector (DRAKEN_BOOL, bit-packed)
 
 namespace {
 
@@ -194,6 +195,18 @@ extern "C" DrakenVector* draken_compare_dv(
                 // the underlying int32 is identical to date ordering. Same
                 // kernel as DRAKEN_INT32.
                 vr = draken::ops::i32_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_BOOL:
+                // BOOL is BIT-PACKED (one bit per stored value), so `data` is a
+                // bitmap and `data[selection[i]]` means *bit* selection[i] — no
+                // fixed-width kernel can read it. Its own kernel
+                // (ops/bool_compare.h) does, over the same uniform access
+                // contract. Ordering is FALSE < TRUE. Until this branch existed
+                // every bool comparison declined to nullptr, which on the
+                // relocated native ExprFilter (no fallback) raised err_op=11 —
+                // that is what forced a BOOL predicate input to fail the whole
+                // scan closed (`bool_predicate_input`, R5).
+                vr = draken::ops::bool_compare_vector(*left, *right, op_code);
                 break;
             case DRAKEN_VARCHAR:
             case DRAKEN_NVARCHAR:

@@ -100,8 +100,8 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
 # ---------------------------------------------------------------------------
 # Canonical single-file triggers, one per residual reason that is still an open
 # frontier with a reachable SQL trigger. The A0 acceptance gate parametrizes its
-# reachability test over these; `non_admissible_kind` carries a `:<DrakenType>`
-# suffix (ARRAY → :NONE) so the gate matches on the prefix.
+# reachability test over these; a reason may carry a `:<detail>` suffix, so the
+# gate matches on the prefix.
 #
 # `footer_gate` is the integer/narrow/unsigned admission gate (A1 closed the
 # integer widths). It stays reachable here via a SCHEMA-EVOLUTION dataset (a
@@ -111,12 +111,18 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
 # ---------------------------------------------------------------------------
 _FLAT = "testdata/flat/formats/parquet"
 _TEN = "testdata/flat/ten_files"
-_ARRAY = "testdata/flat/struct_array"
 _EVOLVING = "testdata/flat/different"
 
 HAND_SET: Dict[str, str] = {
-    # R2 — a scan-pushed LIMIT (no ORDER BY, so not a fused TopN).
-    "pushed_limit": "SELECT followers FROM '%s' LIMIT 5" % _FLAT,
+    # (R2 `pushed_limit` is RETIRED — no longer reachable, so it has no hand-set
+    # entry. A scan-pushed LIMIT used to fail closed because LIMIT semantics lived
+    # in the trampoline's `_records_to_read` slice. NativeParquetScanSource now
+    # carries `row_limit`: it claims each morsel's share under the Source's global
+    # mutex, truncates the morsel that crosses the boundary, and caps the submit
+    # frontier from the footer's per-row-group row counts so row groups that cannot
+    # contribute are never decoded (LIMIT 5 over tpch_1.lineitem: 96 row groups →
+    # 1). The scan MUST enforce this itself — LimitPushdownStrategy removes the
+    # Limit node from the plan when it pushes. See test_pushed_limit_now_native.)
     # R3 (fused_topn) — PARTIALLY closed (A3). The NO-predicate scan-fused
     # ORDER BY ... LIMIT is admitted natively (measured no-regression). WITH a
     # predicate it still fails closed — measured ~400% regression on ClickBench
@@ -129,10 +135,29 @@ HAND_SET: Dict[str, str] = {
         "ORDER BY EventTime LIMIT 10",
     # R4 — a pushed predicate that does not lower to a c-native span (regex).
     "unlowerable_predicate": "SELECT followers FROM '%s' WHERE text RLIKE 'a'" % _FLAT,
-    # R5 — a BOOL column used as a predicate input (WP-11 fail-closed).
-    "bool_predicate_input": "SELECT userid FROM '%s' WHERE user_verified = TRUE" % _TEN,
-    # R6 — a read-set column of a not-yet-admissible kind (ARRAY → :NONE).
-    "non_admissible_kind": "SELECT data FROM '%s'" % _ARRAY,
+    # (R5 `bool_predicate_input` is RETIRED — no longer reachable, so it has no
+    # hand-set entry. A BOOL column used as a predicate input used to fail closed
+    # because draken_compare_dv's type switch had no DRAKEN_BOOL branch: every bool
+    # comparison declined to nullptr, which on the relocated ExprFilter (no fallback)
+    # raised err_op=11. BOOL is BIT-PACKED, so no fixed-width kernel can read it —
+    # draken/ops/bool_compare.h supplies its own, reading bit `selection[i]` of the
+    # bitmap per logical row (uniform §11 access, no shape discriminant), ordering
+    # FALSE < TRUE, result NULL if either operand row is NULL. See
+    # test_bool_predicate_input_now_native. Same convention as R2 / R5b above.)
+    # (R6 `non_admissible_kind` is RETIRED — it has no reachable SQL trigger left,
+    # so it has no hand-set entry. ARRAY was the only kind the reason code was ever
+    # observed with, and ARRAY is now decoded natively: a parquet LIST column always
+    # lands DK_POOL (repetition levels ⇒ no direct kind) and serializes as TAG_ARRAY,
+    # which src/cpp/engine/native_array_pool_decode.hpp now parses in C++ — a
+    # faithful port of the trampoline's Cython `_build_array_vector*`, nested
+    # list<list<...>> and the ARRAY<TIMESTAMP> child retag included. See
+    # test_array_column_now_native. The two OTHER nested kinds stay fail-closed but
+    # do NOT reach this guard: STRUCT binds as json/VARCHAR and MAP is refused by
+    # the footer gate (`footer_gate`), both verified against real files. What is
+    # left behind this guard — VARIANT, INTERVAL, VECTOR_FP16, a DECIMAL/temporal
+    # column with no usable logical descriptor — has no parquet-scan trigger in the
+    # test corpus, making it a defensive check like `no_manifest`/R7a. Same
+    # retirement convention as R2 / R5 / R5b.)
     # R7b — the footer gate; still reachable via schema evolution (missing column).
     "footer_gate": "SELECT followers FROM '%s'" % _EVOLVING,
     # (R5b (A1) `unsigned_predicate_input` is RETIRED — no longer reachable, so it has

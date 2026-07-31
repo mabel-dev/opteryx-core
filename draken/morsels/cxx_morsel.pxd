@@ -65,6 +65,7 @@ cdef extern from * nogil:
     extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel*, const DrakenVector*);
     extern "C" CxxMorsel* cxx_mask_with_consts_c(const CxxMorsel*, const DrakenVector*,
                                                   const int32_t*, const DrakenVector* const*, uint32_t);
+    extern "C" CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel*);
     extern "C" CxxMorsel* cxx_select_c(const CxxMorsel*, const char**, const uint32_t*, uint32_t);
     extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel*, const int32_t*, uint32_t);
     extern "C" void cxx_morsel_delete(CxxMorsel*);
@@ -96,6 +97,10 @@ cdef extern from * nogil:
                                       const int32_t* const_col_idx,
                                       const DrakenVector* const* const_scalar_dv,
                                       uint32_t n_consts) nogil
+    # Materialize every column of `m` into a fresh, plain-C++-owned VectorOwner —
+    # strips any Python-object (py_deleter) ownership before a StreamingScanSource
+    # -pulled morsel crosses into the native engine (see draken_native.cpp).
+    CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m) nogil
     # S-B.2 column select/reorder by identity name (bytes via ptr+len arrays).
     CxxMorsel* cxx_select_c(const CxxMorsel* m, const char** name_ptrs,
                             const uint32_t* name_lens, uint32_t n) nogil

@@ -32,6 +32,7 @@ def read(at_date=None, variables=None):
     variables = variables or {}
 
     username = _get_variable(variables, "external_user", "")
+    billing_account = _get_variable(variables, "billing_account", "")
     memberships = _get_variable(variables, "user_memberships", [])
     entitlements = _get_variable(variables, "user_entitlements", [])
 
@@ -46,6 +47,14 @@ def read(at_date=None, variables=None):
     if username:
         attributes.append("username")
         values.append(username)
+
+    # Emitted only when set, matching `username` above. A session built through
+    # `opteryx.session()` always has one (query_session substitutes
+    # DEFAULT_BILLING_ACCOUNT), so absence here means a context assembled directly
+    # without one — which must show as no row, not as an empty account name.
+    if billing_account:
+        attributes.append("billing_account")
+        values.append(billing_account)
 
     for m in memberships:
         attributes.append("membership")
@@ -78,10 +87,10 @@ def schema():
             sc("value"),
             sc("type"),
         ],
-        # ESTIMATE, not a metric: the row count is one per username + membership +
-        # entitlement, so it varies per caller. Always small (single digits in
-        # practice) — the point is that it must not fall back to
+        # ESTIMATE, not a metric: the row count is one per username + billing
+        # account + membership + entitlement, so it varies per caller. Always small
+        # (single digits in practice) — the point is that it must not fall back to
         # _UNKNOWN_ROW_COUNT (1,000,000), which is wrong by ~5 orders of magnitude.
-        row_count_estimate=8,
+        row_count_estimate=9,
     )
     # fmt:on

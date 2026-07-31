@@ -48,8 +48,10 @@ namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include "logical_type.h"
 #include "fp16/fp16.h"   // fp16_ieee_from_fp32_value / fp16_ieee_to_fp32_value (D.11)
 #include "ops/bool_logical.h"
+#include "ops/bool_compare.h"        // bool_compare_vector (R5 fast-path fuzz test)
 #include "ops/bool_reductions.h"
 #include "ops/hash.h"               // includes decimal_arith.h transitively (E.32)
+#include "parvi.hpp"                 // opteryx::parvi::ParviSet — Vector.unique() fast path (<=16 distinct)
 #include "ops/int64_arithmetic.h"   // i64_neg (used by bridge round-trip test)
 #include "ops/int64_reductions.h"   // i64_sum (used by bridge round-trip test)
 #include "ops/float_ops.h"          // fp_total_lt (used by compare_at row ordering)
@@ -6220,6 +6222,39 @@ static CxxMorsel cxx_mask_with_consts(const CxxMorsel& m, const DrakenVector& ma
     return out;
 }
 
+// Rebuild every column of `m` as a fresh, plain-C++-owned VectorOwner (ordinary
+// `delete`, never nanobind's `py_deleter`) via an identity take — the same
+// vector_take_impl kernel cxx_mask uses, with idx[i]=i instead of a filtered
+// mask. Exists solely to strip Python-object ownership from a morsel about to
+// cross into a nogil-driven engine Source: cxx_from_vectors_list (below) wraps
+// a fresh shared_ptr<VectorOwner> around a Python-owned buffer via nb::cast,
+// and nanobind's shared_ptr caster attaches a py_deleter that does
+// `gil_scoped_acquire; Py_DECREF` on last-ref-drop — on free-threaded builds
+// gil_scoped_acquire attaches but does NOT serialize, so that decref can race a
+// concurrent Python-side read on another thread (the StreamingScanSource
+// trampoline's production SIGSEGV). Calling this once, right after a pulled
+// morsel is assembled and before it is handed to the C++ Source, makes the
+// morsel's lifetime pure-C++ regardless of how it was built (single-pass,
+// LATMAT/two-pass, or the empty-manifest fallback all funnel through the same
+// call site — see _scan_pull_run_inner in opteryx/operators/_operators.pyx).
+static CxxMorsel cxx_morsel_materialize_native(const CxxMorsel& m) {
+    CxxMorsel out;
+    out.names = m.names;
+    out.state = m.state;
+    if (m.columns.empty()) { out.zero_col_rows = m.zero_col_rows; return out; }
+    const uint32_t n = m.num_rows();
+    std::vector<int32_t> idx_vec(n);
+    for (uint32_t i = 0; i < n; ++i) idx_vec[i] = static_cast<int32_t>(i);
+    out.columns.reserve(m.columns.size());
+    for (const CxxColumn& col : m.columns) {
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx_vec.data(), n));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    return out;
+}
+
 static CxxMorsel cxx_from_vectors_list(nb::list vectors) {
     CxxMorsel m;
     const size_t n = nb::len(vectors);
@@ -6308,6 +6343,9 @@ extern "C" CxxMorsel* cxx_mask_with_consts_c(
         const int32_t* const_col_idx, const DrakenVector* const* const_scalar_dv,
         uint32_t n_consts) {
     return new CxxMorsel(cxx_mask_with_consts(*m, *mask, const_col_idx, const_scalar_dv, n_consts));
+}
+extern "C" CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m) {
+    return new CxxMorsel(cxx_morsel_materialize_native(*m));
 }
 // S-B.2: select/reorder columns by identity name (bytes → ptr+len arrays, since
 // identity names are opaque bytes). Pure container op (shares owners, no copy).
@@ -7061,6 +7099,93 @@ NB_MODULE(draken_native, m) {
             // with the nogil C-ABI cxx_hash_c) — release the GIL for the body.
             nb::gil_scoped_release _gil;
             return hash_shaped_impl(v);
+        })
+        // unique() — first-occurrence row index of each distinct value, as a
+        // permutation (DRAKEN_INT32 vector), NOT a rebuilt value vector. Apply
+        // it with .take() to get the deduplicated values themselves, or to
+        // drive any other vector by the same distinct-row selection.
+        //
+        // Only DRAKEN_INT64 input (i.e. the output of .hash_shaped()) is
+        // supported today — this exists to make Vector-level dedup (e.g. a
+        // k-smallest-distinct-hash sketch) fully native instead of a Python
+        // loop that boxes every row.
+        //
+        // Two paths:
+        //   - Compressed (dict-shaped) input: hash_shaped() preserves the
+        //     source column's shape, so a low-cardinality column's hash
+        //     vector is ALREADY deduplicated into data[0..data_length) with
+        //     selection[i] the per-row code. First-occurrence-per-code is a
+        //     single O(n) pass with a data_length-sized seen array indexed
+        //     directly by code — no hashing, no probing, nothing to build.
+        //   - Dense input: single O(n) pass through the SAME Parvi (<=16
+        //     distinct, zero-allocation, one-SIMD-group-probe) -> Carchar
+        //     (unbounded, SIMD-probed hash set) promotion path that already
+        //     drives DISTINCT/GROUP BY in opteryx/operators/distinct —
+        //     mark_new_indices returns early on Parvi overflow so the whole
+        //     input is rescanned once with Carchar, exactly like the
+        //     existing promote-and-replay caller.
+        .def("unique", [](const VectorOwner& v) -> VectorOwner {
+            if (v.vec.type != DRAKEN_INT64)
+                throw std::invalid_argument("unique: only supported for hash_shaped() output (DRAKEN_INT64)");
+            nb::gil_scoped_release _gil;
+            const uint32_t n = v.vec.length;
+            std::vector<int32_t> indices;
+
+            if (n == 0u) {
+                // fall through with empty indices
+            } else if (v.vec.data_length < n) {
+                // Compressed/dict shape: already deduplicated into data[0..data_length).
+                const uint32_t k = v.vec.data_length;
+                std::vector<int32_t> first_row(k, -1);
+                uint32_t found = 0u;
+                for (uint32_t i = 0u; i < n && found < k; ++i) {
+                    const uint32_t code = v.vec.selection[i];
+                    if (first_row[code] < 0) {
+                        first_row[code] = static_cast<int32_t>(i);
+                        ++found;
+                    }
+                }
+                indices.reserve(found);
+                for (uint32_t c = 0u; c < k; ++c)
+                    if (first_row[c] >= 0) indices.push_back(first_row[c]);
+            } else {
+                // Dense: materialise the n logical hash values through the
+                // uniform selection[] indirection (§11 — never assume
+                // identity even though hash_shaped()'s dense path sets it).
+                const uint64_t* data = static_cast<const uint64_t*>(v.vec.data);
+                const uint32_t* sel = v.vec.selection;
+                std::vector<uint64_t> keys(n);
+                for (uint32_t i = 0u; i < n; ++i) keys[i] = data[sel[i]];
+
+                indices.resize(n);
+                opteryx::parvi::ParviSet parvi;
+                auto [pcount, overflow] = parvi.mark_new_indices<int32_t>(keys.data(), indices.data(), n);
+                if (!overflow) {
+                    indices.resize(pcount);
+                } else {
+                    // Promote-and-replay: discard partial Parvi state, rescan
+                    // the WHOLE input once with Carchar (unbounded capacity).
+                    opteryx::carchar::CarcharSet carchar(n);
+                    const std::size_t ccount = carchar.mark_new_indices_32(keys.data(), indices.data(), n);
+                    indices.resize(ccount);
+                }
+            }
+
+            const uint32_t out_n = static_cast<uint32_t>(indices.size());
+            int32_t* out = static_cast<int32_t*>(draken_malloc((out_n > 0u ? out_n : 1u) * sizeof(int32_t)));
+            if (!out) throw std::bad_alloc();
+            if (out_n > 0u) std::memcpy(out, indices.data(), out_n * sizeof(int32_t));
+
+            VecResult r;
+            r.data = out;
+            r.validity = nullptr;
+            r.selection = draken_identity_sel(out_n);
+            r.owns_selection = false;
+            r.data_length = out_n;
+            r.length = out_n;
+            r.type = DRAKEN_INT32;
+            r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+            return vecresult_to_owner(r);
         })
         // ----------------------------------------------------------------
         // ordinalize — shape-preserving int64 ORDINAL KEY vector. Replaces the
@@ -10199,10 +10324,12 @@ NB_MODULE(draken_native, m) {
         "{step_name: passed}. Used by draken/tests/native/test_frame_arena.py.");
 
     // _compare_dv_smoke_test — exercise draken_compare_dv end-to-end against
-    // INT64 and FLOAT64 inputs, verifying that:
+    // INT64, FLOAT64, BOOL, DATE32, TIMESTAMP64, and DECIMAL inputs,
+    // verifying that:
     //   * result type is DRAKEN_BOOL with correct length
     //   * bitmap contents match expected per-row results
-    //   * unsupported types return NULL (caller's fallback signal)
+    //   * unsupported types return NULL (caller's fallback signal) — ARRAY
+    //     has no kernel at all, DECIMAL128 has no kernel yet (see below)
     //   * cross-type operands return NULL
     //   * length mismatch returns NULL
     //   * arena destroy cleans up without UAF
@@ -10272,17 +10399,55 @@ NB_MODULE(draken_native, m) {
             draken_free(fldata);
             draken_free(frdata);
 
-            // ---- Unsupported type: BOOL on either side → NULL ----
-            const uint32_t bn = 2;
+            // ---- BOOL EQ / LT (R5 close-out — bit-packed operands) ----
+            // left  bits = [T, F, T, F]  (0b0101 = 0x05)
+            // right bits = [T, T, F, F]  (0b0011 = 0x03)
+            // EQ         = [T, F, F, T]  → 0b1001 = 0x09
+            // LT         = [F, T, F, F]  → 0b0010 = 0x02   (FALSE < TRUE)
+            const uint32_t bn = 4;
             uint8_t* bldata = static_cast<uint8_t*>(draken_malloc(8));
             uint8_t* brdata = static_cast<uint8_t*>(draken_malloc(8));
             std::memset(bldata, 0, 8); std::memset(brdata, 0, 8);
+            bldata[0] = 0x05u; brdata[0] = 0x03u;
             DrakenVector blv = draken_vector_from_dense(bldata, bn, DRAKEN_BOOL, nullptr);
             DrakenVector brv = draken_vector_from_dense(brdata, bn, DRAKEN_BOOL, nullptr);
             DrakenVector* bres = draken_compare_dv(0, &blv, &brv, 0, 0, bn, arena);
-            r["unsupported_type_returns_null"] = (bres == nullptr);
+            r["bool_eq_returns_non_null"] = (bres != nullptr);
+            if (bres != nullptr) {
+                r["bool_eq_result_is_bool"] = (bres->type == DRAKEN_BOOL);
+                const uint8_t* bbits = static_cast<const uint8_t*>(bres->data);
+                uint8_t bgot = 0u;
+                for (uint32_t i = 0; i < bn; ++i) {
+                    if ((bbits[i >> 3] >> (i & 7)) & 1u) bgot |= static_cast<uint8_t>(1u << i);
+                }
+                r["bool_eq_bitmap"] = (bgot == 0x09u);
+            }
+            DrakenVector* blres = draken_compare_dv(4, &blv, &brv, 0, 0, bn, arena);
+            r["bool_lt_returns_non_null"] = (blres != nullptr);
+            if (blres != nullptr) {
+                const uint8_t* lbits = static_cast<const uint8_t*>(blres->data);
+                uint8_t lgot = 0u;
+                for (uint32_t i = 0; i < bn; ++i) {
+                    if ((lbits[i >> 3] >> (i & 7)) & 1u) lgot |= static_cast<uint8_t>(1u << i);
+                }
+                r["bool_lt_bitmap"] = (lgot == 0x02u);
+            }
             draken_free(bldata);
             draken_free(brdata);
+
+            // ---- Unsupported type: ARRAY on either side → NULL ----
+            // (BOOL used to be this step's subject; it is now a supported
+            // branch above, so the "no kernel → NULL fallback signal" contract
+            // is asserted against a type that genuinely has no compare kernel.)
+            int64_t* uldata = static_cast<int64_t*>(draken_malloc(8));
+            int64_t* urdata = static_cast<int64_t*>(draken_malloc(8));
+            uldata[0] = 0; urdata[0] = 0;
+            DrakenVector ulv = draken_vector_from_dense(uldata, 1, DRAKEN_ARRAY, nullptr);
+            DrakenVector urv = draken_vector_from_dense(urdata, 1, DRAKEN_ARRAY, nullptr);
+            DrakenVector* ures = draken_compare_dv(0, &ulv, &urv, 0, 0, 1, arena);
+            r["unsupported_type_returns_null"] = (ures == nullptr);
+            draken_free(uldata);
+            draken_free(urdata);
 
             // ---- Cross-type (INT64 vs FLOAT64) → NULL ----
             int64_t* cldata = static_cast<int64_t*>(draken_malloc(8));
@@ -10383,16 +10548,43 @@ NB_MODULE(draken_native, m) {
             // file inspection.
             r["varchar_smoke_skipped"] = true;
 
-            // ---- DECIMAL returns NULL (descriptor-on-DrakenVector limitation) ----
+            // ---- DECIMAL EQ (int64-backed, same-scale) ----
+            // compare_dv.cpp routes DRAKEN_DECIMAL through the same
+            // i64_compare_vector kernel as INT64/TIMESTAMP64: unscaled-value
+            // ordering == int64 ordering PROVIDED both operands share one
+            // scale, which the binder guarantees for every compare it emits.
+            // left = right = 150 (unscaled) → EQ = [T] → bitmap = 0b1 = 0x01.
             int64_t* qldata = static_cast<int64_t*>(draken_malloc(8));
             int64_t* qrdata = static_cast<int64_t*>(draken_malloc(8));
             qldata[0] = 150; qrdata[0] = 150;  // unscaled values
             DrakenVector qlv = draken_vector_from_dense(qldata, 1, DRAKEN_DECIMAL, nullptr);
             DrakenVector qrv = draken_vector_from_dense(qrdata, 1, DRAKEN_DECIMAL, nullptr);
             DrakenVector* qres = draken_compare_dv(0, &qlv, &qrv, 0, 0, 1, arena);
-            r["decimal_returns_null_pending_descriptor"] = (qres == nullptr);
+            r["decimal_eq_returns_non_null"] = (qres != nullptr);
+            if (qres != nullptr) {
+                r["decimal_eq_result_is_bool"] = (qres->type == DRAKEN_BOOL);
+                const uint8_t* qbits = static_cast<const uint8_t*>(qres->data);
+                r["decimal_eq_bitmap"] = ((qbits[0] & 0x01u) == 0x01u);
+            }
             draken_free(qldata);
             draken_free(qrdata);
+
+            // ---- DECIMAL128 (int128-backed) — genuinely no compare kernel ----
+            // compare_dv.cpp's switch has no DRAKEN_DECIMAL128 case (only
+            // DRAKEN_DECIMAL, the int64-backed fast path, is wired), so it
+            // falls through to `default: return nullptr`. Adding one needs
+            // scale info from the logical-type descriptor, which lives on
+            // VectorOwner, not on DrakenVector — the caller's Python fallback
+            // path covers it until then.
+            __int128* d128ldata = static_cast<__int128*>(draken_malloc(sizeof(__int128)));
+            __int128* d128rdata = static_cast<__int128*>(draken_malloc(sizeof(__int128)));
+            d128ldata[0] = 150; d128rdata[0] = 150;
+            DrakenVector d128lv = draken_vector_from_dense(d128ldata, 1, DRAKEN_DECIMAL128, nullptr);
+            DrakenVector d128rv = draken_vector_from_dense(d128rdata, 1, DRAKEN_DECIMAL128, nullptr);
+            DrakenVector* d128res = draken_compare_dv(0, &d128lv, &d128rv, 0, 0, 1, arena);
+            r["decimal128_returns_null_pending_kernel"] = (d128res == nullptr);
+            draken_free(d128ldata);
+            draken_free(d128rdata);
 
             // ---- Destroy frees the result vector + adopted buffers ----
             draken_frame_arena_destroy(arena);
@@ -10401,6 +10593,162 @@ NB_MODULE(draken_native, m) {
         },
         "Compare-dv smoke test (C++-side end-to-end). Returns dict of "
         "{step_name: passed}. Used by draken/tests/native/test_compare_dv.py.");
+
+    // _bool_compare_fastpath_fuzz_test — R5 dense-identity byte-wise fast path
+    // (see bool_compare.h ACCESS section; architect-approved per CLAUDE.md §11).
+    //
+    // For random lengths (including non-multiple-of-8, to exercise tail
+    // masking) and both with/without nulls, builds two DrakenVector pairs
+    // carrying the SAME logical values and validity:
+    //   * dense-identity  — both operands DRAKEN_SEL_IDENTITY, hits the new
+    //     byte-wise fast path.
+    //   * dict-encoded    — same values via a 2-entry {False, True}
+    //     dictionary + per-row codes, a non-identity selection that forces
+    //     the untouched uniform bit-by-bit loop.
+    // Runs all 6 ops (EQ/NE/GT/GE/LT/LE) against both and asserts the
+    // resulting DRAKEN_BOOL data + validity bitmaps are byte-for-byte
+    // identical. A single mismatch means the fast path changed the answer,
+    // not just the performance — the one thing CLAUDE.md §11 forbids.
+    m.def("_bool_compare_fastpath_fuzz_test",
+        []() -> nb::dict {
+            nb::dict r;
+            uint32_t cases_run  = 0;
+            uint32_t mismatches = 0;
+
+            // Deterministic xorshift32 — reproducible across platforms/runs,
+            // no <random> engine-version concerns for a correctness fuzz test.
+            uint32_t rng_state = 0x9E3779B9u;
+            auto next_byte = [&rng_state]() -> uint8_t {
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 17;
+                rng_state ^= rng_state << 5;
+                return static_cast<uint8_t>(rng_state & 0xFFu);
+            };
+
+            const uint32_t lengths[] = {0u, 1u, 7u, 8u, 9u, 15u, 16u, 17u, 63u, 64u, 65u, 100u, 257u};
+            const int ops[] = {0, 1, 2, 3, 4, 5};
+
+            for (uint32_t n : lengths) {
+                const uint32_t bm    = (n + 7u) >> 3;
+                const uint32_t padded = ((bm + 7u) & ~7u);
+                const size_t   alloc  = (padded > 0u) ? static_cast<size_t>(padded) : 8u;
+
+                for (int nulls_case = 0; nulls_case < 2; ++nulls_case) {
+                    uint8_t* adata = static_cast<uint8_t*>(draken_malloc(alloc));
+                    uint8_t* bdata = static_cast<uint8_t*>(draken_malloc(alloc));
+                    std::memset(adata, 0, alloc);
+                    std::memset(bdata, 0, alloc);
+                    for (uint32_t k = 0; k < bm; ++k) {
+                        adata[k] = next_byte();
+                        bdata[k] = next_byte();
+                    }
+
+                    uint8_t* avalid = nullptr;
+                    uint8_t* bvalid = nullptr;
+                    if (nulls_case == 1) {
+                        avalid = static_cast<uint8_t*>(draken_malloc(alloc));
+                        bvalid = static_cast<uint8_t*>(draken_malloc(alloc));
+                        std::memset(avalid, 0, alloc);
+                        std::memset(bvalid, 0, alloc);
+                        for (uint32_t k = 0; k < bm; ++k) {
+                            avalid[k] = next_byte();
+                            bvalid[k] = next_byte();
+                        }
+                        if ((n & 7u) != 0u && bm > 0u) {
+                            const uint8_t tail_mask = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+                            avalid[bm - 1u] &= tail_mask;
+                            bvalid[bm - 1u] &= tail_mask;
+                        }
+                    }
+
+                    DrakenVector a_dense = draken_vector_from_dense(adata, n, DRAKEN_BOOL, avalid);
+                    DrakenVector b_dense = draken_vector_from_dense(bdata, n, DRAKEN_BOOL, bvalid);
+
+                    // Dict-encoded equivalent: 2-entry dictionary {False, True}
+                    // (data byte 0x02: bit0=0/False, bit1=1/True), codes[i] = the
+                    // same bit adata/bdata already carry at row i. Same logical
+                    // values/validity, non-identity selection.
+                    uint8_t* a_dict_data = static_cast<uint8_t*>(draken_malloc(8));
+                    uint8_t* b_dict_data = static_cast<uint8_t*>(draken_malloc(8));
+                    std::memset(a_dict_data, 0, 8);
+                    std::memset(b_dict_data, 0, 8);
+                    a_dict_data[0] = 0x02u;
+                    b_dict_data[0] = 0x02u;
+
+                    const size_t codes_alloc = static_cast<size_t>(n > 0u ? n : 1u) * sizeof(uint32_t);
+                    uint32_t* a_codes = static_cast<uint32_t*>(draken_malloc(codes_alloc));
+                    uint32_t* b_codes = static_cast<uint32_t*>(draken_malloc(codes_alloc));
+                    for (uint32_t i = 0; i < n; ++i) {
+                        a_codes[i] = (adata[i >> 3] >> (i & 7u)) & 1u;
+                        b_codes[i] = (bdata[i >> 3] >> (i & 7u)) & 1u;
+                    }
+
+                    uint8_t* avalid_copy = nullptr;
+                    uint8_t* bvalid_copy = nullptr;
+                    if (avalid != nullptr) {
+                        avalid_copy = static_cast<uint8_t*>(draken_malloc(alloc));
+                        std::memcpy(avalid_copy, avalid, alloc);
+                    }
+                    if (bvalid != nullptr) {
+                        bvalid_copy = static_cast<uint8_t*>(draken_malloc(alloc));
+                        std::memcpy(bvalid_copy, bvalid, alloc);
+                    }
+
+                    DrakenVector a_dict = draken_vector_from_dict(a_dict_data, 2u, a_codes, n, DRAKEN_BOOL, avalid_copy);
+                    DrakenVector b_dict = draken_vector_from_dict(b_dict_data, 2u, b_codes, n, DRAKEN_BOOL, bvalid_copy);
+
+                    for (int op : ops) {
+                        ++cases_run;
+                        VecResult fast    = draken::ops::bool_compare_vector(a_dense, b_dense, op);
+                        VecResult uniform = draken::ops::bool_compare_vector(a_dict, b_dict, op);
+
+                        bool ok = (fast.length == uniform.length) && (fast.type == uniform.type);
+                        if (ok) {
+                            const uint32_t out_bm = (n + 7u) >> 3;
+                            const uint8_t* fd = static_cast<const uint8_t*>(fast.data);
+                            const uint8_t* ud = static_cast<const uint8_t*>(uniform.data);
+                            for (uint32_t k = 0; k < out_bm; ++k)
+                                if (fd[k] != ud[k]) { ok = false; break; }
+
+                            const bool f_has_vld = fast.validity != nullptr;
+                            const bool u_has_vld = uniform.validity != nullptr;
+                            if (f_has_vld != u_has_vld) {
+                                ok = false;
+                            } else if (f_has_vld) {
+                                for (uint32_t k = 0; k < out_bm; ++k)
+                                    if (fast.validity[k] != uniform.validity[k]) { ok = false; break; }
+                            }
+                        }
+                        if (!ok) ++mismatches;
+
+                        if (fast.data)        draken_free(fast.data);
+                        if (fast.validity)    draken_free(fast.validity);
+                        if (uniform.data)     draken_free(uniform.data);
+                        if (uniform.validity) draken_free(uniform.validity);
+                    }
+
+                    draken_free(adata);
+                    draken_free(bdata);
+                    if (avalid)       draken_free(avalid);
+                    if (bvalid)       draken_free(bvalid);
+                    draken_free(a_dict_data);
+                    draken_free(b_dict_data);
+                    draken_free(a_codes);
+                    draken_free(b_codes);
+                    if (avalid_copy)  draken_free(avalid_copy);
+                    if (bvalid_copy)  draken_free(bvalid_copy);
+                }
+            }
+
+            r["cases_run"]  = cases_run;
+            r["mismatches"] = mismatches;
+            r["all_match"]  = (mismatches == 0u);
+            return r;
+        },
+        "Fuzz test: dense-identity fast path in bool_compare_vector must be "
+        "bit-for-bit identical to the uniform (dict-encoded, non-identity) "
+        "path across random data, lengths, and null patterns. Used by "
+        "draken/tests/native/test_compare_dv.py.");
 
     // _arithmetic_dv_smoke_test — exercise draken_arithmetic_dv end-to-end.
     // Mirrors the compare_dv smoke test pattern.

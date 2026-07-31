@@ -111,14 +111,10 @@ def test_membership_permissions():
     curr.execute("SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)")
     assert execute_and_get_rowcount("SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)") == 3
 
-    conn = opteryx.connect(
-        memberships=["Apollo 11", "opteryx"],
-    )
-    curr = conn.cursor()
-    curr.execute(
-        "SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'"
-    )
-    assert execute_and_get_rowcount("SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'") == 1
+    # The `INNER JOIN $user` example that used to sit here is gone, not rewritten:
+    # `$user` is internal-only and `SHOW USER` is its only surface, so a caller's
+    # memberships can no longer be joined to a relation. `@@user_memberships`
+    # above is the remaining route to the same information.
 
 
 if __name__ == "__main__":  # pragma: no cover

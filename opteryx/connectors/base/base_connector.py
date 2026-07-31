@@ -40,6 +40,7 @@ class BaseConnector:
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
     requires_execution_context = False  # table_engine() needs the caller's ExecutionContext (e.g. for row-level permission filtering)
+    requires_original_case = False  # table_engine() needs the relation name as typed in SQL, before the binder's case-folding lowercases node.relation
 
     @property
     def __mode__(self):  # pragma: no cover

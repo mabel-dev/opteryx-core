@@ -339,6 +339,24 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
     if t == "DECIMAL":
         if s in ("FLOAT64", "FLOAT32"):
             return ("draken_cast_float_to_decimal", 0)
+        # DECIMAL → DECIMAL rescale. Named by the SOURCE tier; the TARGET tier is the
+        # ctx precision (>18 → int128), so one name covers both destinations. The
+        # source scale rides in binary_op_ctx.left_scale, exactly like the
+        # `_to_string` decimal arm below — the vector carries no scale at all.
+        if s == "DECIMAL":
+            return ("draken_cast_decimal_to_decimal", 0)
+        if s == "DECIMAL128":
+            return ("draken_cast_decimal128_to_decimal", 0)
+        # INTEGER → DECIMAL — an integer is a decimal at scale 0. Reached whenever a
+        # DECIMAL blend has an integer COLUMN branch (CASE, UNION-leg coercion) as
+        # well as by an explicit CAST; integer LITERALS never get here, the binder
+        # retypes those in place.
+        if s == "INT64":
+            return ("draken_cast_int64_to_decimal", 0)
+        if s in _CAST_NARROW_INT:
+            return ("draken_cast_integer_to_decimal", 0)
+        if s in _CAST_UNSIGNED_INT:
+            return ("draken_cast_uint_to_decimal", 0)
         return None
     # → VARCHAR / BLOB (string result; executor owns it as a Vector). NVARCHAR as
     # a TARGET is handled separately below (validate+retag, a different kernel);

@@ -19,7 +19,6 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar import fixed_value_function
-from opteryx.expression.functions.registrar import _check_blend_compatible
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
@@ -58,6 +57,7 @@ from opteryx.types.logical_type import (
 )
 from opteryx.types.scalars.value_parsing import parse_value
 from opteryx.types.schema import ConstantColumn, FunctionColumn, RelationSchema, SchemaColumn
+from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result_type
 
 # Aggregate return-type inference for the binder. Aggregates are dispatched by
 # the physical aggregate operators (not the function catalog), but the binder
@@ -75,6 +75,118 @@ _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
 # the native sink rejects DECIMAL input outright (native_group_sinks.hpp), so
 # there's no AVG-style decimal-passthrough case to handle.
 _AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "MEDIAN", "STDDEV"})
+
+# ---------------------------------------------------------------------------
+# CASE THEN/ELSE branch-type validation.
+#
+# This is deliberately its own family model, not the COALESCE/IFNULL/IIF one
+# (opteryx.expression.functions.registrar._check_blend_compatible): CASE may
+# lower to the native draken_if_then_else kernel (draken/ops/kernels/
+# function_kernels.cpp), whose supported-type surface differs from nc_dispatch
+# — notably it DOES support DECIMAL/DECIMAL128 (with a widening exception),
+# which nc_dispatch explicitly rejects. draken_if_then_else also does no
+# promotion of its own beyond that one exception ("Non-NULL branch types must
+# already match"), so a compatible-but-differently-typed pair (e.g. INT8 vs
+# INT64) is CAST-aligned below rather than rejected.
+_CASE_BLEND_FAMILIES = (
+    frozenset((LogicalCategory.BOOLEAN,)),
+    frozenset((LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY)),
+    frozenset((LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)),
+    frozenset((LogicalCategory.DATE, LogicalCategory.TIME, LogicalCategory.TIMESTAMP)),
+)
+
+
+def _describe_case_branch(node) -> str:
+    if node.node_type == 42:  # NodeType.LITERAL
+        return f"literal {node.value!r}"
+    if node.node_type == 38:  # NodeType.IDENTIFIER
+        name = node.query_column or node.source_column or node.value
+        return f"column '{name}'"
+    return "expression"
+
+
+def _check_case_branches_compatible(typed_branches, case_column) -> None:
+    """Reject a CASE whose THEN/ELSE branches can never share one type — e.g. a
+    scalar branch against ARRAY/VECTOR/VARIANT. draken_if_then_else has no
+    family for these at all (fk_fixed_elem_size returns 0), so no CAST could
+    ever align them; every other combination within one family in
+    _CASE_BLEND_FAMILIES is CAST-aligned by the caller, not rejected here.
+    """
+    if len(typed_branches) < 2:
+        return
+    node0, ct0 = typed_branches[0]
+    family0 = next((f for f in _CASE_BLEND_FAMILIES if ct0.category in f), None)
+    for node_i, ct_i in typed_branches[1:]:
+        family_i = next((f for f in _CASE_BLEND_FAMILIES if ct_i.category in f), None)
+        if family0 is None or family_i is None or family0 is not family_i:
+            raise IncompatibleTypesError(
+                message=(
+                    f"CASE: {_describe_case_branch(node0)} is {ct0} but "
+                    f"{_describe_case_branch(node_i)} is {ct_i} — CASE branches must "
+                    "share a compatible type (all BOOLEAN, all string, all "
+                    "numeric/DECIMAL, or all DATE/TIME/TIMESTAMP). Use CAST to align "
+                    f"the branches. (column '{case_column}')"
+                )
+            )
+
+
+# The null/conditional family returns one ARGUMENT VERBATIM — a selection, exactly like
+# CASE — so every argument that can supply the result must carry the result's own
+# descriptor. Value = the index of the first such argument: IIF's arg 0 is the CONDITION
+# and never a value. IFNOTNULL includes arg 0 because its declared type is derived over
+# BOTH args (see draken_ifnotnull in function_null_conditional.cpp); leaving arg 0
+# unaligned would trip the kernel's own branch-type check.
+_NULL_CONDITIONAL_VALUE_ARG = {"COALESCE": 0, "IFNULL": 0, "IFNOTNULL": 0, "IIF": 1}
+
+
+def _descriptor_carries_meaning(target) -> bool:
+    """True when matching physical/category tags do NOT make two types the same
+    value domain, so a coercion must compare the FULL ColumnType.
+
+    DECIMAL's scale and TIMESTAMP/TIME's unit live on the LogicalType, never on the
+    physical tag (§11/§14). `DECIMAL(10,2)` and `DECIMAL(10,4)` are both
+    DRAKEN_DECIMAL; `timestamp[ms]` and `timestamp[us]` are both DRAKEN_TIMESTAMP64.
+    Blending either pair on tag equality alone reinterprets one side's raw payload
+    at the other's scale/unit — 100x off for decimals, and 2024-01-02 read as
+    1970-01-20 for timestamps. Both were live silent-wrong-answer bugs.
+
+    Unparameterized types cannot hide a difference like that, and keep the cheap
+    tag comparison.
+    """
+    return target.logical is not None
+
+
+def _bound_cast_node(source, target):
+    """CAST-wrap an already-bound expression to `target`, itself fully bound.
+
+    The CAST node contract is the one the parser emits (logical_planner_builders.
+    cast): `value` is the BARE type name and any parameters are LITERAL nodes in
+    `parameters`. That is what the lowering reads — `compiled_expression._linearize`
+    passes `value` to `resolve_cast` and `p.value for p in parameters` to the ctx
+    allocator. Writing the parametrized DISPLAY form (`str(ColumnType)` →
+    "DECIMAL(24, 4)") into `value` instead builds a CAST no resolver can match, and
+    the query dies at compile time with "No native CAST kernel for DECIMAL →
+    DECIMAL(24, 4)".
+    """
+    from opteryx.expression import ExpressionColumn
+
+    parameters = ()
+    if target.category == LogicalCategory.DECIMAL:
+        value = "DECIMAL"
+        parameters = (
+            Node(node_type=NodeType.LITERAL, value=int(target.logical.precision), type=_lt.INT64),
+            Node(node_type=NodeType.LITERAL, value=int(target.logical.scale), type=_lt.INT64),
+        )
+    else:
+        value = str(target)
+    return Node(
+        node_type=NodeType.CAST,
+        left=source,
+        value=value,
+        parameters=parameters,
+        alias=getattr(source, "alias", None),
+        schema_column=ExpressionColumn(name="", column_type=target),
+    )
 
 
 def _operand_column_type(operand):
@@ -664,6 +776,46 @@ def inner_binder(
                         parameters.append(param)
                     node.parameters = parameters
 
+                # Descriptor coercion for the same family (plus IIF). These
+                # functions hand back one argument VERBATIM, so an argument whose
+                # descriptor differs from the declared result reinterprets its own
+                # payload at the wrong scale/unit — COALESCE(ts_ms, ts_us) returned
+                # 1970-01-20 for a 2024 timestamp. The kernel cannot catch it:
+                # nc_dispatch types on the physical tag, and the DrakenVector
+                # carries neither scale nor unit (§11/§14), so both branches look
+                # identical to it. Alignment therefore has to happen HERE, at bind
+                # time — the same move as the CASE branch coercion below and the
+                # UNION-leg coercion in set_ops.
+                #
+                # Deliberately limited to same-physical descriptor mismatches: a
+                # CROSS-physical pair (narrow int vs INT64, int vs float) is the
+                # kernel's own promotion to make (nc_promote_fixed), and inserting
+                # casts there would take work off a path that is already correct.
+                _fn_name = (
+                    _resolved.function_definition.name if _resolved is not None else node.value
+                )
+                _value_arg_start = _NULL_CONDITIONAL_VALUE_ARG.get(_fn_name)
+                if (
+                    _value_arg_start is not None
+                    and result_type is not None
+                    and _descriptor_carries_meaning(result_type)
+                ):
+                    _params = list(node.parameters)
+                    for _i in range(_value_arg_start, len(_params)):
+                        _arg = _params[_i]
+                        _arg_sc = getattr(_arg, "schema_column", None)
+                        if _arg_sc is None or _arg_sc.column_type is None:
+                            continue
+                        _arg_ct = _arg_sc.column_type
+                        # A typed NULL has no value to convert (mirrors the NULL-literal
+                        # case in set_ops._cast_leg_columns_to).
+                        if _arg_ct == result_type or _arg_ct == _CT_NULL:
+                            continue
+                        if _arg_ct.physical != result_type.physical:
+                            continue
+                        _params[_i] = _bound_cast_node(_arg, result_type)
+                    node.parameters = _params
+
                 # Phase 5: result_type is ColumnType — use directly.
                 _ct = result_type
                 schema_column = FunctionColumn(
@@ -678,20 +830,9 @@ def inner_binder(
 
         elif node_type == NodeType.CASE:
             aliases = [node.alias] if node.alias else []
-            # Resolve result type: first non-NULL type from results + else_result.
-            # D-4 Phase 2: inherit the full ColumnType from the first matching
-            # branch — carries precision/scale/element_type uniformly instead of
-            # unpacking sidecars.
-            result_ct = None
             branch_nodes = list(node.results or [])
             if node.else_result is not None:
                 branch_nodes.append(node.else_result)
-            # THEN/ELSE branches blend the same way COALESCE/IFNULL/IIF do (same
-            # native families — see _check_blend_compatible), whether this CASE
-            # later lowers to draken_if_then_else, IFNULL/IIF, or the BC_CASE
-            # Python path. Reject an incompatible mix here, at the one point that
-            # sees every branch and the actual CASE the user wrote, rather than
-            # downstream where only a bare type code survives.
             typed_branches = [
                 (branch, getattr(branch, "schema_column", None).column_type)
                 for branch in branch_nodes
@@ -699,27 +840,86 @@ def inner_binder(
                 and branch.schema_column.column_type is not None
                 and branch.schema_column.column_type != _CT_NULL
             ]
-            try:
-                _check_blend_compatible(typed_branches, "CASE")
-            except IncompatibleTypesError as _case_err:
-                _case_col = node.alias or column_name
-                raise IncompatibleTypesError(
-                    message=f"{_case_err} (column '{_case_col}')"
-                ) from _case_err
-            for branch in branch_nodes:
-                sc = getattr(branch, "schema_column", None)
-                if sc is not None and sc.column_type is not None and sc.column_type != _CT_NULL:
-                    result_ct = sc.column_type
-                    break
-            # Coerce LITERAL branches to the resolved result type
+            _check_case_branches_compatible(typed_branches, node.alias or column_name)
+
+            # The promoted common type across every branch (mirrors COALESCE/
+            # IFNULL and the UNION-leg coercion in set_ops.py) rather than
+            # "whichever branch came first" — D-4 Phase 2 carries the full
+            # ColumnType (precision/scale/element_type), not just a category.
+            # Short-circuit when every branch already carries the identical
+            # ColumnType: find_compatible_type's DECIMAL path has no "already
+            # equal" fast case and always recomputes a precision/scale via
+            # Plus-style promotion (or a wide DECIMAL(38,18) default for a
+            # single input) — widening a same-scale-everywhere CASE for no
+            # reason.
+            #
+            # Otherwise, a DECIMAL mix uses the SELECTION rule
+            # (compute_selection_result_type), not find_compatible_type's
+            # additive one: CASE returns one branch verbatim, so the result
+            # only has to REPRESENT each branch. Plus-style promotion sized
+            # `THEN decimal_col ELSE 0` for `decimal_col + 0` and pushed an
+            # ordinary DECIMAL(15,2) to DECIMAL(22,2), across the int64/int128
+            # tier. Everything else (strings, temporals, the FLOAT mix) keeps
+            # find_compatible_type.
+            _branch_cts = [ct for _, ct in typed_branches]
+            if _branch_cts and all(ct == _branch_cts[0] for ct in _branch_cts):
+                result_ct = _branch_cts[0]
+            elif _branch_cts:
+                result_ct = compute_selection_result_type(
+                    [
+                        (
+                            ct,
+                            branch.value
+                            if branch.node_type == NodeType.LITERAL
+                            else NOT_LITERAL,
+                        )
+                        for branch, ct in typed_branches
+                    ]
+                )
+                if result_ct is None:
+                    result_ct = _lt.find_compatible_type(_branch_cts)
+            else:
+                result_ct = None
+
+            # Coerce LITERAL branches to the resolved result type in place;
+            # CAST-wrap every other (non-literal) branch whose physical type
+            # doesn't already match. draken_if_then_else — the native kernel
+            # this CASE may lower to — blends identical-physical-type branches
+            # only (plus a DECIMAL/DECIMAL128 widening exception) and performs
+            # no promotion of its own, so every branch must carry the same
+            # physical type by the time it reaches execution.
             if result_ct is not None:
                 _result_cat = result_ct.category
-                for branch in branch_nodes:
+
+                def _coerce_case_branch(branch):
+                    if branch is None:
+                        return branch
+                    sc = getattr(branch, "schema_column", None)
+                    if sc is None or sc.column_type is None or sc.column_type == _CT_NULL:
+                        return branch
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
                         branch.value = parse_value(_result_cat, branch.value)
                         branch.type = result_ct  # ColumnType
-                        if branch.schema_column is not None:
-                            branch.schema_column.column_type = result_ct
+                        sc.column_type = result_ct
+                        return branch
+                    if sc.column_type == result_ct:
+                        return branch
+                    # A matching physical tag is enough only for types whose tag
+                    # tells the whole story — see _descriptor_carries_meaning.
+                    # A decimal at another scale, or a timestamp at another unit,
+                    # goes through a real rescale cast instead of blending raw.
+                    if (sc.column_type.physical == result_ct.physical
+                            and not _descriptor_carries_meaning(result_ct)):
+                        return branch
+                    # Inserted fully bound (own schema_column) — this runs
+                    # inside the CASE's own bind step, after its branches are
+                    # already bound, so nothing will traverse into a freshly-
+                    # inserted CAST to bind it a second time.
+                    return _bound_cast_node(branch, result_ct)
+
+                node.results = [_coerce_case_branch(b) for b in (node.results or [])]
+                if node.else_result is not None:
+                    node.else_result = _coerce_case_branch(node.else_result)
             schema_column = FunctionColumn(
                 name=column_name,
                 column_type=result_ct,
@@ -885,6 +1085,19 @@ def inner_binder(
             # Coercing only the InList side left scalar comparisons (Eq/Lt/Gt/...)
             # holding `str` while InList held `bytes`, so a query mixing both against
             # the same column crashed with `'>' not supported between bytes and str`.
+            #
+            # This coercion is CONFINED TO THE STRING FAMILY, where str -> bytes is a
+            # change of representation and nothing else: the literal's ColumnType tag
+            # stays true after it. It must never cross a type category. It used to
+            # also map FLOAT->float / INTEGER->int / BOOLEAN->bool, which rewrote the
+            # VALUE while leaving `.type` and `schema_column.column_type` describing
+            # the ORIGINAL literal — a vector whose payload and type tag disagree.
+            # Two live wrong answers came out of that: `int_col = 4.5` silently
+            # truncated the literal to 4 and matched row 4, and a DECIMAL(18,6)
+            # literal against an INT64 column kept its DECIMAL tag over an int
+            # payload, so `4` was read as 0.000004 and matched nothing. A numeric
+            # literal is now left exactly as written, and the comparison kernels
+            # resolve the mixed-type compare (or the engine refuses it loudly).
             if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
                 "Eq",
                 "NotEq",
@@ -898,9 +1111,6 @@ def inner_binder(
                 from opteryx.types.logical_type import LogicalCategory as _OT
 
                 _COERCE = {
-                    _OT.FLOAT: float,
-                    _OT.INTEGER: int,
-                    _OT.BOOLEAN: bool,
                     _OT.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
                     _OT.NVARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
                     _OT.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
@@ -910,13 +1120,25 @@ def inner_binder(
                     other_type = getattr(
                         getattr(other_node, "schema_column", None), "category", None
                     )
-                    coerce = _COERCE.get(other_type, lambda v: v)
-                    if isinstance(literal_node.value, list):
-                        literal_node.value = [
-                            None if v is None else coerce(v) for v in literal_node.value
-                        ]
-                    elif literal_node.value is not None:
-                        literal_node.value = coerce(literal_node.value)
+                    coerce = _COERCE.get(other_type)
+                    if coerce is None:
+                        return
+                    # An IN-list literal is a collection. `build_literal_node` maps
+                    # BOTH list and tuple to ARRAY, and the two spellings reach here
+                    # from different front doors — SQL's `IN (...)` builds a list,
+                    # while a visibility filter's list is tuple-ised by
+                    # `dnf.simplify_dnf` (it needs hashable clauses to dedup). Handling
+                    # only `list` sent the whole tuple through the scalar branch.
+                    # Rebuild in the container we were given: the ARRAY tag does not
+                    # distinguish them, but nothing downstream should see its literal
+                    # silently change shape either.
+                    value = literal_node.value
+                    if isinstance(value, (list, tuple)):
+                        literal_node.value = type(value)(
+                            None if v is None else coerce(v) for v in value
+                        )
+                    elif value is not None:
+                        literal_node.value = coerce(value)
 
                 if node.right is not None and node.right.node_type == NodeType.LITERAL:
                     _coerce_literal(node.right, node.left)

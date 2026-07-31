@@ -4,12 +4,14 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """`SHOW VARIABLES` withholds RESTRICTED variables from non-administrators, and
-RESTRICTED variables additionally require `platform_admin` to SET.
+RESTRICTED variables additionally require `platform_admin` to READ via `@@name`
+and to SET.
 
-RESTRICTED variables are listed, AND settable, only for a caller holding
-`platform_admin`. The entitlement is SERVER-owned, so it cannot be self-granted,
-and `$variables` (the relation behind SHOW VARIABLES) is internal-only, so the
-read-side filter cannot be side-stepped by querying the relation directly.
+RESTRICTED variables are listed, readable, AND settable, only for a caller
+holding `platform_admin`. The entitlement is SERVER-owned, so it cannot be
+self-granted, and `$variables` (the relation behind SHOW VARIABLES) is
+internal-only, so the read-side filter cannot be side-stepped by querying the
+relation directly — nor, as of this file, by naming the variable as `@@name`.
 
 Visibility (RESTRICTED/UNRESTRICTED) and VariableOwner (SERVER/INTERNAL/USER) are
 independent axes that BOTH gate writes: owner rank decides who is even eligible
@@ -233,6 +235,71 @@ def test_like_selectivity_decay_is_unrestricted_and_settable():
 
     shown = {n for n, _ in _shown()}
     assert "like_selectivity_decay" in shown
+
+
+def _select_variable(name, **session_kwargs):
+    session = opteryx.session(user="bastian", **session_kwargs)
+    for morsel in session.execute_to_morsels(f"SELECT @@{name}"):
+        return morsel[0][0]
+    return None
+
+
+def test_restricted_variable_cannot_be_read_by_name():
+    # The SECOND read surface. `SHOW VARIABLES` omitting the row is worthless if
+    # the value is one `@@name` away — which it was, until the same entitlement
+    # gate was added to SystemVariablesContainer.as_column. Every RESTRICTED
+    # variable is checked, so a newly-registered one cannot quietly miss the gate.
+    restricted = [
+        name
+        for name, (_t, _v, _o, visibility) in SYSTEM_VARIABLES_DEFAULTS.items()
+        if visibility == Visibility.RESTRICTED
+    ]
+    assert restricted, "expected some RESTRICTED variables"
+    for name in restricted:
+        with pytest.raises(PermissionsError):
+            _select_variable(name)
+
+
+def test_admin_can_read_restricted_variable_by_name():
+    assert _select_variable("local_store_root", entitlements=ADMIN) is not None
+
+
+def test_unrestricted_variable_is_readable_by_name():
+    # The gate must not over-withhold: `version` is UNRESTRICTED precisely because
+    # it is already public via `SELECT VERSION()`.
+    assert _select_variable("version") is not None
+
+
+def test_ad_hoc_user_variable_is_not_caught_by_the_gate():
+    # `@x` variables are registered UNRESTRICTED by __setitem__ and belong to the
+    # caller who set them — the RESTRICTED gate must not touch them.
+    session = opteryx.session(user="mallory")
+    for morsel in session.execute_to_morsels("SET @planet = 'earth'; SELECT @planet;"):
+        assert morsel[0][0] == "earth"
+
+
+def test_host_facts_are_restricted_and_not_settable():
+    # The machine the process landed on: interpreter, OS, RAM. RESTRICTED because
+    # they describe the DEPLOYMENT, not the caller's query. SERVER-owned, so not
+    # settable by anyone — there is nothing to set, they are detected at import.
+    for name in ("python_version", "operating_system", "physical_memory_bytes"):
+        _type, value, owner, visibility = SYSTEM_VARIABLES_DEFAULTS[name]
+        assert visibility == Visibility.RESTRICTED, name
+        assert owner == VariableOwner.SERVER, name
+        # A detection that silently returned nothing would publish an empty answer
+        # as if it were the truth.
+        assert value not in ("", 0, None), f"{name} was not detected"
+        with pytest.raises(PermissionsError):
+            session = opteryx.session(user="bastian", entitlements=ADMIN)
+            for _ in session.execute_to_morsels(f"SET {name} TO 1;"):
+                pass
+
+
+def test_physical_memory_is_reported_in_bytes():
+    # Named `_bytes` and it must BE bytes: a machine reporting under 64MB of RAM
+    # means the value is in the wrong unit, not that the host is that small.
+    total = _select_variable("physical_memory_bytes", entitlements=ADMIN)
+    assert total > 64 * 1024 * 1024, total
 
 
 if __name__ == "__main__":  # pragma: no cover

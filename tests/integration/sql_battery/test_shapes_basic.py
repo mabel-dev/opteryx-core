@@ -66,12 +66,19 @@ STATEMENTS = [
         # addressable by name, by any route.
         # This battery runs without entitlements, so RESTRICTED variables are
         # withheld — the full list is asserted in tests/unit/security/.
-        ("SHOW VARIABLES", 17, 5, None),
+        ("SHOW VARIABLES", 18, 5, None),
         ("SELECT * FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM $VARIABLES", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM (SELECT * FROM $variables) AS x", None, None, UnsupportedSyntaxError),
         ("SELECT v.name FROM $planets p CROSS JOIN $variables v", None, None, UnsupportedSyntaxError),
+        # `SHOW USER` reaches the same ShowVariable builder and is planned as a scan
+        # of `$user`. Unlike `$variables`, `$user` stays directly addressable — the
+        # two are deliberately two surfaces onto one reader.
+        # This battery builds its session with two memberships and no user or
+        # entitlements, so the rows are those two plus the billing account
+        # query_session always supplies.
+        ("SHOW USER", 3, 3, None),
         # Every other `SHOW <words>` form parses to the same ShowVariable node and is
         # rejected rather than silently answered as if it were SHOW VARIABLES.
         ("SHOW TIME ZONE", None, None, UnsupportedSyntaxError),

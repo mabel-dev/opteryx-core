@@ -685,6 +685,11 @@ _BINOP_NATIVE_STRING = frozenset({"VARCHAR", "NVARCHAR", "VARBINARY"})
 _BINOP_NATIVE_INTERVAL = frozenset({"INTERVAL"})
 _BINOP_NATIVE_DECIMAL = frozenset({"DECIMAL", "DECIMAL128"})
 _BINOP_NATIVE_TEMPORAL = frozenset({"DATE32", "TIMESTAMP64"})
+# Signed int widths draken_binop accepts paired with a DECIMAL/DECIMAL128 operand.
+# INT8/16/32 widen to INT64 (draken_binop's own widening block, right after it reads
+# left/right type) before falling into the SAME dec_*/dec128_* kernels INT64 already
+# uses — one native path for every width, not a per-width kernel.
+_BINOP_NATIVE_DECIMAL_INT_WIDTHS = frozenset({"INT8", "INT16", "INT32", "INT64"})
 
 
 def _binop_dec_scale(ct):
@@ -741,11 +746,12 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
             return True
     # DECIMAL (S-A.2): same-kind DECIMAL/DECIMAL128, or decimal × float → FLOAT64.
     # + - * / % only (not INT_DIVIDE). All same-kind, cross-kind (DECIMAL×DECIMAL128),
-    # decimal×float and decimal×INT64 are now c-native — incl. promotion to DECIMAL128
-    # (draken_binop widens int64 operands to int128). Only narrower ints (INT8/16/32)
-    # stay on the closure. Results carry their precision/scale descriptor across the
-    # c-native wrap (binder stamps it via ctx; executor reattaches it). MUST precede
-    # the numeric range check (decimal operands are not l_num/r_num → would short-circuit).
+    # decimal×float and decimal×(any signed int width) are now c-native — incl.
+    # promotion to DECIMAL128 (draken_binop widens int64 operands to int128, and an
+    # INT8/16/32 operand to INT64 first). Results carry their precision/scale
+    # descriptor across the c-native wrap (binder stamps it via ctx; executor
+    # reattaches it). MUST precede the numeric range check (decimal operands are not
+    # l_num/r_num → would short-circuit).
     if BOP_PLUS <= op_code <= BOP_MODULO:
         l_dec = left_phys in _BINOP_NATIVE_DECIMAL
         r_dec = right_phys in _BINOP_NATIVE_DECIMAL
@@ -760,25 +766,24 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
         if (l_dec and right_phys in _BINOP_NATIVE_FLOAT) or \
                 (r_dec and left_phys in _BINOP_NATIVE_FLOAT):
             return True
-        # DECIMAL(int64) × INT64 → DECIMAL or DECIMAL128 (S-A.3). The INT64 side is a
-        # scale-0 decimal; draken_binop runs dec_* (int64-tier result, ≤18) or widens
-        # both operands to int128 and runs dec128_* (result DECIMAL128, >18). INT64 only
-        # (dec_* read int64 stride); narrower ints (INT8/16/32) stay on the closure,
-        # which widens them itself.
-        if ((left_phys == "DECIMAL" and right_phys == "INT64") or
-                (left_phys == "INT64" and right_phys == "DECIMAL")) and \
+        # DECIMAL(int64) × (INT8/16/32/64) → DECIMAL or DECIMAL128 (S-A.3). Any signed
+        # int operand is a scale-0 decimal; draken_binop widens INT8/16/32 to INT64 up
+        # front, then runs dec_* (int64-tier result, ≤18) or widens both operands to
+        # int128 and runs dec128_* (result DECIMAL128, >18) — same as the INT64 case.
+        if ((left_phys == "DECIMAL" and right_phys in _BINOP_NATIVE_DECIMAL_INT_WIDTHS) or
+                (left_phys in _BINOP_NATIVE_DECIMAL_INT_WIDTHS and right_phys == "DECIMAL")) and \
                 (result_phys is None or result_phys == "DECIMAL"
                  or result_phys == "DECIMAL128"):
             return True
-        # DECIMAL128 promotion (S-A.3 completion): DECIMAL128 × INT64 (either order) and
-        # cross-kind DECIMAL × DECIMAL128 (either order). draken_binop widens the
-        # int64-backed operand to int128 and runs dec128_*; the result is always
-        # DECIMAL128 (the rc-5 wrap reattaches precision/scale). INT64 only — narrow ints
-        # (INT8/16/32) stay on the closure, which widens them itself.
+        # DECIMAL128 promotion (S-A.3 completion): DECIMAL128 × (INT8/16/32/64) (either
+        # order) and cross-kind DECIMAL × DECIMAL128 (either order). draken_binop widens
+        # the narrow-int/int64-backed operand to int128 (narrow ints via INT64 first)
+        # and runs dec128_*; the result is always DECIMAL128 (the rc-5 wrap reattaches
+        # precision/scale).
         l128 = left_phys == "DECIMAL128"
         r128 = right_phys == "DECIMAL128"
-        l_i64dec = left_phys == "DECIMAL" or left_phys == "INT64"
-        r_i64dec = right_phys == "DECIMAL" or right_phys == "INT64"
+        l_i64dec = left_phys == "DECIMAL" or left_phys in _BINOP_NATIVE_DECIMAL_INT_WIDTHS
+        r_i64dec = right_phys == "DECIMAL" or right_phys in _BINOP_NATIVE_DECIMAL_INT_WIDTHS
         if ((l128 and r_i64dec) or (r128 and l_i64dec)) and \
                 (result_phys is None or result_phys == "DECIMAL128"):
             return True
@@ -1467,6 +1472,50 @@ cdef Py_ssize_t _linearize(
                             bc._hold(_ac_ctx)
                             slot.ctx_ptr = <void*>(<unsigned long long>_ac_ctx.ctx_ptr)
                         return sub_depth   # value pushed, fn pops 1 pushes 1 — net 0
+
+        # `arr @> (…)` (AtArrow, contains-ANY) and `arr @>> (…)` (ArrayContainsAll,
+        # contains-ALL) — the OPERATOR spellings of ARRAY_CONTAINS_ANY/ALL, lowered
+        # to the same draken_array_contains_any/all kernels through the same
+        # BC_C_NATIVE_CHILD + WRAP_AS_BOOL shape (see the FUNCTION lowering below
+        # for why only the array operand is pushed and the needles ride the ctx).
+        #
+        # These reach the filter from two directions, and BOTH were unrunnable while
+        # only the function spelling was lowered: written directly by a user, and
+        # synthesised by predicate_rewriter, which folds OR'd / AND'd `x = ANY(col)`
+        # over one column into a single AtArrow / ArrayContainsAll node. So a query
+        # the rewriter had just made cheaper became a query the engine refused.
+        #
+        # The needle literal is whatever the producer built — the rewriter emits a
+        # list for AtArrow and a set for ArrayContainsAll — and
+        # _build_array_membership_blob takes any of list/tuple/set/frozenset.
+        if op_str in ("AtArrow", "ArrayContainsAll") and node.left != NULL \
+                and node.right != NULL \
+                and node.right.node_type == _NT_LITERAL and node.right.value != NULL \
+                and (node.left.node_type == _NT_IDENTIFIER
+                     or node.left.node_type == _NT_EVALUATED
+                     or node.left.node_type == _NT_AGGREGATOR):
+            _aco_blob = _build_array_membership_blob(<object>node.right.value)
+            if _aco_blob is not None:
+                from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _aco_alloc
+                _aco_fn, _aco_ctx = _resolve_kernel_and_context(
+                    "draken_array_contains_any" if op_str == "AtArrow"
+                    else "draken_array_contains_all", _aco_alloc, _aco_blob)
+                if _aco_fn is not None:
+                    sub_depth = _linearize(node.left, bc, depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 1
+                    slot.bool_value = 0
+                    slot.flags = (BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                                  | BC_C_NATIVE_CHILD)
+                    slot.kernel_fn = <void*>(<unsigned long long>_aco_fn)
+                    # bc.count - 2 is the array's BC_LOAD_COL (this FUNCTION slot is
+                    # bc.count - 1) — same indexing the ARRAY_CONTAINS child path uses.
+                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                    if _aco_ctx is not None:
+                        bc._hold(_aco_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_aco_ctx.ctx_ptr)
+                    return sub_depth   # array pushed, fn pops 1 pushes 1 — net 0
 
         # IN-list — bind-time lowering to the C-ABI draken_in_list kernel for
         # plain literal collections over integer-family or string columns.
@@ -2734,10 +2783,14 @@ cdef Py_ssize_t _linearize(
                 _cn_arg = (0, 0, 0, 0, 0, _cn_src_unit, _cn_dst_unit)
             elif _cn[0].endswith("_to_decimal"):
                 # DECIMAL(p, s): params are the cast's (precision, scale) literals.
+                # left_scale carries the SOURCE scale — zero for the float source
+                # (which has none), the real thing for a DECIMAL source, where the
+                # rescale kernel cannot know how far to shift without it.
                 if len(cast_params) != 2:
                     raise ValueError("CAST to DECIMAL requires (precision, scale)")
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
-                _cn_arg = (0, 0, 0, int(cast_params[1]), int(cast_params[0]), 0, 0)
+                _cn_arg = (0, _binop_dec_scale(source_sql), 0,
+                           int(cast_params[1]), int(cast_params[0]), 0, 0)
             elif _cn[0] in ("draken_cast_decimal_to_string",
                             "draken_cast_decimal128_to_string",
                             "draken_cast_decimal_to_blob",
@@ -3063,7 +3116,22 @@ cdef Py_ssize_t _linearize(
             # Fixed-width (numeric, date, timestamp, etc.)
             kernel_type = _ASSEMBLE_FIXED
 
-        case_callable = build_case_fn(cond_bcs, result_bcs, else_bc, kernel_type)
+        # A DECIMAL CASE also needs its declared (precision, scale) carried into the
+        # assembler: the branch parts come straight off the expression VM, which
+        # leaves DECIMAL results descriptor-less (the descriptor is re-attached at
+        # the ExprProject boundary, downstream of this path). Bind time is the only
+        # place that still knows the scale.
+        _case_dec_p = -1
+        _case_dec_s = -1
+        _case_sc = getattr(src, "schema_column", None)
+        _case_ct = _case_sc.column_type if _case_sc is not None else None
+        if _case_ct is not None and _case_ct.logical is not None and \
+                getattr(_case_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128"):
+            _case_dec_p = int(_case_ct.logical.precision)
+            _case_dec_s = int(_case_ct.logical.scale)
+
+        case_callable = build_case_fn(cond_bcs, result_bcs, else_bc, kernel_type,
+                                      _case_dec_p, _case_dec_s)
 
         slot = bc._push_instr()
         slot.opcode = BC_CASE
@@ -3265,10 +3333,13 @@ def build_bytecode(CompiledExpressionHandle handle):
             bc.is_all_c_native = False
             break
         if op == BC_UNARY_OP:
-            # IS [NOT] NULL is a pure validity read — nogil DV* arm exists
-            # (evaluation.pyx _dv_unary_null_c). Other unaries stay GIL.
+            # IS [NOT] NULL is a pure validity read, and IS [NOT] TRUE/FALSE is a
+            # never-null truth test — both have nogil DV* arms (evaluation.pyx
+            # _dv_unary_null_c / _dv_unary_bool_test_c). Other unaries stay GIL.
             opc = bc.instrs[k].op_code
-            if opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL:
+            if (opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL
+                    or opc == UOP_IS_TRUE or opc == UOP_IS_FALSE
+                    or opc == UOP_IS_NOT_TRUE or opc == UOP_IS_NOT_FALSE):
                 continue
             bc.is_all_c_native = False
             break
