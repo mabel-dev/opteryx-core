@@ -1830,6 +1830,26 @@ cdef class NativeScanPlan:
             "bytes_fetched": self.pipeline_ptr.bytes_fetched(),
         }
 
+    def set_pass1_predicate(self, size_t fn, size_t ctx, list columns):
+        """R3 latmat: push the pass-1 predicate onto this plan's decode workers so the
+        match runs there (nogil, in parallel) rather than serially on the consumer
+        thread. `fn` is opteryx_pass1_predicate_eval's address (get_pass1_eval_fn_ptr),
+        `ctx` a Pass1PredCtx* the CALLER must keep alive for the scan's life, `columns`
+        the predicate's PHYSICAL column names in the ctx's col_idx order.
+
+        rugo evaluates it only for column shapes it can view without a copy (plain
+        DK_VARCHAR); anything else comes back with an empty survivor_mask and
+        LatmatScanSource evaluates the identical program itself over the built columns.
+        An empty plan (every row group pruned) has no pipeline — nothing to push to."""
+        cdef vector[string] v
+        cdef bytes b
+        if self.pipeline_ptr == NULL:
+            return
+        for c in columns:
+            b = c if isinstance(c, bytes) else str(c).encode('utf-8')
+            v.push_back(<string>b)
+        self.pipeline_ptr.set_pass1_predicate(<void*>fn, <void*>ctx, v)
+
     cpdef void close(self):
         if self._closed:
             return

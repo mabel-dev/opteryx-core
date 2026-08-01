@@ -34,14 +34,18 @@ import native_residual_census as census  # dev/native_residual_census.py
 
 
 def assert_scan_native(sql):
-    """A close-out chip's assertion: every parquet scan in `sql` selects the
-    zero-Python NativeParquetScanSource — i.e. NO residual reason was recorded.
+    """A close-out chip's assertion: every parquet scan in `sql` selects a zero-Python
+    Source — i.e. NO residual reason was recorded. There are two such Sources:
+    `NativeParquetScanSource` (single-pass) and `LatmatScanSource` (R3's two-pass
+    late-materialization scan); neither touches Python during execution, and
+    `census._NATIVE_SOURCES` is the single list both this and the census read.
     Raises AssertionError (with the residual reasons) if any scan fell back."""
     sources, reasons, err = census.scan_residuals(sql)
     assert err is None, f"query raised: {err}"
     assert sources, "no parquet scan observed — query did not reach the native scan path"
-    assert all(v == "NativeParquetScanSource" for v in sources.values()), (
-        f"scan fell back to the trampoline; residual reasons={reasons}")
+    assert all(v in census._NATIVE_SOURCES for v in sources.values()), (
+        f"scan fell back to the trampoline; sources={sources} "
+        f"residual reasons={reasons}")
 
 
 # ---------------------------------------------------------------------------
@@ -83,14 +87,13 @@ def test_native_scan_records_no_residual():
 # HAND_SET / test_residual_reason_reachable — which is a distinct, still-open
 # structural gap, NOT the integer admission this test tracked.
 #
-# `fused_topn` (R3) is PARTIALLY closed by A3: the NO-predicate scan-fused
-# `ORDER BY ... LIMIT` now goes native (see test_fused_topn_no_predicate_now_native
-# below) — a real, measured tradeoff-free case. The composed shape (fused TopN
-# WITH a predicate, e.g. ClickBench Q24) stays fail-closed to the trampoline —
-# admitting it natively was tried and reverted after measuring a ~400%
-# regression on Q24 (losing the trampoline's two-pass late-mat decode-skip on
-# a wide SELECT * over a selective predicate). HAND_SET["fused_topn"] is now
-# that composed-shape trigger, so it stays in the open frontier below.
+# `fused_topn` (R3) is CLOSED. A3 admitted the NO-predicate scan-fused
+# `ORDER BY ... LIMIT`; the composed shape (fused TopN WITH a predicate, e.g.
+# ClickBench Q24) is now served by `LatmatScanSource` — a genuinely native
+# two-pass late-materialization scan that KEEPS the decode-skip whose loss caused
+# the earlier ~400% Q24 regression. See test_fused_topn_with_predicate_now_native
+# below and the correctness matrix in test_wp_r3_latmat_scan.py. The reason code
+# has left this list and HAND_SET.
 #
 # `pushed_limit` (R2) is CLOSED: NativeParquetScanSource enforces a scan-pushed
 # LIMIT natively (see test_pushed_limit_now_native below), so it is no longer a
@@ -106,7 +109,6 @@ def test_native_scan_records_no_residual():
 # list and HAND_SET — see the retirement note in dev/native_residual_census.py for
 # what stays behind the guard defensively.
 _OPEN_CATEGORIES = [
-    ("fused_topn", census.HAND_SET["fused_topn"]),
     ("unlowerable_predicate", census.HAND_SET["unlowerable_predicate"]),
 ]
 
@@ -517,53 +519,66 @@ def test_zero_projection_predicate_now_native():
 
 
 # ---------------------------------------------------------------------------
-# CLOSED (partially) — A3 scan-fused TopN, NO-predicate case only. The
-# `fused_topn` strict-xfail frontier remains for the composed (fused TopN WITH
-# a predicate) shape — see `_OPEN_CATEGORIES` above.
+# CLOSED — R3 scan-fused TopN, BOTH sub-cases. These were the `fused_topn`
+# strict-xfail frontier; they are now real passing assertions.
 #
-# Inventory finding: `scan._topn_sort_name` is a TRAMPOLINE-ONLY decode-skip
-# hint (WP-02 §9 pass-2 shrink) consumed by `_apply_topn` in parquet_read.pyx;
-# it only ever activates when a WHERE predicate is ALSO pushed. The actual
-# sort/limit/tie-break/null-order is always performed by the native
-# `HeapSortNode` -> `set_topn_sink` operator downstream of the scan
-# (compiler.py `_compile_scan`), generically over the incoming layout,
-# independent of scan Source. With NO predicate, the trampoline's own two-pass
-# late-mat never activates either, so admitting natively costs nothing — the
-# pre-existing native TopN sink does the real cut and no new native TopN/
-# heap-select kernel was needed.
+# `scan._topn_sort_name` is a decode-skip hint stamped by
+# `TopNScanPushdownStrategy`. The actual sort/limit/tie-break/null-order is
+# always performed by the native `HeapSortNode` -> `set_topn_sink` operator
+# downstream of the scan, generically over the incoming layout and independent
+# of scan Source — so the hint never changes WHICH rows reach the client, only
+# how much has to be decoded to find them.
 #
-# WITH a predicate, native admission was tried and REVERTED: it forces a full
-# single-pass decode of every projected column, losing the trampoline's
-# late-mat decode-skip — measured ~400% slower on ClickBench Q24 (`SELECT *
-# FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10`) and ~20%
-# on the ClickBench suite overall. That composed shape stays fail-closed to
-# the trampoline (tagged `fused_topn`) until native masked pass-2 decode
-# (WP-02 §9's true two-pass late-mat) exists to recover the decode-skip — a
-# future PERFORMANCE follow-on, not a Python/GIL residual. See
-# tests/unit/operators/test_wp_a3_fused_topn_scan.py for the A/B correctness
-# parity harness (ASC/DESC, ties, NULLs, multi-row-group) and the composed-
-# with-predicate fail-closed assertion.
+#   * NO predicate (A3): no late-materialization happens on either path, so a
+#     plain single-pass native scan is exactly equivalent.
+#   * WITH a predicate: the decode-skip is load-bearing — ClickBench Q24
+#     (`SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT
+#     10`) reads only URL + EventTime for the whole table, then ~100 more
+#     columns for the handful of survivors. An earlier attempt to admit this
+#     shape as a plain single-pass scan measured ~400% slower on Q24 and was
+#     reverted. It is now served by `LatmatScanSource`
+#     (src/cpp/engine/native_latmat_scan_source.hpp), which does the two passes
+#     natively and KEEPS the skip.
+#
+# The correctness matrix for the two-pass path — ties at and across the
+# boundary, ties spanning row groups, all-NULL keys, fewer-than-n non-null
+# rows, ASC/DESC, N above the survivor count, string/float keys, and
+# pass-1/pass-2 row alignment — lives in
+# tests/unit/operators/test_wp_r3_latmat_scan.py. The no-predicate sub-case's
+# order-sensitive A/B harness is test_wp_a3_fused_topn_scan.py.
 # ---------------------------------------------------------------------------
 
 
 def test_fused_topn_no_predicate_now_native():
-    """A3: a scan-fused `ORDER BY ... LIMIT` with NO predicate now selects the
-    native scan (measured no-regression — the trampoline does no decode-skip
-    for this shape either). Was part of the `fused_topn` strict-xfail
-    frontier; now a hard pass for this sub-case."""
+    """A3: a scan-fused `ORDER BY ... LIMIT` with NO predicate selects the native
+    single-pass scan (the trampoline does no decode-skip for this shape either)."""
     assert_scan_native("SELECT * FROM testdata.clickbench_tiny ORDER BY EventTime LIMIT 10")
 
 
-def test_fused_topn_with_predicate_stays_trampoline():
-    """The composed shape (fused TopN WITH a predicate, e.g. ClickBench Q24) is
-    a deliberate, measured fail-closed — NOT an oversight. Admitting it
-    natively regressed Q24 ~400% by losing the trampoline's late-mat decode-
-    skip on a wide SELECT * over a selective predicate. Do not flip this
-    without a native masked pass-2 decode to recover that skip."""
-    sources, reasons, err = census.scan_residuals(census.HAND_SET["fused_topn"])
+def test_fused_topn_with_predicate_now_native():
+    """R3: the composed shape — a scan-fused `ORDER BY ... LIMIT` WITH a pushed
+    predicate, i.e. the ClickBench Q24 shape — now runs on the native two-pass
+    late-materialization Source instead of the trampoline. This was the last
+    reachable residual in the census."""
+    sql = ("SELECT * FROM testdata.clickbench_tiny WHERE URL LIKE '%google%' "
+           "ORDER BY EventTime LIMIT 10")
+    sources, reasons, err = census.scan_residuals(sql)
     assert err is None, f"query raised: {err}"
-    assert set(sources.values()) == {"StreamingScanSource"}, sources
-    assert set(reasons.values()) == {"fused_topn"}, reasons
+    assert set(sources.values()) == {"LatmatScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+def test_fused_topn_without_pass2_columns_takes_the_single_pass_scan():
+    """A fused TopN whose projection is entirely covered by the predicate + sort-key
+    columns has nothing for a second pass to fetch, so late-materialization would be
+    pure overhead — the trampoline refuses it too (`bool(_pass2_names)`). It must fall
+    through to the ordinary single-pass native scan, NOT to the trampoline."""
+    sql = ("SELECT SearchPhrase FROM testdata.clickbench_tiny WHERE SearchPhrase <> '' "
+           "ORDER BY SearchPhrase LIMIT 10")
+    sources, reasons, err = census.scan_residuals(sql)
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
 
 
 if __name__ == "__main__":  # pragma: no cover

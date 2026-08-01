@@ -19,16 +19,17 @@ pre-existing native TopN sink does the real cut, so the result is
 byte-identical (SET AND ORDER) to the forced-trampoline path. No new native
 TopN/heap-select kernel was needed for this sub-case.
 
-IMPORTANT — the composed shape (fused TopN WITH a predicate, e.g. ClickBench
-Q24: `SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT
-10`) is DELIBERATELY NOT admitted. It was tried and reverted: the trampoline's
-two-pass late-mat decodes only the predicate + sort-key columns for the whole
-table, then the rest of a wide SELECT * only for the tiny surviving set.
-Admitting it natively forces a full single-pass decode of every column of
-every row — measured ~400% slower on Q24 and ~20% on the ClickBench suite
-overall. That composed shape stays fail-closed to the trampoline until native
-masked pass-2 decode (WP-02 §9's true two-pass late-mat) exists to recover the
-skip — see `test_topn_with_where_predicate_stays_trampoline` below.
+UPDATE (R3 close-out) — the composed shape (fused TopN WITH a predicate, e.g.
+ClickBench Q24: `SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime
+LIMIT 10`) is ALSO native now, but by a different route. Admitting it as a plain
+single-pass scan was tried and reverted: the two-pass late-mat decodes only the
+predicate + sort-key columns for the whole table, then the rest of a wide
+SELECT * only for the tiny surviving set, and losing that measured ~400% slower
+on Q24. `LatmatScanSource` (src/cpp/engine/native_latmat_scan_source.hpp) now
+performs both passes natively and KEEPS the skip — see
+`test_topn_with_where_predicate_now_native` below, and
+tests/unit/operators/test_wp_r3_latmat_scan.py for that Source's own correctness
+matrix. This file remains the NO-predicate sub-case's harness.
 
 Correctness gate (no-predicate sub-case): A/B parity, ORDER-SENSITIVE (this is
 exactly what ORDER BY + LIMIT means) — the native run and the forced-
@@ -207,13 +208,19 @@ def test_topn_nulls_in_sort_column(tmp_path, monkeypatch):
     assert tmp_src == ["StreamingScanSource"], tmp_src
 
 
-def test_topn_with_where_predicate_stays_trampoline(tmp_path, monkeypatch):
-    """The composed shape (fused TopN WITH a predicate) is DELIBERATELY NOT
-    admitted natively — see the module docstring. Admitting it was tried and
-    reverted after measuring a ~400% regression on ClickBench Q24 (losing the
-    trampoline's two-pass late-mat decode-skip). Both runs must still agree on
-    the RESULT (the trampoline is, and remains, correct); only the Source
-    selection differs from the no-predicate sub-case above.
+def test_topn_with_where_predicate_now_native(tmp_path, monkeypatch):
+    """R3: the composed shape (fused TopN WITH a predicate) no longer falls back to
+    the trampoline. It used to, because admitting it as a plain single-pass native
+    scan lost the two-pass late-materialization decode-skip and measured ~400%
+    slower on ClickBench Q24. It is now served by `LatmatScanSource`, which does
+    both passes natively and keeps the skip — see
+    tests/unit/operators/test_wp_r3_latmat_scan.py for that Source's own
+    correctness matrix (ties, NULLs, row-group-spanning tie blocks, alignment).
+
+    Kept here in its original A3 form because the ordering assertion is the point:
+    the native and forced-trampoline runs must still agree on the exact row
+    SEQUENCE for this fixture. `sort_key` is distinct here, so there are no ties to
+    make the order legitimately ambiguous.
 
     NOTE the SQL shape matters for actually EXERCISING the fused path:
     `TopNScanPushdownStrategy` only stamps the scan when HeapSort reads
@@ -221,15 +228,14 @@ def test_topn_with_where_predicate_stays_trampoline(tmp_path, monkeypatch):
     predicate column to ALSO be part of the projection (as `SELECT *` does
     here, mirroring Q24). A predicate on a column NOT in the SELECT list
     forces a Project between Scan and HeapSort (to drop that role-3 column)
-    and the fusion never stamps the scan at all — that shape was never at
-    risk of the Q24 regression in the first place, on EITHER path."""
+    and the fusion never stamps the scan at all."""
     cols, kw = _table(1000, row_group_size=100)
     ds = _write(str(tmp_path / "with_predicate"), cols, **kw)
     sql = "SELECT * FROM '%s' WHERE flag = 1 ORDER BY sort_key ASC LIMIT 20" % ds
     nat, nat_src = _drain_ordered(sql, False, monkeypatch)
     tmp, tmp_src = _drain_ordered(sql, True, monkeypatch)
     assert nat == tmp
-    assert nat_src == ["StreamingScanSource"], nat_src
+    assert nat_src == ["LatmatScanSource"], nat_src
     assert tmp_src == ["StreamingScanSource"], tmp_src
 
 
@@ -270,14 +276,16 @@ def test_instrumentation_trampoline_calls_zero(tmp_path, monkeypatch):
     assert res["trampoline_calls"] == 0
 
 
-def test_census_fused_topn_still_reports_composed_case():
-    """The census tally still reports exactly 1 `fused_topn` over the
-    clickbench + tpch battery: ClickBench Q24 (fused TopN WITH a predicate) is
-    a deliberate fail-closed, not an oversight — see the module docstring."""
+def test_census_reports_no_fused_topn_residual():
+    """R3 close-out: the census tally over the clickbench + tpch battery no longer
+    reports ANY `fused_topn` residual. ClickBench Q24 (fused TopN WITH a predicate)
+    was the single trigger and now runs on `LatmatScanSource`. It was also the last
+    reachable residual of any kind in this battery, so the trampoline count is 0."""
     import native_residual_census as census  # dev/native_residual_census.py
 
     tally = census.census()
-    assert tally.get("fused_topn") == 1, tally
+    assert tally.get("fused_topn") is None, tally
+    assert tally["__trampoline__"] == 0, tally
 
 
 if __name__ == "__main__":  # pragma: no cover

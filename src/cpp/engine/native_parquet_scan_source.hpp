@@ -144,43 +144,30 @@ static inline int lc_unit(int packed)      { return (packed >> 4) & 0xF; }
 static inline int lc_precision(int packed) { return (packed >> 8) & 0xFF; }
 static inline int lc_scale(int packed)     { return (packed >> 16) & 0xFF; }
 
-struct NativeParquetScanGlobal : GlobalSourceState {
-    std::mutex mtx;
-    int next_to_submit = 0;
-    int results_received = 0;
-    // R2 (scan-pushed LIMIT): rows already handed downstream, across ALL workers.
-    // Guarded by `mtx` together with the submit/receive counters — the emit
-    // decision and the submit decision must see one consistent view.
-    int64_t rows_emitted = 0;
-    // R2: work-item frontier beyond which no row group can contribute to the
-    // LIMIT (computed once from the footer row counts; == work_items->size()
-    // when unlimited). Read-only after make_global.
-    int submit_cap = 0;
-};
-
-struct NativeParquetScanSource : Source {
-    // All borrowed from the caller's NativeScanPlan, which outlives this Source for
-    // the whole pipeline run (the Python planning frame holds it alive).
-    rugo::ParquetIOPipeline* pipeline;
-    const std::unordered_map<std::string, FileStats>* footer_map;
-    const std::vector<std::pair<std::string, int>>* work_items;
-    const std::vector<std::string>* column_names;
-    int in_flight_limit;
+// ---- NativeScanColumnBuilder ------------------------------------------------------
+// The decode half of the native scan: rugo ColumnOut -> CxxColumn, for every shape a
+// projected parquet column can arrive in. Split out of NativeParquetScanSource (and
+// otherwise unchanged) so the R3 two-pass late-materialization Source
+// (native_latmat_scan_source.hpp) can build ITS pass-1 and pass-2 columns through the
+// same code rather than a second copy of it — one decoder, two callers. The plan-time
+// per-column flag arrays below are exactly the ones threaded from open_native_scan_plan;
+// the latmat Source holds one builder per pass, each pointing at that pass's arrays.
+struct NativeScanColumnBuilder {
     // Decimal pool-path support (see native_decimal_pool_decode.hpp): `pool` is
-    // the same MemoryPool wired into `pipeline` via wire_pool_sink at planning
+    // the same MemoryPool wired into the pipeline via wire_pool_sink at planning
     // time; `decimal_columns[i]` (parallel to column_names) marks which
     // projected columns are known (plan-time, from the query's schema) to be
     // int64-backed DECIMAL, and therefore expected to land as DK_POOL. Both
     // may be null/empty when this scan has no decimal columns — every existing
     // caller keeps working with the fixed-width-only direct path unchanged.
-    MemoryPool* pool;
-    const std::vector<uint8_t>* decimal_columns;
+    MemoryPool* pool = nullptr;
+    const std::vector<uint8_t>* decimal_columns = nullptr;
     // Same convention as `decimal_columns`, for VARCHAR pool-path columns (see
     // native_varchar_pool_decode.hpp): TPC-H's l_returnflag/l_linestatus are
     // non-nullable dict-encoded byte_array columns that decode via rugo's "RLE
     // skip-dense" path and so classify DK_POOL rather than DK_VARCHAR_DICT —
     // verified directly against real files, this is not a hypothetical case.
-    const std::vector<uint8_t>* varchar_columns;
+    const std::vector<uint8_t>* varchar_columns = nullptr;
     // Per-projected-column declared string DrakenType (parallel to column_names):
     // DRAKEN_VARCHAR / NVARCHAR / VARBINARY for string columns, 0 for non-string.
     // Threaded from the plan-time schema so every string column — direct
@@ -188,19 +175,19 @@ struct NativeParquetScanSource : Source {
     // declared type, byte-identically to column_deserializer.pyx's want_string_type.
     // Also the general-scan signal that a DK_POOL column is a VARCHAR (the agg/join
     // callers instead pass varchar_columns and leave this null → DRAKEN_VARCHAR).
-    const std::vector<int>* string_types;
+    const std::vector<int>* string_types = nullptr;
     // WP-11: per-column packed logical-coercion plan (see the LC_* packing above),
     // parallel to column_names. null/empty → no temporal/decimal coercion (the
     // original numeric+string behaviour). Threaded from the plan-time schema so a
     // projected DATE/TIMESTAMP/TIME/int64-DECIMAL column is retagged natively,
     // byte-identically to the trampoline scan's `_coerce_vectors`.
-    const std::vector<int>* logical_coerce;
+    const std::vector<int>* logical_coerce = nullptr;
     // E37: per-projected-column flag (parallel to column_names) — 1 iff this column
     // is consumed as a GROUP BY / JOIN / DISTINCT key downstream, so the scan should
     // carry its hash SEED (VectorOwner::keyhash_buf) for hash-once reuse. Default
     // null/empty → no column keyed → NO sidecar built (the pay-for-use gate; plain
     // SELECT / LIKE / standalone rugo build nothing). See E37 §7.2.
-    const std::vector<uint8_t>* hash_key_columns;
+    const std::vector<uint8_t>* hash_key_columns = nullptr;
     // R6: same convention as `decimal_columns` / `varchar_columns`, for ARRAY
     // (parquet LIST) columns — `array_columns[i]` = 1 marks a projected column the
     // plan knows (from the schema) is an ARRAY, and which therefore ALWAYS lands
@@ -209,43 +196,7 @@ struct NativeParquetScanSource : Source {
     // flag is what tells this Source which decoder owns that blob; without it the
     // three pool shapes (decimal / varchar / array) are indistinguishable from the
     // DirectKind alone. null/empty for every scan with no array columns.
-    const std::vector<uint8_t>* array_columns;
-    // R2: scan-pushed LIMIT — the maximum number of rows this scan may emit in
-    // total, across every worker. -1 == unlimited (every pre-R2 caller).
-    //
-    // This is a CORRECTNESS obligation, not just an I/O optimization: when
-    // LimitPushdownStrategy pushes a LIMIT into a scan it REMOVES the Limit node
-    // from the plan (limit_pushdown.py::_apply_to_scan → remove_node(heal=True)),
-    // so there is no downstream LimitOperator left to truncate. The scan is the
-    // only thing enforcing it — exactly as the trampoline's `_records_to_read`
-    // slice in `_commit_morsel_cxx` already does.
-    //
-    // Pushdown only happens for a scan with NO pushed predicate (limit_pushdown
-    // refuses on `scan_node.predicates`) and no OFFSET, so "the first N rows in
-    // whatever order the row groups complete" is a valid answer — the trampoline
-    // is equally order-nondeterministic at dop>1 (concurrent `_single_pass_next`
-    // pulls commit under `_scan_mtx` in completion order, not file order).
-    int64_t row_limit;
-
-    NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
-                            const std::unordered_map<std::string, FileStats>* footer_map_,
-                            const std::vector<std::pair<std::string, int>>* work_items_,
-                            const std::vector<std::string>* column_names_,
-                            int in_flight_limit_,
-                            MemoryPool* pool_ = nullptr,
-                            const std::vector<uint8_t>* decimal_columns_ = nullptr,
-                            const std::vector<uint8_t>* varchar_columns_ = nullptr,
-                            const std::vector<int>* string_types_ = nullptr,
-                            const std::vector<int>* logical_coerce_ = nullptr,
-                            const std::vector<uint8_t>* hash_key_columns_ = nullptr,
-                            const std::vector<uint8_t>* array_columns_ = nullptr,
-                            int64_t row_limit_ = -1)
-        : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
-          column_names(column_names_), in_flight_limit(in_flight_limit_),
-          pool(pool_), decimal_columns(decimal_columns_), varchar_columns(varchar_columns_),
-          string_types(string_types_), logical_coerce(logical_coerce_),
-          hash_key_columns(hash_key_columns_), array_columns(array_columns_),
-          row_limit(row_limit_) {}
+    const std::vector<uint8_t>* array_columns = nullptr;
 
     // R6: is projected column i a plan-flagged ARRAY column?
     bool is_array_column(size_t i) const {
@@ -257,34 +208,6 @@ struct NativeParquetScanSource : Source {
     bool wants_keyhash(size_t i) const {
         return hash_key_columns != nullptr && i < hash_key_columns->size()
             && (*hash_key_columns)[i] != 0;
-    }
-
-    // R2: how many row groups, taken in work-item order, are enough to satisfy
-    // `row_limit`? The footer already carries every row group's exact row count
-    // (RowGroupStats::num_rows), so this is an EXACT plan-time bound, not a
-    // guess — no need to decode a row group to discover it was unnecessary.
-    // Returns work_items->size() when unlimited or when the whole scan is needed.
-    //
-    // Without this, `LIMIT 5` still submits the full prefetch window
-    // (`in_flight_limit`, == workers+2) plus one row group per worker that races
-    // in before the first morsel is emitted — measured 31 row groups for a
-    // LIMIT 5 over tpch_1.lineitem. Capping the frontier here reads exactly the
-    // one row group that can actually contribute.
-    int limit_submit_cap() const {
-        const int n_items = static_cast<int>(work_items->size());
-        if (row_limit < 0 || footer_map == nullptr) return n_items;
-        int64_t cumulative = 0;
-        for (int i = 0; i < n_items; ++i) {
-            auto fit = footer_map->find((*work_items)[i].first);
-            // A path we cannot resolve here is not a place to guess — fall back to
-            // the unbounded frontier and let submit_one fail loud on it.
-            if (fit == footer_map->end()) return n_items;
-            const size_t rg_idx = static_cast<size_t>((*work_items)[i].second);
-            if (rg_idx >= fit->second.row_groups.size()) return n_items;
-            cumulative += fit->second.row_groups[rg_idx].num_rows;
-            if (cumulative >= row_limit) return i + 1;
-        }
-        return n_items;
     }
 
     // Packed coercion plan for projected column i (0 = none).
@@ -301,56 +224,6 @@ struct NativeParquetScanSource : Source {
         if (string_types != nullptr && i < string_types->size() && (*string_types)[i] != 0)
             return static_cast<DrakenType>((*string_types)[i]);
         return DRAKEN_VARCHAR;
-    }
-
-    std::unique_ptr<GlobalSourceState> make_global() override {
-        auto g = std::make_unique<NativeParquetScanGlobal>();
-        // Computed once, before any worker runs (make_global is called on the
-        // driver thread ahead of the fan-out), so get_morsel never re-walks the
-        // work list under its lock.
-        g->submit_cap = limit_submit_cap();
-        return g;
-    }
-    std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
-        return std::make_unique<LocalSourceState>();
-    }
-
-    // Mirrors CppIOPipeline.submit_work_native (pool_reader.pyx) exactly, over
-    // plain C++ containers instead of Python list/dict — same parallel-arrays
-    // contract (col_names_vec/col_stats_vec built strictly in lockstep so a
-    // column absent from this row group's stats is simply skipped, not padded).
-    void submit_one(size_t idx, ErrCtx& err) {
-        const std::string& path = (*work_items)[idx].first;
-        int rg_idx = (*work_items)[idx].second;
-        auto fit = footer_map->find(path);
-        if (fit == footer_map->end()) {
-            err.code = 1;
-            err.msg = "NativeParquetScanSource: work item path missing from footer_map";
-            return;
-        }
-        const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
-        std::vector<std::string> col_names_vec;
-        std::vector<ColumnStats> col_stats_vec;
-        col_names_vec.reserve(column_names->size());
-        col_stats_vec.reserve(column_names->size());
-        for (const std::string& want : *column_names) {
-            for (const ColumnStats& cs : rg.columns) {
-                if (cs.name == want) {
-                    col_names_vec.push_back(want);
-                    col_stats_vec.push_back(cs);
-                    break;
-                }
-            }
-        }
-        if (col_names_vec.size() != column_names->size()) {
-            // Schema evolution (a projected column absent from this row group) is
-            // out of scope for this first landing — fail loud, no NULL-fill guess.
-            err.code = 1;
-            err.msg = "NativeParquetScanSource: row group is missing a projected "
-                      "column (schema evolution is not supported on this path)";
-            return;
-        }
-        pipeline->submit_row_group(path, rg_idx, col_names_vec, col_stats_vec);
     }
 
     static bool direct_kind_supported(int dk) {
@@ -648,6 +521,153 @@ struct NativeParquetScanSource : Source {
         }
         out.view = out.own->vec;
         return true;
+    }
+};
+
+struct NativeParquetScanGlobal : GlobalSourceState {
+    std::mutex mtx;
+    int next_to_submit = 0;
+    int results_received = 0;
+    // R2 (scan-pushed LIMIT): rows already handed downstream, across ALL workers.
+    // Guarded by `mtx` together with the submit/receive counters — the emit
+    // decision and the submit decision must see one consistent view.
+    int64_t rows_emitted = 0;
+    // R2: work-item frontier beyond which no row group can contribute to the
+    // LIMIT (computed once from the footer row counts; == work_items->size()
+    // when unlimited). Read-only after make_global.
+    int submit_cap = 0;
+};
+
+struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
+    // All borrowed from the caller's NativeScanPlan, which outlives this Source for
+    // the whole pipeline run (the Python planning frame holds it alive). The per-column
+    // decode flags (pool / decimal_columns / varchar_columns / string_types /
+    // logical_coerce / hash_key_columns / array_columns) live on the
+    // NativeScanColumnBuilder base — same arrays, same meaning, shared with the R3
+    // latmat Source.
+    rugo::ParquetIOPipeline* pipeline;
+    const std::unordered_map<std::string, FileStats>* footer_map;
+    const std::vector<std::pair<std::string, int>>* work_items;
+    const std::vector<std::string>* column_names;
+    int in_flight_limit;
+    // R2: scan-pushed LIMIT — the maximum number of rows this scan may emit in
+    // total, across every worker. -1 == unlimited (every pre-R2 caller).
+    //
+    // This is a CORRECTNESS obligation, not just an I/O optimization: when
+    // LimitPushdownStrategy pushes a LIMIT into a scan it REMOVES the Limit node
+    // from the plan (limit_pushdown.py::_apply_to_scan → remove_node(heal=True)),
+    // so there is no downstream LimitOperator left to truncate. The scan is the
+    // only thing enforcing it — exactly as the trampoline's `_records_to_read`
+    // slice in `_commit_morsel_cxx` already does.
+    //
+    // Pushdown only happens for a scan with NO pushed predicate (limit_pushdown
+    // refuses on `scan_node.predicates`) and no OFFSET, so "the first N rows in
+    // whatever order the row groups complete" is a valid answer — the trampoline
+    // is equally order-nondeterministic at dop>1 (concurrent `_single_pass_next`
+    // pulls commit under `_scan_mtx` in completion order, not file order).
+    int64_t row_limit;
+
+    NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
+                            const std::unordered_map<std::string, FileStats>* footer_map_,
+                            const std::vector<std::pair<std::string, int>>* work_items_,
+                            const std::vector<std::string>* column_names_,
+                            int in_flight_limit_,
+                            MemoryPool* pool_ = nullptr,
+                            const std::vector<uint8_t>* decimal_columns_ = nullptr,
+                            const std::vector<uint8_t>* varchar_columns_ = nullptr,
+                            const std::vector<int>* string_types_ = nullptr,
+                            const std::vector<int>* logical_coerce_ = nullptr,
+                            const std::vector<uint8_t>* hash_key_columns_ = nullptr,
+                            const std::vector<uint8_t>* array_columns_ = nullptr,
+                            int64_t row_limit_ = -1)
+        : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
+          column_names(column_names_), in_flight_limit(in_flight_limit_),
+          row_limit(row_limit_) {
+        pool = pool_;
+        decimal_columns = decimal_columns_;
+        varchar_columns = varchar_columns_;
+        string_types = string_types_;
+        logical_coerce = logical_coerce_;
+        hash_key_columns = hash_key_columns_;
+        array_columns = array_columns_;
+    }
+
+    // R2: how many row groups, taken in work-item order, are enough to satisfy
+    // `row_limit`? The footer already carries every row group's exact row count
+    // (RowGroupStats::num_rows), so this is an EXACT plan-time bound, not a
+    // guess — no need to decode a row group to discover it was unnecessary.
+    // Returns work_items->size() when unlimited or when the whole scan is needed.
+    //
+    // Without this, `LIMIT 5` still submits the full prefetch window
+    // (`in_flight_limit`, == workers+2) plus one row group per worker that races
+    // in before the first morsel is emitted — measured 31 row groups for a
+    // LIMIT 5 over tpch_1.lineitem. Capping the frontier here reads exactly the
+    // one row group that can actually contribute.
+    int limit_submit_cap() const {
+        const int n_items = static_cast<int>(work_items->size());
+        if (row_limit < 0 || footer_map == nullptr) return n_items;
+        int64_t cumulative = 0;
+        for (int i = 0; i < n_items; ++i) {
+            auto fit = footer_map->find((*work_items)[i].first);
+            // A path we cannot resolve here is not a place to guess — fall back to
+            // the unbounded frontier and let submit_one fail loud on it.
+            if (fit == footer_map->end()) return n_items;
+            const size_t rg_idx = static_cast<size_t>((*work_items)[i].second);
+            if (rg_idx >= fit->second.row_groups.size()) return n_items;
+            cumulative += fit->second.row_groups[rg_idx].num_rows;
+            if (cumulative >= row_limit) return i + 1;
+        }
+        return n_items;
+    }
+
+    std::unique_ptr<GlobalSourceState> make_global() override {
+        auto g = std::make_unique<NativeParquetScanGlobal>();
+        // Computed once, before any worker runs (make_global is called on the
+        // driver thread ahead of the fan-out), so get_morsel never re-walks the
+        // work list under its lock.
+        g->submit_cap = limit_submit_cap();
+        return g;
+    }
+    std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
+        return std::make_unique<LocalSourceState>();
+    }
+
+    // Mirrors CppIOPipeline.submit_work_native (pool_reader.pyx) exactly, over
+    // plain C++ containers instead of Python list/dict — same parallel-arrays
+    // contract (col_names_vec/col_stats_vec built strictly in lockstep so a
+    // column absent from this row group's stats is simply skipped, not padded).
+    void submit_one(size_t idx, ErrCtx& err) {
+        const std::string& path = (*work_items)[idx].first;
+        int rg_idx = (*work_items)[idx].second;
+        auto fit = footer_map->find(path);
+        if (fit == footer_map->end()) {
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: work item path missing from footer_map";
+            return;
+        }
+        const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
+        std::vector<std::string> col_names_vec;
+        std::vector<ColumnStats> col_stats_vec;
+        col_names_vec.reserve(column_names->size());
+        col_stats_vec.reserve(column_names->size());
+        for (const std::string& want : *column_names) {
+            for (const ColumnStats& cs : rg.columns) {
+                if (cs.name == want) {
+                    col_names_vec.push_back(want);
+                    col_stats_vec.push_back(cs);
+                    break;
+                }
+            }
+        }
+        if (col_names_vec.size() != column_names->size()) {
+            // Schema evolution (a projected column absent from this row group) is
+            // out of scope for this first landing — fail loud, no NULL-fill guess.
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: row group is missing a projected "
+                      "column (schema evolution is not supported on this path)";
+            return;
+        }
+        pipeline->submit_row_group(path, rg_idx, col_names_vec, col_stats_vec);
     }
 
     SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,

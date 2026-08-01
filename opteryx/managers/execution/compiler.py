@@ -1343,6 +1343,108 @@ class _Compiler:
         self.nplan.set_current_display_name(type(node).__name__)
         return result
 
+    def _classify_scan_columns(self, read_scs):
+        """Per-column native-decode classification for a scan read-set.
+
+        Returns ``(kinds, string_types, decimal_columns, logical_coerce, bad_type)``,
+        the four plan-time arrays the native Source needs (all parallel to
+        ``read_scs``) plus, on refusal, the offending DrakenType's NAME (or "NONE"
+        when the column carries no physical tag at all) so the caller can record a
+        `non_admissible_kind:<T>` residual. ``bad_type`` is None on success.
+
+        Shared by `_native_scan_plan` (one read-set) and `_latmat_scan_plan` (which
+        classifies its pass-1 and pass-2 read-sets separately) so the two cannot
+        disagree about what a column decodes to.
+        """
+        kinds = []
+        string_types = []
+        # WP-11: parallel to read_scs. decimal_columns[i]=1 routes an int64-backed
+        # DECIMAL DK_POOL column to the native decimal decoder; logical_coerce[i]
+        # packs the DATE/TIMESTAMP/TIME/DECIMAL retag kind + unit / precision-scale
+        # (LC_* packing mirrored from native_parquet_scan_source.hpp). 0 = none.
+        decimal_columns = []
+        logical_coerce = []
+        for sc in read_scs:
+            pt = _physical_type(sc)
+            coerce = _wp11_logical_coerce(sc, pt)
+            # WP-11: parquet TIME binds to a TIME32/TIME64 schema type but decodes as
+            # plain INT64 (the binder models no TIME coercion) — the trampoline emits
+            # it as INT64. Route it through the int path so the native scan emits the
+            # identical INT64 column; the "int" footer gate admits the time[...]
+            # logical annotation.
+            if pt in _INT_KIND_TYPES:
+                # Every integer width, signed and unsigned. The schema declares the
+                # column's REAL width now (see _rugo_schema._integer_column_type),
+                # so this can no longer key on INT64 alone — a narrow column would
+                # otherwise fail the scan closed as non-admissible. The native
+                # Source decodes each width exactly (DK_INT8/16/32, DK_UINT8/16/32/64)
+                # and the "int" footer gate admits the whole int/uint logical family.
+                kinds.append("int")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt == DrakenType.FLOAT32:
+                kinds.append("float32")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt == DrakenType.FLOAT64:
+                kinds.append("float64")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY):
+                # WP-01: string columns decode natively (DK_VARCHAR / DK_VARCHAR_DICT
+                # / DK_POOL string). Carry the declared physical type so the native
+                # Source tags each vector byte-identically to the trampoline path.
+                kinds.append("varchar")
+                string_types.append(pt.value)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt == DrakenType.BOOL:
+                # WP-11: BOOLEAN → DK_BOOL dense, self-describing (no descriptor).
+                kinds.append("bool")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt == DrakenType.ARRAY:
+                # R6: a parquet LIST column. It ALWAYS lands DK_POOL (repetition
+                # levels ⇒ direct_kind_for has no direct kind for it) and is
+                # serialized as TAG_ARRAY; `array_columns` (built by the caller from
+                # the same read_scs order) routes it to the native TAG_ARRAY decoder.
+                # The element type is carried on the WIRE (the child_type_tag byte),
+                # so nothing needs packing for it — except ARRAY<TIMESTAMP>, whose
+                # int64 leaf needs the unit-carrying retag the trampoline applies.
+                kinds.append("array")
+                string_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(_r6_array_element_coerce(sc))
+            elif coerce is not None:
+                # WP-11: DECIMAL / DATE / TIMESTAMP / TIME. `coerce` is (kind_str,
+                # is_int64_decimal, packed) — None here means the logical descriptor
+                # was missing/out-of-range, so fail the scan closed (below).
+                kind_str, is_int64_decimal, packed = coerce
+                kinds.append(kind_str)
+                string_types.append(0)
+                decimal_columns.append(1 if is_int64_decimal else 0)
+                logical_coerce.append(packed)
+            else:
+                # R6: a read-set column (projected OR role-3 filter-only) of a
+                # not-yet-admissible kind fails the whole scan closed. Deliberate
+                # strict check: role-3 columns must also be native-admissible.
+                # Carry the offending DrakenType so R6 can be sub-censused by type.
+                # `pt` is the column's physical type; it is None when the column's
+                # ColumnType carries no physical tag at all, so guard the lookup.
+                #
+                # ARRAY used to be the dominant reason code here and is now CLOSED
+                # (see the DrakenType.ARRAY branch above). What still lands here is
+                # STRUCT/MAP (`json`-annotated), a DECIMAL or temporal column whose
+                # logical descriptor is missing/out of range (`_wp11_logical_coerce`
+                # returning None), and anything else with no native decode.
+                return kinds, string_types, decimal_columns, logical_coerce, (
+                    pt.name if pt is not None else "NONE")
+        return kinds, string_types, decimal_columns, logical_coerce, None
+
     def _native_scan_plan(self, scan):
         """Plan-time setup for the zero-Python scan Source (NativeParquetScanSource)
         when this scan is PROVABLY within its increment-1 scope, else None and the
@@ -1420,38 +1522,31 @@ class _Compiler:
         # so nothing downstream truncates. Row identity is unspecified for a
         # LIMIT without ORDER BY, and the trampoline is equally order-
         # nondeterministic at dop>1, so no guarantee is lost.
-        # R3 (fused_topn) — CLOSED for the NO-PREDICATE case only. `scan.
-        # _topn_sort_name`/`_topn_limit` is a trampoline-only decode-skip HINT
-        # (WP-02 §9 pass-2 shrink): the downstream HeapSortNode always compiles
-        # to a real native `set_topn_sink` operator (see the HeapSortNode
-        # branch below in `_compile_scan`) that performs the actual sort/
-        # limit/tie-break/null-order generically over the incoming layout,
-        # independent of which scan Source feeds it. With NO predicate, the
-        # trampoline's own two-pass late-mat never activates either (it
-        # requires a pushed WHERE — see `two_pass_eligible` in
-        # parquet_read.pyx), so admitting natively costs nothing: both paths
-        # already do a full single-pass decode. Measured on the full 100M-row
-        # ClickBench dataset: no regression, gil_held_ns/trampoline_calls == 0.
+        # R3 (fused_topn) — CLOSED. `scan._topn_sort_name`/`_topn_limit` is a
+        # decode-skip HINT: the downstream HeapSortNode always compiles to a real
+        # native `set_topn_sink` operator (see the HeapSortNode branch below in
+        # `_compile_scan`) that performs the actual sort/limit/tie-break/null-order
+        # generically over the incoming layout, independent of which scan Source
+        # feeds it. So the hint never changes WHICH rows reach the client — only
+        # how much gets decoded to find them.
         #
-        # WITH a predicate, the trampoline's late-mat DOES activate and is not
-        # optional cheap insurance: ClickBench Q24 (`SELECT * FROM hits WHERE
-        # URL LIKE '%google%' ORDER BY EventTime LIMIT 10`) decodes only the
-        # predicate + sort-key columns for the whole table, then the other
-        # ~100 projected columns for just the tiny LIKE-surviving set. Sending
-        # this shape native (ignoring the hint, per the no-predicate reasoning
-        # above) forces a full single-pass decode of EVERY column of EVERY row
-        # — measured ~400% slower on Q24 and ~20% on the ClickBench suite
-        # overall. So THIS composed shape (fused TopN + predicate) still fails
-        # closed to the trampoline, tagged `fused_topn`, until native masked
-        # pass-2 decode (WP-02 §9's true two-pass late-mat) exists to recover
-        # the decode-skip. This is a real, measured decision, not caution for
-        # its own sake — do not remove this check without benchmarking Q24 (or
-        # an equivalent selective-predicate + wide-SELECT-* + small-LIMIT
-        # shape) at ClickBench scale first.
-        if (getattr(scan, "_topn_sort_name", None) is not None
-                and getattr(scan, "predicates", None)):
-            self.scan_residual_reasons[scan.identity] = "fused_topn"
-            return None
+        # With NO predicate, no late-materialization happens on either path (it
+        # requires a pushed WHERE — see `two_pass_eligible` in parquet_read.pyx),
+        # so a plain single-pass native scan is exactly equivalent; that sub-case
+        # was admitted by A3.
+        #
+        # WITH a predicate the decode-skip is load-bearing — ClickBench Q24
+        # (`SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT
+        # 10`) reads only the predicate + sort-key columns for the whole table,
+        # then the other ~100 columns for the handful of survivors; ignoring the
+        # hint and single-passing it measured ~400% slower on Q24. That shape is
+        # now handled NATIVELY, by LatmatScanSource, and is routed BEFORE this
+        # method (`_compile_scan` → `_latmat_scan_plan`), so it never reaches
+        # here. What still arrives here carrying a topn hint AND a predicate is
+        # the set of shapes where the trampoline would not have late-materialized
+        # either (no pass-2-only columns, or the manifest selectivity estimate
+        # says the predicate does not prune enough) — for those a single-pass
+        # native scan is the same work the trampoline would have done.
         manifest = getattr(scan, "manifest", None)
         if manifest is None or manifest.get_file_count() == 0:
             # R7a: no manifest / zero files
@@ -1514,94 +1609,11 @@ class _Compiler:
                         seen.add(sc.identity)
                         read_scs.append(sc)
 
-        kinds = []
-        string_types = []
-        # WP-11: parallel to read_scs. decimal_columns[i]=1 routes an int64-backed
-        # DECIMAL DK_POOL column to the native decimal decoder; logical_coerce[i]
-        # packs the DATE/TIMESTAMP/TIME/DECIMAL retag kind + unit / precision-scale
-        # (LC_* packing mirrored from native_parquet_scan_source.hpp). 0 = none.
-        decimal_columns = []
-        logical_coerce = []
-        for sc in read_scs:
-            pt = _physical_type(sc)
-            coerce = _wp11_logical_coerce(sc, pt)
-            # WP-11: parquet TIME binds to a TIME32/TIME64 schema type but decodes as
-            # plain INT64 (the binder models no TIME coercion) — the trampoline emits
-            # it as INT64. Route it through the int path so the native scan emits the
-            # identical INT64 column; the "int" footer gate admits the time[...]
-            # logical annotation.
-            if pt in _INT_KIND_TYPES:
-                # Every integer width, signed and unsigned. The schema declares the
-                # column's REAL width now (see _rugo_schema._integer_column_type),
-                # so this can no longer key on INT64 alone — a narrow column would
-                # otherwise fail the scan closed as non-admissible. The native
-                # Source decodes each width exactly (DK_INT8/16/32, DK_UINT8/16/32/64)
-                # and the "int" footer gate admits the whole int/uint logical family.
-                kinds.append("int")
-                string_types.append(0)
-                decimal_columns.append(0)
-                logical_coerce.append(0)
-            elif pt == DrakenType.FLOAT32:
-                kinds.append("float32")
-                string_types.append(0)
-                decimal_columns.append(0)
-                logical_coerce.append(0)
-            elif pt == DrakenType.FLOAT64:
-                kinds.append("float64")
-                string_types.append(0)
-                decimal_columns.append(0)
-                logical_coerce.append(0)
-            elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY):
-                # WP-01: string columns decode natively (DK_VARCHAR / DK_VARCHAR_DICT
-                # / DK_POOL string). Carry the declared physical type so the native
-                # Source tags each vector byte-identically to the trampoline path.
-                kinds.append("varchar")
-                string_types.append(pt.value)
-                decimal_columns.append(0)
-                logical_coerce.append(0)
-            elif pt == DrakenType.BOOL:
-                # WP-11: BOOLEAN → DK_BOOL dense, self-describing (no descriptor).
-                kinds.append("bool")
-                string_types.append(0)
-                decimal_columns.append(0)
-                logical_coerce.append(0)
-            elif pt == DrakenType.ARRAY:
-                # R6: a parquet LIST column. It ALWAYS lands DK_POOL (repetition
-                # levels ⇒ direct_kind_for has no direct kind for it) and is
-                # serialized as TAG_ARRAY; `array_columns` (built below from the
-                # same read_scs order) routes it to the native TAG_ARRAY decoder.
-                # The element type is carried on the WIRE (the child_type_tag byte),
-                # so nothing needs packing for it — except ARRAY<TIMESTAMP>, whose
-                # int64 leaf needs the unit-carrying retag the trampoline applies.
-                kinds.append("array")
-                string_types.append(0)
-                decimal_columns.append(0)
-                logical_coerce.append(_r6_array_element_coerce(sc))
-            elif coerce is not None:
-                # WP-11: DECIMAL / DATE / TIMESTAMP / TIME. `coerce` is (kind_str,
-                # is_int64_decimal, packed) — None here means the logical descriptor
-                # was missing/out-of-range, so fail the scan closed (below).
-                kind_str, is_int64_decimal, packed = coerce
-                kinds.append(kind_str)
-                string_types.append(0)
-                decimal_columns.append(1 if is_int64_decimal else 0)
-                logical_coerce.append(packed)
-            else:
-                # R6: a read-set column (projected OR role-3 filter-only) of a
-                # not-yet-admissible kind fails the whole scan closed. Deliberate
-                # strict check: role-3 columns must also be native-admissible.
-                # Carry the offending DrakenType so R6 can be sub-censused by type.
-                # `pt` is the column's physical type; it is None when the column's
-                # ColumnType carries no physical tag at all, so guard the lookup.
-                #
-                # ARRAY used to be the dominant reason code here and is now CLOSED
-                # (see the DrakenType.ARRAY branch above). What still lands here is
-                # STRUCT/MAP (`json`-annotated), a DECIMAL or temporal column whose
-                # logical descriptor is missing/out of range (`_wp11_logical_coerce`
-                # returning None), and anything else with no native decode.
-                self.scan_residual_reasons[scan.identity] = (
-                    "non_admissible_kind:" + (pt.name if pt is not None else "NONE"))
-                return None
+        kinds, string_types, decimal_columns, logical_coerce, bad_type = (
+            self._classify_scan_columns(read_scs))
+        if bad_type is not None:
+            self.scan_residual_reasons[scan.identity] = "non_admissible_kind:" + bad_type
+            return None
         # E37: mark which read columns are consumed as a GROUP BY/JOIN/DISTINCT key
         # downstream — only those carry the hash seed (keyhash_buf). Parallel to
         # read_scs; all-zero when nothing keys (SELECT */LIKE) → no sidecar built.
@@ -1710,6 +1722,220 @@ class _Compiler:
                 filter_bc, read_layout, emit_indices, emit_ids, need_select)
         return splan
 
+    def _latmat_scan_plan(self, scan):
+        """R3 (`fused_topn`) plan-time setup for the two-pass late-materialization
+        native Source (`LatmatScanSource`), or None when this scan is not that shape.
+
+        The shape is `WHERE <pushed predicate> ORDER BY <col> LIMIT n` fused into a
+        parquet scan — `TopNScanPushdownStrategy` stamps `_topn_sort_name` /
+        `_topn_limit` / `_topn_descending` on it. Pass 1 reads the predicate columns
+        plus the sort key for the whole table; the survivors are reduced to the
+        top-n boundary; pass 2 reads the remaining projected columns masked to just
+        those rows. It replaces the trampoline's `_run_pass1` / `_apply_topn` /
+        `_combine_pass1_pass2_row_group`, which drove this same algorithm from Python.
+
+        **Eligibility deliberately mirrors the trampoline's own `two_pass_eligible`
+        + `topn_active` (parquet_read.pyx::_ensure_scan_started).** That is the whole
+        safety argument for returning None: every shape refused here is a shape the
+        trampoline would NOT have late-materialized either, so it falls through to
+        the ordinary single-pass native scan doing exactly the work the trampoline
+        would have done — never a silent loss of a decode-skip. In particular the
+        selectivity gate is replicated, because a weak predicate makes two passes
+        cost more than one (and it is also what bounds pass-1's live survivor set).
+
+        Returns a tuple of everything `_compile_scan` needs, or None.
+        """
+        from opteryx import config
+        from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+        from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+        from opteryx.expression import get_all_nodes_of_type
+        from opteryx.expression.evaluator.evaluation import Pass1PredResolver
+        from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
+        from opteryx.operators._operators import bytecode_is_all_c_native
+        from opteryx.operators._operators import resolve_scan_filesystem
+        from opteryx.operators._operators import scan_footer_bytes_cache
+        from opteryx.variables import resolve as _resolve_var
+
+        sort_name = getattr(scan, "_topn_sort_name", None)
+        topn_limit = getattr(scan, "_topn_limit", None)
+        predicates = getattr(scan, "predicates", None)
+        if sort_name is None or topn_limit is None or not predicates:
+            return None
+        if not config.features.parquet_late_materialization:
+            return None
+        manifest = getattr(scan, "manifest", None)
+        if manifest is None or manifest.get_file_count() == 0:
+            return None
+        if not scan.columns:
+            return None
+
+        # ── the pass-1 / pass-2 column split (by physical name, as the scan reads) ──
+        projected_scs = [col.schema_column for col in scan.columns]
+        projected_by_name = {sc.name: sc for sc in projected_scs}
+        if sort_name not in projected_by_name:
+            # TopNScanPushdownStrategy only stamps a HeapSort reading DIRECTLY from
+            # this scan, so the sort key must be one of the columns the scan emits —
+            # otherwise the HeapSort has nothing to sort on. A scan that reached here
+            # without it means that invariant broke upstream; fail loud rather than
+            # quietly planning a scan whose top-n reduction has no key.
+            raise RuntimeError(
+                "compiler: scan carries a fused top-N hint on column "
+                f"{sort_name!r}, which is not in the scan's projection — the "
+                "TopNScanPushdownStrategy invariant (HeapSort reads directly from "
+                "this scan) does not hold"
+            )
+
+        p1_scs = []
+        p1_seen = set()
+        for pred in predicates:
+            for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
+                sc = getattr(ident, "schema_column", None)
+                if sc is None or sc.name in p1_seen:
+                    continue
+                p1_seen.add(sc.name)
+                p1_scs.append(sc)
+        if not p1_scs:
+            return None
+        if sort_name not in p1_seen:
+            p1_seen.add(sort_name)
+            p1_scs.append(projected_by_name[sort_name])
+        p2_scs = [sc for sc in projected_scs if sc.name not in p1_seen]
+        if not p2_scs:
+            # Nothing left for pass 2 to fetch — one pass reads everything anyway.
+            # (The trampoline refuses the same way: `bool(_pass2_names)`.)
+            return None
+
+        # ── the selectivity gate, mirrored from parquet_read.pyx ────────────────────
+        # `predicates` is a list of separately-pushed conjuncts (implicitly ANDed),
+        # so each is estimated on its own and combined multiplicatively — passing the
+        # list to estimate_selectivity would silently return the 1.0 "unknown"
+        # default. estimate_selectivity never raises and never returns None (it
+        # degrades through stat tiers to a constant), so there is nothing to guard.
+        selectivity = 1.0
+        for pred in predicates:
+            selectivity *= manifest.estimate_selectivity(pred)
+        if selectivity > _resolve_var(
+            "parquet_late_materialization_max_selectivity",
+            getattr(scan.properties, "variables", None),
+            config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+        ):
+            return None
+
+        # ── the predicate must lower to a c-native span ─────────────────────────────
+        # Pass 1 evaluates it through opteryx_pass1_predicate_eval's C ABI (the same
+        # entry rugo's decode workers already call), which runs the c-native bytecode
+        # VM and nothing else. Not lowerable → None → `_native_scan_plan` records the
+        # `unlowerable_predicate` (R4) residual on the ordinary path.
+        filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
+        if not bytecode_is_all_c_native(filter_bc):
+            return None
+
+        p1_kinds, p1_string_types, p1_decimals, p1_coerce, bad = (
+            self._classify_scan_columns(p1_scs))
+        if bad is not None:
+            self.scan_residual_reasons[scan.identity] = "non_admissible_kind:" + bad
+            return None
+        p2_kinds, p2_string_types, p2_decimals, p2_coerce, bad = (
+            self._classify_scan_columns(p2_scs))
+        if bad is not None:
+            self.scan_residual_reasons[scan.identity] = "non_admissible_kind:" + bad
+            return None
+
+        p1_names = [sc.name for sc in p1_scs]
+        p2_names = [sc.name for sc in p2_scs]
+        paths = manifest.get_file_paths()
+        file_sizes = {}
+        files = getattr(manifest, "files", None)
+        if files:
+            for entry in files:
+                size = getattr(entry, "file_size_in_bytes", None)
+                if isinstance(size, int) and size > 0:
+                    file_sizes.setdefault(entry.file_path, size)
+        filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
+        # One gate over BOTH read-sets: every column either pass touches has to be
+        # provably decodable, and schema evolution disqualifies the scan outright.
+        if not native_scan_supported(paths, p1_names + p2_names, p1_kinds + p2_kinds,
+                                     file_sizes or None, filesystem=filesystem,
+                                     footer_bytes_cache=scan_footer_bytes_cache()):
+            self.scan_residual_reasons[scan.identity] = "footer_gate"
+            return None
+
+        decode_workers = _resolve_var(
+            "parquet_gcs_io_workers",
+            getattr(scan.properties, "variables", None),
+            config.PARQUET_GCS_IO_WORKERS,
+        ) if connector_type in ("GCS", "GS") else _resolve_var(
+            "parquet_local_io_workers",
+            getattr(scan.properties, "variables", None),
+            config.PARQUET_LOCAL_IO_WORKERS,
+        )
+        # Row-group pruning triples — identical to the single-pass path, applied to
+        # BOTH plans so the two agree on which row groups exist. Pass 2 re-submits
+        # only the row groups pass 1 leaves standing, so its own work-item list is
+        # unused at run time; its footer map and pipeline are what matter.
+        pruning = extract_predicate_stats(predicates) or None
+        _key_ids = self._hash_key_identities()
+
+        def _open(names, scs, string_types, decimals, coerce, preds):
+            return open_native_scan_plan(
+                paths,
+                names,
+                decode_workers=decode_workers,
+                predicates=preds,
+                file_sizes=file_sizes or None,
+                string_types=string_types,
+                decimal_columns=decimals,
+                array_columns=[1 if _physical_type(sc) == DrakenType.ARRAY else 0
+                               for sc in scs],
+                logical_coerce=coerce,
+                hash_key_columns=[1 if sc.identity in _key_ids else 0 for sc in scs],
+                length_only_columns=[
+                    1 if sc.identity in (getattr(scan, "_length_only_columns", None)
+                                         or frozenset()) else 0 for sc in scs],
+                pool=None,
+                filesystem=filesystem,
+                footer_bytes_cache=scan_footer_bytes_cache(),
+            )
+
+        p1_plan = _open(p1_names, p1_scs, p1_string_types, p1_decimals, p1_coerce, pruning)
+        # Pass 2 must NOT re-prune: its work items come from pass 1's survivors, and a
+        # second pruning pass would only cost footer work for a list nothing reads.
+        p2_plan = _open(p2_names, p2_scs, p2_string_types, p2_decimals, p2_coerce, None)
+        self.footer_fetch_ns += p1_plan.footer_fetch_ns + p2_plan.footer_fetch_ns
+
+        # ── the pushed pass-1 predicate ────────────────────────────────────────────
+        # Pass1PredResolver turns the lowered bytecode into the Pass1PredCtx the C ABI
+        # reads, and OWNS the literal vectors + col_idx arrays the worker dereferences
+        # — the NativePlan holds it for the run (see set_latmat_scan_source).
+        identity_to_physical = {sc.identity: sc.name for sc in p1_scs}
+        resolver = Pass1PredResolver(filter_bc, identity_to_physical)
+        p1_index_by_name = {name: i for i, name in enumerate(p1_names)}
+        pred_col_to_p1 = [p1_index_by_name[n] for n in resolver.col_names]
+        # Hand it to rugo as well, so the match runs on the decode workers (in
+        # parallel, nogil) for the column shapes rugo can view without a copy. When it
+        # declines, LatmatScanSource runs the identical program itself — same ctx,
+        # same bytecode, same answer.
+        p1_plan.set_pass1_predicate(get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
+                                    resolver.col_names)
+
+        # ── output assembly ───────────────────────────────────────────────────────
+        p2_index_by_name = {name: i for i, name in enumerate(p2_names)}
+        out_from_p1 = []
+        out_from_p2 = []
+        for sc in projected_scs:
+            if sc.name in p1_index_by_name:
+                out_from_p1.append(p1_index_by_name[sc.name])
+                out_from_p2.append(-1)
+            else:
+                out_from_p1.append(-1)
+                out_from_p2.append(p2_index_by_name[sc.name])
+        emit_ids = [sc.identity for sc in projected_scs]
+        return (p1_plan, p2_plan, resolver, pred_col_to_p1,
+                p1_index_by_name[sort_name],
+                not bool(getattr(scan, "_topn_descending", False)),
+                int(topn_limit), out_from_p1, out_from_p2, emit_ids)
+
     def _compile_scan(self, scan, kind):
         # Tag the scan Source (and any materialized buffer source) with the scan node's
         # identity so its per-operator readings attribute back to the ReadRel node.
@@ -1728,6 +1954,36 @@ class _Compiler:
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")
+        # R3: the composed `WHERE ... ORDER BY ... LIMIT` shape gets the two-pass
+        # late-materialization Source. Tried FIRST — it is a strictly narrower shape
+        # than the single-pass path below, and when it declines the scan falls through
+        # to that path, which is exactly the work the trampoline would have done for
+        # the shapes it declines on. See `_latmat_scan_plan`.
+        lat = self._latmat_scan_plan(scan)
+        if lat is not None:
+            (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,
+             topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
+            from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
+            self.scan_sources[scan.identity] = "LatmatScanSource"
+            manifest = getattr(scan, "manifest", None)
+            self.scan_facts[scan.identity] = {
+                "files_read": manifest.get_file_count() if manifest is not None else 0,
+                "row_groups_read": p1_plan.row_group_count,
+                "row_groups_pruned": p1_plan.pruned_row_group_count,
+                "parquet_rows_before_filter": p1_plan.surviving_row_count,
+                # Both passes' column sets — what the scan actually decodes, though
+                # pass 2's columns are only decoded for the top-n candidate rows.
+                "columns_read": len(out_from_p1),
+            }
+            p = self.nplan.new_pipeline()
+            self.nplan.set_latmat_scan_source(
+                p, p1_plan, p2_plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
+                resolver, pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit,
+                out_from_p1, out_from_p2, emit_ids)
+            self._remember_types(scan.columns)
+            # The predicate is fully applied in pass 1, and the Source emits the
+            # projection directly — no relocated ExprFilter, no trailing Select.
+            return p, emit_ids
         splan = self._native_scan_plan(scan)
         if splan is not None:
             # Zero-Python Source: workers pull decoded row groups straight from

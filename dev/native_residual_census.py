@@ -123,16 +123,24 @@ HAND_SET: Dict[str, str] = {
     # contribute are never decoded (LIMIT 5 over tpch_1.lineitem: 96 row groups →
     # 1). The scan MUST enforce this itself — LimitPushdownStrategy removes the
     # Limit node from the plan when it pushes. See test_pushed_limit_now_native.)
-    # R3 (fused_topn) — PARTIALLY closed (A3). The NO-predicate scan-fused
-    # ORDER BY ... LIMIT is admitted natively (measured no-regression). WITH a
-    # predicate it still fails closed — measured ~400% regression on ClickBench
-    # Q24 (`SELECT * ... WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10`)
-    # from losing the trampoline's two-pass late-mat decode-skip. See
-    # tests/unit/operators/test_wp_a3_fused_topn_scan.py and
-    # docs/NATIVE_RESIDUAL_PLAN.md item 6.
-    "fused_topn":
-        "SELECT * FROM testdata.clickbench_tiny WHERE URL LIKE '%google%' "
-        "ORDER BY EventTime LIMIT 10",
+    # (R3 `fused_topn` is RETIRED — no longer reachable, so it has no hand-set entry.
+    # A3 had already admitted the NO-predicate scan-fused `ORDER BY ... LIMIT`; the
+    # composed shape (fused TopN WITH a pushed predicate — ClickBench Q24, `SELECT *
+    # ... WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10`) stayed on the
+    # trampoline only because admitting it as a plain single-pass scan lost the
+    # two-pass late-materialization decode-skip and measured ~400% slower on Q24.
+    # That decode-skip is now NATIVE: src/cpp/engine/native_latmat_scan_source.hpp's
+    # LatmatScanSource runs pass 1 (predicate columns + sort key) -> a top-n boundary
+    # reduction over draken's own sort comparator -> masked pass-2 decode of the
+    # remaining projected columns, entirely in C++. The reduction is the one new
+    # piece; everything else (masked decode, the pushed pass-1 predicate on rugo's
+    # decode workers, gather) already existed and was only ever driven from Python.
+    # Shapes where the trampoline would NOT have late-materialized (no pass-2-only
+    # columns, or the selectivity estimate says the predicate does not prune enough)
+    # fall through to the ordinary single-pass native scan — the same work the
+    # trampoline would have done. See test_wp_r3_latmat_scan.py,
+    # test_fused_topn_with_predicate_now_native, and docs/NATIVE_RESIDUAL_PLAN.md
+    # item 6. Same retirement convention as R2 / R5 / R5b / R6.)
     # R4 — a pushed predicate that does not lower to a c-native span (regex).
     "unlowerable_predicate": "SELECT followers FROM '%s' WHERE text RLIKE 'a'" % _FLAT,
     # (R5 `bool_predicate_input` is RETIRED — no longer reachable, so it has no
@@ -169,6 +177,14 @@ HAND_SET: Dict[str, str] = {
 }
 
 
+#: Scan Source classes that run with NO Python on the execution path.
+#: ``LatmatScanSource`` (R3) is the two-pass late-materialization scan — a different
+#: Source class from the single-pass one, but equally native: it never constructs a
+#: PyObject and never calls back into Python while executing. The trampoline is
+#: ``StreamingScanSource``, and only that.
+_NATIVE_SOURCES = frozenset({"NativeParquetScanSource", "LatmatScanSource"})
+
+
 def census(verbose: bool = False) -> Dict[str, int]:
     """Tally ``scan_residual_reasons`` over the ``.run_tests`` battery.
 
@@ -187,7 +203,7 @@ def census(verbose: bool = False) -> Dict[str, int]:
             continue
         for identity, source in sources.items():
             scans += 1
-            if source == "NativeParquetScanSource":
+            if source in _NATIVE_SOURCES:
                 native += 1
             else:
                 trampoline += 1

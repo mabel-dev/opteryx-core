@@ -202,6 +202,32 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[uint8_t]* hash_key_columns,
                                     const cppvector[uint8_t]* array_columns,
                                     int64_t row_limit)
+        void set_latmat_scan_source(size_t p, ParquetIOPipeline* p1_pipeline,
+                                    const unordered_map[string, FileStats]* footer_map,
+                                    const cppvector[pair[string, int]]* work_items,
+                                    const cppvector[string]* p1_column_names,
+                                    int in_flight_limit,
+                                    CppMemoryPool* p1_pool,
+                                    const cppvector[int]* p1_string_types,
+                                    const cppvector[uint8_t]* p1_decimal_columns,
+                                    const cppvector[int]* p1_logical_coerce,
+                                    const cppvector[uint8_t]* p1_hash_key_columns,
+                                    const cppvector[uint8_t]* p1_array_columns,
+                                    ParquetIOPipeline* p2_pipeline,
+                                    const cppvector[string]* p2_column_names,
+                                    CppMemoryPool* p2_pool,
+                                    const cppvector[int]* p2_string_types,
+                                    const cppvector[uint8_t]* p2_decimal_columns,
+                                    const cppvector[int]* p2_logical_coerce,
+                                    const cppvector[uint8_t]* p2_hash_key_columns,
+                                    const cppvector[uint8_t]* p2_array_columns,
+                                    void* pred_fn, void* pred_ctx,
+                                    cppvector[int] pred_col_to_p1,
+                                    int sort_p1_index, bint sort_ascending,
+                                    int64_t topn_limit,
+                                    cppvector[int] out_from_p1,
+                                    cppvector[int] out_from_p2,
+                                    cppvector[string] out_names)
         void set_buffer_source(size_t p, size_t buf)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
                              cppvector[void*] lit_dv, ExprFilterFn fn,
@@ -2218,6 +2244,57 @@ cdef class NativePlan:
                                        &splan.decimal_columns, &splan.logical_coerce,
                                        &splan.hash_key_columns, &splan.array_columns,
                                        c_row_limit)
+
+    def set_latmat_scan_source(self, size_t p, NativeScanPlan p1_plan,
+                               NativeScanPlan p2_plan, size_t pred_fn, size_t pred_ctx,
+                               object pred_anchor, list pred_col_to_p1,
+                               int sort_p1_index, bint sort_ascending,
+                               int64_t topn_limit, list out_from_p1, list out_from_p2,
+                               list out_names):
+        """Source = the R3 two-pass late-materialization parquet scan
+        (LatmatScanSource): pass 1 decodes the predicate + sort-key columns for the
+        whole table and reduces the survivors to the top-n boundary; pass 2 decodes the
+        remaining projected columns for only those rows, masked. Replaces the
+        `fused_topn` trampoline residual — the composed
+        `WHERE ... ORDER BY ... LIMIT` shape.
+
+        ``p1_plan`` / ``p2_plan`` are two NativeScanPlans over the SAME files and the
+        same pruning, split by column set; both are held here so their pipelines,
+        footer map and pool outlive the run. ``pred_anchor`` is the Pass1PredResolver
+        that owns ``pred_ctx`` — held for the same reason (the C ABI callback
+        dereferences it from native worker threads, with no reference of its own)."""
+        self.scan_plans.append(p1_plan)
+        self.scan_plans.append(p2_plan)
+        self.held.append(pred_anchor)
+        cdef CppMemoryPool* p1_pool = NULL
+        cdef CppMemoryPool* p2_pool = NULL
+        if p1_plan._pool is not None:
+            p1_pool = p1_plan._pool._pool
+        if p2_plan._pool is not None:
+            p2_pool = p2_plan._pool._pool
+        cdef cppvector[int] c_pred_map
+        cdef cppvector[int] c_from_p1
+        cdef cppvector[int] c_from_p2
+        cdef cppvector[string] c_names
+        for i in pred_col_to_p1:
+            c_pred_map.push_back(<int>i)
+        for i in out_from_p1:
+            c_from_p1.push_back(<int>i)
+        for i in out_from_p2:
+            c_from_p2.push_back(<int>i)
+        for n in out_names:
+            c_names.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
+        self._e.set_latmat_scan_source(
+            p, p1_plan.pipeline_ptr, p1_plan.footer_map, &p1_plan.work_items,
+            &p1_plan.column_names, p1_plan.in_flight_limit, p1_pool,
+            &p1_plan.string_types, &p1_plan.decimal_columns, &p1_plan.logical_coerce,
+            &p1_plan.hash_key_columns, &p1_plan.array_columns,
+            p2_plan.pipeline_ptr, &p2_plan.column_names, p2_pool,
+            &p2_plan.string_types, &p2_plan.decimal_columns, &p2_plan.logical_coerce,
+            &p2_plan.hash_key_columns, &p2_plan.array_columns,
+            <void*>pred_fn, <void*>pred_ctx, c_pred_map,
+            sort_p1_index, sort_ascending, topn_limit,
+            c_from_p1, c_from_p2, c_names)
 
     def close_scan_plans(self):
         """Cancel + shut down every NativeScanPlan's IO pipeline. MUST only run

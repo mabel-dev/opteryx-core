@@ -30,8 +30,26 @@ import pytest
 
 import opteryx
 from opteryx import config
+from opteryx.connectors.parquet_io import pool_reader
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _force_trampoline_scan(monkeypatch):
+    """These tests are about the TRAMPOLINE scan's two-pass implementation and read
+    its own telemetry counters (`parquet_latmat_pass1_row_groups`,
+    `parquet_filter_columns_read`, ...), which only `ParquetReadNode` emits.
+
+    Since the R3 close-out, the `WHERE ... ORDER BY ... LIMIT` shape below is served
+    by the native `LatmatScanSource` instead, which emits none of those counters —
+    so without this the tests would silently stop exercising anything. The
+    trampoline implementation is still live code (a scan the footer gate refuses —
+    schema evolution, say — still reaches it), so it still deserves these tests;
+    they just have to ASK for it now. Native two-pass late-materialization has its
+    own correctness matrix in tests/unit/operators/test_wp_r3_latmat_scan.py.
+    """
+    monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
 
 
 def _get_read_operation(telemetry: dict) -> dict:

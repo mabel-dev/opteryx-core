@@ -1,5 +1,23 @@
 # Native SELECT-path residual close-out plan (A0 acceptance gate)
 
+> ## ✅ MILESTONE — the census frontier is empty (R3 close-out, 2026-08-01)
+>
+> **`dev/native_residual_census.py` now reports 165 scans, 165 native, 0
+> trampoline.** `fused_topn` (R3) was the last reachable residual in the battery
+> and is closed: the composed `WHERE … ORDER BY … LIMIT` shape runs on
+> `LatmatScanSource`, a native two-pass late-materialization scan
+> (`src/cpp/engine/native_latmat_scan_source.hpp`) that keeps the decode-skip
+> instead of losing it. See item 6.
+>
+> **`StreamingScanSource` is NOT dead** — do not delete it. It is still selected
+> by the one residual with a live SQL trigger, `footer_gate` via schema evolution
+> (a projected column absent from some files), which `HAND_SET["footer_gate"]`
+> exercises. It is also still the fixture several instrumentation tests force via
+> `native_scan_supported`. What HAS gone is any *battery* query reaching it.
+>
+> Not closed, and unchanged by this: `unlowerable_predicate` (R4) — see item 7 and
+> the stale-marker warning below.
+
 The native C++ engine runs plain `SELECT` end-to-end **except** for parquet scans
 that fall back to the per-morsel Python trampoline (`StreamingScanSource`). That
 trampoline (`engine.hpp`'s scan-pull callback) is the *only* per-morsel Python
@@ -33,8 +51,12 @@ non-scan reasons — whole-query native-support gaps, out of scope for A0).
 
 Residual reasons for the 13 A0 fallbacks:
 
-**Latest census (after the R2 + R7b-temporal + R5 + R6 close-outs): 165 scans,
-164 native, 1 trampoline — `fused_topn` only.**
+**Latest census (after the R2 + R7b-temporal + R5 + R6 + R3 close-outs): 165
+scans, 165 native, 0 trampoline — the frontier is empty.** "Native" now covers
+two Source classes, both zero-Python: `NativeParquetScanSource` (single-pass) and
+`LatmatScanSource` (R3's two-pass late-materialization scan). The census's
+`_NATIVE_SOURCES` is the single list that defines this, read by both the tool and
+the acceptance gate.
 
 ⚠ The census corpus (clickbench + tpch) contains **no array columns**, so it
 never reported R6 at all and its 164/165 flattered the frontier. On ordinary
@@ -47,7 +69,7 @@ purpose-built corpus, not this battery.
 |---|---:|---:|---:|---:|---:|---|
 | `footer_gate` (R7b) | **10** | **1** | 1 | 1 | **0** | ✔ schema evolution only |
 | `zero_projection` (R1) | 2 | 2 | **0** | 0 | 0 | ✖ closed (A2) |
-| `fused_topn` (R3) | 1 | 1 | 1 | 1 | 1 | ✔ observed (composed shape — see below) |
+| `fused_topn` (R3) | 1 | 1 | 1 | 1 | **0** | ✖ retired (R3 close-out) |
 | `pushed_limit` (R2) | 0 | 0 | 0 | 0 | **0** | ✖ closed (R2 close-out) |
 | `unlowerable_predicate` (R4) | 0 | 0 | 0 | 0 | 0 | ⚠ marker stale — see below |
 | `bool_predicate_input` (R5) | 0 | 0 | 0 | 0 | 0 | ✖ retired (R5 close-out) |
@@ -80,14 +102,18 @@ now has 2 trampoline scans (native 156 / 158). A2 also introduced
 uncovered (not present in the battery census, but reachable — see below).
 
 **A3 closed `fused_topn` for the NO-predicate sub-case only** (R3, see the
-ordered worklist entry below). The battery count is UNCHANGED (native 156 /
-158, 2 trampoline scans) because the battery's one `fused_topn` trigger is
-ClickBench Q24 — `SELECT * ... WHERE URL LIKE '%google%' ORDER BY EventTime
-LIMIT 10` — which is exactly the composed (predicate-bearing) sub-case that
-A3 deliberately did NOT admit (see below: admitting it was tried and reverted
-after measuring a ~400% regression on Q24). The no-predicate sub-case has no
-trigger in this battery, so its close-out is only visible via the dedicated
-unit tests, not this census.
+ordered worklist entry below). The battery count was UNCHANGED at the time
+(native 156 / 158, 2 trampoline scans) because the battery's one `fused_topn`
+trigger is ClickBench Q24 — `SELECT * ... WHERE URL LIKE '%google%' ORDER BY
+EventTime LIMIT 10` — which is exactly the composed (predicate-bearing) sub-case
+A3 deliberately did NOT admit (admitting it as a single-pass scan was tried and
+reverted after measuring a ~400% regression on Q24). The no-predicate sub-case
+has no trigger in this battery, so its close-out is only visible via the
+dedicated unit tests, not this census.
+
+**The R3 close-out then took the composed sub-case as well**, via a native
+two-pass late-materialization Source that keeps the decode-skip rather than
+losing it — which is what finally emptied the battery's frontier. Item 6 below.
 
 ## Corrections to the A0 residual enumeration (findings)
 
@@ -432,71 +458,151 @@ the R4-adjacent hard-error class described in finding 2 above. A bare
 `WHERE <bool col>` is rejected earlier still, by the planner, as unsupported
 syntax.
 
-### 6. `fused_topn` (R3) — census 1 → **1** — **PARTIALLY CLOSED (A3)**
+### 6. `fused_topn` (R3) — census 1 → **0** — **CLOSED**
 `scan._topn_sort_name is not None` — an `ORDER BY … LIMIT` fused into the scan
-(observed on `SELECT * … ORDER BY … LIMIT`).
+(observed on `SELECT * … WHERE … ORDER BY … LIMIT`).
 
-**Inventory finding.** `scan._topn_sort_name`/`_topn_limit`/`_topn_descending`
-is a **trampoline-only decode-skip hint**, not the mechanism that produces
-correctness. `TopNScanPushdownStrategy` (`opteryx/planner/optimizer/strategies/
-topn_scan_pushdown.py`) stamps it purely so the trampoline's own two-pass
-late-materialization (`_apply_topn` in `parquet_read.pyx`, which used Python
-`to_pylist()` + `sorted()`) can shrink pass-2 decode to just the rows that can
-survive the cut. Separately, `HeapSortNode` **always** compiles to a real
-native `set_topn_sink` operator (`compiler.py::_compile_scan`, generically over
-the incoming layout) that performs the actual sort / limit / tie-break /
-null-order — this already ran downstream of `StreamingScanSource` before A3,
-independent of scan Source. So the scan-level hint changes nothing about
-*which rows reach the client*; the open question was only ever about decode
-cost, not correctness.
+**What the hint is.** `scan._topn_sort_name`/`_topn_limit`/`_topn_descending` is
+a **decode-skip hint**, not the mechanism that produces correctness.
+`TopNScanPushdownStrategy` stamps it so the scan can shrink pass-2 decode to the
+rows that can survive the cut. `HeapSortNode` **always** compiles to a real native
+`set_topn_sink` operator (`compiler.py::_compile_scan`) that performs the actual
+sort / limit / tie-break / null-order generically over the incoming layout,
+independent of scan Source. So the hint never changes *which rows reach the
+client* — only how much has to be decoded to find them.
 
-**First attempt (reverted): admit unconditionally.** The first cut removed the
-guard unconditionally and let native ignore the hint in every case, reasoning
-that the no-predicate case is genuinely free (the trampoline's own
-`two_pass_eligible` never activates without a pushed WHERE, so neither path
-decode-skips). **This missed the composed case.** ClickBench Q24 —
-`SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10` — IS
-a fused-TopN-with-predicate query, and there the trampoline's two-pass
-late-mat is doing real, load-bearing work: it decodes only the predicate
-(`URL`) and sort-key (`EventTime`) columns for the whole 100M-row table, then
-the other ~100 projected columns only for the handful of `LIKE`-surviving
-rows. Sending this shape native (ignoring the hint) forces a full single-pass
-decode of **every** column of **every** row — **measured ~400% slower on Q24
-and ~20% slower on the ClickBench suite overall**. This was caught after
-landing (not before — the pre-land benchmark only exercised a synthetic
-no-predicate case) and reverted the same day.
+**A3 closed the NO-predicate sub-case** (no late-materialization happens on either
+path without a pushed WHERE, so a single-pass native scan is exactly equivalent).
+**A first attempt at the composed sub-case admitted it as a plain single-pass
+scan and was reverted**: that forces a full decode of ~105 columns × 100M rows and
+measured ~400% slower on ClickBench Q24. The lesson stands — the shape may only be
+admitted by something that PRESERVES the decode-skip.
 
-**A3 close-out (as landed).** `_native_scan_plan` (`compiler.py`) admits a
-fused-TopN scan to native **only when it carries no predicate**:
-```python
-if (getattr(scan, "_topn_sort_name", None) is not None
-        and getattr(scan, "predicates", None)):
-    self.scan_residual_reasons[scan.identity] = "fused_topn"
-    return None
+**Close-out (done, 2026-08-01).** A new native Source,
+`LatmatScanSource` (`src/cpp/engine/native_latmat_scan_source.hpp`), performs the
+two passes in C++:
+
 ```
-No new native TopN/heap-select kernel was needed for the no-predicate
-sub-case — the "hard part" (native heap-select) already existed and already
-ran on this exact plan shape, unconditionally, regardless of scan Source. The
-composed (predicate-bearing) sub-case remains an **open, fail-closed residual**
-— it is the one case the census still reports, and it is the correct,
-measured decision, not an oversight.
+pass 1  decode predicate columns + sort key for the whole table; evaluate the
+        predicate per row group into a survivor bitmap; keep the survivors
+reduce  across ALL row groups, find the LIMIT boundary in the sort key and drop
+        every survivor strictly worse than it (n rows plus ties at the boundary);
+        row groups with no candidate left are never read again
+pass 2  decode the remaining projected columns, MASKED to those rows, and zip
+        them back onto their pass-1 columns
+```
 
-**Future performance follow-on (not a correctness/residual gap):** closing the
-composed sub-case natively requires full WP-02 §9 two-pass late-materialization
-— pass-1 decode of predicate/sort-key columns → native heap-select survivor
-mask → masked pass-2 decode of the remaining projected columns via
-`submit_work_native_masked`. That is real, structural work (the native source
-does not do masked pass-2 decode today) — do not attempt to close it by simply
-removing the predicate check above again without that machinery in place; that
-is precisely what produced the Q24 regression.
+Four of the five pieces already existed natively and were only ever *driven* from
+Python — this is assembly plus one new kernel, not a from-scratch build:
 
-See `tests/unit/operators/test_wp_a3_fused_topn_scan.py` for the A/B
-correctness parity harness (ascending/descending, ties, NULLs, N above/below a
-row-group boundary, and a large-N edge — all no-predicate) plus the fail-closed
-assertion for the composed shape, and
-`tests/unit/operators/test_native_scan_residual_gate.py::test_fused_topn_no_predicate_now_native`
-/ `test_fused_topn_with_predicate_stays_trampoline` for the acceptance-gate
-assertions.
+| piece | reused from |
+|---|---|
+| decode + **masked** decode | `rugo::ParquetIOPipeline::submit_row_group(…, row_mask)` |
+| pass-1 predicate on the decode workers | rugo `Pass1Pred` / `pass1_run_predicate` |
+| the same predicate as a fallback | `opteryx_pass1_predicate_eval`'s C ABI (`Pass1PredResolver`) |
+| column materialization | `NativeScanColumnBuilder` — extracted verbatim out of `NativeParquetScanSource`, now shared by both Sources |
+| row gather | draken `gather_rows` |
+
+**The one new kernel: the boundary reduction (`reduce_to_topn`).** It does NOT
+implement an ordering. It builds draken's own normalized sort keys
+(`build_sort_keys`) over the pass-1 survivors and uses draken's own comparator
+(`SortKeyCmp`) — the SAME definition the downstream `TopNSink` sorts with — then:
+
+```cpp
+nth_element(idx, idx + n - 1, cmp);   b = idx[n-1];
+keep[r] = !cmp(b, r);                 // r is not strictly worse than the boundary
+```
+
+Because the comparator is shared, this is correct **by construction** for every
+key type, for ties (a tied row compares neither-before-nor-after `b`, so it is
+kept — "n rows plus ties at the boundary"), and for NULLs. No null rule and no
+type switch is written in the reduction at all. `n >= total` skips it entirely.
+
+**⚠ This deliberately DIVERGES from the trampoline, because the trampoline is
+wrong here.** `_apply_topn` (`parquet_read.pyx`) hard-codes "NULLs sort last" in
+both directions. draken orders NULL **below every value** (`SortKeyCmp`:
+`cmp = va ? 1 : -1`), i.e. NULLs come **FIRST ascending**, last descending — so
+for `ORDER BY <nullable> ASC LIMIT n` with more than n non-null survivors,
+`_apply_topn` drops NULL rows that belong in the answer. Verified directly on a
+3-NULL fixture: late-mat ON returned `[1003…1012]`, OFF returned
+`[NULL,NULL,NULL,1003…1009]`. The native Source matches the **un-pushed plan**,
+which is the actual contract. **The trampoline bug is UNTOUCHED and still open** —
+`test_trampoline_null_asc_divergence_is_the_trampolines_bug`
+(`tests/unit/operators/test_wp_r3_latmat_scan.py`) pins it so it stays visible.
+Fixing `_apply_topn` is a separate chip. (Architect ruling, 2026-08-01: fix the
+native path, leave the trampoline's bug reported rather than replicated.)
+
+**Eligibility mirrors the trampoline's own `two_pass_eligible` + `topn_active`**
+(`_latmat_scan_plan`, `compiler.py`): a pushed, all-c-native predicate; the
+late-materialization feature flag; a non-empty pass-2 column set; and the same
+manifest **selectivity gate**
+(`PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY`, 0.7). That mirroring is the whole
+safety argument for declining: every refused shape falls through to the ordinary
+single-pass native scan, which is exactly the work the trampoline would have done
+for it — never a silently lost decode-skip. A fused-TopN scan whose sort key is
+not in its own projection **raises** rather than degrading; the
+`TopNScanPushdownStrategy` invariant (HeapSort reads directly from this scan)
+makes that unreachable, and a broken invariant is not a thing to guess around.
+
+**Threading.** Pass 1 is a barrier — no boundary exists until every row group's
+sort key has been seen. The first worker into `get_morsel` runs it to completion
+under the Source's global mutex (rugo's decode workers still parallelise the
+decode and the pushed predicate); the others park there, then all of them stream
+pass 2 concurrently, claiming work items the same way `NativeParquetScanSource`
+does.
+
+**Measured** (`scratch.hits_rugo_262k`, the ClickBench `FULL_SPLIT_RUGO_262K`
+dataset, 99 files / ~100M rows; peak RSS is `ru_maxrss` of a one-query process):
+
+| Q24 `SELECT * … WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10` | time | peak RSS |
+|---|---:|---:|
+| trampoline (the old path) | 1233 ms | 2.37 GB |
+| **native `LatmatScanSource`** | **1206 ms** | **2.31 GB** |
+| native single-pass (the reverted approach) | 4018 ms | 10.10 GB |
+
+Output is **SHA-identical** to the single-pass reference.
+
+**Memory at the barrier — measured, not assumed.** Pass 1 holds every survivor's
+pass-1 columns until the boundary exists, so a weak predicate is the risk case.
+The selectivity gate catches most of it (`WHERE URL <> ''` is refused and takes
+the single-pass path). The honest worst case is a predicate the estimator
+under-rates on a WIDE string column — `WHERE URL LIKE '%h%'`, which matches
+essentially every row:
+
+| `… WHERE URL LIKE '%h%' ORDER BY EventTime LIMIT 10` | time | peak RSS |
+|---|---:|---:|
+| trampoline | 31 018 ms | 18.32 GB |
+| **native `LatmatScanSource`** | **5 043 ms** | **12.74 GB** |
+| native single-pass | 4 857 ms | 10.40 GB |
+
+So in the degenerate case the native two-pass path costs ~4% time and ~22% memory
+over a single pass — and is **6x faster and 5.6 GB lighter than the trampoline it
+replaces**. The exposure is inherited, bounded, and strictly improved; no new
+threshold was invented for it.
+
+**Verification.** `tests/unit/operators/test_wp_r3_latmat_scan.py` is the
+correctness matrix: every case runs twice in one process — natively, and with
+late-materialization off (the un-pushed single-pass ground truth) — over ties at
+the boundary, tie blocks spanning row groups, all-NULL keys, fewer-than-n non-null
+rows, ASC and DESC, N above the survivor count, string and float keys,
+zero survivors, sort-key-is-the-predicate-column, and an explicit pass-1/pass-2
+row-alignment check. Comparison is row count + sort-key multiset + "every returned
+row is a real survivor row", NOT a row sequence: `ORDER BY … LIMIT n` over a tie
+block wider than the cut has no defined row order, and asserting one would be
+asserting something SQL never promised.
+
+Gates: `make q` 217/217, `make tpch` 22/22, census `fused_topn` **0** (165 scans,
+165 native, 0 trampoline). The reason code is retired from `HAND_SET` — same
+convention as R2 / R5 / R5b / R6.
+
+**Two test files had to be re-pointed, deliberately, not silently.**
+`test_parquet_late_materialization.py` and `test_parquet_latmat_dict_skip.py` read
+the TRAMPOLINE's own latmat telemetry counters, which the native Source does not
+emit; the first now forces the trampoline via an autouse
+`native_scan_supported` fixture so it keeps testing the (still live) code it is
+named after. `test_wp_a3_fused_topn_scan.py`'s two "stays trampoline" assertions
+became "now native".
+
 
 ### 7. `unlowerable_predicate` (R4) — **census 0** (regex reachable) — *structural* — **DO LAST**
 A pushed predicate that does not lower to a c-native span (regex / `RLIKE`).

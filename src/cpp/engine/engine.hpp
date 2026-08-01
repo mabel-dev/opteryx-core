@@ -33,6 +33,7 @@
 #include "native_key_hash.hpp"     // compute_row_hashes — the shared equi-key hash
 #include "native_join2.hpp"         // Join2BuildSink/Probe — multi-key, semi/anti/outer
 #include "native_parquet_scan_source.hpp"  // NativeParquetScanSource (zero-Python pull)
+#include "native_latmat_scan_source.hpp"   // LatmatScanSource (R3 two-pass late-mat)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
@@ -167,6 +168,12 @@ public:
     std::vector<std::unique_ptr<PipelineNode>> pipelines;  // run in creation order
     std::vector<std::unique_ptr<MorselBuffer>> buffers;
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
+    // R3 latmat: the plan-time vectors a LatmatScanSource borrows that have no
+    // NativeScanPlan of their own (predicate column map, output-assembly maps, output
+    // names). Owned here so they outlive the run; unique_ptr keeps the addresses
+    // stable as the vectors grow.
+    std::vector<std::unique_ptr<std::vector<int>>> latmat_owned_ints;
+    std::vector<std::unique_ptr<std::vector<std::string>>> latmat_owned_names;
     MorselQueue* out_q = nullptr;
     std::vector<std::string> final_names;   // terminal schema, for the empty-result morsel
     std::vector<DrakenType>  final_types;
@@ -393,6 +400,84 @@ public:
             pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce,
             hash_key_columns, array_columns, row_limit));
         if (pipeline != nullptr) pipeline->set_trace_node_id(node_id);
+    }
+    // R3 (`fused_topn`): the two-pass late-materialization scan Source. Everything the
+    // Source borrows lives either on the caller's two NativeScanPlans (the pipelines,
+    // footer map, work items, per-column decode flags) or in `latmat_owned_*` below —
+    // the small plan-time vectors that have no NativeScanPlan to live on. Both outlive
+    // the run. See native_latmat_scan_source.hpp for the algorithm and for why the
+    // top-n reduction reuses draken's own sort comparator.
+    void set_latmat_scan_source(
+            size_t p,
+            rugo::ParquetIOPipeline* p1_pipeline,
+            const std::unordered_map<std::string, FileStats>* footer_map,
+            const std::vector<std::pair<std::string, int>>* work_items,
+            const std::vector<std::string>* p1_column_names,
+            int in_flight_limit,
+            MemoryPool* p1_pool,
+            const std::vector<int>* p1_string_types,
+            const std::vector<uint8_t>* p1_decimal_columns,
+            const std::vector<int>* p1_logical_coerce,
+            const std::vector<uint8_t>* p1_hash_key_columns,
+            const std::vector<uint8_t>* p1_array_columns,
+            rugo::ParquetIOPipeline* p2_pipeline,
+            const std::vector<std::string>* p2_column_names,
+            MemoryPool* p2_pool,
+            const std::vector<int>* p2_string_types,
+            const std::vector<uint8_t>* p2_decimal_columns,
+            const std::vector<int>* p2_logical_coerce,
+            const std::vector<uint8_t>* p2_hash_key_columns,
+            const std::vector<uint8_t>* p2_array_columns,
+            void* pred_fn, void* pred_ctx, std::vector<int> pred_col_to_p1,
+            int sort_p1_index, bool sort_ascending, int64_t topn_limit,
+            std::vector<int> out_from_p1, std::vector<int> out_from_p2,
+            std::vector<std::string> out_names) {
+        latmat_owned_ints.push_back(
+            std::make_unique<std::vector<int>>(std::move(pred_col_to_p1)));
+        auto* pred_map = latmat_owned_ints.back().get();
+        latmat_owned_ints.push_back(
+            std::make_unique<std::vector<int>>(std::move(out_from_p1)));
+        auto* from_p1 = latmat_owned_ints.back().get();
+        latmat_owned_ints.push_back(
+            std::make_unique<std::vector<int>>(std::move(out_from_p2)));
+        auto* from_p2 = latmat_owned_ints.back().get();
+        latmat_owned_names.push_back(
+            std::make_unique<std::vector<std::string>>(std::move(out_names)));
+        auto* names = latmat_owned_names.back().get();
+
+        auto src = std::make_unique<LatmatScanSource>();
+        src->p1_pipeline = p1_pipeline;
+        src->footer_map = footer_map;
+        src->work_items = work_items;
+        src->p1_column_names = p1_column_names;
+        src->in_flight_limit = in_flight_limit;
+        src->p1_build.pool = p1_pool;
+        src->p1_build.string_types = p1_string_types;
+        src->p1_build.decimal_columns = p1_decimal_columns;
+        src->p1_build.logical_coerce = p1_logical_coerce;
+        src->p1_build.hash_key_columns = p1_hash_key_columns;
+        src->p1_build.array_columns = p1_array_columns;
+        src->p2_pipeline = p2_pipeline;
+        src->p2_column_names = p2_column_names;
+        src->p2_build.pool = p2_pool;
+        src->p2_build.string_types = p2_string_types;
+        src->p2_build.decimal_columns = p2_decimal_columns;
+        src->p2_build.logical_coerce = p2_logical_coerce;
+        src->p2_build.hash_key_columns = p2_hash_key_columns;
+        src->p2_build.array_columns = p2_array_columns;
+        src->pred_fn = reinterpret_cast<LatmatPredFn>(pred_fn);
+        src->pred_ctx = pred_ctx;
+        src->pred_col_to_p1 = pred_map;
+        src->sort_p1_index = sort_p1_index;
+        src->sort_ascending = sort_ascending;
+        src->topn_limit = topn_limit;
+        src->out_from_p1 = from_p1;
+        src->out_from_p2 = from_p2;
+        src->out_names = names;
+        uint32_t node_id = set_source_(p, std::move(src));
+        // Both passes' IO spans attribute back to this one scan plan node.
+        if (p1_pipeline != nullptr) p1_pipeline->set_trace_node_id(node_id);
+        if (p2_pipeline != nullptr) p2_pipeline->set_trace_node_id(node_id);
     }
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));
