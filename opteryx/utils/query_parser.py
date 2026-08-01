@@ -193,6 +193,40 @@ def _extract_table_name(name_parts: List[Dict[str, Any]]) -> Optional[str]:
     return ".".join(parts) if parts else None
 
 
+def _extract_placeholders(node: Any) -> Set[str]:
+    """
+    Recursively walk a parsed AST (or any sub-node of one) collecting the
+    names of every `:name`-style placeholder referenced anywhere in the
+    query - WHERE, SELECT list, LIMIT, anywhere a value expression can
+    appear.
+
+    Mirrors the traversal `parameter_dict_binder` in
+    `opteryx.planner.ast_rewriter` performs at bind time (a `{"Placeholder":
+    ":name"}` node, name recovered by stripping the leading marker
+    character) - this is a preview of exactly the set of names that
+    binding will require, without needing the parameters supplied.
+
+    Positional `?` placeholders have no name (stripping their single-
+    character value leaves an empty string) and so are not collected here;
+    callers that mix `?` and `:name` placeholders in one statement are
+    already rejected elsewhere in the binder.
+    """
+    names: Set[str] = set()
+
+    if isinstance(node, dict):
+        if "Placeholder" in node:
+            value = node["Placeholder"]
+            if isinstance(value, str) and len(value) > 1:
+                names.add(value[1:])
+        for child in node.values():
+            names.update(_extract_placeholders(child))
+    elif isinstance(node, list):
+        for item in node:
+            names.update(_extract_placeholders(item))
+
+    return names
+
+
 def _extract_subquery_tables(expression: Any) -> Set[str]:
     """
     Recursively extract tables from subqueries within expressions.
@@ -247,6 +281,11 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         Dictionary containing:
         - query_type: str - Type of query (e.g., "Query", "Insert", "Update")
         - tables: List[str] - List of table names referenced in the query
+        - parameters: List[str] - Names of `:name` placeholders referenced in
+          the query (sorted, deduplicated, no leading `:`) - lets a caller
+          resolve exactly the parameters a query needs before execution,
+          without waiting for the bind-time `Parameter not defined` error.
+          Positional `?` placeholders aren't named and so aren't included.
         - is_select: bool - True if this is a SELECT query
         - is_mutation: bool - True if this modifies data (INSERT, UPDATE, DELETE)
         - is_ddl: bool - True if this is a DDL operation (CREATE, ALTER, DROP)
@@ -262,6 +301,8 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         ['users']
         >>> info["is_select"]
         True
+        >>> parse_query_info("SELECT * FROM t WHERE dept = :department")["parameters"]
+        ['department']
     """
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
@@ -293,6 +334,9 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     # Remove system tables (those starting with $)
     filtered_tables = [t for t in sorted(tables) if not t.startswith("$")]
 
+    # Extract named `:name` placeholder parameters
+    parameters = sorted(_extract_placeholders(parsed_statement))
+
     # Determine query characteristics
 
     reader_actions = ["Query", "ShowColumns", "ShowTables", "Use", "ShowCreate"]
@@ -302,6 +346,7 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     return {
         "query_type": query_type,
         "tables": filtered_tables,
+        "parameters": parameters,
         "is_read": query_type in reader_actions,
         "is_mutation": query_type in mutation_actions,
         "is_ddl": query_type in ddl_actions,

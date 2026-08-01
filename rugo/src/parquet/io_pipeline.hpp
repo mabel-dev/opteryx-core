@@ -90,8 +90,8 @@ enum DirectKind {
     DK_BOOL = 4, DK_DECIMAL128 = 5,
     // Stage 4b — variable-width direct path. `data` is a draken_alloc'd
     // DrakenStringSlot array; `arena` holds the long-string bytes. DK_VARCHAR is
-    // one slot per row (plain). DK_VARCHAR_DICT (reserved, not yet emitted) would
-    // carry `data_length` unique-value slots + a `codes` selection of `length`.
+    // one slot per row (plain). DK_VARCHAR_DICT carries `data_length` unique-value
+    // slots + a `codes` selection of `length` (build_direct_string_dict).
     DK_VARCHAR = 6, DK_VARCHAR_DICT = 7,
     // Numeric "compressed" (§11 Dict-shaped) direct path. `data` is a
     // draken_alloc'd int64_t[data_length] dictionary of unique values; `codes`
@@ -210,37 +210,116 @@ struct Pass1Pred {
     std::vector<std::string> cols;   // predicate column names, in pass-order
 };
 
+// The DrakenType a fixed-width direct kind's buffers hold — the SAME mapping the
+// consumer applies (NativeScanColumnBuilder::draken_type_for). Dense and dict-shaped
+// variants of a kind share a tag: the shape is in the buffers, not in the type.
+// Returns 0 (not a valid DrakenType) for anything this view does not build:
+//   DK_POOL       — a serialized IPC blob, not a viewable buffer at all;
+//   DK_DECIMAL128 — its precision/scale live in a logical descriptor the consumer
+//                   attaches OUTSIDE the DrakenVector (VectorOwner::logical_type),
+//                   so a bare view would be a decimal with no scale — a different
+//                   answer, not a cheaper one.
+static inline DrakenType pass1_natural_type(int dk) {
+    switch (dk) {
+        case DK_INT8:    case DK_INT8_DICT:    return DRAKEN_INT8;
+        case DK_INT16:   case DK_INT16_DICT:   return DRAKEN_INT16;
+        case DK_INT32:   case DK_INT32_DICT:   return DRAKEN_INT32;
+        case DK_INT64:   case DK_INT64_DICT:   return DRAKEN_INT64;
+        case DK_UINT8:   case DK_UINT8_DICT:   return DRAKEN_UINT8;
+        case DK_UINT16:  case DK_UINT16_DICT:  return DRAKEN_UINT16;
+        case DK_UINT32:  case DK_UINT32_DICT:  return DRAKEN_UINT32;
+        case DK_UINT64:  case DK_UINT64_DICT:  return DRAKEN_UINT64;
+        case DK_FLOAT32: case DK_FLOAT32_DICT: return DRAKEN_FLOAT32;
+        case DK_FLOAT64: case DK_FLOAT64_DICT: return DRAKEN_FLOAT64;
+        case DK_BOOL:                          return DRAKEN_BOOL;
+        default:                               return static_cast<DrakenType>(0);
+    }
+}
+
+// Is `dk` one of the §11 Dict-shaped direct kinds (dictionary values in `data`,
+// per-row uint32 codes in `codes`)? String dicts are handled separately — their
+// `data` is a slot array that has to be fronted by a DrakenStringArena header.
+static inline bool pass1_is_numeric_dict(int dk) {
+    switch (dk) {
+        case DK_INT8_DICT:  case DK_INT16_DICT:  case DK_INT32_DICT: case DK_INT64_DICT:
+        case DK_UINT8_DICT: case DK_UINT16_DICT: case DK_UINT32_DICT: case DK_UINT64_DICT:
+        case DK_FLOAT32_DICT: case DK_FLOAT64_DICT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Build a NON-owning DrakenVector view over a decoded ColumnOut so the pushed
 // predicate can read it without a copy. Returns false for column shapes not yet
 // supported worker-side (caller then leaves survivor_mask empty → serial fallback).
 // `sa` backs a string column's arena header and must outlive `v`'s use.
+//
+// CLAUDE.md §11: the view is built with draken's own constructors so `data[sel[i]]`
+// holds for every shape and the vector is field-for-field what the consumer would
+// have built from the same buffers — the worker-side mask and the serial fallback
+// are the same computation over the same vector, not two implementations of it.
+// The buffers stay owned by the ColumnOut (nothing here allocates or frees; the
+// codes handed to draken_vector_from_dict are borrowed, NOT transferred).
+//
+// The TAG is the one thing a view cannot derive: a column the plan retags (DATE /
+// TIMESTAMP / TIME-unit / DECIMAL) or declares NVARCHAR / VARBINARY reaches the
+// consumer as a different type than its physical buffers say. rugo cannot know
+// that — it is opteryx plan state — so the opteryx side does not push the
+// predicate at all unless every predicate column lands on its natural tag
+// (pass1_worker_predicate_admissible, connectors/parquet_io/pass1_predicate_gate.py).
 static inline bool pass1_build_dv_view(ColumnOut& co, uint32_t nrows,
                                        DrakenStringArena& sa, DrakenVector& v) {
-    if (co.direct_kind == DK_VARCHAR) {
-        // Plain per-row string slots + separate byte arena (§ wp01 format). Wrap
-        // non-owning; str_contains only dereferences sa.slots[sel[i]] + sa.arena.
+    const int dk = co.direct_kind;
+    if (dk == DK_VARCHAR || dk == DK_VARCHAR_DICT) {
+        // DK_VARCHAR: one slot per row (plain). DK_VARCHAR_DICT: `data_length`
+        // unique-value slots + a per-row uint32 code selection. Both put long
+        // values in `arena` at offsets relative to its base, so the header below
+        // fronts them identically — only the slot COUNT and the selection differ.
+        const bool is_dict = (dk == DK_VARCHAR_DICT);
+        if (is_dict && (co.codes == nullptr || co.data_length == 0)) return false;
+        const uint32_t nslots = is_dict ? co.data_length : nrows;
         sa.slots       = static_cast<DrakenStringSlot*>(co.data);
         sa.arena       = static_cast<uint8_t*>(co.arena);
-        sa.length      = nrows;
+        sa.length      = nslots;
         sa.arena_used  = co.arena_len;
         sa.arena_cap   = co.arena_len;
-        sa.null_bitmap = co.validity;
+        // Validity is per LOGICAL ROW and travels on the vector; the arena header's
+        // own bitmap is indexed by SLOT, which for a dict is a different space
+        // entirely. The consumer leaves it null (consolidate_string_block) — so
+        // does this, for both shapes.
+        sa.null_bitmap = nullptr;
         sa.owns_buffers = 0;
         // Carry the decoder's state: if the payloads were never materialized the
         // predicate reads lengths only, and anything that would move bytes (the
         // gather that compacts survivors) must see it too.
         sa.payloads_elided = co.payloads_elided ? 1u : 0u;
         sa.type        = DRAKEN_VARCHAR;
-        v.data        = &sa;
-        v.selection   = draken_identity_sel(nrows);   // dense
-        v.data_length = nrows;
-        v.length      = nrows;
-        v.validity    = co.validity;
-        v.type        = DRAKEN_VARCHAR;
-        v.flags       = 0;
+        v = is_dict
+            ? draken_vector_from_dict(&sa, nslots, static_cast<const uint32_t*>(co.codes),
+                                      nrows, DRAKEN_VARCHAR, co.validity)
+            : draken_vector_from_dense(&sa, nrows, DRAKEN_VARCHAR, co.validity);
+        if (is_dict && co.dict_sorted && draken_is_dict(&v))
+            v.flags |= DRAKEN_DICT_KEYS_SORTED;
         return true;
     }
-    return false;   // unsupported kind → serial fallback
+    const DrakenType t = pass1_natural_type(dk);
+    if (t == static_cast<DrakenType>(0)) return false;   // unsupported kind → fallback
+    if (co.data == nullptr) return false;
+    if (pass1_is_numeric_dict(dk)) {
+        if (co.codes == nullptr || co.data_length == 0) return false;
+        v = draken_vector_from_dict(co.data, co.data_length,
+                                    static_cast<const uint32_t*>(co.codes), nrows, t,
+                                    co.validity);
+        if (co.dict_sorted && draken_is_dict(&v))
+            v.flags |= DRAKEN_DICT_KEYS_SORTED;
+        return true;
+    }
+    // Dense: a positional array at the kind's exact width (DK_BOOL is the bit-packed
+    // member of this set — same construction, draken reads the bit through the same
+    // data[sel[i]] contract).
+    v = draken_vector_from_dense(co.data, nrows, t, co.validity);
+    return true;
 }
 
 // Run the pushed pass-1 predicate over a fully-decoded row group, filling
@@ -271,8 +350,20 @@ static inline void pass1_run_predicate(MorselRef& result, const Pass1Pred& pred)
     const int rc = pred.fn(pred.ctx, dvp, ncols, nrows, result.survivor_mask.data());
     if (rc != 0) {
         result.survivor_mask.clear();
-        result.success = false;
-        result.error = "pass-1 predicate eval failed (rc=" + std::to_string(rc) + ")";
+        // rc 4 is a KERNEL error — the program ran and the kernel failed. Every other
+        // non-zero rc means the c-native VM does not APPLY to these operands (compare
+        // not-available for the pair of types, a NULL operand, a string result, an
+        // arena it could not take). That is a capability statement, not a fault, and
+        // the consumer's serial path is strictly more capable — the trampoline drops
+        // to the GIL Morsel VM for exactly these rcs. So decline (empty mask) and let
+        // the consumer answer, which is the SAME rule the main thread already applies
+        // in predicate_filter_and_mask_c_native: raise on 4, otherwise fall back.
+        // Nothing is hidden — a consumer that is no more capable re-runs the identical
+        // program and fails loud there.
+        if (rc == 4) {
+            result.success = false;
+            result.error = "pass-1 predicate eval failed (rc=4, kernel error)";
+        }
     }
 }
 

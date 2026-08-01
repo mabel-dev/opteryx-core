@@ -37,16 +37,19 @@ three things SQL actually promises:
 Together those are equivalent to correctness, and unlike a sequence comparison they do
 not assert anything the engine never promised.
 
-⚠ These tests deliberately do NOT compare against the TRAMPOLINE's answer. The
-trampoline's `_apply_topn` (parquet_read.pyx) hard-codes "NULLs sort last" in both
-directions, but draken orders NULL BELOW every value (`SortKeyCmp`: NULLs FIRST
-ascending, LAST descending) — so for `ORDER BY <nullable> ASC LIMIT n` with more than
-n non-null survivors it drops NULL rows that belong in the answer and returns rows the
-un-pushed plan does not. That is a pre-existing trampoline bug, still open, and
-`test_trampoline_null_asc_divergence_is_the_trampolines_bug` pins it so it stays
-visible instead of silently masking a regression here. The native Source has no null
-rule of its own at all — it reduces with draken's own comparator, the same one the
-downstream TopNSink sorts with, so ties and NULLs are correct by construction.
+Each case runs a THIRD arm: the trampoline scan (forced via `native_scan_supported`),
+which has its own independent implementation of the same reduction (`_apply_topn` in
+parquet_read.pyx). Both reduced paths are checked against the same un-pushed
+reference, which is what stops the two from drifting apart.
+
+That third arm exists because they HAD drifted. `_apply_topn` used to hard-code "NULLs
+sort last" in both directions, but draken orders NULL BELOW every value (`SortKeyCmp`:
+NULLs FIRST ascending, LAST descending) — so for `ORDER BY <nullable> ASC LIMIT n` with
+more than n non-null survivors it dropped NULL rows that belong in the answer. Both
+sides are fixed now and hold the rule in ONE place each: the native Source reduces with
+draken's own comparator, and `_apply_topn` reduces on `_topn_rank`, which encodes the
+same ordering — neither writes a null branch by hand. See
+`test_trampoline_apply_topn_keeps_null_rows_ascending`.
 """
 
 import os
@@ -75,11 +78,15 @@ def _write(dataset_dir, columns, row_group_size=250):
     return dataset_dir
 
 
-def _drain(sql, latmat, monkeypatch):
+def _drain(sql, latmat, monkeypatch, trampoline=False):
     """Run `sql` and return (rows, names, scan_sources). `latmat` False disables
-    late-materialization entirely, which is the un-pushed single-pass reference."""
+    late-materialization entirely, which is the un-pushed single-pass reference.
+    `trampoline` forces the scan off the native Sources onto `StreamingScanSource`,
+    which is how the trampoline's OWN two-pass path (`_apply_topn`) is exercised."""
     if not latmat:
         monkeypatch.setattr(config.features, "parquet_late_materialization", False)
+    if trampoline:
+        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
     session = opteryx.session()
     rows = []
     names = []
@@ -89,7 +96,7 @@ def _drain(sql, latmat, monkeypatch):
         for i in range(morsel.num_rows):
             rows.append(tuple(repr(morsel.column(n)[i]) for n in raw))
     src = list(session._telemetry.as_dict()["scan_sources"].values())
-    if not latmat:
+    if not latmat or trampoline:
         monkeypatch.undo()
     return rows, names, src
 
@@ -105,23 +112,17 @@ def _assert_latmat_parity(tmp_path, name, columns, sql_tail, monkeypatch,
     sql = "SELECT " + sql_tail.format(DATASET=f"'{path}'")
     ref_rows, ref_names, ref_src = _drain(sql, latmat=False, monkeypatch=monkeypatch)
     nat_rows, nat_names, nat_src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+    tra_rows, tra_names, tra_src = _drain(sql, latmat=True, monkeypatch=monkeypatch,
+                                          trampoline=True)
     assert ref_src == ["NativeParquetScanSource"], (
         f"the reference run must be the single-pass native scan, got {ref_src}")
     assert nat_src == ["LatmatScanSource"], (
         f"{name}: expected the two-pass late-mat Source, got {nat_src} — this "
         "case is not exercising R3 at all")
+    assert tra_src == ["StreamingScanSource"], (
+        f"{name}: expected the trampoline for the third arm, got {tra_src}")
     assert nat_names == ref_names, f"{name}: output column layout differs"
-
-    assert len(nat_rows) == len(ref_rows), (
-        f"{name}: row COUNT differs — native {len(nat_rows)} vs reference "
-        f"{len(ref_rows)}")
-
-    k = ref_names.index(key_column)
-    nat_keys = sorted(r[k] for r in nat_rows)
-    ref_keys = sorted(r[k] for r in ref_rows)
-    assert nat_keys == ref_keys, (
-        f"{name}: sort-key multiset differs from the un-pushed plan\n"
-        f"  native: {nat_keys}\n  ref   : {ref_keys}")
+    assert tra_names == ref_names, f"{name}: trampoline output column layout differs"
 
     # Every returned row must be a genuine survivor row, whole. This is what catches a
     # pass-1/pass-2 misalignment: swap two rows' payloads and the counts and the key
@@ -130,10 +131,25 @@ def _assert_latmat_parity(tmp_path, name, columns, sql_tail, monkeypatch,
     universe_sql = f"SELECT * FROM '{path}' WHERE {where}"
     universe_rows, _, _ = _drain(universe_sql, latmat=False, monkeypatch=monkeypatch)
     universe = set(universe_rows)
-    stray = [r for r in nat_rows if r not in universe]
-    assert not stray, (
-        f"{name}: {len(stray)} returned row(s) are not rows of the table — the "
-        f"pass-1/pass-2 zip is misaligned. First: {stray[0]}")
+
+    k = ref_names.index(key_column)
+    ref_keys = sorted(r[k] for r in ref_rows)
+    # Both reduced paths — the native two-pass Source and the trampoline's own
+    # `_apply_topn` — must agree with the un-pushed plan. They share the ordering
+    # rule (NULL below every value) but implement it independently, so checking
+    # both is what keeps them from drifting apart again.
+    for arm, rows in (("native", nat_rows), ("trampoline", tra_rows)):
+        assert len(rows) == len(ref_rows), (
+            f"{name} [{arm}]: row COUNT differs — {len(rows)} vs reference "
+            f"{len(ref_rows)}")
+        keys = sorted(r[k] for r in rows)
+        assert keys == ref_keys, (
+            f"{name} [{arm}]: sort-key multiset differs from the un-pushed plan\n"
+            f"  got: {keys}\n  ref: {ref_keys}")
+        stray = [r for r in rows if r not in universe]
+        assert not stray, (
+            f"{name} [{arm}]: {len(stray)} returned row(s) are not rows of the "
+            f"table — the pass-1/pass-2 zip is misaligned. First: {stray[0]}")
     return nat_rows, ref_names
 
 
@@ -297,6 +313,30 @@ def test_latmat_float_sort_key(tmp_path, monkeypatch):
         monkeypatch)
 
 
+@pytest.mark.parametrize("direction", ["", " DESC"])
+def test_latmat_nan_sort_key(tmp_path, monkeypatch, direction):
+    """A FLOAT sort key containing NaN. draken sorts NaN highest regardless of sign
+    (`sort_num_key` -> UINT64_MAX), so it is the best DESC key and the worst ASC
+    key — the opposite corner from NULL, which sorts lowest in both directions.
+    Mirrors `test_latmat_nulls_and_values_mixed_ascending`'s shape (more than n
+    non-null-and-non-NaN survivors, so a boundary genuinely has to be found)."""
+    keys = []
+    seen = 0
+    for i in range(N):
+        if not _MATCH[i]:
+            keys.append(500000.0 + i)
+        elif seen < 3:
+            keys.append(float("nan"))
+            seen += 1
+        else:
+            keys.append(1000.0 + seen)
+            seen += 1
+    _assert_latmat_parity(
+        tmp_path, "nan_key" + direction.strip(), _dataset(keys, sort_type=pa.float64()),
+        "* FROM {DATASET} WHERE tag LIKE '" + NEEDLE + "' ORDER BY k" + direction
+        + " LIMIT 10", monkeypatch)
+
+
 def test_latmat_zero_survivors(tmp_path, monkeypatch):
     """A predicate no row matches: pass 1 finds nothing, so there is no boundary, no
     pass-2 work, and the Source must finish cleanly rather than deadlock or emit."""
@@ -345,18 +385,19 @@ def test_latmat_pass2_columns_stay_aligned_with_their_own_rows(tmp_path, monkeyp
         assert pay_bool == repr(i % 3 == 0)
 
 
-def test_trampoline_null_asc_divergence_is_the_trampolines_bug(tmp_path, monkeypatch):
-    """PINS a pre-existing TRAMPOLINE bug, so it stays visible and cannot be mistaken
-    for a regression in the native path.
+def test_trampoline_apply_topn_keeps_null_rows_ascending(tmp_path, monkeypatch):
+    """Regression test for the `_apply_topn` NULL-ordering fix (parquet_read.pyx).
 
-    `_apply_topn` (parquet_read.pyx) drops every NULL survivor once more than n
-    non-null survivors exist, on the premise that "NULLs sort last". draken sorts NULL
-    BELOW every value, so ascending they sort FIRST — they are exactly the rows that
-    belong at the top of the answer. The trampoline therefore returns rows the
-    un-pushed plan does not.
+    `_apply_topn` used to hard-code "NULLs sort last" in BOTH directions and drop
+    every NULL survivor once more than n non-null survivors existed. draken sorts
+    NULL BELOW every value, so ascending they sort FIRST — they are exactly the rows
+    that belong at the top of the answer, and the trampoline was returning rows the
+    un-pushed plan does not (this fixture: `[1003…1012]` instead of
+    `[NULL, NULL, NULL, 1003…1009]`).
 
-    If this test starts failing because the trampoline now AGREES, the bug has been
-    fixed upstream and this test should be deleted."""
+    The parity helper above already runs the trampoline arm across the whole matrix;
+    this pins the specific shape the bug was found on, by VALUE, so a regression
+    cannot hide behind a coincidentally-matching key multiset."""
     keys = []
     seen = 0
     for i in range(N):
@@ -372,16 +413,65 @@ def test_trampoline_null_asc_divergence_is_the_trampolines_bug(tmp_path, monkeyp
     assert ref_src == ["NativeParquetScanSource"], ref_src
     ki = names.index("k")
 
-    monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
-    tramp_rows, _, tramp_src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
-    monkeypatch.undo()
+    tramp_rows, _, tramp_src = _drain(sql, latmat=True, monkeypatch=monkeypatch,
+                                      trampoline=True)
     assert tramp_src == ["StreamingScanSource"], tramp_src
 
+    # The three NULL-key rows are the three BEST rows ascending, so all three must
+    # be in a LIMIT 10 answer — on both paths.
     assert sum(1 for r in ref_rows if r[ki] == "None") == 3
-    assert sum(1 for r in tramp_rows if r[ki] == "None") == 0, (
-        "the trampoline's _apply_topn now keeps NULL rows for ASC — the bug this "
-        "test pins has been fixed; delete this test")
-    assert sorted(tramp_rows) != sorted(ref_rows)
+    assert sum(1 for r in tramp_rows if r[ki] == "None") == 3, (
+        "_apply_topn dropped NULL survivors again — ascending, NULL is the BEST "
+        "key (draken SortKeyCmp orders NULL below every value)")
+    assert sorted(tramp_rows) == sorted(ref_rows)
+
+
+def test_trampoline_apply_topn_keeps_nan_rows(tmp_path, monkeypatch):
+    """Regression test for the `_apply_topn` NaN-ordering fix (parquet_read.pyx).
+
+    `_apply_topn` compared candidate values against the boundary with plain
+    `<=`/`>=`, which Python defines as False for EVERY comparison involving NaN.
+    A NaN survivor therefore always failed the boundary test regardless of
+    direction, AND the initial `nlargest`/`nsmallest` boundary selection itself
+    saw the same broken comparisons — so this wasn't just "NaN rows get dropped",
+    it corrupted the whole reduction. Observed on this exact fixture: an ASC
+    top-10 over 3 NaN keys + several thousand real ones collapsed to a SINGLE
+    returned row.
+
+    The parity helper above already runs the trampoline arm across the whole
+    matrix (including `test_latmat_nan_sort_key`); this pins the specific shape
+    the bug was found on, by VALUE, the same way the NULL regression test does."""
+    keys = []
+    seen = 0
+    for i in range(N):
+        if not _MATCH[i]:
+            keys.append(500000.0 + i)
+        elif seen < 3:
+            keys.append(float("nan"))
+            seen += 1
+        else:
+            keys.append(1000.0 + seen)
+            seen += 1
+    path = _write(os.path.join(str(tmp_path), "tramp_nan"),
+                  _dataset(keys, sort_type=pa.float64()))
+    sql = f"SELECT * FROM '{path}' WHERE tag LIKE '{NEEDLE}' ORDER BY k LIMIT 10"
+
+    ref_rows, names, ref_src = _drain(sql, latmat=False, monkeypatch=monkeypatch)
+    assert ref_src == ["NativeParquetScanSource"], ref_src
+    ki = names.index("k")
+
+    tramp_rows, _, tramp_src = _drain(sql, latmat=True, monkeypatch=monkeypatch,
+                                      trampoline=True)
+    assert tramp_src == ["StreamingScanSource"], tramp_src
+
+    assert len(ref_rows) == 10
+    assert sum(1 for r in ref_rows if r[ki] == "nan") == 0, (
+        "fixture assumption broken: ascending, NaN is the WORST key and should "
+        "not appear in a top-10 unless fewer than 10 non-NaN survivors exist")
+    assert len(tramp_rows) == 10, (
+        f"_apply_topn corrupted the reduction on a NaN sort key again — expected "
+        f"10 rows, got {len(tramp_rows)}: {tramp_rows}")
+    assert sorted(tramp_rows) == sorted(ref_rows)
 
 
 if __name__ == "__main__":  # pragma: no cover

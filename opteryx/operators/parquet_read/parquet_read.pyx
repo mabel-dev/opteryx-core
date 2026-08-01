@@ -34,11 +34,15 @@ Row groups are yielded in completion order — the thread pool handles overlap
 between I/O and decode across all files and row groups simultaneously.
 """
 
+import heapq as _heapq
 import time
 from copy import deepcopy
 from typing import Generator
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
+from opteryx.connectors.parquet_io.pass1_predicate_gate import (
+    pass1_worker_predicate_admissible as _pass1_worker_predicate_admissible,
+)
 from opteryx.connectors.parquet_io.pool_reader import open_ipc_source
 from opteryx.connectors.parquet_io.pool_reader import open_pass2_source
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -369,6 +373,39 @@ cdef inline void _coerce_logical_types(
                 _array_child_to_timestamp(v_nb, unit_str)
 
 
+cdef inline tuple _topn_rank(object v):
+    """Order-preserving sort rank for one top-n candidate value.
+
+    A three-tier universal scale, lowest to highest: NULL (tag 0) < any real value
+    (tag 1) < NaN (tag 2) — draken's actual ordering (`draken/morsels/sort.hpp`):
+    `SortKeyCmp` sorts NULL below every value (NULLs FIRST ascending, LAST
+    descending, via the `cmp = va ? 1 : -1` validity check), and `sort_num_key`
+    maps NaN to `UINT64_MAX` so it sorts as the single highest key regardless of
+    sign (NaN LAST ascending, FIRST descending — "sorts highest" applied through
+    whichever direction flip is in effect). The downstream HeapSort applies both
+    rules, so `_apply_topn`'s reduction has to see the same ranking or it can
+    throw away rows HeapSort would have kept.
+
+    Encoding both as the leading tuple tag means the boundary test in
+    `_apply_topn` is one plain tuple comparison with no null/NaN branch, so
+    neither rule can be stated inconsistently in two places — and, critically,
+    `float('nan') <=/>= x` is never evaluated directly: Python defines EVERY such
+    comparison as False, which previously made `_apply_topn` drop NaN rows
+    outright (observed: an ASC top-10 over 3 NaNs + real values collapsed to a
+    single returned row).
+
+    Tuple comparison stops at the first differing tag, so `(0,)` / `(1, x)` /
+    `(2,)` never compare their second element against a different tier — in
+    particular `None < None` and any comparison touching a NaN payload are never
+    evaluated.
+    """
+    if v is None:
+        return (0,)
+    if v != v:   # true only for NaN — every other value in this column is self-equal
+        return (2,)
+    return (1, v)
+
+
 cdef list _set_bit_positions(bytes mask_bytes):
     """Return the ascending positions of set bits in a pass-1 survival mask.
 
@@ -586,6 +623,11 @@ cdef class ParquetReadNode(ReaderNode):
     cdef dict _sp_string_type_by_name     # declared DrakenType (VARCHAR/NVARCHAR/VARBINARY), by physical column name
     cdef bint _sp_topn_active
     cdef bint _sp_two_pass_eligible
+    # Snapshot of _lm_pass1_src.pruned_row_group_count taken by _run_pass1 /
+    # _run_pass1_chunk right before they close and null _lm_pass1_src — both
+    # retire pass-1's source long before close_source() runs, so by then the
+    # live count is already gone; close_source() reads this instead.
+    cdef int64_t _sp_pass1_pruned_row_groups
     # Bytecode for the pushed predicate, LOWERED AT PLAN TIME by the compiler
     # (`_compile_scan`) and handed to the scan. The scan never lowers an
     # expression itself: doing so bypassed the plan-time rewrite chain
@@ -638,6 +680,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._emitted_any = False
         self._empty_guard_done = False
         self._sp_claims_pending = 0
+        self._sp_pass1_pruned_row_groups = 0
         self.compiled_predicate = None  # set at plan time by compiler._compile_scan
         self._pass1_resolver = None
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
@@ -676,12 +719,18 @@ cdef class ParquetReadNode(ReaderNode):
         if self.connector is not None:
             base["dataset"] = self.connector.dataset
         base["row_groups_read"] = self.readings.get("row_groups_read", 0)
+        # Written by close_source() from IpcRowGroupSource.pruned_row_group_count
+        # (pushed-predicate min/max + bloom pruning, counted where open_ipc_source
+        # excludes a row group before submission) — 0 whenever there's no pushed
+        # predicate, same meaning as the native path's row_groups_pruned.
         base["row_groups_pruned"] = self.readings.get("parquet_row_groups_pruned", 0)
         base["files_read"] = self.readings.get("files_read", 0)
-        base["parquet_filter_columns_read"] = self.readings.get("parquet_filter_columns_read", 0)
-        base["parquet_projection_columns_read"] = self.readings.get(
-            "parquet_projection_columns_read", 0
-        )
+        # No filter/projection column-count sensors here. `parquet_filter_columns_read`
+        # had no producer on any path, and `parquet_projection_columns_read` is owned by
+        # the NATIVE scan (telemetry harvest sets it from scan facts) — publishing a
+        # hard 0 for it here would claim this scan read no projection columns, which is
+        # a lie, not a default. Both are plan-time column-set sizes, not runtime
+        # measurements; the read column list already lives in the operator's `config`.
         base["parquet_rows_before_filter"] = self.readings.get("parquet_rows_before_filter", 0)
         decode_ns = self.readings.get("time_decoding_blobs", 0)
         if decode_ns > 0 and base["row_groups_read"] > 0:
@@ -701,19 +750,15 @@ cdef class ParquetReadNode(ReaderNode):
                 "parquet_latmat_abandoned_files", 0
             )
             base["parquet_latmat_pass2_bytes"] = self.readings.get("parquet_latmat_pass2_bytes", 0)
-            base["parquet_latmat_skipped_pages"] = self.readings.get(
-                "parquet_latmat_skipped_pages", 0
-            )
-            base["parquet_latmat_decoded_pages"] = self.readings.get(
-                "parquet_latmat_decoded_pages", 0
-            )
-            lm_total_pages = (
-                base["parquet_latmat_skipped_pages"] + base["parquet_latmat_decoded_pages"]
-            )
-            if lm_total_pages > 0:
-                base["parquet_latmat_page_skip_ratio"] = (
-                    base["parquet_latmat_skipped_pages"] / lm_total_pages
-                )
+            # No `parquet_latmat_skipped_pages`/`decoded_pages`/`page_skip_ratio` here.
+            # Unlike row_groups_pruned above, page-level skip/decode counts have no
+            # producer anywhere on this scan's path: the trampoline's decode result
+            # (MorselRef, rugo/src/parquet/io_pipeline.hpp) carries no page fields at
+            # all — that data only exists on the OTHER native scan's ScanRowGroup
+            # struct (rugo/src/parquet/parquet_reader.pxi), an architecturally
+            # separate path this scan never touches. Populating it would mean adding
+            # new C++ page-level instrumentation, not wiring up an existing value —
+            # a real feature, not a sensor fix; not done without agreeing the design.
             base["parquet_latmat_skip_ratio"] = (
                 self.readings.get("parquet_latmat_skipped_row_groups", 0) / lm_pass1
             )
@@ -898,10 +943,10 @@ cdef class ParquetReadNode(ReaderNode):
         """WP-2: shrink pass-2 work to only the rows that can be in the top-n.
 
         Keeps every surviving row whose sort key is at-least-as-good as the n-th
-        best value (i.e. n rows plus any ties exactly at the boundary). Every row
-        dropped here is strictly worse than the true top-n, so the downstream
-        HeapSort produces an identical result to the un-pushed plan — ties at the
-        boundary can never change which n rows HeapSort finally keeps.
+        best (i.e. n rows plus any ties exactly at the boundary). Every row dropped
+        here is strictly worse than the true top-n, so the downstream HeapSort
+        produces an identical result to the un-pushed plan — ties at the boundary
+        can never change which n rows HeapSort finally keeps.
 
         Returns (new_pass2_work, winners_by_rg):
           - new_pass2_work: [(path, rg_idx, reduced_mask_bytes)] for winning row
@@ -910,35 +955,66 @@ cdef class ParquetReadNode(ReaderNode):
           - winners_by_rg: {(path, rg_idx): [survivor_idx, ...]} (ascending), used
             to gather the matching pass-1 column values for assembly.
 
-        NULLs sort last (matching HeapSort), so they only enter the result when
-        fewer than n non-null rows exist; in that case every survivor is kept.
+        ── NULL ordering ────────────────────────────────────────────────────────
+        NULL sorts BELOW every value, so `ORDER BY col` puts NULLs FIRST and
+        `ORDER BY col DESC` puts them LAST. That is what the downstream HeapSort
+        actually does — draken's `SortKeyCmp` (draken/morsels/sort.hpp) compares
+        validity first with `cmp = va ? 1 : -1`, and DESC flips the whole
+        comparator, null arm included.
+
+        This used to read "NULLs sort last" in BOTH directions and dropped every
+        NULL survivor whenever more than n non-null survivors existed. Ascending,
+        those NULLs are the BEST rows — so the reduction was deleting rows that
+        belong in the answer and this path returned rows the un-pushed plan does
+        not (fixture with 3 NULLs, `ORDER BY k LIMIT 10`: it returned
+        `[1003…1012]` where the correct answer is `[NULL, NULL, NULL, 1003…1009]`).
+
+        ── NaN ordering ─────────────────────────────────────────────────────────
+        A FLOAT sort key containing NaN had the SAME class of bug, the other
+        direction: draken sorts NaN HIGHEST regardless of sign
+        (`sort_num_key` -> `UINT64_MAX`), but Python defines every comparison
+        against NaN as False, so `v <= boundary` / `v >= boundary` was silently
+        False for a NaN survivor no matter where the true boundary sat. Observed:
+        an ASC top-10 over 3 NaN keys + several thousand real ones collapsed to a
+        SINGLE returned row (every NaN candidate compared "not <= boundary" and
+        got dropped, and most real candidates never got a chance to become the
+        boundary because the initial `nlargest`/`nsmallest` selection was itself
+        corrupted by the same NaN comparisons).
+
+        The rule for BOTH is now expressed ONCE, as a rank, instead of as
+        hand-written null/NaN branches: `_topn_rank` maps NULL below every value
+        and NaN above every value (never comparing a NaN payload directly), so
+        the boundary test is one plain rank comparison. Ties, NULLs, NaN, and the
+        fewer-than-n degenerate case all fall out of it — there is no separate
+        branch left to get wrong for either. This matches the native twin,
+        `LatmatScanSource::reduce_to_topn`, which already had both properties for
+        free by reducing with draken's own comparator (`sort_num_key` itself maps
+        NaN to `UINT64_MAX`, so the native path never had this bug).
         """
-        cdef list candidates = []          # (value, (path, rg_idx), survivor_idx)
-        cdef Py_ssize_t nonnull = 0
+        cdef list candidates = []          # (rank, (path, rg_idx), survivor_idx)
         cdef Py_ssize_t i
         for key in p1_cache:
             p1_filtered = p1_cache[key][0]
             vals = p1_filtered.column(sort_identity).to_pylist()
             for i in range(len(vals)):
-                v = vals[i]
-                candidates.append((v, key, i))
-                if v is not None:
-                    nonnull += 1
+                candidates.append((_topn_rank(vals[i]), key, i))
 
         cdef dict winners_by_rg = {}
-        if nonnull <= n:
-            for (v, key, i) in candidates:
+        if len(candidates) <= n:
+            # Nothing can be cut — every survivor is at-least-as-good as the n-th.
+            for (r, key, i) in candidates:
                 winners_by_rg.setdefault(key, []).append(i)
         else:
-            vals_only = sorted(
-                (v for (v, key, i) in candidates if v is not None),
-                reverse=descending,
-            )
-            boundary = vals_only[n - 1]
-            for (v, key, i) in candidates:
-                if v is None:
-                    continue
-                if (v >= boundary) if descending else (v <= boundary):
+            # The n-th best rank. nsmallest/nlargest is O(m log n) against the old
+            # full sort's O(m log m) — m is every pass-1 survivor in the table.
+            if descending:
+                boundary = _heapq.nlargest(n, (r for (r, key, i) in candidates))[n - 1]
+            else:
+                boundary = _heapq.nsmallest(n, (r for (r, key, i) in candidates))[n - 1]
+            for (r, key, i) in candidates:
+                # Keep everything not STRICTLY worse than the boundary — which is
+                # the n best plus every row tied with the n-th.
+                if (r >= boundary) if descending else (r <= boundary):
                     winners_by_rg.setdefault(key, []).append(i)
 
         cdef dict mask_by_rg = {(p, rg): mb for (p, rg, mb) in pass2_work}
@@ -1060,6 +1136,8 @@ cdef class ParquetReadNode(ReaderNode):
                 self._scan_finished = True
                 self._flush_decode_telemetry()
                 self.scan_readings.flush_into(self.readings)
+                if self._ipc_source is not None:
+                    self.readings["parquet_row_groups_pruned"] = self._ipc_source.pruned_row_group_count
             src = self._ipc_source
             self._ipc_source = None
             self._scan_mtx.unlock()
@@ -1073,6 +1151,15 @@ cdef class ParquetReadNode(ReaderNode):
                 self._scan_finished = True
                 self._flush_decode_telemetry()
                 self.scan_readings.flush_into(self.readings)
+                # _run_pass1 / _run_pass1_chunk retire (close + null) _lm_pass1_src
+                # long before the scan finishes draining pass 2, so it is almost
+                # always already None here — fall back to the snapshot they took.
+                # Prefer the live source on the rare path where pass 1 never ran
+                # (e.g. the scan is closed before its first pull).
+                if self._lm_pass1_src is not None:
+                    self.readings["parquet_row_groups_pruned"] = self._lm_pass1_src.pruned_row_group_count
+                else:
+                    self.readings["parquet_row_groups_pruned"] = self._sp_pass1_pruned_row_groups
             src1 = self._lm_pass1_src
             src2 = self._lm_pass2_src
             self._lm_pass1_src = None
@@ -1384,11 +1471,21 @@ cdef class ParquetReadNode(ReaderNode):
                     ident: name for name, ident in self._sp_pass1_name_to_identity.items()
                 }
                 self._pass1_resolver = _Pass1PredResolver(self.compiled_predicate, identity_to_physical)
-                self._lm_pass1_src.set_pass1_predicate(
-                    _get_pass1_eval_fn_ptr(),
-                    self._pass1_resolver.ctx_ptr(),
-                    self._pass1_resolver.col_names,
-                )
+                # ...and only when every predicate column reaches the predicate on its
+                # natural physical tag. rugo tags its worker-side view from the decoded
+                # buffers, so a column this scan retags afterwards (DATE / TIMESTAMP /
+                # DECIMAL — _sp_coerce_ops) or declares NVARCHAR / VARBINARY would be
+                # matched as a different type there than here. Same rule, same helper,
+                # as the native LatmatScanSource plan.
+                _col_type_by_name = {c.name: c.column_type for c in base_schema.columns}
+                if _pass1_worker_predicate_admissible(
+                    [_col_type_by_name.get(n) for n in self._pass1_resolver.col_names]
+                ):
+                    self._lm_pass1_src.set_pass1_predicate(
+                        _get_pass1_eval_fn_ptr(),
+                        self._pass1_resolver.ctx_ptr(),
+                        self._pass1_resolver.col_names,
+                    )
             return
 
         self._scan_mode = _SCAN_SINGLE
@@ -1667,6 +1764,7 @@ cdef class ParquetReadNode(ReaderNode):
 
         self._lm_pass2_work = pass2_work
         self._lm_p1_cache = p1_cache
+        self._sp_pass1_pruned_row_groups = pass1_src.pruned_row_group_count
         pass1_src.close()
         self._lm_pass1_src = None
         self._lm_pass2_src = open_pass2_source(
@@ -1841,6 +1939,7 @@ cdef class ParquetReadNode(ReaderNode):
             pulled = pass1_src.next_vectors()
             if pulled is None:
                 self._lm_chunked_pass1_exhausted = True
+                self._sp_pass1_pruned_row_groups = pass1_src.pruned_row_group_count
                 pass1_src.close()
                 self._lm_pass1_src = None
                 break

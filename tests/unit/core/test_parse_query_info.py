@@ -261,11 +261,64 @@ def test_parse_multiple_tables_in_from():
     info = opteryx.parse_query_info("""
         SELECT * FROM users, orders WHERE users.id = orders.user_id
     """)
-    
+
     assert info["query_type"] == "Query"
     assert "users" in info["tables"]
     assert "orders" in info["tables"]
     assert len(info["tables"]) == 2
+
+
+def test_parse_no_parameters():
+    """Test that a query with no placeholders reports an empty parameters list"""
+    info = opteryx.parse_query_info("SELECT * FROM users WHERE id = 1")
+
+    assert info["parameters"] == []
+
+
+def test_parse_named_parameter_in_where():
+    """Test extracting a single `:name` placeholder from a WHERE clause"""
+    info = opteryx.parse_query_info("SELECT * FROM users WHERE department = :department")
+
+    assert info["parameters"] == ["department"]
+
+
+def test_parse_multiple_named_parameters():
+    """Test extracting several `:name` placeholders, sorted and deduplicated"""
+    info = opteryx.parse_query_info("""
+        SELECT * FROM users
+        WHERE department = :department
+          AND active = :is_active
+        LIMIT :lim
+    """)
+
+    assert info["parameters"] == ["department", "is_active", "lim"]
+
+
+def test_parse_repeated_named_parameter_deduplicated():
+    """Test that the same placeholder used twice is only reported once"""
+    info = opteryx.parse_query_info("""
+        SELECT * FROM users
+        WHERE department = :department OR backup_department = :department
+    """)
+
+    assert info["parameters"] == ["department"]
+
+
+def test_parse_qmark_parameter_not_named():
+    """Test that a positional `?` placeholder is not reported as a named parameter"""
+    info = opteryx.parse_query_info("SELECT * FROM users WHERE id = ?")
+
+    assert info["parameters"] == []
+
+
+def test_parse_named_parameter_in_subquery():
+    """Test extracting a `:name` placeholder referenced inside a subquery"""
+    info = opteryx.parse_query_info("""
+        SELECT * FROM users
+        WHERE id IN (SELECT user_id FROM orders WHERE amount > :min_amount)
+    """)
+
+    assert info["parameters"] == ["min_amount"]
 
 
 if __name__ == "__main__":  # pragma: no cover

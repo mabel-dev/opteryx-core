@@ -961,6 +961,13 @@ cdef class IpcRowGroupSource:
     cdef int footer_cache_hits
     cdef int footer_cache_misses
     cdef int footer_process_cache_hits
+    # Row groups excluded by pushed-predicate min/max + bloom pruning at plan
+    # time (open_ipc_source), before any work item is submitted for decode.
+    # Stays 0 for a pass-2 source (open_pass2_source) — pass-1 already chose
+    # the row groups, so pass-2 does no pruning of its own. `public` so the
+    # trampoline scan (parquet_read.pyx, which holds this as `object`) can
+    # read it as a plain attribute, same as `n_items`'s `row_group_count`.
+    cdef public int pruned_row_group_count
 
     def __cinit__(self):
         self.footer_map = NULL
@@ -977,6 +984,7 @@ cdef class IpcRowGroupSource:
         self.footer_cache_hits = -1
         self.footer_cache_misses = -1
         self.footer_process_cache_hits = -1
+        self.pruned_row_group_count = 0
 
     def __dealloc__(self):
         if self.footer_map != NULL:
@@ -1545,6 +1553,7 @@ cpdef IpcRowGroupSource open_ipc_source(
             meta = prefetched_footers[path]
             for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
                 if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                    src.pruned_row_group_count += 1
                     continue
                 work_items.append((path, rg_idx))
                 if limit_gate:
@@ -1574,6 +1583,7 @@ cpdef IpcRowGroupSource open_ipc_source(
                 if predicates and not _rg_passes_predicates_native(
                     src.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
                 ):
+                    src.pruned_row_group_count += 1
                     continue
                 work_items.append((path, rg_i))
                 if limit_gate:
@@ -1837,9 +1847,12 @@ cdef class NativeScanPlan:
         `ctx` a Pass1PredCtx* the CALLER must keep alive for the scan's life, `columns`
         the predicate's PHYSICAL column names in the ctx's col_idx order.
 
-        rugo evaluates it only for column shapes it can view without a copy (plain
-        DK_VARCHAR); anything else comes back with an empty survivor_mask and
-        LatmatScanSource evaluates the identical program itself over the built columns.
+        rugo evaluates it only for column shapes it can view without a copy (the direct
+        string and fixed-width kinds — see pass1_build_dv_view); anything else comes back
+        with an empty survivor_mask and LatmatScanSource evaluates the identical program
+        itself over the built columns. The CALLER must also have checked
+        pass1_worker_predicate_admissible before pushing at all — rugo tags its view from
+        the decoded buffers and cannot know about a plan-time retag.
         An empty plan (every row group pruned) has no pipeline — nothing to push to."""
         cdef vector[string] v
         cdef bytes b

@@ -518,19 +518,36 @@ key type, for ties (a tied row compares neither-before-nor-after `b`, so it is
 kept — "n rows plus ties at the boundary"), and for NULLs. No null rule and no
 type switch is written in the reduction at all. `n >= total` skips it entirely.
 
-**⚠ This deliberately DIVERGES from the trampoline, because the trampoline is
-wrong here.** `_apply_topn` (`parquet_read.pyx`) hard-codes "NULLs sort last" in
-both directions. draken orders NULL **below every value** (`SortKeyCmp`:
+**⚠ Building this surfaced a NULL-ordering bug that BOTH paths had.**
+`_apply_topn` (`parquet_read.pyx`) hard-coded "NULLs sort last" in both
+directions. draken orders NULL **below every value** (`SortKeyCmp`:
 `cmp = va ? 1 : -1`), i.e. NULLs come **FIRST ascending**, last descending — so
 for `ORDER BY <nullable> ASC LIMIT n` with more than n non-null survivors,
-`_apply_topn` drops NULL rows that belong in the answer. Verified directly on a
-3-NULL fixture: late-mat ON returned `[1003…1012]`, OFF returned
-`[NULL,NULL,NULL,1003…1009]`. The native Source matches the **un-pushed plan**,
-which is the actual contract. **The trampoline bug is UNTOUCHED and still open** —
-`test_trampoline_null_asc_divergence_is_the_trampolines_bug`
-(`tests/unit/operators/test_wp_r3_latmat_scan.py`) pins it so it stays visible.
-Fixing `_apply_topn` is a separate chip. (Architect ruling, 2026-08-01: fix the
-native path, leave the trampoline's bug reported rather than replicated.)
+`_apply_topn` dropped NULL rows that belong in the answer. Verified on a 3-NULL
+fixture: it returned `[1003…1012]` where the correct answer is
+`[NULL,NULL,NULL,1003…1009]`.
+
+**Both sides are fixed, and neither now writes a null rule by hand** — that is the
+point, because a rule stated twice is a rule that drifts. The native Source
+reduces with draken's own comparator. `_apply_topn` reduces on `_topn_rank`
+(`(0,)` for NULL, `(1, value)` otherwise), so its boundary test is a single rank
+comparison with no null branch and no separate "fewer than n non-null" case; it
+also drops the old full `sorted()` for `heapq.nsmallest/nlargest`, O(m log n)
+instead of O(m log m) over every pass-1 survivor in the table.
+
+**A FLOAT sort key containing NaN had the same class of bug, fixed the same way.**
+draken sorts NaN HIGHEST regardless of sign (`sort_num_key` → `UINT64_MAX`), but
+Python defines EVERY comparison against NaN as False, so `_apply_topn`'s old
+`v <= boundary` / `v >= boundary` test was silently False for a NaN survivor no
+matter where the boundary sat — and the `nlargest`/`nsmallest` boundary
+selection itself saw the same broken comparisons. Observed: an ASC top-10 over
+3 NaN keys plus several thousand real ones collapsed to a **single** returned
+row. `_topn_rank` now maps NaN to the tag above every real value (`(2,)`, vs
+`(0,)` for NULL and `(1, v)` for a real value), so the boundary test never
+compares a NaN payload directly. The native path never had this bug — it
+reduces with draken's own `sort_num_key`, which already maps NaN to
+`UINT64_MAX`. See `test_latmat_nan_sort_key` and
+`test_trampoline_apply_topn_keeps_nan_rows`.
 
 **Eligibility mirrors the trampoline's own `two_pass_eligible` + `topn_active`**
 (`_latmat_scan_plan`, `compiler.py`): a pushed, all-c-native predicate; the
@@ -562,6 +579,20 @@ dataset, 99 files / ~100M rows; peak RSS is `ru_maxrss` of a one-query process):
 
 Output is **SHA-identical** to the single-pass reference.
 
+`make clickbench` on the same dataset (`FULL_SPLIT_RUGO_262K`), min-of-3 matched
+back-to-back runs, box settled between campaigns:
+
+| | Q24 | Σ suite |
+|---|---:|---:|
+| before (trampoline) | 960.3 ms | 16 116 ms |
+| after (`LatmatScanSource`) | 892.4 ms | 15 822 ms |
+
+⚠ Read that as **no measurable change**, not a win: the within-campaign spread was
+960 / 1041 / 1005 before and 989 / 961 / 892 after — ~10%, comfortably wider than
+the difference. The acceptance criterion here is the ABSENCE of the ~400%
+regression the single-pass approach caused, which is unmissable at this
+resolution.
+
 **Memory at the barrier — measured, not assumed.** Pass 1 holds every survivor's
 pass-1 columns until the boundary exists, so a weak predicate is the risk case.
 The selectivity gate catches most of it (`WHERE URL <> ''` is refused and takes
@@ -581,8 +612,10 @@ replaces**. The exposure is inherited, bounded, and strictly improved; no new
 threshold was invented for it.
 
 **Verification.** `tests/unit/operators/test_wp_r3_latmat_scan.py` is the
-correctness matrix: every case runs twice in one process — natively, and with
-late-materialization off (the un-pushed single-pass ground truth) — over ties at
+correctness matrix: every case runs three ways in one process — natively, on the
+forced trampoline (so `_apply_topn`'s independent implementation of the same
+reduction is checked too), and with late-materialization off (the un-pushed
+single-pass ground truth) — over ties at
 the boundary, tie blocks spanning row groups, all-NULL keys, fewer-than-n non-null
 rows, ASC and DESC, N above the survivor count, string and float keys,
 zero survivors, sort-key-is-the-predicate-column, and an explicit pass-1/pass-2
@@ -602,6 +635,67 @@ emit; the first now forces the trampoline via an autouse
 `native_scan_supported` fixture so it keeps testing the (still live) code it is
 named after. `test_wp_a3_fused_topn_scan.py`'s two "stays trampoline" assertions
 became "now native".
+
+**Perf follow-on (2026-08-01): `pass1_build_dv_view` shape coverage.** At close-out
+`pass1_build_dv_view` (rugo `io_pipeline.hpp`) handled exactly one shape —
+plain `DK_VARCHAR` — and declined everything else, leaving `survivor_mask` empty
+so the consumer (`LatmatScanSource` / the trampoline) evaluated the predicate
+serially on its own thread instead of in parallel on the decode workers. Measured
+on the full ClickBench dataset (`scratch.hits_rugo_262k`, 99 files, ~100M rows,
+`URL LIKE '%google%' ORDER BY EventTime LIMIT 10`): only 75/396 row groups took
+the worker-side path; 321 fell back.
+
+Extended `pass1_build_dv_view` to every direct-path shape rugo can emit for a
+predicate column: `DK_VARCHAR_DICT` (dict-shaped strings — the actual gap; 100%
+of the 321 declines were this one kind), the fixed-width dense kinds
+(`DK_INT8/16/32/64`, `DK_UINT8/16/32/64`, `DK_FLOAT32/64`, `DK_BOOL`), and their
+`_DICT` counterparts. `DK_POOL` (a serialized IPC blob, not a viewable buffer)
+and `DK_DECIMAL128` (precision/scale live in a logical descriptor attached
+OUTSIDE the `DrakenVector`) are still refused — a view of either would answer a
+different question, not a cheaper one.
+
+**The tag problem.** rugo tags a view from the decoded buffers' own physical
+kind — the only thing it can know, since rugo stays opteryx-free. Some columns
+are RETAGGED after decode by plan-time state rugo has no access to: DATE /
+TIMESTAMP (physical int → `DRAKEN_DATE32`/`DRAKEN_TIMESTAMP64`, the latter with a
+mandatory unit descriptor), int64-backed DECIMAL / DECIMAL128, and NVARCHAR /
+VARBINARY (share VARCHAR's byte layout, not its semantics — case folding, LENGTH,
+regex all dispatch on the tag). A worker-side view of one of those would be a
+wrong answer, not a fast path — CLAUDE.md §11's "a fast path whose result
+differs from the uniform path is a bug, never an optimization" applies directly.
+rugo cannot detect this, so the predicate is now only HANDED to the workers at
+all when every predicate column reaches it on its NATURAL physical tag —
+`pass1_worker_predicate_admissible`
+(`opteryx/connectors/parquet_io/pass1_predicate_gate.py`), called from both
+registration sites (`_latmat_scan_plan` and the trampoline's
+`_ensure_scan_started`). Refusing is free: the consumer already evaluates the
+identical program itself whenever `survivor_mask` comes back empty.
+
+**Verification.** A dedicated fixture drove every admitted shape (dense +
+dict, nullable + non-nullable, single-column and multi-column AND'd predicates)
+through the native Source with a temporary harness that additionally ran the
+serial fallback program over the SAME decoded columns and `memcmp`'d the two
+masks. Every case: worker-side mask taken, byte-identical to the fallback,
+zero mismatches. (FLOAT32 was left out of the fixture — it hits the
+pre-existing, unrelated `float32_declared_vs_actual_type_divergence` gap where
+the binder declares float32 columns as FLOAT64.) `make q` 217/217, `make tpch`
+22/22 unaffected.
+
+**Re-measured** on the same dataset and query: worker-side coverage 396/396 row
+groups (was 75/396). Wall time min-of-3, matched back-to-back, jemalloc
+preloaded, box settled: 972.3 / 1016.7 / 1054.4 ms — statistically unchanged
+from the 892–1041 ms noise band already on record for this query. Read that the
+same way the original close-out did: the acceptance criterion here is closing
+the shape-coverage gap (and proving it byte-identical), not a Q24 speedup —
+pass-1 predicate evaluation was evidently never the bottleneck for this
+query/dataset (IO + pass-2 decode of the ~100 survivor columns dominates), so
+routing 100% instead of 19% of row groups through the parallel path doesn't
+move a wall clock it was never gating. The gap closed is architectural
+(uniform coverage per §11, no silent single-threaded fallback for the common
+dict-encoded-string case) and should matter more for CPU-bound predicates or
+smaller-selectivity queries where pass-1 eval is a larger share of the work —
+not proven here, just the honest scope of what this change does and doesn't
+show.
 
 
 ### 7. `unlowerable_predicate` (R4) — **census 0** (regex reachable) — *structural* — **DO LAST**

@@ -41,15 +41,17 @@
 // type, for ties (a tied row compares neither-before-nor-after `b`, so `!cmp(b,r)` is
 // true and it is kept), and for NULLs — no separate null rule is written here at all.
 //
-// ⚠ This deliberately DIFFERS from the trampoline's `_apply_topn`, which hard-codes
-// "NULLs sort last" in both directions. draken orders NULL BELOW every value
-// (SortKeyCmp: `cmp = va ? 1 : -1`), i.e. NULLs come FIRST ascending and LAST
-// descending — so `_apply_topn` drops NULL survivors that belong in the answer for
-// `ORDER BY <nullable> ASC LIMIT n`, and the trampoline returns rows the un-pushed
-// plan does not. Verified directly (latmat on vs off over a 3-NULL fixture: on gave
-// `[1003..1012]`, off gave `[NULL,NULL,NULL,1003..1009]`). This Source matches the
-// UN-PUSHED plan, which is the actual contract; the trampoline bug is untouched and
-// still open.
+// This Source never had a null/NaN rule of its own to get wrong, because it never
+// writes one: `build_sort_keys`/`SortKeyCmp` already encode "NULL below every value"
+// and `sort_num_key` already maps NaN to UINT64_MAX (sorts highest, either
+// direction). The trampoline's OWN two-pass reduction (`_apply_topn`,
+// parquet_read.pyx) used to hand-write both rules and got both wrong — NULL
+// survivors dropped ascending, NaN survivors (and the boundary selection around
+// them) dropped in either direction — because it compared against the boundary with
+// plain Python `<=`/`>=`, and NULL/NaN don't behave arithmetically. Both are fixed
+// there now (`_topn_rank`, one rank expression, no null/NaN branch), verified to
+// agree with this Source and the un-pushed plan across
+// `tests/unit/operators/test_wp_r3_latmat_scan.py`'s whole matrix.
 //
 // ── Threading ─────────────────────────────────────────────────────────────────────
 // Pass 1 is a barrier: it must see every row group's sort key before any boundary
@@ -304,10 +306,12 @@ struct LatmatScanSource : Source {
             } else {
                 // Fallback: the same predicate, same C ABI, evaluated here over the
                 // built columns. Reached whenever rugo declined the worker-side view
-                // (pass1_build_dv_view supports plain DK_VARCHAR only), so every other
-                // column shape still gets its predicate — never a silent unfiltered
-                // pass. The columns are already materialized, so this reads the
-                // DrakenVector views directly.
+                // (pass1_build_dv_view covers the direct string + fixed-width shapes;
+                // a DK_POOL blob or a DK_DECIMAL128 column is refused, as is the whole
+                // push when a predicate column is retagged after decode — see
+                // pass1_predicate_gate.py), so every other column shape still gets its
+                // predicate — never a silent unfiltered pass. The columns are already
+                // materialized, so this reads the DrakenVector views directly.
                 mask.assign(nbytes, 0);
                 std::vector<DrakenVector*> cols;
                 cols.reserve(pred_col_to_p1->size());

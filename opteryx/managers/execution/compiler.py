@@ -1746,6 +1746,9 @@ class _Compiler:
         Returns a tuple of everything `_compile_scan` needs, or None.
         """
         from opteryx import config
+        from opteryx.connectors.parquet_io.pass1_predicate_gate import (
+            pass1_worker_predicate_admissible,
+        )
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -1916,8 +1919,17 @@ class _Compiler:
         # parallel, nogil) for the column shapes rugo can view without a copy. When it
         # declines, LatmatScanSource runs the identical program itself — same ctx,
         # same bytecode, same answer.
-        p1_plan.set_pass1_predicate(get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
-                                    resolver.col_names)
+        #
+        # Not handed over at all when a predicate column is retagged after decode
+        # (DATE / TIMESTAMP / DECIMAL) or declared NVARCHAR / VARBINARY: rugo tags its
+        # view from the decoded buffers, which for those columns is a DIFFERENT type
+        # than the one the predicate is compiled against. See pass1_predicate_gate.
+        _p1_sc_by_name = {sc.name: sc for sc in p1_scs}
+        if pass1_worker_predicate_admissible(
+            _p1_sc_by_name[n].column_type for n in resolver.col_names
+        ):
+            p1_plan.set_pass1_predicate(get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
+                                        resolver.col_names)
 
         # ── output assembly ───────────────────────────────────────────────────────
         p2_index_by_name = {name: i for i, name in enumerate(p2_names)}

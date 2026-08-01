@@ -136,6 +136,8 @@ def analyze_query(sql: str) -> Dict[str, Any]:
         Dictionary containing:
         - query_type: Type of query (e.g., "Query", "Insert", "Update")
         - tables: List of table names referenced in the query
+        - parameters: Names of `:name` placeholders referenced in the query
+          (sorted, deduplicated, no leading `:`)
         - is_select: True if this is a SELECT query
         - is_mutation: True if this modifies data (INSERT, UPDATE, DELETE)
 

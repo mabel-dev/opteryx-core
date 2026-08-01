@@ -39,7 +39,7 @@ from opteryx.connectors.parquet_io import pool_reader
 def _force_trampoline_scan(monkeypatch):
     """These tests are about the TRAMPOLINE scan's two-pass implementation and read
     its own telemetry counters (`parquet_latmat_pass1_row_groups`,
-    `parquet_filter_columns_read`, ...), which only `ParquetReadNode` emits.
+    `parquet_latmat_pass2_bytes`, ...), which only `ParquetReadNode` emits.
 
     Since the R3 close-out, the `WHERE ... ORDER BY ... LIMIT` shape below is served
     by the native `LatmatScanSource` instead, which emits none of those counters —
@@ -174,26 +174,16 @@ def test_q24_no_matching_rows_activates_skip_fast_path():
         session.close()
 
 
-def test_q24_pass1_only_reads_url_column():
-    """When the predicate only references URL, Pass 1 should decode only that
-    column — the 104 other projected columns are deferred to Pass 2."""
-    config.features.parquet_late_materialization = True
-
-    session = opteryx.session()
-    try:
-        _execute(
-            session,
-            "SELECT * FROM testdata.clickbench_tiny"
-            " WHERE URL LIKE '%google%'"
-            " ORDER BY EventTime LIMIT 10"
-        )
-        read_op = _get_read_operation(session.telemetry)
-        # Filter set should contain exactly 1 column (URL).
-        assert read_op.get("parquet_filter_columns_read", 0) == 1, (
-            "only the URL column should be in the filter (Pass 1) column set"
-        )
-    finally:
-        session.close()
+# NOTE: there is deliberately no test asserting "Pass 1 decodes only the URL
+# column". It used to exist as test_q24_pass1_only_reads_url_column, asserting
+# `parquet_filter_columns_read == 1`, but that counter had no producer on any
+# scan path — it was always 0, so the test had never passed and protected
+# nothing. The counter has been removed rather than invented: the pass-1 column
+# set is a plan-time constant (and for this query it is TWO columns, URL plus
+# the top-N sort column EventTime, not one), so it is not a scan sensor. The
+# runtime consequence the test cared about — the other 104 columns are not
+# decoded when no row survives Pass 1 — is covered by
+# test_q24_no_matching_rows_activates_skip_fast_path's `pass2_bytes == 0`.
 
 
 # ─── assembly correctness tests ───────────────────────────────────────────────
