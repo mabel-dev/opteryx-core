@@ -70,6 +70,9 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         size_t num_elements
         const uint32_t* row_level_offsets
         const uint32_t* row_element_offsets
+        bint sorted_hint
+        bint sorted_descending
+        bint sorted_nulls_first
 
     cdef cppclass ColumnStats:
         bint has_minmax

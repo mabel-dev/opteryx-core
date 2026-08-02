@@ -77,6 +77,7 @@ cdef extern from *:
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     int draken_vector_mark_dict_sorted(PyObject* obj)
+    int draken_vector_mark_row_sorted(PyObject* obj, int descending)
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType vec_type,
@@ -153,6 +154,8 @@ cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType w
     vec._nb = <object>raw          # Cython incref → refcount 2
     _pr_decref(raw)                # balance the NEW ref → refcount 1
     vec._dv = draken_vector_unwrap(raw)
+    if result.columns[i].row_sorted:
+        draken_vector_mark_row_sorted(raw, result.columns[i].row_sorted_descending)
     return vec
 
 
@@ -185,6 +188,8 @@ cdef inline Vector _wrap_string_dict_direct(MorselRef* result, size_t i, DrakenT
     vec._dv = draken_vector_unwrap(raw)
     if result.columns[i].dict_sorted:
         draken_vector_mark_dict_sorted(raw)
+    if result.columns[i].row_sorted:
+        draken_vector_mark_row_sorted(raw, result.columns[i].row_sorted_descending)
     return vec
 
 
@@ -237,6 +242,8 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     vec._dv = draken_vector_unwrap(raw)
     if result.columns[i].dict_sorted:
         draken_vector_mark_dict_sorted(raw)
+    if result.columns[i].row_sorted:
+        draken_vector_mark_row_sorted(raw, result.columns[i].row_sorted_descending)
     return vec
 
 
@@ -294,6 +301,8 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
     if dk == 5 and dlen > 0:
         vec._nb.set_decimal_descriptor(
             result.columns[i].dec_precision, result.columns[i].dec_scale)
+    if result.columns[i].row_sorted:
+        draken_vector_mark_row_sorted(<PyObject*>vec._nb, result.columns[i].row_sorted_descending)
     return vec
 
 

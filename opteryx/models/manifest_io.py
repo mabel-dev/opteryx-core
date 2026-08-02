@@ -52,6 +52,62 @@ _MANIFEST_COLUMNS = {
 # boxed per-file lists.
 _SKETCH_VECTOR_COLUMNS = ("min_k_hashes", "histogram_counts", "char_class_counts")
 
+# SQL-visible type for every _MANIFEST_COLUMNS entry, used only for
+# manifest_output_schema() below — _MANIFEST_COLUMNS' own dtype tags feed the
+# writer's `vector_from_sequence(values, dtype=...)` calls and stay as-is.
+# min_values/max_values are ARRAY(VARIANT): positionally-by-field-id bounds
+# span whatever physical types the dataset's own columns have (int, float, ...)
+# and are resolved dynamically at Vector construction (see
+# file_entries_to_manifest_morsel) rather than declared statically — the same
+# open element-type gap noted for ARRAY_AGG.
+def _manifest_column_types():
+    from opteryx.types import logical_type as _lt
+
+    return {
+        "file_path": _lt.VARCHAR,
+        "file_format": _lt.VARCHAR,
+        "record_count": _lt.INT64,
+        "file_size_in_bytes": _lt.INT64,
+        "uncompressed_size_in_bytes": _lt.INT64,
+        "column_uncompressed_sizes_in_bytes": _lt.ARRAY(_lt.INT64),
+        "null_counts": _lt.ARRAY(_lt.INT64),
+        "min_k_hashes": _lt.ARRAY(_lt.ARRAY(_lt.UINT64)),
+        "histogram_counts": _lt.ARRAY(_lt.ARRAY(_lt.INT64)),
+        "histogram_bins": _lt.INT64,
+        "min_values": _lt.ARRAY(_lt.VARIANT),
+        "max_values": _lt.ARRAY(_lt.VARIANT),
+        "field_ids": _lt.ARRAY(_lt.INT64),
+        "min_lengths": _lt.ARRAY(_lt.INT64),
+        "max_lengths": _lt.ARRAY(_lt.INT64),
+        "char_class_counts": _lt.ARRAY(_lt.ARRAY(_lt.INT64)),
+        "char_total_bytes": _lt.ARRAY(_lt.INT64),
+    }
+
+
+def manifest_output_schema(relation_name: str = "$manifest"):
+    """The fixed RelationSchema `SHOW MANIFEST FOR <table>` always returns.
+
+    One row per file, every _MANIFEST_COLUMNS column — never trimmed,
+    filtered, or projected (SHOW MANIFEST FOR has no WHERE/column-list
+    grammar to do so with). row_count_estimate is left unset: the caller
+    (visit_show_manifest) knows the real file count from the bound Manifest
+    and should set it there instead of this being guessed here.
+    """
+    from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+
+    column_types = _manifest_column_types()
+    return RelationSchema(
+        name=relation_name,
+        columns=[
+            SchemaColumn(
+                name=name,
+                column_type=column_types[name],
+                identity=mint_column_identity(relation_name, name),
+            )
+            for name in _MANIFEST_COLUMNS
+        ],
+    )
+
 # Fixed equi-width histogram bucket count, shared by every producer (ANALYZE,
 # the catalog writer) so `histogram_bins` means the same thing regardless of
 # which one wrote a given manifest row.
@@ -178,14 +234,14 @@ def _nested_int64_array_column(dn, values: List, element_type: int):
     return dn.vector_array_from_sequence(values, element_type=element_type, nesting_depth=2)
 
 
-def write_manifest_parquet(
+def file_entries_to_manifest_morsel(
     file_entries: List[FileEntry],
     schema,
     sketches: Optional[Dict[str, List]] = None,
     histograms: Optional[Dict[str, List]] = None,
     char_classes: Optional[Dict[str, List]] = None,
-) -> bytes:
-    """Serialize a list of FileEntry into one manifest Parquet file (bytes).
+):
+    """Build one manifest Morsel (the `_MANIFEST_COLUMNS` shape) from FileEntry rows.
 
     Same schema/nested-array encoding as the catalog's write_parquet_manifest —
     ported without any catalog import (draken + rugo only). `schema` supplies
@@ -222,7 +278,6 @@ def write_manifest_parquet(
     from draken import draken_native as _dn
     from draken.interop.vector_sequence import vector_from_sequence
     from draken.morsels.morsel import Morsel
-    from rugo.parquet import write_parquet
 
     sketches = sketches or {}
     histograms = histograms or {}
@@ -275,6 +330,27 @@ def write_manifest_parquet(
         else:
             morsel.append_vector(name, vector_from_sequence(values, dtype=dtype))
 
+    return morsel
+
+
+def write_manifest_parquet(
+    file_entries: List[FileEntry],
+    schema,
+    sketches: Optional[Dict[str, List]] = None,
+    histograms: Optional[Dict[str, List]] = None,
+    char_classes: Optional[Dict[str, List]] = None,
+) -> bytes:
+    """Serialize a list of FileEntry into one manifest Parquet file (bytes).
+
+    See `file_entries_to_manifest_morsel` for the column shape and the
+    sketches/histograms/char_classes contract — this just writes that morsel
+    to Parquet.
+    """
+    from rugo.parquet import write_parquet
+
+    morsel = file_entries_to_manifest_morsel(
+        file_entries, schema, sketches=sketches, histograms=histograms, char_classes=char_classes
+    )
     return write_parquet(morsel, compression="zstd", bloom_filters=True)
 
 

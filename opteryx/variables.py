@@ -49,6 +49,7 @@ from typing import Any, Dict, Tuple, Type
 
 from opteryx import config
 from opteryx.__version__ import __version__
+from opteryx.compiled.platform import cgroup_memory_limit_bytes
 from opteryx.compiled.platform import cpu_count as _cpu_count
 from opteryx.compiled.platform import physical_memory_total_bytes
 from opteryx.compiled.simd_probe import cpu_architecture
@@ -280,8 +281,17 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "operating_system": (VARCHAR, sys.platform, VariableOwner.SERVER, Visibility.RESTRICTED),
     # BYTES, named so — matches manifest_cache_bytes. Total physical RAM as the
     # kernel reports it; on a container this is the HOST's RAM, not the cgroup
-    # limit, so it is not a memory budget and must not be read as one.
-    "physical_memory_bytes": (INT64, physical_memory_total_bytes(), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # limit, so it is not a memory budget and must not be read as one. `or None`:
+    # a real host is never 0 bytes of RAM, so a 0 from the detector means the
+    # probe failed (e.g. gVisor sandboxes like Cloud Run's default execution
+    # environment don't reliably expose /proc/meminfo or sysinfo(2)). Reporting
+    # that failure as 0 would be a false answer; None is the honest "don't know".
+    "physical_memory_bytes": (INT64, physical_memory_total_bytes() or None, VariableOwner.SERVER, Visibility.RESTRICTED),
+    # The CONTAINER's ceiling, as opposed to `physical_memory_bytes` (the HOST's
+    # RAM) — this is the actual memory budget on a cgroup-constrained deployment
+    # like Cloud Run. None means no cgroup limit is in effect (bare metal, macOS)
+    # or it could not be detected; never conflated with a literal 0-byte limit.
+    "memory_limit_bytes": (INT64, cgroup_memory_limit_bytes() or None, VariableOwner.SERVER, Visibility.RESTRICTED),
     # LOGICAL CPUs (hardware threads), not physical cores — the same number
     # std::thread::hardware_concurrency reports. Same container caveat as the RAM
     # above: this is the host's count, not the cgroup's CPU quota, so it is not

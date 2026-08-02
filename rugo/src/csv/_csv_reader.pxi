@@ -22,6 +22,8 @@ cdef extern from "core/csv_parse_context.hpp" namespace "rugo::_csv":
     struct CsvParseContext:
         uint8_t delimiter
         bint    has_header
+        uint32_t sniff_sample_size
+        bint    ignore_errors
         vector[string] projected_columns
         vector[CsvPredicate] predicates
         size_t max_threads
@@ -46,6 +48,9 @@ cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":
         vector[ParsedCsvColumn] columns
         uint32_t                num_rows
 
+    # except + : commit_row (post-sniff type mismatch, ignore_errors=false)
+    # throws std::runtime_error, which Cython translates to a Python
+    # RuntimeError -- see csv_column_builder.cpp.
     StreamResult build_columns_streaming(
         const uint8_t*          buffer,
         size_t                  length,
@@ -56,7 +61,7 @@ cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":
         const vector[size_t]&   proj_indices,
         const CsvParseContext&  ctx,
         size_t                  max_threads
-    ) nogil
+    ) except + nogil
 
     object wrap_csv_column(ParsedCsvColumn& pc)
 
@@ -79,6 +84,8 @@ def read_csv(
     delimiter=',',
     has_header=True,
     use_threads=True,
+    infer_sample_size=128,
+    fail_on_error=True,
 ):
     """
     Read CSV data into Draken vectors with projection and predicate pushdown.
@@ -99,6 +106,13 @@ def read_csv(
         False: columns are named col_0, col_1, …
     use_threads : bool
         Enable parallel span extraction (default True).
+    infer_sample_size : int
+        Non-null values per projected column sampled to sniff its type
+        (INT64 -> FLOAT64 -> VARCHAR widening). Default 128.
+    fail_on_error : bool
+        True (default): a value past the sample window that doesn't parse as
+        the sniffed type raises RuntimeError, naming the column and value.
+        False: that value is treated as NULL instead.
 
     Returns
     -------
@@ -132,8 +146,12 @@ def read_csv(
     # ---- Build CsvParseContext ----
     if not isinstance(delimiter, str) or len(delimiter) != 1:
         raise ValueError("delimiter must be a single character")
-    ctx.delimiter  = ord(delimiter)
-    ctx.has_header = bool(has_header)
+    if not isinstance(infer_sample_size, int) or isinstance(infer_sample_size, bool) or infer_sample_size <= 0:
+        raise ValueError("infer_sample_size must be a positive integer")
+    ctx.delimiter          = ord(delimiter)
+    ctx.has_header         = bool(has_header)
+    ctx.sniff_sample_size  = <uint32_t>infer_sample_size
+    ctx.ignore_errors      = not bool(fail_on_error)
     ctx.rebuild_lut()
 
     if columns:

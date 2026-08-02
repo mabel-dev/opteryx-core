@@ -178,6 +178,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.aggregate import UngroupedAggregateNode
     from opteryx.operators.asof_join import AsofJoinNode
     from opteryx.operators.cross_join import CrossJoinNode
+    from opteryx.operators.csv_read import CsvReadNode
     from opteryx.operators.distinct import DistinctNode
     from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
     from opteryx.operators.exit import ExitNode
@@ -201,6 +202,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.read import ReaderNode
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
+    from opteryx.operators.show_manifest import ShowManifestNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.sort import SortNode
@@ -240,6 +242,14 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         JsonlReadNode,
         name="JSONL Reader",
+        category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
+        parallel_strategy=ParallelStrategy.MULTI_THREAD,
+        is_scan=True,
+    )
+    r.register(
+        CsvReadNode,
+        name="CSV Reader",
         category=OperatorCategory.SCAN,
         parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
@@ -409,6 +419,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         ShowColumnsNode,
         name="Show Columns",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowManifestNode,
+        name="Show Manifest",
         category=OperatorCategory.DDL,
         is_not_explained=True,
     )

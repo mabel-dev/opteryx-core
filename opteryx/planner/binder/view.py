@@ -25,6 +25,36 @@ def visit_show_columns(self, node: Node, context: BindingContext) -> Tuple[Node,
     return node, context
 
 
+def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind SHOW MANIFEST FOR: consume the Manifest the Scan below already
+    loaded (visit_scan populates context.manifests, gated on the owner-only
+    MANIFEST permission — see dataset.py's for_manifest_only check) and fix
+    the output to the manifest's own schema, never the scanned dataset's
+    column schema, which is unrelated.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.models.manifest_io import manifest_output_schema
+
+    manifest = context.manifests.get(node.relation)
+    if manifest is None:
+        raise UnsupportedSyntaxError(
+            f"'{node.relation}' has no manifest support (its connector does not "
+            "expose file-level metadata)."
+        )
+    node.manifest = manifest
+    node.schema = manifest_output_schema(node.relation)
+    node.columns = []
+    for schema_column in node.schema.columns:
+        column_reference = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=schema_column.name,
+            source=node.relation,
+            schema_column=schema_column,
+        )
+        node.columns.append(column_reference)
+    return node, context
+
+
 def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the CREATE VIEW node to determine which connector should handle

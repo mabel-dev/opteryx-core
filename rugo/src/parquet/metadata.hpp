@@ -65,6 +65,14 @@ struct ColumnStats {
 
   // Raw key/value metadata (flattened for now)
   std::unordered_map<std::string, std::string> key_value_metadata;
+
+  // Clustering: set from the row group's SortingColumn (parquet.thrift) ONLY
+  // when the file's `created_by` footer field identifies rugo as the writer
+  // (see ParseFileMeta in metadata.cpp) — a foreign-written file's claimed
+  // sorting_columns is parsed but then discarded, never surfaced here.
+  bool is_sorted = false;
+  bool sort_descending = false;
+  bool sort_nulls_first = false;
 };
 
 struct RowGroupStats {

@@ -205,7 +205,23 @@ typedef struct {
                                            // the compacting take/mask. With KEYS_SORTED this
                                            // means data[0] / data[data_length-1] ARE the column
                                            // min / max (the "ends" shortcut). Pure hint.
-// bits 4..7 reserved for future layout hints
+#define DRAKEN_ROW_SORTED       (1u << 4)  // data[selection[i]] is non-decreasing (or
+                                           // non-increasing, see DESC) over i in [0,length) —
+                                           // this VECTOR's logical row order, not a dict's value
+                                           // array (unrelated to DICT_KEYS_SORTED). Meaningful
+                                           // for ANY shape (dense/dict/constant alike). Set by
+                                           // the parquet scan (an unverified hint, trusted only
+                                           // from a rugo-written file's sorting_columns) or by
+                                           // the sort operator on its own output (a proven fact,
+                                           // not a hint). Pure hint either way: a consumer must
+                                           // NEVER treat it as a correctness guarantee on its
+                                           // own — a fast path built on it must self-verify or
+                                           // fall back on the first observed violation.
+#define DRAKEN_ROW_SORTED_DESC  (1u << 5)  // direction; meaningful only with ROW_SORTED set.
+                                           // NULLS FIRST under ascending, NULLS LAST under
+                                           // descending (draken's one sort null-ordering rule —
+                                           // see draken/morsels/sort.hpp).
+// bits 6..7 reserved for future layout hints
 
 // Shape predicates — canonical tests for the encoding shapes.
 // Use these instead of open-coding data_length comparisons at call sites.
@@ -242,6 +258,17 @@ static inline int draken_dict_sorted_dense(const DrakenVector* v) {
     return draken_is_compressed(v)
         && (v->flags & DRAKEN_DICT_KEYS_SORTED)
         && (v->flags & DRAKEN_DICT_CODES_DENSE);
+}
+// True iff this vector's logical row order is known-sorted (DRAKEN_ROW_SORTED).
+// A false result never means "unsorted" — only "not known sorted". Applies to
+// any shape; unlike draken_dict_is_sorted this is NOT gated on draken_is_dict.
+static inline int draken_vector_is_row_sorted(const DrakenVector* v) {
+    return (v->flags & DRAKEN_ROW_SORTED) != 0;
+}
+// Direction of the known-sorted row order. Meaningless (0) unless
+// draken_vector_is_row_sorted(v) is also true.
+static inline int draken_vector_row_sorted_descending(const DrakenVector* v) {
+    return (v->flags & DRAKEN_ROW_SORTED_DESC) != 0;
 }
 
 // Is `t` stored as a DrakenStringArena (slots + byte arena)? This is a PHYSICAL

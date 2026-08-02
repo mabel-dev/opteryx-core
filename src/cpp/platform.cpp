@@ -144,6 +144,46 @@ uint64_t get_used_memory_bytes() noexcept {
     return total - free;
 }
 
+uint64_t get_cgroup_memory_limit_bytes() noexcept {
+#if defined(__linux__)
+    // cgroup v2: single unified file, "max" when unconstrained.
+    {
+        std::ifstream f("/sys/fs/cgroup/memory.max");
+        if (f) {
+            std::string val;
+            f >> val;
+            if (!val.empty() && val != "max") {
+                uint64_t limit = 0;
+                std::istringstream iss(val);
+                iss >> limit;
+                if (limit > 0) {
+                    return limit;
+                }
+            }
+            return 0;
+        }
+    }
+    // cgroup v1: "unlimited" is reported as a huge page-aligned sentinel
+    // (close to LONG_MAX), not a real byte count — anything above 1 PiB is
+    // that sentinel, not an actual container limit.
+    {
+        std::ifstream f("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+        if (f) {
+            uint64_t limit = 0;
+            f >> limit;
+            const uint64_t one_pebibyte = 1ULL << 50;
+            if (limit > 0 && limit < one_pebibyte) {
+                return limit;
+            }
+            return 0;
+        }
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
 int get_cpu_count() noexcept {
 #if defined(__APPLE__) || defined(__linux__)
     const long n = sysconf(_SC_NPROCESSORS_ONLN);

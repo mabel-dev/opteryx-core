@@ -1319,7 +1319,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=discover_packages(),
-    python_requires=">=3.13",
+    python_requires=">=3.12",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(
         # DRAKEN_BUILD=1 builds everything except extensions that still

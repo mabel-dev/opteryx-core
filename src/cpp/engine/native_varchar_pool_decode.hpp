@@ -114,13 +114,21 @@ inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t lengt
                                      uint8_t* src_arena, size_t arena_len,
                                      uint8_t* validity, DrakenType type, CxxColumn& out,
                                      uint64_t* keyhash = nullptr,
-                                     bool payloads_elided = false) {
+                                     bool payloads_elided = false,
+                                     bool row_sorted = false,
+                                     bool row_sorted_descending = false) {
     DrakenStringArena* sa = nullptr;
     uint8_t* block = consolidate_string_block(src_slots, length, src_arena, arena_len, type, &sa,
                                               payloads_elided);
     draken_free(src_slots);
     draken_free(src_arena);
     DrakenVector v = draken_vector_from_dense(sa, length, type, validity);
+    // Clustering hint (rugo sorting_columns, trust-gated in metadata.cpp). Direct
+    // scan callers pass the real value; pool/IPC deserialize callers leave the
+    // default (that wire format does not yet carry it — see the parquet writer
+    // conversation's scoping note).
+    if (row_sorted)
+        v.flags |= DRAKEN_ROW_SORTED | (row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
                                             OwnedBuffer<uint8_t>(validity));
     // E37: attach the scan-carried seed (length entries), taking ownership.
@@ -136,7 +144,9 @@ inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_l
                                     uint8_t* src_arena, size_t arena_len,
                                     uint32_t* codes, uint32_t length,
                                     uint8_t* validity, DrakenType type, CxxColumn& out,
-                                    bool sorted = false, uint64_t* keyhash = nullptr) {
+                                    bool sorted = false, uint64_t* keyhash = nullptr,
+                                    bool row_sorted = false,
+                                    bool row_sorted_descending = false) {
     DrakenStringArena* sa = nullptr;
     uint8_t* block = consolidate_string_block(src_slots, data_length, src_arena, arena_len,
                                               type, &sa);
@@ -145,6 +155,10 @@ inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_l
     DrakenVector v = draken_vector_from_dict(sa, data_length, codes, length, type, validity);
     if (sorted && draken_is_dict(&v))
         v.flags |= DRAKEN_DICT_KEYS_SORTED;
+    // Clustering hint (rugo sorting_columns) — unlike DICT_KEYS_SORTED above this
+    // is not gated on the dict shape (row order is meaningful regardless).
+    if (row_sorted)
+        v.flags |= DRAKEN_ROW_SORTED | (row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
                                             OwnedBuffer<uint8_t>(validity),
                                             OwnedBuffer<void>(codes));

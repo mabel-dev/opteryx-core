@@ -45,6 +45,7 @@ class LogicalPlanStepType(int, Enum):
     Scan = auto()  # read a dataset
     Show = auto()  # show a variable
     ShowColumns = auto()  # SHOW COLUMNS
+    ShowManifest = auto()  # SHOW MANIFEST FOR <table>
     Set = auto()  # set a variable
     Limit = auto()  # limit and offset
     Order = auto()  # order by
@@ -1285,10 +1286,11 @@ def create_node_relation(relation: dict):
         function = relation["relation"]["Table"]
         function_name = relation_name.upper()
 
-        # READ_JSONL/READ_PARQUET derive their column names from the file's schema at
-        # bind time (not yet implemented), so unlike UNNEST/VALUES/GENERATE_SERIES they
-        # don't require an AS alias(columns) clause to name their output columns.
-        requires_column_alias = function_name not in ("READ_JSONL", "READ_PARQUET")
+        # READ_JSONL/READ_PARQUET/READ_CSV derive their column names from the file's
+        # schema at bind time (not yet implemented), so unlike UNNEST/VALUES/
+        # GENERATE_SERIES they don't require an AS alias(columns) clause to name
+        # their output columns.
+        requires_column_alias = function_name not in ("READ_JSONL", "READ_PARQUET", "READ_CSV")
 
         if function["alias"] is None and requires_column_alias:
             from opteryx.exceptions import UnnamedColumnError
@@ -1605,14 +1607,56 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> Logica
     return plan
 
 
-def plan_show_variables(statement, **kwargs):
-    """SHOW VARIABLES and SHOW USER — planned as scans of a virtual dataset.
+def _plan_show_manifest(table_name: str) -> LogicalPlan:
+    """`SHOW MANIFEST FOR <table>` — Scan (bound for permission/manifest loading
+    only, never read) -> ShowManifest (materializes the already-bound Manifest).
 
-    The parser folds every bare `SHOW <words>` form into a single `ShowVariable`
-    node carrying the trailing words: `SHOW VARIABLES` gives an empty list,
-    `SHOW USER` gives ["USER"], `SHOW TIME ZONE` gives ["TIME", "ZONE"]. So this
-    one builder is the front door for every form the parser did not recognise,
-    and it has to name the ones that are ours.
+    No Exit node: this mirrors plan_show_columns exactly, not
+    _plan_virtual_dataset_scan — ShowManifest is a non-pipeline special op
+    answered directly from binder-attached metadata (serial_engine.py calls
+    `head_node(None)`), not a normal Scan of real row data run through the
+    native pipeline. An Exit node here would make Exit the plan's head, which
+    is not a special op, and misroute the whole query into the native
+    compiler, which has no operator for ShowManifestNode.
+
+    `SHOW` has no WHERE/column-list grammar in the first place, so there is
+    no filter/projection this builder needs to guard against.
+    """
+    plan = LogicalPlan()
+
+    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step.relation = table_name
+    from_step.alias = table_name
+    from_step.hints = []
+    # binder.visit_scan reads this to (a) additionally require the owner-only
+    # MANIFEST permission beside the normal READ gate and (b) never compile a
+    # real file scan for this Scan — the bound Manifest IS the answer.
+    from_step.for_manifest_only = True
+    step_id = random_string()
+    plan.add_node(step_id, from_step)
+
+    show_step = LogicalPlanNode(node_type=LogicalPlanStepType.ShowManifest)
+    show_step.relation = table_name
+    previous_step_id, step_id = step_id, random_string()
+    plan.add_node(step_id, show_step)
+    plan.add_edge(previous_step_id, step_id)
+
+    return plan
+
+
+def plan_show_variables(statement, **kwargs):
+    """SHOW VARIABLES, SHOW USER, SHOW MANIFEST FOR — planned from the parser's
+    generic `ShowVariable` catch-all.
+
+    The parser folds every bare `SHOW <words>` form it does not recognise as
+    its own statement into a single `ShowVariable` node carrying the trailing
+    words: `SHOW VARIABLES` gives an empty list, `SHOW USER` gives ["USER"],
+    `SHOW TIME ZONE` gives ["TIME", "ZONE"], `SHOW MANIFEST FOR a.b.c` gives
+    ["MANIFEST", "FOR", "a", "b", "c"] (the parser's `parse_identifiers` drops
+    the `.` tokens between identifiers, not just whitespace, so a dotted name
+    arrives as separate words to rejoin — see sqlparser's `parse_identifiers`).
+    So this one builder is the front door for every form the parser did not
+    recognise, and it has to name the ones that are ours.
 
     `SHOW VARIABLES LIKE '<pattern>'` parses to ["LIKE"] with the pattern
     DISCARDED by the parser, so it cannot be honoured here — it is rejected
@@ -1621,7 +1665,8 @@ def plan_show_variables(statement, **kwargs):
     """
     root_node = "ShowVariable"
 
-    words = [part["value"].upper() for part in statement[root_node]["variable"]]
+    parts = statement[root_node]["variable"]
+    words = [part["value"].upper() for part in parts]
     if not words:
         # `$variables` is INTERNAL_ONLY_DATASETS: SHOW VARIABLES is its only surface.
         return _plan_virtual_dataset_scan("$variables", internal_relation=True)
@@ -1634,9 +1679,21 @@ def plan_show_variables(statement, **kwargs):
         raise UnsupportedSyntaxError(
             "Opteryx does not support `SHOW VARIABLES LIKE`; use `SHOW VARIABLES`."
         )
+    if words[0] == "MANIFEST":
+        if len(words) < 3 or words[1] != "FOR":
+            raise UnsupportedSyntaxError(
+                "`SHOW MANIFEST FOR <table>` requires a table name, e.g. "
+                "`SHOW MANIFEST FOR opteryx.test.pypi`."
+            )
+        # Original case preserved for the table's identifier segments -- only
+        # the MANIFEST/FOR control words above were matched via the uppercased
+        # `words` list; catalog/schema/table names are case-sensitive.
+        table_name = ".".join(part["value"] for part in parts[2:])
+        return _plan_show_manifest(table_name)
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
-        "supported forms are `SHOW VARIABLES` and `SHOW USER`."
+        "supported forms are `SHOW VARIABLES`, `SHOW USER`, and "
+        "`SHOW MANIFEST FOR <table>`."
     )
 
 

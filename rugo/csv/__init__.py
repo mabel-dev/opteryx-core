@@ -47,13 +47,16 @@ class CsvMetadata:
 class _CsvReader:
     """Context-managed reader that yields a single Morsel of all matching rows."""
 
-    def __init__(self, source, columns, predicates, delimiter, has_header, use_threads):
+    def __init__(self, source, columns, predicates, delimiter, has_header, use_threads,
+                 infer_sample_size, fail_on_error):
         self._source = source
         self._columns = columns
         self._predicates = predicates
         self._delimiter = delimiter
         self._has_header = has_header
         self._use_threads = use_threads
+        self._infer_sample_size = infer_sample_size
+        self._fail_on_error = fail_on_error
         self._result = None
 
     def __enter__(self) -> "_CsvReader":
@@ -70,6 +73,8 @@ class _CsvReader:
             delimiter=self._delimiter,
             has_header=self._has_header,
             use_threads=self._use_threads,
+            infer_sample_size=self._infer_sample_size,
+            fail_on_error=self._fail_on_error,
         )
         if not result["success"]:
             raise RuntimeError("CSV read failed")
@@ -84,13 +89,19 @@ def read_csv(
     delimiter: str = ",",
     has_header: bool = True,
     use_threads: bool = True,
+    infer_sample_size: int = 128,
+    fail_on_error: bool = True,
 ) -> _CsvReader:
     """Open a CSV file or buffer for reading.
 
     Returns a context manager that yields one Morsel of the (projected, filtered) result.
     predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=.
+    infer_sample_size: non-null values per projected column sampled to sniff its type.
+    fail_on_error: True (default) raises RuntimeError on a post-sample-window value that
+    doesn't fit its column's sniffed type; False treats that value as NULL instead.
     """
-    return _CsvReader(source, columns, predicates, delimiter, has_header, use_threads)
+    return _CsvReader(source, columns, predicates, delimiter, has_header, use_threads,
+                       infer_sample_size, fail_on_error)
 
 
 def read_metadata(source: Source) -> CsvMetadata:

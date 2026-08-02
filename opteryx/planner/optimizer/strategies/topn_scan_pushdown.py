@@ -45,6 +45,7 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
 
     # the HeapSort it targets is created by OperatorFusionStrategy
     requires = ("heapsort-fused",)
+    provides = ("topn-scan-pushdown",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:

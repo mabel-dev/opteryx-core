@@ -121,7 +121,8 @@ cdef inline string _to_std_string(object name):
 def write_parquet(Morsel morsel not None, str compression="zstd",
                   bloom_filters=True, bint dictionary=True,
                   Py_ssize_t max_rows_per_row_group=500000,
-                  Py_ssize_t max_page_bytes=0):
+                  Py_ssize_t max_page_bytes=0,
+                  sorted_by=None, bint sorted_descending=False):
     """Serialize a Morsel to a parquet file (bytes).
 
     compression: "zstd" (default) or "none". Anything else raises ValueError.
@@ -143,6 +144,17 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
         column may need one page while a wide VARCHAR/ARRAY column in the same
         row group needs several. Dictionary-encoded chunks are unaffected
         (single RLE_DICTIONARY page regardless of this setting).
+    sorted_by: name of a column whose values the CALLER asserts are already
+        ordered within every row group written from this morsel (e.g. a
+        clustering key merged from pre-sorted runs). Written verbatim into
+        each row group's parquet sorting_columns footer field — rugo does
+        NOT verify it. A downstream reader only trusts this claim when the
+        file's created_by identifies rugo as the writer (see metadata.cpp);
+        an untrue hint is a correctness bug in the caller, not something
+        this function catches.
+    sorted_descending: sort direction for `sorted_by` (default ascending).
+        nulls_first is implied: True for ascending, False for descending
+        (matches draken's own null-ordering convention).
 
     Supported column types: INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL,
     VARCHAR, NVARCHAR, VARBINARY, DATE32, TIMESTAMP64, TIME32/64, INTERVAL,
@@ -156,27 +168,33 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
     are written bare. ARRAY leaves still widen to INT64/UINT64.
     """
     return _encode(morsel, compression, False, bloom_filters, dictionary,
-                   max_rows_per_row_group, max_page_bytes)[0]
+                   max_rows_per_row_group, max_page_bytes, None,
+                   sorted_by, sorted_descending)[0]
 
 
 def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
                               bloom_filters=True, bint dictionary=True,
                               Py_ssize_t max_rows_per_row_group=500000,
-                              Py_ssize_t max_page_bytes=0):
+                              Py_ssize_t max_page_bytes=0,
+                              sorted_by=None, bint sorted_descending=False):
     """Like write_parquet, but also returns per-column min/max bounds.
 
     Returns (data_bytes, bounds) where bounds is {col_index: (min, max)} of
     typed Python values for bound-eligible plain columns (INT64/FLOAT64/BOOL/
     UTF8 string). Logical-typed and VARBINARY columns are omitted.
     Note: bounds are only populated for single-row-group files.
+
+    sorted_by / sorted_descending: see write_parquet.
     """
     return _encode(morsel, compression, True, bloom_filters, dictionary,
-                   max_rows_per_row_group, max_page_bytes)
+                   max_rows_per_row_group, max_page_bytes, None,
+                   sorted_by, sorted_descending)
 
 
 cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filters,
              bint use_dict=True, Py_ssize_t max_rows_per_row_group=500000,
-             Py_ssize_t max_page_bytes=0, object stream_writer=None):
+             Py_ssize_t max_page_bytes=0, object stream_writer=None,
+             object sorted_by=None, bint sorted_descending=False):
     cdef int codec
     # Resolve the bloom-filter request: all-eligible / none / a name set.
     cdef bint bloom_all = (bloom_filters is True)
@@ -187,6 +205,11 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         bloom_names = set()
         for _bn in bloom_filters:
             bloom_names.add(_bn.decode("utf-8") if isinstance(_bn, bytes) else _bn)
+    # Resolve the sort-order hint's column name once (caller-asserted, not
+    # verified — see write_parquet's docstring).
+    cdef str sorted_by_name = None
+    if sorted_by is not None:
+        sorted_by_name = sorted_by.decode("utf-8") if isinstance(sorted_by, bytes) else sorted_by
     if compression == "zstd":
         codec = CODEC_ZSTD
     elif compression == "none" or compression == "uncompressed":
@@ -1069,6 +1092,14 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 nm = nm.decode("utf-8") if isinstance(nm, bytes) else nm
                 ci.bloom = nm in bloom_names
 
+        if sorted_by_name is not None:
+            nm = names[i]
+            nm = nm.decode("utf-8") if isinstance(nm, bytes) else nm
+            if nm == sorted_by_name:
+                ci.sorted_hint = True
+                ci.sorted_descending = sorted_descending
+                ci.sorted_nulls_first = not sorted_descending
+
         kinds.append((<int>ci.type, bool(ci.is_utf8), <int>ci.logical))
         cols.push_back(ci)
 
@@ -1145,11 +1176,14 @@ cdef class _StreamingParquetWriter:
     cdef object _bloom_filters
     cdef bint _dictionary
     cdef Py_ssize_t _max_page_bytes
+    cdef object _sorted_by
+    cdef bint _sorted_descending
     cdef bint _closed
     cdef bint _finished
 
     def __cinit__(self, object sink, str compression="zstd", object bloom_filters=True,
-                  bint dictionary=True, Py_ssize_t max_page_bytes=0):
+                  bint dictionary=True, Py_ssize_t max_page_bytes=0,
+                  object sorted_by=None, bint sorted_descending=False):
         if not callable(sink):
             raise TypeError("open_parquet_writer: sink must be a callable taking bytes")
         cdef int codec
@@ -1166,6 +1200,8 @@ cdef class _StreamingParquetWriter:
         self._bloom_filters = bloom_filters
         self._dictionary = dictionary
         self._max_page_bytes = max_page_bytes
+        self._sorted_by = sorted_by
+        self._sorted_descending = sorted_descending
         self._closed = False
         self._finished = False
         self._w = new StreamingParquetWriter(codec, 3, <size_t>max_page_bytes)
@@ -1198,7 +1234,8 @@ cdef class _StreamingParquetWriter:
         if morsel._num_columns() == 0:
             raise ValueError("write_row_group: morsel has no columns")
         _encode(morsel, self._compression, False, self._bloom_filters,
-                self._dictionary, 0, self._max_page_bytes, stream_writer=self)
+                self._dictionary, 0, self._max_page_bytes, stream_writer=self,
+                sorted_by=self._sorted_by, sorted_descending=self._sorted_descending)
 
     def close(self):
         """Write the footer + trailing PAR1 and finish. Idempotent."""
@@ -1228,7 +1265,8 @@ cdef class _StreamingParquetWriter:
 
 
 def open_parquet_writer(sink, str compression="zstd", bloom_filters=True,
-                        bint dictionary=True, Py_ssize_t max_page_bytes=0):
+                        bint dictionary=True, Py_ssize_t max_page_bytes=0,
+                        sorted_by=None, bint sorted_descending=False):
     """Open a streaming, constant-memory parquet writer.
 
     `sink` is a callable taking bytes; the writer calls it with each chunk of
@@ -1241,24 +1279,26 @@ def open_parquet_writer(sink, str compression="zstd", bloom_filters=True,
 
     compression ("zstd"/"none"), bloom_filters, dictionary and max_page_bytes
     match write_parquet and apply to every row group. Every batch must share the
-    same column schema.
+    same column schema. sorted_by / sorted_descending: see write_parquet — the
+    hint applies to every row group written by this writer.
     """
     return _StreamingParquetWriter(sink, compression, bloom_filters, dictionary,
-                                   max_page_bytes)
+                                   max_page_bytes, sorted_by, sorted_descending)
 
 
 def write_parquet_stream(morsel_iter, sink, str compression="zstd",
                          bloom_filters=True, bint dictionary=True,
-                         Py_ssize_t max_page_bytes=0):
+                         Py_ssize_t max_page_bytes=0,
+                         sorted_by=None, bint sorted_descending=False):
     """Stream an iterable of Morsels to a byte-chunk `sink` as one parquet file.
 
     Thin wrapper over open_parquet_writer: one row group per yielded morsel,
     constant memory. Empty morsels (no rows) are skipped. Returns the number of
-    row groups written.
+    row groups written. sorted_by / sorted_descending: see write_parquet.
     """
     cdef Py_ssize_t n = 0
     writer = _StreamingParquetWriter(sink, compression, bloom_filters, dictionary,
-                                     max_page_bytes)
+                                     max_page_bytes, sorted_by, sorted_descending)
     with writer:
         for morsel in morsel_iter:
             if morsel is None or morsel.num_rows == 0:

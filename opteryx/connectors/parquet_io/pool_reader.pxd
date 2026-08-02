@@ -36,6 +36,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         void* codes          # DK_VARCHAR_DICT: uint32 code per row
         uint32_t data_length # DK_VARCHAR_DICT: unique-value slot count
         bint dict_sorted     # dict shapes: `data` is ascending (is_sorted)
+        bint row_sorted      # clustering hint: row order sorted (any shape), trust-gated
+        bint row_sorted_descending
         void* keyhash        # E37: per-data-element hash seed (uint64), or NULL
         bint payloads_elided # 1 = long-form payload bytes never materialized
 

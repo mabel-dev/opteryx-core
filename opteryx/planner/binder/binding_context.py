@@ -22,6 +22,12 @@ class BindingContext:
     Attributes:
         schemas: Dict[str, Any]
             Data schemas available during the binding phase.
+        manifests: Dict[str, Any]
+            Bound Manifest objects, keyed by relation alias — populated by
+            visit_scan alongside `schemas` and consumed by visit_show_manifest
+            (SHOW MANIFEST FOR). Not deep-copied like `schemas`: a Manifest
+            holds native draken vector handles that read-only consumers share
+            rather than clone.
         query_id: str
             Query ID.
         connection: ExecutionContext
@@ -46,6 +52,7 @@ class BindingContext:
     relations: Dict[str, str]
     telemetry: QueryTelemetry
     outer_schemas: Dict[str, Any] = field(default_factory=dict)
+    manifests: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def initialize(cls, query_id: str, execution_context=None) -> "BindingContext":
@@ -87,6 +94,7 @@ class BindingContext:
             # own schema objects (identity comparisons downstream rely on
             # those being the same objects).
             outer_schemas=self.outer_schemas,
+            manifests={k: v for k, v in self.manifests.items()},
         )
 
     def open_correlated_scope(self) -> "BindingContext":

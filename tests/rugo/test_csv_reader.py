@@ -347,3 +347,86 @@ def test_returns_dict_with_expected_keys():
     assert "column_names" in r
     assert "num_rows" in r
     assert "columns" in r
+
+
+# ---------------------------------------------------------------------------
+# Type-mismatch past the sniff sample window (infer_sample_size / fail_on_error)
+#
+# sniff_csv_column_types only samples the first `infer_sample_size` non-null
+# values per column; a later value that doesn't fit that sniffed type used to
+# be silently coerced to 0 (int64/float64 columns) instead of erroring or
+# nulling. Fixed to fail loud by default, or null the value under
+# fail_on_error=False.
+# ---------------------------------------------------------------------------
+
+
+def _late_mismatch_csv(good_rows=500, bad_value="notanumber"):
+    header = "id,val\n"
+    body = "\n".join(f"{i},{i}" for i in range(good_rows))
+    return (header + body + f"\n{good_rows},{bad_value}\n").encode()
+
+
+def test_late_int_mismatch_raises_by_default():
+    csv = _late_mismatch_csv()
+    with pytest.raises(RuntimeError, match="val"):
+        read_csv(csv, infer_sample_size=3)
+
+
+def test_late_int_mismatch_names_column_and_value_in_error():
+    csv = _late_mismatch_csv(bad_value="notanumber")
+    with pytest.raises(RuntimeError, match="notanumber"):
+        read_csv(csv, infer_sample_size=3)
+
+
+def test_late_int_mismatch_nulled_when_fail_on_error_false():
+    csv = _late_mismatch_csv(good_rows=10)
+    r = read_csv(csv, infer_sample_size=3, fail_on_error=False)
+    assert r["success"]
+    val_col = _to_list(r["columns"][1])
+    assert val_col[-1] is None
+    assert val_col[:-1] == list(range(10))
+
+
+def test_late_float_mismatch_raises_by_default():
+    header = "id,val\n"
+    body = "\n".join(f"{i},{i}.5" for i in range(20))
+    csv = (header + body + "\n20,notafloat\n").encode()
+    with pytest.raises(RuntimeError, match="val"):
+        read_csv(csv, infer_sample_size=3)
+
+
+def test_mismatch_within_sample_window_widens_to_varchar_not_error():
+    # A mismatching value seen DURING sniffing (not past the window) just
+    # widens the column to VARCHAR -- this is pre-existing, correct behavior,
+    # not the bug this fix addresses.
+    csv = b"id,val\n1,10\n2,notanumber\n3,30\n"
+    r = read_csv(csv, infer_sample_size=128)
+    assert r["success"]
+    assert _to_list(r["columns"][1]) == ["10", "notanumber", "30"]
+
+
+def test_infer_sample_size_is_respected():
+    # With a large sample window, the same file that fails with a small window
+    # succeeds because the offending value falls inside the sniff sample.
+    csv = _late_mismatch_csv(good_rows=5, bad_value="6")
+    r = read_csv(csv, infer_sample_size=128)
+    assert r["success"]
+    assert _to_list(r["columns"][1])[-1] == 6
+
+
+def test_invalid_infer_sample_size_rejected():
+    with pytest.raises(ValueError):
+        read_csv(b"a\n1\n", infer_sample_size=0)
+    with pytest.raises(ValueError):
+        read_csv(b"a\n1\n", infer_sample_size=-1)
+
+
+def test_late_mismatch_with_threading_still_raises():
+    # Exercises the multi-threaded build path (default use_threads=True with
+    # enough rows to split across threads) -- a mismatch discovered on a
+    # worker thread must still propagate as a Python exception, and must not
+    # crash/hang from other still-running pool threads referencing freed
+    # stack state.
+    csv = _late_mismatch_csv(good_rows=5000, bad_value="notanumber")
+    with pytest.raises(RuntimeError, match="val"):
+        read_csv(csv, infer_sample_size=3, use_threads=True)

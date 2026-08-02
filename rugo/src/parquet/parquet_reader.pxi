@@ -487,10 +487,17 @@ def read_rowgroup_stats(data):
         {"num_rows": int,
          "columns": [
              {"name": str, "physical_type": str, "logical_type": str,
-              "min": bytes|None, "max": bytes|None, "null_count": int}, ...]}
+              "min": bytes|None, "max": bytes|None, "null_count": int,
+              "is_sorted": bool, "sort_descending": bool,
+              "sort_nulls_first": bool}, ...]}
 
     `min`/`max` are the raw parquet statistic bytes (None when absent); decode
     them to typed values with `decode_value(physical_type, logical_type, raw)`.
+
+    `is_sorted` reflects this row group's parquet sorting_columns claim, but
+    ONLY when the file's created_by footer field identifies rugo as the
+    writer — a file written by any other tool always reads is_sorted=False
+    here, regardless of what its footer claims.
     """
     cdef const uint8_t[::1] mem_view
     if isinstance(data, (bytes, bytearray)):
@@ -525,6 +532,12 @@ def read_rowgroup_stats(data):
                        if fs.row_groups[rg_i].columns[c_i].distinct_count >= 0 else None),
                 "bloom_offset": fs.row_groups[rg_i].columns[c_i].bloom_offset,
                 "bloom_length": fs.row_groups[rg_i].columns[c_i].bloom_length,
+                # Clustering: True only for files rugo itself wrote (see
+                # metadata.cpp's created_by trust gate) — never a foreign tool's
+                # claim, and never a caller-asserted hint verified after the fact.
+                "is_sorted": fs.row_groups[rg_i].columns[c_i].is_sorted,
+                "sort_descending": fs.row_groups[rg_i].columns[c_i].sort_descending,
+                "sort_nulls_first": fs.row_groups[rg_i].columns[c_i].sort_nulls_first,
             })
         row_groups.append({"num_rows": fs.row_groups[rg_i].num_rows, "columns": cols})
     return row_groups

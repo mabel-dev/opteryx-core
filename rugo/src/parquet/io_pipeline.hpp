@@ -147,6 +147,13 @@ struct ColumnOut {
     void*    codes = nullptr;        // DK_VARCHAR_DICT: uint32 code per row
     uint32_t data_length = 0;        // DK_VARCHAR_DICT: number of unique-value slots
     bool     dict_sorted = false;    // dict shapes: `data` is ascending (is_sorted)
+    // Row-group-level clustering hint (rugo parquet sorting_columns, trusted
+    // only from a rugo-written file — see metadata.cpp's created_by gate), NOT
+    // the dictionary-value-array concept above. Applies to any direct_kind, not
+    // just dict shapes. Copied verbatim from ColumnStats.is_sorted/sort_descending
+    // where this ColumnOut is built (col_stats already in scope there).
+    bool     row_sorted = false;
+    bool     row_sorted_descending = false;
     // E37 carried key-hash: per-data-element hash seed (str_hash_seed) computed
     // during slot build, one uint64 per slot (plain: length; dict: data_length).
     // draken_vector_own_string* COPIES it, so unlike the buffers above this is NOT
@@ -1710,6 +1717,12 @@ class ParquetIOPipeline {
                 }
 
                 ColumnOut cout;
+                // Clustering hint: copied from this row group's own footer claim
+                // (already trust-gated by metadata.cpp's created_by check), applies
+                // regardless of which branch below (direct/pool) ends up building
+                // this column.
+                cout.row_sorted = col_stats.is_sorted;
+                cout.row_sorted_descending = col_stats.sort_descending;
                 // Direct-path logical gate (Stage 4a). Plain numerics + boolean +
                 // int128 DECIMAL128 go direct as their physical kind. DATE and
                 // TIMESTAMP decode to a physical int32/int64 stream and are

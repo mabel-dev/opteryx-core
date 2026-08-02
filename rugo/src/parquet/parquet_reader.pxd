@@ -60,6 +60,11 @@ cdef extern from "metadata.hpp":
         # FIXED_LEN_BYTE_ARRAY width in bytes (0 for other physical types)
         int32_t type_length
 
+        # Clustering (trusted only for rugo-written files; see metadata.cpp)
+        bint is_sorted
+        bint sort_descending
+        bint sort_nulls_first
+
     cdef cppclass RowGroupStats:
         long long num_rows
         long long total_byte_size

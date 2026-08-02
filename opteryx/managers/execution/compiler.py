@@ -644,6 +644,16 @@ class _Compiler:
         Same shape as _project_agg_operands, which hoists SUM(a * b) for the same
         reason: the consumer takes a column, so give it one."""
         for node_ in eval_nodes or []:
+            sc = getattr(node_, "schema_column", None)
+            if sc is not None and sc.identity is not None and sc.identity in layout:
+                # Already a materialized column in the incoming stream — e.g. a
+                # GROUP BY ALL key expression re-read in the final projection, which
+                # shares the AST node with the key already computed pre-aggregate.
+                # Descending into its subtree would chase an inner ARRAY operand
+                # (e.g. SPLIT(name,'/')) back to a raw source column the aggregate
+                # has already legitimately dropped. Same check _add_computed's
+                # compile loop applies per-node, just needed here first too.
+                continue
             layout = self._hoist_array_in_tree(p, node_, layout)
         return layout
 
@@ -1962,7 +1972,10 @@ class _Compiler:
         # -- read_morsels() streams newline-chunk Morsels out of rugo, and every
         # one is buffered here before native execution starts (same legitimacy as
         # the virtual datasets above; true native streaming is a later stage).
-        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode"):
+        # CsvReadNode (READ_CSV): same story, except read_morsels() yields one
+        # whole-file Morsel per file rather than one per newline-chunk -- rugo's
+        # CSV reader has no chunked entry point (see CsvReadNode's docstring).
+        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")

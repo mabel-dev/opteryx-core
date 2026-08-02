@@ -339,6 +339,12 @@ struct NativeScanColumnBuilder {
             ? draken_vector_from_dict(payload, data_length,
                                       static_cast<const uint32_t*>(codes), length, dtype, validity)
             : draken_vector_from_dense(payload, length, dtype, validity);
+        // Clustering hint (rugo sorting_columns, trust-gated in metadata.cpp) — a
+        // DATE/TIMESTAMP column is a very plausible clustering key. See the plain
+        // numeric branch in build_column() for the same treatment.
+        if (result.columns[i].row_sorted)
+            v.flags |= DRAKEN_ROW_SORTED |
+                       (result.columns[i].row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
         out.own = std::make_shared<VectorOwner>(v, std::move(data_buf), std::move(val_buf),
                                                  std::move(codes_buf));
         if (kind == LC_TIMESTAMP) {
@@ -448,7 +454,9 @@ struct NativeScanColumnBuilder {
                                     static_cast<uint8_t*>(arena), arena_len,
                                     static_cast<uint32_t*>(codes), length,
                                     validity, string_type_for(i), out,
-                                    result.columns[i].dict_sorted, kh);
+                                    result.columns[i].dict_sorted, kh,
+                                    result.columns[i].row_sorted,
+                                    result.columns[i].row_sorted_descending);
             return true;
         }
         if (dk == rugo::DK_VARCHAR) {
@@ -472,7 +480,9 @@ struct NativeScanColumnBuilder {
             emit_dense_string_column(static_cast<DrakenStringSlot*>(slots), length,
                                      static_cast<uint8_t*>(arena), arena_len,
                                      validity, string_type_for(i), out, kh,
-                                     result.columns[i].payloads_elided);
+                                     result.columns[i].payloads_elided,
+                                     result.columns[i].row_sorted,
+                                     result.columns[i].row_sorted_descending);
             return true;
         }
         // WP-11: a projected int64 (or widened-int32) column the plan flags as
@@ -506,6 +516,12 @@ struct NativeScanColumnBuilder {
         } else {
             v = draken_vector_from_dense(data, length, dtype, validity);
         }
+        // Clustering hint (rugo sorting_columns, trust-gated in metadata.cpp).
+        // Applies to any shape, unlike DRAKEN_DICT_KEYS_SORTED above, so it is
+        // unconditional here (not gated on is_numeric_dict_kind).
+        if (result.columns[i].row_sorted)
+            v.flags |= DRAKEN_ROW_SORTED |
+                       (result.columns[i].row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
         out.own = std::make_shared<VectorOwner>(v, std::move(data_buf), std::move(val_buf),
                                                  std::move(codes_buf));
         if (dk == rugo::DK_DECIMAL128) {

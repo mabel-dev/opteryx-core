@@ -7,6 +7,8 @@
 #include <cstring>
 #include <thread>
 #include <future>
+#include <exception>
+#include <stdexcept>
 
 #include "draken_bridge.h"
 #include "string_slot.h"
@@ -148,11 +150,9 @@ static void bit_copy(uint8_t* dst, size_t dst_bit_offset,
 }
 
 // ---------------------------------------------------------------------------
-// sniff_csv_column_types — scalar FSM, up to SNIFF_LIMIT non-null per column.
-// Returns one DrakenType per entry in proj_ordinals.
+// sniff_csv_column_types — scalar FSM, up to ctx.sniff_sample_size non-null
+// values per column. Returns one DrakenType per entry in proj_ordinals.
 // ---------------------------------------------------------------------------
-
-static constexpr uint32_t SNIFF_LIMIT = 128;
 
 static std::vector<DrakenType> sniff_csv_column_types(
     const uint8_t*               body,
@@ -195,7 +195,7 @@ static std::vector<DrakenType> sniff_csv_column_types(
     auto process_field = [&](uint32_t value_end) {
         while (req_idx < np && proj_ordinals[req_idx] < current_col) ++req_idx;
 
-        if (req_idx < np && proj_ordinals[req_idx] == current_col && seen[req_idx] < SNIFF_LIMIT) {
+        if (req_idx < np && proj_ordinals[req_idx] == current_col && seen[req_idx] < ctx.sniff_sample_size) {
             uint32_t raw_len = (value_end > field_start) ? (value_end - field_start) : 0u;
             if (raw_len > UINT16_MAX) raw_len = UINT16_MAX;
             const bool is_null = (raw_len == 0 && !was_quoted);
@@ -226,7 +226,7 @@ static std::vector<DrakenType> sniff_csv_column_types(
         state       = S::FIELD_START;
         done = true;
         for (size_t i = 0; i < np; ++i)
-            if (types[i] != DRAKEN_VARCHAR && seen[i] < SNIFF_LIMIT) { done = false; break; }
+            if (types[i] != DRAKEN_VARCHAR && seen[i] < ctx.sniff_sample_size) { done = false; break; }
     };
 
     for (size_t i = 0; i < body_len && !done; ++i) {
@@ -360,6 +360,7 @@ static void stream_build_range(
     const std::vector<bool>&     pred_is_int,
     const std::vector<bool>&     pred_is_float,
     const std::vector<std::string>& pred_values,
+    const std::vector<std::string>& proj_col_names,  // ColBuf index -> projected column name
     std::vector<ColBuf>&         bufs)
 {
     const size_t n_req  = req_ords.size();
@@ -403,13 +404,37 @@ static void stream_build_range(
 
             if (buf.type == DRAKEN_INT64) {
                 int64_t v = 0;
-                if (!fp.is_null && fp.len > 0)
-                    rugo::_jsonl::fast_parse_int64(fp.ptr, 0, fp.len - 1, v);
+                if (!fp.is_null && fp.len > 0 &&
+                    !rugo::_jsonl::fast_parse_int64(fp.ptr, 0, fp.len - 1, v)) {
+                    if (!ctx.ignore_errors) {
+                        throw std::runtime_error(
+                            "CSV column '" + proj_col_names[pi] + "' was inferred as INTEGER "
+                            "from its first " + std::to_string(ctx.sniff_sample_size) +
+                            " sampled value(s), but a later value '" +
+                            std::string(reinterpret_cast<const char*>(fp.ptr), fp.len) +
+                            "' does not parse as an integer. Pass ignore_errors=>true to treat "
+                            "such values as NULL instead of failing.");
+                    }
+                    buf.null_bm[bm_byte] &= static_cast<uint8_t>(~(1u << bm_bit));
+                    v = 0;
+                }
                 buf.i64.push_back(v);
             } else if (buf.type == DRAKEN_FLOAT64) {
                 double v = 0.0;
-                if (!fp.is_null && fp.len > 0)
-                    rugo::_jsonl::fast_parse_float64(fp.ptr, 0, fp.len - 1, v);
+                if (!fp.is_null && fp.len > 0 &&
+                    !rugo::_jsonl::fast_parse_float64(fp.ptr, 0, fp.len - 1, v)) {
+                    if (!ctx.ignore_errors) {
+                        throw std::runtime_error(
+                            "CSV column '" + proj_col_names[pi] + "' was inferred as FLOAT "
+                            "from its first " + std::to_string(ctx.sniff_sample_size) +
+                            " sampled value(s), but a later value '" +
+                            std::string(reinterpret_cast<const char*>(fp.ptr), fp.len) +
+                            "' does not parse as a number. Pass ignore_errors=>true to treat "
+                            "such values as NULL instead of failing.");
+                    }
+                    buf.null_bm[bm_byte] &= static_cast<uint8_t>(~(1u << bm_bit));
+                    v = 0.0;
+                }
                 buf.f64.push_back(v);
             } else {
                 // VARCHAR
@@ -840,12 +865,17 @@ StreamResult build_columns_streaming(
             thread_bufs[t].emplace_back(col_types[c]);
     }
 
+    // ColBuf index -> projected column name, for type-mismatch error messages.
+    std::vector<std::string> proj_col_names(n_proj);
+    for (size_t i = 0; i < n_proj; ++i)
+        proj_col_names[i] = column_names[proj_ordinals[i]];
+
     auto run_thread = [&](size_t t) {
         stream_build_range(
             body, ranges[t].start, ranges[t].end,
             ctx, request_ordinals, proj_idx_map, pred_idx_map,
             pred_i64, pred_f64, pred_is_int, pred_is_float, pred_values,
-            thread_bufs[t]);
+            proj_col_names, thread_bufs[t]);
     };
 
     if (nt <= 1) {
@@ -856,7 +886,21 @@ StreamResult build_columns_streaming(
         futs.reserve(nt);
         for (size_t t = 0; t < nt; ++t)
             futs.push_back(pool.submit_task([&, t]() { run_thread(t); }));
-        for (auto& f : futs) f.get();
+        // Drain every future before propagating -- a thread_build_range task
+        // can throw on a type mismatch (see commit_row); if we rethrow after
+        // only the first future without waiting on the rest, still-running
+        // pool threads keep referencing this frame's locals (ctx, thread_bufs,
+        // ...) by capture after it unwinds -- a use-after-free, not just a
+        // missed result.
+        std::exception_ptr first_exc;
+        for (auto& f : futs) {
+            try {
+                f.get();
+            } catch (...) {
+                if (!first_exc) first_exc = std::current_exception();
+            }
+        }
+        if (first_exc) std::rethrow_exception(first_exc);
     }
 
     // Count survivors and finalize

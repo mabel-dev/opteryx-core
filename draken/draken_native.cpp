@@ -2307,6 +2307,33 @@ extern "C" int draken_vector_mark_dict_sorted(PyObject* obj) {
     return 0;
 }
 
+// draken_vector_mark_row_sorted — OR DRAKEN_ROW_SORTED (+DESC) onto a Vector's
+// flags. Unlike mark_dict_sorted, this is meaningful for every shape (dense
+// included), so there is no shape gate. Pure hint: kernels/operators fall back
+// to the uniform, order-agnostic path if unset, and must self-verify or fall
+// back before relying on it for a correctness-affecting decision even when set.
+extern "C" int draken_vector_mark_row_sorted(PyObject* obj, int descending) {
+    if (!obj || obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_vector_mark_row_sorted: expected Vector, got None");
+        return -1;
+    }
+    nb::handle h(obj);
+    if (!nb::isinstance<VectorOwner>(h)) {
+        PyErr_Format(PyExc_TypeError,
+            "draken_vector_mark_row_sorted: expected Vector, got %.100s",
+            Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    DrakenVector& v = nb::inst_ptr<VectorOwner>(h)->vec;
+    v.flags |= DRAKEN_ROW_SORTED;
+    if (descending)
+        v.flags |= DRAKEN_ROW_SORTED_DESC;
+    else
+        v.flags &= ~static_cast<uint8_t>(DRAKEN_ROW_SORTED_DESC);
+    return 0;
+}
+
 // draken_array_child_unwrap — borrowed child DrakenVector* from a DRAKEN_ARRAY Vector.
 //
 // Fails loud on any bad input: TypeError for non-Vector, RuntimeError for non-array
@@ -5548,16 +5575,27 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
         }
     }
 
-    if (is_varchar_family(type))
-        return concat_string(parts, type);
-    if (type == DRAKEN_BOOL)
-        return concat_bool(parts);
-    if (type == DRAKEN_ARRAY)
-        return concat_array(parts);
-    const size_t itemsize = concat_fixed_itemsize(type, lt);
-    if (itemsize == 0u)
-        throw std::invalid_argument("concat: unsupported type");
-    return concat_fixed(parts, itemsize, type, lt);
+    VectorOwner result = [&]() -> VectorOwner {
+        if (is_varchar_family(type))
+            return concat_string(parts, type);
+        if (type == DRAKEN_BOOL)
+            return concat_bool(parts);
+        if (type == DRAKEN_ARRAY)
+            return concat_array(parts);
+        const size_t itemsize = concat_fixed_itemsize(type, lt);
+        if (itemsize == 0u)
+            throw std::invalid_argument("concat: unsupported type");
+        return concat_fixed(parts, itemsize, type, lt);
+    }();
+    // Concatenation is NOT provably row-order-preserving from index shape alone
+    // the way slice/mask/identity-take are: whether the result stays sorted
+    // depends on whether part[i]'s last value precedes part[i+1]'s first value,
+    // a real value comparison this call site does not make. Every builder above
+    // already returns flags==0 by fresh construction, but clear explicitly here
+    // — the ONE place every concat path funnels through — so that invariant is a
+    // stated decision, not an accident of "nothing happens to set it today".
+    result.vec.flags &= static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -5864,6 +5902,14 @@ static VectorOwner vector_slice_impl(const VectorOwner& v, uint32_t start, uint3
     if ((v.vec.flags & DRAKEN_DICT_KEYS_SORTED) && draken_is_dict(&result.vec) &&
         result.vec.data_length == v.vec.data_length)
         result.vec.flags |= DRAKEN_DICT_KEYS_SORTED;
+    // A contiguous row-range slice of a row-sorted vector is still row-sorted
+    // (a sub-range of a monotonic sequence is monotonic) — carry ROW_SORTED
+    // (+DESC) through by the same reasoning as DICT_KEYS_SORTED above. Without
+    // this, execute_to_morsels' chunking (Morsel.slice, always applied even to
+    // a full-length no-op slice) silently drops the flag before any caller of
+    // the standard query API ever sees it.
+    if (v.vec.flags & DRAKEN_ROW_SORTED)
+        result.vec.flags |= (v.vec.flags & (DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
     return result;
 }
 
@@ -5885,7 +5931,14 @@ static std::vector<int32_t> mask_indices(const DrakenVector& m) {
 static VectorOwner vector_mask_impl(const VectorOwner& v, const VectorOwner& m) {
     std::vector<int32_t> idx_vec = mask_indices(m.vec);
     // vector_take_impl's type switch is identical to the old inline body.
-    return vector_take_impl(v, idx_vec.data(), static_cast<uint32_t>(idx_vec.size()));
+    VectorOwner result = vector_take_impl(v, idx_vec.data(), static_cast<uint32_t>(idx_vec.size()));
+    // mask_indices() walks rows 0..n-1 in order and only ever appends — the
+    // survivor index set is strictly increasing by construction (a filter drops
+    // rows, it never reorders survivors) — so a row-sorted source stays
+    // row-sorted. Same reasoning as vector_slice_impl's carry-through above.
+    if (v.vec.flags & DRAKEN_ROW_SORTED)
+        result.vec.flags |= (v.vec.flags & (DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
+    return result;
 }
 
 // draken_vector_take_buffer — C-bridge take over a raw int32 index buffer.
@@ -6177,6 +6230,12 @@ static CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
     for (const CxxColumn& col : m.columns) {
         CxxColumn nc;
         nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx_vec.data(), n));
+        // mask_indices() is strictly increasing (a filter never reorders
+        // survivors) — carry ROW_SORTED through, same reasoning as
+        // vector_slice_impl/vector_mask_impl above.
+        if (col.own->vec.flags & DRAKEN_ROW_SORTED)
+            nc.own->vec.flags |= (col.own->vec.flags &
+                                  (DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
         nc.view = nc.own->vec;
         out.columns.push_back(std::move(nc));
     }
@@ -6215,6 +6274,12 @@ static CxxMorsel cxx_mask_with_consts(const CxxMorsel& m, const DrakenVector& ma
         } else {
             nc.own = std::make_shared<VectorOwner>(
                 vector_take_impl(*m.columns[ci].own, idx_vec.data(), n));
+            // mask_indices() is strictly increasing — see cxx_mask above. Not
+            // applicable to the const-broadcast branch (that column isn't
+            // gathered from source order at all).
+            if (m.columns[ci].own->vec.flags & DRAKEN_ROW_SORTED)
+                nc.own->vec.flags |= (m.columns[ci].own->vec.flags &
+                                      (DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
         }
         nc.view = nc.own->vec;
         out.columns.push_back(std::move(nc));
@@ -6249,6 +6314,15 @@ static CxxMorsel cxx_morsel_materialize_native(const CxxMorsel& m) {
     for (const CxxColumn& col : m.columns) {
         CxxColumn nc;
         nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx_vec.data(), n));
+        // idx_vec is the identity permutation (i -> i) — this is ownership-only
+        // reshuffling, not a reorder, so a row-sorted source stays row-sorted.
+        // Without this, a morsel pulled through the older Python-trampoline scan
+        // path (_scan_pull_run_inner in _operators.pyx, which always calls this
+        // before the morsel crosses into the C++ engine) would silently lose the
+        // flag even when the native scan producer set it.
+        if (col.own->vec.flags & DRAKEN_ROW_SORTED)
+            nc.own->vec.flags |= (col.own->vec.flags &
+                                  (DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
         nc.view = nc.own->vec;
         out.columns.push_back(std::move(nc));
     }
@@ -8616,6 +8690,12 @@ NB_MODULE(draken_native, m) {
         })
         .def_prop_ro("dict_keys_sorted", [](const VectorOwner& v) {
             return draken_dict_is_sorted(&v.vec) != 0;
+        })
+        .def_prop_ro("row_sorted", [](const VectorOwner& v) {
+            return draken_vector_is_row_sorted(&v.vec) != 0;
+        })
+        .def_prop_ro("row_sorted_descending", [](const VectorOwner& v) {
+            return draken_vector_row_sorted_descending(&v.vec) != 0;
         })
         .def_prop_ro("data_length", [](const VectorOwner& v) {
             return v.vec.data_length;

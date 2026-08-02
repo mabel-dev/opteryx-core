@@ -28,6 +28,7 @@ cdef extern from "platform.h" namespace "opteryx_platform":
     uint64_t get_physical_memory_total_bytes() noexcept
     uint64_t get_free_memory_bytes() noexcept
     uint64_t get_used_memory_bytes() noexcept
+    uint64_t get_cgroup_memory_limit_bytes() noexcept
     uint64_t get_page_size_bytes() noexcept
     int get_cpu_count() noexcept
     int is_macos() noexcept
@@ -57,6 +58,11 @@ def free_memory_bytes() -> int:
 def used_memory_bytes() -> int:
     """Used memory in bytes (physical - free)."""
     return int(get_used_memory_bytes())
+
+
+def cgroup_memory_limit_bytes() -> int:
+    """Cgroup memory limit in bytes; 0 when unconstrained or undetected."""
+    return int(get_cgroup_memory_limit_bytes())
 
 
 def page_size_bytes() -> int:

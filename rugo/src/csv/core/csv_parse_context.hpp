@@ -31,6 +31,24 @@ struct CsvParseContext {
     bool has_header = true;
 
     // ---------------------------------------------------------------------------
+    // Type inference
+    // ---------------------------------------------------------------------------
+
+    // Number of non-null values per projected column sniff_csv_column_types()
+    // samples before settling on a type (INT64 -> FLOAT64 -> VARCHAR widening).
+    // A value past this sample window that doesn't fit the sniffed type is a
+    // type mismatch -- see `ignore_errors` below for how that is handled.
+    uint32_t sniff_sample_size = 128;
+
+    // A post-sniff value that doesn't parse as the column's sniffed type
+    // (e.g. sniffed INT64, but a later row has "abc"): false (default) fails
+    // the whole read loud, naming the column and the offending value; true
+    // treats that single value as NULL instead. Never silently coerced to 0 --
+    // that was a pre-existing bug (see rugo/src/csv/core/csv_column_builder.cpp
+    // commit_row), not a supported behavior.
+    bool ignore_errors = false;
+
+    // ---------------------------------------------------------------------------
     // Pushdown
     // ---------------------------------------------------------------------------
 

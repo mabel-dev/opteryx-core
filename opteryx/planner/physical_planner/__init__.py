@@ -76,6 +76,36 @@ def _translate_jsonl_predicates(predicates, physical_by_identity):
     return translated
 
 
+def _translate_csv_predicates(predicates, physical_by_identity):
+    """Translate pushed-down predicate condition Nodes into rugo's
+    ``(physical_column_name, op, value)`` tuple form (see
+    opteryx.connectors.csv_io.CSV_OP_XLAT).
+
+    Identical shape/reasoning to ``_translate_jsonl_predicates`` above -- every
+    entry here was already gated by CsvPredicatePushable.can_push at optimizer
+    time to be exactly a `column OP literal` COMPARISON_OPERATOR with op in
+    CSV_OP_XLAT.
+    """
+    from opteryx.connectors.csv_io import CSV_OP_XLAT
+
+    translated = []
+    for condition in predicates or []:
+        left, right = condition.left, condition.right
+        if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
+            ident, literal, op = left, right, condition.value
+        elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
+            ident, literal, op = right, left, _INVERT_COMPARISON_OP[condition.value]
+        else:  # pragma: no cover -- can_push only admits this shape
+            raise InvalidInternalStateError(
+                "READ_CSV received a pushed predicate that is not a plain "
+                "column-vs-literal comparison; CsvPredicatePushable.can_push "
+                "should have declined it."
+            )
+        physical_name = physical_by_identity[ident.schema_column.identity]
+        translated.append((physical_name, CSV_OP_XLAT[op], literal.value))
+    return translated
+
+
 def _manifest_is_all_parquet(manifest) -> bool:
     """Return True if every file in *manifest* has a .parquet extension.
 
@@ -180,6 +210,20 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
         # already fully resolved.
         node_config = dict(logical_node.properties)
         return registry.create("Parquet Reader", query_properties, **node_config)
+    if logical_node.function == "READ_CSV":
+        # READ_CSV reads each file whole (no chunking -- see CsvReadNode's module
+        # docstring), but the projection/predicate translation shape is otherwise
+        # identical to READ_JSONL above.
+        node_config = dict(logical_node.properties)
+        physical_by_identity = node_config.get("csv_physical_by_identity") or {}
+        node_config["csv_physical_columns"] = [
+            physical_by_identity[column.schema_column.identity]
+            for column in (logical_node.columns or [])
+        ]
+        node_config["csv_predicates"] = _translate_csv_predicates(
+            node_config.get("predicates"), physical_by_identity
+        )
+        return registry.create("CSV Reader", query_properties, **node_config)
     return registry.create("Function Dataset", query_properties, **logical_node.properties)
 
 
@@ -303,6 +347,10 @@ def _create_show_columns_node(logical_node, query_properties, registry):
     return registry.create("Show Columns", query_properties, **logical_node.properties)
 
 
+def _create_show_manifest_node(logical_node, query_properties, registry):
+    return registry.create("Show Manifest", query_properties, **logical_node.properties)
+
+
 def _create_union_node(logical_node, query_properties, registry):
     return registry.create("Union", query_properties, **logical_node.properties)
 
@@ -356,6 +404,7 @@ _DISPATCH = {
     LogicalPlanStepType.AlterView:        _create_alter_view_node,
     LogicalPlanStepType.DropView:         _create_drop_view_node,
     LogicalPlanStepType.ShowColumns:      _create_show_columns_node,
+    LogicalPlanStepType.ShowManifest:     _create_show_manifest_node,
     LogicalPlanStepType.Union:            _create_union_node,
     LogicalPlanStepType.Window:           _create_window_node,
     LogicalPlanStepType.Unnest:           _create_unnest_node,

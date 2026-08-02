@@ -6,7 +6,7 @@
 """
 Anonymous (no platform credential) GCS access for bare dataset functions.
 
-READ_JSONL and READ_PARQUET, used as table functions (e.g.
+READ_JSONL, READ_PARQUET, and READ_CSV, used as table functions (e.g.
 `SELECT * FROM READ_JSONL('gs://bucket/file.jsonl')`), are bare dataset functions
 with no per-query authorization layer -- unlike catalog-backed table scans
 (opteryx.planner.binder.dataset's visit_scan), which are gated by
@@ -29,8 +29,8 @@ Opteryx makes no allow/deny decision of its own.
 
 Deliberately has no `list_files`: GCS bucket LISTING is a separate IAM permission
 from object GET and is not assumed granted anonymously, so glob patterns over
-gs:// are rejected outright by callers (see the READ_JSONL/READ_PARQUET binder
-branches) rather than silently escalating to an authenticated listing call.
+gs:// are rejected outright by callers (see the READ_JSONL/READ_PARQUET/READ_CSV
+binder branches) rather than silently escalating to an authenticated listing call.
 """
 
 

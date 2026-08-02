@@ -21,6 +21,9 @@ ACTION_MAP = {
     # CREATE OR REPLACE on an existing relation reuses this tier: it has the
     # same blast radius as DROP (the old relation's data/history is gone).
     "DROP": {"owner"},
+    # SHOW MANIFEST FOR exposes file paths and layout (bucket/partition
+    # structure), not just data — stricter than a normal READ.
+    "MANIFEST": {"owner"},
 }
 
 

@@ -149,16 +149,18 @@ def render_function_dataset(node: LogicalPlanNode) -> str:
         return _render_bare_reader(node, "READ_JSONL", "$read_jsonl-")
     if node.function == "READ_PARQUET":
         return _render_bare_reader(node, "READ_PARQUET", "$read_parquet-")
+    if node.function == "READ_CSV":
+        return _render_bare_reader(node, "READ_CSV", "$read_csv-")
     return node.function
 
 
 def _render_bare_reader(node: LogicalPlanNode, label: str, auto_alias_prefix: str) -> str:
-    """READ_JSONL and READ_PARQUET are bare dataset functions with a real backing
-    reader (rugo's JSONL decoder / the native ParquetReadNode), so their plan line
-    carries the same detail a Scan's does -- file path (or glob), columns actually
-    read (projected, plus any filter-only columns not otherwise projected, marked
-    with ~), and any pushed-down predicate -- rather than just the bare function
-    name every other FunctionDataset case renders as.
+    """READ_JSONL, READ_PARQUET, and READ_CSV are bare dataset functions with a
+    real backing reader (rugo's JSONL/CSV decoders / the native ParquetReadNode),
+    so their plan line carries the same detail a Scan's does -- file path (or
+    glob), columns actually read (projected, plus any filter-only columns not
+    otherwise projected, marked with ~), and any pushed-down predicate -- rather
+    than just the bare function name every other FunctionDataset case renders as.
     """
     from opteryx.expression import NodeType, get_all_nodes_of_type
 
@@ -287,6 +289,11 @@ def render_show_columns(node: LogicalPlanNode) -> str:
     full = " FULL" if node.full else ""
     extended = " EXTENDED" if node.extended else ""
     return f"SHOW{full}{extended} COLUMNS ({node.relation})"
+
+
+@register_render(LogicalPlanStepType.ShowManifest)
+def render_show_manifest(node: LogicalPlanNode) -> str:
+    return f"SHOW MANIFEST FOR ({node.relation})"
 
 
 @register_render(LogicalPlanStepType.Subquery)

@@ -72,6 +72,7 @@ from opteryx.planner.optimizer.strategies import (
     SplitConjunctivePredicatesStrategy,
     StatisticsOnlyResponseStrategy,
     TimestampCastSinkStrategy,
+    TopNManifestPruningStrategy,
     TopNScanPushdownStrategy,
     WindowTopKFusionStrategy,
 )
@@ -106,6 +107,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "JoinOrderingStrategy": "disable_join_ordering",
     "JoinPlanningStrategy": "disable_join_planning",
     "JoinRewriteStrategy": "disable_join_rewrite",
+    "LengthOnlyColumnStrategy": "disable_length_only_column",
     "LimitEliminationStrategy": "disable_limit_elimination",
     "LimitFilesPruningStrategy": "disable_limit_files_pruning",
     "LimitPushdownStrategy": "disable_limit_pushdown",
@@ -122,6 +124,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "SplitConjunctivePredicatesStrategy": "disable_split_conjunctive_predicates",
     "StatisticsOnlyResponseStrategy": "disable_statistics_only_response",
     "TimestampCastSinkStrategy": "disable_timestamp_cast_sink",
+    "TopNManifestPruningStrategy": "disable_topn_manifest_pruning",
     "TopNScanPushdownStrategy": "disable_topn_scan_pushdown",
     "WindowTopKFusionStrategy": "disable_window_topk_fusion",
 }
@@ -220,6 +223,7 @@ class OptimizerVisitor:
             DistinctPushdownStrategy(telemetry),
             OperatorFusionStrategy(telemetry),
             TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
+            TopNManifestPruningStrategy(telemetry),  # prune files using topn spec + manifest min/max
             LimitPushdownStrategy(telemetry),
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
             #            EmptyTableStrategy(telemetry),

@@ -64,6 +64,17 @@ const DrakenVector* draken_vector_unwrap(PyObject* obj);
 // TypeError if obj is not a Vector. Pure hint; never changes query answers.
 int draken_vector_mark_dict_sorted(PyObject* obj);
 
+// draken_vector_mark_row_sorted — OR DRAKEN_ROW_SORTED (+ DRAKEN_ROW_SORTED_DESC
+// when `descending`) onto a Vector's flags. Applies to ANY shape (dense
+// included) — unlike mark_dict_sorted this is never a no-op based on shape.
+// Used by the parquet scan to carry a rugo-written file's row-group
+// sorting_columns hint into execution, and by the sort operator to mark its
+// own proven-sorted output. Returns 0 on success, -1 + TypeError if obj is not
+// a Vector. Pure hint; a consumer must self-verify or fall back before relying
+// on it for a correctness-affecting decision — never changes query answers on
+// its own.
+int draken_vector_mark_row_sorted(PyObject* obj, int descending);
+
 // draken_array_child_unwrap — extract the child DrakenVector* of a DRAKEN_ARRAY Vector.
 //
 // obj must be an instance of draken.draken_native.Vector with type DRAKEN_ARRAY.

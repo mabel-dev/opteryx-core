@@ -33,6 +33,7 @@ from .redundant_operators import RedundantOperationsStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
 from .statistics_only_response import StatisticsOnlyResponseStrategy
 from .timestamp_cast_sink import TimestampCastSinkStrategy
+from .topn_manifest_pruning import TopNManifestPruningStrategy
 from .topn_scan_pushdown import TopNScanPushdownStrategy
 from .window_topk_fusion import WindowTopKFusionStrategy
 
@@ -72,6 +73,7 @@ __all__ = [
     "SplitConjunctivePredicatesStrategy",
     "StatisticsOnlyResponseStrategy",
     "TimestampCastSinkStrategy",
+    "TopNManifestPruningStrategy",
     "TopNScanPushdownStrategy",
     "WindowTopKFusionStrategy",
 ]

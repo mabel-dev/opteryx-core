@@ -89,9 +89,17 @@ class FileEntry:
             FileEntry instance
         """
         # Handle different datafile structures
-        # PyIceberg catalog returns Datafile with an 'entry' attribute
-        if isinstance(getattr(datafile, "entry", None), dict):
-            entry = datafile.entry
+        # PyIceberg-style catalogs return Datafile with an 'entry' attribute
+        # carrying the manifest row - a plain dict, or (the current
+        # opteryx_catalog bulk-scan path) an ArrowManifestRow, a dict-like
+        # view over already-materialized columns (see manifest_arrow.py) that
+        # is NOT a dict subclass. Branch on presence, not on isinstance(dict):
+        # every known producer that sets `.entry` supports `.get()`, and a
+        # producer that didn't would be better served by a loud AttributeError
+        # here than by silently falling into the wrong branch below and
+        # returning a FileEntry with no bounds/lengths/null-counts at all.
+        entry = getattr(datafile, "entry", None)
+        if entry is not None:
             file_path = entry.get("file_path")
             record_count = entry.get("record_count", 0)
             file_size = entry.get("file_size_in_bytes", 0)
@@ -184,6 +192,34 @@ class FileEntry:
             elif max_lengths and isinstance(max_lengths, list):
                 max_length_bounds = {i: val for i, val in enumerate(max_lengths) if val is not None}
 
+            # Same field_id-vs-position treatment for null counts — the catalog's
+            # ParquetManifestEntry.to_dict() carries "null_counts" as a positional
+            # list parallel to field_ids, exactly like min_lengths/max_lengths
+            # above (verified against the installed opteryx_catalog package).
+            # Prior to this, from_datafile hardcoded null_value_counts=None for
+            # every catalog-backed FileEntry regardless of what the entry
+            # actually carried, so anything gated on Manifest.get_total_null_count
+            # (e.g. TopNManifestPruningStrategy's NULL-safety check) silently
+            # treated every catalog-backed column as "unknown nullability" and
+            # never fired.
+            catalog_null_counts = entry.get("null_counts")
+            null_value_counts = None
+            if (
+                field_ids
+                and isinstance(field_ids, list)
+                and isinstance(catalog_null_counts, list)
+                and len(field_ids) == len(catalog_null_counts)
+            ):
+                null_value_counts = {
+                    fid: val
+                    for fid, val in zip(field_ids, catalog_null_counts)
+                    if fid is not None and val is not None
+                }
+            elif catalog_null_counts and isinstance(catalog_null_counts, list):
+                null_value_counts = {
+                    i: val for i, val in enumerate(catalog_null_counts) if val is not None
+                }
+
         else:
             # Fallback: try direct attribute access. No known producer of this
             # shape carries string-length stats, so length_bounds stay None —
@@ -191,6 +227,7 @@ class FileEntry:
             # same as any other FileEntry no stats pass has touched.
             min_length_bounds = None
             max_length_bounds = None
+            null_value_counts = None
             file_path = getattr(datafile, "file_path", None)
             record_count = getattr(datafile, "record_count", 0)
             file_size = getattr(datafile, "file_size_in_bytes", 0)
@@ -230,7 +267,7 @@ class FileEntry:
             uncompressed_size_in_bytes=uncompressed_size,
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
-            null_value_counts=None,  # Not available in this format
+            null_value_counts=null_value_counts,
             column_uncompressed_sizes_in_bytes=column_uncompressed_sizes,
             min_values=min_values,
             max_values=max_values,

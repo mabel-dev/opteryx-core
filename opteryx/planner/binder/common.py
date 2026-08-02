@@ -26,6 +26,7 @@ from opteryx.planner.binder.view import (
     visit_create_view,
     visit_drop_view,
     visit_show_columns,
+    visit_show_manifest,
 )
 from opteryx.planner.binder.relation import (
     visit_create_relation,
@@ -144,6 +145,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_show_columns(self, node, context)
+
+    def visit_show_manifest(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_show_manifest(self, node, context)
 
     def visit_create_view(
         self, node: Node, context: BindingContext

@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <thread>
@@ -934,6 +935,25 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
         size_t count = std::min(chunk_rows, total - start);
         MorselPtr m = gather_rows(src, perm, start, count, row_m, row_r, names, err);
         if (err.code != 0) return false;
+        // Each chunk is a contiguous slice of the globally-sorted permutation, so
+        // the PRIMARY (leading) sort key is PROVEN monotonic within it — not a
+        // hint, this operator just produced the fact. Secondary keys are only
+        // ordered within ties of the primary key, not globally, so they are not
+        // marked. Covers every caller of sort_morsels (opteryx's SortSink/TopNSink/
+        // Window operators and the standalone rugo wheel) uniformly, for free.
+        //
+        // CxxColumn.view is a hot-path-only inline COPY of own->vec (see
+        // cxx_morsel.h) — the Python-visible Vector reads own->vec via
+        // to_vectors(), so both copies must be set or the flag is invisible
+        // outside this translation unit despite compiling clean.
+        if (!spec.empty() && spec[0].col_idx < m->columns.size()) {
+            CxxColumn& col = m->columns[spec[0].col_idx];
+            uint8_t bits = DRAKEN_ROW_SORTED | (spec[0].ascending ? 0 : DRAKEN_ROW_SORTED_DESC);
+            uint8_t clear = static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
+            col.view.flags = static_cast<uint8_t>((col.view.flags & clear) | bits);
+            if (col.own)
+                col.own->vec.flags = static_cast<uint8_t>((col.own->vec.flags & clear) | bits);
+        }
         out.push_back(std::move(m));
     }
     return true;

@@ -737,10 +737,23 @@ static void ParseColumnChunk(TInput &in, ColumnStats &out,
   }
 }
 
+// A RowGroup.sorting_columns entry (parquet.thrift SortingColumn), as parsed
+// off the wire before we know whether the file's creator is trusted. Applied
+// to rg.columns[column_idx] only after the whole RowGroup struct has been
+// read, so it does not matter whether field 4 arrives before or after field 1
+// on the wire (our own writer always emits 1 then 4, but a malformed/foreign
+// file is not assumed to).
+struct RawSortingColumn {
+  int32_t column_idx;
+  bool descending;
+  bool nulls_first;
+};
+
 // FIX: correct RowGroup field IDs (columns=1, total_byte_size=2, num_rows=3)
 static void ParseRowGroup(TInput &in, RowGroupStats &rg,
                           const MetadataParseOptions &opts) {
   int16_t last_id = 0;
+  std::vector<RawSortingColumn> raw_sorting_columns;
   while (true) {
     auto fh = ReadFieldHeader(in, last_id);
     if (fh.type == 0)
@@ -763,10 +776,48 @@ static void ParseRowGroup(TInput &in, RowGroupStats &rg,
     case 3:
       rg.num_rows = ReadI64(in);
       break;
+    case 4: { // sorting_columns: list<SortingColumn>
+      auto lh = ReadListHeader(in);
+      raw_sorting_columns.reserve(lh.size);
+      for (uint32_t i = 0; i < lh.size; i++) {
+        RawSortingColumn sc{-1, false, false};
+        int16_t sc_last = 0;
+        while (true) {
+          auto sfh = ReadFieldHeader(in, sc_last);
+          if (sfh.type == 0)
+            break;
+          switch (sfh.id) {
+          case 1:
+            sc.column_idx = ReadI32(in);
+            break;
+          case 2:
+            sc.descending = ReadBool(sfh.type);
+            break;
+          case 3:
+            sc.nulls_first = ReadBool(sfh.type);
+            break;
+          default:
+            SkipField(in, sfh.type);
+            break;
+          }
+        }
+        raw_sorting_columns.push_back(sc);
+      }
+      break;
+    }
     default:
       SkipField(in, fh.type);
       break;
     }
+  }
+
+  for (const auto &sc : raw_sorting_columns) {
+    if (sc.column_idx < 0 || (size_t)sc.column_idx >= rg.columns.size())
+      continue; // malformed/foreign file: out-of-range index, ignored not fatal
+    ColumnStats &cs = rg.columns[(size_t)sc.column_idx];
+    cs.is_sorted = true;
+    cs.sort_descending = sc.descending;
+    cs.sort_nulls_first = sc.nulls_first;
   }
 }
 
@@ -906,8 +957,27 @@ CollectSchemaArtifacts(const std::vector<SchemaElement> &top_level,
   }
 }
 
+// Substring both rugo-emitted created_by variants share: the opteryx_core
+// wheel writes "opteryx-rugo version X.Y.Z (build N)", the standalone rugo
+// wheel writes "rugo version X.Y.Z" (see build_common.py:draken_rugo_extensions).
+// A substring match (not a fixed prefix) is deliberate — it survives either
+// format changing around this token without the two ever needing to be kept
+// in sync by hand, and no other real-world parquet writer's created_by string
+// is expected to contain it.
+static const char *kRugoCreatedByMarker = "rugo";
+
+// Row-group sorting_columns is a claim the WRITER makes about its own bytes;
+// unlike min/max stats (checkable via TestBloomFilter-style spot checks
+// elsewhere), nothing here re-derives it from the data. So it is trusted only
+// when `created_by` identifies rugo as the writer — a foreign tool's claim is
+// parsed (ParseRowGroup already ran) and then discarded here, never surfaced.
+static bool IsTrustedRugoWriter(const std::string &created_by) {
+  return created_by.find(kRugoCreatedByMarker) != std::string::npos;
+}
+
 static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
   FileStats fs;
+  std::string created_by;
 
   int16_t last_id = 0;
   while (true) {
@@ -956,9 +1026,26 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
       }
       break;
     }
+    case 6: // created_by
+      created_by = ReadString(in);
+      break;
     default:
       SkipField(in, fh.type);
       break;
+    }
+  }
+
+  // Trust gate: sorting_columns was parsed unconditionally above (field 4
+  // arrives before field 6 on the wire in every writer, including our own),
+  // so it must be revoked here, after created_by is known, for any file rugo
+  // did not write itself. See IsTrustedRugoWriter.
+  if (!IsTrustedRugoWriter(created_by)) {
+    for (auto &rg : fs.row_groups) {
+      for (auto &col : rg.columns) {
+        col.is_sorted = false;
+        col.sort_descending = false;
+        col.sort_nulls_first = false;
+      }
     }
   }
   return fs;

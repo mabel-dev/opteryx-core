@@ -134,9 +134,9 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     # join/union relation-name lists can point at — it must be renamed too, or a clone of
     # a subplan whose only relations are FunctionDataset nodes (e.g. a FULL OUTER JOIN
     # between two VALUES clauses) collides with the original names it was cloned from.
-    # Guard on a non-empty alias: some FunctionDataset nodes (READ_JSONL/READ_PARQUET) are
-    # not required to carry one, and mapping `None` as a relations-dict key would make
-    # every unrelated `.source is None` column reference match it.
+    # Guard on a non-empty alias: some FunctionDataset nodes (READ_JSONL/READ_PARQUET/
+    # READ_CSV) are not required to carry one, and mapping `None` as a relations-dict
+    # key would make every unrelated `.source is None` column reference match it.
     for nid, node in [
         (nid, node)
         for (nid, node) in plan.nodes(True)

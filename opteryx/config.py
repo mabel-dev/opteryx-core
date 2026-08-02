@@ -438,6 +438,7 @@ class Features:
     disable_join_ordering = get_bool("FEATURE_DISABLE_JOIN_ORDERING", False)
     disable_join_planning = get_bool("FEATURE_DISABLE_JOIN_PLANNING", False)
     disable_join_rewrite = get_bool("FEATURE_DISABLE_JOIN_REWRITE", False)
+    disable_length_only_column = get_bool("FEATURE_DISABLE_LENGTH_ONLY_COLUMN", False)
     disable_limit_elimination = get_bool("FEATURE_DISABLE_LIMIT_ELIMINATION", False)
     disable_limit_files_pruning = get_bool("FEATURE_DISABLE_LIMIT_FILES_PRUNING", False)
     disable_limit_pushdown = get_bool("FEATURE_DISABLE_LIMIT_PUSHDOWN", False)
@@ -451,6 +452,7 @@ class Features:
     disable_split_conjunctive_predicates = get_bool("FEATURE_DISABLE_SPLIT_CONJUNCTIVE_PREDICATES", False)
     disable_statistics_only_response = get_bool("FEATURE_DISABLE_STATISTICS_ONLY_RESPONSE", False)
     disable_timestamp_cast_sink = get_bool("FEATURE_DISABLE_TIMESTAMP_CAST_SINK", False)
+    disable_topn_manifest_pruning = get_bool("FEATURE_DISABLE_TOPN_MANIFEST_PRUNING", False)
     disable_topn_scan_pushdown = get_bool("FEATURE_DISABLE_TOPN_SCAN_PUSHDOWN", False)
     disable_window_topk_fusion = get_bool("FEATURE_DISABLE_WINDOW_TOPK_FUSION", False)
 

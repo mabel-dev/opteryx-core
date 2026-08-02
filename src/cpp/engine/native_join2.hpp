@@ -331,6 +331,14 @@ struct Join2ProbeOperator : Operator {
 
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
+        // A morsel can legitimately carry 0 rows with an EMPTY columns vector (the
+        // engine's zero-column-morsel convention for a row-count-only shape — see
+        // e.g. GroupBySink::sink's identical guard). compute_row_hashes indexes
+        // probe_key_idx into in->columns unconditionally, so skipping this BEFORE
+        // that call (not just before the probe loop below) is required — every
+        // other keyed sink/operator in this engine already guards n==0 first;
+        // this one and AsofProbeOperator below were missing it.
+        if (in->num_rows() == 0) return OpResult::NEED_INPUT;
         auto& st = static_cast<Join2ProbeState&>(st_);
         const Join2BuildGlobal& g = *ref->g;
         if (st.pending_in != in) {
@@ -456,6 +464,10 @@ struct AsofProbeOperator : Join2ProbeOperator {
 
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
+        // See the identical guard in Join2ProbeOperator::execute above — a 0-row
+        // morsel here can carry an EMPTY columns vector, and both compute_row_hashes
+        // and the in->columns[asof_probe_idx] read below assume a real column exists.
+        if (in->num_rows() == 0) return OpResult::NEED_INPUT;
         ensure_sorted();
         auto& st = static_cast<Join2ProbeState&>(st_);
         const Join2BuildGlobal& g = *ref->g;

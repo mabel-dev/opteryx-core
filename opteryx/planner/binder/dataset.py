@@ -32,6 +32,16 @@ _JSONL_SUPPORTED_TYPES = {
     DrakenType.NULL,
 }
 
+# CSV columns rugo's decoder can currently produce (rugo's sniff_csv_column_types
+# only widens INT64 -> FLOAT64 -> VARCHAR -- no BOOL, unlike JSONL, since CSV has
+# no native boolean literal syntax to sniff).
+_CSV_SUPPORTED_TYPES = {
+    DrakenType.INT64,
+    DrakenType.FLOAT64,
+    DrakenType.VARCHAR,
+    DrakenType.NULL,
+}
+
 # Bare-path dataset function glob support (READ_JSONL, READ_PARQUET): a path
 # containing any of these characters is treated as a pattern rather than an
 # exact path.
@@ -605,6 +615,220 @@ def visit_function_dataset(
         node.manifest = manifest
         node.dataset = path
         node.connector = table
+    elif node.function == "READ_CSV":
+        from opteryx.connectors.csv_io import CsvPredicatePushable
+        from opteryx.connectors.csv_io import read_csv_file
+        from opteryx.connectors.io_systems import create_filesystem
+        from opteryx.exceptions import DatasetNotFoundError
+        from opteryx.exceptions import DatasetReadError
+        from opteryx.exceptions import NotSupportedError
+
+        path_arg = node.args[0] if node.args else None
+        if path_arg is not None and path_arg.node_type == NodeType.NESTED:
+            path_arg = path_arg.centre
+        if path_arg is None or path_arg.node_type != NodeType.LITERAL or not isinstance(
+            path_arg.value, str
+        ):
+            raise InvalidFunctionParameterError(
+                "READ_CSV requires a single string literal path, "
+                "e.g. READ_CSV('file.csv')."
+            )
+        path = path_arg.value
+
+        # Validate READ_CSV's named options. `separator`/`has_header_row` map
+        # directly to rugo's own `delimiter`/`has_header` params; `ignore_errors`/
+        # `infer_sample_size` map to rugo's `fail_on_error` (inverted, the same
+        # translation READ_JSONL's `ignore_errors` gets above) / `infer_sample_size`.
+        named_args = node.named_args or {}
+
+        def _literal_value(key):
+            arg = named_args[key]
+            if arg.node_type == NodeType.NESTED:
+                arg = arg.centre
+            return arg
+
+        for key in named_args:
+            if key not in ("separator", "has_header_row", "ignore_errors", "infer_sample_size"):
+                raise InvalidFunctionParameterError(
+                    f"READ_CSV received an unrecognized option '{key}'."
+                )
+
+        if "separator" in named_args:
+            arg = _literal_value("separator")
+            if (
+                arg.node_type != NodeType.LITERAL
+                or not isinstance(arg.value, str)
+                or len(arg.value) != 1
+            ):
+                raise InvalidFunctionParameterError(
+                    "READ_CSV option 'separator' must be a single-character string literal."
+                )
+            separator = arg.value
+        else:
+            separator = ","
+
+        if "has_header_row" in named_args:
+            arg = _literal_value("has_header_row")
+            if arg.node_type != NodeType.LITERAL or not isinstance(arg.value, bool):
+                raise InvalidFunctionParameterError(
+                    "READ_CSV option 'has_header_row' must be a boolean literal."
+                )
+            has_header_row = arg.value
+        else:
+            has_header_row = True
+
+        if "ignore_errors" in named_args:
+            arg = _literal_value("ignore_errors")
+            if arg.node_type != NodeType.LITERAL or not isinstance(arg.value, bool):
+                raise InvalidFunctionParameterError(
+                    "READ_CSV option 'ignore_errors' must be a boolean literal."
+                )
+            fail_on_error = not arg.value
+        else:
+            fail_on_error = True
+
+        if "infer_sample_size" in named_args:
+            arg = _literal_value("infer_sample_size")
+            if (
+                arg.node_type != NodeType.LITERAL
+                or isinstance(arg.value, bool)
+                or not isinstance(arg.value, int)
+                or arg.value <= 0
+            ):
+                raise InvalidFunctionParameterError(
+                    "READ_CSV option 'infer_sample_size' must be a positive integer literal."
+                )
+            infer_sample_size = arg.value
+        else:
+            infer_sample_size = 5
+
+        # Resolve the filesystem the same way READ_JSONL/READ_PARQUET do (protocol
+        # prefix of the path -> opteryx.connectors.io_systems.create_filesystem).
+        protocol = path.split("://")[0] if "://" in path else ""
+        is_glob = _is_glob_pattern(path)
+
+        # "gcs://" is not a recognized scheme -- see the identical check/comment on
+        # the READ_JSONL branch above.
+        if protocol == "gcs":
+            raise InvalidFunctionParameterError(
+                f"READ_CSV('{path}'): 'gcs://' is not a supported scheme; use 'gs://'."
+            )
+
+        # SECURITY: identical reasoning and mechanism to READ_JSONL's gs:// handling
+        # above -- READ_CSV is equally a bare dataset function with no
+        # can_perform_action authorization layer, so it must never use this
+        # process's ambient/platform GCS credentials for a user-supplied path.
+        if protocol == "gs":
+            if is_glob:
+                raise NotSupportedError(
+                    f"READ_CSV('{path}'): glob patterns are not supported for gs:// paths."
+                )
+            from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
+                anonymous_gcs_filesystem,
+            )
+
+            filesystem = anonymous_gcs_filesystem()
+        else:
+            filesystem = create_filesystem(protocol)
+
+        # Stage 4-equivalent glob support, mirroring READ_JSONL: a non-glob path
+        # is just a matched-file list of length 1, so there is no separate
+        # single-file code path.
+        if is_glob:
+            csv_files = _resolve_glob_files(path, filesystem)
+            if not csv_files:
+                raise DatasetNotFoundError(connector="READ_CSV", dataset=path)
+        else:
+            csv_files = [path]
+
+        # Bind-time schema: a real, full rugo.csv.read_csv() pass over the first
+        # matched file. Unlike READ_JSONL's cheap first-chunk peek, this reads the
+        # whole file -- rugo.csv has no chunked entry point to sample from cheaply
+        # (see opteryx.connectors.csv_io's module docstring), and unlike Parquet
+        # there is no embedded footer schema to read instead. The same file is
+        # read again at execution time by CsvReadNode; this double-read is an
+        # accepted v1 cost, not an oversight.
+        schema_source_path = csv_files[0]
+        file_obj = filesystem.open_input_file(schema_source_path)
+        try:
+            sample_morsel = read_csv_file(
+                file_obj.memoryview,
+                delimiter=separator,
+                has_header=has_header_row,
+                fail_on_error=fail_on_error,
+                infer_sample_size=infer_sample_size,
+            )
+        except RuntimeError as err:
+            raise DatasetReadError(f"Cannot read CSV file '{schema_source_path}': {err}") from err
+        finally:
+            file_obj.close()
+
+        physical_names = [
+            name.decode("utf-8") if isinstance(name, bytes) else name
+            for name in sample_morsel.column_names
+        ]
+
+        if node.columns:
+            # See the identical check/comment on the READ_JSONL branch above --
+            # AS alias(col1, col2, ...) column renaming is not supported; AS
+            # alias (relation rename only) is unaffected.
+            raise NotSupportedError(
+                f"READ_CSV('{path}') AS alias(...) is not supported -- only "
+                "AS alias (renaming the relation, not its columns) is. Use a "
+                "SELECT ... AS new_name wrapper to rename individual columns."
+            )
+        external_names = physical_names
+
+        relation_name = node.alias or f"$read_csv-{random_string()}"
+
+        schema_columns = []
+        for physical_name, external_name in zip(physical_names, external_names):
+            vector = sample_morsel.column(physical_name.encode("utf-8"))
+            physical_type = vector.type
+            if physical_type not in _CSV_SUPPORTED_TYPES:
+                raise NotSupportedError(
+                    f"READ_CSV column '{physical_name}' has inferred type "
+                    f"{physical_type!r}, which is not supported (only "
+                    "INT64/FLOAT64/VARCHAR/NULL are supported)."
+                )
+            schema_columns.append(
+                SchemaColumn(
+                    name=external_name,
+                    column_type=ColumnType(physical=physical_type),
+                    identity=mint_column_identity(relation_name, external_name),
+                )
+            )
+
+        schema = RelationSchema(name=relation_name, columns=schema_columns)
+        context.schemas[relation_name] = schema
+        for column in schema.columns:
+            column.origin = [relation_name]
+
+        node.alias = relation_name
+        # node.columns deliberately left unset -- see the identical comment on the
+        # READ_JSONL branch above; ProjectionPushdownStrategy populates it later.
+        node.schema = schema
+        # Carried for the physical operator (CsvReadNode): the source path(s) and
+        # the file's own (pre-alias) column order/names, mirroring READ_JSONL's
+        # jsonl_files/jsonl_physical_columns.
+        node.dataset = path
+        node.csv_files = csv_files
+        node.csv_physical_columns = physical_names
+        # Resolved READ_CSV options, carried for the physical operator to pass
+        # through to every file's decode.
+        node.csv_separator = separator
+        node.csv_has_header_row = has_header_row
+        node.csv_fail_on_error = fail_on_error
+        node.csv_infer_sample_size = infer_sample_size
+        # identity -> pre-alias physical (CSV header) name -- see the identical
+        # jsonl_physical_by_identity comment on the READ_JSONL branch above.
+        node.csv_physical_by_identity = {
+            schema_column.identity: physical_name
+            for physical_name, schema_column in zip(physical_names, schema_columns)
+        }
+        # Enables predicate pushdown for a plain col-OP-literal comparison a
+        # rugo predicate tuple can express; see CsvPredicatePushable.
+        node.connector = CsvPredicatePushable()
     else:
         raise UnsupportedSyntaxError(f"{node.function} cannot be used in place of a table.")
     return node, context
@@ -689,6 +913,16 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         if not can_perform_action(context.execution_context, node.relation, action="READ"):
             raise PermissionError(f"User does not have permission to read {node.relation}")
 
+    # SHOW MANIFEST FOR exposes file paths/layout, not just data — stricter
+    # than READ, and independent of self_governs_permissions (no connector
+    # self-governs manifest access the way information_schema self-governs
+    # per-row READ).
+    if getattr(node, "for_manifest_only", False):
+        if not can_perform_action(context.execution_context, node.relation, action="MANIFEST"):
+            raise PermissionError(
+                f"User does not have permission to view the manifest for {node.relation}"
+            )
+
     if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables
     if gateway.supports_diachronic:
@@ -714,6 +948,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         for column in node.schema.columns:
             column.origin = [node.alias]
 
+        context.manifests[node.alias] = node.manifest
         context.relations[node.alias] = node.connector.__mode__
     except DatabaseError as err:
         raise err

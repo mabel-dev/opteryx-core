@@ -354,6 +354,95 @@ class Manifest:
         self.files = kept_files
         self._live_rows = kept_rows
 
+    def prune_files_for_topn(self, column_name: str, descending: bool, limit: int) -> None:
+        """Drop files that provably cannot hold any of the top-`limit` rows of
+        `column_name` for a single-column ``ORDER BY column_name [ASC|DESC]
+        LIMIT limit`` query.
+
+        SAFE ONLY when `column_name` has zero NULLs across the whole manifest.
+        The caller (TopNManifestPruningStrategy) MUST have already verified
+        `get_total_null_count(column_name) == 0` before calling this - this
+        method does not re-check, so a caller mistake here is a silent wrong
+        answer, not a defensive no-op. With that precondition, record_count IS
+        the non-null row count for every file, so no separate null-aware
+        accounting is needed.
+
+        Algorithm: rank the files that carry a (lower_bound, upper_bound) for
+        this column by the value nearest the query's "best" end - max
+        descending for DESC, min ascending for ASC - and accumulate
+        record_count across that ranking until it reaches `limit`. The
+        threshold is the worst-case (min for DESC, max for ASC) bound seen
+        across every file folded into that accumulation so far: because we
+        only know each file's range, not its distribution, the `limit`
+        guaranteed rows could - in the worst case - all sit down at the
+        lowest bound among the files needed to reach `limit`, not just the
+        bound of the file that happened to cross the threshold last. Any file
+        (including ones excluded from the ranking below) whose own bound
+        cannot reach that threshold is provably outside the top-`limit` and
+        is dropped.
+
+        Files with no bound for this column are always kept, and are excluded
+        from the ranking/accumulation - no stats means no evidence to prune
+        on, and such a file must not be allowed to tighten the threshold
+        applied to files that DO have stats.
+        """
+        field_id = self._resolve_field_id(column_name)
+        if field_id is None or limit is None or limit <= 0:
+            return
+
+        # position in self.files -> (lower_bound, upper_bound)
+        bounds_by_position: Dict[int, Tuple[Any, Any]] = {}
+        for position, file_entry in enumerate(self.files):
+            if not file_entry.lower_bounds or not file_entry.upper_bounds:
+                continue
+            lo = file_entry.lower_bounds.get(field_id)
+            hi = file_entry.upper_bounds.get(field_id)
+            if lo is None or hi is None:
+                continue
+            bounds_by_position[position] = (lo, hi)
+
+        if not bounds_by_position:
+            # No file carries stats for this column - nothing safe to prune.
+            return
+
+        ranked = sorted(
+            bounds_by_position.items(),
+            key=lambda item: item[1][1] if descending else item[1][0],
+            reverse=descending,
+        )
+
+        accumulated = 0
+        threshold = None
+        for position, (lo, hi) in ranked:
+            accumulated += self.files[position].record_count
+            candidate = lo if descending else hi
+            if threshold is None:
+                threshold = candidate
+            elif descending:
+                threshold = min(threshold, candidate)
+            else:
+                threshold = max(threshold, candidate)
+            if accumulated >= limit:
+                break
+
+        kept_files = []
+        kept_rows = []
+        for position, file_entry in enumerate(self.files):
+            original_row = position if self._live_rows is None else self._live_rows[position]
+            bounds = bounds_by_position.get(position)
+            if bounds is not None:
+                lo, hi = bounds
+                if descending:
+                    if hi < threshold:
+                        continue  # provably below the guaranteed top-`limit` floor
+                elif lo > threshold:
+                    continue  # provably above the guaranteed top-`limit` ceiling
+            kept_files.append(file_entry)
+            kept_rows.append(original_row)
+
+        self.files = kept_files
+        self._live_rows = kept_rows
+
     # ================================================================
     # File Accessors
     # ================================================================

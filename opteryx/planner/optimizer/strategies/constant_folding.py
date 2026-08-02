@@ -333,6 +333,22 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # real VECTOR(n) it always was.)
         and _root_cat != LC.VECTOR
     ):
+        if root.node_type == NodeType.FUNCTION:
+            # Some functions (CONCAT, CONCAT_WS, ...) are rewrite-only: they have
+            # no kernel/callable_ref of their own and are only ever meant to reach
+            # execution after PredicateRewriteStrategy/FunctionRewriteStrategy
+            # desugar them (e.g. CONCAT -> StringConcat chains). Those strategies
+            # run AFTER ConstantFoldingStrategy, so an all-literal call such as
+            # CONCAT('a', 'b') arrived here undesugared and its callable_ref was
+            # None -- 'NoneType' object is not callable. Apply the same rewrite
+            # here first so folding evaluates the canonical executable form.
+            from .predicate_rewriter import _rewrite_function
+
+            rewritten = _rewrite_function(root, telemetry)
+            if rewritten is not root or rewritten.node_type != NodeType.FUNCTION:
+                return fold_constants(rewritten, telemetry)
+            root = rewritten
+
         table = no_table_data.read()
         bc = build_bytecode(lower(root))
         result_vector = execute_bytecode(bc, table)

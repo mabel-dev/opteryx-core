@@ -36,6 +36,16 @@ uint64_t get_free_memory_bytes() noexcept;
 // Returns total_memory - free_memory
 uint64_t get_used_memory_bytes() noexcept;
 
+// Get the cgroup memory limit in bytes, i.e. the CONTAINER's ceiling, as
+// distinct from get_physical_memory_total_bytes() (the HOST's RAM). Returns 0
+// when there is no limit in effect (bare metal, macOS) or it cannot be
+// detected — callers must treat 0 as "no limit figure available", not as a
+// literal zero-byte limit.
+// On Linux: reads cgroup v2 memory.max, falling back to cgroup v1
+// memory.limit_in_bytes.
+// On macOS: always 0 (no cgroups).
+uint64_t get_cgroup_memory_limit_bytes() noexcept;
+
 // Get system page size in bytes
 uint64_t get_page_size_bytes() noexcept;
 

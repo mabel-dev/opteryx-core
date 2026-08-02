@@ -79,7 +79,33 @@ SQL_PARTS = {
 }
 
 
-COMBINE_WHITESPACE_REGEX = re.compile(r"[\r\n\t\f\v]+")
+# Matches either a quoted span (captured, left untouched) or a literal/escaped
+# newline, tab, or carriage return outside quotes (captured, collapsed to a
+# single space). Quoted spans use the same doubled-quote escaping as
+# _QUOTED_STRINGS_REGEX below ('don''t' is one literal, not two).
+_WHITESPACE_NORMALIZE_REGEX = re.compile(
+    r'("(?:[^"]|"")*"'
+    r"|'(?:[^']|'')*'"
+    r"|`[^`]*`)"
+    r"|(\\r\\n|\\n|\\t|\\r|\r\n|\n|\t|\r)"
+)
+
+
+def _normalize_whitespace(statement: str) -> str:
+    """
+    Collapse literal newlines/tabs/CRs, and their backslash-escaped text forms
+    (\\n, \\t, \\r), to a single space -- everywhere except inside quoted
+    string literals, whose contents must reach the parser unchanged so it can
+    apply standard SQL string-escape decoding itself.
+    """
+
+    def _replacer(match):
+        if match.group(2) is not None:
+            return " "
+        return match.group(1)  # captured quoted-span, unchanged
+
+    return _WHITESPACE_NORMALIZE_REGEX.sub(_replacer, statement)
+
 
 # Precompile regex patterns at module level for performance
 _KEYWORDS_REGEX = re.compile(
@@ -285,20 +311,15 @@ def rewrite_temporal_units(statement: str) -> str:
 
 
 def do_sql_rewrite(statement):
-    # If the SQL was passed with escaped sequences (e.g. "\\n"),
-    # interpret the common ones so the rewriter sees real newlines/tabs.
+    # Collapse structural newlines/tabs/CRs (and their backslash-escaped text
+    # forms) to spaces so the rest of the rewriter -- sql_parts, and the
+    # text-based rewrite_temporal_units/rewrite_explain/rewrite_comment that
+    # run on it -- see a single-line statement. Quoted string literals are
+    # left untouched so their escape sequences reach the parser intact.
     if isinstance(statement, bytes):
         statement = statement.decode("utf-8")
 
-    statement = (
-        statement.replace("\\r\\n", " ")
-        .replace("\\n", " ")
-        .replace("\\t", " ")
-        .replace("\\r", " ")
-        .replace("\n", " ")
-        .replace("\t", " ")
-        .replace("\r", " ")
-    )
+    statement = _normalize_whitespace(statement)
 
     # Rewrite temporal unit syntax before parsing
     statement = rewrite_temporal_units(statement)

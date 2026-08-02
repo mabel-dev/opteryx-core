@@ -228,6 +228,18 @@ struct ColumnInput {
   // the elem_* buffers (it already walks rows in order to do so).
   const uint32_t *row_level_offsets = nullptr;
   const uint32_t *row_element_offsets = nullptr;
+
+  // ---- clustering / sort-order hint ----
+  // Caller-supplied assertion that this column's values, within each row
+  // group written from this ColumnInput, are already ordered. Written
+  // verbatim into RowGroup.sorting_columns (parquet.thrift SortingColumn)
+  // with NO verification by the writer — the caller (e.g. compaction merging
+  // pre-sorted runs) is the source of truth. A wrong hint produces a wrong
+  // footer claim; see the reader's created_by trust gate in metadata.cpp,
+  // which only believes sorting_columns from files rugo itself wrote.
+  bool sorted_hint = false;
+  bool sorted_descending = false;
+  bool sorted_nulls_first = false;
 };
 
 // Minimum bit width to hold values in [0, maxval]. bit_width(0)=0, (1)=1,
@@ -1750,6 +1762,31 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
   for (size_t s : meta.uncompressed) meta.total_byte_size += s;
 }
 
+// Emit RowGroup.sorting_columns (field 4): one SortingColumn per schema
+// column whose ColumnInput carries sorted_hint, in schema order. Omits the
+// field entirely when no column in this row group is hinted (matches the
+// optional-field-by-omission pattern used elsewhere in this writer, e.g.
+// bloom_filter_offset/length). The writer does not verify the hint — see
+// ColumnInput::sorted_hint.
+inline void write_sorting_columns(TCompactWriter &fm,
+                                  const std::vector<ColumnInput> &rg_cols) {
+  std::vector<size_t> idxs;
+  for (size_t i = 0; i < rg_cols.size(); i++)
+    if (rg_cols[i].sorted_hint) idxs.push_back(i);
+  if (idxs.empty())
+    return;
+
+  fm.writeFieldHeader(CT_LIST, 4);
+  fm.writeListHeader(CT_STRUCT, (uint32_t)idxs.size());
+  for (size_t i : idxs) {
+    fm.structBegin(); // SortingColumn
+    fm.writeI32Field(1, (int32_t)i);                     // column_idx
+    fm.writeBoolField(2, rg_cols[i].sorted_descending);   // descending
+    fm.writeBoolField(3, rg_cols[i].sorted_nulls_first);  // nulls_first
+    fm.structEnd();
+  }
+}
+
 // Append the FileMetaData footer + footer length + trailing PAR1 to `out`.
 // `schema_cols` supplies the schema/column shape (types, names, array depth);
 // `all_rg_cols[rg][i]` supplies each chunk's per-row-group shape (num_levels for
@@ -1781,6 +1818,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                          codec, meta.stats[i], meta.bloom_offset[i], meta.bloom_length[i]);
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size
     fm.writeI64Field(3, (int64_t)meta.row_count);       // num_rows
+    write_sorting_columns(fm, all_rg_cols[rg]);         // sorting_columns (field 4, optional)
     fm.structEnd();
   }
   fm.writeStringField(6, RUGO_PARQUET_CREATED_BY); // created_by
