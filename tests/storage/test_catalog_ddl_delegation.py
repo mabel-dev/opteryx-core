@@ -36,6 +36,9 @@ class _FakeCatalog:
     def create_dataset(self, identifier, schema, properties=None, author=None):
         _FakeCatalog.calls.append(("create_dataset", identifier, author))
 
+    def update_dataset_sort_order(self, identifier, columns, author=None):
+        _FakeCatalog.calls.append(("update_dataset_sort_order", identifier, columns, author))
+
     def get_relation(self, identifier):
         return (None, None)
 
@@ -76,5 +79,44 @@ def test_drop_table_requires_owner_on_catalog(catalog_workspace):
 
     with pytest.raises(PermissionError, match="permission to drop table"):
         list(writer.execute_to_morsels("DROP TABLE cat.coll.tbl"))
+
+    assert catalog_workspace.calls == []
+
+
+def test_cluster_by_delegates_to_catalog_with_user(catalog_workspace):
+    """ALTER TABLE ... CLUSTER BY reaches the catalog carrying the session user."""
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("ALTER TABLE cat.coll.tbl CLUSTER BY (name)"))
+
+    assert catalog_workspace.calls == [
+        ("update_dataset_sort_order", "coll.tbl", ["name"], "alice")
+    ]
+
+
+def test_cluster_by_multi_column_preserves_order(catalog_workspace):
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("ALTER TABLE cat.coll.tbl CLUSTER BY (region, name)"))
+
+    assert catalog_workspace.calls == [
+        ("update_dataset_sort_order", "coll.tbl", ["region", "name"], "alice")
+    ]
+
+
+def test_cluster_by_unauthenticated_passes_none(catalog_workspace):
+    """No session user means no author - not an invented one."""
+    session = opteryx.session(access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("ALTER TABLE cat.coll.tbl CLUSTER BY (name)"))
+
+    assert catalog_workspace.calls == [
+        ("update_dataset_sort_order", "coll.tbl", ["name"], None)
+    ]
+
+
+def test_cluster_by_requires_owner_on_catalog(catalog_workspace):
+    """The owner-only rule applies to CLUSTER BY too - a writer cannot change layout."""
+    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
+
+    with pytest.raises(PermissionError, match="permission to alter table"):
+        list(writer.execute_to_morsels("ALTER TABLE cat.coll.tbl CLUSTER BY (name)"))
 
     assert catalog_workspace.calls == []

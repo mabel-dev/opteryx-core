@@ -174,6 +174,51 @@ def test_drop_table_readonly_rejected(tmp_path):
         list(session.execute_to_morsels("DROP TABLE somefile.foo"))
 
 
+def test_alter_table_cluster_by_not_implemented_on_local_store(tmp_path):
+    """LocalStoreConnector has no catalog to persist a sort order in, so CLUSTER
+    BY is rejected explicitly rather than silently doing nothing."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+
+    with pytest.raises(NotImplementedError, match="does not support ALTER TABLE"):
+        list(session.execute_to_morsels("ALTER TABLE ws.events CLUSTER BY (name)"))
+
+
+def test_alter_table_cluster_by_missing_table(tmp_path):
+    """ALTER TABLE CLUSTER BY on a non-existent table raises, IF EXISTS suppresses it."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("ALTER TABLE ws.nonexistent CLUSTER BY (name)"))
+
+    # IF EXISTS on a missing table succeeds without reaching the connector
+    # (so it never hits the NotImplementedError a real cluster attempt would).
+    list(session.execute_to_morsels("ALTER TABLE IF EXISTS ws.nonexistent CLUSTER BY (name)"))
+
+
+def test_alter_table_cluster_by_readonly_rejected(tmp_path):
+    """ALTER TABLE ... CLUSTER BY on a read-only connector raises ReadOnlyConnectorError."""
+    session = opteryx.session()
+
+    with pytest.raises(ReadOnlyConnectorError, match="does not support ALTER TABLE"):
+        list(session.execute_to_morsels("ALTER TABLE somefile.foo CLUSTER BY (name)"))
+
+
+def test_alter_table_unsupported_operation_rejected(tmp_path):
+    """Only CLUSTER BY is supported; any other ALTER TABLE operation is rejected
+    at plan time rather than silently mishandled."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(session.execute_to_morsels("ALTER TABLE ws.events RENAME TO ws.renamed"))
+
+
 def test_create_view_basic(tmp_path):
     """CREATE VIEW stores the view definition."""
     _setup_workspace(tmp_path)

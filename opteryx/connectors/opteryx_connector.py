@@ -12,7 +12,7 @@ Architecture:
 """
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.connectors import TableType
 
@@ -697,6 +697,18 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         catalog.load_dataset(relative_id).truncate(author=author)
+
+    def set_cluster_by(
+        self, relation_name: str, columns: List[str], author: Optional[str] = None
+    ) -> None:
+        """Set the dataset's clustering (sort-order) columns in the catalog.
+
+        Replaces any previously configured sort order outright - CLUSTER BY
+        re-declares the physical layout, it does not append to it.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        catalog.update_dataset_sort_order(relative_id, columns, author=author)
 
     def relation_exists(self, relation_name: str) -> bool:
         """Check whether a dataset exists in the catalog."""

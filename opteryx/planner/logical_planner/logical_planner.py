@@ -67,6 +67,7 @@ class LogicalPlanStepType(int, Enum):
     CreateRelation = auto()
     DropRelation = auto()
     TruncateRelation = auto()
+    AlterRelation = auto()
     Insert = auto()
 
 
@@ -1834,6 +1835,50 @@ def plan_alter_view(statement, **kwargs):
     return plan
 
 
+def plan_alter_table(statement, **kwargs):
+    """
+    Create a logical plan for ALTER TABLE statement.
+
+    ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column [, column ...])
+
+    This is the only ALTER TABLE operation Opteryx supports; any other
+    operation (RENAME, ADD COLUMN, DROP COLUMN, ...) is rejected.
+    """
+    root_node = "AlterTable"
+    plan = LogicalPlan()
+
+    alter_statement = statement[root_node]
+
+    # Extract table name
+    relation_name_parts = alter_statement["name"]
+    relation_name = extract_variable(relation_name_parts)
+    if isinstance(relation_name, list):
+        relation_name = ".".join(relation_name)
+
+    operations = alter_statement.get("operations") or []
+    if len(operations) != 1 or "ClusterBy" not in operations[0]:
+        raise UnsupportedSyntaxError(
+            "Opteryx only supports 'ALTER TABLE ... CLUSTER BY (...)'."
+        )
+
+    cluster_columns = []
+    for expr in operations[0]["ClusterBy"]["exprs"]:
+        if "Identifier" not in expr:
+            raise UnsupportedSyntaxError(
+                "CLUSTER BY only supports column names, not expressions."
+            )
+        cluster_columns.append(expr["Identifier"]["value"])
+
+    alter_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterRelation)
+    alter_relation_node.relation_name = relation_name
+    alter_relation_node.cluster_columns = cluster_columns
+    alter_relation_node.if_exists = alter_statement.get("if_exists", False)
+
+    plan.add_node(random_string(), alter_relation_node)
+
+    return plan
+
+
 def plan_drop(statement, **kwargs):
     """
     Create a logical plan for DROP statement (VIEW or TABLE).
@@ -2366,6 +2411,7 @@ QUERY_BUILDERS = {
     # "Use": plan_use
     "CreateView": plan_create_view,
     "AlterView": plan_alter_view,
+    "AlterTable": plan_alter_table,
     "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
     "CreateTable": plan_create_table,
     "Truncate": plan_truncate,

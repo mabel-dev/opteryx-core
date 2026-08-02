@@ -45,7 +45,10 @@ class RelationManagementNode(BasePlanNode):
         self.connectors = parameters.get("connectors")
         self.if_exists: bool = parameters.get("if_exists", False)
 
-        # CREATE / TRUNCATE
+        # ALTER ... CLUSTER BY
+        self.cluster_columns = parameters.get("cluster_columns")
+
+        # CREATE / TRUNCATE / ALTER
         self.connector = parameters.get("connector")
 
     @property
@@ -56,6 +59,8 @@ class RelationManagementNode(BasePlanNode):
     def config(self):
         if self.action == "drop_relation":
             return f"drop {', '.join(self.relation_names or [])}"
+        if self.action == "cluster_by":
+            return f"cluster {self.relation_name} by ({', '.join(self.cluster_columns or [])})"
         return f"{self.action} {self.relation_name}"
 
     @property
@@ -96,6 +101,19 @@ class RelationManagementNode(BasePlanNode):
             if not self.connector.relation_exists(self.relation_name):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
             self.connector.truncate_relation(self.relation_name, author=self._author)
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "cluster_by":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            set_cluster_by = getattr(self.connector, "set_cluster_by", None)
+            if set_cluster_by is None:
+                raise NotImplementedError(
+                    f"{self.connector.__class__.__name__} does not support ALTER TABLE ... CLUSTER BY"
+                )
+            set_cluster_by(self.relation_name, self.cluster_columns, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:

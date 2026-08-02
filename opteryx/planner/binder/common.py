@@ -29,6 +29,7 @@ from opteryx.planner.binder.view import (
     visit_show_manifest,
 )
 from opteryx.planner.binder.relation import (
+    visit_alter_relation,
     visit_create_relation,
     visit_drop_relation,
     visit_truncate_relation,
@@ -180,6 +181,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_truncate_relation(self, node, context)
+
+    def visit_alter_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_relation(self, node, context)
 
     def visit_insert(
         self, node: Node, context: BindingContext

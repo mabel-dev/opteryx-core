@@ -66,6 +66,33 @@ def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
+def visit_alter_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER TABLE ... CLUSTER BY node to determine which connector
+    should handle persisting the new sort order.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    # Same tier as DROP - ALTER changes the relation's physical layout, not
+    # just its contents, so a writer cannot do it, only an owner can.
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the TRUNCATE TABLE node to determine which connector should handle
