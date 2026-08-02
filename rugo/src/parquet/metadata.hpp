@@ -152,6 +152,11 @@ struct AggColumnStat {
   std::string min_bytes;     // raw bytes of the minimum value (global min of mins)
   std::string max_bytes;     // raw bytes of the maximum value (global max of maxes)
   int64_t null_count = 0;
+  int64_t total_uncompressed_size = 0;  // sum of ColumnStats.total_uncompressed_size
+                                         // across every row group (and, for a nested
+                                         // column, every leaf rolled into this display
+                                         // name) -- the on-disk uncompressed footprint,
+                                         // for planner byte-size estimation.
   bool has_min = false;
   bool has_max = false;
   bool null_count_complete = true;

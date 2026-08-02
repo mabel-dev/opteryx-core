@@ -418,14 +418,20 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
     });
 }
 
-// String-family retag core: VARCHAR/NVARCHAR/VARBINARY -> `target` (VARCHAR or
-// VARBINARY only — casting TO NVARCHAR needs UTF-8 validation and is not this
-// kernel's job). All three share the exact DrakenStringArena layout (buffers.h
-// §11), so this is a plain byte copy of the K physical slots + arena bytes into
-// a fresh block with the new type tag — no reformatting, no validation.
+// String-family retag core: VARCHAR/NVARCHAR/VARBINARY/VARIANT -> `target`
+// (VARCHAR or VARBINARY only — casting TO NVARCHAR needs UTF-8 validation and is
+// not this kernel's job). All four share the exact DrakenStringArena layout
+// (buffers.h §11 / draken_type_is_string_storage) — VARIANT holds JSON text in
+// that same layout — so this is a plain byte copy of the K physical slots +
+// arena bytes into a fresh block with the new type tag: no reformatting, no
+// validation. For a VARIANT source the result is the raw JSON text verbatim (a
+// JSON string keeps its quotes) — matches `x::text` on Postgres jsonb, which is
+// a different, not-interchangeable operation from `->>` (unwraps a JSON string
+// scalar and drops the quotes).
 static VecResult string_retag_core(const DrakenVector* v, DrakenType target) {
     if (!v) return draken_error_sentinel("Input vector is null");
-    if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+    if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR
+            && v->type != DRAKEN_VARBINARY && v->type != DRAKEN_VARIANT)
         return draken_error_sentinel_fmt("cast string retag: expected string, got %d", v->type);
 
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
@@ -455,20 +461,23 @@ VecResult draken_cast_string_to_blob(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({ return string_retag_core(v, DRAKEN_VARBINARY); });
 }
 
-// VARCHAR/VARBINARY -> NVARCHAR: validate UTF-8 per row, then retag. NVARCHAR
-// source is already-valid UTF-8 (invariant of the type), so it skips straight
-// to string_retag_core — no re-validation. VARCHAR/VARBINARY sources are
-// validated: only the K PHYSICAL values referenced by a non-null logical row
-// are checked (a dict value used solely by null rows must not raise). This is
-// a plain CAST kernel — RAISES on the first invalid row; TRY_CAST never
-// reaches here (`_c_native_cast` returns None for safe=True and keeps the
-// Python closure, matching every other cast kernel's TRY_CAST posture).
+// VARCHAR/VARBINARY/VARIANT -> NVARCHAR: validate UTF-8 per row, then retag.
+// NVARCHAR source is already-valid UTF-8 (invariant of the type), so it skips
+// straight to string_retag_core — no re-validation. VARIANT source is JSON text,
+// which the JSON spec requires to be valid Unicode, so it carries the same
+// already-valid guarantee and also skips straight to the retag. VARCHAR/
+// VARBINARY sources are validated: only the K PHYSICAL values referenced by a
+// non-null logical row are checked (a dict value used solely by null rows must
+// not raise). This is a plain CAST kernel — RAISES on the first invalid row;
+// TRY_CAST never reaches here (`_c_native_cast` returns None for safe=True and
+// keeps the Python closure, matching every other cast kernel's TRY_CAST posture).
 VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
-        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR
+                && v->type != DRAKEN_VARBINARY && v->type != DRAKEN_VARIANT)
             return draken_error_sentinel_fmt("cast string->nvarchar: expected string, got %d", v->type);
-        if (v->type == DRAKEN_NVARCHAR)
+        if (v->type == DRAKEN_NVARCHAR || v->type == DRAKEN_VARIANT)
             return string_retag_core(v, DRAKEN_NVARCHAR);
 
         const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);

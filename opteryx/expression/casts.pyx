@@ -363,9 +363,10 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
     # NVARCHAR as a SOURCE is fine here (its bytes are always valid VARCHAR/
     # VARBINARY bytes, no validation needed — see string_retag_core).
     if t in ("VARCHAR", "BLOB"):
-        if s in _CAST_STRINGS:
-            # VARCHAR/NVARCHAR/VARBINARY share the exact DrakenStringArena byte
-            # layout (buffers.h §11) — this is a retag, not a reformat.
+        if s in _CAST_STRINGS or s == "VARIANT":
+            # VARCHAR/NVARCHAR/VARBINARY/VARIANT share the exact DrakenStringArena
+            # byte layout (buffers.h §11 / draken_type_is_string_storage) — this is
+            # a retag, not a reformat.
             return ("draken_cast_string_to_blob" if t == "BLOB"
                     else "draken_cast_string_to_varchar", 0)
         # Below: numeric/bool/decimal/temporal sources format to the identical
@@ -413,11 +414,12 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
         return None
     # → NVARCHAR: validates UTF-8 per row (raises on the first invalid row) then
     # retags — see draken_cast_string_to_nvarchar in cast_string.cpp. Only
-    # string-family sources are native; a non-string source (INT64 etc.) first
-    # needs VARCHAR formatting, which stays on the resolve_cast closure path
+    # string-family sources are native (including VARIANT, whose JSON text is
+    # already-valid Unicode by the JSON spec); a non-string source (INT64 etc.)
+    # first needs VARCHAR formatting, which stays on the resolve_cast closure path
     # (matches this function's "no chained native kernels" posture elsewhere).
     if t == "NVARCHAR":
-        if s in _CAST_STRINGS:
+        if s in _CAST_STRINGS or s == "VARIANT":
             return ("draken_cast_string_to_nvarchar", 0)
         return None
     return None
@@ -644,7 +646,15 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
 
     # ---- VARCHAR / BLOB target (→ string) ----
     if t in ("VARCHAR", "BLOB"):
-        if s in _CAST_STRINGS:
+        if s in _CAST_STRINGS or s == "VARIANT":
+            # VARIANT already IS the target's German-string layout — draken stores
+            # it as JSON text (buffers.h: draken_type_is_string_storage groups
+            # VARIANT with VARCHAR/NVARCHAR/VARBINARY for exactly this reason).
+            # A retag, not a conversion: no kernel needed, same zero-copy shape as
+            # the DATE32→DATE32 passthrough below. The result is the raw JSON text
+            # verbatim — a JSON string keeps its quotes, matching `x::text` on
+            # Postgres jsonb (a different, and NOT interchangeable, operation from
+            # `->>`, which unwraps a JSON string scalar and drops the quotes).
             return (lambda arr: arr), False, False
         if s == "INT64":
             return vector_cast_int64_to_string, True, True

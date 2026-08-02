@@ -5,7 +5,10 @@
 
 from typing import Tuple
 
+from draken.draken_native import DrakenType
+
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import VariantKeyError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import derived
@@ -13,6 +16,22 @@ from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
+
+
+def _reject_variant_key(what: str, expr) -> None:
+    """Fail fast, at bind time, on a GROUP BY / DISTINCT [ON] key that resolves to
+    VARIANT (dynamic JSON — the `->` operator's result). This is a permanent
+    restriction (no fixed hash/compare for a value whose shape varies row to row),
+    not a coverage gap — catching it here, before the optimizer or native compiler
+    do any work, is strictly earlier than the native compiler's own backstop check
+    (managers/execution/compiler.py's _check_key_type)."""
+    sc = getattr(expr, "schema_column", None)
+    ct = getattr(sc, "column_type", None) if sc is not None else None
+    if ct is not None and ct.physical == DrakenType.VARIANT:
+        from opteryx.expression import format_expression
+
+        name = getattr(sc, "name", None) or format_expression(expr)
+        raise VariantKeyError(what, name)
 
 
 def visit_aggregate_and_group(
@@ -56,6 +75,8 @@ def visit_aggregate_and_group(
     columns_to_keep = set()
     if node.groups:
         tmp_groups, _ = zip(*(inner_binder(group, context) for group in node.groups))
+        for col in tmp_groups:
+            _reject_variant_key("GROUP BY", col)
         columns_to_keep = {col.schema_column.identity for col in tmp_groups}
     # remove literals in the GROUP BY clause, they form one group
     node.groups = [g for g in node.groups if g.node_type != NodeType.LITERAL]
@@ -141,6 +162,8 @@ def visit_distinct(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     if node.on:
         # Bind the local columns to physical columns
         node.on, group_contexts = zip(*(inner_binder(col, context) for col in node.on))
+        for col in node.on:
+            _reject_variant_key("DISTINCT ON", col)
         from opteryx.planner.binder.binder import merge_schemas
 
         context.schemas = merge_schemas(*[ctx.schemas for ctx in group_contexts])

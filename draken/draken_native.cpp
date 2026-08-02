@@ -6704,6 +6704,20 @@ NB_MODULE(draken_native, m) {
         .value("UINT32",       DRAKEN_UINT32)
         .value("UINT64",       DRAKEN_UINT64)
         // ------------------------------------------------------------------
+        // fixed_itemsize() — Python-callable twin of the canonical C
+        // draken_type_fixed_itemsize() (core/buffers.h), the SOLE source for
+        // this width; every native consumer (join build-side, sort/group-by
+        // gather, vector concat) calls that function rather than a hand-copied
+        // switch, after five such copies drifted out of sync with each other.
+        // This binding lets plan-time Python code (byte-size cost estimation)
+        // consult the SAME table instead of adding a sixth. Returns 0 for the
+        // non-fixed families (BOOL is bit-packed; string/variant/array/fp16/
+        // null have no flat per-element width) — callers treat 0 as "not
+        // fixed-width", never as a real zero-byte answer.
+        .def("fixed_itemsize", [](DrakenType self) -> uint64_t {
+            return static_cast<uint64_t>(draken_type_fixed_itemsize(self));
+        })
+        // ------------------------------------------------------------------
         // ordinalize(value) — scalar twin of Vector.ordinalize(). Converts one
         // Python literal into the same int64 ordinal-key space the vector
         // kernels produce for this physical type (ops/ordinalize.h), so

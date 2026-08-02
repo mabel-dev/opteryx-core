@@ -18,6 +18,7 @@ cdef class FileColumnStats:
     cpdef object get_min(self, int field_id)
     cpdef object get_max(self, int field_id)
     cpdef object get_null_count(self, int field_id)
+    cpdef object get_uncompressed_size(self, int field_id)
     cpdef bint has_any_null_counts(self)
     cpdef tuple get_range_by_name(self, str name)
     cpdef bint has_stats(self)

@@ -100,6 +100,22 @@ cdef class FileColumnStats:
             return None
         return s.null_count
 
+    cpdef object get_uncompressed_size(self, int field_id):
+        """Return total uncompressed byte size for field_id, or None if unknown.
+
+        0 is a genuine "no data" signal here (AggColumnStat's default and what a
+        row group with no matching leaf column contributes) -- unlike null_count,
+        there's no separate completeness flag, so a column that never accumulated
+        any size reports None rather than a misleading 0.
+        """
+        idx = self._field_id_to_idx.get(field_id)
+        if idx is None:
+            return None
+        cdef AggColumnStat* s = &self._stats[<int>idx]
+        if s.total_uncompressed_size <= 0:
+            return None
+        return s.total_uncompressed_size
+
     cpdef bint has_any_null_counts(self):
         """True if at least one column has a complete null count."""
         cdef size_t i

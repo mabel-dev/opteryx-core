@@ -29,6 +29,13 @@ from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _Carcha
 
 cdef class DistinctNode(BasePlanNode):
     cdef public object _distinct_on
+    # The unreduced DISTINCT ON expression nodes (schema_column, node_type,
+    # parameters intact) — parallel to GroupedAggregateHashedNode.groups.
+    # Needed by the native compiler to materialize a computed DISTINCT ON key
+    # (e.g. `DISTINCT ON (payload->'x')`) that the stream doesn't already
+    # carry; `_distinct_on` alone (bare identities) throws that expression
+    # tree away before the compiler ever sees it.
+    cdef public object _distinct_on_exprs
     cdef public str _set_variant
     cdef public object _hash_set
     cdef public bint at_least_one_yielded
@@ -38,6 +45,7 @@ cdef class DistinctNode(BasePlanNode):
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
+        self._distinct_on_exprs = parameters.get("on")
         self._distinct_on = parameters.get("on")
         if self._distinct_on:
             self._distinct_on = [
@@ -54,6 +62,7 @@ cdef class DistinctNode(BasePlanNode):
         cdef DistinctNode w = DistinctNode.__new__(DistinctNode)
         self._copy_worker_base(w)
         w._distinct_on = self._distinct_on
+        w._distinct_on_exprs = self._distinct_on_exprs
         w._set_variant = self._set_variant
         w._hash_set = None
         w.at_least_one_yielded = False

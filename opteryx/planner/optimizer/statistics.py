@@ -133,6 +133,21 @@ class ColumnStatistics:
     # trust this field for VARCHAR/VARBINARY, where it's safe either way.
     length_bounds: Optional[tuple] = None
 
+    # Estimated total on-disk uncompressed size (bytes) of this column's
+    # values AT THIS PLAN NODE — a relation total, not a per-row average,
+    # mirroring row_count: it is rescaled at every operator that changes
+    # row_count (Filter selectivity, Limit, Join cardinality, Aggregate/
+    # Distinct output rows, Union) the same way row_count itself is, via
+    # StatisticsRefreshVisitor. Populated at Scan from (in priority order)
+    # Manifest.get_total_uncompressed_size (real per-file measured bytes),
+    # avg_length * row_count (string columns with ANALYZE'd char-class
+    # stats), or row_count * DrakenType.fixed_itemsize() (fixed-width
+    # columns, via the single canonical native width table — see
+    # draken_type_fixed_itemsize in core/buffers.h). None when none of
+    # those signals are available (e.g. a variable-width column with no
+    # ANALYZE pass and no manifest-level size) — never fabricated.
+    total_bytes: Optional[int] = None
+
 
 @dataclass
 class RelationStatistics:

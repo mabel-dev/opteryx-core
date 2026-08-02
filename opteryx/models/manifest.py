@@ -920,6 +920,51 @@ class Manifest:
                 return None
         return total
 
+    def get_total_uncompressed_size(self, column) -> Optional[int]:
+        """Total uncompressed byte size for a column across all files, or None.
+
+        Returns None if any file is missing size data for this column -- a
+        partial sum would silently understate the true size, same
+        conservative contract as get_total_null_count.
+
+        Two sources, indexed differently on purpose:
+          * file.column_stats (FileColumnStats, local/filesystem_connector
+            path) is keyed by real field_id, same as get_min/get_max/
+            get_null_count -- resolved via _resolve_field_id.
+          * file.column_uncompressed_sizes_in_bytes (catalog path) is a
+            plain list "aligned with schema field order" (FileEntry's own
+            docstring) that from_datafile passes straight through with NO
+            field_id remapping, unlike lower_bounds/upper_bounds/
+            min_length_bounds -- so it must be indexed by LOAD-TIME POSITION
+            (_load_time_columns), never by the catalog field_id, which can
+            differ from position after schema evolution.
+        """
+        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+        field_id = self._resolve_field_id(col_name)
+        position = self._load_time_columns.get(col_name)
+        if field_id is None and position is None:
+            return None
+
+        total = 0
+        for file in self.files:
+            if file.column_stats is not None:
+                if field_id is None:
+                    return None
+                size = file.column_stats.get_uncompressed_size(field_id)
+                if size is None:
+                    return None
+                total += size
+            elif file.column_uncompressed_sizes_in_bytes:
+                if position is None or position >= len(file.column_uncompressed_sizes_in_bytes):
+                    return None
+                size = file.column_uncompressed_sizes_in_bytes[position]
+                if size is None:
+                    return None
+                total += size
+            else:
+                return None
+        return total
+
     def estimate_null_fraction(self, column) -> Optional[float]:
         """Estimate fraction of nulls in column using catalog null counts if present."""
         col_name = column.decode("utf-8") if isinstance(column, bytes) else column

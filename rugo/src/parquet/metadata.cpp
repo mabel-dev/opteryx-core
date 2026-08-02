@@ -1348,6 +1348,12 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
         }
       }
 
+      // Aggregate uncompressed size (sum across row groups and, for a
+      // nested column, across every leaf rolled into this display name).
+      if (col.total_uncompressed_size > 0) {
+        agg.total_uncompressed_size += col.total_uncompressed_size;
+      }
+
       // Aggregate min: keep the smallest value.
       if (col.has_min) {
         if (!agg.has_min ||

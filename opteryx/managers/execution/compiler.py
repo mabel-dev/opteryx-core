@@ -29,6 +29,7 @@ import threading
 from draken.draken_native import DrakenType
 from opteryx.constants import ResultType
 from opteryx.exceptions import NotSupportedError
+from opteryx.exceptions import VariantKeyError
 from opteryx.expression import NodeType
 
 _MAX_WORKER_CAP = 16
@@ -831,8 +832,15 @@ class _Compiler:
     _RANK_ROW_NUMBER = 0  # row_number.pyx's _RANK_ROW_NUMBER kind code
 
     def _check_key_type(self, what, name, pt):
-        if pt is not None and pt not in self._KEY_COLUMN_TYPES:
-            _unsupported(f"{what} on column '{name}' ({pt})")
+        if pt is None or pt in self._KEY_COLUMN_TYPES:
+            return
+        if pt == DrakenType.VARIANT:
+            # Backstop only — the binder (visit_distinct / visit_aggregate_and_group)
+            # already rejects a VARIANT key at bind time, before the optimizer or
+            # this compiler ever run. This catches any plan-construction path that
+            # bypasses normal binding; the message lives once, on the exception.
+            raise VariantKeyError(what, name)
+        _unsupported(f"{what} on column '{name}' ({pt})")
 
     @staticmethod
     def _array_agg_options(agg):
@@ -1131,13 +1139,38 @@ class _Compiler:
         if kind == "DistinctNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
             on = getattr(node, "_distinct_on", None)
+            on_exprs = getattr(node, "_distinct_on_exprs", None) or []
+            # Friendly name per key identity (e.g. "payload -> status_code") for
+            # error messages — mirrors GROUP BY's group_key_names above; without
+            # it a computed key falls back to its opaque internal identity.
+            on_key_names = {}
+            for expr in on_exprs:
+                sc = getattr(expr, "schema_column", None)
+                if sc is not None and sc.identity is not None:
+                    on_key_names[sc.identity] = getattr(sc, "name", None)
+            if on:
+                # DISTINCT ON over a computed expression (e.g. `payload->'x'`,
+                # `UPPER(url)`): project the key expression to a stream column
+                # first, then dedup on it — mirrors GroupedAggregateHashedNode's
+                # computed_keys handling above.
+                computed_keys = []
+                for expr in on_exprs:
+                    sc = getattr(expr, "schema_column", None)
+                    if getattr(expr, "node_type", None) in (None, NodeType.IDENTIFIER,
+                                                             NodeType.WILDCARD):
+                        continue
+                    if sc is not None and sc.identity is not None and sc.identity not in layout:
+                        computed_keys.append(expr)
+                if computed_keys:
+                    layout = self._add_computed(p, computed_keys, layout,
+                                                preserve_shape=True)
             on_idx = []
             if on:
                 for identity in on:
                     if identity not in layout:
                         _unsupported("a DISTINCT ON column the stream does not carry")
                     self._check_key_type(
-                        "DISTINCT ON", self._layout_name(identity),
+                        "DISTINCT ON", on_key_names.get(identity) or self._layout_name(identity),
                         self._layout_type(None, identity))
                     on_idx.append(layout.index(identity))
             else:

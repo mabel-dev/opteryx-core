@@ -321,6 +321,7 @@ def _scan_stats(
             avg_length = None
             ordinal_bounds = None
             length_bounds = None
+            total_bytes = None
             if manifest is not None:
                 try:
                     distinct_count = manifest.estimate_cardinality(col_name)
@@ -349,6 +350,26 @@ def _scan_stats(
                     length_bounds = manifest.get_length_bounds(col_name)
                 except Exception:
                     length_bounds = None
+                try:
+                    total_bytes = manifest.get_total_uncompressed_size(col_name)
+                except Exception:
+                    total_bytes = None
+            # Byte-size estimate, in priority order: real measured manifest
+            # bytes (above) > avg_length (ANALYZE'd string columns) > fixed
+            # physical width (row_count * DrakenType.fixed_itemsize(), the
+            # single canonical native width table -- see core/buffers.h).
+            # None -- never a fabricated guess -- when none of these signals
+            # are available (e.g. a variable-width column with no ANALYZE
+            # pass and no manifest-level size).
+            if total_bytes is None and avg_length is not None:
+                total_bytes = int(avg_length * row_count)
+            if total_bytes is None:
+                column_type = getattr(col, "column_type", None)
+                physical = getattr(column_type, "physical", None)
+                if physical is not None:
+                    fixed_width = physical.fixed_itemsize()
+                    if fixed_width:
+                        total_bytes = int(fixed_width) * int(row_count)
             # Keyed by identity; the manifest accessors above are name-based
             # because manifest statistics are per-relation and unambiguous.
             columns[identity] = ColumnStatistics(
@@ -362,6 +383,7 @@ def _scan_stats(
                 avg_length=avg_length,
                 ordinal_bounds=ordinal_bounds,
                 length_bounds=length_bounds,
+                total_bytes=total_bytes,
             )
 
     base = RelationStatistics(row_count=int(row_count), columns=columns)
@@ -396,6 +418,9 @@ def _scan_stats(
                 new_rows = base.row_count
                 if selectivity != 1.0:
                     new_rows = max(1, int(base.row_count * selectivity))
+                narrowed_columns = _scale_total_bytes(
+                    narrowed_columns, _ratio(new_rows, base.row_count)
+                )
                 if new_rows != base.row_count or narrowed_columns is not base.columns:
                     base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
@@ -428,6 +453,7 @@ def _scan_stats(
         new_rows = base.row_count
         if selectivity != 1.0:
             new_rows = max(1, int(base.row_count * selectivity))
+        narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
         if new_rows != base.row_count or narrowed_columns is not base.columns:
             base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
@@ -518,6 +544,7 @@ def _filter_stats(
     new_rows = base.row_count
     if selectivity != 1.0:
         new_rows = estimate_after_filter(base.row_count, selectivity)
+    narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
     return RelationStatistics(row_count=new_rows, columns=narrowed_columns)
 
 
@@ -551,6 +578,7 @@ def _join_stats(
                 _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
             )
         merged = _drop_histograms(_merge_columns(left, right))
+        merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
         return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
 
     # Map planner join names to the estimator's vocabulary.
@@ -584,6 +612,7 @@ def _join_stats(
                 _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
             )
         merged = _drop_histograms(_merge_columns(left, right))
+        merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
         return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
 
     # A composite equi-key (`ON a.x = b.x AND a.y = b.y`) must have EVERY key
@@ -630,6 +659,7 @@ def _join_stats(
     # Equi-join: matching join keys see their range intersected and NDV reduced
     # to min(left, right). Non-key columns just get NDV capped at output rows.
     merged = _intersect_join_keys(merged, left, right, left_keys, right_keys)
+    merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
     return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
 
 
@@ -685,6 +715,7 @@ def _aggregate_stats(
         if col is None:
             continue
         out_cols[key] = replace(col, histogram=None)
+    out_cols = _scale_total_bytes(out_cols, _ratio(out_rows, base.row_count))
     return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
 
 
@@ -703,7 +734,8 @@ def _limit_stats(
     new_rows = max(0, capped)
     # Limit doesn't change ranges or distributions of *which* values appear,
     # but it does cap how many distinct values can be present.
-    return RelationStatistics(row_count=new_rows, columns=_cap_ndvs(base.columns, new_rows))
+    columns = _scale_total_bytes(base.columns, _ratio(new_rows, base.row_count))
+    return RelationStatistics(row_count=new_rows, columns=_cap_ndvs(columns, new_rows))
 
 
 def _child_output_identities(plan: Optional["LogicalPlan"], nid: Optional[str]) -> Optional[set]:
@@ -758,6 +790,7 @@ def _distinct_stats(
     # Distinct collapses duplicates — distribution shape changes (histograms
     # invalid); each column's NDV is bounded by the output row count.
     out_cols = _drop_histograms(base.columns)
+    out_cols = _scale_total_bytes(out_cols, _ratio(out_rows, base.row_count))
     return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
 
 
@@ -787,11 +820,20 @@ def _union_stats(
             new_ndv: Optional[int] = None
             if existing.distinct_count is not None and v.distinct_count is not None:
                 new_ndv = existing.distinct_count + v.distinct_count
+            # Sum total_bytes the same strict way as NDV above -- this column
+            # now carries both sides' concatenated values, but a partial sum
+            # from only one known side would understate the true total, so
+            # require both (matches Manifest.get_total_uncompressed_size's
+            # own no-partial-sums contract).
+            new_total_bytes: Optional[int] = None
+            if existing.total_bytes is not None and v.total_bytes is not None:
+                new_total_bytes = existing.total_bytes + v.total_bytes
             columns[k] = replace(
                 existing,
                 value_range=ColumnRange(lower_bound=new_lower, upper_bound=new_upper),
                 distinct_count=new_ndv,
                 histogram=None,
+                total_bytes=new_total_bytes,
             )
     return RelationStatistics(row_count=rows, columns=_cap_ndvs(columns, rows))
 
@@ -865,6 +907,66 @@ def _merge_columns(left: RelationStatistics, right: RelationStatistics) -> dict:
     for k, v in right.columns.items():
         merged.setdefault(k, v)
     return merged
+
+
+def _ratio(new_rows: int, old_rows: int) -> float:
+    """new_rows / old_rows, guarding the degenerate old_rows == 0 case.
+
+    Shared by every operator that rescales `total_bytes` alongside row_count:
+    bytes-per-row is assumed uniform across an operator's output (the same
+    assumption row_count estimation itself already makes implicitly), so
+    scaling total_bytes by this ratio keeps it consistent with row_count.
+    """
+    if old_rows <= 0:
+        return 1.0 if new_rows == old_rows else 0.0
+    return new_rows / old_rows
+
+
+def _scale_total_bytes(
+    columns: Dict[bytes, ColumnStatistics], ratio: float
+) -> Dict[bytes, ColumnStatistics]:
+    """Return a copy with each column's total_bytes scaled by `ratio`.
+
+    `ratio == 1.0` is a no-op fast path returning `columns` unchanged, so
+    callers can freely call this even when nothing actually changed (mirrors
+    _cap_ndvs / _narrow_filter_columns' own no-op-preserving style, which
+    downstream `is not` identity checks rely on).
+    """
+    if ratio == 1.0:
+        return columns
+    out: Dict[bytes, ColumnStatistics] = {}
+    for k, c in columns.items():
+        if c.total_bytes is None:
+            out[k] = c
+        else:
+            out[k] = replace(c, total_bytes=max(0, int(c.total_bytes * ratio)))
+    return out
+
+
+def _scale_total_bytes_by_origin(
+    merged: Dict[bytes, ColumnStatistics],
+    left: RelationStatistics,
+    right: RelationStatistics,
+    out_rows: int,
+) -> Dict[bytes, ColumnStatistics]:
+    """Join variant of `_scale_total_bytes`: each column scales by ITS OWN
+    side's row-count ratio, not a single shared ratio -- a join can multiply
+    left and right row counts by different factors (e.g. a 10-row left table
+    joined 100-to-1 against a right table), so a left-sourced column's bytes
+    must scale by out_rows/left.row_count while a right-sourced column scales
+    by out_rows/right.row_count. `_merge_columns` (left takes priority via
+    setdefault) already tells us which side a given identity came from.
+    """
+    ratio_left = _ratio(out_rows, left.row_count)
+    ratio_right = _ratio(out_rows, right.row_count)
+    out: Dict[bytes, ColumnStatistics] = {}
+    for k, c in merged.items():
+        if c.total_bytes is None:
+            out[k] = c
+            continue
+        ratio = ratio_left if k in left.columns else ratio_right
+        out[k] = replace(c, total_bytes=max(0, int(c.total_bytes * ratio)))
+    return out
 
 
 def _cap_ndvs(columns: Dict[bytes, ColumnStatistics], row_count: int) -> Dict[bytes, ColumnStatistics]:

@@ -327,6 +327,32 @@ class IncorrectTypeError(SqlError):
     """Exception raised for incorrect types."""
 
 
+class VariantKeyError(IncorrectTypeError):
+    """Raised when a GROUP BY / DISTINCT [ON] / ORDER BY key resolves to VARIANT.
+
+    VARIANT (a dynamic JSON value — object, array, scalar, or null; e.g. the `->`
+    operator's result) has no fixed type to hash or compare, so it can never be a
+    key. This is a permanent restriction, not a coverage gap — the message says so
+    and names the fix, rather than implying the case is merely unported.
+
+    Raised from two places, deliberately: the BINDER (as early as possible — before
+    the optimizer or native compiler do any work) for the common case, and the
+    native compiler's own key-type gate as a backstop for any plan-construction path
+    that bypasses normal binding. Both raise through this one class so the message
+    can't drift between them.
+    """
+
+    def __init__(self, what: str, name: str):
+        self.what = what
+        self.name = name
+        super().__init__(
+            f"{what} on column '{name}' is not possible: the column is VARIANT "
+            "(a dynamic JSON value), which has no fixed type to key on. Cast it "
+            "to a concrete type first — e.g. use `->>` instead of `->` to extract "
+            "JSON text, or `CAST(... AS VARCHAR)`."
+        )
+
+
 class IncompatibleTypesError(Exception):
     """
     Raised when attempting to join fields of incompatible types.
