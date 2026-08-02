@@ -7,6 +7,7 @@ updates the version file, and stages the changes for commit.
 We also update the version in pyproject.toml to keep them in sync.
 """
 
+
 import datetime
 import re
 import subprocess
