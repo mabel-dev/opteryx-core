@@ -47,8 +47,11 @@ class FileEntry:
     max_values: Optional[List] = None
     # Positional (by field_id, parallel to min_values/max_values), populated by
     # ANALYZE's native per-file statistics pass (opteryx.operators.table_management
-    # ._analyze) — see manifest_io.py's _MANIFEST_COLUMNS. None for a FileEntry no
-    # native pass has touched (e.g. catalog DataFile / parquet-footer origin).
+    # ._analyze) — see manifest_io.py's _MANIFEST_COLUMNS. Also populated directly
+    # from the manifest row by from_datafile (catalog path) — manifest_io.py's
+    # _file_entry_to_manifest_dict (used by SHOW MANIFEST) reads these plain
+    # lists, not the field_id-keyed dict forms below. None for a FileEntry no
+    # producer has touched (e.g. parquet-footer origin with no stats pass).
     null_counts: Optional[List[Optional[int]]] = None
     min_lengths: Optional[List[Optional[int]]] = None
     max_lengths: Optional[List[Optional[int]]] = None
@@ -220,6 +223,16 @@ class FileEntry:
                     i: val for i, val in enumerate(catalog_null_counts) if val is not None
                 }
 
+            # Raw positional-by-field_id lists, kept alongside the field_id-keyed
+            # dict forms above — mirrors min_values/max_values, which are passed
+            # through as both a dict (lower_bounds/upper_bounds) and the raw list.
+            # SHOW MANIFEST (manifest_io._file_entry_to_manifest_dict) reads these
+            # plain list attributes directly, not the dict forms; without this,
+            # a catalog-backed FileEntry always displayed empty null_counts/
+            # min_lengths/max_lengths/char_total_bytes regardless of what the
+            # manifest actually stored.
+            char_total_bytes = entry.get("char_total_bytes")
+
         else:
             # Fallback: try direct attribute access. No known producer of this
             # shape carries string-length stats, so length_bounds stay None —
@@ -228,6 +241,10 @@ class FileEntry:
             min_length_bounds = None
             max_length_bounds = None
             null_value_counts = None
+            min_lengths = None
+            max_lengths = None
+            catalog_null_counts = None
+            char_total_bytes = None
             file_path = getattr(datafile, "file_path", None)
             record_count = getattr(datafile, "record_count", 0)
             file_size = getattr(datafile, "file_size_in_bytes", 0)
@@ -273,6 +290,10 @@ class FileEntry:
             max_values=max_values,
             min_length_bounds=min_length_bounds,
             max_length_bounds=max_length_bounds,
+            null_counts=catalog_null_counts,
+            min_lengths=min_lengths,
+            max_lengths=max_lengths,
+            char_total_bytes=char_total_bytes,
         )
 
     def to_dict(self) -> dict:

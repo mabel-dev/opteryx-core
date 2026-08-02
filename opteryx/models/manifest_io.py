@@ -20,7 +20,7 @@ LocalStoreConnector, which is not catalog-backed.
 """
 
 import struct
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from opteryx.models.file_entry import FileEntry
 

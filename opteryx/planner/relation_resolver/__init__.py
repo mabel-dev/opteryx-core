@@ -156,6 +156,11 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
             property.source = relations[property.source][1]
         if isinstance(property, list):
             return [_prop(p) for p in property]
+        if isinstance(property, tuple):
+            # ORDER BY entries are (expr, ascending) tuples — recurse into them too,
+            # or a spliced view/CTE keeps a dangling reference to its old alias
+            # (e.g. `ORDER BY o.observed_at` after `o`'s Scan is renamed away).
+            return tuple(_prop(p) for p in property)
         if isinstance(property, dict):
             return {k: _prop(v) for k, v in property.items()}
         if isinstance(property, Node):

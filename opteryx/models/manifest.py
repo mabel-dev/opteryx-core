@@ -451,6 +451,38 @@ class Manifest:
         """Get file paths from the manifest."""
         return [file.file_path for file in self.files]
 
+    def sketch_vectors_by_file(
+        self,
+    ) -> Tuple[Optional[Dict[str, List]], Optional[Dict[str, List]], Optional[Dict[str, List]]]:
+        """Box the native min_k/histogram/char_class vectors into per-file lists.
+
+        Returns (sketches, histograms, char_classes), each either None (this
+        Manifest holds no such vector) or a ``{file_path: positional-by-field-id
+        list}`` dict — the shape manifest_io.file_entries_to_manifest_morsel's
+        sketches/histograms/char_classes parameters expect. For SHOW MANIFEST
+        only: an admin/diagnostic path where boxing every file is fine, unlike
+        the planner's hot-path kernels which reduce the native vectors directly
+        (see __init__'s min_k_vector/histogram_vector/char_class_vector docs).
+        Honors _live_rows so this stays correct if ever called after
+        prune_files has shrunk self.files.
+        """
+
+        def _box(vector) -> Optional[Dict[str, List]]:
+            if vector is None:
+                return None
+            rows = vector.to_pylist()
+            if self._live_rows is not None:
+                return {
+                    fe.file_path: rows[self._live_rows[i]] for i, fe in enumerate(self.files)
+                }
+            return {fe.file_path: rows[i] for i, fe in enumerate(self.files)}
+
+        return (
+            _box(self._min_k_vector),
+            _box(self._histogram_vector),
+            _box(self._char_class_vector),
+        )
+
     # ================================================================
     # Estimation Methods (for cost-based optimization)
     # ================================================================

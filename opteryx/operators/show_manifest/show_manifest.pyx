@@ -32,7 +32,14 @@ from opteryx.models import QueryProperties
 def _collector(manifest):
     from opteryx.models.manifest_io import file_entries_to_manifest_morsel
 
-    return file_entries_to_manifest_morsel(manifest.files, manifest.schema)
+    sketches, histograms, char_classes = manifest.sketch_vectors_by_file()
+    return file_entries_to_manifest_morsel(
+        manifest.files,
+        manifest.schema,
+        sketches=sketches,
+        histograms=histograms,
+        char_classes=char_classes,
+    )
 
 
 class ShowManifestNode(BasePlanNode):
