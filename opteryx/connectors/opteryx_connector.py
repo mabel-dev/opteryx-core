@@ -35,7 +35,7 @@ def _warn_no_native_sketches() -> None:
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
-from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
+from opteryx.exceptions import CollectionNotEmptyError, DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
@@ -691,6 +691,36 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             raise DatasetNotFoundError(dataset=relation_name, connector=self.__class__.__name__)
 
         catalog.drop_dataset(relative_id, author=author)
+
+    def collection_exists(self, collection_name: str) -> bool:
+        """Check if a collection exists in the catalog."""
+        workspace, relative_id = self._parse_identifier(collection_name)
+        catalog = self._get_catalog(workspace)
+        return catalog.collection_exists(relative_id)
+
+    def drop_collection(
+        self, collection_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop an empty collection from the catalog.
+
+        A collection owns no storage of its own, so unlike drop_relation this
+        is not tombstoned - it either succeeds outright or is rejected because
+        datasets/views remain in it.
+        """
+        from opteryx_catalog.exceptions import CollectionNotEmpty
+
+        workspace, relative_id = self._parse_identifier(collection_name)
+        catalog = self._get_catalog(workspace)
+
+        if not catalog.collection_exists(relative_id):
+            if if_exists:
+                return
+            raise DatasetNotFoundError(dataset=collection_name, connector=self.__class__.__name__)
+
+        try:
+            catalog.drop_collection(relative_id, author=author)
+        except CollectionNotEmpty as exc:
+            raise CollectionNotEmptyError(collection_name) from exc
 
     def truncate_relation(self, relation_name: str, author: Optional[str] = None) -> None:
         """Remove all rows from a dataset, retaining the dataset and its schema."""

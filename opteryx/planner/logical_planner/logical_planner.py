@@ -70,6 +70,8 @@ class LogicalPlanStepType(int, Enum):
     AlterRelation = auto()
     Insert = auto()
 
+    DropCollection = auto()
+
 
 class LogicalPlan(Graph):
     pass
@@ -1935,6 +1937,26 @@ def plan_drop(statement, **kwargs):
         drop_relation_node.if_exists = drop_statement.get("if_exists", False)
 
         plan.add_node(random_string(), drop_relation_node)
+        return plan
+
+    elif object_type == "Schema":
+        # DROP COLLECTION path — rewritten to DROP SCHEMA by the SQL rewriter
+        # (sql_rewriter.rewrite_drop_collection) since the parser has no
+        # COLLECTION object type of its own.
+        drop_collection_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropCollection)
+
+        names = drop_statement["names"]
+        collection_names = []
+        for name_parts in names:
+            collection_name = extract_variable(name_parts)
+            if isinstance(collection_name, list):
+                collection_name = ".".join(collection_name)
+            collection_names.append(collection_name)
+
+        drop_collection_node.collection_names = collection_names
+        drop_collection_node.if_exists = drop_statement.get("if_exists", False)
+
+        plan.add_node(random_string(), drop_collection_node)
         return plan
 
     else:

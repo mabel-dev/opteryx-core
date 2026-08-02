@@ -376,6 +376,10 @@ def _create_drop_relation_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_relation", **logical_node.properties)
 
 
+def _create_drop_collection_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_collection", **logical_node.properties)
+
+
 def _create_truncate_relation_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="truncate_relation", **logical_node.properties)
 
@@ -416,6 +420,7 @@ _DISPATCH = {
     LogicalPlanStepType.Comment:          _create_comment_node,
     LogicalPlanStepType.CreateRelation:   _create_create_relation_node,
     LogicalPlanStepType.DropRelation:     _create_drop_relation_node,
+    LogicalPlanStepType.DropCollection:   _create_drop_collection_node,
     LogicalPlanStepType.TruncateRelation: _create_truncate_relation_node,
     LogicalPlanStepType.AlterRelation:    _create_alter_relation_node,
     LogicalPlanStepType.Insert:           _create_insert_node,

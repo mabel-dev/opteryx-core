@@ -45,6 +45,9 @@ class RelationManagementNode(BasePlanNode):
         self.connectors = parameters.get("connectors")
         self.if_exists: bool = parameters.get("if_exists", False)
 
+        # DROP COLLECTION
+        self.collection_names = parameters.get("collection_names")
+
         # ALTER ... CLUSTER BY
         self.cluster_columns = parameters.get("cluster_columns")
 
@@ -59,6 +62,8 @@ class RelationManagementNode(BasePlanNode):
     def config(self):
         if self.action == "drop_relation":
             return f"drop {', '.join(self.relation_names or [])}"
+        if self.action == "drop_collection":
+            return f"drop collection {', '.join(self.collection_names or [])}"
         if self.action == "cluster_by":
             return f"cluster {self.relation_name} by ({', '.join(self.cluster_columns or [])})"
         return f"{self.action} {self.relation_name}"
@@ -93,6 +98,20 @@ class RelationManagementNode(BasePlanNode):
                     raise DatasetNotFoundError(connector=connector, dataset=relation_name)
                 connector.drop_relation(
                     relation_name, if_exists=self.if_exists, author=self._author
+                )
+                dropped += 1
+            return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_collection":
+            dropped = 0
+            for collection_name in self.collection_names:
+                connector = self.connectors[collection_name]
+                if not connector.collection_exists(collection_name):
+                    if self.if_exists:
+                        continue
+                    raise DatasetNotFoundError(connector=connector, dataset=collection_name)
+                connector.drop_collection(
+                    collection_name, if_exists=self.if_exists, author=self._author
                 )
                 dropped += 1
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)

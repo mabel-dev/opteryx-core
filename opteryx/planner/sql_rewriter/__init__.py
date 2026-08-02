@@ -21,6 +21,8 @@ Responsibilities:
   rejects FORMAT GRAPHVIZ and FORMAT JSON explicitly
 - Rewrites COMMENT ON TABLE / COMMENT ON VIEW to COMMENT ON EXTENSION so the parser
   accepts the statement
+- Rewrites DROP COLLECTION to DROP SCHEMA so the parser accepts the statement
+  (sqlparser-rs has no COLLECTION object type)
 
 The rewriter does NOT parse SQL into an AST; it only manipulates the text.
 """
@@ -271,6 +273,23 @@ def rewrite_comment(parts: list) -> list:
     return parts
 
 
+def rewrite_drop_collection(statement: str) -> str:
+    """
+    Rewrite DROP COLLECTION to DROP SCHEMA.
+
+    The parser (sqlparser-rs) has no COLLECTION object type, so DROP COLLECTION
+    cannot be parsed natively. DROP SCHEMA is accepted and otherwise unused by
+    opteryx, so rewriting to it lets DROP COLLECTION reach the planner as a
+    Statement::Drop AST node with object_type == "Schema", which plan_drop()
+    maps to a DropCollection logical plan node.
+
+    Example:
+        DROP COLLECTION workspace.collection -> DROP SCHEMA workspace.collection
+        DROP COLLECTION IF EXISTS workspace.collection -> DROP SCHEMA IF EXISTS workspace.collection
+    """
+    return re.sub(r"^(\s*DROP\s+)COLLECTION\b", r"\1SCHEMA", statement, count=1, flags=re.IGNORECASE)
+
+
 def rewrite_temporal_units(statement: str) -> str:
     """
     Rewrite temporal unit syntax to internal form for parser compatibility.
@@ -323,6 +342,9 @@ def do_sql_rewrite(statement):
 
     # Rewrite temporal unit syntax before parsing
     statement = rewrite_temporal_units(statement)
+
+    # Rewrite DROP COLLECTION before parsing (parser has no COLLECTION object type)
+    statement = rewrite_drop_collection(statement)
 
     parts = sql_parts(statement)
     parts = rewrite_explain(parts)

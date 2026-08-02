@@ -191,6 +191,18 @@ class DatasetNotFoundError(SqlError):
         super().__init__(message)
 
 
+class CollectionNotEmptyError(SqlError):
+    """Exception raised when DROP COLLECTION targets a non-empty collection."""
+
+    def __init__(self, collection: str):
+        self.collection = collection
+        message = (
+            f"Collection '{collection}' is not empty. "
+            "Drop its datasets and views before dropping the collection."
+        )
+        super().__init__(message)
+
+
 class FunctionNotFoundError(SqlError):
     """Exception raised when a function is not found."""
 

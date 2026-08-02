@@ -66,6 +66,40 @@ def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
+def visit_drop_collection(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the DROP COLLECTION node to determine which connectors should handle
+    removing the collections.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connectors = {}
+    for collection_name in node.collection_names:
+        connector = connector_factory(collection_name, telemetry=context.telemetry)
+        if not isinstance(connector, Writable):
+            raise ReadOnlyConnectorError(
+                f"connector for {collection_name} does not support DROP COLLECTION"
+            )
+
+        # Same tier as DROP TABLE/VIEW - a writer's per-relation grant does not
+        # extend to removing the collection itself, only an owner may. An
+        # owner policy pattern covering the whole workspace (e.g. "workspace.*")
+        # already matches a 2-part collection name via fnmatch, so no new
+        # permission mechanism is needed for "owner of the workspace."
+        if not can_perform_action(context.execution_context, collection_name, action="DROP"):
+            raise PermissionError(
+                f"User does not have permission to drop collection {collection_name}"
+            )
+
+        node.connectors[collection_name] = connector
+
+    node.columns = []
+    return node, context
+
+
 def visit_alter_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the ALTER TABLE ... CLUSTER BY node to determine which connector
@@ -293,10 +327,18 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             f"User does not have permission to insert into {node.relation_name}"
         )
 
-    # Read schema from dataset.json.
-    relation_dir = node.connector._relation_dir(node.relation_name)
-    descriptor = node.connector._read_dataset_json(relation_dir)
-    target_schema = descriptor.schema  # RelationSchema with SchemaColumn list
+    # Read the existing relation's schema through the connector-agnostic table
+    # engine - the same mechanism the SELECT binder uses (see dataset.py) -
+    # not _relation_dir/_read_dataset_json, which are LocalStoreConnector-only
+    # private filesystem helpers. Catalog-backed connectors (e.g.
+    # OpteryxConnector) have no such attributes, so calling them here crashed
+    # unconditionally on every non-local deployment: AttributeError:
+    # 'OpteryxConnector' object has no attribute '_relation_dir'.
+    table = node.connector.table_engine(node.relation_name, telemetry=context.telemetry)
+    if getattr(table, "get_dataset_metadata", None) is not None:
+        target_schema, _manifest = table.get_dataset_metadata()
+    else:
+        target_schema = table.get_dataset_schema()  # RelationSchema with SchemaColumn list
 
     node.target_schema = target_schema
     node.columns = []  # binder convention; INSERT produces no output columns

@@ -12,6 +12,7 @@ import pytest
 import opteryx
 from opteryx.connectors import register_workspace
 from opteryx.connectors.opteryx_connector import OpteryxConnector
+from opteryx.exceptions import CollectionNotEmptyError
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
 
@@ -20,6 +21,7 @@ class _FakeCatalog:
     """Records the calls the connector makes, standing in for the real catalog."""
 
     calls = []
+    collection_is_empty = True
 
     def __init__(self, workspace=None, **kwargs):
         pass
@@ -41,6 +43,16 @@ class _FakeCatalog:
 
     def get_relation(self, identifier):
         return (None, None)
+
+    def collection_exists(self, collection):
+        return True
+
+    def drop_collection(self, collection, author=None):
+        from opteryx_catalog.exceptions import CollectionNotEmpty
+
+        if not _FakeCatalog.collection_is_empty:
+            raise CollectionNotEmpty(f"Collection is not empty: {collection}")
+        _FakeCatalog.calls.append(("drop_collection", collection, author))
 
 
 @pytest.fixture
@@ -118,5 +130,42 @@ def test_cluster_by_requires_owner_on_catalog(catalog_workspace):
 
     with pytest.raises(PermissionError, match="permission to alter table"):
         list(writer.execute_to_morsels("ALTER TABLE cat.coll.tbl CLUSTER BY (name)"))
+
+    assert catalog_workspace.calls == []
+
+
+def test_drop_collection_delegates_to_catalog_with_user(catalog_workspace):
+    """DROP COLLECTION reaches the catalog carrying the session user."""
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("DROP COLLECTION cat.coll"))
+
+    assert catalog_workspace.calls == [("drop_collection", "coll", "alice")]
+
+
+def test_drop_collection_unauthenticated_passes_none(catalog_workspace):
+    """No session user means no dropper - not an invented one."""
+    session = opteryx.session(access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("DROP COLLECTION cat.coll"))
+
+    assert catalog_workspace.calls == [("drop_collection", "coll", None)]
+
+
+def test_drop_collection_requires_owner_on_workspace(catalog_workspace):
+    """DROP COLLECTION is owner-only, same tier as DROP TABLE/VIEW - a writer cannot do it."""
+    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
+
+    with pytest.raises(PermissionError, match="permission to drop collection"):
+        list(writer.execute_to_morsels("DROP COLLECTION cat.coll"))
+
+    assert catalog_workspace.calls == []
+
+
+def test_drop_collection_rejects_non_empty(catalog_workspace):
+    """A non-empty collection is rejected rather than cascade-dropped."""
+    catalog_workspace.collection_is_empty = False
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(CollectionNotEmptyError):
+        list(session.execute_to_morsels("DROP COLLECTION cat.coll"))
 
     assert catalog_workspace.calls == []

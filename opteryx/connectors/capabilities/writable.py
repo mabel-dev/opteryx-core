@@ -149,6 +149,33 @@ class Writable:
         """
         raise NotImplementedError
 
+    def collection_exists(self, collection_name: str) -> bool:
+        """Check if a collection exists.
+
+        Args:
+            collection_name: Fully-qualified collection name (e.g. "workspace.collection")
+
+        Returns:
+            True if the collection exists, False otherwise
+        """
+        raise NotImplementedError
+
+    def drop_collection(
+        self, collection_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop an empty collection.
+
+        Args:
+            collection_name: Fully-qualified collection name (e.g. "workspace.collection")
+            if_exists: If True, do not raise error if collection doesn't exist
+            author: session user the drop is attributed to
+
+        Raises:
+            ValueError: If collection doesn't exist and if_exists is False
+            CollectionNotEmptyError: If the collection still contains datasets or views
+        """
+        raise NotImplementedError
+
     def relation_column_names(self, relation_name: str) -> "List[str]":
         """Return the relation's current column names only (not full type
         fidelity) - used to detect a schema-changing CREATE OR REPLACE before
