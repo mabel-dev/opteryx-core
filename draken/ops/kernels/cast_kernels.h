@@ -68,6 +68,17 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* vector);
  *  type via add_expr_project's `logical` tuple. */
 VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* vector);
 
+/** CAST(<ipv4> AS VARCHAR / VARBINARY): UINT32 -> dotted-decimal, via the one
+ *  renderer in draken/core/ipv4.h. Cannot fail.
+ *
+ *  The SOURCE discriminant is the bound ColumnType's LogicalKind, NOT the
+ *  physical tag: a plain unsigned column is DRAKEN_UINT32 too and must render
+ *  its integer through draken_cast_uint_to_string. A DrakenVector carries no
+ *  descriptor, so the choice is made at bind time (opteryx/expression/casts.pyx)
+ *  and picking the wrong one here is a silent wrong-answer bug, not an error. */
+VecResult draken_cast_ipv4_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_ipv4_to_blob(void* ctx, const DrakenVector* vector);
+
 // String-family retag: VARCHAR/NVARCHAR/VARBINARY -> VARCHAR or -> VARBINARY.
 // All three share the exact DrakenStringArena byte layout (buffers.h), so this
 // is a byte-identical copy that only changes the type tag — no validation, no
@@ -85,6 +96,12 @@ VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* vector);
+
+// Unsigned source (UINT8/16/32/64) -> VARCHAR / VARBINARY, read at the source's
+// native stride. Separate from the signed entry points because a UINT64 above
+// INT64_MAX would print negative through them.
+VecResult draken_cast_uint_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_blob(void* ctx, const DrakenVector* vector);
 
 // E33 — any signed integer source (INT8/16/32/64) -> the named unsigned target,
 // range-checked (negative or out-of-range magnitude raises, never truncates/wraps).

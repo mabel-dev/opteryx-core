@@ -477,6 +477,82 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
     });
 }
 
+// CAST(<ipv4> AS VARCHAR) — the uint32 an address IS -> dotted-decimal text.
+//
+// The INVERSE of draken_cast_string_to_ipv4, and the reason it lives beside it:
+// both directions must route through draken/core/ipv4.h so parse strictness and
+// render form cannot drift apart. Rendering is delegated to draken::ipv4::format,
+// the same writer interop/value_format.hpp's fmt_ipv4 uses for the text writers
+// and to_pylist — there is exactly one dotted-decimal writer in the codebase.
+//
+// A DrakenVector carries no descriptor, so this kernel CANNOT tell an IPv4
+// column from a plain unsigned one — both are DRAKEN_UINT32. The discriminant is
+// the BOUND SOURCE ColumnType's LogicalKind, applied at bind time in
+// opteryx/expression/casts.pyx: a descriptor-less UINT32 routes to
+// draken_cast_uint_to_string and renders '3232235777'. Picking the wrong kernel
+// there is a silent wrong-answer bug, which is why neither name is reachable
+// from the physical type alone.
+//
+// Compression-aware: renders the data_length PHYSICAL values (1 for a constant,
+// K for a dict, length for dense) and carries the input's selection + validity
+// through, so a dictionary-encoded address column formats K values, not N rows.
+// Unlike the parse direction there is no liveness pass — formatting cannot fail,
+// so a dead dictionary slot cannot poison rows that do not reference it; it
+// costs at most MAX_TEXT_LENGTH bytes of work. Two passes over the K values:
+// size the arena, then fill ("255.255.255.255" is 15 bytes, past STR_INLINE_MAX).
+VecResult draken_cast_ipv4_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_UINT32)
+            return draken_error_sentinel_fmt(
+                "cast ipv4->string: expected UINT32, got %d", v->type);
+
+        const uint32_t k = v->data_length;
+        const uint32_t* src = static_cast<const uint32_t*>(v->data);
+
+        char tmp[draken::ipv4::MAX_TEXT_LENGTH];
+        size_t total_extern = 0u;
+        for (uint32_t j = 0u; j < k; ++j) {
+            const uint32_t len = draken::ipv4::format(src[j], tmp);
+            if (len > STR_INLINE_MAX) total_extern += static_cast<size_t>(len);
+        }
+
+        DrakenStringSlot* slots;
+        uint8_t* arena;
+        uint8_t* vunused;
+        uint8_t* block = vecresult_string_block_alloc(k, total_extern, 0, &slots, &arena, &vunused);
+        if (!block) return draken_error_sentinel("Allocation failed");
+        (void)vunused;
+
+        size_t arena_used = 0u;
+        for (uint32_t j = 0u; j < k; ++j) {
+            const uint32_t len = draken::ipv4::format(src[j], tmp);
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(tmp);
+            if (len > STR_INLINE_MAX) {
+                const uint32_t off = static_cast<uint32_t>(arena_used);
+                std::memcpy(arena + off, tmp, static_cast<size_t>(len));
+                draken_build_string_slot(&slots[j], bytes, len, off);
+                arena_used += static_cast<size_t>(len);
+            } else {
+                draken_build_string_slot(&slots[j], bytes, len, 0u);
+            }
+        }
+
+        VecResult r = vecresult_from_string_block(block, k, total_extern, 0, DRAKEN_VARCHAR);
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+// VARBINARY twin — identical bytes, different tag. Same rationale as the
+// DRAKEN_CAST_TO_BLOB family in cast_numeric.cpp: routing a BLOB target at the
+// `_to_string` kernel would silently hand back a VARCHAR-tagged result.
+VecResult draken_cast_ipv4_to_blob(void* ctx, const DrakenVector* v) {
+    VecResult r = draken_cast_ipv4_to_string(ctx, v);
+    if (r.data != nullptr) r.type = DRAKEN_VARBINARY;
+    return r;
+}
+
 // String-family retag core: VARCHAR/NVARCHAR/VARBINARY/VARIANT -> `target`
 // (VARCHAR or VARBINARY only — casting TO NVARCHAR needs UTF-8 validation and is
 // not this kernel's job). All four share the exact DrakenStringArena layout

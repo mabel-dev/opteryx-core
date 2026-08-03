@@ -301,6 +301,10 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_integer_to_int64", (kernel_fn_t)&draken_cast_integer_to_int64},
     {"draken_cast_integer_to_string", (kernel_fn_t)&draken_cast_integer_to_string},
 
+    // Unsigned source (UINT8/16/32/64) → VARCHAR / VARBINARY.
+    {"draken_cast_uint_to_string", (kernel_fn_t)&draken_cast_uint_to_string},
+    {"draken_cast_uint_to_blob", (kernel_fn_t)&draken_cast_uint_to_blob},
+
     // E33 — any signed integer source (INT8/16/32/64) → the named unsigned
     // target, range-checked (fail loud on negative/out-of-range, never wraps).
     {"draken_cast_integer_to_uint8", (kernel_fn_t)&draken_cast_integer_to_uint8},
@@ -326,6 +330,11 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_string_to_bool", (kernel_fn_t)&draken_cast_string_to_bool},
     {"draken_cast_string_to_date32", (kernel_fn_t)&draken_cast_string_to_date32},
     {"draken_cast_string_to_ipv4", (kernel_fn_t)&draken_cast_string_to_ipv4},
+    // Reverse direction. Only ever selected when the bound SOURCE ColumnType
+    // carries LogicalKind::IPV4 — a descriptor-less UINT32 goes to
+    // draken_cast_uint_to_string instead (both are physically UINT32).
+    {"draken_cast_ipv4_to_string", (kernel_fn_t)&draken_cast_ipv4_to_string},
+    {"draken_cast_ipv4_to_blob", (kernel_fn_t)&draken_cast_ipv4_to_blob},
     {"draken_ipv4_in_cidr", (kernel_fn_t)&draken_ipv4_in_cidr},
     {"draken_ip_trunc", (kernel_fn_t)&draken_ip_trunc},
     {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},

@@ -66,32 +66,49 @@ static inline int64_t load_int_signed(const void* data, uint32_t j, DrakenType t
     }
 }
 
-// Shared int64/uint64 → VARCHAR core. Compression-aware: format the data_length
-// PHYSICAL values into a value block (1 for a constant, K for a dict, length for
-// dense) and carry the input's selection + validity through — the output keeps the
-// input's encoding (constant→constant string, dict→dict string). Two passes over
-// the K values: size the arena, then fill. Int formatting never fails (no
-// null-introduction), so validity is preserved 1:1.
-static VecResult int_to_string_core(const DrakenVector* v, bool treat_as_unsigned) {
+static inline uint64_t load_int_unsigned(const void* data, uint32_t j, DrakenType t) noexcept {
+    switch (t) {
+        case DRAKEN_UINT8:  return static_cast<const uint8_t*>(data)[j];
+        case DRAKEN_UINT16: return static_cast<const uint16_t*>(data)[j];
+        case DRAKEN_UINT32: return static_cast<const uint32_t*>(data)[j];
+        default:            return static_cast<const uint64_t*>(data)[j];  // DRAKEN_UINT64
+    }
+}
+
+// Shared integer → VARCHAR core, signed and unsigned. Compression-aware: format
+// the data_length PHYSICAL values into a value block (1 for a constant, K for a
+// dict, length for dense) and carry the input's selection + validity through — the
+// output keeps the input's encoding (constant→constant string, dict→dict string).
+// Two passes over the K values: size the arena, then fill. Int formatting never
+// fails (no null-introduction), so validity is preserved 1:1.
+//
+// Signedness is read off the vector's own type tag rather than taken as a
+// parameter: every width is read at its native stride, so there is no width at
+// which the caller could meaningfully disagree with the tag. (The former
+// `treat_as_unsigned` parameter only accepted DRAKEN_INT64 and no caller ever
+// passed true — a reinterpret-the-bits path that had no route in from SQL.)
+//
+// A UINT32 carrying LogicalKind::IPV4 must NOT reach here: it renders as
+// dotted-decimal via draken_cast_ipv4_to_string. A DrakenVector carries no
+// descriptor, so that choice is made at bind time in casts.pyx, never here.
+static VecResult int_to_string_core(const DrakenVector* v) {
     if (!v) return draken_error_sentinel("Input vector is null");
     const DrakenType st = v->type;
-    const bool is_int = (st == DRAKEN_INT8 || st == DRAKEN_INT16 ||
-                         st == DRAKEN_INT32 || st == DRAKEN_INT64);
-    if (!is_int)
-        return draken_error_sentinel_fmt("cast-to-string: expected INT8/16/32/64, got %d", st);
-    // Unsigned formatting is only meaningful for the full 64-bit width (the bit
-    // pattern is reinterpreted). Narrow widths are always signed here.
-    if (treat_as_unsigned && st != DRAKEN_INT64)
-        return draken_error_sentinel_fmt("cast-to-string: unsigned requires INT64, got %d", st);
+    const bool is_signed = (st == DRAKEN_INT8 || st == DRAKEN_INT16 ||
+                            st == DRAKEN_INT32 || st == DRAKEN_INT64);
+    const bool is_unsigned = (st == DRAKEN_UINT8 || st == DRAKEN_UINT16 ||
+                              st == DRAKEN_UINT32 || st == DRAKEN_UINT64);
+    if (!is_signed && !is_unsigned)
+        return draken_error_sentinel_fmt(
+            "cast-to-string: expected INT8/16/32/64 or UINT8/16/32/64, got %d", st);
 
     const uint32_t k   = v->data_length;   // physical value count
 
     char tmp[21];
     size_t total_extern = 0u;
     for (uint32_t j = 0u; j < k; ++j) {
-        const int64_t val = load_int_signed(v->data, j, st);
-        int len = treat_as_unsigned ? u64_to_ascii(static_cast<uint64_t>(val), tmp)
-                                     : i64_to_ascii(val, tmp);
+        int len = is_unsigned ? u64_to_ascii(load_int_unsigned(v->data, j, st), tmp)
+                              : i64_to_ascii(load_int_signed(v->data, j, st), tmp);
         if (static_cast<uint32_t>(len) > STR_INLINE_MAX) total_extern += static_cast<size_t>(len);
     }
 
@@ -106,9 +123,8 @@ static VecResult int_to_string_core(const DrakenVector* v, bool treat_as_unsigne
 
     size_t arena_used = 0u;
     for (uint32_t j = 0u; j < k; ++j) {
-        const int64_t val = load_int_signed(v->data, j, st);
-        int len = treat_as_unsigned ? u64_to_ascii(static_cast<uint64_t>(val), tmp)
-                                     : i64_to_ascii(val, tmp);
+        int len = is_unsigned ? u64_to_ascii(load_int_unsigned(v->data, j, st), tmp)
+                              : i64_to_ascii(load_int_signed(v->data, j, st), tmp);
         if (static_cast<uint32_t>(len) > STR_INLINE_MAX) {
             const uint32_t off = static_cast<uint32_t>(arena_used);
             std::memcpy(arena + off, tmp, static_cast<size_t>(len));
@@ -170,14 +186,25 @@ VecResult draken_cast_int64_to_bool(void* ctx, const DrakenVector* v) {
 }
 
 VecResult draken_cast_int64_to_string(void* ctx, const DrakenVector* v) {
-    DRAKEN_KERNEL_TRY({ return int_to_string_core(v, /*unsigned=*/false); });
+    DRAKEN_KERNEL_TRY({ return int_to_string_core(v); });
 }
 
 // Narrow signed int (INT8/16/32) → VARCHAR. Single pass at the source's native
 // stride — no widen-to-int64 detour; int_to_string_core reads the value at the
 // correct width. (INT64 keeps its own entry point above.)
 VecResult draken_cast_integer_to_string(void* ctx, const DrakenVector* v) {
-    DRAKEN_KERNEL_TRY({ return int_to_string_core(v, /*unsigned=*/false); });
+    DRAKEN_KERNEL_TRY({ return int_to_string_core(v); });
+}
+
+// Unsigned int (UINT8/16/32/64) → VARCHAR. One entry point for all four widths:
+// the stride comes from the vector's type tag, so there is nothing to specialize
+// per width beyond the load. A UINT64 above INT64_MAX formats correctly here —
+// funnelling the unsigned family through the signed path would print it negative.
+//
+// This is the PLAIN unsigned render. An IPv4 column is also DRAKEN_UINT32, and
+// must NOT arrive here — see draken_cast_ipv4_to_string in cast_string.cpp.
+VecResult draken_cast_uint_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return int_to_string_core(v); });
 }
 
 VecResult draken_cast_bool_to_float64(void* ctx, const DrakenVector* v) {
@@ -516,6 +543,7 @@ VecResult draken_cast_decimal128_to_string(void* ctx, const DrakenVector* v) {
 
 DRAKEN_CAST_TO_BLOB(draken_cast_int64_to_blob, draken_cast_int64_to_string)
 DRAKEN_CAST_TO_BLOB(draken_cast_integer_to_blob, draken_cast_integer_to_string)
+DRAKEN_CAST_TO_BLOB(draken_cast_uint_to_blob, draken_cast_uint_to_string)
 DRAKEN_CAST_TO_BLOB(draken_cast_float64_to_blob, draken_cast_float64_to_string)
 DRAKEN_CAST_TO_BLOB(draken_cast_bool_to_blob, draken_cast_bool_to_string)
 DRAKEN_CAST_TO_BLOB(draken_cast_decimal_to_blob, draken_cast_decimal_to_string)

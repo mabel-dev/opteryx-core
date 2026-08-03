@@ -748,6 +748,55 @@ void register_vector_casts(nb::module_ &m) {
         nb::arg("v"),
         "CAST(v AS IPV4): 'A.B.C.D' -> UINT32. Strict parse; invalid raises ValueError.");
 
+    // Python-evaluator counterparts to the registered draken_cast_ipv4_to_* and
+    // draken_cast_uint_to_* C-ABI kernels. Each calls the SAME kernel the
+    // BC_INSTR_C_NATIVE path dispatches, so the two paths cannot disagree about
+    // how an address (or a plain unsigned) renders.
+    //
+    // NOTE the pairing is chosen by the CALLER (opteryx/expression/casts.pyx,
+    // from the bound source ColumnType's LogicalKind), not from the vector: an
+    // IPv4 column and a plain unsigned column are both DRAKEN_UINT32, so calling
+    // the wrong one of these renders '3232235777' where '192.168.1.1' was meant,
+    // or the reverse. Neither kernel can detect the mistake.
+    m.def("vector_cast_ipv4_to_string",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_ipv4_to_string(nullptr, dv));
+        },
+        nb::arg("v"),
+        "CAST(v AS VARCHAR) for an IPV4 source: UINT32 -> 'A.B.C.D'. Null rows propagate.");
+
+    m.def("vector_cast_ipv4_to_blob",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_ipv4_to_blob(nullptr, dv));
+        },
+        nb::arg("v"),
+        "CAST(v AS VARBINARY) for an IPV4 source: same bytes as the VARCHAR twin, "
+        "tagged VARBINARY. Null rows propagate.");
+
+    m.def("vector_cast_uint_to_string",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_uint_to_string(nullptr, dv));
+        },
+        nb::arg("v"),
+        "CAST(v AS VARCHAR): UINT8/16/32/64 -> decimal ASCII, read at the source "
+        "width. A UINT64 above INT64_MAX formats correctly. Null rows propagate.");
+
+    m.def("vector_cast_uint_to_blob",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_uint_to_blob(nullptr, dv));
+        },
+        nb::arg("v"),
+        "CAST(v AS VARBINARY): same bytes as the VARCHAR twin, tagged VARBINARY. "
+        "Null rows propagate.");
+
     m.def("vector_cast_string_to_time64",
         [](nb::object v) -> nb::object { return string_to_time64_apply(v); },
         nb::arg("v"),

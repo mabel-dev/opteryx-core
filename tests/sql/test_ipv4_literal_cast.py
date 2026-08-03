@@ -28,7 +28,7 @@ import opteryx
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
 from draken.draken_native import ipv4_parse
-from opteryx.exceptions import SqlError, UnsupportedSyntaxError
+from opteryx.exceptions import SqlError
 from opteryx.planner.logical_planner import logical_planner_builders as builders
 from opteryx.third_party import sqloxide
 
@@ -208,26 +208,56 @@ def test_case_over_integer_ipv4_literals_folds():
 
 
 # ---------------------------------------------------------------------------
-# IPV4 -> string family is refused, matching the engine.
+# IPV4 -> string family folds to dotted-decimal, matching the engine.
+#
+# These tests used to assert a REFUSAL (UnsupportedSyntaxError). That refusal was
+# never a semantic guard — it existed purely for parity: the engine had no
+# UINT32 → VARCHAR kernel at all, so the literal path refused rather than fold to
+# str(uint32) ('3232235777', a wrong row) or, for BLOB, to bytes(3232235777) (a
+# 3GB zero buffer built at plan time from a one-line query). The column path now
+# has draken_cast_ipv4_to_string, so parity means FOLDING, and the two hazards
+# the refusal blocked are handled instead by rendering through the shared
+# draken::ipv4::format and then through parser_for — the same one-rendering-rule
+# route _parse_blob already uses to keep BLOB from drifting off VARCHAR.
+#
+# The IPV4-to-VARCHAR behaviour itself is covered in depth (nulls, dictionary
+# shapes, the plain-uint32 negative twin) in tests/sql/test_ipv4_type.py; what is
+# pinned here is that the LITERAL fold and the COLUMN path give the same answer.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("target", ["VARCHAR", "BLOB"])
-def test_ipv4_literal_to_string_family_is_refused(target):
-    # The engine refuses this cast on a column ("No native CAST UINT32 →
-    # VARCHAR"). The literal path must refuse identically rather than folding to
-    # str(uint32) — '3232235777' — or, for BLOB, to bytes(3232235777): a 3GB
-    # zero buffer allocated at plan time.
-    with pytest.raises(UnsupportedSyntaxError):
-        _values(f"SELECT CAST(CAST('192.168.1.1' AS IPV4) AS {target})")
+@pytest.mark.parametrize(
+    "target,expected", [("VARCHAR", "192.168.1.1"), ("BLOB", b"192.168.1.1")]
+)
+def test_ipv4_literal_to_string_family_folds_to_dotted_decimal(target, expected):
+    assert _values(f"SELECT CAST(CAST('192.168.1.1' AS IPV4) AS {target})") == [expected]
+
+
+@pytest.mark.parametrize(
+    "target,expected", [("VARCHAR", "192.168.1.1"), ("BLOB", b"192.168.1.1")]
+)
+def test_ipv4_literal_to_string_family_under_try_cast(target, expected):
+    # TRY_ changes what a BAD VALUE does, and a fold that cannot fail has none —
+    # so TRY_CAST must give the identical answer, not NULL.
+    assert _values(f"SELECT TRY_CAST(CAST('192.168.1.1' AS IPV4) AS {target})") == [expected]
 
 
 @pytest.mark.parametrize("target", ["VARCHAR", "BLOB"])
-def test_ipv4_literal_to_string_family_is_refused_under_try_cast(target):
-    # TRY_ does NOT soften this to NULL: an unsupported conversion is not a bad
-    # value, and the column path refuses it for TRY_CAST too.
-    with pytest.raises(UnsupportedSyntaxError):
-        _values(f"SELECT TRY_CAST(CAST('192.168.1.1' AS IPV4) AS {target})")
+def test_ipv4_literal_and_column_string_folds_agree(target):
+    # Parity is the reason the fold calls draken.ipv4_format rather than
+    # formatting in Python: the planner and the kernel share one renderer.
+    literal = _values(f"SELECT CAST(CAST('192.168.1.1' AS IPV4) AS {target})")
+    column = _values(
+        f"SELECT CAST(CAST(a AS IPV4) AS {target}) FROM (SELECT '192.168.1.1' AS a) AS t"
+    )
+    assert literal == column
+
+
+def test_ipv4_literal_to_string_does_not_fold_to_the_integer():
+    # The specific wrong answer the descriptor discriminant prevents. IPv4's
+    # LogicalCategory is INTEGER, so a fold keyed on the category instead of the
+    # descriptor lands here silently.
+    assert _values("SELECT CAST(CAST('192.168.1.1' AS IPV4) AS VARCHAR)") != ["3232235777"]
 
 
 def test_ipv4_literal_to_integer_still_folds():

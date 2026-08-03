@@ -14,6 +14,7 @@ import decimal
 from typing import List, Optional
 
 from draken.draken_native import LogicalKind
+from draken.draken_native import ipv4_format
 from draken.draken_native import ipv4_parse
 
 from opteryx.compiled.expression.compiled_expression import _BOP_CODE
@@ -1017,19 +1018,37 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
     if base_type in ("VARCHAR", "BLOB"):
-        # IPV4 → string family is not a supported cast: the engine refuses it
-        # ("No native CAST UINT32 → VARCHAR"), for TRY_CAST too, because it is an
-        # unsupported conversion and not a bad value. Refuse identically here, and
-        # OUTSIDE the try block below so TRY_/SAFE_ cannot turn it into a NULL the
-        # column path would never produce. Left to fall through, an IPv4 literal
-        # takes the INTEGER category to parser_for and folds to str(uint32) —
-        # '3232235777' where the engine raises (and for BLOB, bytes(3232235777):
-        # a 3GB zero buffer built at plan time).
+        # IPV4 → string family renders dotted-decimal, matching the column path's
+        # draken_cast_ipv4_to_string. The DESCRIPTOR is the discriminant, never the
+        # category: IPv4's category is deliberately INTEGER (so ordering, grouping
+        # and joins run on the raw uint32), so left to fall through this folds to
+        # str(uint32) — '3232235777' where a column yields '192.168.1.1'. That is
+        # the literal value/type-tag divergence class of bug: a wrong row, not an
+        # error.
+        #
+        # Rendering routes through draken.ipv4_format → draken::ipv4::format, the
+        # SAME writer the kernel (and to_pylist, and the text writers) use, so a
+        # folded literal and a scanned column cannot print an address differently.
+        # The rendered text then goes through the same parser_for the generic path
+        # below uses, so VARCHAR keeps the str and BLOB gets its UTF-8 bytes from
+        # one rendering rule rather than two.
+        #
+        # Sits OUTSIDE the try block below: a NULL-valued IPv4 literal is not an
+        # int and must fall through to the generic path (which yields NULL), and
+        # TRY_/SAFE_ must not be able to turn a rendering into a NULL.
         _lit_lt = literal_node.type.logical if literal_node.type is not None else None
-        if _lit_lt is not None and _lit_lt.kind == LogicalKind.IPV4:
-            raise UnsupportedSyntaxError(
-                f"CAST from IPV4 to {base_type} is not supported. "
-                "Compare or filter on the IPV4 value directly."
+        if (
+            _lit_lt is not None
+            and _lit_lt.kind == LogicalKind.IPV4
+            and isinstance(literal_node.value, int)
+        ):
+            from opteryx.types.scalars.value_parsing import parser_for
+
+            return Node(
+                NodeType.LITERAL,
+                type=sql_type,
+                value=parser_for(sql_type.category)(ipv4_format(literal_node.value)),
+                alias=alias,
             )
         if _node_cat == LogicalCategory.TIMESTAMP and isinstance(literal_node.value, int):
             us = literal_node.value
@@ -1324,6 +1343,41 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         if len(args) != 2:
             raise SqlError("NULLIF expects exactly two arguments.")
         value_node, compare_node = args[0], args[1]
+
+        # A NULL operand is folded away rather than lowered, because the lowering
+        # cannot express it: `a = NULL` is UNKNOWN, and constant-folding that
+        # comparison yields a NULL scalar, which is not the BOOLEAN vector
+        # `vector_iif` requires — every literal NULLIF against a NULL died as
+        # `draken_iif: condition must be BOOLEAN`. (A NULL *column* was fine: the
+        # comparison there produces a real all-NULL BOOLEAN vector.)
+        #
+        # Both folds are exact, from NULLIF(a, b) == CASE WHEN a = b THEN NULL ELSE a END:
+        #   - `a` NULL  -> both branches are NULL, so the answer is NULL.
+        #   - `b` NULL  -> `a = NULL` is never TRUE, so the answer is always `a`.
+        def _is_null_literal(operand) -> bool:
+            return operand.node_type == NodeType.LITERAL and operand.value is None
+
+        if _is_null_literal(value_node) or _is_null_literal(compare_node):
+            # `value_node` answers both folds. When IT is the NULL, returning it
+            # keeps its own type — a typed NULL (CAST(NULL AS VARCHAR)) must stay
+            # VARCHAR, since nothing downstream could recover the type.
+            folded = value_node.copy()
+            # Without an explicit alias the folded node would name the output
+            # column after itself ("name"), silently renaming the result of a
+            # NULLIF. Carry the original spelling so folding stays invisible.
+            folded.alias = alias or format_expression(
+                Node(
+                    node_type=NodeType.FUNCTION,
+                    value="NULLIF",
+                    parameters=[value_node, compare_node],
+                )
+            )
+            # LogicalColumn derives qualified_name as a read-only property; only a
+            # plain literal Node carries a settable one.
+            if folded.node_type == NodeType.LITERAL:
+                folded.qualified_name = format_expression(folded)
+            return folded
+
         equality = Node(
             NodeType.COMPARISON_OPERATOR, value="Eq", left=value_node, right=compare_node
         )

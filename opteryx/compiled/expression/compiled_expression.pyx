@@ -476,6 +476,10 @@ cdef object _LogicalCategory_VARCHAR = None
 cdef object _LogicalCategory_ARRAY = None
 cdef object _LogicalCategory_BLOB = None
 cdef object _LogicalCategory_VARIANT = None
+# LogicalKind, not LogicalCategory: IPv4's category is deliberately INTEGER (so
+# ordering/grouping/joining run on the raw uint32), which makes the DESCRIPTOR the
+# only thing that distinguishes an address column from a plain unsigned one.
+cdef object _LogicalKind_IPV4 = None
 cdef tuple _STRING_FAMILY = ()
 
 # draken_date_part bind-time part ids (kernel contract — function_kernels.cpp).
@@ -931,8 +935,11 @@ cdef inline _ensure_sql_types():
     global _LogicalCategory_VARCHAR, _LogicalCategory_ARRAY, _LogicalCategory_BLOB
     global _STRING_FAMILY
     global _LogicalCategory_VARIANT
+    global _LogicalKind_IPV4
     if _LogicalCategory_DATE is None:
+        from draken.draken_native import LogicalKind
         from opteryx.types.logical_type import LogicalCategory
+        _LogicalKind_IPV4 = LogicalKind.IPV4
         _LogicalCategory_DATE = LogicalCategory.DATE
         _LogicalCategory_TIMESTAMP = LogicalCategory.TIMESTAMP
         _LogicalCategory_BOOLEAN = LogicalCategory.BOOLEAN
@@ -2786,18 +2793,32 @@ cdef Py_ssize_t _linearize(
         # bind-time resolution. source_phys_name is the physical DrakenType name —
         # the discriminant both resolve_cast (closure) and _c_native_cast (C kernel)
         # key on. None when the binder left the source untyped (e.g. ARRAY columns).
+        # source_is_ipv4 is the SECOND half of the source discriminant, and it is
+        # not optional: an IPv4 column's physical type IS "UINT32", identical to a
+        # plain unsigned column's, so the physical name alone cannot choose between
+        # rendering '192.168.1.1' and rendering '3232235777'. The IPv4-ness lives
+        # only in the bound ColumnType's LogicalKind descriptor (CLAUDE.md §14),
+        # so read it here and hand it to both resolvers explicitly.
+        _ensure_sql_types()
         source_phys_name = None
+        source_is_ipv4 = False
         if node.left.schema_column != NULL:
             src_sc = <object>node.left.schema_column
             if src_sc is not None:
                 source_sql = src_sc.column_type
                 if source_sql is not None:
                     source_phys_name = getattr(source_sql.physical, "name", None)
+                    _src_logical = source_sql.logical
+                    source_is_ipv4 = (
+                        _src_logical is not None
+                        and _src_logical.kind == _LogicalKind_IPV4
+                    )
 
         from opteryx.expression.casts import resolve_cast
         try:
             cast_kernel, _cast_needs_nb_input, _cast_returns_raw = resolve_cast(
-                source_phys_name, cast_target_type, cast_params, unit=cast_unit, safe=cast_is_try
+                source_phys_name, cast_target_type, cast_params, unit=cast_unit,
+                safe=cast_is_try, source_is_ipv4=source_is_ipv4
             )
         except (NotImplementedError, ValueError) as e:
             raise ValueError(f"Unsupported CAST: {source_phys_name} → {cast_target_type}: {e}")
@@ -2826,7 +2847,8 @@ cdef Py_ssize_t _linearize(
         # cast not yet C-native (strings, timestamps, DECIMAL/VECTOR/ARRAY, the
         # late-bound escape hatch). _c_native_cast is the single source of truth.
         from opteryx.expression.casts import _c_native_cast
-        _cn = _c_native_cast(source_phys_name, cast_target_type, safe=cast_is_try)
+        _cn = _c_native_cast(source_phys_name, cast_target_type, safe=cast_is_try,
+                             source_is_ipv4=source_is_ipv4)
 
         # CAST ... FORMAT is only meaningful (and only compiles) for the kernels
         # that read a format_ctx — fail loud rather than silently drop the pattern

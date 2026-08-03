@@ -195,9 +195,20 @@ public:
             Py_DECREF(result);
             container_->notify_python_future();
         } else {
+            PyObject* exc;
+#if PY_VERSION_HEX >= 0x030C0000
             // PyErr_GetRaisedException: Python >= 3.12.
             // Returns exception *instance* (new ref) and clears indicator.
-            PyObject* exc = PyErr_GetRaisedException();
+            exc = PyErr_GetRaisedException();
+#else
+            // Pre-3.12: no PyErr_GetRaisedException. Reconstruct the normalized
+            // exception instance from the legacy type/value/traceback triple.
+            PyObject *exc_type, *exc_traceback;
+            PyErr_Fetch(&exc_type, &exc, &exc_traceback);
+            PyErr_NormalizeException(&exc_type, &exc, &exc_traceback);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_traceback);
+#endif
             if (exc) {
                 container_->set_exception(exc);
                 Py_DECREF(exc);   // balance the new ref we own

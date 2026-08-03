@@ -364,6 +364,158 @@ def test_comparison_operators_work_on_addresses():
     assert one(sql) == [1]
 
 
+# ---------------------------------------------------------------------------
+# IPV4 -> VARCHAR / BLOB — the second half of the ticket's "IPv4 <-> VARCHAR".
+#
+# One renderer serves every surface: draken::ipv4::format (draken/core/ipv4.h)
+# backs to_pylist, the JSON/text writers, the runtime kernel
+# draken_cast_ipv4_to_string, and — through the draken.ipv4_format binding — the
+# plan-time literal fold. The tests below pin that they all agree.
+#
+# The failure mode this section exists to catch is NOT an exception. An IPv4
+# column and a plain unsigned column are BOTH physically DRAKEN_UINT32, and a
+# DrakenVector carries no descriptor, so the kernel cannot tell them apart: pick
+# the wrong one at bind time and '192.168.1.1' silently becomes '3232235777' (or
+# the reverse). Every render assertion here therefore has a negative twin.
+# ---------------------------------------------------------------------------
+
+
+RENDER_EXAMPLES = ["0.0.0.0", "10.0.0.1", "192.168.1.1", "255.255.255.255"]
+
+
+@pytest.mark.parametrize("address", RENDER_EXAMPLES)
+def test_literal_ipv4_to_varchar_renders_dotted_decimal(address):
+    # Folded at plan time. '255.255.255.255' is 15 bytes, past STR_INLINE_MAX, so
+    # the set spans both the inline and the arena slot forms.
+    assert rows(f"SELECT CAST(CAST('{address}' AS IPV4) AS VARCHAR)") == [address]
+
+
+@pytest.mark.parametrize("address", RENDER_EXAMPLES)
+def test_column_ipv4_to_varchar_renders_dotted_decimal(address):
+    sql = f"SELECT CAST(CAST(a AS IPV4) AS VARCHAR) FROM (SELECT '{address}' AS a) AS t"
+    assert rows(sql) == [address]
+
+
+def test_literal_and_column_ipv4_to_varchar_agree():
+    """The whole point of routing both through draken::ipv4::format. A planner and
+    an engine printing the same address differently is a wrong answer."""
+    for address in RENDER_EXAMPLES:
+        literal = rows(f"SELECT CAST(CAST('{address}' AS IPV4) AS VARCHAR)")
+        column = rows(
+            f"SELECT CAST(CAST(a AS IPV4) AS VARCHAR) FROM (SELECT '{address}' AS a) AS t"
+        )
+        assert literal == column == [address]
+
+
+def test_round_trip_through_ipv4_returns_the_original_text():
+    src = " UNION ALL ".join(f"SELECT '{a}'" for a in RENDER_EXAMPLES[1:])
+    sql = (
+        "SELECT CAST(CAST(a AS IPV4) AS VARCHAR) = a AS eq FROM "
+        f"(SELECT '{RENDER_EXAMPLES[0]}' AS a UNION ALL {src}) AS t"
+    )
+    assert rows(sql) == [True] * len(RENDER_EXAMPLES)
+
+
+def test_ipv4_to_varchar_preserves_nulls():
+    # A cast that cannot fail must not introduce or drop a null either.
+    sql = (
+        "SELECT CAST(CAST(a AS IPV4) AS VARCHAR) AS s FROM "
+        "(SELECT '10.0.0.1' AS a UNION ALL SELECT NULL UNION ALL SELECT '0.0.0.0') AS t "
+        "ORDER BY s"
+    )
+    assert rows(sql) == [None, "0.0.0.0", "10.0.0.1"]
+
+
+def test_ipv4_to_varchar_over_repeated_values():
+    """A repeated address may reach the kernel dictionary-encoded, where it renders
+    the K physical slots and keeps the selection. A shape-dependent answer here
+    would be the `ptr.data == NULL` class of bug (CLAUDE.md §11)."""
+    src = (
+        "SELECT '10.0.0.1' AS a UNION ALL SELECT '10.0.0.1' "
+        "UNION ALL SELECT '192.168.1.1' UNION ALL SELECT '10.0.0.1'"
+    )
+    sql = f"SELECT CAST(CAST(a AS IPV4) AS VARCHAR) AS s FROM ({src}) AS t ORDER BY s"
+    assert rows(sql) == ["10.0.0.1", "10.0.0.1", "10.0.0.1", "192.168.1.1"]
+
+
+@pytest.mark.parametrize("address", ["192.168.1.1", "255.255.255.255"])
+def test_ipv4_to_blob_is_the_same_bytes(address):
+    """VARBINARY is the VARCHAR bytes with a different tag. Routing a BLOB target
+    at the `_to_string` kernel would hand back a VARCHAR-tagged result."""
+    expected = [address.encode("utf-8")]
+    assert rows(f"SELECT CAST(CAST('{address}' AS IPV4) AS BLOB)") == expected
+    assert (
+        rows(f"SELECT CAST(CAST(a AS IPV4) AS BLOB) FROM (SELECT '{address}' AS a) AS t")
+        == expected
+    )
+
+
+def test_try_cast_ipv4_to_varchar_renders_too():
+    """TRY_CAST is not a different conversion — it only changes what a BAD VALUE
+    does, and this cast has none. It also takes the closure path rather than the
+    C-native one (`_c_native_cast` declines safe=True), so this pins that the
+    nanobind wrapper and the C-ABI kernel agree."""
+    assert rows("SELECT TRY_CAST(CAST('192.168.1.1' AS IPV4) AS VARCHAR)") == ["192.168.1.1"]
+    assert rows(
+        "SELECT TRY_CAST(CAST(a AS IPV4) AS VARCHAR) FROM (SELECT '192.168.1.1' AS a) AS t"
+    ) == ["192.168.1.1"]
+
+
+# --- the negative twin: a descriptor-less uint32 is an integer ---------------
+
+
+def test_plain_uint32_column_to_varchar_renders_the_integer():
+    """THE discriminant test. This column is physically UINT32, exactly like an
+    address column, and differs only in carrying no IPV4 descriptor. It must
+    render 3232235777 — if it renders '192.168.1.1', the bind-time discriminant in
+    casts.pyx is keying on the physical type instead of the LogicalKind."""
+    sql = "SELECT CAST(CAST(a AS UINT32) AS VARCHAR) FROM (SELECT 3232235777 AS a) AS t"
+    assert rows(sql) == ["3232235777"]
+
+
+def test_plain_uint32_literal_to_varchar_renders_the_integer():
+    assert rows("SELECT CAST(CAST(3232235777 AS UINT32) AS VARCHAR)") == ["3232235777"]
+    assert rows("SELECT CAST(3232235777 AS VARCHAR)") == ["3232235777"]
+
+
+def test_plain_uint32_to_varchar_preserves_nulls():
+    sql = (
+        "SELECT CAST(CAST(a AS UINT32) AS VARCHAR) AS s FROM "
+        "(SELECT 3232235777 AS a UNION ALL SELECT NULL) AS t ORDER BY s"
+    )
+    assert rows(sql) == [None, "3232235777"]
+
+
+def test_uint64_above_int64_max_formats_unsigned():
+    """The unsigned family gets its own kernel rather than borrowing the signed
+    one: 0xFFFFFFFFFFFFFFFF through the signed path prints '-1'."""
+    assert rows("SELECT CAST(CAST(18446744073709551615 AS UINT64) AS VARCHAR)") == [
+        "18446744073709551615"
+    ]
+
+
+def test_ipv4_to_integer_still_yields_the_raw_address():
+    """The raw uint32 IS the value, so this pairing must keep matching the unsigned
+    arms — which is why the IPv4 discriminant is a separate argument to the
+    resolvers rather than a synthetic 'IPV4' source name."""
+    assert rows("SELECT CAST(CAST('192.168.1.1' AS IPV4) AS UINT32)") == [3232235777]
+    assert rows(
+        "SELECT CAST(CAST(a AS IPV4) AS UINT32) FROM (SELECT '192.168.1.1' AS a) AS t"
+    ) == [3232235777]
+
+
+def test_ipv4_format_binding_matches_the_vector_renderer():
+    """The planner's scalar renderer and draken's own vector readback are the same
+    writer; assert it directly rather than only through SQL."""
+    from draken.draken_native import ipv4_format
+
+    for address in RENDER_EXAMPLES:
+        assert ipv4_format(ip(address)) == address
+    assert ipv4_vector(RENDER_EXAMPLES).to_pylist() == [
+        ipv4_format(ip(a)) for a in RENDER_EXAMPLES
+    ]
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest as _pytest
 

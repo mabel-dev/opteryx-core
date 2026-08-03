@@ -200,7 +200,7 @@ _CAST_NARROW_INT = ("INT8", "INT16", "INT32")
 _CAST_UNSIGNED_INT = ("UINT8", "UINT16", "UINT32", "UINT64")  # E33
 
 
-def _c_native_cast(source_physical, target_type, bint safe=False):
+def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is_ipv4=False):
     """Return (c_kernel_name, ctx_unit_code) for casts that have a REAL, REGISTERED
     C-ABI kernel the executor can dispatch zero-Python via BC_INSTR_C_NATIVE, or
     None (those fall back to the resolve_cast closure).
@@ -215,6 +215,15 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
 
     The set grows as kernels become real+registered. This table is the single
     source of truth for which casts run C-native.
+
+    `source_is_ipv4` is the IPv4 SOURCE discriminant, and it is NOT derivable from
+    `source_physical`: an IPv4 column is DRAKEN_UINT32 refined by a
+    LogicalKind.IPV4 descriptor, so it and a plain unsigned column arrive here
+    under the same name, "UINT32". The caller reads the descriptor off the bound
+    source ColumnType and passes it explicitly. It is a separate argument rather
+    than a synthetic "IPV4" source name because every other pairing (IPV4 →
+    INTEGER, → UINT32, → BOOLEAN) is correct on the raw uint32 and must keep
+    matching the unsigned arms.
     """
     cdef str s = source_physical
     cdef str t = "BLOB" if target_type == "VARBINARY" else target_type
@@ -367,10 +376,22 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
         # the DRAKEN_CAST_TO_BLOB doc comment in cast_numeric.cpp). Returning the
         # plain `_to_string` name here for a BLOB target would silently mistag
         # the result VARCHAR — that was the bug.
+        # IPv4 renders dotted-decimal ('192.168.1.1'), a plain unsigned renders its
+        # integer ('3232235777'). Both sources are physically UINT32, so this arm
+        # MUST sit ahead of the unsigned arm below and MUST key on the descriptor —
+        # the kernels cannot tell the two apart (a DrakenVector carries no
+        # descriptor), so getting the order or the key wrong here is a silent
+        # wrong-answer bug rather than an error.
+        if s == "UINT32" and source_is_ipv4:
+            return ("draken_cast_ipv4_to_blob" if t == "BLOB" else "draken_cast_ipv4_to_string", 0)
         if s == "INT64":
             return ("draken_cast_int64_to_blob" if t == "BLOB" else "draken_cast_int64_to_string", 0)
         if s in _CAST_NARROW_INT:
             return ("draken_cast_integer_to_blob" if t == "BLOB" else "draken_cast_integer_to_string", 0)
+        if s in _CAST_UNSIGNED_INT:
+            # One kernel for all four widths — the stride comes from the vector's
+            # type tag. Reached only for a descriptor-less unsigned column.
+            return ("draken_cast_uint_to_blob" if t == "BLOB" else "draken_cast_uint_to_string", 0)
         if s in ("FLOAT64", "FLOAT32"):
             return ("draken_cast_float64_to_blob" if t == "BLOB" else "draken_cast_float64_to_string", 0)
         if s == "BOOL":
@@ -442,7 +463,8 @@ def _late_bound_cast(target_type, args, unit, bint safe):
     return _lb
 
 
-def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=False):
+def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=False,
+                 bint source_is_ipv4=False):
     """Bind-time resolver: (source physical type, target category) → cast kernel.
 
     Called once per CAST node at bind time. `source_physical` is the source
@@ -461,6 +483,14 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     There is no per-morsel type dispatch: the exact native kernel is chosen here,
     at bind time, from the physical source type. Raises NotImplementedError for
     unsupported pairs — no row-loop fallback.
+
+    `source_is_ipv4` is the IPv4 SOURCE discriminant — see `_c_native_cast`. It is
+    not derivable from `source_physical` ("UINT32" for an address column and a
+    plain unsigned column alike) and is not derivable from the runtime vector
+    either, so a LATE-BOUND source (`source_physical is None`) cannot recover it:
+    an untyped IPv4 column would render as its integer. That is the pre-existing
+    limit of the late-bound escape hatch, which only fires for binder-untyped
+    sources (ARRAY columns today).
     """
     from opteryx.compiled.nanobind.vectors import (
         vector_cast_int64_to_float64,
@@ -482,6 +512,10 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_string_to_bool,
         vector_cast_string_to_date32,
         vector_cast_string_to_ipv4,
+        vector_cast_ipv4_to_string,
+        vector_cast_ipv4_to_blob,
+        vector_cast_uint_to_string,
+        vector_cast_uint_to_blob,
         vector_cast_string_to_nvarchar,
         vector_cast_int64_to_timestamp,
         vector_cast_string_to_time64,
@@ -526,7 +560,9 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     if t == "NVARCHAR":
         if s in _CAST_STRINGS:
             return (lambda nb: vector_cast_string_to_nvarchar(nb, safe)), True, True
-        vfn, _vni, _vrr = resolve_cast(s, "VARCHAR", (), None)
+        # The IPv4 discriminant must ride along, or IPV4 → NVARCHAR would stringify
+        # the raw uint32 while IPV4 → VARCHAR renders the address.
+        vfn, _vni, _vrr = resolve_cast(s, "VARCHAR", (), None, source_is_ipv4=source_is_ipv4)
         return (lambda nb: vector_cast_string_to_nvarchar(vfn(nb), safe)), True, True
 
     # ---- TIMESTAMP target (parametrized unit for integer sources) ----
@@ -668,6 +704,14 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             # Postgres jsonb (a different, and NOT interchangeable, operation from
             # `->>`, which unwraps a JSON string scalar and drops the quotes).
             return (lambda arr: arr), False, False
+        # Descriptor, never the physical name — an IPv4 column and a plain
+        # unsigned column are both "UINT32" here. Ahead of the unsigned arm.
+        if s == "UINT32" and source_is_ipv4:
+            return (vector_cast_ipv4_to_blob if t == "BLOB"
+                    else vector_cast_ipv4_to_string), True, True
+        if s in _CAST_UNSIGNED_INT:
+            return (vector_cast_uint_to_blob if t == "BLOB"
+                    else vector_cast_uint_to_string), True, True
         if s == "INT64":
             return vector_cast_int64_to_string, True, True
         if s in _CAST_NARROW_INT:

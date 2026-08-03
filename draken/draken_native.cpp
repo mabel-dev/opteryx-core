@@ -10144,6 +10144,27 @@ NB_MODULE(draken_native, m) {
         "draken::ipv4::parse — the same strict parser the CAST kernel uses. "
         "Raises ValueError on an invalid address.");
 
+    // ipv4_format — scalar uint32 -> dotted-decimal text, for the PLANNER.
+    //
+    // The exact mirror of ipv4_parse, and it exists for the same reason:
+    // CAST(<ipv4 literal> AS VARCHAR) is folded at plan time, so the fold must
+    // produce byte-for-byte what draken_cast_ipv4_to_string would have produced
+    // for the same address on a column. A renderer written in Python would be
+    // free to drift on octet formatting, and a planner and an engine printing an
+    // address differently is a wrong answer, not a cosmetic difference. So the
+    // fold calls this, and this calls draken::ipv4::format — the one writer that
+    // also backs fmt_ipv4 (interop/value_format.hpp) and to_pylist.
+    //
+    // The value IS the address (see the bit-order note in core/ipv4.h), so any
+    // uint32 is renderable and this cannot fail. Values outside 0..0xFFFFFFFF
+    // are rejected by nanobind's own uint32_t conversion.
+    m.def("ipv4_format",
+        [](uint32_t value) -> nb::object { return ipv4_to_py_str(value); },
+        nb::arg("value"),
+        "Render a uint32 IPv4 address as dotted-decimal text using "
+        "draken::ipv4::format — the same renderer the CAST kernel and the value "
+        "writers use.");
+
     // vector_retag_array_child_as_timestamp64 — the ARRAY twin of the retag above.
     //
     // Parquet stores a list<timestamp> leaf as physical int64, and neither the

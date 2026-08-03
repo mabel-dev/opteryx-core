@@ -237,3 +237,75 @@ if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
     run_tests()
+
+
+# --- NULLIF with a NULL operand.
+#
+# NULLIF(a, b) lowers to IIF(a = b, NULL, a). That lowering cannot express a NULL
+# operand: `a = NULL` is UNKNOWN, and constant-folding it yields a NULL scalar
+# rather than the BOOLEAN vector vector_iif requires, so every all-literal NULLIF
+# against a NULL died as `ValueError: draken_iif: condition must be BOOLEAN`.
+# Both cases are now folded at plan time, from
+# NULLIF(a, b) == CASE WHEN a = b THEN NULL ELSE a END.
+
+
+def _scalar(sql):
+    for morsel in opteryx.session().execute_to_morsels(sql):
+        if len(morsel):
+            return morsel[0][0]
+    return "<no rows>"
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        # `b` is NULL: `a = NULL` is never TRUE, so the answer is always `a`.
+        ("SELECT NULLIF('a', NULL)", "a"),
+        ("SELECT NULLIF(1, NULL)", 1),
+        ("SELECT NULLIF('a', CAST(NULL AS VARCHAR))", "a"),
+        # `a` is NULL: both branches are NULL, so the answer is NULL.
+        ("SELECT NULLIF(NULL, 'a')", None),
+        ("SELECT NULLIF(CAST(NULL AS VARCHAR), 'a')", None),
+        ("SELECT NULLIF(NULL, NULL)", None),
+    ],
+)
+def test_nullif_with_a_null_operand(sql, expected):
+    assert _scalar(sql) == expected, sql
+
+
+def test_nullif_null_compare_against_a_column_is_the_column():
+    """The column path always worked (the comparison yields a real all-NULL
+    BOOLEAN vector); the fold must not change its answer."""
+    out = _col("SELECT NULLIF(name, NULL) AS k FROM $planets")
+    assert out[:3] == ["Mercury", "Venus", "Earth"], out[:3]
+    assert None not in out, out
+
+
+def test_nullif_null_value_against_a_column_is_null():
+    out = _col("SELECT NULLIF(NULL, name) AS k FROM $planets")
+    assert set(out) == {None}, out
+
+
+def test_nullif_without_a_null_operand_is_unchanged():
+    """The ordinary lowering must be untouched by the fold."""
+    out = _col("SELECT NULLIF(name, 'Earth') AS k FROM $planets")
+    assert out[:4] == ["Mercury", "Venus", None, "Mars"], out[:4]
+
+
+def test_folded_nullif_keeps_its_output_column_name():
+    """Folding to `a` must not silently rename the result column to `a`."""
+    for morsel in opteryx.session().execute_to_morsels(
+        "SELECT NULLIF(name, NULL) FROM $planets"
+    ):
+        names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
+        assert names == ["NULLIF(name,None)"], names
+        return
+
+
+def test_folded_nullif_honours_an_explicit_alias():
+    for morsel in opteryx.session().execute_to_morsels(
+        "SELECT NULLIF(name, NULL) AS n FROM $planets"
+    ):
+        names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
+        assert names == ["n"], names
+        return
