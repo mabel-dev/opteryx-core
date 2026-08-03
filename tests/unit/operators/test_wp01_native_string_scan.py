@@ -254,9 +254,11 @@ def test_pushed_numeric_predicate_relocates_native(tmp_path, monkeypatch):
     assert rows == 49
 
 
-def test_fail_closed_unsupported_predicate_stays_streaming(tmp_path, monkeypatch):
-    # A pushed predicate that does NOT lower to a c-native span (regex) still fails
-    # closed to the trampoline, with the predicate correctly applied on the old path.
+def test_regex_predicate_now_native_and_still_correct(tmp_path, monkeypatch):
+    # A pushed regex predicate used to fail CLOSED to the trampoline (the R4
+    # `unlowerable_predicate` residual). The native regex kernels closed that
+    # category, so it now goes native — and must still select exactly the same
+    # rows, which is the part of the original assertion that still matters.
     cols = {
         "s": (pa.string(), ["ax", "by", "cz", "dw"] * 25),
         "n": (pa.int64(), list(range(100))),
@@ -268,7 +270,7 @@ def test_fail_closed_unsupported_predicate_stays_streaming(tmp_path, monkeypatch
     for m in session.execute_to_morsels(sql):
         rows += m.num_rows
     src = list(session._telemetry.as_dict()["scan_sources"].values())
-    assert src == ["StreamingScanSource"], src
+    assert src == ["NativeParquetScanSource"], src
     assert rows == 25  # only 'ax' matches /a/
 
 

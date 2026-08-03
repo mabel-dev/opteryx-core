@@ -853,12 +853,12 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # surface (e.g. plan_show_variables) and is never set from user SQL, so this
     # rejects the typed form without blocking the sanctioned one. Checked before
     # any connector/catalog work so a rejected scan costs nothing.
-    from opteryx.connectors.virtual_data_connector import INTERNAL_ONLY_DATASETS
+    from opteryx.connectors.virtual_data_connector import INTERNAL_ONLY_SURFACES
 
-    if node.relation in INTERNAL_ONLY_DATASETS and not node.internal_relation:
+    if node.relation in INTERNAL_ONLY_SURFACES and not node.internal_relation:
         # Name the surface that replaces the one they typed. A generic "use SHOW
         # VARIABLES" would send a `$user` caller to the wrong statement.
-        surface = {"$variables": "SHOW VARIABLES", "$user": "SHOW USER"}[node.relation]
+        surface = INTERNAL_ONLY_SURFACES[node.relation]
         raise UnsupportedSyntaxError(
             f"'{node.relation}' cannot be queried directly; use `{surface}`."
         )

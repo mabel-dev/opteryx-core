@@ -496,8 +496,32 @@ class _Compiler:
                     rounding = (_dec.ROUND_CEILING if eff in ("GtEq", "Lt")
                                 else _dec.ROUND_FLOOR)
                     rescaled = q.quantize(quantum, rounding=rounding)
+                # The literal need not FIT the column's declared precision:
+                # `gravity DECIMAL(3,1) = 999` is a perfectly legal predicate that
+                # simply matches nothing. Stamping the column's ColumnType on an
+                # out-of-range literal made the constant materialiser raise
+                # OverflowError("decimal: value exceeds declared precision") and
+                # killed the whole query — an unrunnable predicate, not a wrong
+                # answer, but still a valid query refused.
+                #
+                # Only SCALE carries the kernel contract (equal scale => the raw
+                # int64 domain orders correctly); precision is a declared width.
+                # So widen precision just enough to hold the literal and keep the
+                # scale, which leaves the compare exact. Past the int64 tier's 18
+                # digits we skip instead: DECIMAL128 here would break the
+                # same-tier assumption this rewrite is built on (see docstring).
+                _scale = int(ct.logical.scale)
+                _unscaled = abs(int(rescaled.scaleb(_scale)))
+                _needed_p = len(str(_unscaled))
+                if _needed_p <= int(ct.logical.precision):
+                    _lit_type = ct
+                elif _needed_p <= 18:
+                    from opteryx.types import logical_type as _lt
+                    _lit_type = _lt.DECIMAL(_needed_p, _scale)
+                else:
+                    continue
                 nl = Node(NodeType.LITERAL, value=rescaled)
-                nl.type = ct
+                nl.type = _lit_type
                 if new is None:
                     new = expr.copy()
                 setattr(new, b, nl)
@@ -2182,14 +2206,21 @@ class _Compiler:
             build_id, probe_id = legs["right"], legs["left"]
             build_keys, probe_keys = right_cols, left_cols
 
+        # Keys whose two sides disagree on numeric category get a materialized CAST
+        # column so both sides hash the same representation (see _join_key_coercions).
+        coercions = self._join_key_coercions(node, build_keys, probe_keys)
+
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(node.identity)  # own the build sink + probe below
         self.nplan.set_current_display_name(type(node).__name__)
+        # `blayout` is the leg's real output; `bkeyout` may carry extra synthetic cast
+        # columns at the end. Payload/output use the former, key indices the latter.
+        bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, coercions)
         build_key_idx = []
         for identity in build_keys:
-            if identity not in blayout:
+            if identity not in bkeyout:
                 _unsupported("a build-side join key the stream does not carry")
-            build_key_idx.append(blayout.index(identity))
+            build_key_idx.append(bkeyout.index(identity))
         ref = self.nplan.new_join2_ref()
         # SEMI/ANTI emit probe rows only — no build payload needed, UNLESS a
         # correlated residual has to read build-side columns to decide existence.
@@ -2205,11 +2236,12 @@ class _Compiler:
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
         self.nplan.set_current_display_name(type(node).__name__)
+        pkeyout, probe_keys = self._coerce_join_keys(pp, playout, probe_keys, coercions)
         probe_key_idx = []
         for identity in probe_keys:
-            if identity not in playout:
+            if identity not in pkeyout:
                 _unsupported("a probe-side join key the stream does not carry")
-            probe_key_idx.append(playout.index(identity))
+            probe_key_idx.append(pkeyout.index(identity))
         probe_payload = list(range(len(playout)))
         if filter_residual is not None:
             # The residual reads one column from each side, so the probe needs the
@@ -2237,6 +2269,139 @@ class _Compiler:
             bc = self._lower_expression(residual, "a nested-loop join condition")
             self.nplan.add_expr_filter(pp, bc, out_layout)
         return pp, out_layout
+
+    # ---- implicit numeric join-key coercion ---------------------------------------
+    #
+    # A join keys on COLUMNS, by index — the native build sink and probe hash the raw
+    # buffers. So two keys of different physical types never match: INT64 `2` and
+    # FLOAT64 `2.0` hash differently and the probe finds nothing. Left unhandled that
+    # is a SILENT WRONG ANSWER (`k IN (SELECT k)` returned no rows; `NOT IN` returned
+    # rows it should have excluded), which is why the coercion happens here rather
+    # than being left to the operator.
+    #
+    # The fix materializes a CAST column on whichever side is narrower and keys on
+    # THAT, so both sides hash the same representation. The synthetic column is
+    # internal to the join: it is appended after the leg's real columns and excluded
+    # from the payload and the output layout, so `SELECT *` is unchanged.
+    #
+    # SCOPE — the decision keys off PHYSICAL type, not category, with one verified
+    # exception:
+    #
+    #   * INTEGER x INTEGER is left alone. All 64 signed/unsigned width mixes
+    #     (int8..int64 x uint8..uint64) already join correctly — the native key hash
+    #     canonicalises integer width — and `test_join_key_integer_widths_interoperate`
+    #     pins that, so this exception cannot rot silently into a wrong answer.
+    #   * FLOAT32 x FLOAT64 is NOT the same story and IS coerced: floats are hashed at
+    #     their stored width, so the two never match. Same category, still broken.
+    #   * NON-numeric keys are untouched — this fixes the reported numeric bug without
+    #     changing string / temporal / DECIMAL-tier join behaviour.
+
+    _JOIN_CAST_TARGETS = {
+        "FLOAT": "DOUBLE",
+        "INTEGER": "INTEGER",
+        "DECIMAL": "DECIMAL",
+    }
+
+    def _join_key_coercions(self, node, build_keys, probe_keys):
+        """Map key identity -> (bound IDENTIFIER node, cast target name, target type)
+        for the keys whose two sides would hash differently. Read off ``node.on``'s
+        bound schema columns, so it does not depend on either leg having compiled."""
+        from opteryx.expression import NodeType, get_all_nodes_of_type
+        from opteryx.operators._operators import JoinNode
+        from opteryx.types.logical_type import LogicalCategory
+        from opteryx.types.logical_type import find_compatible_type as _lt_find_compatible
+
+        on = getattr(node, "on", None)
+        if on is None or not build_keys:
+            return {}
+
+        by_identity = {}
+        for comparison in get_all_nodes_of_type(on, (NodeType.COMPARISON_OPERATOR,)):
+            if comparison.value != "Eq":
+                continue
+            for side in (comparison.left, comparison.right):
+                if side is None or side.node_type != NodeType.IDENTIFIER:
+                    continue
+                schema_column = getattr(side, "schema_column", None)
+                if schema_column is not None:
+                    by_identity[schema_column.identity] = side
+
+        numeric = (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)
+        coercions = {}
+        for build_identity, probe_identity in zip(build_keys, probe_keys):
+            build_node = by_identity.get(build_identity)
+            probe_node = by_identity.get(probe_identity)
+            if build_node is None or probe_node is None:
+                continue
+            build_ct = build_node.schema_column.column_type
+            probe_ct = probe_node.schema_column.column_type
+            if build_ct is None or probe_ct is None:
+                continue
+            if build_ct.physical == probe_ct.physical:
+                continue                                  # already hash-compatible
+            build_category, probe_category = build_ct.category, probe_ct.category
+            if build_category not in numeric or probe_category not in numeric:
+                continue                                  # out of scope, unchanged
+            if build_category == LogicalCategory.INTEGER == probe_category:
+                continue                                  # verified interoperable
+
+            if build_category == probe_category:
+                # Same category, different width — only FLOAT reaches here (INTEGER
+                # returned above). Widen both sides to the category's widest so the
+                # narrow side is promoted rather than the wide one truncated.
+                target = _lt_find_compatible([build_category, probe_category])
+            else:
+                target = JoinNode._join_numeric_target_type(build_category, probe_category)
+            if target is None:
+                continue
+            target_name = self._JOIN_CAST_TARGETS.get(target.category.name)
+            if target_name is None:
+                _unsupported(
+                    "a join between %s and %s keys" % (build_category.name, probe_category.name))
+            for identity, key_node, column_type in (
+                (build_identity, build_node, build_ct),
+                (probe_identity, probe_node, probe_ct),
+            ):
+                if column_type.physical != target.physical:
+                    coercions[identity] = (key_node, target_name, target)
+        return coercions
+
+    def _coerce_join_keys(self, p, layout, keys, coercions):
+        """Append a CAST column for every key in ``keys`` that needs coercing.
+
+        Returns ``(grown_layout, keys)`` where ``keys`` names the columns to hash —
+        the synthetic identity where one was minted, the original otherwise. The
+        caller keeps the PRE-growth layout for payload/output purposes."""
+        if not coercions:
+            return layout, keys
+        from opteryx.expression import Node, NodeType
+        from opteryx.types.schema import FunctionColumn
+
+        layout = list(layout)
+        out_keys = []
+        for identity in keys:
+            entry = coercions.get(identity)
+            if entry is None or identity not in layout:
+                out_keys.append(identity)
+                continue
+            key_node, target_name, target_ct = entry
+            schema_column = FunctionColumn(
+                name="%s::%s(join key)" % (self._layout_name(identity), target_name),
+                column_type=target_ct,
+                aliases=[],
+            )
+            cast_node = Node(
+                NodeType.CAST,
+                value=target_name,
+                left=key_node,
+                parameters=[],
+                schema_column=schema_column,
+            )
+            layout = self._add_computed(p, [cast_node], layout)
+            if schema_column.identity not in layout:
+                _unsupported("an implicit join-key cast the projection layer declined")
+            out_keys.append(schema_column.identity)
+        return layout, out_keys
 
     def _compile_unnest(self, in_edges, node):
         """CROSS JOIN UNNEST (single input): expand the source ARRAY column into one

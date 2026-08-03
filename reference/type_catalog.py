@@ -40,6 +40,21 @@ _SQL_ALIASES: dict[str, list[str]] = {
 #   limitations     — list of plain-text strings documenting known gaps
 #   notes           — additional detail (shown as a Notes section)
 _TYPE_METADATA: dict[str, dict[str, Any]] = {
+    "ipv4": {
+        "description": "An IPv4 address. Stored as an unsigned 32-bit integer and displayed in dotted-decimal notation. Because the storage is numeric, ordering, grouping, joining and comparison all operate on the underlying integer — and unsigned integer order is exactly IPv4 address order.",
+        "example": "CAST('192.168.1.1' AS IPV4)",
+        "notes": "Parquet has no IP type: an address column is stored as a plain uint32 and stays readable by tools that do not know about IPv4. The IPv4 typing comes from the Opteryx catalog, which records the column as IPV4 over that uint32.",
+        "cast_to": [
+            {"type": "varchar", "example": "CAST(ip AS VARCHAR)", "note": "Renders dotted-decimal."},
+            {"type": "uint32", "example": "CAST(ip AS UINT32)", "note": "Exposes the raw address as an integer; no bits change."},
+        ],
+        "comparable_with": ["ipv4", "integer"],
+        "limitations": [
+            "IPv4 only. There is no IPv6 type.",
+            "Address text is parsed strictly: no shorthand forms such as `10.1` for `10.0.0.1`, and no leading zeros such as `010.0.0.1`. Both are rejected rather than guessed, because a parser and an access rule disagreeing about what an address means is a security bug.",
+            "An address does not carry a prefix length (unlike a PostgreSQL `inet`). The prefix is always an operand of the operation that needs it — `ip <<= '10.0.0.0/8'`.",
+        ],
+    },
     "null": {
         "description": "The absence of a value. NULL is not a type you declare — it appears when a column has no value or an expression produces no result.",
         "notes": "NULL is never equal to anything, including itself. Use `IS NULL` or `IS NOT NULL` to test for nulls. NULL propagates through arithmetic and most functions: `1 + NULL` is NULL.",
@@ -323,7 +338,8 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "limitations": [
             "There is no standalone array literal syntax in the SELECT list. `SELECT [1, 2, 3]` is not valid, though `[1, 2, 3]` is valid as an operand elsewhere (see notes).",
             "Array EQUALITY is not supported (no `=` operator registered for ARRAY = ARRAY). Membership/containment checks (`col IN (...)`, `@>`, `@>>`) DO work directly in a WHERE clause — the array itself just can't be compared for equality.",
-            "You cannot CAST a scalar value to ARRAY.",
+            "Only VARIANT and VARCHAR values holding JSON array text can be CAST to ARRAY (e.g. `(v -> 'items')::ARRAY<VARCHAR>`). No other scalar can: `1::ARRAY<INTEGER>` is an error, not the one-element array `[1]`.",
+            "CAST to ARRAY is strict. A row whose JSON is not an array (an object, or a bare scalar), or which holds an element that is not already of the declared element type, fails the whole row — elements are never individually nulled, and a number is never stringified to satisfy `ARRAY<VARCHAR>`. Use TRY_CAST to turn such rows into NULL instead of an error. A JSON `null` element is not a failure; it becomes a NULL element.",
             "Element access (`arr[i]`) is unsupported for VECTOR_FP16 and DECIMAL128 element types — it fails loud rather than returning a stripped or misread value.",
         ],
     },
@@ -432,6 +448,32 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
             ]
 
         exported[type_id] = entry
+
+    # IPv4 is deliberately NOT a LogicalCategory — its category is INTEGER, which
+    # is what makes ordering, grouping and joins operate on the raw uint32. The
+    # loop above enumerates categories, so it cannot reach IPv4; the entry is
+    # emitted explicitly here rather than by inventing a category for the docs.
+    exported["ipv4"] = {
+        "canonical_name": "IPV4",
+        "aliases": [],
+        "accepted_spellings": ["ipv4"],
+        "family": "network",
+        "flags": {
+            "numeric": False,
+            "temporal": False,
+            "collection": False,
+            "parameterized": False,
+        },
+        "metadata": _TYPE_METADATA.get("ipv4", {}),
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            # Parquet carries no IP logical type — an address column arrives as a
+            # plain uint32 and the catalog is what declares it IPV4.
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": [],
+        },
+    }
 
     ordered = OrderedDict()
     for name in sorted(exported):

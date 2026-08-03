@@ -55,6 +55,29 @@ def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
+def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind SHOW CREATE VIEW.
+
+    A view's body names the relations it reads and the shape of the query over
+    them, so showing it is a read of the view - gated at READ, the same tier as
+    selecting from it. Without this the statement reached its operator with no
+    authorization at all, because a node type with no visitor was silently
+    passed through (see BinderVisitor.visit_node).
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.managers.permissions import can_perform_action
+
+    if not can_perform_action(context.execution_context, node.object_name, action="READ"):
+        raise PermissionError(
+            f"User does not have permission to read view {node.object_name}"
+        )
+
+    node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
+
+    node.columns = []
+    return node, context
+
+
 def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the CREATE VIEW node to determine which connector should handle

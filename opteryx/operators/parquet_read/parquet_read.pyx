@@ -108,6 +108,11 @@ _int64_to_timestamp = _draken_native_parquet.vector_retag_int64_as_timestamp64
 # ARRAY<TIMESTAMP> child retag — IN-PLACE (mutates the vector, returns None),
 # unlike the scalar retags above which return a new Vector to rebind.
 _array_child_to_timestamp = _draken_native_parquet.vector_retag_array_child_as_timestamp64
+# IPv4: Parquet stores an address column as a plain uint32 (deliberately — the
+# files stay readable by tools that have never heard of the type), so the
+# IPv4-ness comes from the catalog and this attaches it. Zero-copy: the physical
+# tag is already correct, only the descriptor is missing.
+_uint32_to_ipv4 = _draken_native_parquet.vector_retag_uint32_as_ipv4
 
 # TimestampUnit enum name -> the unit string vector_reinterpret_as_timestamp64
 # expects. Used to retag int64-stored timestamp columns with the schema's unit
@@ -316,6 +321,7 @@ cdef inline void _coerce_logical_types(
     set date_col_set,
     set timestamp_col_set,
     dict timestamp_unit_map,
+    set ipv4_col_set,
     dict array_ts_unit_map,
 ):
     """Coerce Integer64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
@@ -371,6 +377,18 @@ cdef inline void _coerce_logical_types(
             v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
             if v_nb.type == _draken_native_parquet.ARRAY:
                 _array_child_to_timestamp(v_nb, unit_str)
+    if ipv4_col_set:
+        for col_name in ipv4_col_set:
+            v = row_group.get(col_name)
+            if v is None:
+                continue
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            # Guarded on UINT32: a catalog that declares IPv4 over a column the
+            # file actually stores as something else is a schema/data mismatch,
+            # and silently retagging it would reinterpret unrelated bytes as
+            # addresses. Leaving it untouched surfaces the real type instead.
+            if v_nb.type == _draken_native_parquet.UINT32:
+                row_group[col_name] = _uint32_to_ipv4(v_nb)
 
 
 cdef inline tuple _topn_rank(object v):
@@ -459,6 +477,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     set date_col_set,
     set timestamp_col_set,
     dict timestamp_unit_map,
+    set ipv4_col_set,
     dict array_ts_unit_map,
     list pass1_column_names,
     bytes precomputed_mask=None,
@@ -481,7 +500,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     result.rows_before_filter = 0
 
     _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set,
-                          timestamp_unit_map, array_ts_unit_map)
+                          timestamp_unit_map, ipv4_col_set, array_ts_unit_map)
 
     # Positional pairing: column order in the data dict matches pass1_column_names order.
     # C++ preserves column order; dict keys (bytes) are not used for identity lookup.
@@ -614,6 +633,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef set _sp_timestamp_col_set
     cdef dict _sp_timestamp_unit_map
     cdef dict _sp_array_ts_unit_map   # ARRAY<TIMESTAMP> cols -> unit, for the child retag
+    cdef set _sp_ipv4_col_set
     cdef object _sp_predicate_stats
     cdef list _sp_pass1_column_names
     cdef list _sp_pass2_column_names
@@ -1256,6 +1276,17 @@ cdef class ParquetReadNode(ReaderNode):
             col.name.encode('utf-8') for col in base_schema.columns
             if col.column_type is not None and col.column_type.category == _LC.TIMESTAMP
         }
+        # IPv4 keys on the DESCRIPTOR, not the category: IPv4's category IS
+        # INTEGER (deliberately — that is what makes ordering, grouping and joins
+        # work on the raw uint32), so a category test would sweep in every plain
+        # integer column and retag them all as addresses.
+        from draken.draken_native import LogicalKind as _LogicalKind
+        self._sp_ipv4_col_set = {
+            col.name.encode('utf-8') for col in base_schema.columns
+            if col.column_type is not None
+            and col.column_type.logical is not None
+            and col.column_type.logical.kind == _LogicalKind.IPV4
+        }
         # Per-column reinterpret unit (string) for the int64->timestamp retag,
         # sourced from the schema's logical unit; defaults to "us". Keyed by the
         # same bytes names as the set.
@@ -1742,6 +1773,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
                 self._sp_timestamp_unit_map,
+                self._sp_ipv4_col_set,
                 self._sp_array_ts_unit_map,
                 self._sp_pass1_column_names,
                 <bytes>pulled[6] if pulled[6] is not None else None,
@@ -1800,7 +1832,8 @@ cdef class ParquetReadNode(ReaderNode):
         _coerce_logical_types(
             row_group, self._sp_decimal_col_map,
             self._sp_date_col_set, self._sp_timestamp_col_set,
-            self._sp_timestamp_unit_map, self._sp_array_ts_unit_map,
+            self._sp_timestamp_unit_map, self._sp_ipv4_col_set,
+            self._sp_array_ts_unit_map,
         )
 
         p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
@@ -1961,6 +1994,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_pass1_name_to_identity, self._sp_decimal_col_map,
                 self._sp_date_col_set, self._sp_timestamp_col_set,
                 self._sp_timestamp_unit_map,
+                self._sp_ipv4_col_set,
                 self._sp_array_ts_unit_map,
                 self._sp_pass1_column_names,
                 <bytes>pulled[6] if pulled[6] is not None else None,

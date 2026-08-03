@@ -276,14 +276,6 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
 
     # Bitwise ops on INTEGER
     if op_code in (BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR, BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT):
-        # Special case: BitwiseOr on VARCHAR → IP-in-CIDR
-        if op_code == BOP_BITWISE_OR:
-            if (left_cat == LogicalCategory.VARCHAR or right_cat == LogicalCategory.VARCHAR):
-                from opteryx.compiled.nanobind.vectors import vector_ip_in_cidr
-                def _ip_in_cidr_kernel(left, right, _k=vector_ip_in_cidr):
-                    return _k(_unwrap_nb(left), _unwrap_nb(right))
-                return _ip_in_cidr_kernel
-        # Standard bitwise on INTEGER
         return _build_bitwise_closure(op_code)
 
     raise NotImplementedError(

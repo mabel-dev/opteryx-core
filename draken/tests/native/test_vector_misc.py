@@ -1,8 +1,11 @@
 """
-Native correctness tests for vector_misc: vector_log, vector_in_list, vector_ip_in_cidr.
+Native correctness tests for vector_misc: vector_log, vector_in_list.
 
-Milestone E.14: C′ nanobind consumers replacing vector_log.pyx, vector_in_list.pyx,
-vector_ip_in_cidr.pyx.
+Milestone E.14: C′ nanobind consumers replacing vector_log.pyx, vector_in_list.pyx.
+
+IPv4 CIDR containment moved to the `<<=` / `>>=` operators over a native uint32
+IPv4 column (vector_ipv4_in_cidr / draken_ipv4_in_cidr); the string-based `|`
+overload this file used to cover was removed with it.
 """
 
 import importlib.util
@@ -32,7 +35,6 @@ sys.modules["opteryx.compiled.nanobind.vectors"] = _vm
 _spec.loader.exec_module(_vm)
 
 vector_in_list = _vm.vector_in_list
-vector_ip_in_cidr = _vm.vector_ip_in_cidr
 vector_log = _vm.vector_log
 
 
@@ -200,61 +202,3 @@ class TestVectorInList:
         assert result == [True, False, True]
 
 
-# ---------------------------------------------------------------------------
-# vector_ip_in_cidr — IPv4 CIDR membership
-# ---------------------------------------------------------------------------
-
-
-class TestVectorIpInCidr:
-    def test_basic_match(self):
-        v = make_str([b"192.168.1.5"])
-        cidr = make_str([b"192.168.0.0/16"])
-        result = bool_to_list(vector_ip_in_cidr(v, cidr))
-        assert result == [True]
-
-    def test_basic_no_match(self):
-        v = make_str([b"10.0.0.1"])
-        cidr = make_str([b"192.168.0.0/16"])
-        result = bool_to_list(vector_ip_in_cidr(v, cidr))
-        assert result == [False]
-
-    def test_slash32(self):
-        v = make_str([b"192.168.1.1", b"192.168.1.2"])
-        cidr = make_str([b"192.168.1.1/32"])
-        result = bool_to_list(vector_ip_in_cidr(v, cidr))
-        assert result == [True, False]
-
-    def test_slash0_matches_all(self):
-        v = make_str([b"1.2.3.4", b"255.255.255.255"])
-        cidr = make_str([b"0.0.0.0/0"])
-        result = bool_to_list(vector_ip_in_cidr(v, cidr))
-        assert result == [True, True]
-
-    def test_null_row_yields_false(self):
-        v = make_str([None, b"192.168.1.1"])
-        cidr = make_str([b"192.168.0.0/16"])
-        result = bool_to_list(vector_ip_in_cidr(v, cidr))
-        assert result[0] is False  # null → False (not NULL), per old contract
-        assert result[1] is True
-
-    def test_invalid_ip_raises(self):
-        v = make_str([b"not_an_ip"])
-        cidr = make_str([b"192.168.0.0/16"])
-        with pytest.raises(Exception):
-            vector_ip_in_cidr(v, cidr)
-
-    def test_invalid_cidr_raises(self):
-        v = make_str([b"192.168.1.1"])
-        cidr = make_str([b"192.168.0.0/33"])
-        with pytest.raises(Exception):
-            vector_ip_in_cidr(v, cidr)
-
-    def test_multiple_ips(self):
-        v = make_str([
-            b"10.0.0.1",
-            b"10.0.1.1",
-            b"172.16.0.1",
-        ])
-        cidr = make_str([b"10.0.0.0/24"])
-        result = bool_to_list(vector_ip_in_cidr(v, cidr))
-        assert result == [True, False, False]

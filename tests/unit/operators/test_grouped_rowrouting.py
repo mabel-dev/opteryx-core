@@ -115,67 +115,61 @@ def test_string_key_routes_and_is_correct():
     _assert_matches_serial("SELECT name, COUNT(*) AS c FROM $planets GROUP BY name")
 
 
-def test_skew_ndv_telemetry_emitted():
-    # Row-routing measures bin balance (skew) and exact NDV and emits them as
-    # telemetry, without acting on them. Assert the readings are present and
-    # self-consistent.
+# The `generic_pipeline_*` / `route_agg_*` readings the next two tests asserted on
+# are GONE — not renamed. Grouped aggregation moved into the native engine and that
+# Python-side row-routing sink took its skew/NDV telemetry with it; what the engine
+# reports now is `native_engine_engaged` / `native_engine_dop` / `native_op_stats`.
+#
+# The self-consistency the skew test really pinned needs no telemetry, so it is
+# asserted against the DATA below. What is NOT recovered is the bin-balance (skew)
+# reading — no current sensor exposes per-bin occupancy — so that one piece of
+# coverage is dropped rather than faked with a substitute that doesn't measure it.
+
+
+def _grouped_telemetry(sql, workers):
+    """Run `sql` at a given worker count; return its telemetry readings."""
+    saved = config.MAX_EXECUTION_WORKERS
+    try:
+        config.MAX_EXECUTION_WORKERS = workers
+        session = opteryx.session()
+        for _ in session.execute_to_morsels(sql):
+            pass
+        return session._telemetry._reading
+    finally:
+        config.MAX_EXECUTION_WORKERS = saved
+
+
+def test_grouped_counts_are_self_consistent():
+    # Every input row lands in exactly one group: COUNT(*) must sum to the table's
+    # row count, the emitted group count must equal the key's exact NDV, and no
+    # group may be emitted twice. A router that dropped, duplicated or mis-binned
+    # rows moves one of these — which is what the old NDV/total telemetry watched.
     saved = config.MAX_EXECUTION_WORKERS
     try:
         config.MAX_EXECUTION_WORKERS = 4
-        sess = __import__("opteryx").session()
-        group_count = 0
-        total_from_counts = 0
-        for m in sess.execute_to_morsels(
-            "SELECT gravity, COUNT(*) c FROM $planets GROUP BY gravity"
-        ):
-            group_count += m.num_rows
-            names = [n if isinstance(n, bytes) else n.encode() for n in m.column_names]
-            total_from_counts += sum(m.column(names[1]).to_pylist())  # the COUNT(*) col
-        rd = sess._telemetry._reading
+        rows = _collect("SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity")
     finally:
         config.MAX_EXECUTION_WORKERS = saved
 
-    # The SOLE grouped path is the HASH_REPARTITION PipelineSink (route-raw + parallel
-    # per-partition read-out); it emits the generic-pipeline + route-agg telemetry.
-    for k in (
-        "generic_pipeline_workers",
-        "generic_pipeline_radix",
-        "route_agg_total_rows",
-        "route_agg_ndv",
-    ):
-        assert k in rd, f"missing telemetry reading: {k}"
+    total = _collect("SELECT COUNT(*) AS c FROM $planets")[0][0]
+    distinct = _collect("SELECT DISTINCT gravity FROM $planets")
 
-    w = rd["generic_pipeline_workers"]
-    total = rd["route_agg_total_rows"]
-    assert 1 <= w <= 4
-    assert rd["generic_pipeline_radix"] >= w  # radix = next pow2 >= DOP
-    assert total == total_from_counts  # COUNT(*) per group sums to all input rows
-    assert rd["route_agg_ndv"] == group_count  # exact distinct group count
+    assert sum(r[1] for r in rows) == total
+    assert len(rows) == len(distinct)
+    assert len({r[0] for r in rows}) == len(rows)
 
 
-def test_w1_runs_rowrouting_path():
-    # W=1 must GENUINELY run the parallel grouped path (one worker), not divert to
-    # serial. Prove it ran via the generic-pipeline telemetry the sole grouped sink
-    # emits (so the assertion can't pass vacuously by both runs being serial), and
-    # that the result still matches serial.
+def test_w1_runs_the_same_grouped_path():
+    # W=1 must run the SAME grouped path with one worker, not divert to a separate
+    # serial implementation. The generic-pipeline reading that used to prove this is
+    # gone; `native_engine_engaged` is the surviving one, and a serial divert would
+    # be a different operator. Paired with the serial-equality oracle so the
+    # assertion cannot pass vacuously.
     sql = "SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity"
     _assert_matches_serial(sql, workers=1)
 
-    saved = config.MAX_EXECUTION_WORKERS
-    try:
-        config.MAX_EXECUTION_WORKERS = 1
-        sess = __import__("opteryx").session()
-        for _ in sess.execute_to_morsels(sql):
-            pass
-        rd = sess._telemetry._reading
-    finally:
-        config.MAX_EXECUTION_WORKERS = saved
-
-    assert rd.get("generic_pipeline_workers") == 1, (
-        "W=1 must run the parallel grouped sink (1 worker), not serial"
-    )
-    assert rd.get("generic_pipeline") == 1
-    assert "route_agg_ndv" in rd
+    assert _grouped_telemetry(sql, 1).get("native_engine_engaged") == 1
+    assert _grouped_telemetry(sql, 4).get("native_engine_engaged") == 1
 
 
 if __name__ == "__main__":

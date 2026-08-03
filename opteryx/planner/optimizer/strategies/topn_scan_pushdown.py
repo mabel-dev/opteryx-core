@@ -28,6 +28,12 @@ Scope of this first cut (deliberately narrow, mirrors the conservative WP-1
 gate): single-column ORDER BY where the key is a plain column reference that is
 physically present in the scanned relation, no OFFSET, and the HeapSort reads
 directly from the Scan. Anything else falls through unchanged.
+
+Note this also excludes vector (nearest-neighbour) top-k without a special case:
+`OperatorFusionStrategy.vector_topk_candidate` requires the sort key to be a
+COSINE_DISTANCE/COSINE_SIMILARITY FUNCTION node, and the plain-column-reference
+check below admits only IDENTIFIER — so a flagged node can never reach the
+stamping code.
 """
 
 from opteryx.expression import NodeType
@@ -52,10 +58,6 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
 
         if node.node_type != LogicalPlanStepType.HeapSort:
-            return context
-
-        # Vector (nearest-neighbour) top-k has its own fused path; leave it alone.
-        if getattr(node, "vector_topk_candidate", False):
             return context
 
         limit = getattr(node, "limit", None)

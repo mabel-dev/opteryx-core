@@ -51,13 +51,11 @@ def _load_module(name, rel_path):
 
 
 _json = _load_module(
-    "vector_json",
-    "opteryx/compiled/nanobind/vector_json.cpython",
+    "opteryx.compiled.nanobind.vectors",
+    "opteryx/compiled/nanobind/vectors",
 )
 vector_json_extract = _json.vector_json_extract
 vector_map_access   = _json.vector_map_access
-
-import draken.draken_native as dn
 
 DRAKEN_VARCHAR = dn.DrakenType.VARCHAR
 DRAKEN_VARIANT = dn.DrakenType.VARIANT

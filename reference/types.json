@@ -20,7 +20,8 @@
             "limitations": [
                 "There is no standalone array literal syntax in the SELECT list. `SELECT [1, 2, 3]` is not valid, though `[1, 2, 3]` is valid as an operand elsewhere (see notes).",
                 "Array EQUALITY is not supported (no `=` operator registered for ARRAY = ARRAY). Membership/containment checks (`col IN (...)`, `@>`, `@>>`) DO work directly in a WHERE clause \u2014 the array itself just can't be compared for equality.",
-                "You cannot CAST a scalar value to ARRAY.",
+                "Only VARIANT and VARCHAR values holding JSON array text can be CAST to ARRAY (e.g. `(v -> 'items')::ARRAY<VARCHAR>`). No other scalar can: `1::ARRAY<INTEGER>` is an error, not the one-element array `[1]`.",
+                "CAST to ARRAY is strict. A row whose JSON is not an array (an object, or a bare scalar), or which holds an element that is not already of the declared element type, fails the whole row \u2014 elements are never individually nulled, and a number is never stringified to satisfy `ARRAY<VARCHAR>`. Use TRY_CAST to turn such rows into NULL instead of an error. A JSON `null` element is not a failure; it becomes a NULL element.",
                 "Element access (`arr[i]`) is unsupported for VECTOR_FP16 and DECIMAL128 element types \u2014 it fails loud rather than returning a stripped or misread value."
             ]
         },
@@ -450,6 +451,52 @@
                 "There is no INTERVAL literal that combines months and days in one expression (e.g. '1 month 3 days' is not supported). Use separate additions.",
                 "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type.",
                 "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
+            ]
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": []
+        }
+    },
+    "ipv4": {
+        "canonical_name": "IPV4",
+        "aliases": [],
+        "accepted_spellings": [
+            "ipv4"
+        ],
+        "family": "network",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "metadata": {
+            "description": "An IPv4 address. Stored as an unsigned 32-bit integer and displayed in dotted-decimal notation. Because the storage is numeric, ordering, grouping, joining and comparison all operate on the underlying integer \u2014 and unsigned integer order is exactly IPv4 address order.",
+            "example": "CAST('192.168.1.1' AS IPV4)",
+            "notes": "Parquet has no IP type: an address column is stored as a plain uint32 and stays readable by tools that do not know about IPv4. The IPv4 typing comes from the Opteryx catalog, which records the column as IPV4 over that uint32.",
+            "cast_to": [
+                {
+                    "type": "varchar",
+                    "example": "CAST(ip AS VARCHAR)",
+                    "note": "Renders dotted-decimal."
+                },
+                {
+                    "type": "uint32",
+                    "example": "CAST(ip AS UINT32)",
+                    "note": "Exposes the raw address as an integer; no bits change."
+                }
+            ],
+            "comparable_with": [
+                "ipv4",
+                "integer"
+            ],
+            "limitations": [
+                "IPv4 only. There is no IPv6 type.",
+                "Address text is parsed strictly: no shorthand forms such as `10.1` for `10.0.0.1`, and no leading zeros such as `010.0.0.1`. Both are rejected rather than guessed, because a parser and an access rule disagreeing about what an address means is a security bug.",
+                "An address does not carry a prefix length (unlike a PostgreSQL `inet`). The prefix is always an operand of the operation that needs it \u2014 `ip <<= '10.0.0.0/8'`."
             ]
         },
         "parameterized_forms": [],

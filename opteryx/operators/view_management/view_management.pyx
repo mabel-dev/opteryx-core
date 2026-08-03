@@ -40,7 +40,6 @@ class ViewManagementNode(BasePlanNode):
         self.view_name: Optional[str] = parameters.get("view_name")
         self.query = parameters.get("query")
         self.or_replace = parameters.get("or_replace", False)
-        self.materialized = parameters.get("materialized", False)
 
         # DROP
         self.view_names = parameters.get("view_names")
@@ -147,12 +146,12 @@ class ViewManagementNode(BasePlanNode):
             if object_type not in (TableType.View, TableType.Table):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.object_name)
 
-            # Store the comment via the connector's generic comment API
-            # Ensure the connector implements the API before calling.
-            if getattr(self.connector, "set_comment", None) is None:
-                raise NotImplementedError("Connector does not support updating comments")
-
-            self.connector.set_comment(self.object_name, self.comment, describer="system")
+            # Declared on the Writable mixin, and visit_comment has already
+            # rejected a non-Writable connector.
+            # The session user, not a fixed literal - every other DDL path here
+            # attributes to _author, and recording "system" made the stored
+            # describer useless for telling authors apart.
+            self.connector.set_comment(self.object_name, self.comment, describer=self._author)
 
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

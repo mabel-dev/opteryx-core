@@ -60,9 +60,8 @@
         "sql_symbol": "|",
         "node_kind": "binary",
         "category": "bitwise",
-        "description": "Bitwise OR and IP containment operator.",
-        "documentation": "Combines integer operands using a bitwise OR operation. When used with address and CIDR-compatible operands, the same `|` token acts as an IP containment predicate and returns a boolean result.",
-        "notes": "This operator is overloaded by operand type: integer inputs perform bitwise OR, while address/CIDR-style inputs use `|` for containment checks."
+        "description": "Bitwise OR operator.",
+        "documentation": "Combines integer operands using a bitwise OR operation."
     },
     "BitwiseXor": {
         "ast_symbol": "BitwiseXor",
@@ -117,6 +116,26 @@
         "category": "comparison",
         "description": "Case-insensitive pattern match comparison.",
         "documentation": "Returns true when the left string matches the SQL ILIKE pattern on the right without case sensitivity."
+    },
+    "IPContainedBy": {
+        "ast_symbol": "IPContainedBy",
+        "friendly_name": "IP contained by",
+        "sql_symbol": "<<=",
+        "node_kind": "comparison",
+        "category": "comparison",
+        "description": "IPv4 CIDR containment operator.",
+        "documentation": "Returns true when the left IPv4 address falls inside the network given on the right in CIDR notation, for example `ip <<= '10.0.0.0/8'`. Comparison is on the underlying 32-bit address, so it is a single mask-and-compare per row with no text parsing.",
+        "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension. A NULL address is not contained by any network and yields false. An invalid or prefix-less CIDR raises rather than matching nothing."
+    },
+    "IPContains": {
+        "ast_symbol": "IPContains",
+        "friendly_name": "IP contains",
+        "sql_symbol": ">>=",
+        "node_kind": "comparison",
+        "category": "comparison",
+        "description": "IPv4 CIDR containment operator, reversed.",
+        "documentation": "Returns true when the network on the left, in CIDR notation, contains the IPv4 address on the right, for example `'10.0.0.0/8' >>= ip`. The mirror of `<<=`.",
+        "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension."
     },
     "InList": {
         "ast_symbol": "InList",

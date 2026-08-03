@@ -16,6 +16,7 @@ _MODULES = {
     "planets": "opteryx.managers.virtual_datasets.planet_data",
     "variables": "opteryx.managers.virtual_datasets.variables_data",
     "user": "opteryx.managers.virtual_datasets.user",
+    "grants": "opteryx.managers.virtual_datasets.grants",
 }
 
 

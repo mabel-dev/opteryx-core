@@ -40,8 +40,8 @@ def _load_module(name, rel_path):
 
 
 _misc3 = _load_module(
-    "vector_string_misc3",
-    "opteryx/compiled/nanobind/vector_string_misc3.cpython",
+    "opteryx.compiled.nanobind.vectors",
+    "opteryx/compiled/nanobind/vectors",
 )
 vector_soundex = _misc3.vector_soundex
 

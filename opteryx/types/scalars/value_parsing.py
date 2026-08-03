@@ -77,7 +77,15 @@ def _parse_blob(value):
         return value.encode("utf-8")
     if isinstance(value, (bytearray, memoryview)):
         return bytes(value)
-    return bytes(value)
+    # Everything else is the VARCHAR rendering, encoded — the same bytes the
+    # runtime cast produces (CAST(id AS BLOB) on a column gives b'1', b'2', and
+    # CAST(gravity AS BLOB) gives b'3.7'). This used to be bytes(value), whose
+    # int overload builds a ZERO BUFFER OF THAT LENGTH: CAST(42 AS BLOB) folded
+    # to 42 zero bytes instead of b'42', and CAST(3232235777 AS BLOB) allocated
+    # ~3GB at plan time from a one-line query. Routing through _parse_varchar
+    # rather than a second str() keeps one rendering rule for both targets, so
+    # BLOB cannot drift from VARCHAR.
+    return _parse_varchar(value).encode("utf-8")
 
 
 def _parse_date(value):
@@ -86,8 +94,16 @@ def _parse_date(value):
     if isinstance(value, datetime.datetime):
         return value.date()
     if isinstance(value, str):
-        parts = value.strip().split("-")
-        if len(parts) == 3:
+        # No .strip(). The runtime kernel's parse_iso_date (cast_string.cpp)
+        # requires every character between the dashes to be a digit, so
+        # '2021-02-21 ' is a hard error on a column; stripping it here let the
+        # literal path quietly succeed where the column path fails. int() would
+        # also swallow surrounding whitespace on each part, so the parts are
+        # digit-checked rather than handed straight to int().
+        parts = value.split("-")
+        # isascii() as well as isdigit(): the kernel tests bytes against '0'-'9',
+        # so non-ASCII digits ('٢٠٢١') are a reject there and must be here too.
+        if len(parts) == 3 and all(p.isascii() and p.isdigit() for p in parts):
             return datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
     raise ValueError(f"Cannot parse {value} as date")
 
@@ -109,8 +125,11 @@ def _parse_time(value):
     raise ValueError(f"Cannot parse {value} as time")
 
 
+# Seconds are OPTIONAL: the runtime kernel accepts 'YYYY-MM-DDTHH:MM' (it reads
+# back as 12:00:00), and requiring them here meant that literal parsed to NULL
+# while the same text on a column parsed fine.
 _TIMESTAMP_RE = re.compile(
-    r"^(?P<base>\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?)"
+    r"^(?P<base>\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?)"
     r"(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
 )
 
@@ -132,6 +151,10 @@ def _parse_timestamp(value):
         if "." in base:
             return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M:%S.%f")
         if " " in base:
+            # Seconds are optional in the pattern above, so pick the format from
+            # what is actually present rather than assuming HH:MM:SS.
+            if base.count(":") == 1:
+                return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M")
             return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M:%S")
         return datetime.datetime.strptime(base, "%Y-%m-%d")
     raise ValueError(f"Cannot parse {value} as timestamp")

@@ -31,6 +31,47 @@ ACTION_MAP = {
 }
 
 
+def can_perform_workspace_action(
+    execution_context: ExecutionContext, workspace: str, action: str = "ALTER"
+) -> bool:
+    """Check whether the session may perform a workspace-level action.
+
+    This is deliberately not `can_perform_action`: that function reads a name
+    with no dots as a local table and short-circuits to READ-only, and a policy
+    pattern granting ownership *inside* a workspace (e.g. "ws.*") does not
+    fnmatch the bare workspace name anyway. Ownership of the workspace itself is
+    required and is not implied by owning anything within it - a policy must
+    match the workspace name directly (e.g. "ws", or "*").
+
+    Args:
+        execution_context (ExecutionContext): The execution context containing access policies.
+        workspace (str): The workspace name.
+        action (str): The action to check. Defaults to "ALTER".
+
+    Returns:
+        bool: True if any role can perform the action on the workspace, False otherwise.
+    """
+    policies: Iterable[dict] = execution_context.access_policies
+    action_map = ACTION_MAP.get(action, set())
+
+    try:
+        for policy in policies:
+            pattern = policy.get("pattern", "")
+            role = policy.get("role", "reader")
+            if role in action_map and fnmatch(workspace, pattern):
+                return True
+        return False
+
+    except Exception as exc:
+        # On any error, deny access
+        from opteryx.logging import get_logger
+
+        get_logger().error(
+            f"Permission check failed for policies {policies} on workspace {workspace} with action {action}: {exc}"
+        )
+        raise PermissionsError(f"Permission denied for action {action} on workspace {workspace}.")
+
+
 def can_perform_action(
     execution_context: ExecutionContext, table: str, action: str = "READ"
 ) -> bool:

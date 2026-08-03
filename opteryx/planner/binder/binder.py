@@ -657,6 +657,24 @@ def inner_binder(
             )
         ):
             found_column = None
+        # Two literals that are textually identical but carry DIFFERENT aliases are
+        # two distinct OUTPUT columns, and interning them onto one ConstantColumn
+        # gives them one shared identity — so one type and one name. That is the
+        # same failure the case-distinct guard above prevents, one level up.
+        # It surfaced through FULL OUTER JOIN: FullOuterToUnionStrategy synthesizes
+        # one NULL literal per column of the non-preserved side, all spelled `None`,
+        # so every one of them collapsed onto the first. The union's per-column type
+        # coercion then wrote each leg's type onto that single shared column (last
+        # write won) and concatenated mismatched types. Reuse only when the alias
+        # agrees too.
+        if (
+            found_column
+            and node_type == NodeType.LITERAL
+            and isinstance(found_column, ConstantColumn)
+            and node.alias
+            and node.alias not in (found_column.aliases or [])
+        ):
+            found_column = None
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
             # found_identity = found_column.identity

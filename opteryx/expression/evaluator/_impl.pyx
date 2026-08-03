@@ -68,6 +68,8 @@ DEF OP_ANYOP_LIKE       = 30
 DEF OP_ANYOP_NOT_LIKE   = 31
 DEF OP_ANYOP_ILIKE      = 32
 DEF OP_ANYOP_NOT_ILIKE  = 33
+DEF OP_IP_CONTAINED_BY  = 34
+DEF OP_IP_CONTAINS      = 35
 
 # Python-side mirror so dispatchers can resolve a string op once. Must stay
 # in sync with the DEFs above; if they ever diverge the verification check
@@ -83,6 +85,7 @@ _OP_CODE = {
     "AllOpEq": 25, "AllOpNotEq": 26,
     "AtArrow": 27, "ArrayContainsAll": 28, "AtQuestion": 29,
     "AnyOpLike": 30, "AnyOpNotLike": 31, "AnyOpILike": 32, "AnyOpNotILike": 33,
+    "IPContainedBy": 34, "IPContains": 35,
 }
 
 
@@ -98,7 +101,7 @@ _OP_CODE = {
 # our op_code. Negative entries flag "no Draken equivalent" so the caller
 # can fall back. The body of the array is set once at module load.
 # ---------------------------------------------------------------------------
-cdef int _DRAKEN_CMP_OP[34]
+cdef int _DRAKEN_CMP_OP[36]
 _DRAKEN_CMP_OP[0]  = -1  # OP_UNKNOWN
 _DRAKEN_CMP_OP[1]  =  0  # OP_EQ        → Draken Eq
 _DRAKEN_CMP_OP[2]  =  1  # OP_NOT_EQ    → Draken Ne
@@ -133,6 +136,8 @@ _DRAKEN_CMP_OP[30] = -1  # OP_ANYOP_LIKE    — own kernel
 _DRAKEN_CMP_OP[31] = -1  # OP_ANYOP_NOT_LIKE — own kernel
 _DRAKEN_CMP_OP[32] = -1  # OP_ANYOP_ILIKE   — own kernel
 _DRAKEN_CMP_OP[33] = -1  # OP_ANYOP_NOT_ILIKE — own kernel
+_DRAKEN_CMP_OP[34] = -1  # OP_IP_CONTAINED_BY — own kernel
+_DRAKEN_CMP_OP[35] = -1  # OP_IP_CONTAINS     — own kernel
 
 # Same table but with directional ops flipped — used when we dispatch the
 # compare on the right-hand operand (e.g. Float64 < Int64 → Int64 > Float64).

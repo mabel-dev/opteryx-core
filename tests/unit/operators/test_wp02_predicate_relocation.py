@@ -232,13 +232,16 @@ def test_no_predicate_free_case(tmp_path, monkeypatch):
     _assert_parity(tmp_path, monkeypatch, cols, "s, n", write_kw=wk)
 
 
-# ── fail-closed: an unsupported predicate stays on the trampoline ─────────────
+# ── regex predicates: were fail-closed (R4), now relocated natively ──────────
 
 @pytest.mark.parametrize("where", ["s RLIKE 'a'", "s SIMILAR TO 'a.*'"])
-def test_fail_closed_unsupported_predicate(tmp_path, monkeypatch, where):
-    """A pushed predicate that does not lower to a c-native span must fail CLOSED:
-    StreamingScanSource, predicate on the old path, correct result — never a
-    dropped filter or a silent wrong answer."""
+def test_regex_predicate_relocates_natively(tmp_path, monkeypatch, where):
+    """A pushed regex predicate used to fail CLOSED — it did not lower to a c-native
+    span, so the whole scan fell back (the R4 `unlowerable_predicate` residual). The
+    native regex kernels closed that category: it now relocates like any other
+    predicate. The parity half of the original assertion is the half that still
+    matters, and matters MORE now — a relocated filter that dropped or mis-evaluated
+    rows would be a silent wrong answer."""
     cols, wk = _mixed()
     ds = _write(str(tmp_path / "fc"), cols, **wk)
     sql = "SELECT s FROM '%s' WHERE %s" % (ds, where)
@@ -246,8 +249,9 @@ def test_fail_closed_unsupported_predicate(tmp_path, monkeypatch, where):
     nat, nat_src = _drain(sql, False, monkeypatch)   # natural path
     tmp, _ = _drain(sql, True, monkeypatch)          # forced trampoline baseline
 
-    assert nat_src == ["StreamingScanSource"], nat_src  # did NOT go native
-    assert nat == tmp                                    # and the result is correct
+    assert nat_src == ["NativeParquetScanSource"], nat_src   # DID go native
+    assert nat == tmp                                        # and agrees with the old path
+    assert nat, "predicate matched nothing — not a meaningful parity check"
 
 
 # ── pruning is preserved (row groups / bytes unchanged) ──────────────────────

@@ -74,6 +74,45 @@ _ROW_COUNT_SAFE_TYPES = {
 }
 
 
+def _limit_sees_only_aggregate_row(plan, limit_nid) -> bool:
+    """True when everything feeding `limit_nid` collapses to a single row.
+
+    Descends the plan from the LIMIT (edges run child -> parent, so
+    `ingoing_edges` walks toward the sources). An ungrouped Aggregate is a hard
+    collapse to one row, so the walk stops there rather than descending past it;
+    anything that can INCREASE row count between the LIMIT and that aggregate
+    (Join, Unnest, Union, ... — deny-by-default) or a grouped aggregate feeding
+    the LIMIT disqualifies it.
+
+    This has to be asked PER LIMIT. Asking it of the whole plan — "is there an
+    ungrouped aggregate anywhere?" — eliminated LIMITs that the aggregate does
+    not sit under at all: `SELECT COUNT(*) FROM t WHERE id IN (SELECT id FROM t
+    LIMIT 5)` dropped the SUBQUERY's LIMIT because the outer COUNT(*) made the
+    plan look single-row, silently widening the IN-list to every row and
+    returning 9 instead of 5. Silent wrong answers, no error.
+    """
+    stack = [source for source, _, _ in plan.ingoing_edges(limit_nid)]
+    seen = set()
+    found_aggregate = False
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        node_type = plan[current].node_type
+        if node_type == LogicalPlanStepType.Aggregate:
+            # Collapses every row beneath it to exactly one — stop here, what is
+            # below can no longer affect how many rows the LIMIT sees.
+            found_aggregate = True
+            continue
+        if node_type == LogicalPlanStepType.AggregateAndGroup:
+            return False
+        if node_type not in _ROW_COUNT_SAFE_TYPES:
+            return False
+        stack.extend(source for source, _, _ in plan.ingoing_edges(current))
+    return found_aggregate
+
+
 class LimitEliminationStrategy(OptimizationStrategy):
     """Drop LIMIT nodes that are provably no-ops."""
 
@@ -91,16 +130,10 @@ class LimitEliminationStrategy(OptimizationStrategy):
     def complete(self, plan, context: OptimizerContext) -> object:
         scan_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,))
 
-        # Case 1: ungrouped aggregate. Safe regardless of what else is in the
-        # plan (join, unnest, ...) - the aggregate collapses everything to
-        # one row before the LIMIT ever sees it.
-        ungrouped_aggregates = get_nodes_of_type_from_logical_plan(
-            plan, (LogicalPlanStepType.Aggregate,)
-        )
-        grouped_aggregates = get_nodes_of_type_from_logical_plan(
-            plan, (LogicalPlanStepType.AggregateAndGroup,)
-        )
-        single_row_output = bool(ungrouped_aggregates) and not grouped_aggregates
+        # Case 1 (ungrouped aggregate) is decided PER LIMIT below, by walking the
+        # plan down from that LIMIT — see _limit_sees_only_aggregate_row. It used
+        # to be a single plan-wide flag, which dropped LIMITs the aggregate did
+        # not sit above.
 
         # Cases 2 and 3 require a single Scan and an all-safe node-type plan;
         # anything else (a second Scan, a Join, an Unnest, ...) means row
@@ -126,7 +159,7 @@ class LimitEliminationStrategy(OptimizationStrategy):
                 continue
 
             eliminable = (
-                single_row_output
+                _limit_sees_only_aggregate_row(plan, nid)
                 or no_table_scan
                 or (manifest_row_count is not None and manifest_row_count <= limit_node.limit)
             )

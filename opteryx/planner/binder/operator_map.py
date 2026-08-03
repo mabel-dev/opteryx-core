@@ -170,6 +170,13 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.INTEGER     , LC.INTEGER     , 'NotEq'                   ): OMT(_B, None, 100.0),
     (LC.INTEGER     , LC.INTEGER     , 'Plus'                    ): OMT(_I, None, 100.0),
     (LC.INTEGER     , LC.INTEGER     , 'ShiftLeft'               ): OMT(_I, None, 100.0),
+    # IPv4 CIDR containment (`addr <<= '10.0.0.0/8'`, `'10.0.0.0/8' >>= addr`).
+    # Keyed on INTEGER because IPv4's category IS INTEGER — the address is a
+    # uint32 and the descriptor that marks it as an address is not visible to
+    # LogicalCategory. A plain integer column therefore also binds here; the
+    # kernel reads it as an address, which is the only meaning `<<=` has.
+    (LC.INTEGER     , LC.VARCHAR     , 'IPContainedBy'           ): OMT(_B, None, 100.0),
+    (LC.VARCHAR     , LC.INTEGER     , 'IPContains'              ): OMT(_B, None, 100.0),
     (LC.INTEGER     , LC.INTEGER     , 'ShiftRight'              ): OMT(_I, None, 100.0),
     (LC.INTERVAL    , LC.DATE        , 'Minus'                   ): OMT(_T, None, 100.0),
     (LC.INTERVAL    , LC.DATE        , 'Plus'                    ): OMT(_T, None, 100.0),
@@ -188,7 +195,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.NVARCHAR    , LC.INTEGER     , 'MapAccess'               ): OMT(_N, None, 100.0),
     (LC.NVARCHAR    , LC.NVARCHAR    , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.NVARCHAR    , LC.NVARCHAR    , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.NVARCHAR    , LC.NVARCHAR    , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.NVARCHAR    , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.NVARCHAR    , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.NVARCHAR    , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -205,7 +211,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.NVARCHAR    , LC.NVARCHAR    , 'StringConcat'            ): OMT(_N, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.NVARCHAR    , LC.VARBINARY   , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -222,7 +227,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.NVARCHAR    , LC.VARBINARY   , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.NVARCHAR    , LC.VARCHAR     , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -260,7 +264,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARBINARY   , LC.INTEGER     , 'MapAccess'               ): OMT(_V, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.VARBINARY   , LC.NVARCHAR    , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -289,7 +292,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARBINARY   , LC.VARBINARY   , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.VARBINARY   , LC.VARCHAR     , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -307,7 +309,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARCHAR     , LC.INTEGER     , 'MapAccess'               ): OMT(_S, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.VARCHAR     , LC.NVARCHAR    , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -324,7 +325,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARCHAR     , LC.NVARCHAR    , 'StringConcat'            ): OMT(_N, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.VARCHAR     , LC.VARBINARY   , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -341,7 +341,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARCHAR     , LC.VARBINARY   , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'AtQuestion'              ): OMT(_B, None, 100.0),
-    (LC.VARCHAR     , LC.VARCHAR     , 'BitwiseOr'               ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'GtEq'                    ): OMT(_B, None, 100.0),
@@ -356,7 +355,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARCHAR     , LC.VARCHAR     , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'RLike'                   ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'StringConcat'            ): OMT(_S, None, 100.0),
-    (LC.VARIANT     , LC.INTEGER     , 'MapAccess'               ): OMT(_A, None, 100.0),
     (LC.VARIANT     , LC.NVARCHAR    , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARIANT     , LC.NVARCHAR    , 'AtQuestion'              ): OMT(_B, None, 100.0),
     (LC.VARIANT     , LC.NVARCHAR    , 'LongArrow'               ): OMT(_N, None, 100.0),
@@ -489,6 +487,20 @@ def determine_type(node):
         return None
     if right_lc is None or right_lc == OT.NULL:
         return None
+
+    # Subscripting a VARIANT is ambiguous - the value may be an array (index it),
+    # a string (take a character), or neither - and the answer differs per row, so
+    # there is no single correct reading. Require the intent to be spelled out with
+    # a cast rather than picking one silently.
+    if operator == "MapAccess" and left_lc == OT.VARIANT:
+        from opteryx.expression import format_expression
+
+        raise IncorrectTypeError(
+            f"Unable to perform `{format_expression(node)}` because subscripting a VARIANT "
+            "is ambiguous - it may hold an array, a string, or neither, and which it is can "
+            "differ per row. Cast it to the type you mean first, for example "
+            "`(value::VARCHAR)[0]` to index the JSON text."
+        )
 
     # MapAccess special case: ARRAY<T>[index] → T
     if (

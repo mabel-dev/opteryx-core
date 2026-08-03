@@ -64,6 +64,11 @@ def get_mismatched_condition_column_types(
             "LongArrow",
             "AtQuestion",
             "AtArrow",
+            # IPv4 CIDR containment is INHERENTLY mixed-type: an address operand
+            # (INTEGER category) against a CIDR string. Matching operand types
+            # would be the bug here, not the exemption.
+            "IPContainedBy",
+            "IPContains",
         ) or node.value.startswith(("AllOp", "AnyOp")):
             return None  # Some ops are meant to have different types
         left_type = node.left.schema_column.category if node.left.schema_column else None

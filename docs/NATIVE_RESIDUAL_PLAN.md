@@ -15,8 +15,9 @@
 > exercises. It is also still the fixture several instrumentation tests force via
 > `native_scan_supported`. What HAS gone is any *battery* query reaching it.
 >
-> Not closed, and unchanged by this: `unlowerable_predicate` (R4) — see item 7 and
-> the stale-marker warning below.
+> `unlowerable_predicate` (R4) is now **CLOSED** — see item 7. It was the last
+> entry in the strict-xfail frontier, which is now empty; `footer_gate` via schema
+> evolution remains the one residual with a live SQL trigger.
 
 The native C++ engine runs plain `SELECT` end-to-end **except** for parquet scans
 that fall back to the per-morsel Python trampoline (`StreamingScanSource`). That
@@ -71,23 +72,38 @@ purpose-built corpus, not this battery.
 | `zero_projection` (R1) | 2 | 2 | **0** | 0 | 0 | ✖ closed (A2) |
 | `fused_topn` (R3) | 1 | 1 | 1 | 1 | **0** | ✖ retired (R3 close-out) |
 | `pushed_limit` (R2) | 0 | 0 | 0 | 0 | **0** | ✖ closed (R2 close-out) |
-| `unlowerable_predicate` (R4) | 0 | 0 | 0 | 0 | 0 | ⚠ marker stale — see below |
+| `unlowerable_predicate` (R4) | 0 | 0 | 0 | 0 | **0** | ✖ retired (R4 close-out) |
 | `bool_predicate_input` (R5) | 0 | 0 | 0 | 0 | 0 | ✖ retired (R5 close-out) |
 | `unsigned_predicate_input` (R5b, A1) | — | 0 | 0 | 0 | 0 | ✖ retired (A1) |
 | `non_admissible_kind:<T>` (R6) | 0 | 0 | 0 | 0 | 0 | ✖ retired (R6 close-out) |
 | `no_manifest` (R7a) | 0 | 0 | 0 | 0 | 0 | ✖ no SQL trigger |
 | `temporal_predicate_input` (new, A2) | — | — | 0 | 0 | 0 | ✔ observed (missions dataset, not in battery) |
 
-⚠ **`unlowerable_predicate` (R4) — the frontier marker is STALE, unverified.**
-`test_category_now_native[unlowerable_predicate]` and its reachability twin are
-currently RED (strict-xfail xpass): the hand-set trigger
-(`... WHERE text RLIKE 'a'`) now selects the **native** Source, i.e. the regex
-predicate lowers to a c-native span. That was NOT done by the R2/R7b close-outs —
-neither touches `bytecode_is_all_c_native`, and the trigger has no LIMIT so the R2
-guard never applied to it — so R4 appears to have been closed incidentally by the
-native RLIKE kernel work. **Not investigated or retired here**, because item 7
-below marks R4 hands-off pending other WIP. Someone owning R4 should confirm the
-whole category (not just this one trigger) and retire the marker.
+✔ **`unlowerable_predicate` (R4) — CLOSED and retired.** The marker was stale for
+some months: the hand-set trigger (`... WHERE text RLIKE 'a'`) selects the
+**native** Source, i.e. the regex predicate lowers to a c-native span. No R4
+close-out chip was ever written — the native regex kernel work closed it
+**incidentally**, which is exactly why the marker outlived the category.
+
+Confirmed as a whole category, not just the one trigger:
+
+* the battery census reports **165/165 scans native, 0 trampoline, no residual
+  reasons of any kind**;
+* a 43-shape hand sweep found no SQL that tags R4 — the regex family (`RLIKE`,
+  `NOT RLIKE`, `SIMILAR TO`, `NOT SIMILAR TO`, `~`, `!~`, composed with
+  `AND`/`OR`/`NOT`), string transforms, hashing/encoding, `SPLIT`, `SOUNDEX`,
+  `LEVENSHTEIN`, `ARRAY_CONTAINS`, `CASE`, `COALESCE`/`NULLIF`, casts and
+  arithmetic all either go native or raise.
+
+Retired from `_OPEN_CATEGORIES` and `HAND_SET`; replaced by real passing
+assertions in `test_regex_predicate_now_native` plus a native-vs-forced-trampoline
+survivor-count parity check. The `bytecode_is_all_c_native` guard in `compiler.py`
+**stays** as the structural fail-closed, exactly as R6's does — what is retired is
+the claim that SQL can still reach it.
+
+R4 was the last entry in the strict-xfail frontier, so `_OPEN_CATEGORIES` is now
+empty. That is **not** the same as "nothing reaches the trampoline":
+`footer_gate` via schema evolution still does, and keeps its `HAND_SET` entry.
 
 `footer_gate` was **77% of all A0 fallbacks**. **A1 closed the integer sub-case**:
 after A1 the battery has 4 trampoline scans (native 154 / 158), and `footer_gate`
@@ -698,14 +714,21 @@ not proven here, just the honest scope of what this change does and doesn't
 show.
 
 
-### 7. `unlowerable_predicate` (R4) — **census 0** (regex reachable) — *structural* — **DO LAST**
+### 7. `unlowerable_predicate` (R4) — **CLOSED** (retired)
 A pushed predicate that does not lower to a c-native span (regex / `RLIKE`).
-* **Needs:** widened c-native expression-kernel coverage (regex + the kernels
-  behind the `compiler.py:454` hard-error class).
-* **⚠ Dependency / overlap — DO NOT TOUCH from A0:** this overlaps the uncommitted
-  `draken/draken_native.cpp` / `opteryx/expression/evaluator/evaluation.pyx` WIP
-  and the native `draken_if_then_else` / `join2` correctness bugs. Close only
-  after that WIP lands and those bugs are fixed. Overlaps R5.
+
+**Closed incidentally by the native regex kernel work**, not by a close-out chip;
+retired 2026-08-03 after confirming the whole category (census 165/165 native +
+a 43-shape hand sweep — see the R4 note above the census table). The old
+"DO NOT TOUCH from A0 / overlaps uncommitted `draken_native.cpp` +
+`evaluation.pyx` WIP" dependency no longer applies: that WIP landed, and closing
+R4 required no engine change at all — only retiring the marker and re-pointing
+the tests that used its trigger as their canonical trampoline fixture.
+
+The `bytecode_is_all_c_native` guard stays as the structural fail-closed. The
+adjacent hard-error class (a non-lowerable predicate that never *pushes* becomes
+a standalone Filter and raises in `_lower_expression`) is unchanged and was never
+tagged R4 — see finding 2 above.
 
 ### (not a close-out) `no_manifest` (R7a)
 Defensive guard, unreachable from SQL. Leave as-is.

@@ -35,9 +35,16 @@ struct cast_decimal_ctx {
 /**
  * Context for BC_CAST to ARRAY(element_type).
  * Stores the target element type for array cast.
+ *
+ * `safe` distinguishes TRY_CAST from a plain cast. Both share one code path: a
+ * row that is not a JSON array, or that holds an element which will not coerce
+ * to `element_type`, FAILS. `safe == 0` (plain `::`) raises on that row;
+ * `safe != 0` (TRY_CAST) yields a NULL row instead. The disposition is the only
+ * difference — never the set of rows considered bad, so the two can't drift.
  */
 struct cast_array_ctx {
     int element_type;  // DrakenType enum value
+    int safe;          // 0 = raise on a bad row (`::`), 1 = NULL that row (TRY_CAST)
 };
 
 /**

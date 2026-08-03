@@ -1521,16 +1521,29 @@ cdef inline int _dv_function_kernel_c(
     const DrakenVector* const* fargs,
     uint32_t arity,
     DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
-    DrakenFrameArena* arena, VecResult* out_vr,
+    DrakenFrameArena* arena, VecResult* out_vr, bint own_array_result,
 ) noexcept nogil:
     """Phase 9a-fn: C-ABI scalar function dispatch (func_fn_t) — the kernel is
     called DIRECTLY from the nogil VM, no Python/nanobind between them. rc 0 =
     fixed-width or canonical-string result folded and pushed; rc 4 = kernel error
-    sentinel; rc 5 = descriptor-carrying result the arena DV cannot hold."""
+    sentinel; rc 5 = descriptor-carrying result the arena DV cannot hold; rc 6 =
+    ARRAY result the CALLER must own (see own_array_result).
+
+    ``own_array_result`` is set by the GIL VM only. An ARRAY result carries its
+    elements on VecResult.child, and the frame arena has nowhere to put a child —
+    _dv_vecresult_adopt_c would fold the offsets and silently drop the elements,
+    leaving an ARRAY pointing at nothing (which `arr[i]` then reports as "DRAKEN_ARRAY
+    vector has no child"). The engine VM solves this with its out_child
+    out-parameter; the GIL VM has none, so it instead owns the whole result as a
+    Vector via draken_vecresult_own_c, whose vecresult_to_owner adopts the child
+    recursively. Returning BEFORE the adopt is the point: once the arena has
+    registered the buffers, owning them too would double-free."""
     cdef VecResult vr = (<func_fn_t>kernel_fn)(ctx_ptr, fargs, arity)
     out_vr[0] = vr
     if vr.data == NULL:
         return 4
+    if own_array_result and vr.child != NULL:
+        return 6
     return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
 
 
@@ -1613,14 +1626,19 @@ cdef inline int _dv_cast_kernel_c(
     Py_ssize_t slot_idx,          # result slot (== sp after the one pop)
     DrakenFrameArena* arena,
     VecResult* out_vr,
+    bint own_array_result,
 ) noexcept nogil:
     """C-native BC_CAST kernel dispatch (unary; mirrors _dv_binop_kernel_c).
     rc 0 = fixed-width result folded into the arena and pushed; rc 4 = kernel
-    error; rc 5 = string result in out_vr (GIL caller wraps as a Vector)."""
+    error; rc 5 = string result in out_vr (GIL caller wraps as a Vector); rc 6 =
+    ARRAY result the caller must own — see _dv_function_kernel_c for why
+    (CAST(json AS ARRAY<T>) is the one cast that returns a child)."""
     cdef VecResult vr = (<cast_fn_t>kernel_fn)(ctx_ptr, dv_left_ptr)
     out_vr[0] = vr
     if vr.data == NULL:
         return 4
+    if own_array_result and vr.child != NULL:
+        return 6
     if (vr.type == DRAKEN_VARCHAR or vr.type == DRAKEN_NVARCHAR
             or vr.type == DRAKEN_VARBINARY):
         return 5
@@ -1878,9 +1896,11 @@ cdef int c_execute_dv_inner(
                     return 4
                 fargs[arity] = dv_cache[i]
                 _eff_nargs = <uint32_t>(arity + 1)
+            # own_array_result=0: the engine VM captures an ARRAY's child in
+            # out_child below, so the arena fold is correct here.
             rc = _dv_function_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr, fargs,
                                        _eff_nargs, dv_store, dv_stack, sp,
-                                       arena, &vr)
+                                       arena, &vr, 0)
             if rc == 0:
                 sp += 1
                 if vr.child != NULL:
@@ -1941,12 +1961,23 @@ cdef int c_execute_dv_inner(
                 rc = 4 if vr.data == NULL else 5
             else:
                 rc = _dv_cast_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
-                                       dv_left_ptr, dv_store, dv_stack, sp, arena, &vr)
+                                       dv_left_ptr, dv_store, dv_stack, sp, arena, &vr, 0)
             if rc == 5:
                 # canonical-block string result (`*_to_string` casts) — fold nogil
                 rc = _dv_vecresult_string_fold_c(&vr, dv_store, dv_stack, sp, arena)
             if rc == 0:
                 sp += 1
+                # CAST(json AS ARRAY<T>) returns its elements on VecResult.child,
+                # exactly as the BC_FUNCTION ARRAY producers do. Until that cast
+                # existed no CAST ever returned a child (ARRAY->VARCHAR goes the
+                # other way), so this capture was absent — and without it the child
+                # is dropped and leaked, leaving an ARRAY with offsets but no
+                # elements. Same one-child-terminal-result invariant as
+                # BC_FUNCTION: no kernel READS an ARRAY operand, so an ARRAY result
+                # can only ever be the program's terminal value, never an
+                # intermediate — one pointer, captured once.
+                if vr.child != NULL:
+                    out_child[0] = <VecResult*>vr.child
         else:
             err_op[0] = opcode
             return 99
@@ -2006,15 +2037,29 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
                 arena, nbytes, <uint32_t>num_rows, &err_op, &err_msg_ptr, &child_vr)
         if rc == 0:
             if child_vr != NULL:
-                # ARRAY result (e.g. JSONB_OBJECT_KEYS) — this legacy Python-Vector
-                # materialization path (_slot_to_pyobj) has no child-adoption wired
-                # up. Fail loud rather than silently drop the element data; the
-                # engine's ExprMultiProjectOperator path (native_expression.hpp)
-                # is where ARRAY results are actually supported.
+                # A child was produced somewhere in this program. Whether that is a
+                # problem depends ENTIRELY on what the program finally RETURNS —
+                # `child_vr != NULL` alone does not mean the result is an ARRAY.
+                #
+                # Final result IS an ARRAY (e.g. SPLIT(x) on its own): this
+                # Python-Vector materialization path (_slot_to_pyobj) builds a Vector
+                # from the arena DV*, which has nowhere to carry a child, so the
+                # elements would be silently dropped. Fail loud — the engine's
+                # ExprMultiProjectOperator path is where ARRAY results are supported.
+                #
+                # Final result is NOT an ARRAY (e.g. LENGTH(SPLIT(x)) -> INT64): the
+                # ARRAY was a consumed INTERMEDIATE. draken_length_array reads only
+                # the offsets — it needs no child, which is exactly why it composes
+                # over a computed array where the element-reading kernels (SORT,
+                # ARRAY_CONTAINS) cannot. The child is genuinely unused, so freeing
+                # it and returning the result is correct, not a silent drop. The old
+                # guard tested only `child_vr != NULL` and so refused this case too.
+                if dv_stack[0] != NULL and dv_stack[0].type == DRAKEN_ARRAY:
+                    draken_vecresult_discard_c(child_vr)
+                    raise NotImplementedError(
+                        "evaluate_c_native: ARRAY function results are not supported "
+                        "on the legacy Python-Vector evaluation path")
                 draken_vecresult_discard_c(child_vr)
-                raise NotImplementedError(
-                    "evaluate_c_native: ARRAY function results are not supported "
-                    "on the legacy Python-Vector evaluation path")
             # Gate guarantees the last op is a compute op → arena result, anchor None.
             return _slot_to_pyobj(dv_stack[0], None, arena)
         if rc == 4:
@@ -3466,14 +3511,20 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         _eff_nargs = 1
                     rc = _dv_function_kernel_c(
                         slot.kernel_fn, <void*>slot.ctx_ptr, cfargs,
-                        _eff_nargs, dv_store, dv_stack, sp, arena, &binop_vr)
+                        _eff_nargs, dv_store, dv_stack, sp, arena, &binop_vr, 1)
                     if rc == 4:
                         cast_err_msg = (
                             binop_vr.error_msg.decode("utf-8", "replace")
                             if binop_vr.error_msg != NULL else "C function kernel error"
                         )
                         raise ValueError(cast_err_msg)
-                    if rc == 5:
+                    if rc == 5 or rc == 6:
+                        # rc 6 = ARRAY result: owned rather than arena-folded so the
+                        # elements on VecResult.child survive (vecresult_to_owner
+                        # adopts the child recursively). Anchoring the Vector is what
+                        # lets a following arr[i] reach them — an arena DV* cannot
+                        # carry a child. Identical handling to rc 5, which likewise
+                        # owns rather than folds.
                         legacy_result = Vector(draken_vecresult_own_c(binop_vr))
                         anchor[sp] = legacy_result
                         dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
@@ -3629,17 +3680,20 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                 if (slot.flags & BC_INSTR_C_NATIVE) != 0 and dv_left_ptr != NULL:
                     rc = _dv_cast_kernel_c(
                         slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr,
-                        dv_store, dv_stack, sp, arena, &cast_vr)
+                        dv_store, dv_stack, sp, arena, &cast_vr, 1)
                     if rc == 4:
                         cast_err_msg = (
                             cast_vr.error_msg.decode("utf-8", "replace")
                             if cast_vr.error_msg != NULL else "C cast kernel error"
                         )
                         raise ValueError(cast_err_msg)
-                    if rc == 5:
+                    if rc == 5 or rc == 6:
                         # String result: consolidated block with embedded validity —
                         # own it as a Vector (the canonical owner; carries the block).
                         # Stays on the GIL path (string ownership can't fold to arena).
+                        # rc 6 = CAST(json AS ARRAY<T>): owned for the same reason, so
+                        # the elements on VecResult.child survive the arena boundary
+                        # and a following arr[i] can reach them.
                         legacy_result = Vector(draken_vecresult_own_c(cast_vr))
                         anchor[sp] = legacy_result
                         dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv

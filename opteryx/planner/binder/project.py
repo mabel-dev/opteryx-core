@@ -249,6 +249,16 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
         name = c.alias or getattr(c, "value", None)
         if isinstance(name, str):
             name = name.lower()
+        elif isinstance(name, (list, dict, set)):
+            # An unaliased literal uses its VALUE as its display name, and an ARRAY /
+            # VECTOR / STRUCT literal's value is a Python container — unhashable, so the
+            # duplicate-name set below raised TypeError instead of doing its job. repr()
+            # is stable within a query and keeps distinct literals distinct.
+            # Unreachable today: the parenthesised-values guard in logical_planner refuses
+            # such a column before binding. Defensive, so that lifting that guard (which
+            # needs constant ARRAY/VECTOR materialization) surfaces the real limitation
+            # instead of a TypeError from a name-collision check.
+            name = repr(name)
         return (c.schema_column.identity, name)
 
     top_level_columns = list(node.columns) + list(node.passthrough_columns)
@@ -270,7 +280,14 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
         duplicates = [
             key for key, count in Counter(all_top_level_keys).items() if count > 1
         ]
-        matches = {c.value for c in node.columns if _output_key(c) in duplicates}
+        # Report the DISPLAY name, not the raw value: a duplicated literal column
+        # (`SELECT 1, 1`) has a non-str value, and joining those raised
+        # `TypeError: sequence item 0: expected str instance` — the ambiguity
+        # error replaced by a crash that names no column at all.
+        matches = sorted(
+            {str(c.alias or getattr(c, "value", None)) for c in node.columns
+             if _output_key(c) in duplicates}
+        )
         raise AmbiguousIdentifierError(
             message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(matches)}`"
         )

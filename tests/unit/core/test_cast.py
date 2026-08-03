@@ -18,7 +18,9 @@ from opteryx.expression.casts import try_cast
 CAST_TESTS = [
     ("BOOLEAN", "true", True),
     ("BOOLEAN", "false", False),
-    ("BOOLEAN", "not a boolean", False),
+    # Unparseable text is NOT False — the engine refuses it outright ("Cannot
+    # cast string to BOOL: expected true/false/..."), so a safe cast is NULL.
+    ("BOOLEAN", "not a boolean", None),
     ("BOOLEAN", 1, True),
     ("BOOLEAN", 0, False),
     ("BOOLEAN", "1", True),
@@ -28,7 +30,7 @@ CAST_TESTS = [
     ("BOOLEAN", "yes", True),
     ("BOOLEAN", "no", False),
     ("BOOLEAN", None, None),
-    ("BOOLEAN", "", False),
+    ("BOOLEAN", "", None),  # same: empty string is not a spelling of false
     ("DOUBLE", "3.14", 3.14),
     ("DOUBLE", "not a double", None),
     ("DOUBLE", 2, 2.0),
@@ -88,18 +90,21 @@ CAST_TESTS = [
     ("TIMESTAMP", "2021-02-21T12:00:60", None),  # Invalid second
     ("TIMESTAMP", None, None),
     ("TIMESTAMP", "", None),
-    ("STRUCT", '{"key": "value"}', b'{"key": "value"}'),
-    ("STRUCT", "not a struct", b"not a struct"),
-    ("STRUCT", '{"number": 123}', b'{"number": 123}'),
-    ("STRUCT", '{"boolean": true}', b'{"boolean": true}'),
-    ("STRUCT", '{"list": [1, 2, 3]}', b'{"list": [1, 2, 3]}'),
-    ("STRUCT", '{"nested": {"key": "value"}}', b'{"nested": {"key": "value"}}'),
-    ("STRUCT", '{"string": "string", "number": 123}', b'{"string": "string", "number": 123}'),
-    ("STRUCT", '{"null_value": null}', b'{"null_value": null}'),
-    ("STRUCT", "{}", b"{}"),
-    ("STRUCT", "[]", b"[]"),  # Invalid struct
+    # STRUCT is an ALIAS for NVARCHAR (_SQL_NAME_ALIASES in logical_type.py),
+    # so a cast to it is a string passthrough. These expected BYTES, which no
+    # path produces — not this helper and not the engine.
+    ("STRUCT", '{"key": "value"}', '{"key": "value"}'),
+    ("STRUCT", "not a struct", "not a struct"),
+    ("STRUCT", '{"number": 123}', '{"number": 123}'),
+    ("STRUCT", '{"boolean": true}', '{"boolean": true}'),
+    ("STRUCT", '{"list": [1, 2, 3]}', '{"list": [1, 2, 3]}'),
+    ("STRUCT", '{"nested": {"key": "value"}}', '{"nested": {"key": "value"}}'),
+    ("STRUCT", '{"string": "string", "number": 123}', '{"string": "string", "number": 123}'),
+    ("STRUCT", '{"null_value": null}', '{"null_value": null}'),
+    ("STRUCT", "{}", "{}"),
+    ("STRUCT", "[]", "[]"),  # Invalid struct
     ("STRUCT", None, None),
-    ("STRUCT", "", b""),
+    ("STRUCT", "", ""),
     ("DATE", "2021-02-21", datetime.date(2021, 2, 21)),
     ("DATE", "not a date", None),
     ("DATE", "2021-12-31", datetime.date(2021, 12, 31)),
@@ -115,8 +120,8 @@ CAST_TESTS = [
     # Additional test cases for BOOLEAN
     ("BOOLEAN", "tRuE", True),  # Case insensitivity
     ("BOOLEAN", "FaLsE", False),  # Case insensitivity
-    ("BOOLEAN", 2, False),  # Invalid integer value
-    ("BOOLEAN", -1, False),  # Invalid negative value
+    ("BOOLEAN", 2, True),  # nonzero is true, as the engine does
+    ("BOOLEAN", -1, True),  # nonzero is true, including negatives
     # Additional test cases for DOUBLE
     ("DOUBLE", "3,14", None),  # Comma instead of a dot
     ("DOUBLE", "  123.45  ", 123.45),  # Leading and trailing spaces
@@ -133,7 +138,7 @@ CAST_TESTS = [
     # Additional test cases for BOOLEAN
     ("BOOLEAN", "tRuE", True),  # Case insensitivity
     ("BOOLEAN", "FaLsE", False),  # Case insensitivity
-    ("BOOLEAN", -1, False),
+    ("BOOLEAN", -1, True),
     # Additional test cases for DOUBLE
     ("DOUBLE", "3,14", None),  # Comma instead of a dot
     ("DOUBLE", "  123.45  ", 123.45),  # Leading and trailing spaces

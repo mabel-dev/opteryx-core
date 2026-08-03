@@ -26,14 +26,26 @@ from opteryx.types.schema import RelationSchema
 
 # Datasets that exist ONLY to back a dedicated SQL surface and are therefore not
 # addressable by name in user SQL. `$variables` is reachable exclusively through
-# `SHOW VARIABLES` and `$user` exclusively through `SHOW USER` (see
-# logical_planner.plan_show_variables), so that each has a SINGLE surface rather
-# than two that can drift.
+# `SHOW VARIABLES`, `$user` exclusively through `SHOW USER`, and `$grants`
+# exclusively through `SHOW GRANTS` (see logical_planner.plan_show_variables),
+# so that each has a SINGLE surface rather than two that can drift.
 #
 # The flag in WELL_KNOWN_DATASETS below is `suggestable`, which only governs
 # "did you mean?" hints — it does NOT gate access (`$no_table` is suggestable=False
 # and freely queryable). Enforcement lives in binder.visit_scan.
-INTERNAL_ONLY_DATASETS = frozenset({"$variables", "$user"})
+#
+# Keyed by the surface that replaces the typed name, so the binder can name it in
+# the rejection ("use `SHOW USER`") rather than sending every caller to the same
+# generic advice. INTERNAL_ONLY_DATASETS is DERIVED from it: two hand-kept lists
+# drifted the moment a third dataset was added, and the binder's lookup raised
+# KeyError instead of the intended error.
+INTERNAL_ONLY_SURFACES = {
+    "$variables": "SHOW VARIABLES",
+    "$user": "SHOW USER",
+    "$grants": "SHOW GRANTS",
+}
+
+INTERNAL_ONLY_DATASETS = frozenset(INTERNAL_ONLY_SURFACES)
 
 WELL_KNOWN_DATASETS = {
     "$planets": ("opteryx.managers.virtual_datasets.planet_data", True),
@@ -42,6 +54,7 @@ WELL_KNOWN_DATASETS = {
     "$no_table": ("opteryx.managers.virtual_datasets.no_table_data", False),
     "$telemetry": ("opteryx.managers.virtual_datasets.telemetry", True),
     "$user": ("opteryx.managers.virtual_datasets.user", False),
+    "$grants": ("opteryx.managers.virtual_datasets.grants", False),
 }
 
 

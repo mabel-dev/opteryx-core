@@ -7,6 +7,7 @@
 from libc.stdint cimport uint8_t, uint32_t, int32_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
+from libc.string cimport memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -17,26 +18,29 @@ from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
 
 cdef extern from "_text_render.hpp" namespace "rugo_text":
+    # for_excel raises std::invalid_argument (-> ValueError) on a morsel Excel
+    # would silently mangle, hence `except +`.
     string csv_write(const DrakenVector** dvs, const DrakenVector** childs,
-                     const int* units, const int* scales,
-                     const int* cunits, const int* cscales,
-                     const int* dims,
+                     const ColumnDesc* descs,
                      const string* names, size_t ncols, size_t nrows,
-                     char delim, bint header)
+                     char delim, bint header, bint for_excel) except +
 
 
-cdef inline int _csv_unit_code(object u):
-    if u == "s": return 0
-    if u == "ms": return 1
-    if u == "ns": return 3
-    return 2  # us / default
-
-
-def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
+def write_csv(Morsel morsel not None, str delimiter=",", bint header=True,
+              bint for_excel=False):
     """Serialize a Morsel to CSV bytes (RFC 4180).
 
     delimiter: single-character field separator (default ',').
     header: write a header row of column names (default True).
+    for_excel: check the morsel against the limits of the Excel grid it is
+    destined for (default False -- a CSV file itself has no such limits).
+    Excel enforces them by truncating the cell and dropping the off-sheet rows
+    and columns without saying so, so this raises ValueError instead:
+      * more than 1,048,576 lines (the header row counts),
+      * more than 16,384 columns,
+      * any cell -- or column name -- over 32,767 characters.
+    The row count is per-morsel; a caller concatenating several morsels into
+    one file must add up the rows itself.
     Nulls are empty fields; ARRAY and VECTOR_FP16 columns render as a JSON
     array (quoted) -- VECTOR_FP16 has no wire type here any more than in
     Parquet, so it renders as an array of floats.
@@ -53,58 +57,43 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True):
     cdef list child_vecs = []
     cdef const DrakenVector** dvs = <const DrakenVector**>malloc(ncols * sizeof(void*))
     cdef const DrakenVector** child_dvs = <const DrakenVector**>malloc(ncols * sizeof(void*))
-    cdef int* units = <int*>malloc(ncols * sizeof(int))
-    cdef int* scales = <int*>malloc(ncols * sizeof(int))
-    cdef int* cunits = <int*>malloc(ncols * sizeof(int))
-    cdef int* cscales = <int*>malloc(ncols * sizeof(int))
-    cdef int* dims = <int*>malloc(ncols * sizeof(int))
+    # One descriptor per column. Zero-filled == the C++ struct's own defaults
+    # (kind NONE, unit s, no scale/dimension) -- malloc does not run them.
+    cdef ColumnDesc* descs = <ColumnDesc*>malloc(ncols * sizeof(ColumnDesc))
 
     cdef Vector v, cv
     cdef const DrakenVector* dv
     cdef Py_ssize_t c
-    cdef object nm, u, sc, dm
+    cdef object nm
     cdef string out
     cdef bytes nb_name
     cdef vector[string] cnames
 
     try:
+        memset(descs, 0, ncols * sizeof(ColumnDesc))
         for c in range(ncols):
             v = morsel._get_column(c)
             vecs.append(v)
             dv = v.unified()
             dvs[c] = dv
             child_dvs[c] = NULL
-            units[c] = 0; scales[c] = 0; cunits[c] = 0; cscales[c] = 0; dims[c] = 0
-            u = v._nb.logical_type_unit
-            if u is not None:
-                units[c] = _csv_unit_code(u)
-            sc = v._nb.logical_type_scale
-            if sc is not None:
-                scales[c] = <int>sc
-            if dv.type == DRAKEN_VECTOR_FP16:
-                dm = v._nb.logical_type_dimension
-                if dm is None:
-                    raise ValueError(
-                        "write_csv: VECTOR_FP16 column %r missing logical-type "
-                        "descriptor (dimension)" % (names[c],))
-                dims[c] = <int>dm
+            _fill_logical_desc(&descs[c].column, v._nb)
+            if dv.type == DRAKEN_VECTOR_FP16 and descs[c].column.dim == 0:
+                raise ValueError(
+                    "write_csv: VECTOR_FP16 column %r missing logical-type "
+                    "descriptor (dimension)" % (names[c],))
             if dv.type == DRAKEN_ARRAY and v._nb.array_child_type is not None:
                 cv = Vector(v._nb.array_child)
                 child_vecs.append(cv)
                 child_dvs[c] = cv.unified()
-                u = cv._nb.logical_type_unit
-                if u is not None:
-                    cunits[c] = _csv_unit_code(u)
-                sc = cv._nb.logical_type_scale
-                if sc is not None:
-                    cscales[c] = <int>sc
+                _fill_logical_desc(&descs[c].child, cv._nb)
             nm = names[c]
             nb_name = nm if isinstance(nm, bytes) else str(nm).encode("utf-8")
             cnames.push_back(string(<const char*>nb_name, len(nb_name)))
 
-        out = csv_write(dvs, child_dvs, units, scales, cunits, cscales, dims,
-                        cnames.data(), <size_t>ncols, <size_t>nrows, delim, header)
+        out = csv_write(dvs, child_dvs, descs,
+                        cnames.data(), <size_t>ncols, <size_t>nrows, delim, header,
+                        for_excel)
         return PyBytes_FromStringAndSize(out.data(), out.size())
     finally:
-        free(dvs); free(child_dvs)
-        free(units); free(scales); free(cunits); free(cscales); free(dims)
+        free(dvs); free(child_dvs); free(descs)

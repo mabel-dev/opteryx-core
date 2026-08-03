@@ -21,6 +21,8 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     """
     import draken.draken_native as _dn
 
+    from opteryx.compiled.nanobind.vectors import vector_ip_trunc as _ip_trunc_kernel
+
     _greatest_kernel = _dn.vector_array_greatest
     _least_kernel    = _dn.vector_array_least
 
@@ -67,6 +69,38 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     )
 
     return [
+        FunctionDefinition(
+            name="IP_TRUNC",
+            aliases=(),
+            category="utility",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Network address of an IPv4 address for a given prefix length.",
+            documentation=(
+                "Applies a network mask to an IPv4 address, returning the network "
+                "address: `IP_TRUNC(ip, 24)` on `192.168.1.1` returns `192.168.1.0`. "
+                "The operation is a bitwise AND with the netmask for the prefix. "
+                "Name and signature follow BigQuery's NET.IP_TRUNC — the prefix is an "
+                "argument because an Opteryx IPv4 address carries no prefix length of "
+                "its own, unlike a PostgreSQL `inet`."
+            ),
+            overloads=(
+                FunctionOverload(
+                    id="IP_TRUNC_2",
+                    parameters=(
+                        ParameterSpec(name="ip", type_family="integer"),
+                        ParameterSpec(name="prefix", type_family="integer"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_IPV4),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=_ip_trunc_kernel,
+                    ),
+                ),
+            ),
+        ),
         FunctionDefinition(
             name="GREATEST",
             aliases=(),
@@ -280,7 +314,11 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             "JSONB_OBJECT_KEYS",
             other_functions.jsonb_object_keys,
             _CT_ARRAY(_CT_VARIANT),
-            (ParameterSpec(name="json", type_family="any"),),
+            # "string", not "any": it parses its argument as a JSON document, so
+            # a non-string never worked — it failed inside the native engine as
+            # `ExprMultiProjectOperator: error code 1`, which names nothing the
+            # caller can act on. JSON documents arrive as VARCHAR/VARBINARY.
+            (ParameterSpec(name="json", type_family="string"),),
             cost=590.21,
             summary="Extract keys from JSON object.",
         ),

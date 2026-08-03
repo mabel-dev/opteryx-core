@@ -9,6 +9,7 @@
 # (draken_vector_own_raw, draken_vector_own_string, etc.) are resolved within
 # one translation unit — no cross-.so symbol lookup needed.
 
+include "_text_render.pxi"          # shared descriptor for the CSV / JSONL writers
 include "parquet/parquet_reader.pxi"
 include "parquet/parquet_writer.pxi"
 include "jsonl/_jsonl_reader.pxi"

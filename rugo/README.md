@@ -474,7 +474,17 @@ Type inference cascade per field: `int64` → `float64` → `VARCHAR` → `null`
 
 ### Writing
 
-`write_csv(morsel, delimiter=",", header=True)` returns RFC 4180 bytes: fields are quoted when they contain the delimiter/quote/newline (quotes doubled), nulls are empty fields, and ARRAY columns render as a (quoted) JSON array. The CSV and JSONL writers share the same C++ value formatter.
+`write_csv(morsel, delimiter=",", header=True, for_excel=False)` returns RFC 4180 bytes: fields are quoted when they contain the delimiter/quote/newline (quotes doubled), nulls are empty fields, and ARRAY columns render as a (quoted) JSON array. The CSV and JSONL writers share the same C++ value formatter.
+
+`for_excel=True` checks the morsel against the limits of the Excel grid the file is destined for and raises `ValueError` rather than writing something Excel would silently mangle (it truncates the over-long cell and drops the off-sheet rows and columns without reporting either):
+
+| Limit                       | Value                                     |
+|-----------------------------|-------------------------------------------|
+| Lines per sheet             | 1,048,576 — the header row counts         |
+| Columns per sheet           | 16,384                                    |
+| Characters per cell         | 32,767 — UTF-16 code units, as Excel counts them |
+
+The row count is per-morsel; a caller concatenating several morsels into one file has to add up the rows itself. A CSV file has no limits of its own, so this is off by default and does not otherwise change the output.
 
 ---
 

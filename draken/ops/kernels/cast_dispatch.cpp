@@ -220,14 +220,9 @@ VecResult draken_cast_to_decimal(void* ctx, const DrakenVector* vector) {
     return draken_error_sentinel("DECIMAL cast not yet implemented");
 }
 
-/**
- * Cast to ARRAY(element_type).
- * ctx → cast_array_ctx with element_type.
- * (Deferred: Requires full array construction logic)
- */
-VecResult draken_cast_to_array(void* ctx, const DrakenVector* vector) {
-    return draken_error_sentinel("ARRAY cast not yet implemented");
-}
+/* draken_cast_to_array is IMPLEMENTED IN function_array_json.cpp — it needs that
+ * TU's yyjson + StringRows staging + finalize_child helpers, the same reason
+ * draken_split lives there. Declared in cast_kernels.h alongside the rest. */
 
 /**
  * Cast to VECTOR (FP16 embedding).

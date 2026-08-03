@@ -146,6 +146,15 @@ cdef extern from "core/buffers.h":
     # reads, no allocation.
     size_t draken_vector_nbytes(const DrakenVector* v) noexcept nogil
 
+    # Fixed byte-width per element, or 0 for the families that have no flat
+    # per-element width (bool is bit-packed; string/variant use an arena;
+    # array/fp16/null have no scalar width). THE canonical width — callers must
+    # not keep a private copy of this table: a divergent one silently sized a
+    # CASE result buffer at 1 byte for every unsigned type, truncating the value
+    # to its low byte. Treat a 0 return as "this type does not belong on this
+    # path" and fail loud, never as a default width.
+    size_t draken_type_fixed_itemsize(DrakenType t) noexcept nogil
+
 cdef extern from "core/vector_alloc.h":
     const uint32_t* draken_identity_sel(uint32_t length) nogil
     const uint32_t* draken_zero_sel(uint32_t length) nogil

@@ -109,12 +109,23 @@ VecResult draken_interval_interval_op(void* ctx, const DrakenVector* left, const
  * ========================================================================== */
 
 /**
- * IP address in CIDR block check.
- * ctx is NULL.
- * Special case: BOP_BITWISE_OR on VARCHAR operands becomes IP-in-CIDR.
- * Returns BOOL (BoolVector) or error.
+ * IPv4 CIDR containment over a UINT32 address column (`<<=` / `>>=`).
+ * ctx is NULL. Operand ORDER does not matter: whichever operand is UINT32 is
+ * the address column, the other is the CIDR string (row 0 only).
+ * Returns BOOL, or an error sentinel for a malformed/NULL CIDR.
+ *
+ * func_fn_t shape (args[], nargs) — NOT the (left, right) binary shape of the
+ * kernels above: it is dispatched via BC_FUNCTION | BC_INSTR_C_NATIVE.
  */
-VecResult draken_ip_in_cidr(void* ctx, const DrakenVector* left, const DrakenVector* right);
+VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+
+/**
+ * IP_TRUNC(ip, prefix): network address of `ip` within a /prefix network
+ * (ip AND netmask). prefix is a scalar integer read from row 0, range 0..32.
+ * Returns UINT32; the IPV4 descriptor is re-attached from the bound output type.
+ * func_fn_t shape.
+ */
+VecResult draken_ip_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 
 #ifdef __cplusplus
 }

@@ -13,6 +13,9 @@ import datetime
 import decimal
 from typing import List, Optional
 
+from draken.draken_native import LogicalKind
+from draken.draken_native import ipv4_parse
+
 from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.exceptions import ArrayWithMixedTypesError, SqlError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, format_expression
@@ -657,13 +660,33 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     # CAST(<lit> AS DECIMAL(p,s)) would silently drop (p,s) and skip quantization.
     # The runtime CAST node carries `parameters=[precision, scale]` and threads them
     # through _build_decimal_closure (bare DECIMAL → DECIMAL(18,6), Decision F).
+    # ARRAY splits on the SOURCE literal, because only some sources are readable by the
+    # native kernel. `_extract_data_type` puts the `ARRAY<element>` element type in
+    # `cast_parameters` (the VECTOR(384) channel), so whichever way this goes the element
+    # type is carried — `_cast_literal_value` folds it into the literal's ColumnType, and
+    # the runtime CAST node hands it to the binder as `parameters=[element]`.
+    #   - array literal / NULL source -> FOLD. draken_cast_to_array reads its elements
+    #     from the column owner's CHILD vector, which only a real column has. Such a
+    #     literal has no child, so the kernel cannot see its own input and silently
+    #     yields empty arrays (it does not refuse). Folding is not an optimization here;
+    #     it is the only way these shapes can run — the same reason VECTOR folds.
+    #   - every other literal source (notably VARCHAR holding JSON array text) -> runtime
+    #     CAST node. That input the kernel CAN read, and folding it would be a second,
+    #     Python-side implementation of draken_cast_to_array (CLAUDE.md §3/§11).
     # A FORMAT-bearing cast is likewise never folded: the pattern semantics live
     # entirely in the native kernel (sql_temporal_format.h) — folding would mean a
     # second, Python-side implementation of the same token engine (CLAUDE.md §3/§11
     # bans duplicated logic between Python and native).
+    _base_target = normalized_type.replace("TRY_", "")
+    _source_category = source_expr.type.category if source_expr.type is not None else None
+    if _base_target == "ARRAY":
+        _fold_target = _source_category in (LogicalCategory.ARRAY, LogicalCategory.NULL)
+    else:
+        _fold_target = _base_target not in ("NVARCHAR", "DECIMAL")
+
     if (
         source_expr.node_type == NodeType.LITERAL
-        and normalized_type.replace("TRY_", "") not in ("NVARCHAR", "DECIMAL")
+        and _fold_target
         and format_literal_node is None
     ):
         return _cast_literal_value(source_expr, normalized_type, kind, alias, cast_parameters)
@@ -758,6 +781,13 @@ def _normalize_cast_type(data_type: str) -> str:
     if upper_type in ("UINT8", "UINT16", "UINT32", "UINT64"):
         return upper_type
 
+    # IPv4 — exact match, and it MUST sit ahead of the substring rules below:
+    # sqlparser hands this through as a custom type name, and "ipv4" contains no
+    # mapped substring today, but the substring table is a trap waiting to catch
+    # any future alias. Matched exactly so it cannot be shadowed.
+    if upper_type == "IPV4":
+        return "IPV4"
+
     # Map of substring patterns to normalized types
     type_mappings = {
         "timestamp": "TIMESTAMP",
@@ -801,6 +831,24 @@ def _normalize_cast_type(data_type: str) -> str:
     raise SqlError(f"Unsupported type for CAST - '{data_type}'.")
 
 
+def _array_element_type(params):
+    """The ARRAY<element> element type, read out of the cast's parameters channel.
+
+    `_extract_data_type` flattens a dict-shaped AST data_type to its top-level key, so
+    `ARRAY<VARCHAR>` would arrive as the bare name "ARRAY". The element type survives only
+    because it is copied into the cast's parameters — the same channel VECTOR's width and
+    DECIMAL's precision/scale use. This is the single place the fold path reads it back;
+    the binder reads the same parameters for the runtime-CAST path.
+    """
+    from opteryx.types.logical_type import parse_column_type
+
+    if not params or params[0].node_type != NodeType.LITERAL or params[0].value is None:
+        raise UnsupportedSyntaxError(
+            "CAST to ARRAY requires an element type, e.g. CAST(['a'] AS ARRAY<VARCHAR>)."
+        )
+    return parse_column_type(str(params[0].value).upper())
+
+
 def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params=()):
     """Cast a literal value at compile time.
 
@@ -829,6 +877,20 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     if _node_cat == LogicalCategory.NULL:
         if target_type.replace("TRY_", "") == "VARCHAR":
             return Node(NodeType.LITERAL, value=None, type=_CT_VARCHAR, alias=alias)
+        if target_type.replace("TRY_", "") == "ARRAY":
+            # CAST(NULL AS ARRAY<E>) is NULL — but a *typed* NULL. The untyped NULL would
+            # drop the declared element type, leaving a UNION arm or a projection with
+            # nothing to recover ARRAY<E> from. The native kernel never sees this: it
+            # takes VARIANT/VARCHAR sources only, so a NULL source has no runtime path
+            # and folding is the only way the shape can run.
+            from opteryx.types.logical_type import ARRAY as _CT_ARRAY_OF
+
+            return Node(
+                NodeType.LITERAL,
+                value=None,
+                type=_CT_ARRAY_OF(_array_element_type(params)),
+                alias=alias,
+            )
         # Other targets keep the untyped NULL: a VARBINARY null reaching the
         # string-concat closure would be stringified (VARBINARY is not in its
         # string allow-list), and numeric/temporal kernels short-circuit on the
@@ -837,6 +899,40 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
 
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")
+
+    if base_type == "ARRAY":
+        # CAST(<array literal> AS ARRAY<E>): folded for the same reason VECTOR is — the
+        # native kernel reads its elements from the column owner's CHILD vector, which
+        # only a real column has. An array literal has no child, so the kernel cannot see
+        # its own input; it does not refuse, it silently returns empty arrays. Folding is
+        # not an optimization here; it is the only way this shape can run. `cast()` routes
+        # every other literal source (VARCHAR holding JSON text) to the native kernel.
+        #
+        # This is a RETYPE, not a conversion. The declared element type must already match
+        # the literal's own, because the native kernel's rule 3 — an element type mismatch
+        # fails, never implicit stringification, never implicit parsing, never truncation —
+        # has to hold identically here, or the folded and native paths would answer the
+        # same question two different ways. Rule 4 likewise: plain `::` raises, TRY_ nulls.
+        from opteryx.types.logical_type import ARRAY as _CT_ARRAY_OF
+
+        _element_ct = _array_element_type(params)
+        _vals = literal_node.value
+        if not isinstance(_vals, (list, tuple)):
+            raise UnsupportedSyntaxError("CAST to ARRAY expects an array literal.")
+        _source_element = literal_node.type.element if literal_node.type is not None else None
+        if _source_element != _element_ct:
+            if target_type.startswith("TRY_"):
+                return Node(
+                    NodeType.LITERAL, value=None, type=_CT_ARRAY_OF(_element_ct), alias=alias
+                )
+            raise UnsupportedSyntaxError(
+                f"CAST ARRAY<{_source_element}> → ARRAY<{_element_ct}>: element does not match "
+                "the declared element type. An array literal is retyped, never converted "
+                "element-by-element — cast the elements at the source, or use TRY_CAST."
+            )
+        return Node(
+            NodeType.LITERAL, value=list(_vals), type=_CT_ARRAY_OF(_element_ct), alias=alias
+        )
 
     if base_type == "VECTOR":
         # CAST(<array literal> AS VECTOR(n)): the values are known here, so fold to a
@@ -921,6 +1017,20 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
     if base_type in ("VARCHAR", "BLOB"):
+        # IPV4 → string family is not a supported cast: the engine refuses it
+        # ("No native CAST UINT32 → VARCHAR"), for TRY_CAST too, because it is an
+        # unsupported conversion and not a bad value. Refuse identically here, and
+        # OUTSIDE the try block below so TRY_/SAFE_ cannot turn it into a NULL the
+        # column path would never produce. Left to fall through, an IPv4 literal
+        # takes the INTEGER category to parser_for and folds to str(uint32) —
+        # '3232235777' where the engine raises (and for BLOB, bytes(3232235777):
+        # a 3GB zero buffer built at plan time).
+        _lit_lt = literal_node.type.logical if literal_node.type is not None else None
+        if _lit_lt is not None and _lit_lt.kind == LogicalKind.IPV4:
+            raise UnsupportedSyntaxError(
+                f"CAST from IPV4 to {base_type} is not supported. "
+                "Compare or filter on the IPV4 value directly."
+            )
         if _node_cat == LogicalCategory.TIMESTAMP and isinstance(literal_node.value, int):
             us = literal_node.value
             sec, usec = divmod(us, 1_000_000)
@@ -975,6 +1085,29 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     # Attempt to parse and cast the literal value
     try:
         from opteryx.types.scalars.value_parsing import parser_for
+
+        # IPv4 is UINT32 refined by a LogicalKind.IPV4 descriptor, and its category
+        # is deliberately INTEGER (ordering, grouping, joins and comparison all run
+        # on the raw uint32). So the DESCRIPTOR, never the category, is the
+        # discriminant here — parser_for(category) would hand '192.168.1.1' to
+        # int(). Parsing routes through draken::ipv4::parse, the same strict parser
+        # draken_cast_string_to_ipv4 runs on a column, so a folded literal and a
+        # scanned column can never disagree about what '010.1' means.
+        if (
+            isinstance(sql_type, ColumnType)
+            and sql_type.logical is not None
+            and sql_type.logical.kind == LogicalKind.IPV4
+            and isinstance(literal_node.value, (str, bytes))
+        ):
+            # Value AND type together: an int tagged VARCHAR, or dotted-decimal
+            # text tagged IPV4, is the literal value/type-tag divergence that
+            # silently produces wrong rows downstream.
+            return Node(
+                NodeType.LITERAL,
+                type=sql_type,
+                value=ipv4_parse(literal_node.value),
+                alias=alias,
+            )
 
         _sql_type_lc = sql_type.category if isinstance(sql_type, ColumnType) else sql_type
         # parser_for(), not parse_value(): parse_value() silently swallows parse
@@ -1342,16 +1475,6 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
 
     key_value = key_node.value
     identifier_name = format_expression(identifier_node)
-    if isinstance(key_value, str):
-        key_value = f"'{key_value}'"
-        return Node(
-            NodeType.EXTRACTION_OPERATOR,
-            value="Arrow",
-            left=identifier_node,
-            right=key_node,
-            alias=alias or f"{identifier_name} -> {key_value}",
-        )
-
     return Node(
         NodeType.EXTRACTION_OPERATOR,
         value="MapAccess",
@@ -1717,7 +1840,18 @@ def build(value, alias: Optional[List[str]] = None, key=None):
     ignored = ("filter",)
 
     if value in ("Null", "Wildcard"):
-        return BUILDERS[value](value)
+        # `Null` and `Wildcard` are BARE STRING ast nodes, not dicts, so they are
+        # dispatched here rather than through the keyed branch below — but the
+        # alias must still be threaded. Dropping it left `SELECT NULL AS a` named
+        # `None` instead of `a`, and, because the projection's duplicate check
+        # keys on (identity, alias-or-value), made every pair of NULL literals
+        # look like the SAME output column: `SELECT NULL AS a, NULL AS b` died in
+        # the binder. That also broke FULL OUTER JOIN, which
+        # FullOuterToUnionStrategy rewrites into a union whose anti-join leg
+        # synthesizes one NULL literal per column of the non-preserved side —
+        # two such columns collided and the union concatenated mismatched types.
+        # Both builders already accept and honour `alias`.
+        return BUILDERS[value](value, alias)
     if isinstance(value, dict):
         key = next(iter(value))
         if key in ignored:

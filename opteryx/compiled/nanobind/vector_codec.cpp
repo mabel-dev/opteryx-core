@@ -143,6 +143,19 @@ static nb::object codec_apply(
 
     // --- Pass 2: encode each logical row. -------------------------------------
     // One reusable heap buffer per codec_apply call (grows as needed).
+    //
+    // Scratch headroom: the mabel codecs can WRITE past the length they RETURN,
+    // so max_out_fn() alone is not a safe capacity. Measured worst-case excess
+    // over max_out_fn(n) for every codec routed through here (n = 1..300, this
+    // build's SIMD paths included):
+    //     hex encode +1 (trailing NUL)   hex decode    0
+    //     base64 encode 0                base64 decode 0
+    //     base85 encode +3               base85 decode 0
+    // base85 encode is the binding case: bintob85 pads its final partial group
+    // to 4 bytes and writes all 5 output chars, then advances the cursor by
+    // only (remaining + 1). 8 covers the measured 3 with margin.
+    constexpr size_t kCodecScratchHeadroom = 8u;
+
     size_t   tmp_cap = 0u;
     uint8_t* tmp_buf = nullptr;
 
@@ -166,10 +179,14 @@ static nb::object codec_apply(
             continue;
         }
 
-        // Grow temp buffer if needed (+1 byte headroom for null terminator safety).
-        if (out_max + 1u > tmp_cap) {
+        // Grow temp buffer if needed. The guard and the allocation MUST use the
+        // same headroom: sizing with +8 while testing with +1 let a long value
+        // following a short one pass the guard without the buffer actually
+        // carrying its own headroom (in_len 8 -> tmp_cap 18, then in_len 13
+        // writes 20 bytes = 2-byte overflow).
+        if (out_max + kCodecScratchHeadroom > tmp_cap) {
             if (tmp_buf) draken_free(tmp_buf);
-            tmp_cap = out_max + 8u;
+            tmp_cap = out_max + kCodecScratchHeadroom;
             tmp_buf = static_cast<uint8_t*>(draken_malloc(tmp_cap));
             if (!tmp_buf) throw std::bad_alloc();
         }

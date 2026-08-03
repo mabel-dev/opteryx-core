@@ -38,11 +38,21 @@ STRING_SQL = "SELECT text FROM '%s'" % DATASET
 # WP-02: a c-native pushed predicate now RELOCATES to a native downstream
 # ExprFilter and the scan goes native — so this is a NATIVE exemplar now.
 PREDICATE_SQL = "SELECT followers FROM '%s' WHERE followers > 100" % DATASET
-# The trampoline exemplar: a pushed predicate that does NOT lower to a c-native
-# span (regex) still fails closed to StreamingScanSource, exercising the
-# per-morsel Python re-entry (its residual runs on the bytecode-VM fallback).
-UNSUPPORTED_PREDICATE_SQL = "SELECT followers FROM '%s' WHERE text RLIKE 'a'" % DATASET
-TRAMPOLINE_SQL = UNSUPPORTED_PREDICATE_SQL
+
+# The trampoline exemplar. These instruments measure the per-morsel Python
+# re-entry, so they need a StreamingScanSource. This used to be
+# `WHERE text RLIKE 'a'` — the R4 `unlowerable_predicate` trigger — and went red
+# when the native regex kernels closed R4 incidentally.
+#
+# The trampoline is now obtained by FORCING the footer gate (the `forced_trampoline`
+# fixture), the same way test_wp_a3_fused_topn_scan.py's A/B harness does, rather
+# than by picking another still-unsupported SQL shape. One such shape does still
+# exist — `HAND_SET["footer_gate"]`, schema evolution — but coupling these
+# instruments to whichever category happens to be open is exactly what rotted them,
+# and would rot them again at the next close-out. What they need is "a query that
+# runs on the trampoline", which forcing states directly. The SQL below is then
+# just a query; its predicate is incidental.
+TRAMPOLINE_SQL = "SELECT followers FROM '%s' WHERE text RLIKE 'a'" % DATASET
 
 
 def _run(sql):
@@ -52,6 +62,16 @@ def _run(sql):
     for morsel in session.execute_to_morsels(sql):
         rows += morsel.num_rows
     return session._telemetry.as_dict(), rows
+
+
+@pytest.fixture
+def forced_trampoline(monkeypatch):
+    """Force every parquet scan onto the Python trampoline for one test, by
+    declining the native footer gate. Yields nothing; use with TRAMPOLINE_SQL."""
+    from opteryx.connectors.parquet_io import pool_reader
+
+    monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+    yield
 
 
 @pytest.fixture
@@ -84,9 +104,10 @@ def test_scan_source_native_for_cnative_predicate():
     assert list(telemetry["scan_sources"].values()) == ["NativeParquetScanSource"]
 
 
-def test_scan_source_streaming_for_unsupported_predicate():
-    # A predicate outside the c-native kernel set (regex) still fails closed.
-    telemetry, _ = _run(UNSUPPORTED_PREDICATE_SQL)
+def test_scan_source_streaming_when_footer_gate_declines(forced_trampoline):
+    # The trampoline is still selectable and still reports itself as such — the
+    # precondition every instrument below depends on.
+    telemetry, _ = _run(TRAMPOLINE_SQL)
     assert list(telemetry["scan_sources"].values()) == ["StreamingScanSource"]
 
 
@@ -99,7 +120,7 @@ def test_gil_held_ns_zero_for_native(armed):
     assert telemetry["worker_gil_sites"] == []
 
 
-def test_gil_held_ns_nonzero_for_trampoline(armed):
+def test_gil_held_ns_nonzero_for_trampoline(armed, forced_trampoline):
     telemetry, _ = _run(TRAMPOLINE_SQL)
     # The trampoline re-enters Python per morsel per worker → clearly > 0. This is
     # the baseline number later work packages must drive back to ~0.
@@ -132,7 +153,7 @@ def test_worker_purity_guard_passes_on_native(armed):
     assert ie.assert_native_worker_purity(telemetry) == []
 
 
-def test_worker_purity_guard_passes_trampoline_under_default_whitelist(armed):
+def test_worker_purity_guard_passes_trampoline_under_default_whitelist(armed, forced_trampoline):
     telemetry, _ = _run(TRAMPOLINE_SQL)
     # The trampoline's _scan_pull_run IS whitelisted today, so the guard passes and
     # returns the recorded sites.
@@ -144,11 +165,29 @@ def test_worker_purity_guard_flags_trampoline_with_empty_whitelist(armed):
     # The deliberate flag: with nothing whitelisted, ANY execution-time Python on a
     # worker is a violation — this is how a future package proves a path went
     # native (the guard must then pass with an empty whitelist).
-    telemetry, _ = _run(TRAMPOLINE_SQL)
+    #
+    # This test needs BOTH legs, so it forces the gate around the trampoline leg
+    # only rather than taking the `forced_trampoline` fixture — under that fixture
+    # the "native" leg would also be on the trampoline and the contrast would be
+    # vacuous. Restored by hand (not monkeypatch.undo, which would also disarm the
+    # instrumentation `armed` installed — and an unarmed run records no sites, so
+    # the guard would pass for the wrong reason).
+    from opteryx.connectors.parquet_io import pool_reader
+
+    original = pool_reader.native_scan_supported
+    pool_reader.native_scan_supported = lambda *a, **k: False
+    try:
+        telemetry, _ = _run(TRAMPOLINE_SQL)
+    finally:
+        pool_reader.native_scan_supported = original
+
+    assert list(telemetry["scan_sources"].values()) == ["StreamingScanSource"]
     with pytest.raises(ie.WorkerPurityError):
         ie.assert_native_worker_purity(telemetry, whitelist=())
+
     # ...and the native scan still passes even with nothing whitelisted.
     native_telemetry, _ = _run(NUMERIC_SQL)
+    assert list(native_telemetry["scan_sources"].values()) == ["NativeParquetScanSource"]
     assert ie.assert_native_worker_purity(native_telemetry, whitelist=()) == []
 
 
@@ -168,7 +207,7 @@ def test_alloc_harness_native_has_zero_trampoline_calls(armed):
     assert result["blocks_per_row"] < 1.0
 
 
-def test_alloc_harness_trampoline_has_growing_reentry(armed):
+def test_alloc_harness_trampoline_has_growing_reentry(armed, forced_trampoline):
     result = ie.measure_query_allocations(TRAMPOLINE_SQL)
     assert set(result["scan_sources"].values()) == {"StreamingScanSource"}
     # The trampoline re-enters Python O(morsels) times — non-zero, unlike native.

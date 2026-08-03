@@ -208,15 +208,124 @@ def test_alter_table_cluster_by_readonly_rejected(tmp_path):
 
 
 def test_alter_table_unsupported_operation_rejected(tmp_path):
-    """Only CLUSTER BY is supported; any other ALTER TABLE operation is rejected
-    at plan time rather than silently mishandled."""
+    """Only CLUSTER BY and RENAME TO are supported; any other ALTER TABLE
+    operation is rejected at plan time rather than silently mishandled."""
     _setup_workspace(tmp_path)
     session = opteryx.session()
 
     list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
 
     with pytest.raises(UnsupportedSyntaxError):
+        list(session.execute_to_morsels("ALTER TABLE ws.events ADD COLUMN extra VARCHAR"))
+
+
+def test_alter_table_rename_not_implemented_on_local_store(tmp_path):
+    """LocalStoreConnector has no rename primitive, so RENAME TO is rejected
+    explicitly rather than silently doing nothing."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+
+    with pytest.raises(NotImplementedError):
         list(session.execute_to_morsels("ALTER TABLE ws.events RENAME TO ws.renamed"))
+
+
+def test_alter_table_rename_missing_table(tmp_path):
+    """RENAME TO on a non-existent table raises, IF EXISTS suppresses it."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("ALTER TABLE ws.nonexistent RENAME TO ws.renamed"))
+
+    # IF EXISTS on a missing table succeeds without reaching the connector
+    # (so it never hits the NotImplementedError a real rename would).
+    list(session.execute_to_morsels("ALTER TABLE IF EXISTS ws.nonexistent RENAME TO ws.renamed"))
+
+
+def test_alter_table_rename_onto_existing_rejected(tmp_path):
+    """A rename must not absorb an existing relation - that would destroy the
+    target's data with no DROP anywhere in the statement."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT)"))
+    list(session.execute_to_morsels("CREATE TABLE ws.other (id BIGINT)"))
+
+    with pytest.raises(ValueError, match="relation already exists"):
+        list(session.execute_to_morsels("ALTER TABLE ws.events RENAME TO ws.other"))
+
+
+def test_alter_table_rename_across_workspaces_rejected(tmp_path):
+    """A rename may move a relation between collections but never between
+    workspaces - that is a copy, not a rename."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="between workspaces"):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.collection.events RENAME TO other.collection.events"
+            )
+        )
+
+
+def test_alter_table_rename_to_same_name_rejected(tmp_path):
+    """Renaming to the current name is a no-op written as a mutation - rejected
+    rather than reported as a successful rename that changed nothing."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="same as the source"):
+        list(session.execute_to_morsels("ALTER TABLE ws.events RENAME TO ws.events"))
+
+
+def test_alter_table_rename_readonly_rejected(tmp_path):
+    """RENAME TO on a read-only connector raises ReadOnlyConnectorError."""
+    session = opteryx.session()
+
+    with pytest.raises(ReadOnlyConnectorError, match="does not support ALTER TABLE"):
+        list(session.execute_to_morsels("ALTER TABLE somefile.foo RENAME TO somefile.bar"))
+
+
+def test_alter_workspace_unknown_property_rejected(tmp_path):
+    """An unrecognised property is rejected at plan time - a typo must not be
+    written through to the catalog as a new, meaningless property."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="not a settable workspace property"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET delete_protecton TO OFF"))
+
+
+def test_alter_workspace_non_boolean_value_rejected(tmp_path):
+    """delete_protection is boolean; a non-boolean value is rejected rather than
+    coerced into something arbitrary."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="is a boolean"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET delete_protection TO 7"))
+
+
+def test_alter_workspace_rejects_qualified_name(tmp_path):
+    """ALTER WORKSPACE names a workspace, not a relation inside one."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="not a relation within one"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws.collection SET delete_protection TO OFF"))
+
+
+def test_alter_workspace_not_implemented_on_local_store(tmp_path):
+    """LocalStoreConnector has no catalog to persist workspace properties in, so
+    it is rejected explicitly rather than silently doing nothing."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(NotImplementedError):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET delete_protection TO OFF"))
 
 
 def test_create_view_basic(tmp_path):
@@ -497,3 +606,143 @@ def test_view_owner_none_when_unauthenticated(tmp_path):
 
     with open(tmp_path / "ws" / "v" / "view.json") as f:
         assert json.load(f)["owner"] is None
+
+
+# --- Statements that reached their operator with no permission check at all.
+# Each of these node types had no binder visitor, and BinderVisitor.visit_node
+# used to pass an unvisited node straight through. See NO_BINDER_REQUIRED.
+
+
+def test_analyze_table_requires_owner(tmp_path):
+    """A writer may not ANALYZE - it rewrites the metadata the optimizer plans
+    from, the same tier as ALTER TABLE ... CLUSTER BY."""
+    _seed_relations(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+
+    with pytest.raises(PermissionError, match="permission to analyze table"):
+        list(writer.execute_to_morsels("ANALYZE TABLE ws.t"))
+
+
+def test_analyze_table_reader_rejected(tmp_path):
+    _seed_relations(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+
+    with pytest.raises(PermissionError, match="permission to analyze table"):
+        list(reader.execute_to_morsels("ANALYZE TABLE ws.t"))
+
+
+def test_drop_statistics_requires_owner(tmp_path):
+    """DROP STATISTICS destroys what ANALYZE builds, so it is gated the same."""
+    _seed_relations(tmp_path)
+    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
+
+    with pytest.raises(PermissionError, match="permission to drop statistics on table"):
+        list(writer.execute_to_morsels("DROP STATISTICS ON ws.t"))
+
+
+def test_show_create_view_requires_read(tmp_path):
+    """A view's body names the relations it reads; showing it is a read of the
+    view, and a caller with no grant on it may not."""
+    _seed_relations(tmp_path)
+    outsider = opteryx.session(
+        user="oscar", access_policies=[{"pattern": "other.*", "role": "owner"}]
+    )
+
+    with pytest.raises(PermissionError, match="permission to read view"):
+        list(outsider.execute_to_morsels("SHOW CREATE VIEW ws.v"))
+
+
+def test_show_create_view_allowed_for_reader(tmp_path):
+    """READ is the tier - a reader can see the definition."""
+    _seed_relations(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+
+    result = list(reader.execute_to_morsels("SHOW CREATE VIEW ws.v"))
+    assert len(result) == 1
+
+
+# --- Syntax the parser accepted and the engine silently ignored.
+
+
+def test_drop_cascade_rejected(tmp_path):
+    """CASCADE was parsed and discarded, so a DROP COLLECTION ... CASCADE read
+    as a successful recursive drop that never happened."""
+    _seed_relations(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    for statement in (
+        "DROP TABLE ws.t CASCADE",
+        "DROP VIEW ws.v CASCADE",
+        "DROP COLLECTION ws.c CASCADE",
+    ):
+        with pytest.raises(UnsupportedSyntaxError, match="CASCADE"):
+            list(owner.execute_to_morsels(statement))
+
+
+def test_drop_restrict_rejected(tmp_path):
+    _seed_relations(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="RESTRICT"):
+        list(owner.execute_to_morsels("DROP TABLE ws.t RESTRICT"))
+
+
+def test_materialized_view_rejected(tmp_path):
+    """Opteryx has no materialization; this used to create an ordinary view."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(owner.execute_to_morsels("CREATE TABLE ws.t (id BIGINT)"))
+
+    with pytest.raises(UnsupportedSyntaxError, match="materialized views"):
+        list(owner.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.t"))
+
+
+def test_show_create_table_rejected_at_plan_time(tmp_path):
+    """Rejected by name, rather than as 'Invalid SHOW statement' at execution."""
+    _seed_relations(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="SHOW CREATE TABLE"):
+        list(owner.execute_to_morsels("SHOW CREATE TABLE ws.t"))
+
+
+def test_comment_on_column_rejected(tmp_path):
+    """COMMENT ON COLUMN used to fail as a missing dataset named after the column."""
+    _seed_relations(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="COMMENT ON COLUMN"):
+        list(owner.execute_to_morsels("COMMENT ON COLUMN ws.t.id IS 'the id'"))
+
+
+# --- CREATE COLLECTION. The counterpart DROP COLLECTION had none of.
+
+
+def test_create_collection_not_implemented_on_local_store(tmp_path):
+    """LocalStoreConnector has no catalog to register a collection in, so this is
+    rejected explicitly rather than silently doing nothing."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(NotImplementedError, match="does not support CREATE COLLECTION"):
+        list(owner.execute_to_morsels("CREATE COLLECTION ws.staging"))
+
+
+def test_create_collection_requires_two_part_name(tmp_path):
+    """A collection is always `<workspace>.<collection>`. A bare name would
+    resolve to some default workspace and create it somewhere unnamed."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    for name in ("staging", "ws.a.b"):
+        with pytest.raises(UnsupportedSyntaxError, match="<workspace>.<collection>"):
+            list(owner.execute_to_morsels(f"CREATE COLLECTION {name}"))
+
+
+def test_create_collection_rejected_for_reader(tmp_path):
+    """Checked at bind time, before the connector is asked to do anything."""
+    _setup_workspace(tmp_path)
+    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
+
+    with pytest.raises(PermissionError, match="permission to create collection"):
+        list(reader.execute_to_morsels("CREATE COLLECTION ws.staging"))

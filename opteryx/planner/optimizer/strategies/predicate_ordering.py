@@ -28,7 +28,7 @@ from opteryx.planner.cost_estimation.predicate_cost import (
     BASIC_COMPARISON_COSTS,
     OPERATION_COSTS,
     base_cost as _base_cost,
-    catalog_function_cost as _catalog_function_cost,
+    predicate_cost as _predicate_cost,
 )
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
@@ -79,25 +79,31 @@ def _estimate_selectivity(condition):
 
 
 def _order_complex_predicates(predicates, telemetry, relation_stats=None):
-    """Order function-containing predicates by selectivity/cost when a
-    predicate's selectivity is estimable, falling back to catalog cost alone
-    otherwise.
+    """Order complex predicates by selectivity/cost when a predicate's
+    selectivity is estimable, falling back to cost alone otherwise.
+
+    "Complex" here is everything ``order_predicates`` does not route to the
+    simple path: FUNCTION-containing comparisons *and* non-comparison shapes
+    (OR/NOT/DNF trees). Cost therefore comes from ``predicate_cost``, which
+    sums catalog function costs for function-containing expressions and falls
+    back to the type/operator cost model otherwise. Using
+    ``catalog_function_cost`` directly here returned 0.0 for the
+    non-comparison shapes — every one of them is function-free — which is
+    both a meaningless cost and a divide-by-zero in the ranking key.
 
     Ranks by the same ``(selectivity - 1.0) / cost`` formula
     ``cost_estimation.predicate_ordering`` uses for simple predicates, with
-    cost as an explicit secondary key. This is a strict generalization of the
-    previous cost-only sort, not a behavior change for predicates
-    ``estimate_selectivity`` has no model for (e.g. most FUNCTION calls):
-    those resolve to selectivity 1.0, so the primary key ties at 0 for all of
-    them and the secondary (cost) key reproduces the old ``sorted(costs)``
-    order exactly. Only predicates with a real estimator (currently
-    _STARTS_WITH/_CI_STARTS_WITH, bare or AND/NOT-wrapped) move based on
-    actual selectivity.
+    cost as an explicit secondary key. Predicates ``estimate_selectivity``
+    has no model for (e.g. most FUNCTION calls) resolve to selectivity 1.0,
+    so the primary key ties at 0 for all of them and the secondary (cost) key
+    orders them cheapest-first. Only predicates with a real estimator
+    (currently _STARTS_WITH/_CI_STARTS_WITH, bare or AND/NOT-wrapped) move
+    based on actual selectivity.
     """
     if len(predicates) <= 1:
         return predicates
 
-    costs = [_catalog_function_cost(p.condition) for p in predicates]
+    costs = [_predicate_cost(p.condition) for p in predicates]
     if relation_stats is not None:
         selectivities = [estimate_selectivity(p.condition, relation_stats) for p in predicates]
     else:

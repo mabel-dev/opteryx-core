@@ -15,7 +15,9 @@
 #include <string>
 
 #include "core/buffers.h"
+#include "core/ipv4.h"
 #include "core/string_slot.h"
+#include "logical_type.h"  // LogicalKind — the kind vocabulary is draken's, never copied
 #include "ryu.h"  // third_party/ulfjack/ryu is on every consuming extension's include path
 
 namespace rugo_text {
@@ -23,7 +25,60 @@ namespace rugo_text {
 // Time unit codes (match draken TimestampUnit: 0=s,1=ms,2=us,3=ns).
 enum { U_S = 0, U_MS = 1, U_US = 2, U_NS = 3 };
 
+// ---------------------------------------------------------------------------
+// Per-column render descriptor.
+//
+// Everything the renderers need to know about a column's LOGICAL type travels
+// as one value. The physical DrakenType is on the vector; this carries what the
+// physical tag cannot answer:
+//   kind  — which logical type this is. Mandatory for IPv4: a UINT32 address
+//           column and a plain UINT32 column share the same physical tag, so
+//           the kind is the ONLY signal that distinguishes them.
+//   unit  — TIMESTAMP / TIME resolution (U_S..U_NS).
+//   scale — DECIMAL digits to the right of the point.
+//   dim   — VECTOR_FP16 values per row.
+//
+// Read once per column at resolve time, never inside a row loop.
+// ---------------------------------------------------------------------------
+struct LogicalDesc {
+  LogicalKind kind  = LogicalKind::NONE;
+  int         unit  = U_S;
+  int         scale = 0;
+  int         dim   = 0;
+};
+
+// A column and (for ARRAY columns) its element vector. `child` stays at its
+// defaults — kind NONE — for every non-ARRAY column.
+//
+// Zero-filling a ColumnDesc yields exactly these defaults, which is what the
+// Cython writers rely on when they bulk-allocate one per column.
+struct ColumnDesc {
+  LogicalDesc column;
+  LogicalDesc child;
+};
+
+// Render a UINT32 carrying LogicalKind::IPV4 as dotted-decimal. Delegates to
+// draken/core/ipv4.h so the writers, the cast kernels and the CIDR/IP_TRUNC
+// kernels cannot disagree about the octet-to-bit mapping.
+//
+// The caller decides WHETHER a uint32 is an address; this only knows how to
+// render one. A UINT32 with no descriptor renders through fmt_uint64 as the
+// plain integer it is.
+inline void fmt_ipv4(std::string &out, uint32_t v) {
+  char buf[draken::ipv4::MAX_TEXT_LENGTH];
+  out.append(buf, draken::ipv4::format(v, buf));
+}
+
 inline void fmt_int64(std::string &out, int64_t v) {
+  char buf[24];
+  std::to_chars_result r = std::to_chars(buf, buf + sizeof(buf), v);
+  out.append(buf, r.ptr - buf);
+}
+
+// Unsigned counterpart. UINT64 values above INT64_MAX are not representable as
+// int64_t, so the unsigned family must NOT be funnelled through fmt_int64 —
+// 2^63 would render as -9223372036854775808.
+inline void fmt_uint64(std::string &out, uint64_t v) {
   char buf[24];
   std::to_chars_result r = std::to_chars(buf, buf + sizeof(buf), v);
   out.append(buf, r.ptr - buf);
@@ -314,7 +369,7 @@ inline bool row_valid(const uint8_t *validity, size_t i) {
 // Append the JSON representation of the scalar at logical row i of `dv`.
 // (Not for ARRAY columns — see render_json_value.)
 inline void render_json_scalar(std::string &out, const DrakenVector *dv,
-                               size_t i, int unit, int scale) {
+                               size_t i, const LogicalDesc &d) {
   if (!row_valid(dv->validity, i)) { out.append("null"); return; }
   uint32_t p = dv->selection[i];
   switch (dv->type) {
@@ -322,6 +377,20 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
   case DRAKEN_INT32:  fmt_int64(out, ((const int32_t *)dv->data)[p]); break;
   case DRAKEN_INT16:  fmt_int64(out, ((const int16_t *)dv->data)[p]); break;
   case DRAKEN_INT8:   fmt_int64(out, ((const int8_t *)dv->data)[p]); break;
+  case DRAKEN_UINT64: fmt_uint64(out, ((const uint64_t *)dv->data)[p]); break;
+  // A UINT32 carrying LogicalKind::IPV4 is the same 32 bits with a narrower
+  // meaning, so the descriptor kind is the only thing that can tell them apart.
+  // It renders as a quoted dotted-decimal string, matching what to_pylist()
+  // hands back for an IPv4 column; with no descriptor it stays a plain number.
+  case DRAKEN_UINT32:
+    if (d.kind == LogicalKind::IPV4) {
+      out.push_back('"'); fmt_ipv4(out, ((const uint32_t *)dv->data)[p]); out.push_back('"');
+    } else {
+      fmt_uint64(out, ((const uint32_t *)dv->data)[p]);
+    }
+    break;
+  case DRAKEN_UINT16: fmt_uint64(out, ((const uint16_t *)dv->data)[p]); break;
+  case DRAKEN_UINT8:  fmt_uint64(out, ((const uint8_t *)dv->data)[p]); break;
   case DRAKEN_FLOAT64: {
     double d = ((const double *)dv->data)[p];
     if (double_is_nan_or_inf(d)) out.append("null"); else fmt_double(out, d);
@@ -339,16 +408,16 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
     out.push_back('"'); fmt_date(out, ((const int32_t *)dv->data)[p]); out.push_back('"');
     break;
   case DRAKEN_TIMESTAMP64:
-    out.push_back('"'); fmt_timestamp(out, ((const int64_t *)dv->data)[p], unit); out.push_back('"');
+    out.push_back('"'); fmt_timestamp(out, ((const int64_t *)dv->data)[p], d.unit); out.push_back('"');
     break;
   case DRAKEN_TIME64:
-    out.push_back('"'); fmt_time(out, ((const int64_t *)dv->data)[p], unit); out.push_back('"');
+    out.push_back('"'); fmt_time(out, ((const int64_t *)dv->data)[p], d.unit); out.push_back('"');
     break;
   case DRAKEN_TIME32:
-    out.push_back('"'); fmt_time(out, ((const int32_t *)dv->data)[p], unit); out.push_back('"');
+    out.push_back('"'); fmt_time(out, ((const int32_t *)dv->data)[p], d.unit); out.push_back('"');
     break;
-  case DRAKEN_DECIMAL:    fmt_decimal(out, (__int128)((const int64_t *)dv->data)[p], scale); break;
-  case DRAKEN_DECIMAL128: { __int128 v; std::memcpy(&v, (const uint8_t *)dv->data + (size_t)p * 16, 16); fmt_decimal(out, v, scale); break; }
+  case DRAKEN_DECIMAL:    fmt_decimal(out, (__int128)((const int64_t *)dv->data)[p], d.scale); break;
+  case DRAKEN_DECIMAL128: { __int128 v; std::memcpy(&v, (const uint8_t *)dv->data + (size_t)p * 16, 16); fmt_decimal(out, v, d.scale); break; }
   case DRAKEN_VARCHAR:
   case DRAKEN_NVARCHAR:
   case DRAKEN_VARBINARY:
@@ -369,12 +438,12 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
 // This is the column-oriented analogue of the row-oriented morsel writers in
 // _text_render.hpp; it backs draken's Vector._to_json() so a single column can
 // serialize itself to JSON bytes with the SAME per-value rendering the rugo
-// JSONL writer uses (matching /download output). `child`, `cunit`, `cscale`
-// are consulted only when `dv->type == DRAKEN_ARRAY` (they describe the array's
+// JSONL writer uses (matching /download output). `child` and `desc.child` are
+// consulted only when `dv->type == DRAKEN_ARRAY` (they describe the array's
 // element vector, mirroring _text_render.hpp::ej_array).
 inline void render_json_column(std::string &out, const DrakenVector *dv,
-                               const DrakenVector *child, int unit, int scale,
-                               int cunit, int cscale, size_t nrows) {
+                               const DrakenVector *child, const ColumnDesc &desc,
+                               size_t nrows) {
   out.push_back('[');
   for (size_t i = 0; i < nrows; i++) {
     if (i) out.push_back(',');
@@ -386,11 +455,11 @@ inline void render_json_column(std::string &out, const DrakenVector *dv,
       out.push_back('[');
       for (int32_t k = s; k < e; k++) {
         if (k > s) out.push_back(',');
-        render_json_scalar(out, child, (size_t)k, cunit, cscale);
+        render_json_scalar(out, child, (size_t)k, desc.child);
       }
       out.push_back(']');
     } else {
-      render_json_scalar(out, dv, i, unit, scale);
+      render_json_scalar(out, dv, i, desc.column);
     }
   }
   out.push_back(']');

@@ -19,6 +19,7 @@ import math
 import draken.draken_native as _draken_native_casts
 
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import parse_column_type
 from opteryx.types.scalars.value_parsing import parse_value, parser_for
 from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us
 
@@ -76,40 +77,6 @@ cpdef parse_timestamp_value(value, unit=None):
         ).replace(tzinfo=None)
 
     return parse_value(LogicalCategory.TIMESTAMP, value)
-
-
-def _parse_array_value(value, element_type, bint safe_cast=False):
-    """Parse array values with element-type coercion."""
-    if _is_nullish(value):
-        return None
-
-    # Duck-typed: any array-like exposing to_pylist (Arrow array, Draken
-    # vector). isinstance(bytes/str) intentionally short-circuits — bytes
-    # does NOT have to_pylist but we want to treat raw bytes as a single
-    # value, not a sequence.
-    if not isinstance(value, (bytes, str)):
-        pylist_fn = getattr(value, "to_pylist", None)
-        if pylist_fn is not None:
-            value = pylist_fn()
-
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        value = bytes(value).decode("utf-8", errors="ignore")
-
-    cdef str stripped
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if safe_cast:
-                return safe(parser_for(LogicalCategory.ARRAY), value)
-            return parse_value(LogicalCategory.ARRAY, value)
-        value = [value]
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        value = list(value)
-    else:
-        value = [value]
-
-    caster = parser_for(LogicalCategory[element_type.name])
-    return [caster(item) if item is not None else None for item in value]
 
 
 cdef str _array_row_to_json(object row):
@@ -242,13 +209,29 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
     BOOL) — these fold into the frame arena as a dense DV* with no Python object.
     String- and timestamp-producing kernels (and parametrized/closure casts) are
     NOT listed yet; they stay on the closure path until later increments wire
-    their result handling. TRY_CAST stays on the closure path (conservative).
+    their result handling. TRY_CAST stays on the closure path (conservative) —
+    EXCEPT for the ARRAY target, whose kernel takes the safe/raise disposition in
+    its ctx and is the only pair admitted with safe=True (see the branch below).
 
     The set grows as kernels become real+registered. This table is the single
     source of truth for which casts run C-native.
     """
     cdef str s = source_physical
     cdef str t = "BLOB" if target_type == "VARBINARY" else target_type
+    # ---- ARRAY target — the ONE pair that is admitted for safe=True ----
+    # Ahead of the blanket `safe -> None` below, deliberately. That rule keeps
+    # TRY_CAST on the resolve_cast closure path, but this engine has no closure
+    # fallback (the c-native admission gate refuses anything not listed here), so
+    # obeying it would make TRY_CAST(x AS ARRAY<T>) unrunnable — and the architect
+    # ruled that TRY_CAST is exactly how a caller opts into NULL-ing rows whose
+    # JSON is not an array. `safe` rides in cast_array_ctx, so ONE kernel serves
+    # both dispositions; there is no separate safe kernel to fall out of sync.
+    if t == "ARRAY":
+        if s in _CAST_STRINGS or s == "VARIANT":
+            return ("draken_cast_to_array", 0)
+        # Every other source (a number, a bool, a temporal) is NOT castable to
+        # ARRAY. Returning None here is a plan-time refusal, not a fallback.
+        return None
     if s is None or safe:
         return None
     if t in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
@@ -294,6 +277,15 @@ def _c_native_cast(source_physical, target_type, bint safe=False):
     if t in ("DATE", "DATE32"):
         if s in _CAST_STRINGS:
             return ("draken_cast_string_to_date32", 0)
+        return None
+    # IPv4. The kernel yields UINT32; the IPV4 descriptor is re-attached from the
+    # bound output type via add_expr_project's `logical` tuple, not from the
+    # kernel result — VecResult has no descriptor channel and does not need one.
+    if t == "IPV4":
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_ipv4", 0)
+        # uint32 -> IPv4 is a pure retag: same bits, same physical tag, only the
+        # descriptor is added, and that is the caller's job. No kernel runs.
         return None
     if t == "BOOLEAN":
         if s == "INT64":
@@ -489,6 +481,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_float64_to_bool,
         vector_cast_string_to_bool,
         vector_cast_string_to_date32,
+        vector_cast_string_to_ipv4,
         vector_cast_string_to_nvarchar,
         vector_cast_int64_to_timestamp,
         vector_cast_string_to_time64,
@@ -516,8 +509,15 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     if t == "ARRAY":
         if len(args) < 1:
             raise ValueError("CAST to ARRAY requires element_type parameter")
-        element_type = args[0]
-        return (lambda arr: _build_array_cast(arr, element_type)), False, True
+        if s not in _CAST_STRINGS and s != "VARIANT":
+            # Only VARIANT and VARCHAR (holding JSON array text) may cast to ARRAY.
+            # A scalar is NOT wrapped into a 1-element array — refuse at plan time.
+            raise NotImplementedError(
+                f"No CAST {source_physical} → ARRAY: only VARIANT and VARCHAR "
+                "(containing JSON array text) can be cast to ARRAY"
+            )
+        # Native-only (draken_cast_to_array). No Python row-loop exists any more.
+        return _array_cast_native_only, False, True
     if t == "VECTOR":
         # VECTOR (FP16) has no native kernel yet — Python row-loop (separate track).
         return (lambda arr: _build_vector_cast(arr)), False, True
@@ -562,6 +562,18 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         if s == "TIMESTAMP64":
             return vector_timestamp_to_date32, True, True
         raise NotImplementedError(f"No native CAST {source_physical} → DATE")
+
+    # ---- IPV4 target ----
+    # UINT32 -> IPV4 is a pure retag (identical bits, identical physical tag); the
+    # descriptor is attached from the bound output type by the projection, so
+    # there is no conversion to run. String -> IPV4 parses via the same kernel the
+    # C-native path uses.
+    if t == "IPV4":
+        if s == "UINT32":
+            return (lambda arr: arr), False, False
+        if s in _CAST_STRINGS:
+            return vector_cast_string_to_ipv4, True, True
+        raise NotImplementedError(f"No native CAST {source_physical} -> IPV4")
 
     # ---- TIME target (string parse; only TIME64/microseconds is reachable
     # from SQL — TIME() always resolves to TIME64, see logical_type.TIME()) ----
@@ -767,10 +779,20 @@ def _build_decimal_closure(args, bint safe=False):
     return _decimal_cast
 
 
-def _build_array_cast(arr, element_type):
-    """Build a closure for CAST to ARRAY(element_type)."""
-    result = [_parse_array_value(i, element_type, safe_cast=False) for i in arr]
-    return _draken_native_casts.vector_array_from_sequence(result)
+def _array_cast_native_only(arr):
+    """callable_ref for CAST → ARRAY: native-only, no Python fallback.
+
+    `draken_cast_to_array` always services this cast (element type + the TRY_CAST
+    disposition are threaded into a cast_array_ctx at bind time). This is only
+    reached if that kernel is somehow absent from the registry — in which case
+    fail loud. The Python row-loop this replaces was not a usable fallback: it
+    wrapped a non-array scalar into a 1-element array and decoded bytes with
+    errors="ignore", so it answered rows the native kernel deliberately rejects.
+    """
+    raise NotImplementedError(
+        "CAST to ARRAY is native-only (draken_cast_to_array); "
+        "the kernel is missing from the registry"
+    )
 
 
 def _build_vector_cast(arr):
@@ -788,7 +810,19 @@ def try_cast(target_type):
     """
     def _try_cast_fn(arr):
         """Cast each element in arr, returning None on parse failures."""
-        caster = parser_for(LogicalCategory[target_type])
+        # `target_type` is a SQL type name, which is NOT the same vocabulary as
+        # LogicalCategory's member names: indexing the enum directly meant DOUBLE
+        # and STRUCT — both perfectly valid in a CAST — died with a bare
+        # KeyError before a single value was looked at. Category names are still
+        # accepted first (DECIMAL is a category but not a bare SQL type: it needs
+        # precision/scale, so parse_column_type rejects it), then the name is
+        # resolved through the same alias table the planner uses, so DOUBLE
+        # resolves to FLOAT64 and STRUCT to NVARCHAR exactly as CAST does.
+        if target_type in LogicalCategory.__members__:
+            category = LogicalCategory[target_type]
+        else:
+            category = parse_column_type(target_type).category
+        caster = parser_for(category)
         result = []
         for item in arr:
             try:

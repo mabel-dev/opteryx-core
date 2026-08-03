@@ -610,8 +610,8 @@ struct OpsTable {
         entries[DRAKEN_TIME64] = entries[DRAKEN_INT64];
 
         // D.12 — INTERVAL: normalized ops + component-wise arithmetic.
-        // compare/hash/between/in_list normalize to total_ms = months×2_592_000_000+ms
-        // before comparing.  Arithmetic is component-wise (months and ms independently).
+        // compare/hash/between/in_list normalize to total_us = months×2_592_000_000_000+us
+        // before comparing.  Arithmetic is component-wise (months and us independently).
         // sum/min_r/max_r are null: Python edge handles min/max via interval_find_min/max.
         entries[DRAKEN_INTERVAL].hash             = draken::ops::interval_hash;
         entries[DRAKEN_INTERVAL].compare_scalar   = draken::ops::interval_compare_scalar;

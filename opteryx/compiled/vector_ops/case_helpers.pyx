@@ -36,6 +36,7 @@ from draken.core.buffers cimport (
     DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_NVARCHAR,
     DRAKEN_NULL, DRAKEN_DECIMAL, DRAKEN_DECIMAL128,
     DRAKEN_TIMESTAMP64, DRAKEN_TIME64, DRAKEN_DATE32, DRAKEN_TIME32,
+    draken_type_fixed_itemsize,
 )
 from draken.vectors.bool_vector cimport BoolVector, from_decoded as _bool_from_decoded
 from draken.vectors.vector cimport Vector, from_decoded as _vec_from_decoded
@@ -65,26 +66,6 @@ cdef inline bint _sel_is_valid(const uint8_t* bitmap, Py_ssize_t i) noexcept nog
 cdef inline void _sel_set_true_bit(uint8_t* bitmap, int32_t row_r) noexcept nogil:
     """Set bit row_r in a packed bitmap (Arrow convention: set = valid/true)."""
     bitmap[row_r >> 3] |= <uint8_t>(1 << (row_r & 7))
-
-
-cdef inline Py_ssize_t _draken_itemsize(DrakenType t) noexcept nogil:
-    """Fixed byte-width per element for fixed-width DrakenTypes.
-
-    DECIMAL is int64-backed (8); the 8-byte temporal types and 4-byte
-    DATE32/TIME32 must be listed too — a CASE result of any of these is sized and
-    scattered by this width, and a wrong width undersizes the buffer (heap
-    overflow when read at the true element width).
-    """
-    if t == DRAKEN_DECIMAL128:
-        return 16  # __int128 storage
-    if (t == DRAKEN_INT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
-            or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64):
-        return 8
-    if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
-        return 4
-    if t == DRAKEN_INT16:
-        return 2
-    return 1  # INT8 and others
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +283,18 @@ def assemble_fixed(
 
     cdef DrakenVector* tmpl_uv = template_vec.unified()
     cdef DrakenType out_dtype = tmpl_uv.type
-    cdef Py_ssize_t itemsize = _draken_itemsize(out_dtype)
+    # THE canonical width (draken/core/buffers.h). This used to be a private copy
+    # that listed only the signed types, so every unsigned result was sized and
+    # memcpy'd at 1 byte: CASE ... THEN CAST(70000 AS UINT32) returned 112, the
+    # low byte. INTERVAL (16) was truncated the same way. A 0 return means a
+    # family with no flat per-element width — bool is bit-packed, strings live in
+    # an arena — which has its own assembler and must never reach this one.
+    cdef Py_ssize_t itemsize = <Py_ssize_t>draken_type_fixed_itemsize(out_dtype)
+    if itemsize == 0:
+        raise TypeError(
+            f"assemble_fixed: DrakenType {<int>out_dtype} has no fixed element width — "
+            "bool/string/array results have their own assemblers and must not reach here"
+        )
     cdef Py_ssize_t n = branch_id.shape[0]
     cdef Py_ssize_t nbytes = n * itemsize
     cdef Py_ssize_t vbytes = (n + 7) >> 3

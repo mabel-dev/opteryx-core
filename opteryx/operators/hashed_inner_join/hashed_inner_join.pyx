@@ -212,20 +212,19 @@ cdef class DrakenInnerJoinNode(JoinNode):
 
             left = comparison.left
             right = comparison.right
-            if left.source in left_relation_names and right.source in right_relation_names:
-                left_type = left.schema_column.category
-                right_type = right.schema_column.category
-            elif left.source in right_relation_names and right.source in left_relation_names:
-                left_type = right.schema_column.category
-                right_type = left.schema_column.category
-            else:
-                return False
-
-            if (
-                left_type != right_type
-                and JoinNode._join_numeric_target_type(left_type, right_type) is not None
+            if not (
+                (left.source in left_relation_names and right.source in right_relation_names)
+                or (left.source in right_relation_names and right.source in left_relation_names)
             ):
                 return False
+
+            # A mixed-numeric key pair (INTEGER vs FLOAT vs DECIMAL) used to be
+            # DECLINED here, which surfaced as "Draken inner join does not support
+            # this query shape". It is now supported: the compiler materializes a
+            # CAST column on the narrower side and keys on that, so both sides hash
+            # the same representation (_join_key_coercions in
+            # opteryx/managers/execution/compiler.py). Declining is no longer
+            # correct — it refused a shape the engine can answer.
 
         return True
 

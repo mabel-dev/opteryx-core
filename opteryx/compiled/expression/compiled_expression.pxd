@@ -168,6 +168,17 @@ cdef enum BCInstrFlag:
     # so is_all_c_native excludes it; bytecode_ops_all_c_native (engine) admits
     # it via the STRING bit it always rides with.
     BC_C_NATIVE_CHILD = 0x10000
+    # Result is an ARRAY: the elements ride out on VecResult.child and must be
+    # adopted into the result VectorOwner's child_owner. Only the engine's
+    # ExprMultiProject path does that (via the out_child out-parameter), so this
+    # is engine-only in the same way BC_C_NATIVE_DESC is — admitted by
+    # bytecode_ops_all_c_native, excluded from is_all_c_native, whose
+    # Python-Morsel VM has no child_owner to adopt into and would silently drop
+    # the elements, leaving an ARRAY with offsets and nothing to point at.
+    # A separate bit from DESC deliberately: DESC means "raw values, descriptor
+    # re-attached later", which is a different mechanism and would misdescribe
+    # this one.
+    BC_C_NATIVE_ARRAY = 0x20000
 
 
 ctypedef struct BytecodeInstr:

@@ -32,10 +32,14 @@ def _filter(condition):
     return node
 
 
+# MapAccess is an EXTRACTION_OPERATOR, not a BINARY_OPERATOR - see
+# expression.binary_operators.EXTRACTION_OPERATORS and the node the logical planner
+# builds in logical_planner_builders.json_access. Building it as a BINARY_OPERATOR
+# tests a shape nothing produces, and fails in the bytecode builder.
 def test_constant_folding_folds_constant_map_access_expression():
     telemetry = QueryTelemetry("test_map_access_constant_folding")
     expr = Node(
-        NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
         value="MapAccess",
         left=_literal(ARRAY(INT64), [10, 20, 30]),
         right=_literal(INT64, 1),
@@ -65,7 +69,7 @@ def test_predicate_ordering_treats_nested_function_map_access_as_complex():
         parameters=[_identifier("name", VARCHAR), _literal(VARCHAR, " ")],
     )
     map_access = Node(
-        NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
         value="MapAccess",
         left=split_fn,
         right=_literal(INT64, 0),

@@ -21,8 +21,8 @@ Responsibilities:
   rejects FORMAT GRAPHVIZ and FORMAT JSON explicitly
 - Rewrites COMMENT ON TABLE / COMMENT ON VIEW to COMMENT ON EXTENSION so the parser
   accepts the statement
-- Rewrites DROP COLLECTION to DROP SCHEMA so the parser accepts the statement
-  (sqlparser-rs has no COLLECTION object type)
+- Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA so the parser accepts the
+  statement (sqlparser-rs has no COLLECTION object type)
 
 The rewriter does NOT parse SQL into an AST; it only manipulates the text.
 """
@@ -110,9 +110,18 @@ def _normalize_whitespace(statement: str) -> str:
 
 
 # Precompile regex patterns at module level for performance
+#
+# `(?<![@$])` guards the leading `\b`: `@` and `$` are identifier-START characters
+# in the Opteryx dialect (see `is_identifier_start` in src/opteryx_dialect.rs), but
+# they are not word characters, so `\b` happily matches BETWEEN the sigil and the
+# name. Without the guard a variable whose name is a keyword — `@OR`, `@WHERE`,
+# `@SELECT` — was split into `@` + the keyword and rejoined as `@ OR`, which the
+# parser then rejected with "Expected: identifier, found: @". Only the 17
+# single-word SQL_PARTS entries could collide, which is why `@ORDER` (ORDER BY is
+# two words) and `@my_or` (preceded by a word char, so `\b` never matched) worked.
 _KEYWORDS_REGEX = re.compile(
     r"(\,|\(|\)|;|\t|\n|\->>|\->|@>|@>>|\&\&|@\?|"
-    + r"|".join([r"\b" + i.replace(r" ", r"\s") + r"\b" for i in SQL_PARTS])
+    + r"|".join([r"(?<![@$])\b" + i.replace(r" ", r"\s") + r"\b" for i in SQL_PARTS])
     + r")",
     re.IGNORECASE,
 )
@@ -203,7 +212,14 @@ def rewrite_explain(parts: list) -> list:
             select_idx = i
             break
     head_tokens = parts[:select_idx] if select_idx is not None else parts
-    head = " ".join(head_tokens).upper()
+    # Scan SYNTAX only, never string CONTENT. The head runs up to the first
+    # SELECT/WITH, so for `SET @a = 'FORMAT JSON'; SELECT @a;` the literal sits
+    # inside it, and matching on the raw text rejected the statement with
+    # "JSON format is not supported" — a value the user is merely storing read
+    # as a directive. Blanking quoted spans (rather than dropping whole tokens)
+    # also covers a literal embedded in a larger token, e.g. the
+    # `CAST('...' AS VARBINARY)` that sql_parts builds for a b-string.
+    head = _QUOTED_STRINGS_REGEX.sub(" ", " ".join(head_tokens)).upper()
 
     # If the head explicitly requests GRAPHVIZ or JSON, they are unsupported
     if "FORMAT GRAPHVIZ" in head:
@@ -290,6 +306,45 @@ def rewrite_drop_collection(statement: str) -> str:
     return re.sub(r"^(\s*DROP\s+)COLLECTION\b", r"\1SCHEMA", statement, count=1, flags=re.IGNORECASE)
 
 
+def rewrite_create_collection(statement: str) -> str:
+    """
+    Rewrite CREATE COLLECTION to CREATE SCHEMA.
+
+    The mirror of rewrite_drop_collection, for the same reason: the parser has no
+    COLLECTION object type, and CREATE SCHEMA is accepted and otherwise unused by
+    opteryx, so rewriting to it lets CREATE COLLECTION reach the planner as a
+    Statement::CreateSchema AST node, which plan_create_collection() maps to a
+    CreateCollection logical plan node.
+
+    Example:
+        CREATE COLLECTION workspace.collection -> CREATE SCHEMA workspace.collection
+        CREATE COLLECTION IF NOT EXISTS ws.col -> CREATE SCHEMA IF NOT EXISTS ws.col
+    """
+    return re.sub(
+        r"^(\s*CREATE\s+)COLLECTION\b", r"\1SCHEMA", statement, count=1, flags=re.IGNORECASE
+    )
+
+
+def rewrite_alter_workspace(statement: str) -> str:
+    """
+    Rewrite ALTER WORKSPACE to ALTER FUNCTION.
+
+    The parser (sqlparser-rs) has no WORKSPACE object type, so ALTER WORKSPACE
+    cannot be parsed natively. ALTER FUNCTION accepts the same
+    `<name> SET <property> TO <value>` shape and is otherwise unused by opteryx,
+    so rewriting to it lets ALTER WORKSPACE reach the planner as a
+    Statement::AlterFunction AST node, which plan_alter_workspace() maps to an
+    AlterWorkspace logical plan node.
+
+    Example:
+        ALTER WORKSPACE ws SET delete_protection TO OFF
+        -> ALTER FUNCTION ws SET delete_protection TO OFF
+    """
+    return re.sub(
+        r"^(\s*ALTER\s+)WORKSPACE\b", r"\1FUNCTION", statement, count=1, flags=re.IGNORECASE
+    )
+
+
 def rewrite_temporal_units(statement: str) -> str:
     """
     Rewrite temporal unit syntax to internal form for parser compatibility.
@@ -343,8 +398,12 @@ def do_sql_rewrite(statement):
     # Rewrite temporal unit syntax before parsing
     statement = rewrite_temporal_units(statement)
 
-    # Rewrite DROP COLLECTION before parsing (parser has no COLLECTION object type)
+    # Rewrite CREATE/DROP COLLECTION before parsing (parser has no COLLECTION object type)
+    statement = rewrite_create_collection(statement)
     statement = rewrite_drop_collection(statement)
+
+    # Rewrite ALTER WORKSPACE before parsing (parser has no WORKSPACE object type)
+    statement = rewrite_alter_workspace(statement)
 
     parts = sql_parts(statement)
     parts = rewrite_explain(parts)

@@ -32,6 +32,9 @@ class ShowCreateNode(BasePlanNode):
 
         self.object_type = parameters.get("object_type")
         self.object_name = parameters.get("object_name")
+        # Bound by visit_show, which authorizes the read first. Never derived
+        # here - deriving it locally is what let this run unauthorized.
+        self.connector = parameters.get("connector")
 
     @property
     def name(self):  # pragma: no cover
@@ -42,21 +45,18 @@ class ShowCreateNode(BasePlanNode):
         return ""
 
     def execute(self, morsel):
-        if self.object_type == "VIEW":
-            from opteryx.connectors import TableType, connector_factory
+        # VIEW is the only object type that reaches here: plan_show_create_query
+        # rejects every other form by name at plan time.
+        from opteryx.connectors import TableType
 
-            connector = connector_factory(self.object_name, telemetry=self.telemetry)
-            object_type, _ = connector.locate_object(self.object_name)
-            if object_type != TableType.View:
-                raise DatasetNotFoundError(dataset=self.object_name, connector="VIEW")
+        object_type, _ = self.connector.locate_object(self.object_name)
+        if object_type != TableType.View:
+            raise DatasetNotFoundError(dataset=self.object_name, connector="VIEW")
 
-            view_definition = connector.get_view(self.object_name)
-            vectors = [
-                vector_from_sequence([self.object_name], dtype=_draken_native.DrakenType.VARCHAR),
-                vector_from_sequence([view_definition.statement], dtype=_draken_native.DrakenType.VARCHAR),
-            ]
-            morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
-            yield morsel
-            return
-
-        raise UnsupportedSyntaxError("Invalid SHOW statement")
+        view_definition = self.connector.get_view(self.object_name)
+        vectors = [
+            vector_from_sequence([self.object_name], dtype=_draken_native.DrakenType.VARCHAR),
+            vector_from_sequence([view_definition.statement], dtype=_draken_native.DrakenType.VARCHAR),
+        ]
+        morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
+        yield morsel

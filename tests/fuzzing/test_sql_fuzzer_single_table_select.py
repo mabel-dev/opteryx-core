@@ -17,11 +17,11 @@ import time
 
 import pytest
 
-import opteryx
 from opteryx.managers import virtual_datasets
 from opteryx.types import LogicalCategory
 from opteryx.utils import random_string
 from opteryx.utils.formatter import format_sql
+from tests.helpers import execute_and_get_shape
 
 
 def random_value(t):
@@ -74,8 +74,10 @@ def generate_random_sql_select(columns, table):
     column_list = [columns[i] for i in column_list]
     agg_column = None
     is_count_star = False
+    is_distinct = False
     # Add DISTINCT keyword with 20% chance
     if random.random() < 0.2:
+        is_distinct = True
         select_clause = "SELECT DISTINCT " + ", ".join(c.name for c in column_list)
     elif random.random() < 0.3:
         distinct = "DISTINCT " if random.random() < 0.1 else ""
@@ -122,7 +124,15 @@ def generate_random_sql_select(columns, table):
         select_clause = select_clause + " GROUP BY " + ", ".join(column_list + [agg_column.name])
     # Add ORDER BY clause with 60% chance
     if not agg_column and not is_count_star and random.random() < 0.6:
-        order_column = columns[random.choice(range(len(columns)))]
+        # Under SELECT DISTINCT the sort key must appear in the select list —
+        # that is the SQL standard, not an Opteryx limitation (Postgres rejects
+        # it with the same message). Ordering by an arbitrary column here just
+        # generates invalid SQL, which tests the parser's error path over and
+        # over instead of the executor.
+        if is_distinct:
+            order_column = column_list[random.choice(range(len(column_list)))]
+        else:
+            order_column = columns[random.choice(range(len(columns)))]
         if order_column.category not in (LogicalCategory.ARRAY,):
             order_direction = random.choice(["ASC", "DESC", ""])
             select_clause = select_clause + " ORDER BY " + order_column.name + " " + order_direction
@@ -184,10 +194,12 @@ def test_sql_fuzzing_single_table(i):
 
     start_time = time.time()  # Start timing the query execution
     try:
-        session = opteryx.session()
-        session.execute(statement)
+        # The assertion is "did not raise". `execute_and_get_shape` drains every
+        # morsel, so the whole plan runs — a lazy generator left undrained would
+        # make this fuzzer assert nothing at all.
+        shape = execute_and_get_shape(statement)
         execution_time = time.time() - start_time  # Measure execution time
-        print(f"Shape: {session.shape}, Execution Time: {execution_time:.2f} seconds")
+        print(f"Shape: {shape}, Execution Time: {execution_time:.2f} seconds")
         # Additional success criteria checks can be added here
     except Exception as e:
         import traceback

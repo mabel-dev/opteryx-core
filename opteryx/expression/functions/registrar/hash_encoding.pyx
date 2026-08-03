@@ -42,10 +42,18 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ]
         return _Vector(vector_from_sequence(result, dtype=_draken_native_he.DrakenType.VARBINARY))
 
-    # Parameter short-hands
-    _any = ParameterSpec(name="val", type_family="any")
+    # Parameter short-hands.
+    #
+    # These are "string", not "any", because that is what the kernels accept —
+    # every one of them rejects a non-string with `draken_<fn>: string operand
+    # required`. Declaring "any" did not make them accept more; it only moved
+    # the refusal from plan time into the kernel, where it surfaced as a raw
+    # ValueError naming an internal function (or, over a real column, as
+    # `ExprMultiProjectOperator: error code 1`). The "string" family covers
+    # VARCHAR, NVARCHAR and VARBINARY, which is the full set they do accept.
+    _any = ParameterSpec(name="val", type_family="string")
     _n = ParameterSpec(name="n", type_family="integer")
-    _b = ParameterSpec(name="blob", type_family="any")
+    _b = ParameterSpec(name="blob", type_family="string")
 
     # Return types follow what the kernels ACTUALLY produce, which is also what the
     # value semantically IS:

@@ -43,6 +43,7 @@ from opteryx.types.logical_type import (
     DATE as _CT_DATE,
     INTERVAL as _CT_INTERVAL,
     VARIANT as _CT_VARIANT,
+    IPV4 as _CT_IPV4,
     NULL as _CT_NULL,
     TIMESTAMP as _CT_TIMESTAMP,  # factory: _CT_TIMESTAMP() → ColumnType
     TIME as _CT_TIME,            # factory: _CT_TIME() → ColumnType
@@ -209,8 +210,14 @@ def _iif_return_type(arg_nodes):
 _NC_STRING_TYPES = frozenset((DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY))
 _NC_SIGNED_INT = frozenset((DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64))
 _NC_FLOAT = frozenset((DrakenType.FLOAT32, DrakenType.FLOAT64))
-_NC_FIXED = _NC_SIGNED_INT | _NC_FLOAT | frozenset((
-    DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+_NC_UNSIGNED_WIDTH = {
+    DrakenType.UINT8: 1,
+    DrakenType.UINT16: 2,
+    DrakenType.UINT32: 4,
+    DrakenType.UINT64: 8,
+}
+_NC_UNSIGNED_INT = frozenset(_NC_UNSIGNED_WIDTH)
+_NC_FIXED = _NC_SIGNED_INT | _NC_FLOAT | _NC_UNSIGNED_INT | frozenset((
     DrakenType.DATE32, DrakenType.TIME32, DrakenType.TIME64, DrakenType.TIMESTAMP64,
 ))
 
@@ -221,8 +228,18 @@ def _nc_promote_fixed(a, b):
         return a
     if a in _NC_SIGNED_INT and b in _NC_SIGNED_INT:
         return DrakenType.INT64
+    # Two unsigned widths widen to the WIDER of the two, never through INT64 —
+    # INT64 cannot hold the top half of UINT64. Must stay identical to
+    # nc_promote_fixed in function_null_conditional.cpp: this mirror exists only
+    # so the rejection names the real SQL branches, so a rule that is stricter
+    # here rejects something the kernel would have blended, and a rule that is
+    # looser lets a plan through that dies in the kernel with only type codes.
+    if a in _NC_UNSIGNED_INT and b in _NC_UNSIGNED_INT:
+        return a if _NC_UNSIGNED_WIDTH[a] >= _NC_UNSIGNED_WIDTH[b] else b
     if (a in _NC_SIGNED_INT or a in _NC_FLOAT) and (b in _NC_SIGNED_INT or b in _NC_FLOAT):
         return DrakenType.FLOAT64
+    # Signed/unsigned mixes stay unpromotable: no fixed-width type holds both
+    # negatives and the top half of UINT64.
     return None
 
 

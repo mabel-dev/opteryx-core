@@ -12,7 +12,7 @@ Coverage:
   - IN where all outer rows match
   - Aggregate over IN-filtered result
   - IN inside a FROM-clause subquery
-  - NOT IN raises UnsupportedSyntaxError
+  - NOT IN is supported and null-aware (a NULL in the subquery yields no rows)
   - Multi-column subquery raises UnsupportedSyntaxError
   - Plan structure: result contains a Join node, not a Filter with embedded SUBQUERY
   - Semi-join semantics: no duplicate outer rows even if subquery has duplicates
@@ -108,7 +108,7 @@ def test_in_subquery_inner_planets():
         "SELECT name FROM $planets WHERE id IN (SELECT id FROM $planets WHERE id < 4)",
         "name",
     )
-    assert result == sorted([b"Mercury", b"Venus", b"Earth"])
+    assert result == sorted(["Mercury", "Venus", "Earth"])
 
 
 def test_in_subquery_outer_giants():
@@ -341,43 +341,67 @@ def test_in_subquery_only_outer_columns():
 # ---------------------------------------------------------------------------
 
 def test_in_subquery_plan_shows_join():
-    """The rewritten logical plan must contain a Join node and no InSubQuery expression node."""
-    from opteryx.planner.logical_planner import do_logical_planning_phase, LogicalPlanStepType
-    from opteryx.planner.plan_rewriter import do_plan_rewrite
-    from opteryx.planner.ast_rewriter import do_ast_rewriter
-    from opteryx.planner.sql_rewriter import do_sql_rewrite
-    from opteryx.third_party import sqloxide
-    from opteryx.expression import NodeType, get_all_nodes_of_type
+    """The optimized plan must contain a semi-join — the subquery is eliminated, not
+    carried into execution as a SUBQUERY expression.
 
-    sql = "SELECT name FROM $planets WHERE id IN (SELECT id FROM $planets WHERE id < 5)"
-    tokens = sqloxide.parse_sql(do_sql_rewrite(sql), "opteryx")
-    logical_plan, _, _ = do_logical_planning_phase(do_ast_rewriter(tokens, {})[0])
-    plan = do_plan_rewrite(logical_plan, {}, None)
-
-    step_types = [node.node_type for _, node in plan.nodes(True)]
-    assert LogicalPlanStepType.Join in step_types, (
-        f"Expected a Join in the plan; got: {step_types}"
+    The elimination is POST-BIND: it is `DecorrelateSubqueryStrategy` in the optimizer,
+    not the pre-bind plan rewriter (the per-syntax-form `in_subquery_to_join` strategy
+    was deleted when all subquery forms were unified onto one decorrelation pass). So
+    this asserts on the optimized plan, which is where the join now appears.
+    """
+    d = run("EXPLAIN SELECT name FROM $planets WHERE id IN (SELECT id FROM $planets WHERE id < 5)")
+    plan_text = "\n".join(
+        v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else str(v)
+        for col in d.values()
+        for v in col
     )
 
-    # No InSubQuery expression should survive the rewrite
-    for _, node in plan.nodes(True):
-        for attr in ("condition", "on"):
-            expr = getattr(node, attr, None)
-            if expr is not None:
-                in_sq_nodes = get_all_nodes_of_type(expr, (NodeType.SUBQUERY,))
-                assert not in_sq_nodes, (
-                    f"InSubQuery expression node survived rewrite in {attr} of {node.node_type}"
-                )
+    assert "LEFT SEMI JOIN" in plan_text, f"Expected a semi-join in the plan; got:\n{plan_text}"
+    assert "decorrelate in subquery" in plan_text, (
+        f"Expected the decorrelation optimization to fire; got:\n{plan_text}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 13. Error cases
 # ---------------------------------------------------------------------------
 
-def test_not_in_subquery_raises():
-    """NOT IN (<subquery>) is explicitly unsupported due to NULL semantics."""
-    with pytest.raises(UnsupportedSyntaxError):
-        _execute("SELECT name FROM $planets WHERE id NOT IN (SELECT id FROM $planets WHERE id > 5)")
+def test_not_in_subquery_is_supported():
+    """NOT IN (<subquery>) is supported — it rewrites to a null-aware anti-join.
+
+    It used to be rejected outright over NULL semantics; that restriction was lifted
+    once the anti-join was made null-aware, so this pins the answer instead.
+    """
+    result = sorted_col(
+        "SELECT name FROM $planets WHERE id NOT IN (SELECT id FROM $planets WHERE id > 5)",
+        "name",
+    )
+    direct = sorted_col("SELECT name FROM $planets WHERE id <= 5", "name")
+    assert result == direct
+
+
+def test_not_in_subquery_is_null_aware():
+    """A NULL anywhere in the subquery makes `x NOT IN (…)` UNKNOWN for EVERY row.
+
+    This is the rule NOT IN has and NOT EXISTS does not — a plain anti-join would
+    return the non-matching rows here instead of nothing.
+    """
+    n = row_count(
+        """
+        SELECT name FROM $planets
+        WHERE id NOT IN (SELECT CASE WHEN id > 5 THEN id ELSE NULL END FROM $planets)
+        """
+    )
+    assert n == 0
+
+    # The positive form is unaffected: IN simply ignores the NULLs.
+    assert sorted_col(
+        """
+        SELECT name FROM $planets
+        WHERE id IN (SELECT CASE WHEN id > 5 THEN id ELSE NULL END FROM $planets)
+        """,
+        "name",
+    ) == sorted_col("SELECT name FROM $planets WHERE id > 5", "name")
 
 
 def test_in_subquery_multi_column_raises():
@@ -433,7 +457,8 @@ if __name__ == "__main__":
         test_in_subquery_no_row_duplication,
         test_in_subquery_only_outer_columns,
         test_in_subquery_plan_shows_join,
-        test_not_in_subquery_raises,
+        test_not_in_subquery_is_supported,
+        test_not_in_subquery_is_null_aware,
         test_in_subquery_multi_column_raises,
         test_in_subquery_with_inner_where,
     ]

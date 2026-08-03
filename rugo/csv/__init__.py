@@ -119,6 +119,13 @@ def read_metadata(source: Source) -> CsvMetadata:
     return CsvMetadata(num_rows=result["num_rows"], schema_columns=schema_columns)
 
 
-def write_csv(morsel, delimiter: str = ",", header: bool = True) -> bytes:
-    """Serialize a Morsel to RFC 4180 CSV bytes."""
-    return _write_csv(morsel, delimiter=delimiter, header=header)
+def write_csv(morsel, delimiter: str = ",", header: bool = True, for_excel: bool = False) -> bytes:
+    """Serialize a Morsel to RFC 4180 CSV bytes.
+
+    for_excel: raise ValueError if the morsel exceeds a limit of the Excel grid
+    (1,048,576 lines including the header, 16,384 columns, 32,767 characters per
+    cell) rather than writing a file Excel would silently truncate. The row
+    count is per-morsel; a caller writing several morsels to one file must add
+    up the rows itself.
+    """
+    return _write_csv(morsel, delimiter=delimiter, header=header, for_excel=for_excel)

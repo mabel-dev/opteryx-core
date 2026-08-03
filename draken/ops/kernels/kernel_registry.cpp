@@ -325,6 +325,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_string_to_int64", (kernel_fn_t)&draken_cast_string_to_int64},
     {"draken_cast_string_to_bool", (kernel_fn_t)&draken_cast_string_to_bool},
     {"draken_cast_string_to_date32", (kernel_fn_t)&draken_cast_string_to_date32},
+    {"draken_cast_string_to_ipv4", (kernel_fn_t)&draken_cast_string_to_ipv4},
+    {"draken_ipv4_in_cidr", (kernel_fn_t)&draken_ipv4_in_cidr},
+    {"draken_ip_trunc", (kernel_fn_t)&draken_ip_trunc},
     {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},
 
     // String-family retag (byte-identical copy, new type tag only) — see the
@@ -617,6 +620,15 @@ cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit) {
     auto* ctx = static_cast<cast_timestamp_ctx*>(malloc(sizeof(cast_timestamp_ctx)));
     if (ctx) {
         ctx->unit = unit;
+    }
+    return ctx;
+}
+
+cast_array_ctx* kernel_alloc_cast_array_ctx(int element_type, int safe) {
+    auto* ctx = static_cast<cast_array_ctx*>(malloc(sizeof(cast_array_ctx)));
+    if (ctx) {
+        ctx->element_type = element_type;
+        ctx->safe = safe;
     }
     return ctx;
 }

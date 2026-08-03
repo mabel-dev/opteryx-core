@@ -196,8 +196,8 @@ cdef class AsofJoinNode(JoinNode):
     cdef public object asof_left_column
     cdef public object asof_right_column
     cdef public object asof_op
-    cdef public list partition_left_columns
-    cdef public list partition_right_columns
+    cdef public list left_columns
+    cdef public list right_columns
     cdef public Morsel left_morsel
     cdef public list left_morsels
     cdef public list right_morsels
@@ -211,10 +211,17 @@ cdef class AsofJoinNode(JoinNode):
         self.asof_right_column = parameters.get("asof_right_column")
         self.asof_op           = parameters.get("asof_op")
 
-        left_cols  = parameters.get("left_columns") or []
-        right_cols = parameters.get("right_columns") or []
-        self.partition_left_columns  = [c.schema_column.identity for c in left_cols]
-        self.partition_right_columns = [c.schema_column.identity for c in right_cols]
+        # The optional USING equi-partition keys. These arrive from the binder's
+        # extract_join_fields, which already appends `schema_column.identity` —
+        # they are column IDENTITIES, not bound nodes. Every other join operator
+        # (inner, nested loop, filter) consumes them directly; do the same.
+        #
+        # They MUST be stored under `left_columns`/`right_columns`: the native
+        # compiler's _compile_asof_join reads those names off this node to build
+        # the build/probe key indices. Storing them under any other name makes
+        # USING silently vanish and the join degrade to an unpartitioned ASOF.
+        self.left_columns  = list(parameters.get("left_columns") or [])
+        self.right_columns = list(parameters.get("right_columns") or [])
 
         self.left_morsel  = None
         self.left_morsels = []
@@ -234,8 +241,13 @@ cdef class AsofJoinNode(JoinNode):
         op_map = {"Lt": "<", "LtEq": "<=", "Gt": ">", "GtEq": ">="}
         op_sym = op_map.get(self.asof_op, self.asof_op)
         base = f"MATCH_CONDITION({self.asof_left_column} {op_sym} {self.asof_right_column})"
-        if self.partition_left_columns:
-            base += f" USING ({', '.join(self.partition_left_columns)})"
+        if self.left_columns:
+            # Identities are bytes — decode for display.
+            names = ", ".join(
+                c.decode("utf8") if isinstance(c, bytes) else str(c)
+                for c in self.left_columns
+            )
+            base += f" USING ({names})"
         return base
 
     cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
@@ -295,8 +307,8 @@ cdef class AsofJoinNode(JoinNode):
                 self.asof_left_column,
                 self.asof_right_column,
                 self.asof_op,
-                self.partition_left_columns,
-                self.partition_right_columns,
+                self.left_columns,
+                self.right_columns,
             )
             if result is not None:
                 self.emit(result)

@@ -70,8 +70,9 @@
 #include "ops/float_ops.h"                // fp_total_lt — Draken's canonical NaN-highest order
 #include "ops/string_result.h"            // StringRows + sr_* helpers
 #include "ops/vec_result.h"
+#include "ops/kernels/cast_kernels.h"     // draken_cast_to_array decl (impl lives here)
 #include "ops/kernels/error_handling.h"
-#include "ops/kernels/kernel_context.h"   // in_list_ctx — ARRAY_CONTAINS_ANY/ALL needles
+#include "ops/kernels/kernel_context.h"   // in_list_ctx; cast_array_ctx
 #include "ops/kernels/result_helpers.h"   // vecresult_from_string_buffers
 #include "yyjson.h"
 
@@ -949,6 +950,138 @@ inline void sp_split_one(const uint8_t* hay, uint32_t hlen,
     parts.emplace_back(hay + start, hlen - start);
 }
 
+// ---------------------------------------------------------------------------
+// CAST(json_text -> ARRAY<element_type>) support
+// ---------------------------------------------------------------------------
+// Element coercion is STRICT: a JSON element only satisfies the declared element
+// type if it is already that kind of value. A number does not satisfy VARCHAR, a
+// string does not satisfy INTEGER, a real with a fractional part does not satisfy
+// an integer type, and an out-of-range integer does not satisfy a narrow width.
+// Anything else fails the ROW (architect ruling: reject the whole row, never a
+// per-element NULL) — which the caller then either raises on or nulls, per
+// cast_array_ctx::safe.
+//
+// A JSON `null` element is NOT a coercion failure: it is an absent value, not a
+// wrong-typed one, so it becomes a NULL element and the row survives. (Flagged
+// as a judgement call, not architect-specified — the ruling was about mixed
+// element TYPES. The alternative, failing the row, would make ARRAY<T> unusable
+// against real-world JSON, where nulls inside arrays are routine.)
+
+enum class CtaKind { SInt, UInt, Float, Bool, String, Unsupported };
+
+inline CtaKind cta_kind_of(DrakenType t) noexcept {
+    switch (t) {
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+            return CtaKind::SInt;
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+            return CtaKind::UInt;
+        case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
+            return CtaKind::Float;
+        case DRAKEN_BOOL:
+            return CtaKind::Bool;
+        case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR:
+        case DRAKEN_VARBINARY: case DRAKEN_VARIANT:
+            return CtaKind::String;
+        default:
+            return CtaKind::Unsupported;
+    }
+}
+
+inline uint32_t cta_width_of(DrakenType t) noexcept {
+    switch (t) {
+        case DRAKEN_INT8:  case DRAKEN_UINT8:                       return 1u;
+        case DRAKEN_INT16: case DRAKEN_UINT16:                      return 2u;
+        case DRAKEN_INT32: case DRAKEN_UINT32: case DRAKEN_FLOAT32: return 4u;
+        default:                                                    return 8u;
+    }
+}
+
+// Signed-integer element -> raw little-endian bytes at the target width.
+// Returns false (row fails) on a non-integral or out-of-range value.
+inline bool cta_coerce_sint(yyjson_val* v, DrakenType t, std::vector<uint8_t>& out) {
+    int64_t x;
+    if (yyjson_is_int(v)) {
+        x = yyjson_get_sint(v);
+    } else if (yyjson_is_uint(v)) {
+        const uint64_t u = yyjson_get_uint(v);
+        if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return false;
+        x = static_cast<int64_t>(u);
+    } else {
+        return false;   // a real, string, bool, object or array is not an integer
+    }
+    switch (t) {
+        case DRAKEN_INT8:
+            if (x < INT8_MIN  || x > INT8_MAX)  return false; break;
+        case DRAKEN_INT16:
+            if (x < INT16_MIN || x > INT16_MAX) return false; break;
+        case DRAKEN_INT32:
+            if (x < INT32_MIN || x > INT32_MAX) return false; break;
+        default: break;
+    }
+    const uint32_t w = cta_width_of(t);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+    out.insert(out.end(), p, p + w);   // little-endian: low bytes first
+    return true;
+}
+
+inline bool cta_coerce_uint(yyjson_val* v, DrakenType t, std::vector<uint8_t>& out) {
+    uint64_t x;
+    if (yyjson_is_uint(v)) {
+        x = yyjson_get_uint(v);
+    } else if (yyjson_is_int(v)) {
+        const int64_t s = yyjson_get_sint(v);
+        if (s < 0) return false;       // never wrap a negative into unsigned
+        x = static_cast<uint64_t>(s);
+    } else {
+        return false;
+    }
+    switch (t) {
+        case DRAKEN_UINT8:  if (x > UINT8_MAX)  return false; break;
+        case DRAKEN_UINT16: if (x > UINT16_MAX) return false; break;
+        case DRAKEN_UINT32: if (x > UINT32_MAX) return false; break;
+        default: break;
+    }
+    const uint32_t w = cta_width_of(t);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+    out.insert(out.end(), p, p + w);
+    return true;
+}
+
+inline bool cta_coerce_float(yyjson_val* v, DrakenType t, std::vector<uint8_t>& out) {
+    double d;
+    if (yyjson_is_real(v))      d = yyjson_get_real(v);
+    else if (yyjson_is_int(v))  d = static_cast<double>(yyjson_get_sint(v));
+    else if (yyjson_is_uint(v)) d = static_cast<double>(yyjson_get_uint(v));
+    else                        return false;
+    if (t == DRAKEN_FLOAT32) {
+        const float f = static_cast<float>(d);
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&f);
+        out.insert(out.end(), p, p + 4);
+    } else {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&d);
+        out.insert(out.end(), p, p + 8);
+    }
+    return true;
+}
+
+// String-family element. VARCHAR/NVARCHAR/VARBINARY accept ONLY a JSON string.
+// VARIANT is the deliberate escape hatch — it accepts any element, holding a
+// string's bytes verbatim (unquoted) and any other value as its JSON text. That
+// matches draken_split, whose ARRAY<VARIANT> child likewise holds plain text.
+inline bool cta_coerce_string(yyjson_val* v, DrakenType t, std::string& out) {
+    if (yyjson_is_str(v)) {
+        out.assign(yyjson_get_str(v), yyjson_get_len(v));
+        return true;
+    }
+    if (t != DRAKEN_VARIANT) return false;
+    size_t len = 0;
+    char* txt = yyjson_val_write(v, 0, &len);
+    if (!txt) return false;
+    out.assign(txt, len);
+    free(txt);          // yyjson_val_write allocates with the default allocator
+    return true;
+}
+
 }  // namespace
 
 extern "C" {
@@ -1654,6 +1787,283 @@ VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t narg
         return draken_error_sentinel(e.what());
     } catch (...) {
         return draken_error_sentinel("Unknown error in draken_split");
+    }
+}
+
+// CAST(<json text> AS ARRAY<element_type>) — VARCHAR/VARIANT -> ARRAY.
+//
+// Declared in cast_kernels.h; lives here rather than in cast_dispatch.cpp because
+// every helper it needs (yyjson, StringRows staging, finalize_child) is already in
+// this TU — the same reason draken_split does. It is the RESULT-half mirror of the
+// ARRAY->VARCHAR cast: the elements ride out on VecResult::child, exactly as
+// JSONB_OBJECT_KEYS and SPLIT do.
+//
+// Row dispositions:
+//   NULL input row        -> NULL output row (empty span). Not a failure.
+//   invalid JSON          -> row FAILS
+//   root is not an array  -> row FAILS  (a JSON object or bare scalar is NOT
+//                            silently wrapped into a 1-element array)
+//   element won't coerce  -> row FAILS  (whole row, never a per-element NULL)
+//   JSON null element     -> NULL element; the row survives
+// A failed row raises under a plain `::` cast, or becomes a NULL row under
+// TRY_CAST — cast_array_ctx::safe selects which, and nothing else differs.
+//
+// NOTE: explicit try/catch, not DRAKEN_KERNEL_TRY — that macro takes the body as
+// ONE argument and the preprocessor does not protect commas inside braces, so a
+// brace-init like `pg{offsets, nullptr}` would split it. Same trap as
+// jsonb_object_keys above.
+VecResult draken_cast_to_array(void* ctx, const DrakenVector* vector) {
+    try {
+        if (!ctx)
+            return draken_error_sentinel("draken_cast_to_array: missing cast_array_ctx");
+        if (!vector)
+            return draken_error_sentinel("draken_cast_to_array: null operand");
+
+        const cast_array_ctx* cc = static_cast<const cast_array_ctx*>(ctx);
+        const DrakenType elem    = static_cast<DrakenType>(cc->element_type);
+        const bool       safe    = cc->safe != 0;
+        const CtaKind    kind    = cta_kind_of(elem);
+
+        if (kind == CtaKind::Unsupported)
+            return draken_error_sentinel_fmt(
+                "CAST to ARRAY: unsupported element type (tag %d)", (int)elem);
+        if (!aj_is_string_family(vector->type) && vector->type != DRAKEN_VARIANT)
+            return draken_error_sentinel_fmt(
+                "CAST to ARRAY: operand must be VARCHAR or VARIANT holding JSON array "
+                "text (got type tag %d)", (int)vector->type);
+
+        const uint32_t n  = vector->length;
+        const auto*    sa = static_cast<const DrakenStringArena*>(vector->data);
+
+        const size_t off_bytes = (static_cast<size_t>(n) + 1u) * sizeof(int32_t);
+        int32_t* offsets = static_cast<int32_t*>(draken_malloc(off_bytes));
+        if (!offsets) throw std::bad_alloc();
+        struct ParentGuard {
+            int32_t* off; uint8_t* val; bool released = false;
+            ~ParentGuard() { if (!released) { draken_free(off); draken_free(val); } }
+        } pg{offsets, nullptr};
+        offsets[0] = 0;
+
+        // Element staging. Fixed-width kinds accumulate raw target-width bytes;
+        // BOOL accumulates one 0/1 byte per element (packed to bits at the end);
+        // the string family stages owned copies. `elem_null` is one byte per
+        // staged element, parallel to all three.
+        std::vector<uint8_t>     fixed_buf;
+        std::vector<uint8_t>     bool_buf;
+        std::vector<std::string> staged;
+        std::vector<uint8_t>     elem_null;
+        bool any_elem_null = false;
+
+        std::vector<uint8_t> row_null(n, 0u);
+        bool any_row_null = false;
+
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (!sr_row_is_valid(vector, i)) {
+                row_null[i]     = 1u;
+                any_row_null    = true;
+                offsets[i + 1u] = offsets[i];
+                continue;
+            }
+
+            // Rewind marks — a row that fails midway must leave no partial elements.
+            const size_t mark_fixed = fixed_buf.size();
+            const size_t mark_bool  = bool_buf.size();
+            const size_t mark_str   = staged.size();
+            const size_t mark_null  = elem_null.size();
+
+            const DrakenStringSlot* slot = &sa->slots[vector->selection[i]];
+            const uint8_t* json_bytes    = str_data(slot, sa->arena);
+            const uint32_t json_len      = str_length(slot);
+
+            const char* why = nullptr;   // non-null => this row failed
+            int32_t emitted = 0;
+
+            yyjson_read_err perr;
+            yyjson_doc* raw = yyjson_read_opts(
+                const_cast<char*>(reinterpret_cast<const char*>(json_bytes)),
+                static_cast<size_t>(json_len), 0u, nullptr, &perr);
+            AjDocGuard guard{raw};
+
+            if (!raw) {
+                why = "invalid JSON";
+            } else {
+                yyjson_val* root = yyjson_doc_get_root(raw);
+                if (!root || !yyjson_is_arr(root)) {
+                    why = "value is not a JSON array";
+                } else {
+                    yyjson_arr_iter it;
+                    yyjson_arr_iter_init(root, &it);
+                    yyjson_val* el = nullptr;
+                    while ((el = yyjson_arr_iter_next(&it)) != nullptr) {
+                        if (yyjson_is_null(el)) {
+                            // Absent, not wrong-typed: a NULL element, row survives.
+                            if (kind == CtaKind::String)     staged.emplace_back();
+                            else if (kind == CtaKind::Bool)  bool_buf.push_back(0u);
+                            else fixed_buf.insert(fixed_buf.end(), cta_width_of(elem), 0u);
+                            elem_null.push_back(1u);
+                            any_elem_null = true;
+                            ++emitted;
+                            continue;
+                        }
+                        bool ok;
+                        switch (kind) {
+                            case CtaKind::SInt:  ok = cta_coerce_sint(el, elem, fixed_buf);  break;
+                            case CtaKind::UInt:  ok = cta_coerce_uint(el, elem, fixed_buf);  break;
+                            case CtaKind::Float: ok = cta_coerce_float(el, elem, fixed_buf); break;
+                            case CtaKind::Bool:
+                                ok = yyjson_is_bool(el);
+                                if (ok) bool_buf.push_back(yyjson_get_bool(el) ? 1u : 0u);
+                                break;
+                            default: {
+                                std::string s;
+                                ok = cta_coerce_string(el, elem, s);
+                                if (ok) staged.emplace_back(std::move(s));
+                                break;
+                            }
+                        }
+                        if (!ok) { why = "element does not match the declared element type"; break; }
+                        elem_null.push_back(0u);
+                        ++emitted;
+                    }
+                }
+            }
+
+            if (why != nullptr) {
+                if (!safe)
+                    throw std::runtime_error(
+                        "CAST to ARRAY: row " + std::to_string(i) + ": " + why +
+                        " (use TRY_CAST to null such rows instead)");
+                // TRY_CAST: discard anything this row staged, emit a NULL row.
+                fixed_buf.resize(mark_fixed);
+                bool_buf.resize(mark_bool);
+                staged.resize(mark_str);
+                elem_null.resize(mark_null);
+                row_null[i]     = 1u;
+                any_row_null    = true;
+                offsets[i + 1u] = offsets[i];
+                continue;
+            }
+            offsets[i + 1u] = offsets[i] + emitted;
+        }
+
+        const uint32_t total = static_cast<uint32_t>(elem_null.size());
+
+        // Child validity — one bit per staged element, set = valid.
+        uint8_t* child_validity = nullptr;
+        if (any_elem_null) {
+            const uint32_t bm     = (total + 7u) >> 3;
+            const uint32_t padded = (bm + 7u) & ~7u;
+            const size_t   vbytes = padded > 0u ? padded : 8u;
+            child_validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+            if (!child_validity) throw std::bad_alloc();
+            std::memset(child_validity, 0xFFu, vbytes);
+            for (uint32_t k = 0u; k < total; ++k)
+                if (elem_null[k])
+                    child_validity[k >> 3] &= ~static_cast<uint8_t>(1u << (k & 7u));
+        }
+
+        VecResult* child = nullptr;
+        if (kind == CtaKind::String) {
+            StringRows rows;
+            rows.length = total;
+            rows.type   = elem;
+            rows.slots  = sr_alloc_slots(total);
+            struct RowsGuard {
+                StringRows* r; bool released = false;
+                ~RowsGuard() { if (!released && r) sr_free(*r); }
+            } rg{&rows};
+
+            std::vector<uint8_t> arena_buf;
+            for (uint32_t k = 0u; k < total; ++k) {
+                if (elem_null[k]) { sr_mark_null(rows, k); continue; }
+                const std::string& s = staged[k];
+                const uint32_t len   = static_cast<uint32_t>(s.size());
+                if (len <= STR_INLINE_MAX) {
+                    str_init_inline(&rows.slots[k],
+                                    reinterpret_cast<const uint8_t*>(s.data()), len);
+                } else {
+                    const uint32_t off = static_cast<uint32_t>(arena_buf.size());
+                    arena_buf.insert(arena_buf.end(), s.data(), s.data() + len);
+                    // insert() may reallocate — re-derive the pointer for the hash.
+                    draken_build_string_slot(&rows.slots[k], arena_buf.data() + off, len, off);
+                }
+            }
+            rows.arena_len = arena_buf.size();
+            if (rows.arena_len > 0u) {
+                rows.arena = static_cast<uint8_t*>(draken_malloc(rows.arena_len));
+                if (!rows.arena) { draken_free(child_validity); throw std::bad_alloc(); }
+                std::memcpy(rows.arena, arena_buf.data(), rows.arena_len);
+            }
+            // sr_mark_null already built the child's validity into `rows`; the
+            // standalone bitmap is redundant on this path.
+            draken_free(child_validity);
+            child_validity = nullptr;
+            rg.released = true;              // finalize_child consumes rows' buffers
+            child = finalize_child(rows, "cast_to_array");
+        } else {
+            const uint32_t w = (kind == CtaKind::Bool) ? 0u : cta_width_of(elem);
+            void* cdata = nullptr;
+            if (kind == CtaKind::Bool) {
+                const uint32_t bm     = (total + 7u) >> 3;
+                const uint32_t padded = (bm + 7u) & ~7u;
+                const size_t   cbytes = padded > 0u ? padded : 8u;
+                uint8_t* bits = static_cast<uint8_t*>(draken_malloc(cbytes));
+                if (!bits) { draken_free(child_validity); throw std::bad_alloc(); }
+                std::memset(bits, 0, cbytes);
+                for (uint32_t k = 0u; k < total; ++k)
+                    if (bool_buf[k])
+                        bits[k >> 3] |= static_cast<uint8_t>(1u << (k & 7u));
+                cdata = bits;
+            } else {
+                const size_t cbytes = static_cast<size_t>(total) * w;
+                void* buf = draken_malloc(cbytes > 0u ? cbytes : 8u);
+                if (!buf) { draken_free(child_validity); throw std::bad_alloc(); }
+                if (cbytes > 0u) std::memcpy(buf, fixed_buf.data(), cbytes);
+                cdata = buf;
+            }
+            VecResult cr{};
+            cr.data           = cdata;
+            cr.validity       = child_validity;
+            cr.selection      = draken_identity_sel(total);
+            cr.owns_selection = false;
+            cr.data_length    = total;
+            cr.length         = total;
+            cr.type           = elem;
+            cr.flags          = DRAKEN_SEL_IDENTITY;
+            child             = new VecResult(cr);
+            child_validity    = nullptr;      // the child owns it now
+        }
+
+        // Parent validity — logical-row indexed, bit set = valid.
+        uint8_t* validity = nullptr;
+        if (any_row_null) {
+            const uint32_t bm     = (n + 7u) >> 3;
+            const uint32_t padded = (bm + 7u) & ~7u;
+            const size_t   vbytes = padded > 0u ? padded : 8u;
+            validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+            if (!validity) { delete child; throw std::bad_alloc(); }
+            std::memset(validity, 0xFFu, vbytes);
+            for (uint32_t i = 0u; i < n; ++i)
+                if (row_null[i]) validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            pg.val = validity;
+        }
+
+        VecResult r{};
+        r.data           = offsets;
+        r.validity       = validity;
+        r.selection      = draken_identity_sel(n);   // global; not owned
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_ARRAY;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        r.child          = child;
+        pg.released      = true;                     // r owns offsets + validity now
+        return r;
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_cast_to_array");
     }
 }
 

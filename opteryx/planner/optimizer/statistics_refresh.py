@@ -372,9 +372,10 @@ def _scan_stats(
                         total_bytes = int(fixed_width) * int(row_count)
             # Keyed by identity; the manifest accessors above are name-based
             # because manifest statistics are per-relation and unambiguous.
+            col_type = getattr(col, "column_type", None)
             columns[identity] = ColumnStatistics(
                 column_name=col_name,
-                data_type=str(getattr(col, "type", "")),
+                data_type=str(col_type) if col_type is not None else "",
                 distinct_count=distinct_count,
                 value_range=value_range,
                 histogram=histogram,
@@ -1200,9 +1201,9 @@ class StatisticsRefreshVisitor:
     ``telemetry``, when given, additionally records per-predicate selectivity
     and cost and per-join cardinality inputs as they're computed (see
     ``_predicate_note``/``_join_note``) -- diagnostic detail only, never
-    consulted for correctness. ``run()`` also then records one row-count
-    entry per node so estimated-vs-actual comparisons don't require a second
-    plan walk elsewhere.
+    consulted for correctness. ``run()`` also then records one row-count and
+    one total-byte-size entry per node so estimated-vs-actual comparisons
+    don't require a second plan walk elsewhere.
     """
 
     def __init__(self, plan: LogicalPlan, telemetry=None):
@@ -1220,6 +1221,7 @@ class StatisticsRefreshVisitor:
 
     def _record_telemetry(self) -> None:
         row_counts = []
+        total_bytes_by_node = []
         for nid, node in self.plan.nodes(True):
             stats = getattr(node, "statistics", None)
             if stats is None:
@@ -1230,7 +1232,21 @@ class StatisticsRefreshVisitor:
                 "relation": getattr(node, "relation", None),
                 "row_count": stats.row_count,
             })
+            # Node-level total, summing only the columns with a known
+            # total_bytes -- a variable-width column with no ANALYZE pass and
+            # no manifest size (see ColumnStatistics.total_bytes) contributes
+            # nothing rather than forcing the whole node to "unknown". None
+            # (not 0) when NOT ONE column has a known estimate, so a consumer
+            # can tell "genuinely unknown" from "known to be empty".
+            known = [c.total_bytes for c in stats.columns.values() if c.total_bytes is not None]
+            total_bytes_by_node.append({
+                "nid": nid,
+                "node_type": node.node_type.name,
+                "relation": getattr(node, "relation", None),
+                "total_bytes": sum(known) if known else None,
+            })
         self.telemetry._reading["estimated_row_counts"] = row_counts
+        self.telemetry._reading["estimated_total_bytes"] = total_bytes_by_node
         self.telemetry._reading["predicate_estimates"] = self.predicate_notes
         self.telemetry._reading["join_estimates"] = self.join_notes
 
@@ -1291,11 +1307,13 @@ def refresh_statistics(plan: LogicalPlan, telemetry=None) -> LogicalPlan:
     plan's ``statistics_are_stale`` flag on completion.
 
     When ``telemetry`` is given, also records the planner's per-node row-count
-    estimates, per-predicate selectivity/cost, and per-join cardinality inputs
-    onto ``telemetry._reading`` (``estimated_row_counts`` / ``predicate_estimates``
-    / ``join_estimates``) -- diagnostic detail for comparing estimate vs actual,
-    never consulted by planning itself. Omitting ``telemetry`` (the default)
-    skips this entirely; existing callers are unaffected.
+    and total-byte-size estimates, per-predicate selectivity/cost, and
+    per-join cardinality inputs onto ``telemetry._reading``
+    (``estimated_row_counts`` / ``estimated_total_bytes`` /
+    ``predicate_estimates`` / ``join_estimates``) -- diagnostic detail for
+    comparing estimate vs actual, never consulted by planning itself.
+    Omitting ``telemetry`` (the default) skips this entirely; existing
+    callers are unaffected.
     """
     StatisticsRefreshVisitor(plan, telemetry).run()
     plan.statistics_are_stale = False

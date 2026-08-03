@@ -30,7 +30,7 @@ def _load(name):
     return mod
 
 
-vs = _load("vector_special")
+vs = _load("vectors")
 
 
 # ---------------------------------------------------------------------------

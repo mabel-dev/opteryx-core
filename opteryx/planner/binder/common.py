@@ -25,14 +25,19 @@ from opteryx.planner.binder.view import (
     visit_alter_view,
     visit_create_view,
     visit_drop_view,
+    visit_show,
     visit_show_columns,
     visit_show_manifest,
 )
 from opteryx.planner.binder.relation import (
     visit_alter_relation,
+    visit_alter_workspace,
+    visit_analyze,
+    visit_create_collection,
     visit_create_relation,
     visit_drop_collection,
     visit_drop_relation,
+    visit_rename_relation,
     visit_truncate_relation,
     visit_insert,
 )
@@ -46,6 +51,23 @@ from opteryx.planner.binder.join_helpers import (  # noqa: F401
 )
 
 CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")
+
+# Logical plan node types that legitimately need no binding: they carry no
+# relation name to authorize and no columns to resolve, taking their schema
+# from the node below them.
+#
+# This list is exhaustive by design. A node type that is neither here nor
+# served by a visit_ method is a bug, and visit_node raises rather than passing
+# it through - an unbound node is an unauthorized one, which is how ANALYZE,
+# DROP STATISTICS and SHOW CREATE VIEW each shipped with no permission check.
+NO_BINDER_REQUIRED = frozenset(
+    {
+        "Explain",  # wraps an already-bound subplan
+        "Limit",  # row count only
+        "HeapSort",  # rewritten from Order + Limit, both bound
+        "Difference",  # unreachable: no builder emits it
+    }
+)
 
 
 @lru_cache(maxsize=128)
@@ -82,6 +104,15 @@ class BinderVisitor:
         visit_method_name = node_type_to_method_name(node_type)
         visit_method = getattr(self, visit_method_name, None)
         if visit_method is None:
+            if node_type not in NO_BINDER_REQUIRED:
+                from opteryx.exceptions import InvalidInternalStateError
+
+                raise InvalidInternalStateError(
+                    f"Logical plan node '{node_type}' reached the Binder with no visitor. "
+                    "Add a visit_ method for it, or add it to NO_BINDER_REQUIRED if it "
+                    "genuinely needs no binding - a node type must not acquire a "
+                    "silent pass-through by omission."
+                )
             return node, context
         return visit_method(node, context)
 
@@ -143,6 +174,12 @@ class BinderVisitor:
     def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         return visit_window(self, node, context)
 
+    def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return visit_show(self, node, context)
+
+    def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return visit_analyze(self, node, context)
+
     def visit_show_columns(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -178,6 +215,11 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_relation(self, node, context)
 
+    def visit_create_collection(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_create_collection(self, node, context)
+
     def visit_drop_collection(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -192,6 +234,16 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_relation(self, node, context)
+
+    def visit_rename_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_rename_relation(self, node, context)
+
+    def visit_alter_workspace(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_workspace(self, node, context)
 
     def visit_insert(
         self, node: Node, context: BindingContext

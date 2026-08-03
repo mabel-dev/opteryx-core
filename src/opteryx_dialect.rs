@@ -13,7 +13,7 @@
 use std::boxed::Box;
 
 use sqlparser::ast::{BinaryOperator, Expr};
-use sqlparser::dialect::Dialect;
+use sqlparser::dialect::{Dialect, Precedence};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
@@ -72,36 +72,150 @@ impl Dialect for OpteryxDialect {
         true
     }
 
+    // The accessor / containment family (`->`, `->>`, `@>`, `@>>`, `@?`) binds tighter
+    // than everything except member access (`.`).
+    //
+    // sqlparser rates all of these at Precedence::PgOther (16), BELOW Is (17), Like (19),
+    // Eq/Between (20), PlusMinus (30), MulDivModOp (40) and DoubleColon/`[ ]` (50). Since
+    // the right operand is parsed with parse_subexpr(precedence), that low rating let the
+    // operand run away and swallow whatever followed:
+    //
+    //     a->>'b' = 'x'         became  a ->> ('b' = 'x')
+    //     a->>'b' IS NULL       became  a ->> ('b' IS NULL)
+    //     a->'b' * 2            became  a -> ('b' * 2)
+    //     a->>'id'::INTEGER     became  a ->> ('id'::INTEGER)
+    //     a @> ['x'] = true     became  a @>  (['x'] = true)
+    //
+    // The comparison and arithmetic cases are plainly wrong - Postgres itself puts the
+    // "any other operator" band ABOVE comparison and LIKE, so `payload->>'a' = 'x'` groups
+    // as `(payload->>'a') = 'x'` there too; sqlparser's table is what disagrees.
+    //
+    // The cast/subscript cases ARE Postgres behaviour (`::` outranks `->` there, so
+    // `payload->>'id'::INTEGER` casts the KEY) and diverging from it is deliberate: that
+    // is a well-known Postgres footgun, giving a confusing error for a non-numeric key and
+    // silently degrading into an array index for a numeric-looking one. Opteryx binds the
+    // extraction first, so the cast applies to the extracted value - what the syntax reads
+    // like and what it is always written to mean. Likewise `a->'b'[1]` is `(a->'b')[1]`.
+    //
+    // The whole family is raised to ONE level, by architect's decision, so the rule is a
+    // single sentence rather than a per-operator table. The consequence to know about is
+    // that a cast on a containment operand regroups too: `a @> ['x']::ARRAY<VARCHAR>` is
+    // `(a @> ['x'])::ARRAY<VARCHAR>`, not a cast of the operand. Parenthesise to get the
+    // other reading.
+    //
+    // `@>` and `@>>` share a leading Token::AtArrow, so raising AtArrow covers both.
+    //
+    // This replaced opteryx/planner/ast_rewriter/rewrite_json_accessors, a downstream AST
+    // rewriter that existed solely to undo the mangling above (comparison, LIKE and
+    // IS NULL forms). It has been deleted - the parse is now correct at the source.
+    fn get_next_precedence(
+        &self,
+        parser: &sqlparser::parser::Parser,
+    ) -> Option<Result<u8, ParserError>> {
+        match parser.peek_token_ref().token {
+            Token::Arrow | Token::LongArrow | Token::AtArrow | Token::AtQuestion => {
+                // One step above the `::` / `[ ]` band, so the right operand stops before
+                // a trailing cast or subscript and the outer expression applies it to the
+                // accessor's result instead.
+                Some(Ok(self.prec_value(Precedence::DoubleColon) + 1))
+            }
+            // fall back to the default precedence table
+            _ => None,
+        }
+    }
+
     fn parse_infix(
         &self,
         parser: &mut sqlparser::parser::Parser,
         expr: &sqlparser::ast::Expr,
-        _precedence: u8,
+        precedence: u8,
     ) -> Option<Result<sqlparser::ast::Expr, ParserError>> {
+        // IPv4 CIDR containment: `addr <<= '10.0.0.0/8'` (contained by or equal)
+        // and `'10.0.0.0/8' >>= addr` (contains or equal). This is the Postgres
+        // spelling, also used by CockroachDB and DuckDB's inet extension.
+        //
+        // The tokenizer emits `<<=` as ShiftLeft + Eq, so both tokens are PEEKED
+        // before either is consumed. Bare `<<` / `>>` have no infix parser in this
+        // dialect (they are a parse error, not shift operators), so consuming a
+        // lone ShiftLeft here would turn that clean error into a corrupted parser
+        // state. Peeking leaves the not-a-match case exactly as it is today.
+        //
+        // The right operand is parsed with parse_subexpr(precedence), NOT
+        // parse_expr(): parse_expr consumes the whole remaining expression, so
+        // `ip <<= '10/8' AND x = 1` would bind as `ip <<= ('10/8' AND x = 1)`.
+        if matches!(parser.peek_token().token, Token::ShiftLeft)
+            && matches!(parser.peek_nth_token(1).token, Token::Eq)
+        {
+            parser.next_token(); // <<
+            parser.next_token(); // =
+            return Some(match parser.parse_subexpr(precedence) {
+                Ok(right) => Ok(Expr::BinaryOp {
+                    left: Box::new(expr.clone()),
+                    op: BinaryOperator::Custom("IPContainedBy".to_string()),
+                    right: Box::new(right),
+                }),
+                Err(e) => Err(e),
+            });
+        }
+        if matches!(parser.peek_token().token, Token::ShiftRight)
+            && matches!(parser.peek_nth_token(1).token, Token::Eq)
+        {
+            parser.next_token(); // >>
+            parser.next_token(); // =
+            return Some(match parser.parse_subexpr(precedence) {
+                Ok(right) => Ok(Expr::BinaryOp {
+                    left: Box::new(expr.clone()),
+                    op: BinaryOperator::Custom("IPContains".to_string()),
+                    right: Box::new(right),
+                }),
+                Err(e) => Err(e),
+            });
+        }
+        // As above, the right operand of every custom operator below is parsed with
+        // parse_subexpr(precedence), NOT parse_expr(): parse_expr consumes the whole
+        // remaining expression regardless of binding power, so `a DIV 2 = 1 AND b = 1`
+        // would bind as `a DIV (2 = 1 AND b = 1)` - integer division by a boolean, a
+        // silently wrong query rather than an error. Errors are propagated, never
+        // unwrapped: a panic here unwinds out of the extension into Python instead of
+        // surfacing as a ParserError.
+        //
+        // Unlike `<<=` / `>>=`, these operators consume via parse_keyword/consume_token,
+        // which do not leave the parser in a partially-consumed state on a non-match, so
+        // no peeking is needed.
+
         // Parse DIV as an operator
         if parser.parse_keyword(Keyword::DIV) {
-            Some(Ok(Expr::BinaryOp {
-                left: Box::new(expr.clone()),
-                op: BinaryOperator::MyIntegerDivide,
-                right: Box::new(parser.parse_expr().unwrap()),
-            }))
+            Some(match parser.parse_subexpr(precedence) {
+                Ok(right) => Ok(Expr::BinaryOp {
+                    left: Box::new(expr.clone()),
+                    op: BinaryOperator::MyIntegerDivide,
+                    right: Box::new(right),
+                }),
+                Err(e) => Err(e),
+            })
         // Parse `@>>` as "ArrayContainsAll"
         } else if parser.consume_token(&Token::AtArrow) {
             // we just consumed @>
             if parser.consume_token(&Token::Gt) {
                 // Actually saw @>>
-                return Some(Ok(Expr::BinaryOp {
-                    left: Box::new(expr.clone()),
-                    op: BinaryOperator::Custom("ArrayContainsAll".to_string()), // your ALL operator
-                    right: Box::new(parser.parse_expr().unwrap()),
-                }));
+                return Some(match parser.parse_subexpr(precedence) {
+                    Ok(right) => Ok(Expr::BinaryOp {
+                        left: Box::new(expr.clone()),
+                        op: BinaryOperator::Custom("ArrayContainsAll".to_string()), // your ALL operator
+                        right: Box::new(right),
+                    }),
+                    Err(e) => Err(e),
+                });
             } else {
                 // Just plain @>
-                return Some(Ok(Expr::BinaryOp {
-                    left: Box::new(expr.clone()),
-                    op: BinaryOperator::AtArrow,
-                    right: Box::new(parser.parse_expr().unwrap()),
-                }));
+                return Some(match parser.parse_subexpr(precedence) {
+                    Ok(right) => Ok(Expr::BinaryOp {
+                        left: Box::new(expr.clone()),
+                        op: BinaryOperator::AtArrow,
+                        right: Box::new(right),
+                    }),
+                    Err(e) => Err(e),
+                });
             }
         } else {
             None

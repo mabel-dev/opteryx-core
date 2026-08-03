@@ -17,10 +17,33 @@ from draken.core.buffers cimport (
 # Shared native value renderer (draken/interop/value_format.hpp) — the SAME
 # per-value formatting rugo's write_jsonl uses, so Vector._to_json() output
 # matches the /download JSON format. Resolved via -I draken.
+# Draken's logical-type vocabulary — imported, never copied (see CLAUDE.md §14).
+cdef extern from "logical_type.h":
+    cdef enum class LogicalKind(uint8_t):
+        NONE
+        TIMESTAMP
+        TIME
+        DECIMAL
+        VECTOR
+        IPV4
+
 cdef extern from "interop/value_format.hpp" namespace "rugo_text" nogil:
+    # One descriptor per column carries every logical-type field the renderer
+    # needs — including the KIND, which is the only thing that distinguishes an
+    # IPv4 column from the plain UINT32 it is physically identical to.
+    cdef struct LogicalDesc:
+        LogicalKind kind
+        int unit
+        int scale
+        int dim
+
+    cdef struct ColumnDesc:
+        LogicalDesc column
+        LogicalDesc child
+
     void render_json_column(string& out, const DrakenVector* dv,
-                            const DrakenVector* child, int unit, int scale,
-                            int cunit, int cscale, size_t nrows)
+                            const DrakenVector* child, const ColumnDesc& desc,
+                            size_t nrows)
 
 
 cdef inline int _unit_code(object u):
@@ -29,6 +52,27 @@ cdef inline int _unit_code(object u):
     if u == "ms": return 1
     if u == "ns": return 3
     return 2  # us / default
+
+
+cdef inline void _fill_logical_desc(LogicalDesc* d, object nb) except *:
+    # Pack one nanobind Vector handle's logical type into `d`. No descriptor
+    # leaves `d` at its C++ defaults (kind NONE, no parameters).
+    cdef object kind = nb.logical_type_kind
+    cdef object unit
+    cdef object scale
+    cdef object dim
+    if kind is None:
+        return
+    d.kind = <LogicalKind><int>kind.value
+    unit = nb.logical_type_unit
+    if unit is not None:
+        d.unit = _unit_code(unit)
+    scale = nb.logical_type_scale
+    if scale is not None:
+        d.scale = <int>scale
+    dim = nb.logical_type_dimension
+    if dim is not None:
+        d.dim = <int>dim
 
 # Native row-hash kernel (header-only static inline in ops/hash.h). Used by
 # c_hash_single to fill a caller buffer with zero Python object creation.
@@ -335,27 +379,17 @@ cdef class Vector:
         if dv == NULL:
             return b"[]"
         cdef const DrakenVector* child = NULL
-        cdef int unit = 0, scale = 0, cunit = 0, cscale = 0
+        cdef ColumnDesc desc      # C++ defaults: kind NONE, no parameters
         cdef Vector cv
         cdef string out
-        # unit/scale live on the nanobind logical descriptor, not the
-        # DrakenVector ABI (see rugo _jsonl_writer.pyx for the same reads).
-        u = self._nb.logical_type_unit
-        if u is not None:
-            unit = _unit_code(u)
-        sc = self._nb.logical_type_scale
-        if sc is not None:
-            scale = <int>sc
+        # The logical type lives on the nanobind descriptor, not the
+        # DrakenVector ABI (see rugo _text_render.pxi for the same reads).
+        _fill_logical_desc(&desc.column, self._nb)
         if dv.type == DRAKEN_ARRAY and self._nb.array_child_type is not None:
             cv = Vector(self._nb.array_child)
             child = cv._dv
-            cu = cv._nb.logical_type_unit
-            if cu is not None:
-                cunit = _unit_code(cu)
-            csc = cv._nb.logical_type_scale
-            if csc is not None:
-                cscale = <int>csc
-        render_json_column(out, dv, child, unit, scale, cunit, cscale, <size_t>dv.length)
+            _fill_logical_desc(&desc.child, cv._nb)
+        render_json_column(out, dv, child, desc, <size_t>dv.length)
         return PyBytes_FromStringAndSize(out.data(), out.size())
 
     def to_arrow(self):

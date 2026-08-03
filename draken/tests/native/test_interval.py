@@ -6,8 +6,8 @@ Coverage (D.12 acceptance criteria):
   shapes:            sequence / constant / dict
   nullability:       no nulls / some nulls / all null
   sizes:             0 / 1 / small / medium
-  round-trip:        (months, ms) preserved exactly; None → None
-  PostgreSQL eq:     '1 month' == '30 days' (both normalize to 2_592_000_000 ms)
+  round-trip:        (months, us) preserved exactly; None → None
+  PostgreSQL eq:     '1 month' == '30 days' (both normalize to 2_592_000_000_000 µs)
   ingestion errors:  normalization overflow → OverflowError (or ValueError)
   compare_scalar:    all 6 ops, null rows, null scalar → all null
   compare_vector:    eq/ne/lt/gt, null propagation, cross-type throws
@@ -29,8 +29,10 @@ import draken.draken_native as dn
 # ---------------------------------------------------------------------------
 EQ, NE, GT, GE, LT, LE = 0, 1, 2, 3, 4, 5
 
-# Normalization constant: 1 month = 30 days × 86_400_000 ms/day
-MONTH_MS = 2_592_000_000
+# Normalization constant: 1 month = 30 days × 86_400_000_000 µs/day.
+# The slot's sub-month component is MICROSECONDS — see draken/core/interval_slot.h
+# (INTERVAL_MONTH_US). Must stay in step with it.
+MONTH_US = 2_592_000_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +40,7 @@ MONTH_MS = 2_592_000_000
 # ---------------------------------------------------------------------------
 
 def iv(lst):
-    """Build a dense INTERVAL vector from a list of (months, ms) or None."""
+    """Build a dense INTERVAL vector from a list of (months, us) or None."""
     return dn.vector_interval_from_sequence(lst)
 
 def iv_const(value, length):
@@ -53,9 +55,9 @@ def pylist(v):
 def cmp_s(v, scalar, op):
     return pylist(v.compare_scalar(scalar, op))
 
-def norm(months, ms):
+def norm(months, us):
     """Python-side normalization for expected values."""
-    return months * MONTH_MS + ms
+    return months * MONTH_US + us
 
 
 # ===========================================================================
@@ -106,12 +108,12 @@ class TestRoundTrip:
         v = iv([(-6, 0)])
         assert pylist(v) == [(-6, 0)]
 
-    def test_negative_ms(self):
+    def test_negative_us(self):
         v = iv([(0, -1000)])
         assert pylist(v) == [(0, -1000)]
 
     def test_large_values(self):
-        # months=120 (10 years), ms=31_536_000_000 (365 days in ms)
+        # months=120 (10 years), us=31_536_000_000 (a sub-month µs component)
         v = iv([(120, 31_536_000_000)])
         assert pylist(v) == [(120, 31_536_000_000)]
 
@@ -137,32 +139,32 @@ class TestRoundTrip:
 
 class TestPostgresSemantics:
     def test_one_month_equals_30_days(self):
-        # (1 month, 0 ms) and (0 months, 2_592_000_000 ms) normalize identically.
+        # (1 month, 0 µs) and (0 months, 2_592_000_000_000 µs) normalize identically.
         one_month  = iv([(1, 0)])
-        thirty_days = iv([(0, MONTH_MS)])
+        thirty_days = iv([(0, MONTH_US)])
         result = pylist(one_month.compare_vector(thirty_days, EQ))
         assert result == [True]
 
     def test_one_month_equal_hash(self):
         # (1, 0) and (0, 2_592_000_000) must produce the same hash.
         one_month   = iv([(1, 0)])
-        thirty_days = iv([(0, MONTH_MS)])
+        thirty_days = iv([(0, MONTH_US)])
         assert one_month.hash()[0] == thirty_days.hash()[0]
 
     def test_one_month_not_gt_30_days(self):
         one_month   = iv([(1, 0)])
-        thirty_days = iv([(0, MONTH_MS)])
+        thirty_days = iv([(0, MONTH_US)])
         assert pylist(one_month.compare_vector(thirty_days, GT)) == [False]
 
     def test_compare_scalar_one_month_eq_30_days(self):
         v = iv([(1, 0)])
-        result = cmp_s(v, (0, MONTH_MS), EQ)
+        result = cmp_s(v, (0, MONTH_US), EQ)
         assert result == [True]
 
     def test_in_list_normalized_match(self):
         # (1, 0) should be found when set contains (0, 2_592_000_000)
         v = iv([(1, 0), (2, 0)])
-        result = pylist(v.in_list([(0, MONTH_MS), (0, MONTH_MS * 2)]))
+        result = pylist(v.in_list([(0, MONTH_US), (0, MONTH_US * 2)]))
         assert result == [True, True]
 
 
@@ -172,19 +174,19 @@ class TestPostgresSemantics:
 
 class TestIngestionErrors:
     def test_overflow_on_extreme_months(self):
-        # months so large that months × MONTH_MS overflows int64
-        huge_months = (2**63 // MONTH_MS) + 1  # just over overflow
+        # months so large that months × MONTH_US overflows int64
+        huge_months = (2**63 // MONTH_US) + 1  # just over overflow
         with pytest.raises((OverflowError, ValueError)):
             iv([(huge_months, 0)])
 
-    def test_overflow_on_extreme_ms(self):
-        # ms alone overflowing: store months=0, ms=2^63+1
+    def test_overflow_on_extreme_us(self):
+        # us alone overflowing: store months=0, us=2^63+1
         with pytest.raises((OverflowError, ValueError, Exception)):
             # 2^63 overflows int64
             iv([(0, 2**63)])
 
     def test_negative_overflow_months(self):
-        huge_neg = -(2**63 // MONTH_MS) - 1
+        huge_neg = -(2**63 // MONTH_US) - 1
         with pytest.raises((OverflowError, ValueError)):
             iv([(huge_neg, 0)])
 
@@ -263,9 +265,9 @@ class TestCompareScalar:
             cmp_s(v, None, EQ)
 
     def test_normalized_comparison(self):
-        # (1, 0) and (0, MONTH_MS) normalize to the same value
+        # (1, 0) and (0, MONTH_US) normalize to the same value
         v = iv([(1, 0)])
-        assert cmp_s(v, (0, MONTH_MS), EQ) == [True]
+        assert cmp_s(v, (0, MONTH_US), EQ) == [True]
 
 
 # ===========================================================================
@@ -275,9 +277,9 @@ class TestCompareScalar:
 class TestCompareVector:
     def test_eq_vector(self):
         a = iv([(1, 0), (2, 0), (3, 0)])
-        b = iv([(1, 0), (0, MONTH_MS * 2), (4, 0)])
+        b = iv([(1, 0), (0, MONTH_US * 2), (4, 0)])
         result = pylist(a.compare_vector(b, EQ))
-        # (2, 0) vs (0, MONTH_MS * 2): norm(2,0) = 2*MONTH_MS; norm(0,MONTH_MS*2) = 2*MONTH_MS → equal
+        # (2, 0) vs (0, MONTH_US * 2): norm(2,0) = 2*MONTH_US; norm(0,MONTH_US*2) = 2*MONTH_US → equal
         assert result == [True, True, False]
 
     def test_lt_vector(self):
@@ -311,8 +313,8 @@ class TestHash:
         assert h[0] != h[1]  # probabilistic
 
     def test_normalized_equal_hash(self):
-        # (1, 0) and (0, MONTH_MS) normalize to the same ms — must share hash
-        v = iv([(1, 0), (0, MONTH_MS)])
+        # (1, 0) and (0, MONTH_US) normalize to the same µs — must share hash
+        v = iv([(1, 0), (0, MONTH_US)])
         h = v.hash()
         assert h[0] == h[1]
 
@@ -358,9 +360,9 @@ class TestBetween:
         assert result == [True, None, False]
 
     def test_between_normalized_bounds(self):
-        # bound (0, MONTH_MS) is the same as (1, 0)
+        # bound (0, MONTH_US) is the same as (1, 0)
         v = iv([(1, 0), (2, 0)])
-        result = pylist(v.between((0, MONTH_MS), (2, 0)))
+        result = pylist(v.between((0, MONTH_US), (2, 0)))
         assert result == [True, True]
 
 
@@ -385,9 +387,9 @@ class TestInList:
         assert result == [False, False]
 
     def test_in_list_normalized_match(self):
-        # (1, 0) in set that contains (0, MONTH_MS) → must match (same normalized value)
+        # (1, 0) in set that contains (0, MONTH_US) → must match (same normalized value)
         v = iv([(1, 0)])
-        result = pylist(v.in_list([(0, MONTH_MS)]))
+        result = pylist(v.in_list([(0, MONTH_US)]))
         assert result == [True]
 
     def test_in_list_null_in_set_skipped(self):
@@ -406,7 +408,7 @@ class TestArithmetic:
         a = iv([(1, 500), (2, 1000)])
         b = iv([(3, 200), (0, 800)])
         result = pylist(a.add(b))
-        # component-wise: months added, ms added independently
+        # component-wise: months added, us added independently
         assert result == [(4, 700), (2, 1800)]
 
     def test_sub_component_wise(self):
@@ -437,13 +439,13 @@ class TestArithmetic:
         result = pylist(v.neg())
         assert result == [None, (-1, 0)]
 
-    def test_add_cross_month_ms(self):
-        # component-wise: months and ms are NOT merged/normalized
-        a = iv([(1, 0)])     # 1 month, 0 ms
-        b = iv([(0, MONTH_MS)])  # 0 months, one month worth of ms
+    def test_add_cross_month_us(self):
+        # component-wise: months and us are NOT merged/normalized
+        a = iv([(1, 0)])     # 1 month, 0 µs
+        b = iv([(0, MONTH_US)])  # 0 months, one month worth of µs
         result = pylist(a.add(b))
-        # result is (1, MONTH_MS), NOT (2, 0)
-        assert result == [(1, MONTH_MS)]
+        # result is (1, MONTH_US), NOT (2, 0)
+        assert result == [(1, MONTH_US)]
 
     def test_add_cross_type_throws(self):
         a = iv([(1, 0)])
@@ -459,7 +461,7 @@ class TestArithmetic:
 class TestMinMax:
     def test_min_basic(self):
         v = iv([(3, 0), (1, 0), (2, 0)])
-        # min by normalized total_ms; all zero ms so months determines order
+        # min by normalized total_us; all zero us so months determines order
         assert v.min() == (1, 0)
 
     def test_max_basic(self):
@@ -491,9 +493,9 @@ class TestMinMax:
             iv([]).max()
 
     def test_min_normalized_tie_returns_smallest_months(self):
-        # (1, 0) and (0, MONTH_MS) normalize to same value; min returns the first found
+        # (1, 0) and (0, MONTH_US) normalize to same value; min returns the first found
         # (implementation detail — just check it doesn't crash and returns valid interval)
-        v = iv([(1, 0), (0, MONTH_MS)])
+        v = iv([(1, 0), (0, MONTH_US)])
         result = v.min()
         # both are valid — just assert it's a tuple with the right normalized value
         assert isinstance(result, tuple)

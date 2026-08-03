@@ -4,7 +4,7 @@
 //
 //   vector_log(v, base_v)             — LOG(v, base) element-wise → FLOAT64
 //   vector_in_list(v, literals, neg)  — v IN (literals) → BOOL
-//   vector_ip_in_cidr(v, cidr)        — IP IN CIDR → BOOL
+//   vector_ipv4_in_cidr(v, cidr)      — IPv4 (uint32) IN CIDR → BOOL
 //
 // All functions:
 //   1. Unwrap nb::object operands via draken_vector_unwrap (raises TypeError).
@@ -43,6 +43,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/draken_bridge.h"
+#include "core/ipv4.h"          // draken::ipv4::parse_cidr, netmask (shared with casts/IP_TRUNC)
 #include "core/string_slot.h"   // draken_build_string_slot, str_hash_seed, str_data, str_length
 
 // Draken ops
@@ -58,6 +59,8 @@
 // Hashing
 #include "simd_hash.h"              // simd_hash_i64 (RTLD_GLOBAL), NULL_HASH
 #include "carchar_set.hpp"          // opteryx::carchar::CarcharSet
+
+extern "C" VecResult draken_ip_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 
 namespace nb = nanobind;
 using CarcharSet = opteryx::carchar::CarcharSet;
@@ -367,47 +370,6 @@ static VecResult dispatch_in_list(
 }
 
 // ---------------------------------------------------------------------------
-// vector_ip_in_cidr helpers
-// ---------------------------------------------------------------------------
-
-// Parse an IPv4 address from a NUL-free byte buffer.
-// Returns 0 on success, -1 on any parse error.
-static int parse_ip_to_int(
-    const uint8_t* ip, uint32_t length, uint32_t* out) noexcept
-{
-    uint32_t result = 0u;
-    uint32_t num;
-    int shift = 24;
-    uint32_t i = 0;
-    int octet_count = 0;
-
-    while (octet_count < 4) {
-        num = 0u;
-        int digit_count = 0;
-        while (i < length) {
-            uint8_t c = ip[i];
-            if (c < '0' || c > '9') break;
-            num = num * 10u + static_cast<uint32_t>(c - '0');
-            ++digit_count;
-            ++i;
-        }
-        if (digit_count == 0) return -1;
-        if (num > 255u) return -1;
-        result += (num << shift);
-        shift -= 8;
-        ++octet_count;
-        if (octet_count < 4) {
-            if (i >= length || ip[i] != '.') return -1;
-            ++i;
-        } else {
-            if (i < length) return -1;
-        }
-    }
-    *out = result;
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
@@ -438,102 +400,98 @@ void register_vector_misc(nb::module_ &m) {
         "Hash-only, no key verification. NULL propagates (TVL). "
         "Set negate=True for NOT IN LIST.");
 
-    m.def("vector_ip_in_cidr",
+    // vector_ipv4_in_cidr — the UINT32 twin of vector_ip_in_cidr above, backing
+    // the `<<=` / `>>=` containment operators on a native IPv4 column.
+    //
+    // Where the string version re-parses dotted-decimal text on EVERY row, this
+    // reads the address as the 32-bit integer it already is: the whole point of
+    // the IPv4 storage model. Per row the work is one load, one AND and one
+    // compare — no parsing, no branching on text.
+    //
+    // CIDR parsing is delegated to draken::ipv4::parse_cidr so this kernel, the
+    // casts and IP_TRUNC cannot disagree about what a prefix means (including
+    // the /0 case, where a 32-bit shift by 32 would be undefined behaviour).
+    // Python-evaluator counterpart to the registered draken_ip_trunc C-ABI kernel.
+    // Calls the SAME kernel so the two paths cannot disagree on prefix validation
+    // or masking. Result is UINT32; the IPV4 descriptor is re-attached from the
+    // bound output type by the projection, not here.
+    m.def("vector_ip_trunc",
+        [](nb::object v_obj, nb::object prefix_obj) -> nb::object {
+            const DrakenVector* a = unwrap(v_obj);
+            const DrakenVector* p = unwrap(prefix_obj);
+            const DrakenVector* argv[2] = {a, p};
+            VecResult r = draken_ip_trunc(nullptr, argv, 2u);
+            if (r.data == nullptr)
+                throw std::invalid_argument(
+                    r.error_msg ? r.error_msg : "IP_TRUNC failed");
+            return wrap(r);
+        },
+        nb::arg("v"), nb::arg("prefix"),
+        "IP_TRUNC(ip, prefix): network address of ip within a /prefix network. "
+        "prefix is read from row 0 and must be 0..32; out of range raises.");
+
+    m.def("vector_ipv4_in_cidr",
         [](nb::object v_obj, nb::object cidr_obj) -> nb::object {
             const DrakenVector* dv = unwrap(v_obj);
-            if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR
-                    && dv->type != DRAKEN_VARBINARY)
+            if (dv->type != DRAKEN_UINT32)
                 throw std::invalid_argument(
-                    "vector_ip_in_cidr: v must be a string (VARCHAR) vector");
+                    "vector_ipv4_in_cidr: v must be a UINT32 (IPv4) vector");
 
             const DrakenVector* cv = unwrap(cidr_obj);
             if (cv->type != DRAKEN_VARCHAR && cv->type != DRAKEN_NVARCHAR
                     && cv->type != DRAKEN_VARBINARY)
                 throw std::invalid_argument(
-                    "vector_ip_in_cidr: cidr must be a string (VARCHAR) vector");
+                    "vector_ipv4_in_cidr: cidr must be a string (VARCHAR) vector");
             if (cv->length == 0)
-                throw std::invalid_argument("vector_ip_in_cidr: cidr vector must not be empty");
-
-            // Read CIDR string from row 0 of cidr vector.
+                throw std::invalid_argument(
+                    "vector_ipv4_in_cidr: cidr vector must not be empty");
             if (cv->validity != nullptr && !((cv->validity[0] >> 0) & 1u))
-                throw std::invalid_argument("vector_ip_in_cidr: cidr row 0 must not be NULL");
+                throw std::invalid_argument(
+                    "vector_ipv4_in_cidr: cidr row 0 must not be NULL");
 
             const DrakenStringArena* ca =
                 static_cast<const DrakenStringArena*>(cv->data);
             const DrakenStringSlot* cslot = &ca->slots[cv->selection[0]];
-            const uint8_t* cidr_bytes  = str_data(cslot, ca->arena);
-            const uint32_t cidr_len    = str_length(cslot);
-
-            // Find '/' separator.
-            uint32_t slash = 0;
-            while (slash < cidr_len && cidr_bytes[slash] != '/') ++slash;
-            if (slash == cidr_len)
-                throw std::invalid_argument(
-                    "vector_ip_in_cidr: CIDR notation missing '/'");
-
-            // Parse mask size.
-            const uint8_t* mask_str = cidr_bytes + slash + 1u;
-            const uint32_t mask_len = cidr_len - slash - 1u;
-            uint32_t mask_size = 0u;
-            for (uint32_t k = 0; k < mask_len; ++k) {
-                uint8_t c = mask_str[k];
-                if (c < '0' || c > '9')
-                    throw std::invalid_argument(
-                        "vector_ip_in_cidr: CIDR mask is not a valid integer");
-                mask_size = mask_size * 10u + static_cast<uint32_t>(c - '0');
-            }
-            if (mask_size > 32u)
-                throw std::invalid_argument(
-                    "vector_ip_in_cidr: CIDR mask out of range (> 32)");
-
-            uint32_t netmask = mask_size == 0u
-                ? 0u
-                : (0xFFFFFFFFu << (32u - mask_size)) & 0xFFFFFFFFu;
 
             uint32_t base_ip = 0u;
-            if (parse_ip_to_int(cidr_bytes, slash, &base_ip) != 0)
+            uint32_t prefix  = 0u;
+            if (!draken::ipv4::parse_cidr(str_data(cslot, ca->arena),
+                                          str_length(cslot), &base_ip, &prefix)) {
+                char buf[68];
+                const uint32_t slen = str_length(cslot);
+                const uint32_t cp   = slen < 64u ? slen : 64u;
+                std::memcpy(buf, str_data(cslot, ca->arena), cp);
+                buf[cp] = '\0';
                 throw std::invalid_argument(
-                    "vector_ip_in_cidr: invalid CIDR base address");
-            base_ip &= netmask;
+                    std::string("vector_ipv4_in_cidr: invalid CIDR: ") + buf);
+            }
+            const uint32_t netmask = draken::ipv4::netmask(prefix);
 
-            // Probe each row of dv (the IP vector).
-            const uint32_t          n     = dv->length;
-            const DrakenStringArena* arena =
-                static_cast<const DrakenStringArena*>(dv->data);
-            const DrakenStringSlot*  slots = arena->slots;
-            const uint8_t*           nulls = dv->validity;
-
+            const uint32_t  n     = dv->length;
+            const uint8_t*  nulls = dv->validity;
             uint8_t* dst = draken::ops::cmp_alloc_bool_buf(n);
+            if (dst == nullptr)
+                throw std::bad_alloc();
 
-            for (uint32_t i = 0; i < n; ++i) {
-                if (nulls != nullptr && !((nulls[i >> 3] >> (i & 7)) & 1u))
-                    continue;
-
-                const DrakenStringSlot* slot = &slots[dv->selection[i]];
-                const uint32_t slen  = str_length(slot);
-                const uint8_t* sptr  = str_data(slot, arena->arena);
-
-                if (slen == 0) continue;
-
-                uint32_t ip_int = 0u;
-                if (parse_ip_to_int(sptr, slen, &ip_int) != 0) {
-                    // Copy up to 64 bytes for the error message (safe local buffer).
-                    char buf[68];
-                    uint32_t cp = slen < 64u ? slen : 64u;
-                    std::memcpy(buf, sptr, cp);
-                    buf[cp] = '\0';
-                    draken_free(dst);
-                    throw std::invalid_argument(
-                        std::string("vector_ip_in_cidr: invalid IP address: ") + buf);
+            // Pure C++ from here to the wrap: no Python object is touched, so the
+            // GIL is released for the scan itself.
+            {
+                nb::gil_scoped_release _gil;
+                const uint32_t* codes = dv->selection;
+                const uint32_t* data  = static_cast<const uint32_t*>(dv->data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    // A NULL address is not contained by anything. Left as 0 (false)
+                    // rather than propagated as NULL, matching vector_ip_in_cidr.
+                    if (nulls != nullptr && !((nulls[i >> 3] >> (i & 7)) & 1u))
+                        continue;
+                    if ((data[codes[i]] & netmask) == base_ip)
+                        dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
                 }
-
-                if ((ip_int & netmask) == base_ip)
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
             }
 
             VecResult r;
-            r.data     = dst;
-            r.validity = nullptr;
+            r.data           = dst;
+            r.validity       = nullptr;
             r.selection      = draken_identity_sel(n);
             r.owns_selection = false;
             r.data_length    = n;
@@ -543,8 +501,8 @@ void register_vector_misc(nb::module_ &m) {
             return wrap(r);
         },
         nb::arg("v"), nb::arg("cidr"),
-        "v IN CIDR: per-row IPv4 CIDR membership → BOOL. "
+        "IPv4 CIDR containment over a UINT32 address column → BOOL. "
         "cidr is a string Vector; value is read from row 0. "
-        "Invalid IP raises ValueError. Null input rows → False (not NULL).");
+        "Invalid CIDR raises ValueError. Null address rows → False (not NULL).");
 
 }

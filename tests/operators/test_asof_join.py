@@ -63,7 +63,7 @@ def test_asof_basic_gtoreq_row_count():
 def test_asof_basic_gtoreq_correctness():
     # For each planet, ASOF >= finds the right planet with the largest gravity
     # that is still ≤ the left planet's gravity.
-    # Mercury has the smallest gravity (3.7). Its only ≤ match is itself.
+    # Column NAMES come back as bytes; string VALUES come back as str.
     sql = """
         SELECT p.name, p.gravity, p2.name AS match_name, p2.gravity AS match_gravity
         FROM $planets AS p
@@ -72,12 +72,14 @@ def test_asof_basic_gtoreq_correctness():
     rows = _collect(sql)
     by_name = {r[b"p.name"]: r for r in rows}
 
-    # Mercury (gravity 3.7): nearest right gravity ≤ 3.7 → Mercury itself
-    mercury = by_name[b"Mercury"]
+    # Mercury (gravity 3.7): nearest right gravity ≤ 3.7. Mercury and Mars both
+    # sit at 3.7, so which of the tied rows wins is not pinned here — only the
+    # ASOF invariant is.
+    mercury = by_name["Mercury"]
     assert mercury[b"match_gravity"] <= mercury[b"p.gravity"]
 
-    # Jupiter (gravity 24.7, highest): nearest right ≤ 24.7 → Jupiter itself
-    jupiter = by_name[b"Jupiter"]
+    # Jupiter (gravity 23.1, the highest): nearest right ≤ 23.1 → Jupiter itself
+    jupiter = by_name["Jupiter"]
     assert jupiter[b"match_gravity"] <= jupiter[b"p.gravity"]
 
 
@@ -164,6 +166,38 @@ def test_asof_using_partition_row_count():
     total = row_count(sql)
     # Each satellite gets at least itself as a match (id >= id within same planet)
     assert total > 0
+
+
+def test_asof_using_partition_confines_matches():
+    # The USING key is the correctness contract for a partitioned ASOF: a probe
+    # row must NEVER match a build row from a different partition. `>` (not `>=`)
+    # excludes the self-match, so an unpartitioned join would reach back into the
+    # previous planet — which is exactly what a dropped USING key looks like.
+    from opteryx.connectors import DiskConnector
+    opteryx.register_workspace("testdata", DiskConnector)
+
+    sql = """
+        SELECT s.planetId, s2.planetId AS match_pid, s2.name AS match_name
+        FROM testdata.satellites AS s
+        ASOF JOIN testdata.satellites AS s2
+            MATCH_CONDITION(s.id > s2.id)
+            USING (planetId)
+    """
+    rows = _collect(sql)
+    matched = [r for r in rows if r[b"match_name"] is not None]
+    assert matched, "expected some matches"
+
+    cross = [r for r in matched if r[b"s.planetId"] != r[b"match_pid"]]
+    assert not cross, f"USING(planetId) must not match across partitions: {cross[:5]}"
+
+    # And the partition must actually bite: the first satellite of each planet has
+    # no earlier id within its own planet, so it must be unmatched. Unpartitioned,
+    # only the single globally-first satellite would be unmatched.
+    unmatched = len(rows) - len(matched)
+    distinct_planets = len({r[b"s.planetId"] for r in rows})
+    assert unmatched == distinct_planets, (
+        f"expected one unmatched row per planet ({distinct_planets}), got {unmatched}"
+    )
 
 
 # ---------------------------------------------------------------------------

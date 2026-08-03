@@ -712,7 +712,6 @@ void test_draken_string_concat() { DrakenVector* l = static_cast<DrakenVector*>(
 void test_draken_temporal_interval_op() { int64_t d[] = {0}; DrakenVector* l = create_int64_vector(d, 1); DrakenVector* r = create_int64_vector(d, 1); VecResult res = draken_temporal_interval_op(nullptr, l, r); free_vector(l); free_vector(r); }
 void test_draken_date_minus_date() { DrakenVector* l = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); DrakenVector* r = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(l, 0, sizeof(DrakenVector)); memset(r, 0, sizeof(DrakenVector)); l->type = r->type = DRAKEN_DATE32; VecResult res = draken_date_minus_date(nullptr, l, r); free(l); free(r); }
 void test_draken_interval_interval_op() { int64_t d[] = {0}; DrakenVector* l = create_int64_vector(d, 1); DrakenVector* r = create_int64_vector(d, 1); VecResult res = draken_interval_interval_op(nullptr, l, r); free_vector(l); free_vector(r); }
-void test_draken_ip_in_cidr() { DrakenVector* l = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); DrakenVector* r = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(l, 0, sizeof(DrakenVector)); memset(r, 0, sizeof(DrakenVector)); VecResult res = draken_ip_in_cidr(nullptr, l, r); free(l); free(r); }
 // Extraction kernels take every bind-time parameter in extraction_ctx and ignore
 // the ABI's `key` operand. An INT64 operand is not a document/string column, so
 // each must FAIL LOUD (error sentinel), never silently produce a vector.
@@ -838,7 +837,7 @@ void test_registry_honesty() {
     const char* removed_stubs[] = {
         "draken_bitwise_or", "draken_bitwise_and", "draken_bitwise_xor",
         "draken_bitwise_shift_left", "draken_bitwise_shift_right",
-        "draken_string_concat", "draken_ip_in_cidr",
+        "draken_string_concat",
         "draken_temporal_interval_op", "draken_date_minus_date",
         "draken_interval_interval_op",
         "draken_cast_timestamp_to_date32",
@@ -1261,7 +1260,6 @@ int main() {
         {"draken_cast_to_vector", test_draken_cast_to_vector}, {"draken_cast_to_varchar_with_length", test_draken_cast_to_varchar_with_length},
         {"draken_string_concat", test_draken_string_concat}, {"draken_temporal_interval_op", test_draken_temporal_interval_op},
         {"draken_date_minus_date", test_draken_date_minus_date}, {"draken_interval_interval_op", test_draken_interval_interval_op},
-        {"draken_ip_in_cidr", test_draken_ip_in_cidr},
         {"draken_map_access_string", test_draken_map_access_string}, {"draken_array_map_access", test_draken_array_map_access},
         {"draken_json_extract", test_draken_json_extract}, {"draken_pointer_extract", test_draken_pointer_extract},
         {"error_handling", test_error_handling}, {"context_passing", test_context_passing},

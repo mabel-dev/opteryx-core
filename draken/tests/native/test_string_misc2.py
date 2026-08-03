@@ -65,8 +65,8 @@ def _load_module(name, rel_path):
     return mod
 
 _misc2 = _load_module(
-    "vector_string_misc2",
-    "opteryx/compiled/nanobind/vector_string_misc2.cpython",
+    "opteryx.compiled.nanobind.vectors",
+    "opteryx/compiled/nanobind/vectors",
 )
 vector_replace             = _misc2.vector_replace
 vector_cosine_similarity   = _misc2.vector_cosine_similarity

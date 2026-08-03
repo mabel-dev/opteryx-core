@@ -52,17 +52,23 @@ def assert_scan_native(sql):
 # REACHABILITY — every residual reason string is reachable and correctly wired.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("expected_reason,sql", list(census.HAND_SET.items()))
-def test_residual_reason_reachable(expected_reason, sql):
+def test_residual_reasons_reachable():
     """Each canonical query forces exactly its guard and tags the matching reason.
-    A reason may carry a `:<detail>` suffix, so match on the prefix."""
-    sources, reasons, err = census.scan_residuals(sql)
-    assert err is None, f"query raised: {err}"
-    assert set(sources.values()) == {"StreamingScanSource"}, (
-        f"expected trampoline fallback, got sources={sources}")
-    observed = set(reasons.values())
-    assert any(r == expected_reason or r.startswith(expected_reason + ":") for r in observed), (
-        f"expected residual reason {expected_reason!r}, got {sorted(observed)}")
+    A reason may carry a `:<detail>` suffix, so match on the prefix.
+
+    HAND_SET holds one entry today — `footer_gate` via schema evolution, the last
+    residual with a live SQL trigger. Written as a loop rather than a parametrize so
+    that HAND_SET emptying out (when that last one closes) stays a real passing
+    assertion instead of an empty parameter set, which pytest turns into a skip."""
+    for expected_reason, sql in census.HAND_SET.items():
+        sources, reasons, err = census.scan_residuals(sql)
+        assert err is None, f"{expected_reason}: query raised: {err}"
+        assert set(sources.values()) == {"StreamingScanSource"}, (
+            f"{expected_reason}: expected trampoline fallback, got sources={sources}")
+        observed = set(reasons.values())
+        assert any(
+            r == expected_reason or r.startswith(expected_reason + ":") for r in observed
+        ), f"expected residual reason {expected_reason!r}, got {sorted(observed)}"
 
 
 def test_native_scan_records_no_residual():
@@ -108,20 +114,33 @@ def test_native_scan_records_no_residual():
 # below). The reason code has no reachable SQL trigger left, so it has left this
 # list and HAND_SET — see the retirement note in dev/native_residual_census.py for
 # what stays behind the guard defensively.
-_OPEN_CATEGORIES = [
-    ("unlowerable_predicate", census.HAND_SET["unlowerable_predicate"]),
-]
+#
+# `unlowerable_predicate` (R4) is CLOSED — and it was the LAST one, so the frontier
+# is now empty. Its trigger was a pushed regex predicate; the native regex kernels
+# closed it incidentally, which is why the marker outlived the category by some
+# months. See test_regex_predicate_now_native below.
+_OPEN_CATEGORIES: list = []
 
 
-@pytest.mark.parametrize("category,sql", _OPEN_CATEGORIES,
-                         ids=[c for c, _ in _OPEN_CATEGORIES])
-@pytest.mark.xfail(strict=True,
-                   reason="A0 residual frontier: category still on the Python trampoline")
-def test_category_now_native(category, sql):
-    """XFAIL while `category` is an open residual. When its close-out chip lands
-    (the scan goes native), this xpasses → strict-xfail turns it RED, telling the
-    author to retire this marker and mark the category closed."""
-    assert_scan_native(sql)
+def test_residual_frontier():
+    """The residual frontier: every category listed here must still be on the
+    trampoline. When a close-out chip admits one natively this turns RED — the
+    signal to retire its entry and record the category closed.
+
+    `_OPEN_CATEGORIES` is EMPTY: R4 was the last entry. That does NOT mean nothing
+    reaches the trampoline — `footer_gate` via schema evolution still does (see
+    HAND_SET and test_residual_reasons_reachable); it was never in this frontier
+    list because its integer sub-case closed in A1 and the schema-evolution
+    remainder is a distinct structural gap. A loop rather than a strict-xfail
+    parametrize so the empty frontier is a passing assertion, not a skip — and so
+    the RED signal returns automatically if a category is ever re-opened."""
+    for category, sql in _OPEN_CATEGORIES:
+        sources, reasons, err = census.scan_residuals(sql)
+        assert err is None, f"{category}: query raised: {err}"
+        assert set(sources.values()) == {"StreamingScanSource"}, (
+            f"{category} is no longer on the trampoline (sources={sources}) — "
+            f"retire its _OPEN_CATEGORIES/HAND_SET entry and record it closed")
+        assert reasons, f"{category}: expected a residual reason"
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +598,89 @@ def test_fused_topn_without_pass2_columns_takes_the_single_pass_scan():
     assert err is None, f"query raised: {err}"
     assert set(sources.values()) == {"NativeParquetScanSource"}, sources
     assert reasons == {}, reasons
+
+
+# ---------------------------------------------------------------------------
+# CLOSED — R4 `unlowerable_predicate`. Was the last strict-xfail frontier entry;
+# now real passing assertions.
+#
+# The guard is `bytecode_is_all_c_native(filter_bc)` in compiler.py: a PUSHED
+# predicate whose bytecode is not entirely c-native declines the whole native
+# scan. Its canonical trigger was a regex (`WHERE text RLIKE 'a'`), and the
+# native regex work (the SIMD op-program matcher) closed it INCIDENTALLY — there
+# was never an R4 close-out chip, which is why the marker outlived the category.
+#
+# The `return None` guard STAYS, defensively, exactly as R6's does: what is
+# retired is the claim that SQL can still reach it.
+#
+# Note the adjacent class this test does NOT cover: a non-lowerable predicate
+# that never PUSHES becomes a standalone Filter and hard-errors in
+# `_lower_expression` ("outside the c-native kernel set ... no fallback engine").
+# That is a different failure mode which R4 never tagged — see
+# docs/NATIVE_RESIDUAL_PLAN.md finding 2.
+# ---------------------------------------------------------------------------
+
+_REGEX_FLAT = "testdata/flat/formats/parquet"
+
+
+@pytest.mark.parametrize("predicate", [
+    "text RLIKE 'a'",                 # the canonical HAND_SET trigger
+    "text NOT RLIKE 'a'",
+    "text SIMILAR TO 'a.*'",
+    "text NOT SIMILAR TO 'a.*'",
+    "text ~ 'a'",
+    "text !~ 'a'",
+    # composed with a plain compare in the SAME pushed span, and negated
+    "text RLIKE 'a' AND followers > 5",
+    "text RLIKE 'a' OR followers > 5",
+    "NOT (text RLIKE 'a')",
+    # role-3: the regex column is read for the filter but never emitted
+    "text RLIKE 'a'",
+    # other once-suspect predicate kernels that also lower now
+    "SOUNDEX(user_name) = 'A000'",
+    "LEVENSHTEIN(user_name, 'x') < 3",
+    "SPLIT(text, ' ')[1] = 'a'",
+    "CASE WHEN followers > 5 THEN 1 ELSE 0 END = 1",
+    "COALESCE(user_name, 'x') = 'x'",
+])
+def test_regex_predicate_now_native(predicate):
+    """R4 close-out: a pushed predicate that once could not lower to a c-native
+    span now selects the zero-Python native Source. The reason code no longer has
+    a reachable SQL trigger."""
+    sources, reasons, err = census.scan_residuals(
+        "SELECT followers FROM '%s' WHERE %s" % (_REGEX_FLAT, predicate))
+    assert err is None, f"query raised: {err}"
+    assert set(sources.values()) == {"NativeParquetScanSource"}, sources
+    assert reasons == {}, reasons
+
+
+def test_regex_predicate_survivor_count_matches_trampoline():
+    """Admitted natively is not enough — the regex must SELECT THE SAME ROWS. Runs
+    the native path against a forced-trampoline baseline in one process, so this
+    compares the two implementations rather than a hard-coded number."""
+    import opteryx
+    from opteryx.connectors.parquet_io import pool_reader
+
+    sql = "SELECT user_id FROM '%s' WHERE text RLIKE 'a'" % _REGEX_FLAT
+
+    def _count():
+        session = opteryx.session()
+        rows = sum(m.num_rows for m in session.execute_to_morsels(sql))
+        return rows, set(session._telemetry.as_dict()["scan_sources"].values())
+
+    native_rows, native_src = _count()
+
+    original = pool_reader.native_scan_supported
+    pool_reader.native_scan_supported = lambda *a, **k: False
+    try:
+        tramp_rows, tramp_src = _count()
+    finally:
+        pool_reader.native_scan_supported = original
+
+    assert native_src == {"NativeParquetScanSource"}, native_src
+    assert tramp_src == {"StreamingScanSource"}, tramp_src
+    assert native_rows == tramp_rows, (native_rows, tramp_rows)
+    assert native_rows > 0, "predicate matched nothing — not a meaningful parity check"
 
 
 if __name__ == "__main__":  # pragma: no cover

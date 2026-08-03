@@ -56,6 +56,9 @@ void kernel_registry_register(const char* name, kernel_fn_t fn);
  */
 
 cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit);
+// Allocate a CAST-to-ARRAY context. `element_type` is a DrakenType tag; `safe`
+// is 1 for TRY_CAST (bad row -> NULL) and 0 for a plain cast (bad row -> raise).
+cast_array_ctx* kernel_alloc_cast_array_ctx(int element_type, int safe);
 binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
                                           unsigned char left_scale,
                                           unsigned char right_scale,

@@ -53,8 +53,8 @@ def _load_module(name, rel_path):
     return mod
 
 _misc = _load_module(
-    "vector_string_misc",
-    "opteryx/compiled/nanobind/vector_string_misc.cpython",
+    "opteryx.compiled.nanobind.vectors",
+    "opteryx/compiled/nanobind/vectors",
 )
 vector_levenshtein  = _misc.vector_levenshtein
 vector_position     = _misc.vector_position

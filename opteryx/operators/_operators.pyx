@@ -48,7 +48,8 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_LOAD_LIT_BOOL, BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
     BC_COMPARE, BC_BINARY_OP, BC_CAST,
     BC_CMP_INLIST_INLINE, BC_INSTR_C_NATIVE, BC_C_NATIVE_FIXED, BC_C_NATIVE_STRING,
-    BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_UNARY_OP, UOP_IS_NULL, UOP_IS_NOT_NULL, BC_FUNCTION,
+    BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_C_NATIVE_ARRAY,
+    BC_UNARY_OP, UOP_IS_NULL, UOP_IS_NOT_NULL, BC_FUNCTION,
     UOP_IS_TRUE, UOP_IS_FALSE, UOP_IS_NOT_TRUE, UOP_IS_NOT_FALSE,
     BC_EXTRACTION,
     BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_COMPARE,
@@ -2099,7 +2100,7 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
         if op == BC_BINARY_OP or op == BC_CAST:
             if (fl & BC_INSTR_C_NATIVE) != 0 and \
                     (fl & (BC_C_NATIVE_FIXED | BC_C_NATIVE_STRING
-                           | BC_C_NATIVE_DESC)) != 0:
+                           | BC_C_NATIVE_DESC | BC_C_NATIVE_ARRAY)) != 0:
                 continue
             return False
         if op == BC_FUNCTION:

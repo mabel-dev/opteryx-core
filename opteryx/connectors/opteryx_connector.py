@@ -35,7 +35,12 @@ def _warn_no_native_sketches() -> None:
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
-from opteryx.exceptions import CollectionNotEmptyError, DatasetNotFoundError, DatasetReadError
+from opteryx.exceptions import (
+    CollectionNotEmptyError,
+    DatasetNotFoundError,
+    DatasetReadError,
+    InvalidInternalStateError,
+)
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
@@ -191,7 +196,23 @@ class OpteryxTable(Diachronic, PredicatePushable):
                        if raw_element_type is not None else None)
                 _p = getattr(column, "precision", None)
                 _s = getattr(column, "scale", None)
-                if _ot == LogicalCategory.DECIMAL and _p is not None and _s is not None:
+                # IPv4 must be recovered from the RAW type name, not rebuilt from
+                # the category. `_normalize_type` collapses to LogicalCategory, and
+                # IPv4's category IS INTEGER (deliberately — that is what makes
+                # ordering, grouping and joins run on the raw uint32), so a column
+                # the catalog declares as IPV4 came back out of
+                # _CATEGORY_TO_CANONICAL as plain INT64: descriptor destroyed,
+                # scan retag never fires, values render as integers.
+                #
+                # DECIMAL and ARRAY below are special-cased for the same underlying
+                # reason — the category round-trip is lossy for any type carrying
+                # information the category cannot hold. IPv4 is the third instance.
+                _raw_name = getattr(raw_type, "name", None) or (
+                    str(raw_type) if raw_type is not None else None
+                )
+                if _raw_name is not None and str(_raw_name).upper() == "IPV4":
+                    _ct = _lt.IPV4
+                elif _ot == LogicalCategory.DECIMAL and _p is not None and _s is not None:
                     _ct = _lt.DECIMAL(_p, _s)
                 elif _ot == LogicalCategory.ARRAY:
                     _elem = _CATEGORY_TO_CANONICAL.get(_et, _lt.VARIANT) if _et is not None else _lt.VARIANT
@@ -698,6 +719,22 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
         return catalog.collection_exists(relative_id)
 
+    def create_collection(
+        self, collection_name: str, if_not_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Create a collection in the catalog.
+
+        Existence is the catalog's to decide, in one atomic call - deliberately
+        NOT a `collection_exists` check followed by a create. That would be a
+        race, and it would also make CREATE COLLECTION depend on
+        `collection_exists`, which this connector's catalog does not currently
+        provide (the same gap that blocks drop_collection).
+        """
+        workspace, relative_id = self._parse_identifier(collection_name)
+        catalog = self._get_catalog(workspace)
+
+        catalog.create_collection(relative_id, exists_ok=if_not_exists, author=author)
+
     def drop_collection(
         self, collection_name: str, if_exists: bool = False, author: Optional[str] = None
     ) -> None:
@@ -739,6 +776,45 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         catalog.update_dataset_sort_order(relative_id, columns, author=author)
+
+    def rename_relation(
+        self, relation_name: str, new_relation_name: str, author: Optional[str] = None
+    ) -> None:
+        """Rename a dataset in the catalog, optionally moving it between collections.
+
+        The catalog moves everything - data files, every snapshot's manifest,
+        and the catalog entry - so the storage prefix keeps matching the
+        relation name and no two datasets can ever share a location. Snapshot
+        history survives the rename.
+
+        That makes this O(all bytes), not a metadata edit: the catalog copies
+        every file the dataset references (server-side, but still per-object),
+        so renaming a large dataset is a long-running operation behind a
+        statement that reads as instant. The vacated prefix is handed to the
+        existing 24h reclamation sweep rather than deleted inline.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        new_workspace, new_relative_id = self._parse_identifier(new_relation_name)
+        if workspace != new_workspace:
+            raise InvalidInternalStateError(
+                f"rename_relation reached the connector with two workspaces "
+                f"({workspace} -> {new_workspace}); the planner should have rejected this."
+            )
+
+        catalog = self._get_catalog(workspace)
+        catalog.rename_dataset(relative_id, new_relative_id, author=author)
+
+    def set_workspace_property(
+        self, workspace_name: str, property_name: str, value, author: Optional[str] = None
+    ) -> None:
+        """Set a property on the workspace's `$properties` document in the catalog.
+
+        The catalog's setter merges, so sending the single changed property is
+        enough - no read-modify-write here, and no window in which a concurrent
+        change to a different property could be lost.
+        """
+        catalog = self._get_catalog(workspace_name)
+        catalog.set_workspace_properties({property_name: value}, author=author)
 
     def relation_exists(self, relation_name: str) -> bool:
         """Check whether a dataset exists in the catalog."""

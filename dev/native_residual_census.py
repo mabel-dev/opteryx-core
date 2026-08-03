@@ -141,8 +141,28 @@ HAND_SET: Dict[str, str] = {
     # trampoline would have done. See test_wp_r3_latmat_scan.py,
     # test_fused_topn_with_predicate_now_native, and docs/NATIVE_RESIDUAL_PLAN.md
     # item 6. Same retirement convention as R2 / R5 / R5b / R6.)
-    # R4 — a pushed predicate that does not lower to a c-native span (regex).
-    "unlowerable_predicate": "SELECT followers FROM '%s' WHERE text RLIKE 'a'" % _FLAT,
+    # (R4 `unlowerable_predicate` is RETIRED — no longer reachable, so it has no
+    # hand-set entry. Its canonical trigger was `WHERE text RLIKE 'a'`: a pushed
+    # predicate whose bytecode was not all-c-native, so `bytecode_is_all_c_native`
+    # declined and the whole scan fell back. The native regex work closed it
+    # INCIDENTALLY — nobody wrote an R4 close-out chip — which is why the marker
+    # outlived the category. Confirmed closed by (a) the battery census: 165/165
+    # scans native, zero residual reasons of any kind, and (b) a 43-shape hand
+    # sweep over the regex family (RLIKE / NOT RLIKE / SIMILAR TO / ~ / !~,
+    # composed with AND / OR / NOT), string transforms, hashing/encoding, SPLIT,
+    # SOUNDEX, LEVENSHTEIN, ARRAY_CONTAINS, CASE, COALESCE/NULLIF, casts and
+    # arithmetic — every one either goes native or raises. None tags R4.
+    #
+    # ⚠ The `return None` guard in compiler.py STAYS, defensively: it is the
+    # structural fail-closed for any future non-lowerable predicate, exactly like
+    # R6's. What is retired is the claim that SQL can still reach it. R4 was the
+    # last entry in the test's `_OPEN_CATEGORIES` frontier, but NOT the last
+    # trampoline trigger overall — `footer_gate` (schema evolution) below still is.
+    # Note also
+    # that a non-lowerable predicate which never PUSHES is a different class — it
+    # becomes a standalone Filter and hard-errors in `_lower_expression` ("outside
+    # the c-native kernel set ... no fallback engine"), which R4 never tagged. See
+    # test_regex_predicate_now_native, and docs/NATIVE_RESIDUAL_PLAN.md item 7.)
     # (R5 `bool_predicate_input` is RETIRED — no longer reachable, so it has no
     # hand-set entry. A BOOL column used as a predicate input used to fail closed
     # because draken_compare_dv's type switch had no DRAKEN_BOOL branch: every bool

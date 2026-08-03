@@ -341,7 +341,9 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
 
     reader_actions = ["Query", "ShowColumns", "ShowTables", "Use", "ShowCreate"]
     mutation_actions = ["Insert", "Update", "Delete"]
-    ddl_actions = ["CreateTable", "CreateView", "AlterTable", "Drop"]
+    # "AlterFunction" is ALTER WORKSPACE - the SQL rewriter borrows the parser's
+    # AlterFunction statement for it (see sql_rewriter.rewrite_alter_workspace).
+    ddl_actions = ["CreateTable", "CreateView", "AlterTable", "AlterFunction", "Drop"]
 
     return {
         "query_type": query_type,

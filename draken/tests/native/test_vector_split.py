@@ -62,8 +62,8 @@ def _load_module(name, rel_path):
 
 
 _split = _load_module(
-    "vector_split_native",
-    "opteryx/compiled/nanobind/vector_split_native.cpython",
+    "opteryx.compiled.nanobind.vectors",
+    "opteryx/compiled/nanobind/vectors",
 )
 
 

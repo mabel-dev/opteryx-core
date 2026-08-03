@@ -1,6 +1,11 @@
 """
-Test show functions works; the number of functions is constantly changing so test it's
-more than it was when we last reviewed this test.
+SHOW FUNCTIONS is not a supported statement — it must be refused, loudly.
+
+This test used to reach the statement through `opteryx.connect()`/`cursor()`, a
+DBAPI-style surface that no longer exists — the resulting AttributeError is not
+an UnsupportedSyntaxError, so `pytest.raises` did not catch it and the test went
+red without SHOW FUNCTIONS ever being executed. Driven through the current
+session API instead, so the refusal itself is what is asserted.
 """
 
 import os
@@ -11,20 +16,14 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 
-def test_show_functions():
+def test_show_functions_is_unsupported():
     import opteryx
     from opteryx.exceptions import UnsupportedSyntaxError
 
+    session = opteryx.session()
     with pytest.raises(UnsupportedSyntaxError):
-        conn = opteryx.connect()
-        cur = conn.cursor()
-        cur.execute("SHOW FUNCTIONS")
-        rows = cur.fetchall()
-
-        # below here is not in the documentation
-        rows = list(rows)
-        assert len(rows) > 85, len(rows)
-        conn.close()
+        for _ in session.execute_to_morsels("SHOW FUNCTIONS"):
+            pass
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -21,11 +21,17 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     but we do need to determine the connector for storage.
     """
     from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_action
     from opteryx.managers.virtual_datasets import derived
 
     # Get connector gateway (cached by prefix)
     node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.object_name} does not support COMMENT ON"
+        )
 
     # Ensure this user can write to the object location
     if not can_perform_action(context.execution_context, node.object_name, action="WRITE"):

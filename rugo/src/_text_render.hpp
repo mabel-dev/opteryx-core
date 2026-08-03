@@ -7,6 +7,11 @@
 // (low-cardinality columns format each unique value once). float uses
 // std::to_chars (shortest round-trip — the cast kernel is 6-dp display only),
 // decimal/time use the dedicated formatters, strings/arrays render directly.
+//
+// The choice is made from the column's physical type plus its ColumnDesc (see
+// value_format.hpp) — one descriptor carrying the logical kind and whatever
+// parameters that kind implies. The kind matters because a UINT32 column is an
+// IPv4 address or a plain integer depending on it, and nothing else can say.
 
 #include "interop/value_format.hpp"  // moved into draken; resolved via -I draken
 
@@ -19,10 +24,22 @@
 
 #include <algorithm>
 #include <future>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
 namespace rugo_text {
+
+// ---- Excel workbook limits (csv_write for_excel) ----
+// A CSV file has no limits of its own; these are the limits of the grid the
+// user is going to open it in (Excel 2007+ / .xlsx). Excel does not report
+// them — it truncates the over-long cell and drops the rows and columns past
+// the end of the sheet, silently — so for_excel refuses to write a file Excel
+// would mangle rather than producing one that quietly loses data.
+static constexpr size_t kExcelMaxRows = 1048576;      // sheet lines, header included
+static constexpr size_t kExcelMaxCols = 16384;        // last column is XFD
+static constexpr size_t kExcelMaxCellChars = 32767;
 
 typedef void (*EmitFn)(std::string &, struct Col &, size_t);
 
@@ -30,14 +47,35 @@ struct Col {
   const DrakenVector *dv;    // original column (validity + per-cell formatters)
   const DrakenVector *child; // ARRAY element vector
   DrakenVector sv;           // string source (cast result OR original string col)
-  int unit, scale, cunit, cscale;
-  int dim;                   // VECTOR_FP16 only: values per row
+  ColumnDesc desc;           // logical type of the column and its ARRAY element
+  const std::string *name;   // for error messages; null on the JSONL path
   char delim;
   EmitFn emit;               // resolved once per column
   void *free_data;           // cast result block to draken_free (else null)
   const uint32_t *free_sel;  // owned cast selection to draken_free (else null)
   std::string scratch;       // reused per-row JSON staging buffer (ec_array only)
 };
+
+// Excel measures a cell in UTF-16 code units (what VBA's Len() counts), not in
+// bytes and not in codepoints — an astral character costs two. Only ever called
+// for a cell already over the limit in bytes, since n bytes can encode at most
+// n code units.
+static inline size_t utf16_length(const char *s, size_t n) {
+  size_t units = 0;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if ((c & 0xC0) == 0x80) continue; // continuation byte
+    units += c >= 0xF0 ? 2 : 1;       // 4-byte sequence -> surrogate pair
+  }
+  return units;
+}
+
+[[noreturn]] static void excel_too_wide(const std::string &what, size_t chars) {
+  throw std::invalid_argument(
+      "write_csv(for_excel=True): " + what + " is " + std::to_string(chars) +
+      " characters; Excel truncates cells over " +
+      std::to_string(kExcelMaxCellChars) + ".");
+}
 
 // Fetch the rendered string cell at logical row i from a string-source vector.
 static inline bool sv_cell(const DrakenVector &sv, size_t i, const char *&p,
@@ -76,21 +114,21 @@ static void ej_decimal(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_DECIMAL)
-    fmt_decimal(o, (__int128)((const int64_t *)c.dv->data)[p], c.scale);
-  else { __int128 v; std::memcpy(&v, (const uint8_t *)c.dv->data + (size_t)p * 16, 16); fmt_decimal(o, v, c.scale); }
+    fmt_decimal(o, (__int128)((const int64_t *)c.dv->data)[p], c.desc.column.scale);
+  else { __int128 v; std::memcpy(&v, (const uint8_t *)c.dv->data + (size_t)p * 16, 16); fmt_decimal(o, v, c.desc.column.scale); }
 }
 static void ej_time(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
   o.push_back('"');
-  if (c.dv->type == DRAKEN_TIME64) fmt_time(o, ((const int64_t *)c.dv->data)[p], c.unit);
-  else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.unit);
+  if (c.dv->type == DRAKEN_TIME64) fmt_time(o, ((const int64_t *)c.dv->data)[p], c.desc.column.unit);
+  else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.desc.column.unit);
   o.push_back('"');
 }
 static void ej_timestamp(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   o.push_back('"');
-  fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.unit);
+  fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.desc.column.unit);
   o.push_back('"');
 }
 // Direct numeric/temporal emitters — used for DENSE columns (data_length >=
@@ -102,6 +140,13 @@ template <typename T>
 static void ej_int(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   fmt_int64(o, (int64_t)((const T *)c.dv->data)[c.dv->selection[i]]);
+}
+// Unsigned widths widen to uint64_t, never int64_t: a UINT64 above INT64_MAX
+// would otherwise render negative. See fmt_uint64 in value_format.hpp.
+template <typename T>
+static void ej_uint(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
+  fmt_uint64(o, (uint64_t)((const T *)c.dv->data)[c.dv->selection[i]]);
 }
 static void ej_bool(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
@@ -118,7 +163,7 @@ static void ej_array(std::string &o, Col &c, size_t i) {
   uint32_t p = c.dv->selection[i];
   int32_t s = offs[p], e = offs[p + 1];
   o.push_back('[');
-  for (int32_t k = s; k < e; k++) { if (k > s) o.push_back(','); render_json_scalar(o, c.child, (size_t)k, c.cunit, c.cscale); }
+  for (int32_t k = s; k < e; k++) { if (k > s) o.push_back(','); render_json_scalar(o, c.child, (size_t)k, c.desc.child); }
   o.push_back(']');
 }
 // VECTOR_FP16 has no wire representation in CSV/JSONL any more than Parquet
@@ -129,14 +174,24 @@ static void ej_array(std::string &o, Col &c, size_t i) {
 static void ej_fp16(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
-  const uint16_t *base = (const uint16_t *)c.dv->data + (size_t)p * (size_t)c.dim;
+  const uint16_t *base = (const uint16_t *)c.dv->data + (size_t)p * (size_t)c.desc.column.dim;
   o.push_back('[');
-  for (int k = 0; k < c.dim; k++) {
+  for (int k = 0; k < c.desc.column.dim; k++) {
     if (k) o.push_back(',');
     double v = (double)draken_fp16_to_fp32(base[k]);
     if (double_is_nan_or_inf(v)) o.append("null"); else fmt_double(o, v);
   }
   o.push_back(']');
+}
+// An IPv4 column is physically DRAKEN_UINT32; only the descriptor kind says it
+// is an address (see draken/logical_type.h). Rendered dotted-decimal via the
+// canonical draken::ipv4::format, quoted in JSON like the other text-shaped
+// scalars (date/timestamp/time) — an address is not a JSON number.
+static void ej_ipv4(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
+  o.push_back('"');
+  fmt_ipv4(o, ((const uint32_t *)c.dv->data)[c.dv->selection[i]]);
+  o.push_back('"');
 }
 static void ej_null(std::string &o, Col &c, size_t i) { (void)c; (void)i; o.append("null"); }
 
@@ -158,18 +213,18 @@ static void ec_decimal(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
   if (c.dv->type == DRAKEN_DECIMAL)
-    fmt_decimal(o, (__int128)((const int64_t *)c.dv->data)[p], c.scale);
-  else { __int128 v; std::memcpy(&v, (const uint8_t *)c.dv->data + (size_t)p * 16, 16); fmt_decimal(o, v, c.scale); }
+    fmt_decimal(o, (__int128)((const int64_t *)c.dv->data)[p], c.desc.column.scale);
+  else { __int128 v; std::memcpy(&v, (const uint8_t *)c.dv->data + (size_t)p * 16, 16); fmt_decimal(o, v, c.desc.column.scale); }
 }
 static void ec_time(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
-  if (c.dv->type == DRAKEN_TIME64) fmt_time(o, ((const int64_t *)c.dv->data)[p], c.unit);
-  else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.unit);
+  if (c.dv->type == DRAKEN_TIME64) fmt_time(o, ((const int64_t *)c.dv->data)[p], c.desc.column.unit);
+  else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.desc.column.unit);
 }
 static void ec_timestamp(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
-  fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.unit);
+  fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.desc.column.unit);
 }
 static void ec_array(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
@@ -187,6 +242,11 @@ static void ec_int(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   fmt_int64(o, (int64_t)((const T *)c.dv->data)[c.dv->selection[i]]);
 }
+template <typename T>
+static void ec_uint(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) return;
+  fmt_uint64(o, (uint64_t)((const T *)c.dv->data)[c.dv->selection[i]]);
+}
 static void ec_bool(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
@@ -195,6 +255,56 @@ static void ec_bool(std::string &o, Col &c, size_t i) {
 static void ec_date(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   fmt_date(o, ((const int32_t *)c.dv->data)[c.dv->selection[i]]);
+}
+// Dotted-decimal, through csv_field so a '.' delimiter quotes the field instead
+// of splitting the address across four columns. Formatted into a stack buffer
+// (an address is at most 15 bytes) rather than the shared scratch string, so
+// the quote-awareness costs one pass over those bytes and no allocation.
+static void ec_ipv4(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) return;
+  char buf[draken::ipv4::MAX_TEXT_LENGTH];
+  uint32_t n = draken::ipv4::format(((const uint32_t *)c.dv->data)[c.dv->selection[i]], buf);
+  csv_field(o, buf, n, c.delim);
+}
+
+// ---- Excel-checked CSV emitters ----
+// Separate emitters rather than a flag tested per cell: the width check is only
+// reachable for the three shapes that can plausibly produce a 32,767-character
+// cell (text, ARRAY, VECTOR_FP16 — every numeric and temporal rendering is tens
+// of bytes wide at most), and the default non-Excel path keeps the same single
+// fixed emitter per column it has always had.
+//
+// The measurement is on the *cell content*, taken before csv_field quotes it:
+// RFC 4180 quoting is transport, not content, and Excel does not count it.
+static inline void check_cell_width(Col &c, size_t i, const char *p, size_t n) {
+  if (n <= kExcelMaxCellChars)
+    return;
+  // VARBINARY is not text — its bytes are what lands in the cell, so they are
+  // counted as-is rather than decoded as UTF-8.
+  size_t chars = c.dv->type == DRAKEN_VARBINARY ? n : utf16_length(p, n);
+  if (chars > kExcelMaxCellChars)
+    excel_too_wide("column '" + (c.name ? *c.name : std::string("?")) +
+                       "' row " + std::to_string(i),
+                   chars);
+}
+
+static void ec_string_x(std::string &o, Col &c, size_t i) {
+  const char *p; uint32_t n;
+  if (!sv_cell(c.sv, i, p, n)) return;
+  check_cell_width(c, i, p, n);
+  csv_field(o, p, n, c.delim);
+}
+static void ec_array_x(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) return;
+  c.scratch.clear(); ej_array(c.scratch, c, i);
+  check_cell_width(c, i, c.scratch.data(), c.scratch.size());
+  csv_field(o, c.scratch.data(), c.scratch.size(), c.delim);
+}
+static void ec_fp16_x(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) return;
+  c.scratch.clear(); ej_fp16(c.scratch, c, i);
+  check_cell_width(c, i, c.scratch.data(), c.scratch.size());
+  csv_field(o, c.scratch.data(), c.scratch.size(), c.delim);
 }
 
 // Pick the width-specialized integer emitter so the row loop stays branch-free.
@@ -207,6 +317,15 @@ static inline EmitFn pick_int_emitter(DrakenType t, bool csv) {
   }
 }
 
+static inline EmitFn pick_uint_emitter(DrakenType t, bool csv) {
+  switch (t) {
+  case DRAKEN_UINT8:  return csv ? ec_uint<uint8_t>  : ej_uint<uint8_t>;
+  case DRAKEN_UINT16: return csv ? ec_uint<uint16_t> : ej_uint<uint16_t>;
+  case DRAKEN_UINT32: return csv ? ec_uint<uint32_t> : ej_uint<uint32_t>;
+  default:            return csv ? ec_uint<uint64_t> : ej_uint<uint64_t>;
+  }
+}
+
 static inline void vr_to_dv(const VecResult &vr, DrakenVector &dv) {
   dv.data = vr.data; dv.selection = vr.selection; dv.validity = vr.validity;
   dv.data_length = vr.data_length; dv.length = vr.length; dv.type = vr.type;
@@ -216,10 +335,9 @@ static inline void vr_to_dv(const VecResult &vr, DrakenVector &dv) {
 // Resolve one column: choose the cell emitter, and (for int/bool/date/ts) run
 // the batch cast kernel to produce the string source.
 static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *child,
-                        int unit, int scale, int cunit, int cscale, int dim, char delim,
-                        bool csv) {
-  c.dv = dv; c.child = child; c.unit = unit; c.scale = scale;
-  c.cunit = cunit; c.cscale = cscale; c.dim = dim; c.delim = delim;
+                        const ColumnDesc &desc, const std::string *name,
+                        char delim, bool csv, bool for_excel) {
+  c.dv = dv; c.child = child; c.desc = desc; c.name = name; c.delim = delim;
   c.free_data = nullptr; c.free_sel = nullptr;
   VecResult vr;
   bool quoted = false;
@@ -232,6 +350,20 @@ static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *chil
   case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
     if (dense) { c.emit = pick_int_emitter(dv->type, csv); return; }
     vr = draken_cast_integer_to_string(nullptr, dv); break;
+  case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+    // IPv4 is a UINT32 whose descriptor kind says the bits are an address. The
+    // physical tag cannot tell the two apart, so the kind is read HERE, once
+    // per column, and never again — the row loop keeps its single fixed emitter.
+    if (dv->type == DRAKEN_UINT32 && desc.column.kind == LogicalKind::IPV4) {
+      c.emit = csv ? ec_ipv4 : ej_ipv4; return;
+    }
+    // No dict/dense split: draken's int->string cast kernel accepts only the
+    // signed family (it rejects unsigned outright), so the direct emitter is
+    // the only path. It reads via the uniform data[selection[i]] contract, so
+    // it is correct for dense, constant and dictionary shapes alike — a
+    // dictionary-encoded unsigned column simply formats repeated values more
+    // than once.
+    c.emit = pick_uint_emitter(dv->type, csv); return;
   case DRAKEN_BOOL:
     if (dense) { c.emit = csv ? ec_bool : ej_bool; return; }
     vr = draken_cast_bool_to_string(nullptr, dv); break;
@@ -248,11 +380,11 @@ static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *chil
   case DRAKEN_TIME32: case DRAKEN_TIME64:
     c.emit = csv ? ec_time : ej_time; return;
   case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR: case DRAKEN_VARBINARY: case DRAKEN_VARIANT:
-    c.sv = *dv; c.emit = csv ? ec_string : ej_string; return;
+    c.sv = *dv; c.emit = csv ? (for_excel ? ec_string_x : ec_string) : ej_string; return;
   case DRAKEN_ARRAY:
-    c.emit = csv ? ec_array : ej_array; return;
+    c.emit = csv ? (for_excel ? ec_array_x : ec_array) : ej_array; return;
   case DRAKEN_VECTOR_FP16:
-    c.emit = csv ? ec_fp16 : ej_fp16; return;
+    c.emit = csv ? (for_excel ? ec_fp16_x : ec_fp16) : ej_fp16; return;
   default:
     c.emit = csv ? ec_null : ej_null; return;
   }
@@ -313,14 +445,12 @@ static inline BS::thread_pool<> &jsonl_render_pool() {
 // copies give each worker its own array-staging scratch. Small inputs render
 // inline on the calling thread.
 inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const DrakenVector **childs,
-                                            const int *units, const int *scales,
-                                            const int *cunits, const int *cscales,
-                                            const int *dims,
+                                            const ColumnDesc *descs,
                                             const std::string *prefixes, size_t ncols, size_t nrows) {
   std::vector<Col> cols(ncols);
   size_t prefsum = 0;
   for (size_t c = 0; c < ncols; c++) {
-    resolve_col(cols[c], dvs[c], childs[c], units[c], scales[c], cunits[c], cscales[c], dims[c], 0, false);
+    resolve_col(cols[c], dvs[c], childs[c], descs[c], nullptr, 0, false, false);
     prefsum += prefixes[c].size();
   }
   size_t est = prefsum + ncols + 2 + ncols * 8; // reserve heuristic (per row)
@@ -357,15 +487,35 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
 }
 
 inline std::string csv_write(const DrakenVector **dvs, const DrakenVector **childs,
-                             const int *units, const int *scales,
-                             const int *cunits, const int *cscales,
-                             const int *dims,
+                             const ColumnDesc *descs,
                              const std::string *names, size_t ncols, size_t nrows,
-                             char delim, bool header) {
+                             char delim, bool header, bool for_excel) {
+  // Shape checks first: refuse before rendering a file that cannot be opened
+  // whole, rather than after building it.
+  if (for_excel) {
+    size_t lines = nrows + (header ? 1 : 0);
+    if (lines > kExcelMaxRows)
+      throw std::invalid_argument(
+          "write_csv(for_excel=True): " + std::to_string(lines) +
+          " lines (" + std::to_string(nrows) + " rows" +
+          (header ? " + header" : "") + "); an Excel sheet holds " +
+          std::to_string(kExcelMaxRows) + ".");
+    if (ncols > kExcelMaxCols)
+      throw std::invalid_argument(
+          "write_csv(for_excel=True): " + std::to_string(ncols) +
+          " columns; an Excel sheet holds " + std::to_string(kExcelMaxCols) + ".");
+    if (header)
+      for (size_t c = 0; c < ncols; c++)
+        if (names[c].size() > kExcelMaxCellChars) {
+          size_t chars = utf16_length(names[c].data(), names[c].size());
+          if (chars > kExcelMaxCellChars)
+            excel_too_wide("the name of column " + std::to_string(c), chars);
+        }
+  }
   std::vector<Col> cols(ncols);
   size_t namesum = 0;
   for (size_t c = 0; c < ncols; c++) {
-    resolve_col(cols[c], dvs[c], childs[c], units[c], scales[c], cunits[c], cscales[c], dims[c], delim, true);
+    resolve_col(cols[c], dvs[c], childs[c], descs[c], &names[c], delim, true, for_excel);
     namesum += names[c].size();
   }
   std::string out;
@@ -374,9 +524,16 @@ inline std::string csv_write(const DrakenVector **dvs, const DrakenVector **chil
     for (size_t c = 0; c < ncols; c++) { if (c) out.push_back(delim); csv_field(out, names[c].data(), names[c].size(), delim); }
     out.push_back('\n');
   }
-  for (size_t i = 0; i < nrows; i++) {
-    for (size_t c = 0; c < ncols; c++) { if (c) out.push_back(delim); cols[c].emit(out, cols[c], i); }
-    out.push_back('\n');
+  // for_excel's cell-width check throws from inside an emitter; the cast blocks
+  // held by `cols` are ours to release on the way out.
+  try {
+    for (size_t i = 0; i < nrows; i++) {
+      for (size_t c = 0; c < ncols; c++) { if (c) out.push_back(delim); cols[c].emit(out, cols[c], i); }
+      out.push_back('\n');
+    }
+  } catch (...) {
+    free_cols(cols);
+    throw;
   }
   free_cols(cols);
   return out;

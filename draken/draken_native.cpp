@@ -39,6 +39,7 @@ namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include "fast_float.h"
 #include "ryu.h"
 #include "core/buffers.h"
+#include "core/ipv4.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
@@ -1411,6 +1412,29 @@ static inline int32_t py_date_to_days(PyObject* d) {
 }
 
 // int32 days since Unix epoch → Python datetime.date.
+// A UINT32 carrying LogicalKind::IPV4 reads back as a dotted-decimal `str`,
+// not as the raw integer — the same choice TIMESTAMP64 makes when it reads back
+// as a datetime rather than raw micros. The bits are unchanged; only the
+// presentation at the Python edge differs.
+//
+// Every readback surface must agree, or the same column reads back as "10.0.0.1"
+// through one entry point and 167772161 through another. That means __getitem__,
+// to_pylist, min and max alike: min/max of an address column are addresses.
+static nb::object ipv4_to_py_str(uint32_t value) {
+    char buf[draken::ipv4::MAX_TEXT_LENGTH];
+    const uint32_t n = draken::ipv4::format(value, buf);
+    return nb::str(buf, static_cast<size_t>(n));
+}
+
+// True when this vector is an IPv4 column: UINT32 refined by an IPV4 descriptor.
+// A UINT32 with no descriptor is a plain unsigned integer and must keep reading
+// back as one.
+static inline bool is_ipv4_vector(const VectorOwner& v) {
+    return v.vec.type == DRAKEN_UINT32
+        && v.logical_type != nullptr
+        && v.logical_type->kind == LogicalKind::IPV4;
+}
+
 static nb::object days_to_py_date(int32_t days) {
     int y, mo, d, h, mi, s, us;
     us_epoch_to_parts(static_cast<int64_t>(days) * 86400000000LL,
@@ -3374,6 +3398,15 @@ static inline int64_t row_narrow_int(const DrakenVector& v, uint32_t i) noexcept
 // rather than a sign-extending narrow-int helper). nb::cast on an unsigned C++
 // integer produces a correct arbitrary-precision Python int even above
 // INT64_MAX, so this covers all four widths uniformly.
+// Direct uint32 row read. IPv4 readback needs the raw 32 bits, and must NOT go
+// through row_narrow_int: that switch covers the signed family only and its
+// default arm reads the buffer as int64_t*, which on a 4-byte-element column
+// splices two adjacent rows into one value (and reads out of bounds on the last
+// row). row_uint_boxed does the right read but returns a boxed Python int.
+static inline uint32_t row_uint32(const DrakenVector& v, uint32_t i) noexcept {
+    return static_cast<const uint32_t*>(v.data)[v.selection[i]];
+}
+
 static inline nb::object row_uint_boxed(const DrakenVector& v, uint32_t i) {
     const uint32_t idx = v.selection[i];
     switch (v.type) {
@@ -6846,6 +6879,7 @@ NB_MODULE(draken_native, m) {
         .value("TIME",      LogicalKind::TIME)
         .value("DECIMAL",   LogicalKind::DECIMAL)
         .value("VECTOR",    LogicalKind::VECTOR)
+        .value("IPV4",      LogicalKind::IPV4)
         .export_values();
 
     nb::enum_<TimestampUnit>(m, "TimestampUnit")
@@ -6875,14 +6909,20 @@ NB_MODULE(draken_native, m) {
         .def_ro("precision",      &LogicalType::precision)
         .def_ro("scale",          &LogicalType::scale)
         .def_ro("dimension",      &LogicalType::dimension)
+        // `.none()` is required: without it nanobind refuses to bind None to an
+        // nb::handle argument and raises TypeError instead of reaching the body,
+        // so `descriptor == None` blew up while `descriptor == 5` correctly
+        // returned False. That asymmetry is reachable from any ColumnType
+        // comparison where both sides share a physical tag but only one carries
+        // a descriptor — exactly the UINT32-vs-IPv4 case.
         .def("__eq__", [](const LogicalType& a, nb::handle o) -> bool {
             if (!nb::isinstance<LogicalType>(o)) return false;
             return a == nb::cast<LogicalType>(o);
-        })
+        }, nb::arg("other").none())
         .def("__ne__", [](const LogicalType& a, nb::handle o) -> bool {
             if (!nb::isinstance<LogicalType>(o)) return true;
             return a != nb::cast<LogicalType>(o);
-        })
+        }, nb::arg("other").none())
         .def("__hash__", [](const LogicalType& a) -> Py_hash_t {
             size_t h = static_cast<size_t>(a.kind);
             h = h * 131u + static_cast<size_t>(a.unit);
@@ -6959,6 +6999,8 @@ NB_MODULE(draken_native, m) {
                         static_cast<double>(fp16_ieee_to_fp32_value(row[k]))));
                 return result;
             }
+            if (is_ipv4_vector(v))
+                return ipv4_to_py_str(row_uint32(v.vec, idx));
             if (v.vec.type == DRAKEN_TIMESTAMP64)
                 return instant_to_py_datetime(row_int64(v.vec, idx), v.logical_type);
             if (v.vec.type == DRAKEN_DATE32)
@@ -7030,7 +7072,7 @@ NB_MODULE(draken_native, m) {
                 }
                 return out;
             }
-            // D.12: interval — each row is a (months, ms) tuple.
+            // D.12: interval — each row is a (months, us) tuple.
             if (v.vec.type == DRAKEN_INTERVAL) {
                 const DrakenIntervalSlot* data =
                     static_cast<const DrakenIntervalSlot*>(v.vec.data);
@@ -7053,6 +7095,9 @@ NB_MODULE(draken_native, m) {
             const bool is_binary   = (v.vec.type == DRAKEN_VARBINARY);
             const bool is_float    = is_float_type(v.vec.type);
             const bool is_uint     = is_unsigned_type(v.vec.type);
+            // Hoisted with the other type flags: the descriptor is a per-column
+            // property, so the row loop must not re-derive it per value.
+            const bool is_ipv4     = is_ipv4_vector(v);
             const bool is_time64   = (v.vec.type == DRAKEN_TIME64);
             if (is_time && !v.logical_type)
                 throw std::invalid_argument(
@@ -7085,6 +7130,8 @@ NB_MODULE(draken_native, m) {
                     out.append(row_bytes(v.vec, i));
                 } else if (is_float) {
                     out.append(nb::cast(row_float(v.vec, i)));
+                } else if (is_ipv4) {
+                    out.append(ipv4_to_py_str(row_uint32(v.vec, i)));
                 } else if (is_uint) {
                     out.append(row_uint_boxed(v.vec, i));
                 } else {
@@ -7401,6 +7448,8 @@ NB_MODULE(draken_native, m) {
                         "TIME vector is missing its logical-type descriptor");
                 return raw_to_py_time(val, v.logical_type->unit);
             }
+            if (is_ipv4_vector(v))
+                return ipv4_to_py_str(static_cast<uint32_t>(val));
             if (v.vec.type == DRAKEN_DECIMAL) {
                 require_decimal_descriptor(v, "min");
                 return unscaled_to_py_decimal(val, v.logical_type->scale);
@@ -7412,7 +7461,7 @@ NB_MODULE(draken_native, m) {
         // max(): empty or all-null → raises ValueError.
         // TIMESTAMP64: returns datetime; DATE32: returns date; TIME32/64: returns time.
         // DECIMAL: returns decimal.Decimal preserving scale.
-        // INTERVAL: returns (months, ms) tuple of the row with maximum normalized duration.
+        // INTERVAL: returns (months, us) tuple of the row with maximum normalized duration.
         .def("max", [](const VectorOwner& v) -> nb::object {
             if (v.vec.type == DRAKEN_ARRAY)
                 throw std::invalid_argument("max: not supported for DRAKEN_ARRAY");
@@ -7461,6 +7510,8 @@ NB_MODULE(draken_native, m) {
                         "TIME vector is missing its logical-type descriptor");
                 return raw_to_py_time(val, v.logical_type->unit);
             }
+            if (is_ipv4_vector(v))
+                return ipv4_to_py_str(static_cast<uint32_t>(val));
             if (v.vec.type == DRAKEN_DECIMAL) {
                 require_decimal_descriptor(v, "max");
                 return unscaled_to_py_decimal(val, v.logical_type->scale);
@@ -8531,7 +8582,7 @@ NB_MODULE(draken_native, m) {
                     }
                     { nb::gil_scoped_release _gil; return vecresult_to_owner(draken_in_list(v.vec, set)); }
                 }
-                // D.12: INTERVAL — normalize each value to total_ms, hash.
+                // D.12: INTERVAL — normalize each value to total_us, hash.
                 if (v.vec.type == DRAKEN_INTERVAL) {
                     for (size_t k = 0; k < n; ++k) {
                         nb::object obj = values[static_cast<Py_ssize_t>(k)];
@@ -8716,6 +8767,15 @@ NB_MODULE(draken_native, m) {
         })
         // D.8 — logical-type introspection (primarily for tests and consumers).
         // Returns None for types that carry no logical descriptor.
+        //
+        // The KIND is the descriptor field that cannot be inferred from the
+        // physical tag: DRAKEN_UINT32 is both a plain unsigned column and an
+        // IPv4 address column, and only this tells them apart. The text
+        // writers read it to choose their per-column emitter.
+        .def_prop_ro("logical_type_kind", [](const VectorOwner& v) -> nb::object {
+            if (!v.logical_type) return nb::none();
+            return nb::cast(v.logical_type->kind);
+        })
         .def_prop_ro("logical_type_unit", [](const VectorOwner& v) -> nb::object {
             if (!v.logical_type) return nb::none();
             return nb::cast(std::string(unit_to_str(v.logical_type->unit)));
@@ -9692,19 +9752,20 @@ NB_MODULE(draken_native, m) {
             return make_interval_from_sequence(seq);
         },
         nb::arg("sequence"),
-        "Build a dense INTERVAL Vector from a Python list[(months: int, ms: int) | None].\n"
-        "Each non-null element must be a 2-tuple (months: int, ms: int).\n"
+        "Build a dense INTERVAL Vector from a Python list[(months: int, us: int) | None].\n"
+        "Each non-null element must be a 2-tuple (months: int, us: int); the second\n"
+        "component is MICROSECONDS (see draken/core/interval_slot.h).\n"
         "None elements become null rows.\n"
-        "Raises OverflowError if months × 2_592_000_000 + ms overflows int64.\n"
-        "Normalized comparison: total_ms = months × 2_592_000_000 + ms (30-day month).\n"
-        "Arithmetic: component-wise (months and ms independently, not normalized).");
+        "Raises OverflowError if months × 2_592_000_000_000 + us overflows int64.\n"
+        "Normalized comparison: total_us = months × 2_592_000_000_000 + us (30-day month).\n"
+        "Arithmetic: component-wise (months and us independently, not normalized).");
 
     m.def("vector_interval_from_constant",
         [](nb::object value, uint32_t length) {
             return make_interval_constant(value, length);
         },
         nb::arg("value").none(true), nb::arg("length"),
-        "Build a constant INTERVAL Vector from a single (months, ms) tuple or None.\n"
+        "Build a constant INTERVAL Vector from a single (months, us) tuple or None.\n"
         "None produces a length-row all-null vector.\n"
         "Raises OverflowError if normalization overflows int64.");
 
@@ -9714,7 +9775,7 @@ NB_MODULE(draken_native, m) {
         },
         nb::arg("values"), nb::arg("codes"), nb::arg("nulls") = nb::none(),
         "Build a dict-encoded INTERVAL Vector.\n"
-        "values: list of distinct (months, ms) tuples (the dictionary).\n"
+        "values: list of distinct (months, us) tuples (the dictionary).\n"
         "codes: list of uint32 indices into values.\n"
         "nulls: optional bytes validity bitmap (1 bit per logical row, LSB first); "
         "None = all valid.\n"
@@ -9987,6 +10048,101 @@ NB_MODULE(draken_native, m) {
         "(\"s\"/\"ms\"/\"us\"/\"ns\"). MOVES the source's buffers — the source "
         "Vector is emptied and must not be used afterwards; caller must hold the "
         "sole reference.");
+
+    // vector_retag_uint32_as_ipv4 — the IPv4 twin of the retag above.
+    //
+    // Parquet has no IPv4 concept: an address column is stored, and decoded, as a
+    // plain uint32 (this is the whole point of the storage model — the files stay
+    // interoperable with tools that have never heard of the type). The IPv4-ness
+    // lives in the Opteryx catalog, so the scan decodes uint32 and this attaches
+    // the descriptor that makes it render and cast as an address.
+    //
+    // Zero-copy and MOVE-based for the same reason as the timestamp retag: the
+    // bits are already exactly right, only the label is missing.
+    m.def("vector_retag_uint32_as_ipv4",
+        [](nb::object obj) -> VectorOwner {
+            if (obj.is_none() || !nb::isinstance<VectorOwner>(obj))
+                throw std::invalid_argument(
+                    "vector_retag_uint32_as_ipv4: expected draken Vector");
+            VectorOwner* src = nb::inst_ptr<VectorOwner>(obj);
+            if (src->vec.type != DRAKEN_UINT32)
+                throw std::invalid_argument(
+                    "vector_retag_uint32_as_ipv4: requires UINT32 vector");
+            // The type tag does NOT change — IPv4 IS uint32. Only the descriptor
+            // is attached, which is what distinguishes this from every other
+            // retag in this file.
+            DrakenVector v = src->vec;
+            VectorOwner owner(v,
+                              std::move(src->data_buf),
+                              std::move(src->validity_buf),
+                              std::move(src->codes_buf));
+            src->vec.data = nullptr;
+            src->vec.validity = nullptr;
+            src->vec.length = 0;
+            src->vec.data_length = 0;
+            LogicalType lt;
+            lt.kind = LogicalKind::IPV4;
+            owner.logical_type = logical_type_intern(lt);
+            return owner;
+        },
+        nb::arg("vec"),
+        "Zero-copy retag of a UINT32 Vector to IPv4 by attaching the IPV4 "
+        "logical-type descriptor. The physical tag is unchanged. MOVES the "
+        "source's buffers — the source Vector is emptied and must not be used "
+        "afterwards; caller must hold the sole reference.");
+
+    // ipv4_parse — scalar dotted-decimal text -> uint32, for the PLANNER.
+    //
+    // CAST(<literal> AS IPV4) is folded at plan time, so the fold has to produce
+    // exactly the integer draken_cast_string_to_ipv4 would have produced for the
+    // same text on a column. A second parser written in Python would be free to
+    // drift on precisely the forms ipv4.h deliberately refuses — inet_aton
+    // shorthand ("10.1"), leading zeros ("010.0.0.1"), trailing junk,
+    // out-of-range octets — and a planner and an engine disagreeing about what
+    // "010.1" means is a security bug in an ACL-style predicate, not a cosmetic
+    // difference. So the fold calls this, and this calls the one parser.
+    //
+    // Accepts str or bytes and reads the raw bytes of either, which is what the
+    // kernel sees, so the two cannot disagree about encoding either.
+    //
+    // Raises ValueError on a rejected address — the caller decides whether that
+    // is a CAST error or a TRY_CAST NULL.
+    m.def("ipv4_parse",
+        [](nb::object text) -> uint32_t {
+            const char* ptr = nullptr;
+            Py_ssize_t  len = 0;
+            PyObject*   obj = text.ptr();
+            if (PyUnicode_Check(obj)) {
+                ptr = PyUnicode_AsUTF8AndSize(obj, &len);
+                if (ptr == nullptr) throw nb::python_error();
+            } else if (PyBytes_Check(obj)) {
+                if (PyBytes_AsStringAndSize(obj, const_cast<char**>(&ptr), &len) < 0)
+                    throw nb::python_error();
+            } else {
+                throw std::invalid_argument("ipv4_parse: expected str or bytes");
+            }
+            // Bound the length before narrowing to uint32. Anything longer than
+            // "255.255.255.255" is trailing junk, which parse() rejects anyway —
+            // this only stops a >4GB input from wrapping the cast into a length
+            // that would look valid.
+            uint32_t value = 0u;
+            if (len < 0 || len > static_cast<Py_ssize_t>(draken::ipv4::MAX_TEXT_LENGTH) ||
+                !draken::ipv4::parse(reinterpret_cast<const uint8_t*>(ptr),
+                                     static_cast<uint32_t>(len), &value)) {
+                // Echo a bounded prefix: the input is untrusted and may be huge.
+                const size_t echo = (len < 0) ? 0u : (len > 64 ? 64u : static_cast<size_t>(len));
+                throw std::invalid_argument(
+                    "ipv4_parse: '" + std::string(ptr, echo) +
+                    "' is not a valid IPv4 address (expected four decimal octets "
+                    "0-255 separated by dots, with no leading zeros, shorthand or "
+                    "trailing characters)");
+            }
+            return value;
+        },
+        nb::arg("text"),
+        "Parse dotted-decimal IPv4 text (str or bytes) to its uint32 value using "
+        "draken::ipv4::parse — the same strict parser the CAST kernel uses. "
+        "Raises ValueError on an invalid address.");
 
     // vector_retag_array_child_as_timestamp64 — the ARRAY twin of the retag above.
     //

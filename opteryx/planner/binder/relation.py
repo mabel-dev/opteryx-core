@@ -66,6 +66,37 @@ def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
+def visit_create_collection(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """
+    Bind the CREATE COLLECTION node to determine which connector should handle
+    creating the collection.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.collection_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.collection_name} does not support CREATE COLLECTION"
+        )
+
+    # Creating a collection risks nothing existing, so this is the fresh-create
+    # tier a writer holds - NOT the owner tier DROP COLLECTION requires, which
+    # exists because dropping destroys. An owner policy covering the workspace
+    # (e.g. "workspace.*") matches a 2-part collection name via fnmatch.
+    if not can_perform_action(context.execution_context, node.collection_name, action="CREATE"):
+        raise PermissionError(
+            f"User does not have permission to create collection {node.collection_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_drop_collection(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the DROP COLLECTION node to determine which connectors should handle
@@ -121,6 +152,99 @@ def visit_alter_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
     if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
         raise PermissionError(
             f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_rename_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER TABLE ... RENAME TO node to determine which connector should
+    handle moving the relation.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    # A rename destroys the source name and creates the target one, so it is
+    # gated at both ends: owner on the source (same tier as DROP - the old
+    # relation stops existing under that name) and the fresh-create tier on the
+    # target, so a writer cannot move a relation into a collection they have no
+    # grant on. The workspace is guaranteed unchanged by the logical planner, so
+    # both names resolve through the same connector.
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to rename table {node.relation_name}"
+        )
+    if not can_perform_action(context.execution_context, node.new_relation_name, action="CREATE"):
+        raise PermissionError(
+            f"User does not have permission to rename table to {node.new_relation_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ANALYZE TABLE / DROP STATISTICS node.
+
+    Both statements share the Analyze node, dispatching on `action`, so they
+    share this binder and its permission tier.
+
+    Gated at ALTER (owner), the same tier as ALTER TABLE ... CLUSTER BY: neither
+    changes the relation's rows, both rewrite the metadata the optimizer plans
+    from, and DROP STATISTICS destroys it outright. Until this existed neither
+    statement was authorized at all - the Analyze node had no visitor, and a
+    node type with no visitor is silently passed through by
+    BinderVisitor.visit_node.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.managers.permissions import can_perform_action
+
+    verb = "analyze" if node.action == "analyze_table" else "drop statistics on"
+
+    if not can_perform_action(context.execution_context, node.table_name, action="ALTER"):
+        raise PermissionError(f"User does not have permission to {verb} table {node.table_name}")
+
+    node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER WORKSPACE ... SET node to determine which connector should
+    handle persisting the workspace property.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_workspace_action
+
+    node.connector = connector_factory(node.workspace_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.workspace_name} does not support ALTER WORKSPACE"
+        )
+
+    # Owner of the workspace itself - owning relations within it is not enough,
+    # since these properties govern the whole workspace (see
+    # can_perform_workspace_action for why this is not can_perform_action).
+    if not can_perform_workspace_action(
+        context.execution_context, node.workspace_name, action="ALTER"
+    ):
+        raise PermissionError(
+            f"User does not have permission to alter workspace {node.workspace_name}"
         )
 
     node.columns = []

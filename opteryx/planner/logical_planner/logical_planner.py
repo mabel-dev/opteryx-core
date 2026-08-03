@@ -68,9 +68,12 @@ class LogicalPlanStepType(int, Enum):
     DropRelation = auto()
     TruncateRelation = auto()
     AlterRelation = auto()
+    RenameRelation = auto()
     Insert = auto()
 
+    CreateCollection = auto()
     DropCollection = auto()
+    AlterWorkspace = auto()
 
 
 class LogicalPlan(Graph):
@@ -908,6 +911,15 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         for column in _projection:
             if (
                 column.node_type == NodeType.LITERAL
+                # A typed NULL is never a parenthesised value list — `(a, b)` always
+                # carries values. `CAST(NULL AS ARRAY<E>)` folds to a NULL literal that
+                # must keep ARRAY<E> (nothing downstream could recover the element type
+                # otherwise), which gives it category ARRAY and would trip this refusal.
+                # Exempted narrowly by absence of a value, NOT by widening the category
+                # test: an array literal that HAS values still cannot be projected (its
+                # materialization is broken three separate ways), and this guard is what
+                # keeps that a clean error instead of a TypeError or an empty array.
+                and column.value is not None
                 and column.type is not None
                 and column.type.category
                 in (
@@ -917,9 +929,16 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
-                        "Values cannot be parenthesised in the SELECT clause — did you mean DISTINCT ON(cols) cols FROM ?"
+                        "A value list cannot be projected in the SELECT clause — did you mean DISTINCT ON(cols) cols FROM ?"
                     )
-                raise UnsupportedSyntaxError("Values cannot be parenthesised in the SELECT clause.")
+                # Names BOTH spellings: the message used to say "parenthesised"
+                # at a caller who had typed `SELECT ['a','b']`, sending them to
+                # look for parentheses they had not used.
+                raise UnsupportedSyntaxError(
+                    "A literal list cannot be projected in the SELECT clause, in either "
+                    "`['a', 'b']` or `('a', 'b')` form. Use `UNNEST(('a', 'b'))` in the "
+                    "FROM clause to build a relation from literals."
+                )
 
         # ORDER BY needing to be able to order by columns not in the projection
         # whilst being able to order by aliases created by the projection means
@@ -1405,6 +1424,9 @@ def plan_explain(statement, **kwargs) -> LogicalPlan:
         explain_node.format = "TEXT"
     else:
         explain_node.format = explain_format.get("Keyword", "TEXT").upper()
+    # GRAPHVIZ is the carrier token, not a request: the parser has no MERMAID
+    # keyword, so sql_rewriter.rewrite_explain sends MERMAID through as GRAPHVIZ
+    # (and rejects a genuine FORMAT GRAPHVIZ before parsing). This maps it back.
     if explain_node.format == "GRAPHVIZ":
         explain_node.format = "MERMAID"
 
@@ -1648,8 +1670,8 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
 
 
 def plan_show_variables(statement, **kwargs):
-    """SHOW VARIABLES, SHOW USER, SHOW MANIFEST FOR — planned from the parser's
-    generic `ShowVariable` catch-all.
+    """SHOW VARIABLES, SHOW USER, SHOW GRANTS, SHOW MANIFEST FOR — planned from
+    the parser's generic `ShowVariable` catch-all.
 
     The parser folds every bare `SHOW <words>` form it does not recognise as
     its own statement into a single `ShowVariable` node carrying the trailing
@@ -1677,6 +1699,11 @@ def plan_show_variables(statement, **kwargs):
         # `$user` is INTERNAL_ONLY_DATASETS on the same rule as `$variables`:
         # SHOW USER is its only surface.
         return _plan_virtual_dataset_scan("$user", internal_relation=True)
+    if words == ["GRANTS"]:
+        # `$grants` is INTERNAL_ONLY_DATASETS on the same rule: SHOW GRANTS is
+        # its only surface. It reports the session's own policies and confers
+        # nothing — Opteryx has no GRANT/REVOKE.
+        return _plan_virtual_dataset_scan("$grants", internal_relation=True)
     if words == ["LIKE"]:
         # The parser discards the pattern, so we cannot apply it.
         raise UnsupportedSyntaxError(
@@ -1695,7 +1722,7 @@ def plan_show_variables(statement, **kwargs):
         return _plan_show_manifest(table_name)
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
-        "supported forms are `SHOW VARIABLES`, `SHOW USER`, and "
+        "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, and "
         "`SHOW MANIFEST FOR <table>`."
     )
 
@@ -1705,6 +1732,14 @@ def plan_show_create_query(statement, **kwargs):
     plan = LogicalPlan()
     show_step = LogicalPlanNode(node_type=LogicalPlanStepType.Show)
     show_step.object_type = statement[root_node]["obj_type"].upper()
+    if show_step.object_type != "VIEW":
+        # Rejected here, by name, rather than at execution time: a table has no
+        # stored CREATE statement to show (its schema is the catalog's, not a
+        # statement we kept), so no amount of planning makes this answerable.
+        raise UnsupportedSyntaxError(
+            f"Opteryx does not support 'SHOW CREATE {show_step.object_type}'; "
+            "only `SHOW CREATE VIEW <view>` is supported."
+        )
     show_step.object_name = extract_variable(statement[root_node]["obj_name"])
     if isinstance(show_step.object_name, list):
         show_step.object_name = ".".join(show_step.object_name)
@@ -1735,8 +1770,16 @@ def plan_create_view(statement, **kwargs):
     # Extract OR REPLACE flag
     create_view_node.or_replace = statement[root_node].get("or_replace", False)
 
-    # Extract MATERIALIZED flag (if supported)
-    create_view_node.materialized = statement[root_node].get("materialized", False)
+    # Opteryx has no materialization: the view body is stored as text and
+    # planned afresh on every reference. Accepting MATERIALIZED and creating an
+    # ordinary view would hand back something that reads as precomputed and is
+    # not - and DROP MATERIALIZED VIEW is rejected, so it could not even be
+    # dropped by the name it was created with.
+    if statement[root_node].get("materialized", False):
+        raise UnsupportedSyntaxError(
+            "Opteryx does not support materialized views; "
+            "`CREATE VIEW` stores the query and plans it on each reference."
+        )
 
     # Extract columns (if specified)
     columns = statement[root_node].get("columns")
@@ -1842,9 +1885,10 @@ def plan_alter_table(statement, **kwargs):
     Create a logical plan for ALTER TABLE statement.
 
     ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column [, column ...])
+    ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name
 
-    This is the only ALTER TABLE operation Opteryx supports; any other
-    operation (RENAME, ADD COLUMN, DROP COLUMN, ...) is rejected.
+    These are the only ALTER TABLE operations Opteryx supports; any other
+    operation (ADD COLUMN, DROP COLUMN, ...) is rejected.
     """
     root_node = "AlterTable"
     plan = LogicalPlan()
@@ -1857,26 +1901,193 @@ def plan_alter_table(statement, **kwargs):
     if isinstance(relation_name, list):
         relation_name = ".".join(relation_name)
 
+    if_exists = alter_statement.get("if_exists", False)
+
     operations = alter_statement.get("operations") or []
-    if len(operations) != 1 or "ClusterBy" not in operations[0]:
+    if len(operations) != 1:
         raise UnsupportedSyntaxError(
-            "Opteryx only supports 'ALTER TABLE ... CLUSTER BY (...)'."
+            "Opteryx only supports a single ALTER TABLE operation per statement."
+        )
+    operation = operations[0]
+
+    if "ClusterBy" in operation:
+        cluster_columns = []
+        for expr in operation["ClusterBy"]["exprs"]:
+            if "Identifier" not in expr:
+                raise UnsupportedSyntaxError(
+                    "CLUSTER BY only supports column names, not expressions."
+                )
+            cluster_columns.append(expr["Identifier"]["value"])
+
+        alter_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterRelation)
+        alter_relation_node.relation_name = relation_name
+        alter_relation_node.cluster_columns = cluster_columns
+        alter_relation_node.if_exists = if_exists
+
+        plan.add_node(random_string(), alter_relation_node)
+        return plan
+
+    if "RenameTable" in operation:
+        new_name = extract_variable(operation["RenameTable"]["table_name"]["To"])
+        if isinstance(new_name, list):
+            new_name = ".".join(new_name)
+
+        # A rename may move the relation between collections but never between
+        # workspaces: the two would live in different catalogs, and moving data
+        # across them is a copy, not a rename. Rejected here rather than left
+        # for a connector to discover half way through.
+        if relation_name.split(".", 1)[0] != new_name.split(".", 1)[0]:
+            raise UnsupportedSyntaxError(
+                f"RENAME TO cannot move a relation between workspaces "
+                f"({relation_name} -> {new_name}); the workspace must be unchanged."
+            )
+        if relation_name == new_name:
+            raise UnsupportedSyntaxError(
+                f"RENAME TO target is the same as the source ({relation_name})."
+            )
+
+        rename_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.RenameRelation)
+        rename_relation_node.relation_name = relation_name
+        rename_relation_node.new_relation_name = new_name
+        rename_relation_node.if_exists = if_exists
+
+        plan.add_node(random_string(), rename_relation_node)
+        return plan
+
+    raise UnsupportedSyntaxError(
+        "Opteryx only supports 'ALTER TABLE ... CLUSTER BY (...)' and "
+        "'ALTER TABLE ... RENAME TO ...'."
+    )
+
+
+def _parse_boolean_workspace_property(name: str, value):
+    """ON/OFF/TRUE/FALSE -> bool, for a boolean-typed workspace property."""
+    if isinstance(value, dict) and "Identifier" in value:
+        token = value["Identifier"]["value"].upper()
+        if token == "ON":
+            return True
+        if token == "OFF":
+            return False
+    if isinstance(value, dict) and "Value" in value:
+        literal = value["Value"]["value"]
+        if isinstance(literal, dict) and "Boolean" in literal:
+            return literal["Boolean"]
+
+    raise UnsupportedSyntaxError(
+        f"Workspace property '{name}' is a boolean; use ON, OFF, TRUE or FALSE."
+    )
+
+
+# The workspace properties Opteryx will set, each with the parser that turns its
+# AST value into the stored value. A property absent from this map is rejected at
+# plan time - an unrecognised name must not be written through to the catalog,
+# where a typo would silently become a new, meaningless property.
+WORKSPACE_PROPERTIES = {
+    "delete_protection": _parse_boolean_workspace_property,
+}
+
+
+def plan_alter_workspace(statement, **kwargs):
+    """
+    Create a logical plan for ALTER WORKSPACE statement.
+
+    ALTER WORKSPACE workspace SET property TO value
+
+    The parser has no WORKSPACE object type, so the SQL rewriter
+    (sql_rewriter.rewrite_alter_workspace) turns this into ALTER FUNCTION,
+    which parses to the same `<name> SET <property> TO <value>` shape.
+    """
+    root_node = "AlterFunction"
+    plan = LogicalPlan()
+
+    alter_statement = statement[root_node]
+
+    workspace_name = extract_variable(alter_statement["function"]["name"])
+    if isinstance(workspace_name, list):
+        workspace_name = ".".join(workspace_name)
+    if "." in workspace_name:
+        raise UnsupportedSyntaxError(
+            f"ALTER WORKSPACE names a workspace, not a relation within one (got '{workspace_name}')."
         )
 
-    cluster_columns = []
-    for expr in operations[0]["ClusterBy"]["exprs"]:
-        if "Identifier" not in expr:
-            raise UnsupportedSyntaxError(
-                "CLUSTER BY only supports column names, not expressions."
-            )
-        cluster_columns.append(expr["Identifier"]["value"])
+    operation = alter_statement.get("operation") or {}
+    actions = (operation.get("Actions") or {}).get("actions") or []
+    if len(actions) != 1 or "Set" not in actions[0]:
+        raise UnsupportedSyntaxError(
+            "Opteryx only supports 'ALTER WORKSPACE <workspace> SET <property> TO <value>'."
+        )
 
-    alter_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterRelation)
-    alter_relation_node.relation_name = relation_name
-    alter_relation_node.cluster_columns = cluster_columns
-    alter_relation_node.if_exists = alter_statement.get("if_exists", False)
+    action = actions[0]["Set"]
 
-    plan.add_node(random_string(), alter_relation_node)
+    property_name = extract_variable(action["name"])
+    if isinstance(property_name, list):
+        property_name = ".".join(property_name)
+    property_name = property_name.lower()
+
+    parser = WORKSPACE_PROPERTIES.get(property_name)
+    if parser is None:
+        supported = ", ".join(sorted(WORKSPACE_PROPERTIES))
+        raise UnsupportedSyntaxError(
+            f"'{property_name}' is not a settable workspace property. Supported: {supported}."
+        )
+
+    values = action["value"].get("Values") or []
+    if len(values) != 1:
+        raise UnsupportedSyntaxError(
+            f"Workspace property '{property_name}' takes a single value."
+        )
+
+    alter_workspace_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterWorkspace)
+    alter_workspace_node.workspace_name = workspace_name
+    alter_workspace_node.property_name = property_name
+    alter_workspace_node.property_value = parser(property_name, values[0])
+
+    plan.add_node(random_string(), alter_workspace_node)
+
+    return plan
+
+
+def plan_create_collection(statement, **kwargs):
+    """
+    Create a logical plan for CREATE COLLECTION statement.
+
+    CREATE COLLECTION [IF NOT EXISTS] [workspace].[collection]
+
+    Rewritten to CREATE SCHEMA by the SQL rewriter
+    (sql_rewriter.rewrite_create_collection) since the parser has no COLLECTION
+    object type of its own. `CREATE SCHEMA` spelled directly lands here too -
+    the same aliasing DROP SCHEMA already has for DROP COLLECTION.
+    """
+    root_node = "CreateSchema"
+    plan = LogicalPlan()
+
+    create_statement = statement[root_node]
+
+    schema_name = create_statement["schema_name"]
+    # The parser wraps the name; `Simple` is the only form a collection name can
+    # take (an unqualified or dotted identifier).
+    if not isinstance(schema_name, dict) or "Simple" not in schema_name:
+        raise UnsupportedSyntaxError("CREATE COLLECTION expects a collection name.")
+
+    collection_name = extract_variable(schema_name["Simple"])
+    if isinstance(collection_name, list):
+        collection_name = ".".join(collection_name)
+
+    # A collection lives inside exactly one workspace, so its name is always
+    # `workspace.collection`. Rejected here rather than left for a connector to
+    # discover, where a bare name would resolve to some default workspace and
+    # silently create the collection somewhere the caller did not name.
+    if collection_name.count(".") != 1:
+        raise UnsupportedSyntaxError(
+            f"CREATE COLLECTION names a collection as '<workspace>.<collection>' "
+            f"(got '{collection_name}')."
+        )
+
+    create_collection_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateCollection)
+    create_collection_node.collection_name = collection_name
+    create_collection_node.if_not_exists = create_statement.get("if_not_exists", False)
+
+    plan.add_node(random_string(), create_collection_node)
 
     return plan
 
@@ -1893,6 +2104,17 @@ def plan_drop(statement, **kwargs):
 
     drop_statement = statement[root_node]
     object_type = drop_statement.get("object_type")
+
+    # The parser accepts these modifiers for every DROP form; Opteryx implements
+    # none of them. Accepting them silently is worse than rejecting them: a
+    # `DROP COLLECTION ... CASCADE` that quietly did not cascade reads as a
+    # successful recursive drop, and `RESTRICT`/`PURGE` promise a guarantee about
+    # dependants and storage reclamation that nothing here honours.
+    for modifier in ("cascade", "restrict", "purge", "temporary"):
+        if drop_statement.get(modifier, False):
+            raise UnsupportedSyntaxError(
+                f"Opteryx does not support `{modifier.upper()}` on DROP statements."
+            )
 
     if object_type == "View":
         # DROP VIEW path (unchanged)
@@ -1911,9 +2133,6 @@ def plan_drop(statement, **kwargs):
 
         # Extract IF EXISTS flag
         drop_view_node.if_exists = drop_statement.get("if_exists", False)
-
-        # Extract CASCADE/RESTRICT flag
-        drop_view_node.cascade = drop_statement.get("cascade", False)
 
         plan.add_node(random_string(), drop_view_node)
         return plan
@@ -2404,8 +2623,18 @@ def plan_comment(statement, **kwargs):
         object_name = ".".join(object_name)
     comment_node.object_name = object_name
 
-    # Extract object type (should be Extension after rewrite)
-    comment_node.object_type = statement[root_node].get("object_type", "Extension")
+    # The SQL rewriter turns TABLE and VIEW into EXTENSION, which is the only
+    # object type the parser accepts for a dotted name. Anything else is a form
+    # the rewriter did not produce - COMMENT ON COLUMN in particular parses
+    # cleanly and reached the operator, where it failed as a missing *dataset*
+    # named `ws.collection.table.column`.
+    object_type = statement[root_node].get("object_type", "Extension")
+    if object_type != "Extension":
+        raise UnsupportedSyntaxError(
+            f"Opteryx does not support 'COMMENT ON {object_type.upper()}'; "
+            "comments can be set on a TABLE or a VIEW."
+        )
+    comment_node.object_type = object_type
 
     # Extract the comment text
     comment_node.comment = statement[root_node].get("comment", "")
@@ -2431,9 +2660,11 @@ QUERY_BUILDERS = {
     # "ShowFunctions": show_functions_query,
     "ShowVariable": plan_show_variables,  # generic SHOW handler; only SHOW VARIABLES is supported
     # "Use": plan_use
+    "CreateSchema": plan_create_collection,  # CREATE COLLECTION, rewritten by the SQL rewriter
     "CreateView": plan_create_view,
     "AlterView": plan_alter_view,
     "AlterTable": plan_alter_table,
+    "AlterFunction": plan_alter_workspace,  # ALTER WORKSPACE, rewritten by the SQL rewriter
     "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
     "CreateTable": plan_create_table,
     "Truncate": plan_truncate,

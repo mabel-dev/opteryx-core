@@ -115,6 +115,13 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # Never empty in practice: query_session substitutes DEFAULT_BILLING_ACCOUNT
     # when the submitting service asserts none.
     "billing_account": (VARCHAR, "", VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
+    # The pattern/role grants this session was handed at construction
+    # (ExecutionContext.access_policies) — the same list can_perform_action reads.
+    # RESTRICTED not because the caller may not see their own grants (SHOW GRANTS
+    # exists precisely so they can) but because SHOW VARIABLES renders values as
+    # text, and a list of dicts there is noise, not an answer. INTERNAL-owned, so
+    # a caller cannot SET themselves a wider grant.
+    "access_policies": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.RESTRICTED),
     # Detected from the CPU at import; there is no env var and no SET for these.
     "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.INTERNAL, Visibility.RESTRICTED),
     # UNRESTRICTED: already public via `SELECT VERSION()`, so hiding it from

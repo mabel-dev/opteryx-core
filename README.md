@@ -8,7 +8,7 @@ This project is opinionated toward the needs of `opteryx.app`. It is still usefu
 
 ## Requirements
 
-- Python 3.13
+- Python 3.11 or later
 - A C/C++ toolchain for local source builds
 - Rust/Cargo for the Rust extension in `src/`
 

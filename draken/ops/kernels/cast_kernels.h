@@ -63,6 +63,11 @@ VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* vector);
 
+/** CAST(<string> AS IPV4): dotted-decimal -> UINT32. Strict parse; invalid raises.
+ *  Result carries NO descriptor — IPv4-ness is re-attached from the bound output
+ *  type via add_expr_project's `logical` tuple. */
+VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* vector);
+
 // String-family retag: VARCHAR/NVARCHAR/VARBINARY -> VARCHAR or -> VARBINARY.
 // All three share the exact DrakenStringArena byte layout (buffers.h), so this
 // is a byte-identical copy that only changes the type tag — no validation, no

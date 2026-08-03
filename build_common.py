@@ -584,6 +584,8 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/buffers.h",
                 "draken/core/vector_alloc.h",
                 "draken/interop/value_format.hpp",
+                # value_format.hpp's render descriptor carries LogicalKind.
+                "draken/logical_type.h",
             ],
         ),
         make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
@@ -893,6 +895,7 @@ def draken_rugo_extensions(parquet_created_by):
             ),
             depends=[
                 "draken/interop/value_format.hpp",
+                "draken/logical_type.h",   # LogicalKind, via value_format.hpp
                 "rugo/src/_text_render.hpp",
                 "rugo/src/jsonl/core/markers.hpp",
                 "rugo/src/jsonl/core/parse_context.hpp",

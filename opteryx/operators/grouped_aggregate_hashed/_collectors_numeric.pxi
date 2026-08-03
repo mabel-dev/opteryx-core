@@ -1171,11 +1171,11 @@ cdef class MinMaxBoolCollector(BaseCollector):
         return self._build(start, stop)
 
 # ---------------------------------------------------------------------------
-# MIN/MAX(interval) — ordered by the approximate scalar fold (months*30d + ms),
+# MIN/MAX(interval) — ordered by the approximate scalar fold (months*30d + us),
 # the same order the engine uses everywhere else for intervals. The winning
-# row's ORIGINAL (months, ms) slot is kept, so the result is exact for the slot
+# row's ORIGINAL (months, us) slot is kept, so the result is exact for the slot
 # even though the ORDERING is approximate. Per-row accumulate is nogil; finalize
-# boxes (months, ms) tuples over #groups (interval MIN/MAX is rare).
+# boxes (months, us) tuples over #groups (interval MIN/MAX is rare).
 # ---------------------------------------------------------------------------
 
 cdef class MinMaxIntervalCollector(BaseCollector):

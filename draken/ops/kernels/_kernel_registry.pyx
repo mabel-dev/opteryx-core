@@ -34,6 +34,11 @@ cdef extern from "ops/kernels/kernel_registry.h":
         int unit
     ctypedef cast_timestamp_ctx_ cast_timestamp_ctx
 
+    ctypedef struct cast_array_ctx_:
+        int element_type
+        int safe
+    ctypedef cast_array_ctx_ cast_array_ctx
+
     ctypedef struct binary_op_ctx_:
         uint16_t op_code
     ctypedef binary_op_ctx_ binary_op_ctx
@@ -45,6 +50,7 @@ cdef extern from "ops/kernels/kernel_registry.h":
     ctypedef extraction_ctx_ extraction_ctx
 
     cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit)
+    cast_array_ctx* kernel_alloc_cast_array_ctx(int element_type, int safe)
     binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
                                               unsigned char left_scale,
                                               unsigned char right_scale,
@@ -144,6 +150,22 @@ def alloc_cast_timestamp_ctx(int unit):
         Caller must free via free_context() when done
     """
     cdef cast_timestamp_ctx* ctx = kernel_alloc_cast_timestamp_ctx(unit)
+    return <unsigned long long>ctx
+
+
+def alloc_cast_array_ctx(int element_type, int safe):
+    """
+    Allocate context for CAST(json_text AS ARRAY<element_type>).
+
+    Args:
+        element_type: DrakenType tag of the declared element type
+        safe: 1 for TRY_CAST (a bad row becomes NULL), 0 for a plain cast (raises)
+
+    Returns:
+        Opaque integer pointer to cast_array_ctx struct
+        Caller must free via free_context() when done
+    """
+    cdef cast_array_ctx* ctx = kernel_alloc_cast_array_ctx(element_type, safe)
     return <unsigned long long>ctx
 
 

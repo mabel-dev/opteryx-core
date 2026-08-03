@@ -28,6 +28,7 @@ from opteryx.compiled.nanobind.vectors import vector_contains
 from libc.stdint cimport int16_t
 
 from opteryx.compiled.nanobind.vectors import vector_in_list
+from opteryx.compiled.nanobind.vectors import vector_ipv4_in_cidr
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 # Note: _json_at_arrow, _json_array_contains_all, _json_at_question,
@@ -337,6 +338,16 @@ cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, i
         return _json_array_contains_all(left, right)
     if op_code == OP_AT_QUESTION:
         return _json_at_question(left, right)
+    # IPv4 CIDR containment. `>>=` is the same predicate with the operands the
+    # other way round (network on the left), so it reuses the one kernel rather
+    # than duplicating the scan — there is no separate "contains" kernel to keep
+    # in step.
+    if op_code == OP_IP_CONTAINED_BY or op_code == OP_IP_CONTAINS:
+        address = left if op_code == OP_IP_CONTAINED_BY else right
+        network = right if op_code == OP_IP_CONTAINED_BY else left
+        address_nb = (<Vector>address)._nb if isinstance(address, Vector) else address
+        network_nb = (<Vector>network)._nb if isinstance(network, Vector) else network
+        return BoolVector(vector_ipv4_in_cidr(address_nb, network_nb))
     # LIKE ANY / ILIKE ANY: the constant-pattern case is compiled to the native
     # draken_like_any kernel in compiled_expression.pyx (both scalar and
     # ARRAY<string> subjects), so it never reaches this Python evaluator. The

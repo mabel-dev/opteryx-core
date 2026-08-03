@@ -318,9 +318,25 @@ def explain(
     def _est_row_count(node_id):
         return int(est_rows_by_nid.get(node_id, 0) or 0)
 
+    # est_bytes mirrors est_rows above -- same planning-time availability, same
+    # nid correlation. `total_bytes` is None (not 0) for a node where not one
+    # column carried a byte-size estimate (see StatisticsRefreshVisitor.
+    # _record_telemetry); 0 here means exactly that "genuinely unknown" case,
+    # same convention _est_row_count already uses for a node refresh_statistics
+    # never reached.
+    est_bytes_by_nid = {
+        entry["nid"]: entry["total_bytes"]
+        for entry in (getattr(telemetry, "estimated_total_bytes", None) or [])
+    }
+
+    def _est_bytes(node_id):
+        value = est_bytes_by_nid.get(node_id)
+        return int(value) if value is not None else 0
+
     tree_col = [row[0] for row in op_rows]
     details_col = [row[1] for row in op_rows]
     est_rows_col = [_est_row_count(row[3]) for row in op_rows]
+    est_bytes_col = [_est_bytes(row[3]) for row in op_rows]
     rows_col = [_row_count(row[3]) for row in op_rows]
     time_col = [_time_ms(row[3]) for row in op_rows]
     self_col = [_self_ms(row[3]) for row in op_rows]
@@ -341,6 +357,7 @@ def explain(
         tree_col.append("OPTIMIZATIONS")
         details_col.append("")
         est_rows_col.append(0)
+        est_bytes_col.append(0)
         rows_col.append(0)
         time_col.append(0.0)
         self_col.append(0.0)
@@ -349,6 +366,7 @@ def explain(
             tree_col.append(connector + label)
             details_col.append(f"applied {count}×" if count > 1 else "applied")
             est_rows_col.append(0)
+            est_bytes_col.append(0)
             rows_col.append(0)
             time_col.append(0.0)
             self_col.append(0.0)
@@ -364,6 +382,7 @@ def explain(
         tree_col.append("REWRITE TRACE")
         details_col.append("")
         est_rows_col.append(0)
+        est_bytes_col.append(0)
         rows_col.append(0)
         time_col.append(0.0)
         self_col.append(0.0)
@@ -376,15 +395,17 @@ def explain(
                 f"nodes {node_before}→{node_after}, edges {edge_before}→{edge_after}"
             )
             est_rows_col.append(0)
+            est_bytes_col.append(0)
             rows_col.append(0)
             time_col.append(0.0)
             self_col.append(0.0)
 
-    columns = ["tree", "details", "est_rows"]
+    columns = ["tree", "details", "est_rows", "est_bytes"]
     vectors = [
         vector_from_sequence([row.encode("utf-8") for row in tree_col], dtype=DrakenType.VARBINARY),
         vector_from_sequence(details_col, dtype=DrakenType.VARCHAR),
         vector_from_sequence(est_rows_col, dtype=DrakenType.INT64),
+        vector_from_sequence(est_bytes_col, dtype=DrakenType.INT64),
     ]
     if analyze:
         # time_ms is INCLUSIVE (own + downstream); self_ms is this operator's own

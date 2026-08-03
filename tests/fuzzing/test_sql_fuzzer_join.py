@@ -12,14 +12,16 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import datetime
 import random
 import time
+from dataclasses import dataclass
 
 import pytest
 
-from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
-from opteryx.models import QueryTelemetry
+import opteryx
 from opteryx.types import LogicalCategory
-from opteryx.utils import random_int, random_string
+from opteryx.types.logical_type import _CATEGORY_OF
+from opteryx.utils import random_string
 from opteryx.utils.formatter import format_sql
+from tests.helpers import execute_and_get_shape
 
 
 def random_value(t):
@@ -28,11 +30,16 @@ def random_value(t):
     if t == LogicalCategory.VARBINARY:
         return f"b'{random_string(8)}'"
     if t in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP):
-        # Use a fixed reference date to ensure reproducibility
+        # Use a fixed reference date to ensure reproducibility.
+        # The ::TIMESTAMP cast is required, not decorative: Opteryx does not
+        # implicitly coerce a string literal to a temporal column type, and
+        # rejects `date_col = '1930-01-01'` with IncompatibleTypesError. Without
+        # the cast every temporal predicate this generator emits dies in the
+        # binder, so no temporal join or filter is ever actually executed.
         reference_date = datetime.datetime(2024, 1, 1, 0, 0, 0)
         if random.random() < 0.5:
-            return f"'{reference_date + datetime.timedelta(seconds=random.randint(-1000000, 1000000))}'"
-        return f"'{(reference_date + datetime.timedelta(seconds=random.randint(-1000000, 1000000))).date()}'"
+            return f"'{reference_date + datetime.timedelta(seconds=random.randint(-1000000, 1000000))}'::TIMESTAMP"
+        return f"'{(reference_date + datetime.timedelta(seconds=random.randint(-1000000, 1000000))).date()}'::TIMESTAMP"
     if random.random() < 0.5:
         return random.randint(-1000000, 1000000)
     return random.randint(-1000000, 1000000) / 1000
@@ -141,7 +148,30 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
     return query
 
 
-from opteryx.managers import virtual_datasets
+# The $satellites, $astronauts and $missions virtual datasets no longer exist —
+# only $planets survives in opteryx.managers.virtual_datasets. The same four
+# relations are still present as parquet under testdata/, so the join fuzzer
+# reads them from there. A join fuzzer needs two DIFFERENT relations, so a
+# single-table fallback would leave it generating nothing.
+FUZZ_TABLES = (
+    "testdata.planets",
+    "testdata.satellites",
+    "testdata.missions",
+    "testdata.astronauts",
+)
+
+
+@dataclass(frozen=True)
+class FuzzColumn:
+    """A column as the generators need it: a name plus a dispatch category.
+
+    Mirrors the `.name` / `.category` surface of `SchemaColumn`, which is all
+    the generators below ever touch.
+    """
+
+    name: str
+    category: LogicalCategory
+
 
 # Tables to use for fuzzing
 _tables_cache = None
@@ -153,24 +183,21 @@ def get_tables():
     if _tables_cache is not None:
         return _tables_cache
 
-    _tables_cache = [
-        {
-            "name": virtual_datasets.planets.schema().name,
-            "fields": virtual_datasets.planets.schema().columns,
-        },
-        {
-            "name": virtual_datasets.satellites.schema().name,
-            "fields": virtual_datasets.satellites.schema().columns,
-        },
-        {
-            "name": virtual_datasets.astronauts.schema().name,
-            "fields": virtual_datasets.astronauts.schema().columns,
-        },
-        {
-            "name": virtual_datasets.missions.schema().name,
-            "fields": virtual_datasets.missions.schema().columns,
-        },
-    ]
+    # Ask the engine what each relation actually contains rather than carrying a
+    # hardcoded copy of the schemas — a hardcoded table drifts silently the
+    # moment the test data changes, and a fuzzer built on a stale schema
+    # generates queries that only ever exercise the binder's error path.
+    _tables_cache = []
+    for table in FUZZ_TABLES:
+        session = opteryx.session()
+        morsels = list(session.execute_to_morsels(f"SELECT * FROM {table}"))
+        if not morsels:
+            raise ValueError(f"fuzzing source table {table!r} returned no data")
+        fields = [
+            FuzzColumn(name=name, category=_CATEGORY_OF[physical])
+            for name, physical in morsels[0].schema.items()
+        ]
+        _tables_cache.append({"name": table, "fields": fields})
     return _tables_cache
 
 

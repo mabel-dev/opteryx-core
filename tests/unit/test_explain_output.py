@@ -11,6 +11,9 @@ table with no operator names or structure. It now emits:
   * a ``details`` column — each operator's config,
   * an ``est_rows`` column — the planner's row-count estimate (statistics_refresh),
     available even without ANALYZE since it needs no execution,
+  * an ``est_bytes`` column — the planner's total-byte-size estimate, same
+    availability as est_rows; 0 when no column at that node carried a known
+    size (see ColumnStatistics.total_bytes),
   * an OPTIMIZATIONS section listing which optimizer rules fired,
   * and, for EXPLAIN ANALYZE, ``rows`` and ``time_ms`` columns -- the actual
     numbers to compare est_rows against.
@@ -75,7 +78,7 @@ def test_explain_lists_optimizations():
 
 def test_explain_analyze_adds_stats_columns():
     names, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
-    assert names == ["tree", "details", "est_rows", "rows", "time_ms", "self_ms"]
+    assert names == ["tree", "details", "est_rows", "est_bytes", "rows", "time_ms", "self_ms"]
     # the single scan's row count surfaces (5 nations in region 1)
     assert max(data["rows"]) == 5, data["rows"]
 
@@ -84,9 +87,18 @@ def test_explain_has_est_rows_without_analyze():
     # est_rows is a planning-time number (statistics_refresh's estimate) --
     # available without running the query, unlike rows/time_ms/self_ms.
     names, data = _explain("EXPLAIN SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
-    assert names == ["tree", "details", "est_rows"]
+    assert names == ["tree", "details", "est_rows", "est_bytes"]
     scan_idx = next(i for i, line in enumerate(data["tree"]) if "Parquet Read" in line)
     assert data["est_rows"][scan_idx] > 0, data["est_rows"]
+
+
+def test_explain_has_est_bytes_without_analyze():
+    # Same planning-time availability as est_rows; testdata.tpch_001.nation
+    # is a real Parquet manifest so the scan's est_bytes comes from measured
+    # per-column uncompressed size, not just a fixed-width guess.
+    names, data = _explain("EXPLAIN SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
+    scan_idx = next(i for i, line in enumerate(data["tree"]) if "Parquet Read" in line)
+    assert data["est_bytes"][scan_idx] > 0, data["est_bytes"]
 
 
 def test_explain_est_rows_can_be_compared_against_actual_rows():

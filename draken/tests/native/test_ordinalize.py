@@ -625,10 +625,7 @@ class TestInterval:
 
     def test_cross_field_equivalence(self):
         # (1, 0) and (0, MONTH_US) normalize to the SAME instant -- their
-        # ordinal keys must be equal. Note: this test uses real MICROSECONDS
-        # throughout, unlike test_interval.py's pre-existing, unrelated
-        # MONTH_MS/us unit mismatch (flagged separately, not this test's
-        # concern).
+        # ordinal keys must be equal.
         v = dn.vector_interval_from_sequence([(1, 0), (0, self.MONTH_US)])
         k0, k1 = v.ordinalize().to_pylist()
         assert k0 == k1

@@ -261,20 +261,12 @@ OPERATOR_DEFINITIONS = {
         friendly_name="Integer division",
     ),
     "BitwiseOr": OperatorDefinition(
-        summary="Bitwise OR and IP containment operator.",
-        documentation=(
-            "Combines integer operands using a bitwise OR operation. "
-            "When used with address and CIDR-compatible operands, the same `|` token "
-            "acts as an IP containment predicate and returns a boolean result."
-        ),
+        summary="Bitwise OR operator.",
+        documentation="Combines integer operands using a bitwise OR operation.",
         token="|",
         category="bitwise",
         node_kind="binary",
         friendly_name="Bitwise OR",
-        notes=(
-            "This operator is overloaded by operand type: integer inputs perform bitwise OR, "
-            "while address/CIDR-style inputs use `|` for containment checks."
-        ),
     ),
     "BitwiseAnd": OperatorDefinition(
         summary="Bitwise AND operator.",
@@ -365,5 +357,36 @@ OPERATOR_DEFINITIONS = {
         category="comparison",
         node_kind="comparison",
         friendly_name="Array contains all",
+    ),
+    "IPContainedBy": OperatorDefinition(
+        summary="IPv4 CIDR containment operator.",
+        documentation=(
+            "Returns true when the left IPv4 address falls inside the network given "
+            "on the right in CIDR notation, for example `ip <<= '10.0.0.0/8'`. "
+            "Comparison is on the underlying 32-bit address, so it is a single "
+            "mask-and-compare per row with no text parsing."
+        ),
+        token="<<=",
+        category="comparison",
+        node_kind="comparison",
+        friendly_name="IP contained by",
+        notes=(
+            "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension. "
+            "A NULL address is not contained by any network and yields false. An "
+            "invalid or prefix-less CIDR raises rather than matching nothing."
+        ),
+    ),
+    "IPContains": OperatorDefinition(
+        summary="IPv4 CIDR containment operator, reversed.",
+        documentation=(
+            "Returns true when the network on the left, in CIDR notation, contains "
+            "the IPv4 address on the right, for example `'10.0.0.0/8' >>= ip`. "
+            "The mirror of `<<=`."
+        ),
+        token=">>=",
+        category="comparison",
+        node_kind="comparison",
+        friendly_name="IP contains",
+        notes="Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension.",
     ),
 }

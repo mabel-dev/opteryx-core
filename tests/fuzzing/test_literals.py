@@ -36,10 +36,13 @@ def test_fuzz_literals(literal):
     statement = f"SELECT HASH('{literal}');"
     print(statement)
 
-    conn = opteryx.connect()
-    curr = conn.cursor()
-    curr.execute(statement)
-    curr.arrow()
+    # The assertion here is "did not raise". `execute_to_morsels` is lazy, so the
+    # drain is load-bearing: without it nothing executes and the fuzzer asserts
+    # nothing. This is the direct equivalent of the old `cursor.arrow()`, which
+    # forced materialisation for the same reason.
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(statement):
+        pass
 
 
 if __name__ == "__main__":  # pragma: no cover

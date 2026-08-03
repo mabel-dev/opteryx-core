@@ -143,10 +143,104 @@ def test_phash_probe_null_triggers_carchar_demotion(tmp_path):
 
 
 def test_implicit_numeric_key_cast(tmp_path):
-    # Left key INTEGER, right key DOUBLE → implicit numeric coercion (cast plan
-    # → cxx_cast_column_c). Left {1,2,3} cast to double, matched against {2.0,3.0,4.0}.
+    # Left key INTEGER, right key DOUBLE → implicit numeric coercion. A join keys on
+    # raw column buffers, so INT64 2 and FLOAT64 2.0 hash differently; without the
+    # coercion this returned NO rows — a silent wrong answer, not an error. The
+    # compiler materializes a CAST column on the narrower side and keys on that
+    # (_join_key_coercions / _coerce_join_keys in managers/execution/compiler.py).
     left = _write(str(tmp_path / "l"), {"k": (pa.int32(), [1, 2, 3])})
     right = _write(str(tmp_path / "r"), {"k": (pa.float64(), [2.0, 3.0, 4.0])})
+    assert _ids(f"SELECT k FROM '{left}' WHERE k IN (SELECT k FROM '{right}')") == [2, 3]
+
+
+def test_implicit_numeric_key_cast_anti(tmp_path):
+    # The ANTI direction is the dangerous one: an uncoerced key made NOT IN return
+    # rows it should have EXCLUDED (all of {1,2,3} instead of just {1}).
+    left = _write(str(tmp_path / "l"), {"k": (pa.int32(), [1, 2, 3])})
+    right = _write(str(tmp_path / "r"), {"k": (pa.float64(), [2.0, 3.0, 4.0])})
+    assert _ids(f"SELECT k FROM '{left}' WHERE k NOT IN (SELECT k FROM '{right}')") == [1]
+
+
+def test_implicit_numeric_key_cast_exists(tmp_path):
+    # Correlated EXISTS/NOT EXISTS key on the same path and need the same coercion.
+    left = _write(str(tmp_path / "l"), {"k": (pa.int32(), [1, 2, 3])})
+    right = _write(str(tmp_path / "r"), {"k": (pa.float64(), [2.0, 3.0, 4.0])})
+    assert _ids(
+        f"SELECT k FROM '{left}' AS a WHERE EXISTS "
+        f"(SELECT 1 FROM '{right}' AS b WHERE a.k = b.k)"
+    ) == [2, 3]
+    assert _ids(
+        f"SELECT k FROM '{left}' AS a WHERE NOT EXISTS "
+        f"(SELECT 1 FROM '{right}' AS b WHERE a.k = b.k)"
+    ) == [1]
+
+
+def test_implicit_numeric_key_cast_does_not_match_fractional(tmp_path):
+    # The coercion widens the INT side to DOUBLE — it must not round the DOUBLE side
+    # down to an int, which would make 2.5 match 2. Nothing may match here.
+    left = _write(str(tmp_path / "l"), {"k": (pa.int32(), [1, 2, 3])})
+    right = _write(str(tmp_path / "r"), {"k": (pa.float64(), [2.5, 3.5])})
+    assert _ids(f"SELECT k FROM '{left}' WHERE k IN (SELECT k FROM '{right}')") == []
+
+
+def test_implicit_numeric_key_cast_leaves_output_columns_alone(tmp_path):
+    # The CAST column is internal to the join: it is appended after the leg's real
+    # columns and excluded from the payload/output layout, so the projection is
+    # unchanged. A leak would show up as an extra column here.
+    left = _write(
+        str(tmp_path / "l"), {"k": (pa.int32(), [1, 2, 3]), "v": (pa.string(), ["a", "b", "c"])}
+    )
+    right = _write(str(tmp_path / "r"), {"k": (pa.float64(), [2.0, 3.0])})
+    session = opteryx.session()
+    names = None
+    for morsel in session.execute_to_morsels(
+        f"SELECT * FROM '{left}' WHERE k IN (SELECT k FROM '{right}')"
+    ):
+        if morsel.num_rows:
+            names = list(morsel.column_names)
+    assert names == [b"k", b"v"], names
+
+
+def test_implicit_numeric_key_cast_inner_join(tmp_path):
+    """INNER JOIN keys on the same coerced column and is no longer refused.
+
+    `DrakenInnerJoinNode.supports` used to DECLINE a mixed-numeric key pair, which
+    surfaced as `UnsupportedSyntaxError: Draken inner join does not support this
+    query shape` — the loud counterpart of the semi-join's silent wrong answer.
+    With the coercion in place that shape is answerable, so the decline was dropped.
+    """
+    left = _write(str(tmp_path / "l"), {"k": (pa.int32(), [1, 2, 3])})
+    right = _write(str(tmp_path / "r"), {"k": (pa.float64(), [2.0, 3.0, 4.0])})
+
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        f"SELECT l.k FROM '{left}' AS l INNER JOIN '{right}' AS r ON l.k = r.k"
+    ):
+        if morsel.num_rows:
+            rows += morsel.column(morsel.column_names[0]).to_pylist()
+    assert sorted(rows) == [2, 3]
+
+
+@pytest.mark.parametrize("build_type", ["int8", "int16", "int32", "int64",
+                                        "uint8", "uint16", "uint32", "uint64"])
+@pytest.mark.parametrize("probe_type", ["int8", "int16", "int32", "int64",
+                                        "uint8", "uint16", "uint32", "uint64"])
+def test_join_key_integer_widths_interoperate(tmp_path, build_type, probe_type):
+    """INTEGER x INTEGER join keys match across every signed/unsigned width WITHOUT
+    a coercion — the native key hash canonicalises integer width.
+
+    `_join_key_coercions` relies on exactly this to skip INTEGER x INTEGER pairs
+    (it coerces on physical-type mismatch otherwise). If the native hash ever stops
+    canonicalising, this goes red instead of the skip quietly becoming a silent
+    wrong answer.
+    """
+    types = {
+        "int8": pa.int8(), "int16": pa.int16(), "int32": pa.int32(), "int64": pa.int64(),
+        "uint8": pa.uint8(), "uint16": pa.uint16(), "uint32": pa.uint32(), "uint64": pa.uint64(),
+    }
+    left = _write(str(tmp_path / "l"), {"k": (types[build_type], [1, 2, 3])})
+    right = _write(str(tmp_path / "r"), {"k": (types[probe_type], [2, 3, 4])})
     assert _ids(f"SELECT k FROM '{left}' WHERE k IN (SELECT k FROM '{right}')") == [2, 3]
 
 

@@ -801,17 +801,16 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
 
 namespace {
 
+// THE canonical width (core/buffers.h), not a private table. The private one
+// this replaces listed only the SIGNED types, so every unsigned branch reported
+// width 0 and the blend refused outright: CASE ... THEN CAST(x AS UINT32) died
+// with "unsupported branch type" on the runtime path (and an IPv4 column, being
+// UINT32, with it). The blend below is a type-agnostic memcpy of `es` bytes, so
+// there is nothing signedness-specific about it — only the table was wrong.
+// 0 still means "no flat per-element width" (bool and the string family are
+// handled by their own blocks above) and is still refused.
 inline size_t fk_fixed_elem_size(DrakenType t) {
-    switch (t) {
-        case DRAKEN_INT8:                                             return 1;
-        case DRAKEN_INT16:                                            return 2;
-        case DRAKEN_INT32: case DRAKEN_FLOAT32:
-        case DRAKEN_DATE32: case DRAKEN_TIME32:                       return 4;
-        case DRAKEN_INT64: case DRAKEN_FLOAT64: case DRAKEN_DECIMAL:
-        case DRAKEN_TIMESTAMP64: case DRAKEN_TIME64:                  return 8;
-        case DRAKEN_DECIMAL128:                                       return 16;
-        default:                                                      return 0;
-    }
+    return draken_type_fixed_itemsize(t);
 }
 
 }  // namespace

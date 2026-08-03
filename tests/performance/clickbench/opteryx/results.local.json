@@ -62,9 +62,9 @@ current (15.44s)
 (10.65 seconds) <- DuckDB Baseline
 
 make tpch - (2002.2ms) (28-JUL) [4.05x]
-make medicare1 - (456.1ms) (31-JUL)
-make job - (48075.1ms) (28-JUL)
-make h2o - (2496.0ms) (2 fails) (28-JUL)
-make jsonbench (29383.2ms) (28-JUL)
-make dash (189.5ms) (28-JUL)
+make medicare1 - (456.1ms) (31-JUL) [~4x]
+make job - (45916.4ms) (03-AUG) [6.8x]
+make h2o - (2496.0ms) (2 fails) (28-JUL) [~1x]
+make jsonbench (29383.2ms) (28-JUL) [10x]
+make dash (189.5ms) (28-JUL) [2x]
 make signals (1.4s) [only two tests] (28-JUL)

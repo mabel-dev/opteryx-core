@@ -46,6 +46,26 @@ enum class TimestampUnit : uint8_t {
 // TIME      = DRAKEN_TIME32 / DRAKEN_TIME64 with unit only (no offset).
 // DECIMAL   = DRAKEN_DECIMAL with precision (1..18) and scale (0..precision).
 //             Physical storage is int64 unscaled value.
+// IPV4      = DRAKEN_UINT32 reinterpreted as an IPv4 address.
+//
+// IPV4 is the first kind that REFINES an otherwise-unparameterized physical
+// type rather than completing a parameterized one.  TIMESTAMP/TIME/DECIMAL/
+// VECTOR are mandatory — their physical tag is uninterpretable without the
+// descriptor.  IPV4 is optional: a DRAKEN_UINT32 vector with no descriptor is
+// a perfectly well-formed unsigned integer column, and one carrying
+// LogicalKind::IPV4 is the SAME 32 bits with a narrower meaning.
+//
+// Consequences, which every consumer must respect:
+//   - Dispatch stays on the PHYSICAL tag.  IPv4 sorts, groups, joins, hashes
+//     and compares as UINT32, which is exactly correct for IPv4 ordering.
+//   - Only the value-rendering and cast edges read this kind.  Nothing in a
+//     hot loop may branch on it.
+//   - Dropping the descriptor degrades an IPv4 column to UINT32 — a display
+//     and cast regression, never a wrong answer.
+//
+// No parameter fields are used: the prefix length is NOT carried on the value
+// (unlike a Postgres `inet`).  Prefix length is always an operand of the
+// operation that needs it (see IP_TRUNC / `<<=`).
 // ---------------------------------------------------------------------------
 enum class LogicalKind : uint8_t {
     NONE      = 0,
@@ -53,6 +73,7 @@ enum class LogicalKind : uint8_t {
     TIME      = 2,
     DECIMAL   = 3,
     VECTOR    = 4,  // DRAKEN_VECTOR_FP16: carries dimension parameter.
+    IPV4      = 5,  // DRAKEN_UINT32: dotted-decimal rendering; no parameters.
 };
 
 // ---------------------------------------------------------------------------

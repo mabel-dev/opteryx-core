@@ -160,6 +160,30 @@ class Writable:
         """
         raise NotImplementedError
 
+    def create_collection(
+        self, collection_name: str, if_not_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Create a collection.
+
+        A collection owns no storage of its own - it is a namespace between a
+        workspace and its relations - so this registers it and nothing more.
+        Creating one is not a precondition for creating relations in it: a
+        relation created in an unknown collection brings the collection into
+        existence. This statement exists so a collection can be made ahead of
+        its first relation, and so DROP COLLECTION has a counterpart.
+
+        Args:
+            collection_name: Fully-qualified collection name (e.g. "workspace.collection")
+            if_not_exists: If True, an already-existing collection is not an error
+            author: session user the creation is attributed to
+
+        Raises:
+            ValueError: If the collection already exists and if_not_exists is False
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support CREATE COLLECTION"
+        )
+
     def drop_collection(
         self, collection_name: str, if_exists: bool = False, author: Optional[str] = None
     ) -> None:
@@ -173,6 +197,80 @@ class Writable:
         Raises:
             ValueError: If collection doesn't exist and if_exists is False
             CollectionNotEmptyError: If the collection still contains datasets or views
+        """
+        raise NotImplementedError
+
+    def rename_relation(
+        self, relation_name: str, new_relation_name: str, author: Optional[str] = None
+    ) -> None:
+        """Rename a relation, keeping its data, schema and history.
+
+        The two names always share a workspace (the logical planner rejects a
+        cross-workspace rename), so a single connector handles both ends. The
+        collection may differ - a rename doubles as a move between collections.
+        Callers guarantee the source exists and the target does not.
+
+        Args:
+            relation_name: Fully-qualified current name
+            new_relation_name: Fully-qualified new name, same workspace
+            author: session user this rename is attributed to (see create_relation)
+
+        Raises:
+            ValueError: If the source doesn't exist or the target already does
+        """
+        raise NotImplementedError
+
+    def set_cluster_by(
+        self, relation_name: str, cluster_columns: "List[str]", author: Optional[str] = None
+    ) -> None:
+        """Set the columns a relation should be sorted/clustered by.
+
+        Declares intent for future compaction; it does not itself reorder any
+        existing data files. Replaces the relation's entire clustering
+        configuration rather than adding to it.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            cluster_columns: Clustering columns, in priority order
+            author: session user this change is attributed to (see create_relation)
+        """
+        # Unlike the methods above, this default is reachable: a Writable
+        # connector with no catalog (e.g. LocalStoreConnector) has nowhere to
+        # persist a sort order, and must say so rather than silently doing
+        # nothing. The message is part of the contract - callers match on it.
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support ALTER TABLE ... CLUSTER BY"
+        )
+
+    def set_comment(self, object_name: str, comment: str, describer: Optional[str] = None) -> None:
+        """Store a descriptive comment against a relation or view.
+
+        Args:
+            object_name: Fully-qualified relation or view name
+            comment: The comment text
+            describer: session user the description is attributed to
+        """
+        # Reachable for the same reason as set_cluster_by: a connector with no
+        # catalog has nowhere to store a comment.
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support updating comments"
+        )
+
+    def set_workspace_property(
+        self, workspace_name: str, property_name: str, value, author: Optional[str] = None
+    ) -> None:
+        """Set a property on the workspace itself, not on a relation within it.
+
+        The property name has already been checked against Opteryx's supported
+        set and its value coerced to the declared type (see
+        logical_planner.WORKSPACE_PROPERTIES), so a connector receives only
+        names it is expected to understand.
+
+        Args:
+            workspace_name: The workspace whose property is being set
+            property_name: The property to set, e.g. "delete_protection"
+            value: The already-typed value to store
+            author: session user this change is attributed to (see create_relation)
         """
         raise NotImplementedError
 

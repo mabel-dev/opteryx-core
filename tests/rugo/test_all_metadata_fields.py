@@ -70,6 +70,12 @@ def test_all_metadata_fields_exposed():
             # Bloom filter
             "bloom_offset",
             "bloom_length",
+            # Clustering: this row group's parquet SortingColumn claim for the
+            # column, surfaced only for files rugo itself wrote (created_by
+            # trust gate) — always False for a foreign writer's file.
+            "is_sorted",
+            "sort_descending",
+            "sort_nulls_first",
             # Encodings & codec
             "encodings",
             "compression_codec",

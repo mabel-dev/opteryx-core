@@ -50,6 +50,7 @@ __all__ = [
     "FLOAT32", "FLOAT64",
     "BOOLEAN", "DATE", "INTERVAL",
     "VARCHAR", "NVARCHAR", "VARBINARY", "VARIANT",
+    "IPV4",
     "NULL",
     # constructors
     "DECIMAL", "TIMESTAMP", "TIME", "VECTOR",
@@ -129,6 +130,27 @@ _PARAMETERIZED_PHYSICAL = frozenset(
     }
 )
 
+# Physical types that PERMIT a LogicalType descriptor without requiring one.
+#
+# Until IPv4 the rule was a biconditional: a descriptor was present if and only
+# if the physical type was parameterized. IPv4 breaks that in one direction and
+# one direction only — it REFINES an otherwise-complete physical type rather
+# than completing an incomplete one. A UINT32 with no descriptor is a valid
+# unsigned integer column; the same UINT32 carrying LogicalKind.IPV4 is the
+# same 32 bits with a narrower meaning (see draken/logical_type.h).
+#
+# The two sets must stay disjoint: a physical type is either incomplete without
+# a descriptor (_PARAMETERIZED_PHYSICAL, absence is an error) or complete
+# without one (_REFINABLE_PHYSICAL, absence is just the unrefined type). A type
+# in both would have no defined meaning for a missing descriptor.
+#
+# Kept deliberately tight. This is not an invitation to hang arbitrary logical
+# meanings off physical types — each entry needs the architect's agreement, and
+# each one costs a second dispatch axis at the render and cast edges.
+_REFINABLE_PHYSICAL: dict = {
+    DrakenType.UINT32: frozenset({LogicalKind.IPV4}),
+}
+
 # Physical type -> SQL display name for the unparameterized cases.
 _NAME_OF: dict = {
     DrakenType.INT8: "INT8",
@@ -197,6 +219,24 @@ class ColumnType:
                     "ARRAY must not carry a LogicalType (the array child lives in `element`)"
                 )
             return
+        # Refinable physical types (UINT32/IPv4): a descriptor is optional, but
+        # when present it must be one this physical type actually permits — a
+        # UINT32 carrying LogicalKind.DECIMAL is nonsense, and accepting it here
+        # would surface as a wrong rendering much further downstream.
+        permitted = _REFINABLE_PHYSICAL.get(self.physical)
+        if permitted is not None and self.logical is not None:
+            if self.logical.kind not in permitted:
+                raise ValueError(
+                    f"{self.physical!r} permits only "
+                    f"{sorted(k.name for k in permitted)} as a LogicalType kind; "
+                    f"got {self.logical.kind!r}"
+                )
+            if self.element is not None:
+                raise ValueError(
+                    f"{self.physical!r} must not carry an `element` (that is ARRAY-only)"
+                )
+            return
+
         # Unparameterized physical types: both descriptors must be None.
         if self.logical is not None:
             raise ValueError(
@@ -295,6 +335,11 @@ class ColumnType:
             return "TIME"
         if self.physical == DrakenType.ARRAY:
             return f"ARRAY<{self.element}>"
+        # IPv4 shares UINT32's physical tag, so the descriptor — not the tag —
+        # decides the name. Checked before _NAME_OF so a refined UINT32 does not
+        # serialize as plain "UINT32" and lose its logical type on round-trip.
+        if self.logical is not None and self.logical.kind == LogicalKind.IPV4:
+            return "IPV4"
         name = _NAME_OF.get(self.physical)
         if name is None:
             raise NotImplementedError(f"no display name for {self.physical!r}")
@@ -322,6 +367,16 @@ NVARCHAR = ColumnType(DrakenType.NVARCHAR)
 VARBINARY = ColumnType(DrakenType.VARBINARY)
 VARIANT = ColumnType(DrakenType.VARIANT)
 NULL = ColumnType(DrakenType.NULL)
+
+# IPv4 — UINT32 physical refined by LogicalKind.IPV4. Unparameterized (the
+# prefix length is never carried on the value; it is always an operand of the
+# operation that needs it), so this is a canonical instance, not a constructor.
+#
+# `.category` is deliberately INTEGER: ordering, grouping, joins, hashing and
+# comparison all operate on the underlying uint32, which is exactly correct for
+# IPv4 — dotted-decimal order and unsigned integer order are the same order.
+# Only rendering and casting read the descriptor.
+IPV4 = ColumnType(DrakenType.UINT32, LogicalType(kind=LogicalKind.IPV4))
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +517,10 @@ def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
         return TIMESTAMP()
     if upper == "TIME":
         return TIME()
+    # Canonical, not an alias — IPV4 cannot go through _NAME_TO_PHYSICAL because
+    # that maps UINT32 to the name "UINT32", which would drop the descriptor.
+    if upper == "IPV4":
+        return IPV4
 
     alias = _SQL_NAME_ALIASES.get(upper)
     if alias is not None:
@@ -525,6 +584,23 @@ _COMPLEX_TYPES = {LogicalCategory.ARRAY, LogicalCategory.VECTOR, LogicalCategory
 _STRING_TYPES = {LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY}
 _LARGE_OBJECT_TYPES = {LogicalCategory.VARBINARY, LogicalCategory.ARRAY, LogicalCategory.NVARCHAR, LogicalCategory.VECTOR}
 
+# The unsigned tier, widest-wins. Kept here rather than derived from itemsize so
+# find_compatible_type answers exactly what nc_promote_fixed
+# (draken/ops/kernels/function_null_conditional.cpp) produces — the declared type
+# must follow the kernel, never lead it.
+_UNSIGNED_WIDTH = {
+    DrakenType.UINT8: 1,
+    DrakenType.UINT16: 2,
+    DrakenType.UINT32: 4,
+    DrakenType.UINT64: 8,
+}
+_UNSIGNED_OF = {
+    DrakenType.UINT8: UINT8,
+    DrakenType.UINT16: UINT16,
+    DrakenType.UINT32: UINT32,
+    DrakenType.UINT64: UINT64,
+}
+
 
 def find_compatible_type(types: list) -> Optional["ColumnType"]:
     """Find a ColumnType that can represent all types in the list (promotion rules).
@@ -548,6 +624,49 @@ def find_compatible_type(types: list) -> Optional["ColumnType"]:
 
     if not non_null:
         return None
+
+    # Every non-null input the SAME ColumnType: pass it through unchanged instead
+    # of collapsing to the category's canonical instance. The collapse is lossy in
+    # two ways at once. IPV4 is UINT32 refined by a LogicalKind.IPV4 descriptor
+    # and its category is deliberately INTEGER, so COALESCE(ipv4, ipv4) resolved
+    # to INT64: the descriptor was gone (results read back as raw integers like
+    # 3232235777 instead of '192.168.1.1') AND the declared physical type no
+    # longer matched the UINT32 the blend kernel actually produces — the declared
+    # vs actual divergence that drives downstream cast-kernel selection off a
+    # type the data never had. Plain UINT32/UINT64/FLOAT32 were mislabelled the
+    # same way.
+    #
+    # Narrow SIGNED ints are the deliberate exception: they still widen to INT64
+    # because that is exactly what the kernel does (nc_canon_fixed in
+    # function_null_conditional.cpp widens INT8/16/32 and passes everything else
+    # through), and the declared type has to follow the data, not lead it.
+    _WIDENED_TO_INT64 = (DrakenType.INT8, DrakenType.INT16, DrakenType.INT32)
+    _column_types = [
+        t
+        for t in types
+        if isinstance(t, ColumnType) and t.category != LogicalCategory.NULL
+    ]
+    _all_column_types = len(_column_types) == len(non_null)
+    if (
+        _all_column_types
+        and len(set(_column_types)) == 1
+        and _column_types[0].physical not in _WIDENED_TO_INT64
+    ):
+        return _column_types[0]
+
+    # Mixed unsigned widths resolve to the WIDEST, matching nc_promote_fixed.
+    # The category path below would answer INT64 (every unsigned's category is
+    # INTEGER), which cannot hold the top half of UINT64 — and the blend kernel
+    # would refuse the pair anyway, so COALESCE(uint32_col, uint64_col) failed
+    # outright rather than returning a wrong number. Descriptor-bearing types are
+    # excluded: an IPV4 is UINT32, but blending an address with a plain integer
+    # is not a widening, it is a category error, and it stays refused.
+    if _all_column_types and len(_column_types) > 1:
+        _physicals = {t.physical for t in _column_types}
+        if _physicals <= _UNSIGNED_WIDTH.keys() and all(
+            t.logical is None for t in _column_types
+        ):
+            return _UNSIGNED_OF[max(_physicals, key=_UNSIGNED_WIDTH.__getitem__)]
 
     if len(set(non_null)) == 1:
         result_lc = non_null[0]

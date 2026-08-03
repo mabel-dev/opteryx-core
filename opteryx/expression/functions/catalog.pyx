@@ -236,9 +236,26 @@ class FunctionCatalog:
                 return 2.0
 
             node_type, element_type = resolve_node_type(node)
-            # NULL literals should be compatible with any type (they yield NULL at runtime).
-            if node_type is None or node_type == LogicalCategory.NULL:
+
+            # An UNRESOLVED type (None) is not a type judgement — it is an
+            # identifier the binder has not typed yet. It must stay compatible
+            # with everything or nothing would bind.
+            if node_type is None:
                 return 0.0
+
+            # An untyped NULL literal is a type judgement, and the answer is
+            # "no type". It used to score 0.0 here on the belief that these
+            # "yield NULL at runtime" — they do not. The kernels are strict:
+            # scoring 0.0 selected an overload and handed the untyped NULL to a
+            # native kernel, which rejected it with its own internal message
+            # (`draken_octet_length: string input required` and 30+ others).
+            # Scoring _INF instead routes it to the mismatch path below, which
+            # names the argument and the cast that fixes it, at plan time.
+            #
+            # `any`-family parameters returned above and are unaffected, so
+            # COALESCE/IFNULL and friends still take a bare NULL.
+            if node_type == LogicalCategory.NULL:
+                return _INF
 
             if type_family == "array":
                 return 0.0 if node_type == LogicalCategory.ARRAY else _INF
@@ -296,6 +313,7 @@ class FunctionCatalog:
                 "temporal": "TIMESTAMP",
                 "date": "DATE",
                 "timestamp": "TIMESTAMP",
+                "array": "ARRAY<VARCHAR>",
             }
             selected_for_error = scored[0]
             mismatches = []
@@ -306,14 +324,31 @@ class FunctionCatalog:
                     break
                 if _score_parameter(node, current_param.type_family) == _INF:
                     node_type, _ = resolve_node_type(node)
-                    col_name = getattr(
-                        getattr(node, "schema_column", None), "name", None
-                    ) or getattr(node, "value", f"arg{i + 1}")
                     cast_type = _FAMILY_TO_CAST.get(current_param.type_family)
-                    cast_hint = f" - use `{col_name}::{cast_type}`." if cast_type else "."
-                    mismatches.append(
-                        f"arg{i + 1} ('{col_name}'): expected {current_param.type_family.upper()}, got {node_type.value}{cast_hint}"
-                    )
+
+                    # A bare NULL has no name and no value to quote - rendering
+                    # it through the column-name path gives "use `None::VARCHAR`".
+                    # It also needs a different fix from a mistyped column: the
+                    # literal must be given a type, not the expression rewritten.
+                    if node_type == LogicalCategory.NULL:
+                        cast_hint = (
+                            f" - an untyped NULL has no type to match; write "
+                            f"`CAST(NULL AS {cast_type})`."
+                            if cast_type
+                            else " - an untyped NULL has no type to match; CAST it to the type you mean."
+                        )
+                        mismatches.append(
+                            f"arg{i + 1} (NULL): expected "
+                            f"{current_param.type_family.upper()}{cast_hint}"
+                        )
+                    else:
+                        col_name = getattr(
+                            getattr(node, "schema_column", None), "name", None
+                        ) or getattr(node, "value", f"arg{i + 1}")
+                        cast_hint = f" - use `{col_name}::{cast_type}`." if cast_type else "."
+                        mismatches.append(
+                            f"arg{i + 1} ('{col_name}'): expected {current_param.type_family.upper()}, got {node_type.value}{cast_hint}"
+                        )
                 if not current_param.variadic:
                     current_param = next(param_iter, None)
             raise TypeError(f"{canonical} " + "; ".join(mismatches))

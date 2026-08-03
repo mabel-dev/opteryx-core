@@ -729,6 +729,25 @@ void register_vector_casts(nb::module_ &m) {
         "CAST(v AS DATE): 'YYYY-MM-DD' (and short variants 'YYYY-M-D') → DATE32 (int32 days-since-epoch). "
         "Raises ValueError on malformed rows. Null rows propagate.");
 
+    // Python-evaluator counterpart to the registered draken_cast_string_to_ipv4
+    // C-ABI kernel. Calls the SAME kernel, so the two paths cannot disagree on
+    // parse strictness. Result is UINT32; the IPV4 descriptor is re-attached
+    // from the bound output type by the projection, not here.
+    m.def("vector_cast_string_to_ipv4",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            VecResult r = draken_cast_string_to_ipv4(nullptr, dv);
+            if (r.data == nullptr)
+                throw std::invalid_argument(
+                    r.error_msg ? r.error_msg : "cast string->ipv4 failed");
+            PyObject* out = draken_vector_own_raw(r.data, r.validity, r.length, r.type);
+            if (!out) throw nb::python_error();
+            return nb::steal<nb::object>(out);
+        },
+        nb::arg("v"),
+        "CAST(v AS IPV4): 'A.B.C.D' -> UINT32. Strict parse; invalid raises ValueError.");
+
     m.def("vector_cast_string_to_time64",
         [](nb::object v) -> nb::object { return string_to_time64_apply(v); },
         nb::arg("v"),

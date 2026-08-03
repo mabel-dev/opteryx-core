@@ -61,7 +61,7 @@ def test_date32_permutation_slice():
 
 
 def test_interval_permutation_slice():
-    vals = [(0, x * 1000) for x in range(8)]  # (months, ms)
+    vals = [(0, x * 1000) for x in range(8)]  # (months, us)
     v = dn.vector_interval_from_dict(vals, PERM)
     assert v.slice(2, 4).to_pylist() == _expect(vals, 2, 4)
 

@@ -36,14 +36,15 @@ from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16, DRAKEN_ARRAY
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
-from draken.core.buffers cimport DRAKEN_DECIMAL128
+from draken.core.buffers cimport DRAKEN_DECIMAL128, DRAKEN_DECIMAL, DRAKEN_TIME32, DRAKEN_TIME64
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
 
 
 cdef Vector _materialise_constant_literal(object value, int physical_type,
-                                           int precision=-1, int scale=-1):
+                                           int precision=-1, int scale=-1,
+                                           object logical=None):
     """Materialise a scalar literal into a constant-shape Draken Vector ONCE at
     bind time (data_length==1, length==1). The executor re-stamps only the
     logical length per morsel — no per-morsel Python object, isinstance, or
@@ -116,12 +117,54 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
             return Vector(_draken_native.vector_float64_from_constant(None, 1))
         if physical_type == <int>DRAKEN_DATE32:
             return Vector(_draken_native.vector_date32_from_constant(None, 1))
-        # DECIMAL/DECIMAL128/TIMESTAMP64/TIME32/TIME64 need a declared descriptor
-        # (precision/scale/unit) this function is never called with for a NULL
-        # literal (precision/scale default -1, no unit param at all) — left as
-        # untyped DRAKEN_NULL rather than guessing a descriptor. BOOL has no
-        # constant constructor in draken_native at all. Numeric and genuinely
-        # untyped (physical_type == -1) NULLs also keep DRAKEN_NULL — their
+        # DECIMAL/DECIMAL128/TIMESTAMP64/TIME32/TIME64/ARRAY are the PARAMETERIZED
+        # and STRUCTURED physical types (§14): their tag alone is not a full type,
+        # so a NULL literal for one of them used to fall through to untyped
+        # DRAKEN_NULL rather than guess a descriptor.
+        #
+        # That is safe for a kernel (they short-circuit on the DRAKEN_NULL tag) but
+        # NOT for a concat. FullOuterToUnionStrategy rewrites FULL OUTER JOIN into
+        # (LEFT OUTER) UNION (LEFT ANTI + synthesized NULL literals for the
+        # non-preserved side); the union then concatenates the real column against
+        # those literals, and `vector_concat` requires ONE type. Every FULL OUTER
+        # JOIN projecting a DECIMAL, TIMESTAMP, TIME or ARRAY column died with
+        # "concat: all inputs must share one type". Unparameterized types were
+        # unaffected — they already had a typed-null constructor above.
+        #
+        # `logical` carries the declared descriptor when the caller knows it, which
+        # is exactly the union case (set_ops retypes the NULL literal to the other
+        # leg's ColumnType). Without a descriptor we still cannot invent one, so the
+        # untyped fall-through below is kept for that case.
+        if physical_type == <int>DRAKEN_DECIMAL and precision >= 1:
+            return Vector(_draken_native.vector_decimal_from_constant(
+                None, 1, precision, scale if scale >= 0 else 0))
+        if physical_type == <int>DRAKEN_DECIMAL128 and precision >= 1:
+            return Vector(_draken_native.vector_decimal128_from_constant(
+                None, 1, precision, scale if scale >= 0 else 0))
+        if physical_type == <int>DRAKEN_ARRAY:
+            # One null ARRAY row; the child type rides on `logical`/the schema, and
+            # a null row has no elements to type either way.
+            return Vector(_draken_native.vector_array_from_sequence([None]))
+        if physical_type == <int>DRAKEN_TIMESTAMP64:
+            null_ts = _draken_native.vector_reinterpret_as_timestamp64(
+                _draken_native.vector_from_constant(None, 1))
+            if logical is not None:
+                _draken_native.vector_attach_logical_type(null_ts, logical)
+            return Vector(null_ts)
+        if physical_type == <int>DRAKEN_TIME32:
+            null_t = _draken_native.vector_reinterpret_as_time32(
+                _draken_native.vector_from_constant(None, 1))
+            if logical is not None:
+                _draken_native.vector_attach_logical_type(null_t, logical)
+            return Vector(null_t)
+        if physical_type == <int>DRAKEN_TIME64:
+            null_t = _draken_native.vector_reinterpret_as_time64(
+                _draken_native.vector_from_constant(None, 1))
+            if logical is not None:
+                _draken_native.vector_attach_logical_type(null_t, logical)
+            return Vector(null_t)
+        # BOOL has no constant constructor in draken_native at all. Numeric and
+        # genuinely untyped (physical_type == -1) NULLs keep DRAKEN_NULL — their
         # kernels short-circuit on the DRAKEN_NULL tag.
         return Vector(_draken_native.vector_null_from_length(1))
     if isinstance(value, bool):
@@ -248,6 +291,14 @@ cdef bint _exact_as_float32(object v) except -1:
     if v < -3.4e38 or v > 3.4e38:           # outside binary32 range
         return False
     return _struct.unpack("<f", _struct.pack("<f", v))[0] == v
+
+
+def _column_type_for_physical(int physical_code):
+    """Canonical unparameterized ColumnType for a DrakenType int. Used to report a
+    coerced literal's new physical type to the c-native gate."""
+    from draken.draken_native import DrakenType as _DT
+    from opteryx.types.logical_type import ColumnType as _CT
+    return _CT(_DT(physical_code))
 
 
 cdef int _coerce_literal_physical(object col_type, object lit_value) except -99:
@@ -424,6 +475,7 @@ cdef object _LogicalCategory_BOOLEAN = None
 cdef object _LogicalCategory_VARCHAR = None
 cdef object _LogicalCategory_ARRAY = None
 cdef object _LogicalCategory_BLOB = None
+cdef object _LogicalCategory_VARIANT = None
 cdef tuple _STRING_FAMILY = ()
 
 # draken_date_part bind-time part ids (kernel contract — function_kernels.cpp).
@@ -814,12 +866,6 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
             return True
     if BOP_PLUS <= op_code <= BOP_INT_DIVIDE:
         return l_num and r_num
-    # IP-in-CIDR: BitwiseOr over string operands (left = IP column, right = CIDR
-    # scalar) → BOOL. Distinct from integer bitwise-OR; the kernel reads both
-    # operands as strings. Mixed string/non-string stays on the closure.
-    if op_code == BOP_BITWISE_OR and left_phys in _BINOP_NATIVE_STRING \
-            and right_phys in _BINOP_NATIVE_STRING:
-        return True
     # Bitwise OR/AND/XOR/SHIFT over SAME-type integers (int_bitwise requires it;
     # mismatch would return a loud error sentinel, so require equality up front).
     if BOP_BITWISE_OR <= op_code <= BOP_SHIFT_RIGHT:
@@ -884,6 +930,7 @@ cdef inline _ensure_sql_types():
     global _LogicalCategory_DATE, _LogicalCategory_TIMESTAMP, _LogicalCategory_BOOLEAN
     global _LogicalCategory_VARCHAR, _LogicalCategory_ARRAY, _LogicalCategory_BLOB
     global _STRING_FAMILY
+    global _LogicalCategory_VARIANT
     if _LogicalCategory_DATE is None:
         from opteryx.types.logical_type import LogicalCategory
         _LogicalCategory_DATE = LogicalCategory.DATE
@@ -892,8 +939,10 @@ cdef inline _ensure_sql_types():
         _LogicalCategory_VARCHAR = LogicalCategory.VARCHAR
         _LogicalCategory_ARRAY = LogicalCategory.ARRAY
         _LogicalCategory_BLOB = LogicalCategory.VARBINARY
+        _LogicalCategory_VARIANT = LogicalCategory.VARIANT
         # Types valid as the LEFT operand of an extraction operator (-> ->> [i]).
         # Includes VARIANT so JSON access chains (a -> b ->> c) with no user cast.
+        # NOTE: MapAccess excludes VARIANT explicitly - see the guard in _linearize.
         _STRING_FAMILY = (_LogicalCategory_VARCHAR, LogicalCategory.NVARCHAR, _LogicalCategory_BLOB, LogicalCategory.VARIANT)
 
 
@@ -1080,23 +1129,33 @@ cdef Py_ssize_t _linearize(
             else:
                 # Genuine scalar literal — materialise the native constant ONCE.
                 # The executor re-stamps only the logical length per morsel.
-                if isinstance(value_obj, _decimal.Decimal):
-                    # Thread the bind-time DECLARED (precision, scale) through —
-                    # e.g. CAST(1.23 AS DECIMAL(38,6)) — since the parsed Decimal
-                    # value itself is never re-quantized to it upstream. Without
-                    # this, _materialise_constant_literal falls back to deriving
-                    # (precision, scale) from the value's own digit count, which
-                    # silently picks the wrong physical tier (DECIMAL vs
-                    # DECIMAL128) and the wrong stored magnitude.
+                # Thread the bind-time DECLARED descriptor through for both a
+                # Decimal value and a NULL.
+                #
+                # Decimal: the DECLARED (precision, scale) — e.g.
+                # CAST(1.23 AS DECIMAL(38,6)) — since the parsed Decimal value
+                # itself is never re-quantized to it upstream. Without this,
+                # _materialise_constant_literal falls back to deriving
+                # (precision, scale) from the value's own digit count, which
+                # silently picks the wrong physical tier (DECIMAL vs DECIMAL128)
+                # and the wrong stored magnitude.
+                #
+                # NULL: a None with a parameterized physical tag (DECIMAL,
+                # TIMESTAMP64, TIME32/64) needs the same descriptor to
+                # materialise as a TYPED null rather than untyped DRAKEN_NULL —
+                # see the None branch of _materialise_constant_literal. The
+                # union leg of a rewritten FULL OUTER JOIN depends on it.
+                if isinstance(value_obj, _decimal.Decimal) or value_obj is None:
                     _lit_py_node = <object>node.source_node
                     _lit_ct = getattr(_lit_py_node, "type", None)
                     _lit_lg = getattr(_lit_ct, "logical", None) if _lit_ct is not None else None
                     if _lit_lg is not None and getattr(_lit_lg, "precision", None):
                         const_lit = _materialise_constant_literal(
                             value_obj, node.physical_type,
-                            int(_lit_lg.precision), int(_lit_lg.scale))
+                            int(_lit_lg.precision), int(_lit_lg.scale), _lit_lg)
                     else:
-                        const_lit = _materialise_constant_literal(value_obj, node.physical_type)
+                        const_lit = _materialise_constant_literal(
+                            value_obj, node.physical_type, -1, -1, _lit_lg)
                 else:
                     const_lit = _materialise_constant_literal(value_obj, node.physical_type)
                 slot.opcode = BC_LOAD_LIT_CONST
@@ -1601,6 +1660,27 @@ cdef Py_ssize_t _linearize(
             )
         _ensure_sql_types()
 
+        # IPv4 CIDR containment (`<<=` / `>>=`). Routed to its own C-ABI kernel
+        # rather than draken_compare_dv: this is not an ordering comparison at
+        # all, it is a mask-and-compare against a network parsed once per morsel.
+        #
+        # No ctx and no operand reordering — draken_ipv4_in_cidr discriminates on
+        # operand TYPE (the UINT32 side is the address), so both spellings share
+        # one kernel and one code path here.
+        if op_str == "IPContainedBy" or op_str == "IPContains":
+            _ip_fn, _ip_ctx = _resolve_kernel_and_context("draken_ipv4_in_cidr")
+            if _ip_fn is None:
+                raise NotImplementedError(
+                    "compiled_expression: draken_ipv4_in_cidr kernel is not registered"
+                )
+            slot = bc._push_instr()
+            slot.opcode = BC_FUNCTION
+            slot.arity = 2
+            slot.bool_value = 0
+            slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+            slot.kernel_fn = <void*>(<unsigned long long>_ip_fn)
+            return sub_depth - 2 + 1
+
         # Mixed-type NUMERIC comparison — draken_compare_dv declines any type
         # mismatch (DECIMAL vs FLOAT64 from a float-literal product, DECIMAL vs
         # DECIMAL128, INT vs FLOAT, cross-scale DECIMAL) and would error with no
@@ -1705,12 +1785,50 @@ cdef Py_ssize_t _linearize(
         bin_result_type = bin_result_sc.column_type if bin_result_sc is not None else None
         bin_op_str = <object>node.value
 
+        # Bitwise/shift ops require IDENTICAL physical operand types — draken's
+        # int_bitwise returns a loud error sentinel on a mismatch, so the gate
+        # below demands equality up front. An integer LITERAL, though, binds at
+        # its own natural width, so `id | 1` against an INT8 column was INT8 | INT64
+        # and got refused at plan time with "outside the c-native kernel set" —
+        # while `id | id` worked. Arithmetic never hit this because its gate asks
+        # only that both sides be numeric.
+        #
+        # Fixed the same way the comparison path already fixes it: materialise the
+        # literal in the COLUMN's physical type. _coerce_literal_physical returns
+        # only value-exact coercions (a literal that will not fit is left alone and
+        # the expression stays non-c-native rather than silently wrapping), so this
+        # cannot change an answer.
+        #
+        # The coerced type has to be reported to the gate as well as set on the
+        # node: the node drives materialisation, the gate reads the physical names.
+        bin_op_code = <int>_BOP_CODE.get(bin_op_str, BOP_UNKNOWN)
+        if BOP_BITWISE_OR <= bin_op_code <= BOP_SHIFT_RIGHT:
+            # Fires only column-op-literal. literal-op-literal is constant folding's
+            # job and has no column type to adopt; column-op-column already matches
+            # or genuinely cannot.
+            if (node.right.node_type == _NT_LITERAL
+                    and node.left.node_type != _NT_LITERAL
+                    and node.right.value != NULL and bin_left_type is not None):
+                bw_coerce_phys = _coerce_literal_physical(
+                    bin_left_type, <object>node.right.value)
+                if bw_coerce_phys >= 0:
+                    node.right.physical_type = bw_coerce_phys
+                    bin_right_type = _column_type_for_physical(bw_coerce_phys)
+            elif (node.left.node_type == _NT_LITERAL
+                    and node.right.node_type != _NT_LITERAL
+                    and node.left.value != NULL and bin_right_type is not None):
+                bw_coerce_phys = _coerce_literal_physical(
+                    bin_right_type, <object>node.left.value)
+                if bw_coerce_phys >= 0:
+                    node.left.physical_type = bw_coerce_phys
+                    bin_left_type = _column_type_for_physical(bw_coerce_phys)
+
         sub_depth = _linearize(node.left, bc, depth)
         sub_depth = _linearize(node.right, bc, sub_depth)
 
         slot = bc._push_instr()
         slot.opcode = BC_BINARY_OP
-        slot.op_code = <int>_BOP_CODE.get(bin_op_str, BOP_UNKNOWN)
+        slot.op_code = bin_op_code
         if slot.op_code == BOP_UNKNOWN:
             raise NotImplementedError(f"compiled_expression: unknown binary op {bin_op_str!r}")
 
@@ -2791,6 +2909,26 @@ cdef Py_ssize_t _linearize(
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
                 _cn_arg = (0, _binop_dec_scale(source_sql), 0,
                            int(cast_params[1]), int(cast_params[0]), 0, 0)
+            elif _cn[0] == "draken_cast_to_array":
+                # CAST(json AS ARRAY<T>): the kernel needs the ELEMENT type, which
+                # a DrakenVector cannot carry (the parent's tag is just ARRAY), and
+                # the TRY_CAST disposition. Both ride a bind-time cast_array_ctx.
+                #
+                # The element type is read off the BOUND result ColumnType, not
+                # re-parsed from the cast's parameter literal: the binder already
+                # resolved `ARRAY<VARCHAR>` to ColumnType(ARRAY, element=VARCHAR),
+                # and re-parsing would be a second, driftable resolution of the
+                # same thing.
+                _cn_res_sc = getattr(cast_py_node, "schema_column", None)
+                _cn_res_ct = getattr(_cn_res_sc, "column_type", None) if _cn_res_sc is not None else None
+                _cn_elem = _cn_res_ct.element if _cn_res_ct is not None else None
+                if _cn_elem is None:
+                    raise ValueError(
+                        "CAST to ARRAY requires an element type, e.g. "
+                        "CAST(x AS ARRAY<VARCHAR>) — the binder resolved no element type"
+                    )
+                from draken.ops.kernels._kernel_registry import alloc_cast_array_ctx as _cn_alloc
+                _cn_arg = (int(_cn_elem.physical.value), 1 if cast_is_try else 0)
             elif _cn[0] in ("draken_cast_decimal_to_string",
                             "draken_cast_decimal128_to_string",
                             "draken_cast_decimal_to_blob",
@@ -2848,6 +2986,11 @@ cdef Py_ssize_t _linearize(
                 elif (_cn[0].endswith("_to_timestamp") or _cn[0].endswith("_to_decimal")
                         or _cn[0] == "draken_cast_timestamp_rescale"):
                     slot.flags |= BC_C_NATIVE_DESC
+                elif _cn[0] == "draken_cast_to_array":
+                    # ARRAY result: elements ride VecResult.child, adoptable only
+                    # on the engine path. Must NOT be marked FIXED — that would
+                    # admit it to is_all_c_native, whose VM drops the child.
+                    slot.flags |= BC_C_NATIVE_ARRAY
                 else:
                     slot.flags |= BC_C_NATIVE_FIXED
         elif (not cast_is_try and cast_target_type == "VARCHAR"
@@ -2954,6 +3097,17 @@ cdef Py_ssize_t _linearize(
                 sub_op = BC_EXTR_MAP_ARRAY
                 # Store the int64 key directly in bool_value.
                 slot_bool_val = int(extr_key)
+            elif left_sql == _LogicalCategory_VARIANT:
+                # VARIANT is in _STRING_FAMILY, but subscripting one is ambiguous - the
+                # value may be an array, a string, or neither, and it differs per row.
+                # Taking the string path here would byte-index the raw JSON text, which
+                # is nearly never what was meant. The binder rejects this first; this is
+                # the backstop so the string path cannot be reached by accident.
+                raise IncorrectTypeError(
+                    "MapAccess: subscripting a VARIANT is ambiguous - it may hold an array, "
+                    "a string, or neither. Cast it to the type you mean first, for example "
+                    "`(value::VARCHAR)[0]` to index the JSON text."
+                )
             elif left_sql in _STRING_FAMILY:
                 # MapAccess on string: store length-1 INT64 key Vector.
                 sub_op = BC_EXTR_MAP_STRING

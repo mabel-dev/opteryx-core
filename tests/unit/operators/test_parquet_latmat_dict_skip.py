@@ -101,9 +101,29 @@ def _unique_ws():
 
 def _run(sql, *, latmat):
     """Write the fixture, run ``sql`` (with the LATMAT flag set as requested),
-    and return (sorted payload rows, ReadRel telemetry operation)."""
+    and return (sorted payload rows, ReadRel telemetry operation).
+
+    The native footer gate is DECLINED for the duration so the scan takes the
+    Python trampoline. The two-pass late-materialization path under test lives in
+    ``ParquetReadNode._run_pass1`` — i.e. on the trampoline — and this query now
+    selects ``NativeParquetScanSource`` on its own (the predicate relocates
+    natively, WP-02), which is single-pass and leaves every ``parquet_latmat_*``
+    sensor at zero. Without forcing, this test asserted 2 == 0 and the branch it
+    exists to guard was never entered at all.
+    """
+    from opteryx.connectors.parquet_io import pool_reader
+
     table = _build_table()
     ws = _unique_ws()
+    saved_gate = pool_reader.native_scan_supported
+    pool_reader.native_scan_supported = lambda *a, **k: False
+    try:
+        return _run_inner(sql, table, ws, latmat)
+    finally:
+        pool_reader.native_scan_supported = saved_gate
+
+
+def _run_inner(sql, table, ws, latmat):
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = os.path.join(tmp, ws, "t")
         os.makedirs(data_dir)

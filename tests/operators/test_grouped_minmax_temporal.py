@@ -84,7 +84,7 @@ def test_grouped_min_max_bool():
 
 def test_grouped_min_max_interval():
     """MIN/MAX(INTERVAL) ordered by the engine's approximate fold (months*30d+ms),
-    keeping the winning row's original (months, ms) slot; nulls skipped.
+    keeping the winning row's original (months, us) slot; nulls skipped.
 
     Driven directly through GroupHashEngine because interval columns can't be
     produced via grouped-agg SQL in this build (interval arithmetic gaps).

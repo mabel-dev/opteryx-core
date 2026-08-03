@@ -1,4 +1,5 @@
 #include "ops/kernels/cast_kernels.h"
+#include "core/ipv4.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"
 #include "ops/kernels/result_helpers.h"
@@ -413,6 +414,64 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
 
         VecResult r;
         r.data = out; r.type = DRAKEN_DATE32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
+        return r;
+    });
+}
+
+// CAST(<string> AS IPV4) — dotted-decimal text -> the uint32 the address IS.
+//
+// The result is DRAKEN_UINT32 with NO descriptor set here: a VecResult has no
+// channel for LogicalKind::IPV4, and it does not need one. The IPv4-ness comes
+// from the BOUND OUTPUT TYPE via add_expr_project's `logical` tuple, which is
+// re-attached to the output column's owner (engine.hpp). Same mechanism the
+// parquet scan uses for a catalog-declared IPv4 column.
+//
+// Parsing is delegated to draken::ipv4::parse, which is deliberately strict —
+// no inet_aton shorthand, no leading zeros. An unparseable address is a hard
+// error, per the ticket: silently yielding NULL or 0 would turn a typo in an
+// ACL into a rule that matches 0.0.0.0.
+VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR
+                && v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt(
+                "cast string->ipv4: expected string, got %d", v->type);
+
+        // Compression-aware with liveness: convert each PHYSICAL slot once and
+        // keep the selection, so a dictionary-encoded address column parses K
+        // distinct values rather than N rows. Dead slots are never parsed — a
+        // dictionary entry no longer referenced by any live row must not be able
+        // to fail the cast for rows that do not use it.
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        const uint32_t n = v->length;
+        uint32_t* out = static_cast<uint32_t*>(
+            draken_malloc((k > 0u ? k : 1u) * sizeof(uint32_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+
+        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+
+        for (uint32_t j = 0u; j < k; ++j) {
+            if (!live[j]) { out[j] = 0u; continue; }
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
+            const uint32_t len = str_length(slot);
+            uint32_t addr = 0u;
+            if (!draken::ipv4::parse(s, len, &addr)) {
+                draken_free(out);
+                return draken_error_sentinel_fmt(
+                    "Cannot cast string to IPV4: expected A.B.C.D, got %.*s",
+                    (int)(len < 32u ? len : 32u), s);
+            }
+            out[j] = addr;
+        }
+
+        VecResult r;
+        r.data = out; r.type = DRAKEN_UINT32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
         return r;
     });

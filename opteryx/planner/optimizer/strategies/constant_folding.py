@@ -19,6 +19,7 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
+from draken.draken_native import LogicalKind
 from draken.draken_native import vector_attach_logical_type
 from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType, get_all_nodes_of_type
@@ -29,7 +30,6 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import BOOLEAN, LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
-from opteryx.utils.vector_types import is_draken_vector
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
@@ -360,8 +360,17 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # ONE place they still run — the native engine refuses an unported function
         # at plan time rather than falling back. Assuming a Vector here crashed
         # `SELECT CHR(200)` with AttributeError: 'list' has no attribute 'to_pylist'.
+        # A boolean connective carries NO schema_column — AND/OR are structure, not
+        # a projected column — and `_build_passthru_node` copies that None onto the
+        # _PASSTHRU wrapper it folds through here. Dereferencing it unconditionally
+        # crashed any always-false conjunct nested under an OR
+        # (`WHERE id < 3 OR (id == -312.458 AND name < 'x')`) with
+        # AttributeError: 'NoneType' object has no attribute 'column_type'.
+        # No schema_column means no plan-known target descriptor, which is exactly
+        # the `target_ct is None` case the re-attach below already handles.
+        _target_sc = root.schema_column
+        target_ct = _target_sc.column_type if _target_sc is not None else None
         if not isinstance(result_vector, list):
-            target_ct = root.schema_column.column_type
             if target_ct is not None and target_ct.logical is not None:
                 # A C-ABI kernel's VecResult carries a descriptor-bearing result
                 # (TIMESTAMP64 unit, DECIMAL precision/scale) in the raw domain —
@@ -373,10 +382,27 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 # here (root.schema_column.column_type), so re-attach it before
                 # to_pylist() reads the value back out, exactly like
                 # ExprProjectOperator's `logical` param does at runtime.
-                vector_attach_logical_type(result_vector._nb, target_ct.logical)
+                #
+                # IPV4 is the one kind that must NOT be attached here. The attach
+                # exists so the readback lands in the LITERAL's own domain, and for
+                # every other kind it does: a TIMESTAMP64 reads back as a datetime
+                # and DECIMAL as a Decimal, both of which build_literal_node stores
+                # (converting the datetime back to int64 micros). An IPv4 reads back
+                # as dotted-decimal TEXT (ipv4_to_py_str), but a folded IPv4 literal
+                # is the raw uint32 — the form _cast_literal_value produces and
+                # _materialise_constant_literal consumes. Attaching would hand
+                # build_literal_node a str for a UINT32/IPV4 column, and its
+                # isinstance(value, (str, bytes)) branch would build a VARCHAR
+                # constant: value/type-tag divergence, wrong rows rather than a
+                # crash. Left un-attached, the vector is already plain UINT32, the
+                # readback is the int, and ExprProjectOperator re-attaches the
+                # descriptor downstream from the schema exactly as it does for a
+                # CAST-folded IPv4 literal.
+                if target_ct.logical.kind != LogicalKind.IPV4:
+                    vector_attach_logical_type(result_vector._nb, target_ct.logical)
         result = result_vector[0] if isinstance(result_vector, list) else result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
-        return build_literal_node(result, root, root.schema_column.column_type)
+        return build_literal_node(result, root, target_ct)
 
     return root
 

@@ -309,9 +309,8 @@ def render_exit(_: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.CreateView)
 def render_create_view(node: LogicalPlanNode) -> str:
     or_replace = "OR REPLACE " if node.or_replace else ""
-    materialized = "MATERIALIZED " if node.materialized else ""
     columns = f" ({', '.join(node.columns)})" if node.columns else ""
-    return f"CREATE {or_replace}{materialized}VIEW ({node.view_name}{columns})"
+    return f"CREATE {or_replace}VIEW ({node.view_name}{columns})"
 
 
 @register_render(LogicalPlanStepType.AlterView)
@@ -323,9 +322,19 @@ def render_alter_view(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.DropView)
 def render_drop_view(node: LogicalPlanNode) -> str:
     if_exists = "IF EXISTS " if node.if_exists else ""
-    cascade = " CASCADE" if node.cascade else ""
     view_list = ", ".join(node.view_names)
-    return f"DROP VIEW {if_exists}({view_list}){cascade}"
+    return f"DROP VIEW {if_exists}({view_list})"
+
+
+@register_render(LogicalPlanStepType.RenameRelation)
+def render_rename_relation(node: LogicalPlanNode) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    return f"ALTER TABLE {if_exists}({node.relation_name}) RENAME TO ({node.new_relation_name})"
+
+
+@register_render(LogicalPlanStepType.AlterWorkspace)
+def render_alter_workspace(node: LogicalPlanNode) -> str:
+    return f"ALTER WORKSPACE ({node.workspace_name}) SET {node.property_name} = {node.property_value}"
 
 
 @register_render(LogicalPlanStepType.Analyze)

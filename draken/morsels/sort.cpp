@@ -16180,7 +16180,7 @@ static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *__
   return __pyx_r;
 }
 
-/* "draken/core/buffers.pxd":170
+/* "draken/core/buffers.pxd":179
  * # the frozen ABI surface here so the listed consumers continue to bind it via
  * # `cimport draken.core.buffers`. Inline so it links into each extension.
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):             # <<<<<<<<<<<<<<
@@ -16196,7 +16196,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
 
-  /* "draken/core/buffers.pxd":171
+  /* "draken/core/buffers.pxd":180
  * # `cimport draken.core.buffers`. Inline so it links into each extension.
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))             # <<<<<<<<<<<<<<
@@ -16205,7 +16205,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf = ((DrakenVarBuffer *)malloc((sizeof(DrakenVarBuffer))));
 
-  /* "draken/core/buffers.pxd":172
+  /* "draken/core/buffers.pxd":181
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
  *     if buf == NULL:             # <<<<<<<<<<<<<<
@@ -16215,16 +16215,16 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_t_1 = (__pyx_v_buf == NULL);
   if (unlikely(__pyx_t_1)) {
 
-    /* "draken/core/buffers.pxd":173
+    /* "draken/core/buffers.pxd":182
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
  *     if buf == NULL:
  *         raise MemoryError()             # <<<<<<<<<<<<<<
  * 
  *     # allocate offsets: length + 1
 */
-    PyErr_NoMemory(); __PYX_ERR(2, 173, __pyx_L1_error)
+    PyErr_NoMemory(); __PYX_ERR(2, 182, __pyx_L1_error)
 
-    /* "draken/core/buffers.pxd":172
+    /* "draken/core/buffers.pxd":181
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
  *     cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
  *     if buf == NULL:             # <<<<<<<<<<<<<<
@@ -16233,7 +16233,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   }
 
-  /* "draken/core/buffers.pxd":176
+  /* "draken/core/buffers.pxd":185
  * 
  *     # allocate offsets: length + 1
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))             # <<<<<<<<<<<<<<
@@ -16242,7 +16242,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->offsets = ((uint32_t *)malloc(((__pyx_v_length + 1) * (sizeof(uint32_t)))));
 
-  /* "draken/core/buffers.pxd":177
+  /* "draken/core/buffers.pxd":186
  *     # allocate offsets: length + 1
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
  *     if buf.offsets == NULL:             # <<<<<<<<<<<<<<
@@ -16252,7 +16252,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_t_1 = (__pyx_v_buf->offsets == NULL);
   if (unlikely(__pyx_t_1)) {
 
-    /* "draken/core/buffers.pxd":178
+    /* "draken/core/buffers.pxd":187
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
  *     if buf.offsets == NULL:
  *         free(buf)             # <<<<<<<<<<<<<<
@@ -16261,16 +16261,16 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
     free(__pyx_v_buf);
 
-    /* "draken/core/buffers.pxd":179
+    /* "draken/core/buffers.pxd":188
  *     if buf.offsets == NULL:
  *         free(buf)
  *         raise MemoryError()             # <<<<<<<<<<<<<<
  * 
  *     # allocate data buffer
 */
-    PyErr_NoMemory(); __PYX_ERR(2, 179, __pyx_L1_error)
+    PyErr_NoMemory(); __PYX_ERR(2, 188, __pyx_L1_error)
 
-    /* "draken/core/buffers.pxd":177
+    /* "draken/core/buffers.pxd":186
  *     # allocate offsets: length + 1
  *     buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
  *     if buf.offsets == NULL:             # <<<<<<<<<<<<<<
@@ -16279,7 +16279,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   }
 
-  /* "draken/core/buffers.pxd":182
+  /* "draken/core/buffers.pxd":191
  * 
  *     # allocate data buffer
  *     if bytes_cap > 0:             # <<<<<<<<<<<<<<
@@ -16289,7 +16289,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_t_1 = (__pyx_v_bytes_cap > 0);
   if (__pyx_t_1) {
 
-    /* "draken/core/buffers.pxd":183
+    /* "draken/core/buffers.pxd":192
  *     # allocate data buffer
  *     if bytes_cap > 0:
  *         buf.data = <uint8_t*> malloc(bytes_cap)             # <<<<<<<<<<<<<<
@@ -16298,7 +16298,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
     __pyx_v_buf->data = ((uint8_t *)malloc(__pyx_v_bytes_cap));
 
-    /* "draken/core/buffers.pxd":184
+    /* "draken/core/buffers.pxd":193
  *     if bytes_cap > 0:
  *         buf.data = <uint8_t*> malloc(bytes_cap)
  *         if buf.data == NULL:             # <<<<<<<<<<<<<<
@@ -16308,7 +16308,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
     __pyx_t_1 = (__pyx_v_buf->data == NULL);
     if (unlikely(__pyx_t_1)) {
 
-      /* "draken/core/buffers.pxd":185
+      /* "draken/core/buffers.pxd":194
  *         buf.data = <uint8_t*> malloc(bytes_cap)
  *         if buf.data == NULL:
  *             free(buf.offsets)             # <<<<<<<<<<<<<<
@@ -16317,7 +16317,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
       free(__pyx_v_buf->offsets);
 
-      /* "draken/core/buffers.pxd":186
+      /* "draken/core/buffers.pxd":195
  *         if buf.data == NULL:
  *             free(buf.offsets)
  *             free(buf)             # <<<<<<<<<<<<<<
@@ -16326,16 +16326,16 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
       free(__pyx_v_buf);
 
-      /* "draken/core/buffers.pxd":187
+      /* "draken/core/buffers.pxd":196
  *             free(buf.offsets)
  *             free(buf)
  *             raise MemoryError()             # <<<<<<<<<<<<<<
  *     else:
  *         buf.data = NULL
 */
-      PyErr_NoMemory(); __PYX_ERR(2, 187, __pyx_L1_error)
+      PyErr_NoMemory(); __PYX_ERR(2, 196, __pyx_L1_error)
 
-      /* "draken/core/buffers.pxd":184
+      /* "draken/core/buffers.pxd":193
  *     if bytes_cap > 0:
  *         buf.data = <uint8_t*> malloc(bytes_cap)
  *         if buf.data == NULL:             # <<<<<<<<<<<<<<
@@ -16344,7 +16344,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
     }
 
-    /* "draken/core/buffers.pxd":182
+    /* "draken/core/buffers.pxd":191
  * 
  *     # allocate data buffer
  *     if bytes_cap > 0:             # <<<<<<<<<<<<<<
@@ -16354,7 +16354,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
     goto __pyx_L5;
   }
 
-  /* "draken/core/buffers.pxd":189
+  /* "draken/core/buffers.pxd":198
  *             raise MemoryError()
  *     else:
  *         buf.data = NULL             # <<<<<<<<<<<<<<
@@ -16366,7 +16366,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   }
   __pyx_L5:;
 
-  /* "draken/core/buffers.pxd":191
+  /* "draken/core/buffers.pxd":200
  *         buf.data = NULL
  * 
  *     buf.null_bitmap = NULL             # <<<<<<<<<<<<<<
@@ -16375,7 +16375,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->null_bitmap = NULL;
 
-  /* "draken/core/buffers.pxd":192
+  /* "draken/core/buffers.pxd":201
  * 
  *     buf.null_bitmap = NULL
  *     buf.length = length             # <<<<<<<<<<<<<<
@@ -16384,7 +16384,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->length = __pyx_v_length;
 
-  /* "draken/core/buffers.pxd":193
+  /* "draken/core/buffers.pxd":202
  *     buf.null_bitmap = NULL
  *     buf.length = length
  *     buf.type = dtype             # <<<<<<<<<<<<<<
@@ -16392,7 +16392,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
 */
   __pyx_v_buf->type = __pyx_v_dtype;
 
-  /* "draken/core/buffers.pxd":194
+  /* "draken/core/buffers.pxd":203
  *     buf.length = length
  *     buf.type = dtype
  *     return buf             # <<<<<<<<<<<<<<
@@ -16400,7 +16400,7 @@ static CYTHON_INLINE DrakenVarBuffer *__pyx_f_6draken_4core_7buffers_alloc_var_b
   __pyx_r = __pyx_v_buf;
   goto __pyx_L0;
 
-  /* "draken/core/buffers.pxd":170
+  /* "draken/core/buffers.pxd":179
  * # the frozen ABI surface here so the listed consumers continue to bind it via
  * # `cimport draken.core.buffers`. Inline so it links into each extension.
  * cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):             # <<<<<<<<<<<<<<

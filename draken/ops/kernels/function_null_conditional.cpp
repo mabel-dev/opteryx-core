@@ -106,11 +106,28 @@ inline DrakenType nc_canon_fixed(DrakenType t) {
 // find_compatible_type: any two signed ints widen to INT64; an int/float mix to
 // FLOAT64. Equal types pass through. DRAKEN_NULL == "cannot promote" (caller fails
 // loud): temporal/unsigned cross-family scaling is genuinely ambiguous.
+inline bool nc_is_unsigned_int(DrakenType t) {
+    return t == DRAKEN_UINT8 || t == DRAKEN_UINT16 ||
+           t == DRAKEN_UINT32 || t == DRAKEN_UINT64;
+}
+
 inline DrakenType nc_promote_fixed(DrakenType a, DrakenType b) {
     if (a == b) return nc_canon_fixed(a);
     if (nc_is_signed_int(a) && nc_is_signed_int(b)) return DRAKEN_INT64;
+    // Two unsigned widths widen to the WIDER of the two, not to INT64: INT64
+    // cannot hold the top half of UINT64, so the signed rule above would turn
+    // a large address or id into a negative number. Widening unsigned->unsigned
+    // is always exact (zero-extension), so no value can be lost. Unlike the
+    // signed rule this does NOT canonicalise to the widest tier — nc_canon_fixed
+    // passes unsigned through, so a UINT8 pair stays UINT8 and a {UINT8, UINT32}
+    // pair becomes UINT32.
+    if (nc_is_unsigned_int(a) && nc_is_unsigned_int(b))
+        return nc_fixed_size(a) >= nc_fixed_size(b) ? a : b;
     if ((nc_is_signed_int(a) || nc_is_float(a)) &&
         (nc_is_signed_int(b) || nc_is_float(b))) return DRAKEN_FLOAT64;
+    // A signed/unsigned mix stays unpromotable on purpose: no fixed-width type
+    // holds both negative values and the top half of UINT64, so any choice here
+    // would silently corrupt one side. The caller fails loud and the user CASTs.
     return DRAKEN_NULL;
 }
 
@@ -163,6 +180,22 @@ inline int64_t nc_read_int(const DrakenVector* v, uint32_t row) {
     }
 }
 
+// Unsigned twin of nc_read_int. Separate rather than folded in because the two
+// cannot share a return type: UINT64 values above INT64_MAX have no int64
+// representation, which is the whole reason the unsigned family promotes among
+// itself instead of through INT64.
+inline uint64_t nc_read_uint(const DrakenVector* v, uint32_t row) {
+    const uint8_t* p = static_cast<const uint8_t*>(v->data)
+        + static_cast<size_t>(v->selection[row]) * nc_fixed_size(v->type);
+    switch (v->type) {
+        case DRAKEN_UINT8:  return *p;
+        case DRAKEN_UINT16: return *reinterpret_cast<const uint16_t*>(p);
+        case DRAKEN_UINT32: return *reinterpret_cast<const uint32_t*>(p);
+        case DRAKEN_UINT64: return *reinterpret_cast<const uint64_t*>(p);
+        default:            return 0;   // unreachable: nc_promote_fixed gates entry
+    }
+}
+
 inline double nc_read_double(const DrakenVector* v, uint32_t row) {
     const uint8_t* p = static_cast<const uint8_t*>(v->data)
         + static_cast<size_t>(v->selection[row]) * nc_fixed_size(v->type);
@@ -185,6 +218,23 @@ inline void nc_write_fixed(uint8_t* out, uint32_t row, DrakenType out_type,
     if (out_type == DRAKEN_INT64) {
         const int64_t v = nc_read_int(src, row);
         std::memcpy(dst, &v, sizeof(int64_t));
+    } else if (nc_is_unsigned_int(out_type)) {
+        // Narrower unsigned source into a wider unsigned target: zero-extend.
+        // nc_read_int must NOT be used — its switch has no unsigned arms and
+        // would silently write 0. Written through the exact-width type rather
+        // than "the low osz bytes of a uint64" so there is no endianness
+        // assumption (§6). The promotion only ever widens, so the narrowing
+        // casts below cannot lose a value.
+        const uint64_t v = nc_read_uint(src, row);
+        switch (out_type) {
+            case DRAKEN_UINT8:  { const uint8_t  x = static_cast<uint8_t>(v);
+                                  std::memcpy(dst, &x, 1); break; }
+            case DRAKEN_UINT16: { const uint16_t x = static_cast<uint16_t>(v);
+                                  std::memcpy(dst, &x, 2); break; }
+            case DRAKEN_UINT32: { const uint32_t x = static_cast<uint32_t>(v);
+                                  std::memcpy(dst, &x, 4); break; }
+            default:            { std::memcpy(dst, &v, 8); break; }
+        }
     } else {   // DRAKEN_FLOAT64 — the only other promotion target
         const double v = nc_read_double(src, row);
         std::memcpy(dst, &v, sizeof(double));

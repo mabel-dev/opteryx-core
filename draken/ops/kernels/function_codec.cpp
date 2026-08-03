@@ -116,10 +116,21 @@ VecResult codec_kernel(const DrakenVector* v, MaxOutFn max_out_fn, CodecFn codec
                                                   &slots, &arena, &validity_unused);
     if (block == nullptr) return draken_error_sentinel_fmt("%s: allocation failed", who);
 
-    // Reusable scratch buffer: every mabel encode function (bintob16/64/85)
-    // writes at most out_max bytes of real content — the encode-direction
-    // ones additionally write one trailing NUL past the returned end pointer,
-    // hence the +8 headroom, matching the pre-existing nanobind codec's margin.
+    // Reusable scratch buffer. The mabel codecs can WRITE past the length they
+    // RETURN, so max_out_fn() is not by itself a safe capacity — hence the
+    // headroom. Measured worst-case excess over max_out_fn(n), n = 1..300:
+    //     hex encode +1                  hex decode    0
+    //     base64 encode 0                base64 decode 0
+    //     base85 encode +3               base85 decode 0
+    // The two mechanisms are different and only hex is a NUL: bintob16 writes a
+    // trailing NUL past the returned pointer, whereas bintob85 pads its final
+    // partial group to 4 bytes and writes all 5 output chars while advancing the
+    // cursor by only (remaining + 1). 8 covers the measured 3 with margin.
+    //
+    // Safe here because max_out is the max over ALL values (pass 1 above), so
+    // every per-value call gets the full headroom. Contrast
+    // opteryx/compiled/nanobind/vector_codec.cpp, which grows its scratch
+    // lazily and had to be fixed to test and allocate with the SAME margin.
     uint8_t* tmp = nullptr;
     if (max_out > 0u) {
         tmp = static_cast<uint8_t*>(draken_malloc(max_out + 8u));

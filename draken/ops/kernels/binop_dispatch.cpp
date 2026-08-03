@@ -307,87 +307,6 @@ static VecResult binop_string_concat(const DrakenVector* left, const DrakenVecto
     return vecresult_from_string_buffers(slots, arena, arena_pos, validity, n, out_type);
 }
 
-// ---- IP-in-CIDR (op 8 BOP_BITWISE_OR over string operands) ----------------
-// `ip_column >> cidr` → BOOL. left = IP string column (N rows); right = CIDR
-// string — ONLY row 0 is read (the CIDR is a scalar, matching the live
-// vector_ip_in_cidr). Ported byte-identical from vector_misc.cpp: IPv4 only;
-// NULL ip → false (result validity null = all "valid"); invalid IP/CIDR → loud
-// error sentinel. Reads operands via the uniform data[selection[row]] path.
-static int bicidr_parse_ip(const uint8_t* ip, uint32_t length, uint32_t* out) {
-    uint32_t result = 0u, num; int shift = 24; uint32_t i = 0u; int oc = 0;
-    while (oc < 4) {
-        num = 0u; int dc = 0;
-        while (i < length) {
-            uint8_t c = ip[i];
-            if (c < '0' || c > '9') break;
-            num = num * 10u + static_cast<uint32_t>(c - '0'); ++dc; ++i;
-        }
-        if (dc == 0) return -1;
-        if (num > 255u) return -1;
-        result += (num << shift); shift -= 8; ++oc;
-        if (oc < 4) { if (i >= length || ip[i] != '.') return -1; ++i; }
-        else        { if (i < length) return -1; }
-    }
-    *out = result; return 0;
-}
-
-static VecResult binop_ip_in_cidr(const DrakenVector* ipv, const DrakenVector* cidrv) {
-    if (cidrv->length == 0u) return draken_error_sentinel("binop_ip_in_cidr: cidr vector empty");
-    if (!bsc_row_valid(cidrv, 0u)) return draken_error_sentinel("binop_ip_in_cidr: cidr row 0 is NULL");
-    const uint8_t* cidr_bytes; uint32_t cidr_len;
-    bsc_read_row(cidrv, 0u, &cidr_bytes, &cidr_len);
-
-    uint32_t slash = 0u;
-    while (slash < cidr_len && cidr_bytes[slash] != '/') ++slash;
-    if (slash == cidr_len) return draken_error_sentinel("binop_ip_in_cidr: CIDR notation missing '/'");
-
-    const uint8_t* mask_str = cidr_bytes + slash + 1u;
-    const uint32_t mask_len = cidr_len - slash - 1u;
-    uint32_t mask_size = 0u;
-    for (uint32_t k = 0u; k < mask_len; ++k) {
-        uint8_t c = mask_str[k];
-        if (c < '0' || c > '9') return draken_error_sentinel("binop_ip_in_cidr: CIDR mask not an integer");
-        mask_size = mask_size * 10u + static_cast<uint32_t>(c - '0');
-    }
-    if (mask_size > 32u) return draken_error_sentinel("binop_ip_in_cidr: CIDR mask out of range (>32)");
-    const uint32_t netmask = mask_size == 0u
-        ? 0u : ((0xFFFFFFFFu << (32u - mask_size)) & 0xFFFFFFFFu);
-
-    uint32_t base_ip = 0u;
-    if (bicidr_parse_ip(cidr_bytes, slash, &base_ip) != 0)
-        return draken_error_sentinel("binop_ip_in_cidr: invalid CIDR base address");
-    base_ip &= netmask;
-
-    const uint32_t n = ipv->length;
-    uint8_t* dst = draken::ops::cmp_alloc_bool_buf(n);  // zero-initialised
-    if (!dst) return draken_error_sentinel("binop_ip_in_cidr: bool buffer alloc failed");
-
-    const uint8_t* ip_bytes; uint32_t ip_len;
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (!bsc_row_valid(ipv, i)) continue;
-        bsc_read_row(ipv, i, &ip_bytes, &ip_len);
-        if (ip_len == 0u) continue;
-        uint32_t ip_int = 0u;
-        if (bicidr_parse_ip(ip_bytes, ip_len, &ip_int) != 0) {
-            draken_free(dst);
-            return draken_error_sentinel("binop_ip_in_cidr: invalid IP address");
-        }
-        if ((ip_int & netmask) == base_ip)
-            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-    }
-
-    VecResult r;
-    r.data           = dst;
-    r.validity       = nullptr;
-    r.selection      = draken_identity_sel(n);
-    r.owns_selection = false;
-    r.data_length    = n;
-    r.length         = n;
-    r.type           = DRAKEN_BOOL;
-    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-    return r;
-}
-
 }  // namespace
 
 extern "C" {
@@ -833,14 +752,6 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
                 return binop_string_concat_null(right->length, rt);
             if (rt == DRAKEN_NULL && lt_is_string)
                 return binop_string_concat_null(left->length, lt);
-        }
-
-        // IP-in-CIDR (op 8 over string operands): left = IP column, right = CIDR
-        // scalar (row 0). Distinct from integer bitwise-OR (guarded by is_int below).
-        const bool rt_is_string = (rt == DRAKEN_VARCHAR || rt == DRAKEN_NVARCHAR
-                                   || rt == DRAKEN_VARBINARY);
-        if (op == BOP_BITWISE_OR && lt_is_string && rt_is_string) {
-            return binop_ip_in_cidr(left, right);
         }
 
         // Not yet C-native (later P9.1 sub-stages): UINT64 × narrow int, and any
