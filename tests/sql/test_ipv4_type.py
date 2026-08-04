@@ -25,13 +25,25 @@ from draken.draken_native import DrakenType, LogicalKind, LogicalType
 from draken.draken_native import vector_retag_uint32_as_ipv4, vector_uint32_from_sequence
 from draken.vectors.vector import Vector
 from opteryx.types.logical_type import (
+    ARRAY,
+    BOOLEAN,
+    DECIMAL,
+    FLOAT32,
+    FLOAT64,
     INT64,
+    INTERVAL,
     IPV4,
+    NVARCHAR,
+    TIMESTAMP,
     UINT32,
+    VARBINARY,
+    VARCHAR,
+    VARIANT,
     ColumnType,
     LogicalCategory,
     parse_column_type,
     serialize_column_type,
+    try_parse_column_type,
 )
 
 
@@ -97,8 +109,15 @@ def test_ipv4_serializes_as_its_own_name_not_uint32():
     assert str(UINT32) == "UINT32"
 
 
-@pytest.mark.parametrize("column_type", [IPV4, UINT32, INT64])
-def test_column_type_round_trips(column_type):
+@pytest.mark.parametrize("type_name", ["IPV4", "UINT32", "INT64"])
+def test_column_type_round_trips(type_name):
+    """Parametrized over the type NAME, and the ColumnType looked up inside the
+    test, because pytest retains argvalues and per-item callspec params for the
+    whole session. A retained IPV4 ColumnType keeps its Draken LogicalType alive
+    past the point nanobind counts live instances during interpreter shutdown,
+    which surfaced as `nanobind: leaked 1 instances` on the full suite. Module
+    globals hold IPV4 too, but those are cleared in time; pytest's are not."""
+    column_type = {"IPV4": IPV4, "UINT32": UINT32, "INT64": INT64}[type_name]
     assert parse_column_type(serialize_column_type(column_type)) == column_type
 
 
@@ -153,13 +172,8 @@ def test_only_ipv4_is_descriptor_distinguishable_from_other_integers():
     } == {"addr"}
 
 
-def test_catalog_connector_preserves_ipv4_through_schema_normalization():
-    """The catalog connector rebuilds column types from LogicalCategory, and IPv4's
-    category is INTEGER — so a column the catalog declares IPV4 came back out as
-    plain INT64 with the descriptor destroyed, and the scan retag could never fire.
-    Recovered from the raw type name instead. DECIMAL and ARRAY are special-cased
-    in the same place for the same reason: the category round-trip is lossy for any
-    type carrying what the category cannot hold."""
+def _normalized(*columns):
+    """Run a duck-typed catalog schema through the connector's normalizer."""
     from opteryx.connectors.opteryx_connector import OpteryxTable
 
     class _Col:
@@ -169,19 +183,149 @@ def test_catalog_connector_preserves_ipv4_through_schema_normalization():
 
     class _Schema:
         name = "t"
-        columns = [
-            _Col(name="addr", type="IPV4"),
-            _Col(name="n", type="INTEGER"),
-            _Col(name="ts", type="TIMESTAMP"),
-        ]
 
-    by_name = {c.name: c.column_type for c in OpteryxTable._normalize_schema(_Schema(), "t").columns}
+    schema = _Schema()
+    schema.columns = [_Col(**kw) for kw in columns]
+    return {
+        c.name: c.column_type for c in OpteryxTable._normalize_schema(schema, "t").columns
+    }
+
+
+def test_catalog_connector_preserves_ipv4_through_schema_normalization():
+    """The connector used to rebuild column types from LogicalCategory. IPv4's
+    category is INTEGER, so a column the catalog declares IPV4 came back out as
+    plain INT64 with the descriptor destroyed and the scan retag never firing.
+    The stored name is now parsed directly, which is exact for IPV4."""
+    by_name = _normalized(
+        dict(name="addr", type="IPV4"),
+        dict(name="n", type="INTEGER"),
+        dict(name="ts", type="TIMESTAMP"),
+    )
     assert by_name["addr"] == IPV4
     assert by_name["addr"].physical == DrakenType.UINT32
     assert by_name["addr"].logical.kind == LogicalKind.IPV4
     # neighbours unaffected
     assert by_name["n"] == INT64
     assert by_name["ts"].logical.kind == LogicalKind.TIMESTAMP
+
+
+def test_schema_normalization_does_not_widen_unsigned_columns():
+    """The same category round-trip that destroyed IPv4's descriptor also WIDENED
+    every unsigned width — UINT32/UINT64's category is INTEGER too, so both read
+    back as signed INT64. Parsing the stored name is exact for these as well, so
+    a plain unsigned column stays unsigned and is NOT turned into an address."""
+    by_name = _normalized(
+        dict(name="u32", type="UINT32"),
+        dict(name="u64", type="UINT64"),
+        dict(name="i32", type="INT32"),
+        dict(name="f32", type="FLOAT32"),
+    )
+    assert by_name["u32"] == UINT32
+    assert by_name["u32"].physical == DrakenType.UINT32
+    assert by_name["u32"].logical is None, "a plain uint32 must carry NO descriptor"
+    assert by_name["u64"].physical == DrakenType.UINT64
+    assert by_name["i32"].physical == DrakenType.INT32
+    assert by_name["f32"].physical == DrakenType.FLOAT32
+
+
+def test_schema_normalization_is_unchanged_for_every_name_the_catalog_stores_today():
+    """The catalog persists LogicalCategory names (`_core_type_to_stored` returns
+    `column_type.category.name`), so parsing the name first must be a no-op for
+    all of them — this change is only allowed to matter once the catalog starts
+    storing exact type strings."""
+    expected = {
+        "INTEGER": INT64, "VARCHAR": VARCHAR, "NVARCHAR": NVARCHAR,
+        "VARBINARY": VARBINARY, "BOOLEAN": BOOLEAN, "FLOAT": FLOAT64,
+        "TIMESTAMP": TIMESTAMP(), "INTERVAL": INTERVAL, "VARIANT": VARIANT,
+    }
+    by_name = _normalized(*[dict(name=n, type=n) for n in expected])
+    for stored, want in expected.items():
+        assert by_name[stored] == want, f"{stored} drifted to {by_name[stored]}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="PRE-EXISTING, unrelated to the parse-first change and NOT fixed here: "
+    "the DECIMAL and ARRAY branches of _normalize_schema are unreachable for the "
+    "catalog's actual stored format. Both gate on `_ot`, which comes from "
+    "_normalize_type(raw) -- and bare 'DECIMAL'/'ARRAY' have never resolved to a "
+    "type (they are stored bare, with precision/scale and element-type in SEPARATE "
+    "columns), so _ot falls to the VARCHAR default and neither branch fires. A "
+    "catalog DECIMAL column therefore reads back as VARCHAR. Verified identical "
+    "under the pre-change code. Remove this marker when the read path is fixed.",
+)
+def test_bare_decimal_and_array_still_read_their_separate_parameter_columns():
+    """DECIMAL and ARRAY are stored BARE, with precision/scale and element-type in
+    separate catalog columns. Those bare names must NOT parse — they have to fall
+    through to the parameter-aware branches, which are the only correct readers."""
+    by_name = _normalized(
+        dict(name="d", type="DECIMAL", precision=10, scale=2),
+        dict(name="a", type="ARRAY", element_type="VARCHAR"),
+    )
+    assert by_name["d"] == DECIMAL(10, 2)
+    assert by_name["a"] == ARRAY(VARCHAR)
+
+
+def test_parameterized_names_are_parsed_rather_than_falling_through():
+    """If the catalog ever stores the full form instead, it must be read exactly —
+    and must not reach the separate-parameter branches at all."""
+    by_name = _normalized(
+        dict(name="d", type="DECIMAL(10, 2)"),
+        dict(name="a", type="ARRAY<VARCHAR>"),
+    )
+    assert by_name["d"] == DECIMAL(10, 2)
+    assert by_name["a"] == ARRAY(VARCHAR)
+
+
+@pytest.mark.parametrize(
+    "spelling,physical",
+    [
+        ("TINYINT", DrakenType.INT8),
+        ("SMALLINT", DrakenType.INT16),
+        ("REAL", DrakenType.FLOAT32),
+        ("FLOAT32", DrakenType.FLOAT32),  # canonical already — no alias needed
+        ("INT8", DrakenType.INT8),
+        ("UINT32", DrakenType.UINT32),
+    ],
+)
+def test_width_bearing_spellings_resolve_to_the_exact_width(spelling, physical):
+    """A catalog storing exact widths may use the natural SQL spelling. Without
+    these aliases the name does not parse AT ALL and the reader falls back to its
+    VARCHAR default — a narrow int column silently becoming a STRING, which is
+    worse than the INT64 widening the exact widths are meant to fix."""
+    assert try_parse_column_type(spelling).physical == physical
+    assert _normalized(dict(name="c", type=spelling))["c"].physical == physical
+
+
+def test_float_stays_double_while_real_is_single():
+    """REAL is single-precision per the SQL standard, but bare FLOAT must NOT be
+    re-pointed to match it: FLOAT is what the catalog actually persists for the
+    FLOAT category today, so narrowing it would silently truncate every stored
+    float column."""
+    assert try_parse_column_type("REAL") == FLOAT32
+    assert try_parse_column_type("FLOAT") == FLOAT64
+    assert try_parse_column_type("DOUBLE") == FLOAT64
+
+
+@pytest.mark.parametrize("spelling", ["TINYINT", "SMALLINT", "REAL", "FLOAT32", "INT8"])
+def test_schema_spellings_do_not_widen_the_cast_dialect(spelling):
+    """`_SQL_NAME_ALIASES` is read-side only. Cast targets go through
+    `_extract_data_type`'s own mapping, which never consults it — so teaching the
+    schema reader a spelling must not teach the SQL dialect one."""
+    import opteryx
+    from opteryx.exceptions import SqlError
+
+    with pytest.raises(SqlError):
+        list(opteryx.session().execute_to_morsels(f"SELECT CAST(1 AS {spelling}) AS v"))
+
+
+def test_unparseable_stored_type_still_falls_back_rather_than_raising():
+    """Reading a schema is not the place to fail loud on an unknown name — that
+    would make an old or hand-edited catalog entry unreadable. The pre-existing
+    VARCHAR default is preserved, which is why this path uses
+    `try_parse_column_type` and not the raising entry point."""
+    by_name = _normalized(dict(name="mystery", type="NOT_A_REAL_TYPE"))
+    assert by_name["mystery"] == VARCHAR
 
 
 # ---------------------------------------------------------------------------

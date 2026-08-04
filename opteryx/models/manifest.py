@@ -21,6 +21,104 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram, merge
 from opteryx.types.schema import RelationSchema
 
+# INT64_MIN, the codebase-wide "this producer computed no real bound for this
+# column" sentinel, smuggled through as a plain int rather than None.
+# RelationStatistics.update_lower/update_upper
+# (compiled/structures/relation_statistics.pyx) already reject exactly this
+# value - value-exact, NOT "any negative", because a signed column's genuine
+# ordinal key is routinely negative and pruning on those is correct.
+#
+# It reaches a FileEntry from the catalog's manifest builder, which leaves
+# col_min/col_max at NULL_FLAG = -(1<<63) for any column whose category is
+# outside its compressible-categories set - which today includes EVERY
+# unsigned width (UINT8/16/32/64), since its logical-type table maps no
+# "uintN" name. Treated as a real bound, `col = <anything>` prunes on
+# `v < -2**63 or v > -2**63` -> True and EVERY file is dropped: zero rows
+# returned for any equality/range predicate over an unsigned column.
+#
+# Skipping is safe in one direction only, which is the direction that matters:
+# it can only ever KEEP a file that might have been pruned, never drop one that
+# should be read. An INT64 column genuinely holding INT64_MIN as its minimum
+# therefore loses pruning on that file - correct answer, one avoidable read.
+_NO_BOUND_SENTINEL = -(1 << 63)
+
+
+def _is_real_bound(min_value: Any, max_value: Any) -> bool:
+    """True when both bounds are usable for pruning.
+
+    None is the other "not computed" marker (ANALYZE's `min_max = None` path,
+    see _analyze_one_file); `_NO_BOUND_SENTINEL` is the same statement made by
+    a producer that had no None to hand. Both mean the same thing here.
+    """
+    if min_value is None or max_value is None:
+        return False
+    return min_value != _NO_BOUND_SENTINEL and max_value != _NO_BOUND_SENTINEL
+
+
+# Physical types whose stored representation is a bare temporal integer whose
+# meaning depends on a domain: DATE32 stores days, TIMESTAMP64 stores unit-scaled
+# ticks (s/ms/us/ns), TIME32/TIME64 store time-of-day ticks. File bounds hold the
+# column's raw integer, so two temporal operands are only order-comparable when
+# they share both the physical type and (where applicable) the unit.
+# Lazily populated from DrakenType on first use - importing it at module scope
+# would pull the type system in ahead of everything that imports Manifest.
+_TEMPORAL_PHYSICALS = None
+
+
+def _temporal_domain_mismatch(column_type: Any, literal_type: Any) -> bool:
+    """True when a column and a predicate literal are both temporal but occupy
+    different raw integer domains - DATE32 (days) vs TIMESTAMP64 (microseconds),
+    or two TIMESTAMP64s at different units.
+
+    `_comparable_literal` cannot catch this: both sides arrive as plain ints, so
+    it waves them through. The result is not a near miss but a total one - a DATE
+    column against a `2025-01-01T00:00:00Z` literal compares ~20_000 days against
+    ~1.7e15 microseconds, `max_ < v` holds for EVERY file, every file is pruned,
+    and the query returns zero rows with no error. The asymmetry is the tell: the
+    lower-bound operators (Lt/LtEq) prune nothing and answer correctly, while
+    Gt/GtEq/Eq drop the whole table. Reverse the pairing (TIMESTAMP column, DATE
+    literal) and so does the failure - Lt/LtEq return nothing instead.
+
+    Declining the pushdown costs one avoidable scan; the row-level filter
+    promotes both sides to a common unit and produces the right answer. This is
+    the same guard, for the same reason, that
+    `connectors.parquet_io.predicates._temporal_domain_mismatch` applies one
+    layer down at row-group granularity - the two layers prune independently, so
+    a fix in one does nothing for the other.
+    """
+    global _TEMPORAL_PHYSICALS
+    if _TEMPORAL_PHYSICALS is None:
+        from opteryx.types.logical_type import DrakenType
+
+        _TEMPORAL_PHYSICALS = frozenset(
+            {
+                DrakenType.DATE32,
+                DrakenType.TIMESTAMP64,
+                DrakenType.TIME32,
+                DrakenType.TIME64,
+            }
+        )
+
+    if column_type is None or literal_type is None:
+        return False
+
+    column_physical = getattr(column_type, "physical", None)
+    literal_physical = getattr(literal_type, "physical", None)
+    if column_physical not in _TEMPORAL_PHYSICALS or literal_physical not in _TEMPORAL_PHYSICALS:
+        # Not both temporal, so not a temporal-domain question. A temporal column
+        # against a non-temporal literal (`date_col >= 100`) is a type error the
+        # binder has already rejected before pruning ever runs.
+        return False
+    if column_physical != literal_physical:
+        return True  # e.g. DATE32 (days) vs TIMESTAMP64 (ticks)
+
+    # Same physical type: only the unit can still differ (TIMESTAMP64/TIME*).
+    column_logical = getattr(column_type, "logical", None)
+    literal_logical = getattr(literal_type, "logical", None)
+    column_unit = column_logical.unit if column_logical is not None else None
+    literal_unit = literal_logical.unit if literal_logical is not None else None
+    return column_unit != literal_unit
+
 
 def _comparable_literal(literal_value: Any, bound_sample: Any) -> Optional[Any]:
     """Coerce a predicate literal into the representation a stored bound uses.
@@ -188,8 +286,60 @@ class Manifest:
             return None
         try:
             return column_type.ordinalize(literal_value)
-        except ValueError:
+        except (TypeError, ValueError):
+            # TypeError is the same statement made by the native kernel rather
+            # than by ColumnType: an INT64 column's ordinalize rejects a float
+            # literal with "'float' object cannot be interpreted as an integer".
+            # Pruning is an optimisation, so "can't ordinalize this" must cost a
+            # scan, never raise out of the optimizer and fail the whole query.
             return None
+
+    def _predicate_domain_mismatch(self, predicate) -> bool:
+        """True when `predicate` compares a column against a literal that is not
+        order-comparable with the column's raw stored bounds, so pruning on it
+        would be a wrong answer rather than a wrong guess.
+
+        Covers the same two predicate shapes `prune_files` knows how to prune -
+        `column <op> literal` and `column BETWEEN literal AND literal` - and
+        answers False for anything else, since a shape that is never pruned needs
+        no guard. See `_temporal_domain_mismatch` for what makes the two sides
+        incomparable and why silence here is a zero-row result, not a slow one.
+
+        The column type is resolved by NAME against the live schema and falls
+        back to the predicate node's own bound `schema_column`, which survives
+        projection pushdown having pruned the column out of `self.schema`.
+        """
+        from opteryx.expression import NodeType
+
+        if predicate.node_type == NodeType.COMPARISON_OPERATOR:
+            if (
+                predicate.left.node_type != NodeType.IDENTIFIER
+                or predicate.right.node_type != NodeType.LITERAL
+            ):
+                return False
+            literal_types = (getattr(predicate.right, "type", None),)
+        elif predicate.node_type == NodeType.BETWEEN:
+            if (
+                predicate.left.node_type != NodeType.IDENTIFIER
+                or predicate.right.node_type != NodeType.LITERAL
+                or predicate.centre.node_type != NodeType.LITERAL
+            ):
+                return False
+            literal_types = (
+                getattr(predicate.right, "type", None),
+                getattr(predicate.centre, "type", None),
+            )
+        else:
+            return False
+
+        column_type = self._column_type(predicate.left.source_column)
+        if column_type is None:
+            schema_column = getattr(predicate.left, "schema_column", None)
+            column_type = getattr(schema_column, "column_type", None)
+
+        return any(
+            _temporal_domain_mismatch(column_type, literal_type) for literal_type in literal_types
+        )
 
     def prune_files(self, predicates: List) -> None:
         """
@@ -220,8 +370,17 @@ class Manifest:
             "LtEq": lambda v, min_, max_: min_ > v,
         }
 
+        # Whether a literal is order-comparable with a column's raw stored bounds
+        # depends only on the two TYPES, so it is settled once per predicate here
+        # rather than re-derived for every file below. A predicate that fails the
+        # check is dropped entirely: it must not reach the bounds comparison, and
+        # it must not reach `_membership_keep_masks` either, which eliminates
+        # files on raw integer equality and would drop them on the same
+        # cross-domain compare.
+        predicates = [p for p in (predicates or []) if not self._predicate_domain_mismatch(p)]
+
         if not predicates:
-            # No predicates = no pruning
+            # No predicates (or none left that can be safely compared) = no pruning
             return self.files
 
         kept_files = []
@@ -281,7 +440,7 @@ class Manifest:
                     min_value = file_entry.lower_bounds.get(field_id)
                     max_value = file_entry.upper_bounds.get(field_id)
 
-                    if min_value is not None and max_value is not None:
+                    if _is_real_bound(min_value, max_value):
                         compare_value = literal_value
                         if self.bounds_are_ordinal:
                             # Bounds are Vector.ordinalize() ordinal keys, not real
@@ -332,7 +491,7 @@ class Manifest:
                     min_value = file_entry.lower_bounds.get(field_id)
                     max_value = file_entry.upper_bounds.get(field_id)
 
-                    if min_value is not None and max_value is not None:
+                    if _is_real_bound(min_value, max_value):
                         compare_lower, compare_upper = lower, upper
                         if self.bounds_are_ordinal:
                             compare_lower = self._ordinalize_literal(column_name, lower)
@@ -397,7 +556,18 @@ class Manifest:
                 continue
             lo = file_entry.lower_bounds.get(field_id)
             hi = file_entry.upper_bounds.get(field_id)
-            if lo is None or hi is None:
+            if not _is_real_bound(lo, hi):
+                # `_NO_BOUND_SENTINEL` is this docstring's "no bound" case
+                # stated as an int instead of None, and admitting it breaks
+                # BOTH directions - measured, not assumed:
+                #   ASC  - it sorts FIRST (lo == INT64_MIN), so it is the first
+                #          file accumulated and its own INT64_MIN `hi` becomes
+                #          the threshold. Every real file then has lo > that
+                #          and EVERY ONE is dropped.
+                #   DESC - it sorts last, so it never reaches accumulation, but
+                #          its INT64_MIN `hi` is below any real threshold and
+                #          the file itself is dropped - rows that could be in
+                #          the top-n, discarded on no evidence.
                 continue
             bounds_by_position[position] = (lo, hi)
 

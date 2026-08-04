@@ -21,6 +21,22 @@ Algorithm: see Manifest.prune_files_for_topn's docstring for the
 threshold-accumulation itself.
 
 v1 scope, deliberately narrow:
+- Only fires when the Scan carries NO residual predicate. The accumulation
+  counts each file's `record_count`, which is its TOTAL row count; a filter
+  applied at scan time means an unknown number of those rows never reach the
+  sort, so the threshold is computed from rows that do not exist and files
+  holding the only surviving rows get dropped. Measured, on a 3-file, 9-row
+  dataset (tests/storage/test_temporal_domain_manifest_pruning.py):
+
+      WHERE n IN (4,5,6) ORDER BY date_added ASC LIMIT 3  -> <empty>  want 4,5,6
+      WHERE n <> 1       ORDER BY date_added ASC LIMIT 3  -> 2,3      want 2,3,4
+
+  A predicate that manifest pruning DID use is no safer: bounds are ranges, so
+  a surviving file's record_count still overstates how many of its rows pass.
+  Making this filter-aware needs a per-file LOWER bound on surviving rows,
+  which the manifest does not carry - a bound-derived estimate is an estimate,
+  and an estimate here is a wrong answer, not a slower one. Same gate, same
+  reason, as LimitFilesPruningStrategy.
 - Only fires when the sort column has ZERO NULLs anywhere in the manifest
   (Manifest.get_total_null_count == 0). NULL/ASC ordering interacts with
   this kind of pruning in ways this codebase has already shipped one bug
@@ -66,6 +82,11 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
         sort_name = getattr(node, "topn_sort_name", None)
         limit = getattr(node, "topn_limit", None)
         if node.manifest is None or not sort_name or not limit:
+            return context
+
+        if node.predicates:
+            # A residual filter at the Scan makes record_count-based
+            # accumulation unsound - see module docstring.
             return context
 
         column = next(

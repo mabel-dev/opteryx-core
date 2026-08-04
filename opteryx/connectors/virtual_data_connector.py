@@ -52,7 +52,6 @@ WELL_KNOWN_DATASETS = {
     "$variables": ("opteryx.managers.virtual_datasets.variables_data", False),
     "$derived": ("opteryx.managers.virtual_datasets.derived_data", False),
     "$no_table": ("opteryx.managers.virtual_datasets.no_table_data", False),
-    "$telemetry": ("opteryx.managers.virtual_datasets.telemetry", True),
     "$user": ("opteryx.managers.virtual_datasets.user", False),
     "$grants": ("opteryx.managers.virtual_datasets.grants", False),
 }

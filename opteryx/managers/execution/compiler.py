@@ -481,9 +481,31 @@ class _Compiler:
                 v = lit.value
                 if isinstance(v, bool) or not isinstance(v, (int, float, _dec.Decimal)):
                     continue
-                # Decimal(float) is the EXACT binary rational — never str(), the
-                # shortest repr can sit on the other side of a scale gridline.
-                q = _dec.Decimal(v) if isinstance(v, float) else _dec.Decimal(str(v))
+                # `str()` first, for floats too. Python's float repr is
+                # shortest-roundtrip, so it recovers the decimal the user actually
+                # WROTE for a source literal, and keeps the noise for a genuinely
+                # computed one:
+                #
+                #   typed    9.8        -> '9.8'                  (on a scale-1 gridline)
+                #   computed 0.06-0.01  -> '0.049999999999999996' (not on a scale-2 one)
+                #
+                # Taking the exact binary rational instead made every source decimal
+                # literal look inexact — `Decimal(9.8)` is 9.80000000000000071 — so the
+                # direction-aware branch below fired on literals it was never meant for
+                # and rounded the bound to the NEXT gridline: `gravity < 9.8` became
+                # `gravity < 9.9` and returned the 9.8 row. `<` and `<=` gave identical
+                # answers, and `<`/`=`/`>` over a NULL-free column summed to MORE than
+                # the table (the 9.8 row landed in both `<` and `=`) — trichotomy broken.
+                #
+                # This does NOT weaken the folded-double case the rounding exists for:
+                # that value's shortest repr is still off-gridline (see above), so the
+                # branch still fires and still rounds direction-aware.
+                #
+                # It is a mitigation, not the root fix. Opteryx types `9.8` and `9.8e0`
+                # both as FLOAT64, where the SQL standard makes the first an EXACT
+                # numeric literal (DECIMAL) and only the second approximate. Fixing that
+                # removes the float from this path altogether — tracked separately.
+                q = _dec.Decimal(str(v))
                 quantum = _dec.Decimal(1).scaleb(-int(ct.logical.scale))
                 rescaled = q.quantize(quantum)
                 if rescaled != q:

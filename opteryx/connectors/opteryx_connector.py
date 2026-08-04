@@ -153,11 +153,10 @@ class OpteryxTable(Diachronic, PredicatePushable):
         if candidate is None:
             return default
 
-        from opteryx.types.logical_type import parse_column_type
-        try:
-            return parse_column_type(str(candidate)).category
-        except (TypeError, ValueError):
-            return default
+        from opteryx.types.logical_type import try_parse_column_type
+
+        parsed = try_parse_column_type(str(candidate))
+        return default if parsed is None else parsed.category
 
     @classmethod
     def _normalize_schema(
@@ -191,27 +190,45 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
                 from opteryx.types import logical_type as _lt
                 from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
+                from opteryx.types.logical_type import try_parse_column_type
                 _ot = cls._normalize_type(raw_type, default=LogicalCategory.VARCHAR)
                 _et = (cls._normalize_type(raw_element_type, default=None)
                        if raw_element_type is not None else None)
                 _p = getattr(column, "precision", None)
                 _s = getattr(column, "scale", None)
-                # IPv4 must be recovered from the RAW type name, not rebuilt from
-                # the category. `_normalize_type` collapses to LogicalCategory, and
-                # IPv4's category IS INTEGER (deliberately — that is what makes
-                # ordering, grouping and joins run on the raw uint32), so a column
-                # the catalog declares as IPV4 came back out of
-                # _CATEGORY_TO_CANONICAL as plain INT64: descriptor destroyed,
-                # scan retag never fires, values render as integers.
+                # Take the stored name at face value FIRST, and only fall back to
+                # the LogicalCategory round-trip when it isn't a name we can parse.
                 #
-                # DECIMAL and ARRAY below are special-cased for the same underlying
-                # reason — the category round-trip is lossy for any type carrying
-                # information the category cannot hold. IPv4 is the third instance.
+                # The category round-trip is lossy for any type carrying
+                # information the category cannot hold, and it is lossy in a
+                # direction that silently WIDENS: IPv4's category is INTEGER
+                # (deliberately — that is what makes ordering, grouping and joins
+                # run on the raw uint32), and so is every unsigned width's, so
+                # `IPV4`, `UINT32` and `UINT64` all came back out of
+                # _CATEGORY_TO_CANONICAL as plain INT64. Descriptor destroyed,
+                # scan retag never fires, addresses render as integers — and an
+                # unsigned column silently becomes signed.
+                #
+                # Parsing the name directly is exact for all of those, and this
+                # is behaviour-neutral for what the catalog stores TODAY:
+                # `INTEGER`/`VARCHAR`/`TIMESTAMP`/`BOOLEAN`/`DOUBLE`/`BLOB` parse
+                # to the same types the category path produced. It is what makes
+                # a catalog that starts persisting exact type strings read back
+                # correctly, with no second change needed here.
+                #
+                # DECIMAL and ARRAY deliberately fall THROUGH: the catalog stores
+                # them bare, with precision/scale and element-type in separate
+                # columns, so the bare names do not parse (that is why this uses
+                # try_parse_column_type rather than the fail-loud entry point) and
+                # the parameter-aware branches below are still the only correct
+                # readers for them. A parameterized `DECIMAL(10, 2)` in the stored
+                # name is handled by the parse and never reaches them.
                 _raw_name = getattr(raw_type, "name", None) or (
                     str(raw_type) if raw_type is not None else None
                 )
-                if _raw_name is not None and str(_raw_name).upper() == "IPV4":
-                    _ct = _lt.IPV4
+                _exact = try_parse_column_type(str(_raw_name)) if _raw_name is not None else None
+                if _exact is not None:
+                    _ct = _exact
                 elif _ot == LogicalCategory.DECIMAL and _p is not None and _s is not None:
                     _ct = _lt.DECIMAL(_p, _s)
                 elif _ot == LogicalCategory.ARRAY:

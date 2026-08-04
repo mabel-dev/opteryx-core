@@ -81,6 +81,13 @@ cdef inline ParsedDateTime _parse_iso_parts(bytes bts):
     cdef int i = 0
     cdef int digit_count = 0
 
+    # Guard before touching the buffer - parse_2digit(s + 8) reads past the end
+    # of a short input. 32 is the longest valid form:
+    #   YYYY-MM-DDTHH:MM:SS.ffffff+HH:MM
+    # fewer than 10, more than 32 and the first separators not '-'
+    if n < 10 or n > 32 or s[4] != 45 or s[7] != 45:
+        raise ValueError("Invalid ISO timestamp")
+
     out.year = parse_4digit(s)
     out.month = parse_2digit(s + 5)
     out.day = parse_2digit(s + 8)
@@ -91,10 +98,6 @@ cdef inline ParsedDateTime _parse_iso_parts(bytes bts):
     out.offset_sign = 0
     out.offset_hour = 0
     out.offset_minute = 0
-
-    # fewer than 10, more than 26 and the first separators not '-'
-    if n < 10 or n > 26 or s[4] != 45 or s[7] != 45:
-        raise ValueError("Invalid ISO timestamp")
 
     if n == 10:
         if not (1 <= out.month <= 12):

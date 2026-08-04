@@ -46,13 +46,17 @@ work normally, but the actual connector classes are loaded on first access.
 Usage Patterns:
 
 1. Direct Import:
-   from opteryx.connectors import ArrowConnector
+   from opteryx.connectors import FileSystemConnector
 
-2. Registration:
-   opteryx.register_workspace("my_prefix", my_connector_instance)
+2. Registration (the connector is UNINSTANTIATED - a class or factory):
+   opteryx.register_workspace("my_prefix", create_gcs_connector, bucket="my-bucket")
 
-3. Query Usage:
-   opteryx.query("SELECT * FROM gs://bucket/file.parquet")
+3. Query Usage - the prefix is the first segment of the relation name:
+   opteryx.query("SELECT * FROM my_prefix.my_dataset")
+
+   A bucket URL is NOT a valid relation name: `FROM gs://bucket/file.parquet` is
+   a syntax error. Register a prefix as above, or name the file directly with
+   `read_parquet('...')`.
 
 Connector Development:
 1. Inherit from BaseConnector

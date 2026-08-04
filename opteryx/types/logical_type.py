@@ -469,9 +469,26 @@ _NAME_TO_PHYSICAL: dict = {name: phys for phys, name in _NAME_OF.items()}
 
 # SQL-spelling aliases -> canonical ColumnType. The single place SQL type names
 # (incl. legacy/alias spellings) resolve to a type — this is what `from_name` did.
+#
+# READ-SIDE ONLY. This table is reached through `parse_column_type`, which resolves
+# PERSISTED and external schema type names. It is NOT the CAST surface: cast targets
+# go through `_extract_data_type`'s own `type_mappings` in
+# planner/logical_planner/logical_planner_builders.py, which never consults this
+# table (it rejects even `INT8`/`FLOAT32`). Adding a spelling here therefore widens
+# what a stored schema may say, not what the dialect accepts.
+#
+# The width-bearing spellings exist so a catalog storing exact widths can use the
+# natural SQL name and still land on the exact type. Without them the name does not
+# parse at all and the reader falls back to its VARCHAR default — a narrow int column
+# silently becoming a STRING, which is worse than the INT64 widening they replace.
 _SQL_NAME_ALIASES: dict = {
     "INTEGER": INT64, "INT": INT64, "BIGINT": INT64,
-    "DOUBLE": FLOAT64, "FLOAT": FLOAT64,
+    "TINYINT": INT8, "SMALLINT": INT16,
+    # REAL is single-precision per the SQL standard. FLOAT's mapping to FLOAT64 is
+    # pre-existing and deliberately NOT changed to match — several engines treat
+    # bare FLOAT as double, and re-pointing it would narrow every stored `FLOAT`
+    # column (which is what this catalog actually persists for the FLOAT category).
+    "DOUBLE": FLOAT64, "FLOAT": FLOAT64, "REAL": FLOAT32,
     "STRING": VARCHAR, "TEXT": VARCHAR,
     "BOOL": BOOLEAN,
     "BYTES": VARBINARY, "BLOB": VARBINARY,
@@ -486,21 +503,28 @@ def serialize_column_type(ct) -> Optional[str]:
     return str(ct)
 
 
-def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
-    """Inverse of `serialize_column_type` / `str(ColumnType)`.
+def try_parse_column_type(s: str) -> Optional[ColumnType]:
+    """`parse_column_type`'s body, returning None instead of raising when `s`
+    is not a recognized exact type string.
 
-    Raises ValueError on an unrecognized form (fail-loud — a malformed persisted
-    type is a bug, not something to silently coerce).
+    Exists so a caller with a LEGITIMATE fallback can probe without wrapping
+    `parse_column_type` in try/except (§9 — try/except is not flow control).
+    The one such caller is the catalog schema reader: the catalog stores bare
+    `DECIMAL` and `ARRAY` with their parameters in SEPARATE columns
+    (precision/scale, element-type), so those two names correctly do not parse
+    on their own and must fall through to a parameter-aware branch.
+
+    "Not recognized" is the ONLY thing None means here. A malformed
+    parameterized form (`DECIMAL(x, y)`) still raises from int() — that is a
+    corrupt persisted type, not a fallback case.
     """
-    if s is None:
-        return None
     s = s.strip()
     upper = s.upper()
 
     # ARRAY<element>
     if upper.startswith("ARRAY<") and s.endswith(">"):
-        inner = s[s.index("<") + 1 : -1]
-        return ARRAY(parse_column_type(inner))
+        inner = try_parse_column_type(s[s.index("<") + 1 : -1])
+        return None if inner is None else ARRAY(inner)
 
     # parameterized: NAME(params)
     if "(" in s:
@@ -511,7 +535,7 @@ def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
             return DECIMAL(int(parts[0]), int(parts[1]))
         if base == "VECTOR":
             return VECTOR(int(parts[0]))
-        raise ValueError(f"parse_column_type: unknown parameterized type {s!r}")
+        return None
 
     if upper == "TIMESTAMP":
         return TIMESTAMP()
@@ -529,7 +553,22 @@ def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
     phys = _NAME_TO_PHYSICAL.get(upper)
     if phys is not None:
         return ColumnType(phys)
-    raise ValueError(f"parse_column_type: unknown type {s!r}")
+    return None
+
+
+def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
+    """Inverse of `serialize_column_type` / `str(ColumnType)`.
+
+    Raises ValueError on an unrecognized form (fail-loud — a malformed persisted
+    type is a bug, not something to silently coerce). Callers that genuinely
+    have somewhere else to look use `try_parse_column_type` instead.
+    """
+    if s is None:
+        return None
+    parsed = try_parse_column_type(s)
+    if parsed is None:
+        raise ValueError(f"parse_column_type: unknown type {s!r}")
+    return parsed
 
 
 
